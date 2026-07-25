@@ -28,6 +28,7 @@ expected_exec="Exec=\"${COPIED_PROJECT//%/%%}/download-video-gui.sh\""
 grep -Fxq -- "${expected_exec}" "${DESKTOP_FILE}"
 grep -Fxq -- 'Terminal=false' "${DESKTOP_FILE}"
 grep -Fxq -- 'Categories=AudioVideo;' "${DESKTOP_FILE}"
+grep -Fxq -- 'Comment=Download a video or extract an audio track' "${DESKTOP_FILE}"
 
 if command -v desktop-file-validate >/dev/null 2>&1; then
     desktop-file-validate "${DESKTOP_FILE}"

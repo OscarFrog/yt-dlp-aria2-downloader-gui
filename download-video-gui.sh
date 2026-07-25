@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video-gui.sh
-# Version     : 2.1.5
+# Version     : 2.1.6
 # Date        : 2026-07-25
 # Description : Two-choice Zenity GUI for complete MKV video or native audio.
 # ============================================================================
@@ -53,7 +53,7 @@ run_zenity_capture() {
 
     error_file=$(mktemp --tmpdir="${TMPDIR:-/tmp}" zenity-error.XXXXXXXX) || {
         ZENITY_STATUS=70
-        ZENITY_ERROR='Impossible de créer le fichier temporaire de diagnostic Zenity.'
+        ZENITY_ERROR='Unable to create the temporary Zenity diagnostic file.'
         printf -v "${output_variable}" '%s' ''
         return 0
     }
@@ -76,7 +76,7 @@ run_zenity_capture() {
     *)
         ZENITY_STATUS=70
         if [[ -z ${ZENITY_ERROR} ]]; then
-            ZENITY_ERROR="Zenity s’est arrêté avec le code ${status}."
+            ZENITY_ERROR="Zenity exited with status ${status}."
         fi
         ;;
     esac
@@ -202,15 +202,14 @@ default_output_dir() {
 
     if command -v xdg-user-dir >/dev/null 2>&1; then
         candidate=$(xdg-user-dir DOWNLOAD 2>/dev/null || true)
+        if [[ -z ${candidate} || ! -d ${candidate} ]]; then
+            candidate=$(xdg-user-dir VIDEOS 2>/dev/null || true)
+        fi
     fi
 
     if [[ -z ${candidate} || ! -d ${candidate} ]]; then
-        if [[ -d ${HOME}/Téléchargements ]]; then
-            candidate=${HOME}/Téléchargements
-        elif [[ -d ${HOME}/Downloads ]]; then
+        if [[ -d ${HOME}/Downloads ]]; then
             candidate=${HOME}/Downloads
-        elif [[ -d ${HOME}/Vidéos ]]; then
-            candidate=${HOME}/Vidéos
         elif [[ -d ${HOME}/Videos ]]; then
             candidate=${HOME}/Videos
         else
@@ -228,9 +227,9 @@ select_url() {
 
     run_zenity_capture entered_url --entry \
         --title="${APP_NAME}" \
-        --text="Collez l’adresse de la vidéo à télécharger :" \
-        --ok-label='Continuer' \
-        --cancel-label='Annuler' \
+        --text="Paste the video URL to download:" \
+        --ok-label='Continue' \
+        --cancel-label='Cancel' \
         --width=700
     capture_status=${ZENITY_STATUS}
 
@@ -239,12 +238,12 @@ select_url() {
     fi
 
     if [[ ${entered_url} == *$'\n'* || ${entered_url} == *$'\r'* ]]; then
-        show_error "L’adresse ne doit pas contenir de saut de ligne."
+        show_error "The URL must not contain line breaks."
         return 2
     fi
 
     if [[ ! ${entered_url} =~ ^https?://.+ ]]; then
-        show_error "L’adresse doit commencer par http:// ou https://."
+        show_error "The URL must start with http:// or https://."
         return 2
     fi
 
@@ -268,17 +267,17 @@ select_profile() {
     run_zenity_capture selected --list \
         --radiolist \
         --title="${APP_NAME}" \
-        --text='Choisissez le type de fichier :' \
-        --column='Choix' \
-        --column='Profil' \
+        --text='Choose the output type:' \
+        --column='Select' \
+        --column='Profile' \
         --hide-header \
         --print-column=2 \
-        --ok-label='Continuer' \
-        --cancel-label='Annuler' \
+        --ok-label='Continue' \
+        --cancel-label='Cancel' \
         --width=560 \
         --height=240 \
-        "${default_video}" 'Vidéo entière (MKV)' \
-        "${default_audio}" 'Piste audio (format natif)'
+        "${default_video}" 'Complete video (MKV)' \
+        "${default_audio}" 'Audio track (native format)'
     capture_status=${ZENITY_STATUS}
 
     if ((capture_status != 0)); then
@@ -286,8 +285,8 @@ select_profile() {
     fi
 
     case ${selected} in
-    'Vidéo entière (MKV)') selected_profile='video' ;;
-    'Piste audio (format natif)') selected_profile='audio' ;;
+    'Complete video (MKV)') selected_profile='video' ;;
+    'Audio track (native format)') selected_profile='audio' ;;
     *) return 2 ;;
     esac
 
@@ -304,7 +303,7 @@ select_output_dir() {
 
     run_zenity_capture selected_dir --file-selection \
         --directory \
-        --title='Choisir le dossier de destination' \
+        --title='Choose the destination folder' \
         --filename="${initial_dir%/}/"
     capture_status=${ZENITY_STATUS}
 
@@ -315,7 +314,7 @@ select_output_dir() {
         first_error=${ZENITY_ERROR}
         run_zenity_capture selected_dir --file-selection \
             --directory \
-            --title='Choisir le dossier de destination'
+            --title='Choose the destination folder'
         capture_status=${ZENITY_STATUS}
 
         if ((capture_status == 70)) && [[ -n ${first_error} ]]; then
@@ -328,12 +327,12 @@ select_output_dir() {
     fi
 
     if [[ ${selected_dir} == *$'\n'* || ${selected_dir} == *$'\r'* ]]; then
-        show_error 'Le chemin ne doit pas contenir de saut de ligne.'
+        show_error 'The path must not contain line breaks.'
         return 2
     fi
 
     if [[ ! -d ${selected_dir} || ! -w ${selected_dir} || ! -x ${selected_dir} ]]; then
-        show_error "Le dossier sélectionné n’est pas accessible en écriture."
+        show_error "The selected folder is not writable."
         return 2
     fi
 
@@ -359,7 +358,7 @@ monitor_progress() {
     local eta=''
     local percent_number=0
     local display_percent=0
-    local message='Analyse de la page…'
+    local message='Analyzing the webpage...'
 
     while kill -0 "${worker_pid}" 2>/dev/null; do
         # aria2c refreshes its console line with carriage returns. Converting
@@ -384,7 +383,7 @@ monitor_progress() {
                 eta=$(trim_field "${eta}")
                 percent_number=${percent_text%%%}
                 percent_number=$(trim_field "${percent_number}")
-                message="Téléchargement : ${percent_text:-en cours}"
+                message="Download: ${percent_text:-in progress}"
             else
                 percent_text=''
                 speed=''
@@ -411,7 +410,7 @@ monitor_progress() {
                     eta=${eta%% *}
                 fi
 
-                message="Téléchargement aria2 : ${percent_text:-en cours}"
+                message="aria2 download: ${percent_text:-in progress}"
             fi
 
             if [[ ${percent_number} =~ ^[0-9]+([.][0-9]+)?$ ]]; then
@@ -424,14 +423,14 @@ monitor_progress() {
             fi
 
             if [[ -n ${speed} && ${speed} != 'NA' && ${speed} != 'Unknown' ]]; then
-                message+=" — ${speed}"
+                message+=" - ${speed}"
             fi
             if [[ -n ${eta} && ${eta} != 'NA' && ${eta} != 'Unknown' ]]; then
-                message+=" — reste ${eta}"
+                message+=" - ${eta} remaining"
             fi
         elif grep -aq '^YTDLP_POSTPROCESS|' "${log_file}" 2>/dev/null; then
             display_percent=99
-            message='Finalisation du fichier…'
+            message='Finalizing the file...'
         fi
 
         printf '%d\n' "${display_percent}" || return 0
@@ -440,7 +439,7 @@ monitor_progress() {
     done
 
     printf '100\n' || true
-    printf '# Terminé\n' || true
+    printf '# Completed\n' || true
 }
 
 wait_for_worker_pgid() {
@@ -500,7 +499,7 @@ readonly SCRIPT_DIR
 readonly DOWNLOAD_SCRIPT="${SCRIPT_DIR}/download-video.sh"
 
 if [[ ! -x ${DOWNLOAD_SCRIPT} ]]; then
-    show_error 'Le fichier download-video.sh est absent ou non exécutable.'
+    show_error 'download-video.sh is missing or not executable.'
     exit 1
 fi
 
@@ -531,11 +530,11 @@ while true; do
         continue
         ;;
     5)
-        show_error "La fenêtre de saisie de l’adresse a expiré."
+        show_error "The URL entry dialog timed out."
         exit 1
         ;;
     *)
-        show_error "Zenity n’a pas pu afficher la fenêtre de saisie de l’adresse."
+        show_error "Zenity could not display the URL entry dialog."
         exit 1
         ;;
     esac
@@ -555,15 +554,15 @@ while true; do
         exit 0
         ;;
     2)
-        show_error 'Le profil sélectionné est invalide.'
+        show_error 'The selected profile is invalid.'
         continue
         ;;
     5)
-        show_error 'La fenêtre de sélection du profil a expiré.'
+        show_error 'The profile selection dialog timed out.'
         exit 1
         ;;
     *)
-        show_error "Zenity n’a pas pu afficher la fenêtre de sélection du profil."
+        show_error "Zenity could not display the profile selection dialog."
         exit 1
         ;;
     esac
@@ -586,17 +585,17 @@ while true; do
         continue
         ;;
     5)
-        show_error 'La fenêtre de sélection du dossier a expiré.'
+        show_error 'The folder selection dialog timed out.'
         exit 1
         ;;
     *)
         if [[ -n ${ZENITY_ERROR} ]]; then
-            show_error "Zenity n’a pas pu afficher la fenêtre de sélection du dossier.
+            show_error "Zenity could not display the folder selection dialog.
 
-Détail technique :
+Technical details:
 ${ZENITY_ERROR}"
         else
-            show_error "Zenity n’a pas pu afficher la fenêtre de sélection du dossier."
+            show_error "Zenity could not display the folder selection dialog."
         fi
         exit 1
         ;;
@@ -640,7 +639,7 @@ audio)
     COMMAND+=(--mode audio)
     ;;
 *)
-    show_error "Le profil interne « ${PROFILE} » est invalide."
+    show_error "The internal profile '${PROFILE}' is invalid."
     exit 2
     ;;
 esac
@@ -662,18 +661,18 @@ pgid_status=$?
 set -e
 if ((pgid_status != 0)); then
     wait "${WORKER_PID}" 2>/dev/null || true
-    show_error "Le téléchargement n’a pas pu démarrer.\n\nJournal : ${LOG_FILE}"
+    show_error "The download could not start.\n\nLog: ${LOG_FILE}"
     exit 1
 fi
 
 set +e
 monitor_progress "${LOG_FILE}" "${WORKER_PID}" | zenity --progress \
     --title="${APP_NAME}" \
-    --text='Initialisation…' \
+    --text='Initializing...' \
     --percentage=0 \
     --auto-close \
     --time-remaining \
-    --cancel-label='Annuler' \
+    --cancel-label='Cancel' \
     --width=560
 pipeline_status=("${PIPESTATUS[@]}")
 set -e
@@ -689,18 +688,18 @@ if ((zenity_status != 0)); then
     if ((zenity_status == 1)); then
         zenity --info \
             --title="${APP_NAME}" \
-            --text='Le téléchargement a été annulé.' \
+            --text='The download was canceled.' \
             --no-markup \
             --width=420 || true
         exit 130
     fi
 
     if ((zenity_status == 5)); then
-        show_error "La fenêtre de progression a expiré ; le téléchargement a été arrêté."
+        show_error "The progress dialog timed out; the download was stopped."
         exit 1
     fi
 
-    show_error "La fenêtre de progression s’est arrêtée avec le code ${zenity_status}."
+    show_error "The progress dialog exited with status ${zenity_status}."
     exit 1
 fi
 
@@ -716,9 +715,9 @@ if ((worker_status == 0)); then
         final_path=$(<"${RESULT_FILE}")
     fi
 
-    success_text='Le téléchargement est terminé.'
+    success_text='The download is complete.'
     if [[ -n ${final_path} ]]; then
-        success_text+=$'\n\nFichier : '
+        success_text+=$'\n\nFile: '
         success_text+="${final_path}"
     fi
 
@@ -727,16 +726,16 @@ if ((worker_status == 0)); then
         --title="${APP_NAME}" \
         --text="${success_text}" \
         --no-markup \
-        --extra-button='Nouveau téléchargement' \
-        --ok-label='Ouvrir le dossier' \
-        --cancel-label='Fermer' \
+        --extra-button='New download' \
+        --ok-label='Open folder' \
+        --cancel-label='Close' \
         --width=700
     success_status=${ZENITY_STATUS}
 
-    if [[ ${success_action} == 'Nouveau téléchargement' ]]; then
-        # Le nouveau processus repart depuis la saisie de l’URL.
-        # Le répertoire temporaire du téléchargement terminé est supprimé,
-        # tandis que le journal reste disponible dans STATE_DIR.
+    if [[ ${success_action} == 'New download' ]]; then
+        # The new process starts again at the URL entry step.
+        # The completed download's temporary directory is removed,
+        # while the log remains available in STATE_DIR.
         if [[ -n ${TEMP_DIR} && -d ${TEMP_DIR} ]]; then
             rm -rf -- "${TEMP_DIR}"
         fi
@@ -752,34 +751,34 @@ if ((worker_status == 0)); then
         fi
         ;;
     1)
-        # Bouton Fermer ou fermeture de la fenêtre.
+        # Close button or window close action.
         ;;
     5)
-        show_error 'La fenêtre de fin a expiré.'
+        show_error 'The completion dialog timed out.'
         ;;
     *)
         if [[ -n ${ZENITY_ERROR} ]]; then
-            show_error "Zenity n’a pas pu afficher la fenêtre de fin.
+            show_error "Zenity could not display the completion dialog.
 
-Détail technique :
+Technical details:
 ${ZENITY_ERROR}"
         else
-            show_error "Zenity n’a pas pu afficher la fenêtre de fin."
+            show_error "Zenity could not display the completion dialog."
         fi
         ;;
     esac
 else
     if zenity --question \
-        --title="Échec du téléchargement" \
-        --text="Le téléchargement a échoué avec le code ${worker_status}.
+        --title="Download failed" \
+        --text="The download failed with status ${worker_status}.
 
-Afficher le journal ?" \
+View the log?" \
         --no-markup \
-        --ok-label='Afficher le journal' \
-        --cancel-label='Fermer' \
+        --ok-label='View log' \
+        --cancel-label='Close' \
         --width=540; then
         zenity --text-info \
-            --title="Journal — ${APP_NAME}" \
+            --title="Log - ${APP_NAME}" \
             --filename="${LOG_FILE}" \
             --width=950 \
             --height=650

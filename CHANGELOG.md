@@ -1,45 +1,61 @@
 # Changelog
 
-## 2.1.5 — 2026-07-25
+## 2.1.6 - 2026-07-25
 
-### Stabilisation de la locale
+### English localization
 
-- Exécution de `yt-dlp --version` avec `LC_ALL=C`.
-- Exécution de `yt-dlp --help` avec `LC_ALL=C`.
-- Exécution de `deno --version` avec `LC_ALL=C`.
-- Exécution de `aria2c --version` avec `LC_ALL=C`.
-- Exécution de `aria2c --help=#all` avec `LC_ALL=C`.
-- Exécution de `setsid --help` avec `LC_ALL=C`.
-- Conservation de `LC_ALL=C` sur le worker de téléchargement afin de
-  stabiliser la progression réelle de `yt-dlp` et d’aria2c.
+- Translated all Markdown documentation into English.
+- Translated all Zenity labels, messages, and completion actions into English.
+- Translated the application launcher's `.desktop` description into English.
+- Translated the remaining French comments and integration-test expectations.
+- Replaced hard-coded French directory fallbacks with XDG user-directory
+  detection and English fallback paths.
+- Updated the project version to 2.1.6.
+
+### Validation
+
+- Updated integration assertions for the English graphical interface.
+- Retained Bash syntax checks, ShellCheck validation, mock integration tests,
+  and launcher installation tests.
+
+## 2.1.5 - 2026-07-25
+
+### Locale stabilization
+
+- Ran `yt-dlp --version` with `LC_ALL=C`.
+- Ran `yt-dlp --help` with `LC_ALL=C`.
+- Ran `deno --version` with `LC_ALL=C`.
+- Ran `aria2c --version` with `LC_ALL=C`.
+- Ran `aria2c --help=#all` with `LC_ALL=C`.
+- Ran `setsid --help` with `LC_ALL=C`.
+- Kept `LC_ALL=C` on the download worker to stabilize actual `yt-dlp` and
+  aria2c progress output.
 
 ### Tests
 
-- Ajout de contrôles statiques empêchant la régression des six sondes
-  stabilisées.
-- Conservation du contrôle du lancement du worker avec
+- Added static checks preventing regressions in the six stabilized probes.
+- Kept validation of the worker launch with
   `LC_ALL=C setsid --fork --wait`.
 
-## 2.1.4 — 2026-07-25
+## 2.1.4 - 2026-07-25
 
 ### Interface
 
-- Ajout du bouton **Nouveau téléchargement** après un téléchargement réussi.
-- Le bouton relance l’interface depuis la saisie de l’URL.
-- Le dernier dossier de destination et le dernier profil restent mémorisés.
+- Added a **New download** button after a successful download.
+- The button restarts the interface at the URL entry step.
+- The last destination folder and profile remain saved.
 
-### Lanceur d’application
+### Application launcher
 
-- Remplacement de `Categories=AudioVideo;Network;` par
-  `Categories=AudioVideo;`.
-- Suppression de l’avertissement concernant plusieurs catégories principales.
+- Replaced `Categories=AudioVideo;Network;` with `Categories=AudioVideo;`.
+- Removed the warning about multiple main categories.
 
 ### Tests
 
-- Mise à jour du test d’intégration du lanceur.
-- Validation du bouton **Nouveau téléchargement**.
+- Updated the launcher integration test.
+- Added validation for the **New download** button.
 
-## 2.1.3 — 2026-07-25
+## 2.1.3 - 2026-07-25
 
 ### aria2c compatibility
 
@@ -54,7 +70,7 @@
 - Replaced literal `\n` sequences in the download-failure question with real
   line breaks.
 
-## 2.1.2 — 2026-07-25
+## 2.1.2 - 2026-07-25
 
 ### Zenity
 
@@ -65,7 +81,7 @@
 - Added an integration guard that fails if custom button-label options are ever
   passed to a file-selection dialog again.
 
-## 2.1.1 — 2026-07-25
+## 2.1.1 - 2026-07-25
 
 ### Zenity
 
@@ -77,7 +93,7 @@
 - Added an integration test that simulates a `--filename`-specific Zenity
   failure and verifies the successful fallback.
 
-## 2.1.0 — 2026-07-25
+## 2.1.0 - 2026-07-25
 
 ### Audio
 
@@ -100,7 +116,7 @@
   `--audio-quality 0` while rejecting forced MP3/M4A/Opus values.
 - Updated CLI validation, README files, and release validation notes.
 
-## 2.0.4 — 2026-07-24
+## 2.0.4 - 2026-07-24
 
 ### Tests
 
@@ -115,7 +131,7 @@
 - Initialized `URL`, `PROFILE`, and `OUTPUT_DIR` before the Zenity selection
   loops to make their data flow explicit and avoid the SC2153 false positive.
 
-## 2.0.3 — 2026-07-24
+## 2.0.3 - 2026-07-24
 
 - Fixed the warnings and optional diagnostics reported by
   `shellcheck -o all` on the three production scripts.
@@ -132,7 +148,7 @@
   as option definitions, not merely inside descriptive text.
 - Configured CI to run ShellCheck optional checks on production scripts.
 
-## 2.0.2 — 2026-07-24
+## 2.0.2 - 2026-07-24
 
 - Raised the minimum yt-dlp version to 2026.06.09, which contains the security
   fix relevant to aria2c-backed downloads.
@@ -140,38 +156,37 @@
 - Added integration tests for Zenity progress timeout and unexpected progress
   errors, including process-group termination verification.
 - Extended local syntax validation to every shipped Bash script.
-- Preserved conventional signal exit codes: 129 for HUP, 130 for INT and 143
+- Preserved conventional signal exit codes: 129 for HUP, 130 for INT, and 143
   for TERM.
 - Pinned actions/checkout v7.0.1 to its full commit SHA, disabled persisted
-  credentials and added a CI timeout.
+  credentials, and added a CI timeout.
 
-## 2.0.1 — 2026-07-24
+## 2.0.1 - 2026-07-24
 
 - Confirmed that the reported concatenated lines were display artifacts; all
   shipped Bash files pass syntax validation.
 - Added minimum-version checks for yt-dlp 2025.11.12 and Deno 2.3.0.
 - Added runtime capability checks for required yt-dlp and aria2c options.
-- Distinguished Zenity cancellation, timeout, validation failure and internal
+- Distinguished Zenity cancellation, timeout, validation failure, and internal
   errors in all selection dialogs.
 - Added integration coverage for dependency and Zenity failure paths.
 
+## 2.0.0 - 2026-07-24
 
-## 2.0.0 — 2026-07-24
+- Added the Zenity interface.
+- Added destination-folder selection.
+- Added MKV video, MP3 audio, M4A audio, and Opus audio profiles.
+- Added atomic persistence of the last profile and destination folder.
+- Added structured `yt-dlp` progress and fallback `aria2c` progress.
+- Added private, unique logs.
+- Added complete process-group cancellation.
+- Added a `.desktop` launcher installer.
+- Added static tests, mocked-command tests, and continuous integration.
+- Added the `--output-dir`, `--mode`, `--audio-format`, `--audio-quality`,
+  `--machine-progress`, and `--result-file` CLI options.
+- Isolated user configurations with `--ignore-config` for `yt-dlp` and
+  `--no-conf=true` for `aria2c`.
 
-- ajout de l’interface Zenity ;
-- ajout du choix du dossier de destination ;
-- ajout des profils vidéo MKV, audio MP3, M4A et Opus ;
-- mémorisation atomique du dernier profil et du dernier dossier ;
-- progression structurée `yt-dlp` et progression de secours `aria2c` ;
-- journaux privés et uniques ;
-- annulation du groupe de processus complet ;
-- ajout d’un installateur de lanceur `.desktop` ;
-- ajout des tests statiques, des tests avec commandes simulées et de la CI ;
-- ajout des options CLI `--output-dir`, `--mode`, `--audio-format`,
-  `--audio-quality`, `--machine-progress` et `--result-file` ;
-- isolation des configurations utilisateur avec `--ignore-config` pour
-  `yt-dlp` et `--no-conf=true` pour `aria2c`.
+## 1.1.0 - 2026-07-22
 
-## 1.1.0 — 2026-07-22
-
-- version initiale du moteur vidéo MKV avec `yt-dlp` et `aria2c`.
+- Initial MKV video engine using `yt-dlp` and `aria2c`.

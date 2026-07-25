@@ -163,7 +163,7 @@ case " $* " in
             exit 2
         fi
         printf '%s
-' "${MOCK_PROFILE:-Piste audio (format natif)}"
+' "${MOCK_PROFILE:-Audio track (native format)}"
         ;;
     *' --file-selection '*)
         if [[ " $* " == *' --ok-label='* ]] \
@@ -327,21 +327,21 @@ MOCK_ARIA_ONLY=1 MOCK_PROGRESS_CAPTURE="${PROGRESS_CAPTURE}" \
     "${PROJECT_DIR}/download-video-gui.sh"
 
 grep -Fxq -- '40' "${PROGRESS_CAPTURE}"
-grep -Fq -- '# Téléchargement aria2 : 40% — 1.00MiB — reste 6s' \
+grep -Fq -- '# aria2 download: 40% - 1.00MiB - 6s remaining' \
     "${PROGRESS_CAPTURE}"
 
 mapfile -d '' -t list_arguments < "${LIST_ARGS_LOG}"
 list_joined=$(printf '%s
 ' "${list_arguments[@]}")
 for expected_profile_label in \
-    'Vidéo entière (MKV)' \
-    'Piste audio (format natif)'; do
+    'Complete video (MKV)' \
+    'Audio track (native format)'; do
     grep -Fxq -- "${expected_profile_label}" <<< "${list_joined}"
 done
 for removed_profile_label in \
-    'Audio — MP3' \
-    'Audio — M4A' \
-    'Audio — Opus'; do
+    'Audio - MP3' \
+    'Audio - M4A' \
+    'Audio - Opus'; do
     if grep -Fxq -- "${removed_profile_label}" <<< "${list_joined}"; then
         printf 'Removed GUI profile is still present: %s
 ' \
@@ -353,7 +353,7 @@ done
 MOCK_PROGRESS_CAPTURE="${YTDLP_PROGRESS_CAPTURE}" \
     "${PROJECT_DIR}/download-video-gui.sh"
 grep -Fxq -- '12' "${YTDLP_PROGRESS_CAPTURE}"
-grep -Fq -- '# Téléchargement : 12.5% — 1.00MiB/s — reste 00:07' \
+grep -Fq -- '# Download: 12.5% - 1.00MiB/s - 00:07 remaining' \
     "${YTDLP_PROGRESS_CAPTURE}"
 
 grep -Fxq -- "output_dir=${OUTPUT_DIR}" \
@@ -447,7 +447,7 @@ if (( zenity_timeout_status != 1 )); then
         "${zenity_timeout_status}" >&2
     exit 1
 fi
-grep -Fq -- "fenêtre de saisie de l’adresse a expiré" "${error_capture}"
+grep -Fq -- "URL entry dialog timed out" "${error_capture}"
 
 : > "${error_capture}"
 set +e
@@ -460,7 +460,7 @@ if (( zenity_error_status != 1 )); then
         "${zenity_error_status}" >&2
     exit 1
 fi
-grep -Fq -- "Zenity n’a pas pu afficher" "${error_capture}"
+grep -Fq -- "Zenity could not display" "${error_capture}"
 
 set +e
 MOCK_YTDLP_VERSION=2026.06.08 \
@@ -528,7 +528,7 @@ for _ in {1..30}; do
     sleep 0.1
 done
 [[ -f ${progress_timeout_marker} ]]
-grep -Fq -- 'fenêtre de progression a expiré' "${progress_timeout_errors}"
+grep -Fq -- 'progress dialog timed out' "${progress_timeout_errors}"
 
 progress_error_marker="${TEST_ROOT}/progress-error-terminated"
 progress_error_capture="${TEST_ROOT}/progress-error-errors.txt"
@@ -550,6 +550,6 @@ for _ in {1..30}; do
     sleep 0.1
 done
 [[ -f ${progress_error_marker} ]]
-grep -Fq -- 'code 42' "${progress_error_capture}"
+grep -Fq -- 'status 42' "${progress_error_capture}"
 
 printf 'Mock integration tests passed.\n'
