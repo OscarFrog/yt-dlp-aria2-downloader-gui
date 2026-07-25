@@ -1,0 +1,36 @@
+# yt-dlp temporary and state files
+*.part
+*.ytdl
+*.temp
+*.tmp
+*.aria2
+
+# Downloaded video and audio files
+*.mkv
+*.mp4
+*.webm
+*.avi
+*.mov
+*.flv
+*.m4v
+*.mp3
+*.m4a
+*.aac
+*.opus
+*.ogg
+*.wav
+*.flac
+
+# Optional metadata and subtitle files created during experiments
+*.info.json
+*.description
+*.vtt
+*.srt
+*.ass
+*.lrc
+
+# Editor and operating-system files
+*~
+*.swp
+.DS_Store
+Thumbs.db
