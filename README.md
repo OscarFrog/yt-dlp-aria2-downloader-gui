@@ -43,7 +43,8 @@ starting a download.
 
 ## Installation on Fedora 44
 
-Install the packages available from the Fedora repositories:
+Install the required packages. The **ffmpeg** package from the RPM Fusion Free
+repository is recommended because it provides full codec support :
 
 ```bash
 sudo dnf install yt-dlp aria2 ffmpeg-free zenity
