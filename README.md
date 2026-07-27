@@ -47,7 +47,7 @@ Install the required packages. The **ffmpeg** package from the RPM Fusion Free
 repository is recommended because it provides full codec support :
 
 ```bash
-sudo dnf install yt-dlp aria2 ffmpeg-free zenity
+sudo dnf install yt-dlp aria2 ffmpeg zenity
 ```
 
 Install Deno when it is not already available:
