@@ -1,0 +1,57 @@
+name: Release archive
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag and script versions
+        shell: bash
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          grep -Fqx -- "readonly VERSION=\"${version}\"" download-video.sh
+          grep -Fq -- "# Version     : ${version}" download-video-gui.sh
+
+      - name: Build ZIP archive and checksum
+        shell: bash
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          package="yt-dlp-aria2-downloader-gui-${version}"
+          mkdir -p dist
+          git archive \
+            --format=zip \
+            --prefix="${package}/" \
+            --output="dist/${package}.zip" \
+            "${GITHUB_SHA}"
+          (
+            cd dist
+            sha256sum "${package}.zip" > SHA256SUMS
+          )
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          package="yt-dlp-aria2-downloader-gui-${version}"
+          gh release create "${GITHUB_REF_NAME}" \
+            "dist/${package}.zip" \
+            dist/SHA256SUMS \
+            --verify-tag \
+            --generate-notes \
+            --title "yt-dlp aria2 downloader ${version}"

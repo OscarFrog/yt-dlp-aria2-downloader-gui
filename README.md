@@ -1,5 +1,9 @@
 # yt-dlp aria2 downloader
 
+[![Shell validation](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/actions/workflows/shell.yml/badge.svg)](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/actions/workflows/shell.yml)
+
+[Version française](README.fr.md)
+
 A Zenity graphical interface and Bash download engine for Linux. It downloads a
 single URL in one of two forms:
 
@@ -8,7 +12,8 @@ single URL in one of two forms:
   Opus conversion.
 
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
-downloads, and FFmpeg to merge, remux, or extract streams. The current version
+HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
+streams deliberately remain on yt-dlp's native downloader. The current version
 is **2.1.6**.
 
 ## Main features
@@ -23,7 +28,8 @@ is **2.1.6**.
 - graphical progress display and cancellation of the complete process group;
 - private log file for every run;
 - application-menu launcher;
-- static tests, integration tests, and GitHub Actions validation.
+- static tests, integration tests, and GitHub Actions validation on Ubuntu and
+  Fedora 44.
 
 ## Requirements
 
@@ -43,8 +49,15 @@ starting a download.
 
 ## Installation on Fedora 44
 
-Install the required packages. The **ffmpeg** package from the RPM Fusion Free
-repository is recommended because it provides full codec support :
+The full `ffmpeg` package is provided by the RPM Fusion Free repository. Enable
+that repository first when it is not already configured:
+
+```bash
+sudo dnf install \
+  "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
+```
+
+Then install the required Fedora packages:
 
 ```bash
 sudo dnf install yt-dlp aria2 ffmpeg zenity
@@ -68,7 +81,27 @@ zenity --version
 setsid --version
 ```
 
-## Installation from GitHub
+## Installation from a release archive
+
+Download both release assets from the GitHub release page:
+
+```text
+yt-dlp-aria2-downloader-gui-2.1.6.zip
+SHA256SUMS
+```
+
+Verify and extract the archive:
+
+```bash
+sha256sum --check SHA256SUMS
+unzip yt-dlp-aria2-downloader-gui-2.1.6.zip
+cd yt-dlp-aria2-downloader-gui-2.1.6
+chmod +x download-video.sh download-video-gui.sh install-gui.sh
+chmod +x test-static.sh tests/*.sh
+./install-gui.sh install
+```
+
+## Installation from Git
 
 Clone the repository:
 
@@ -77,16 +110,11 @@ git clone https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui.git
 cd yt-dlp-aria2-downloader-gui
 ```
 
-Make the scripts executable:
+Make the scripts executable and install the application-menu launcher:
 
 ```bash
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
-```
-
-Install the application-menu launcher:
-
-```bash
 ./install-gui.sh install
 ```
 
@@ -101,9 +129,7 @@ directory, run `./install-gui.sh install` again.
 
 ## Graphical usage
 
-Start **yt-dlp aria2 downloader** from the application menu.
-
-The graphical interface can also be started directly:
+Start **yt-dlp aria2 downloader** from the application menu, or run:
 
 ```bash
 ./download-video-gui.sh
@@ -114,6 +140,9 @@ The interface requests, in order:
 1. the video URL;
 2. **Complete video (MKV)** or **Audio track (native format)**;
 3. the destination folder.
+
+Leading and trailing whitespace accidentally copied with the URL is removed by
+the graphical interface.
 
 ## Command-line usage
 
@@ -145,7 +174,28 @@ Display help or version information:
 Always quote URLs with single or double quotation marks because they may
 contain shell metacharacters such as `&`.
 
-## Mode behavior
+## Downloader behavior
+
+The engine configures aria2c for direct HTTP/FTP transfers and explicitly uses
+yt-dlp's native downloader for DASH and HLS manifests:
+
+```text
+--downloader aria2c
+--downloader dash,m3u8:native
+```
+
+This keeps segmented media handling inside yt-dlp while retaining aria2c's
+multi-connection acceleration where it is appropriate.
+
+For current YouTube extraction, the engine also enables Deno and requests the
+EJS components from npm when yt-dlp needs them:
+
+```text
+--js-runtimes deno
+--remote-components ejs:npm
+```
+
+This means a YouTube download can contact npm in addition to the media website.
 
 ### Complete video
 
@@ -155,7 +205,7 @@ compatible.
 
 ### Native audio track
 
-Audio mode uses the following options:
+Audio mode uses:
 
 ```text
 --format ba/b
@@ -182,25 +232,12 @@ Execution logs:
 ~/.local/state/yt-dlp-aria2-downloader/download-*.log
 ```
 
+Logs are private and are intentionally retained until the user removes them.
+
 ## Tests
 
-Run the included tests:
-
-```bash
-./test-static.sh
-./tests/mock-integration.sh
-./tests/installer-integration.sh
-```
-
-Recommended ShellCheck analysis:
-
-```bash
-shellcheck -o all download-video.sh download-video-gui.sh install-gui.sh
-shellcheck test-static.sh tests/*.sh
-```
-
-The `.github/workflows/shell.yml` workflow automatically runs these checks on
-pushes and pull requests.
+See [TESTING.md](TESTING.md) for local validation, Fedora-specific checks, and
+the GitHub Actions jobs.
 
 ## Uninstalling the launcher
 

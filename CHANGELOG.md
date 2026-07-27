@@ -1,6 +1,18 @@
 # Changelog
 
-## 2.1.6 - 2026-07-25
+## 2.1.6 - 2026-07-27
+
+### Post-review maintenance
+
+- Trimmed accidental leading and trailing whitespace from URLs entered in the
+  graphical interface.
+- Replaced the premature final progress message with a neutral finalization
+  message until the worker exit status is known.
+- Added a French localized description to the generated `.desktop` launcher.
+- Consolidated version-specific notes into this changelog and replaced the
+  dated validation report with reusable testing documentation.
+- Added GitHub Actions validation in a Fedora 44 container.
+- Added tag-driven release automation for a versioned ZIP and `SHA256SUMS`.
 
 ### English localization
 

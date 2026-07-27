@@ -141,7 +141,8 @@ case " $* " in
         if [[ -n ${MOCK_ZENITY_ENTRY_STATUS:-} ]]; then
             exit "${MOCK_ZENITY_ENTRY_STATUS}"
         fi
-        printf '%s\n' 'https://example.com/watch?v=abc123'
+        printf '%s\n' \
+            "${MOCK_ZENITY_ENTRY_VALUE:-https://example.com/watch?v=abc123}"
         ;;
     *' --list '*)
         if [[ -n ${MOCK_LIST_ARGS_LOG:-} ]]; then
@@ -323,12 +324,27 @@ if grep -Fq -- '--show-console-readout=true' <<< "${joined}"; then
     exit 1
 fi
 
-MOCK_ARIA_ONLY=1 MOCK_PROGRESS_CAPTURE="${PROGRESS_CAPTURE}" \
+trimmed_gui_url='https://example.com/watch?v=trimmed'
+MOCK_ZENITY_ENTRY_VALUE="  ${trimmed_gui_url}  " \
+MOCK_ARIA_ONLY=1 \
+MOCK_PROGRESS_CAPTURE="${PROGRESS_CAPTURE}" \
     "${PROJECT_DIR}/download-video-gui.sh"
 
 grep -Fxq -- '40' "${PROGRESS_CAPTURE}"
 grep -Fq -- '# aria2 download: 40% - 1.00MiB - 6s remaining' \
     "${PROGRESS_CAPTURE}"
+grep -Fq -- '# Finalizing the file...' "${PROGRESS_CAPTURE}"
+if grep -Fq -- '# Completed' "${PROGRESS_CAPTURE}"; then
+    printf 'The progress dialog displayed a premature success message.\n' >&2
+    exit 1
+fi
+mapfile -d '' -t gui_arguments < "${ARG_LOG}"
+gui_joined=$(printf '%s\n' "${gui_arguments[@]}")
+grep -Fxq -- "${trimmed_gui_url}" <<< "${gui_joined}"
+if grep -Fxq -- "  ${trimmed_gui_url}  " <<< "${gui_joined}"; then
+    printf 'The GUI did not trim surrounding URL whitespace.\n' >&2
+    exit 1
+fi
 
 mapfile -d '' -t list_arguments < "${LIST_ARGS_LOG}"
 list_joined=$(printf '%s

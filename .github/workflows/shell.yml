@@ -8,7 +8,8 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  validate-ubuntu:
+    name: Ubuntu
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -17,22 +18,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install ShellCheck
+      - name: Install validation tools
         run: |
           sudo apt-get update
           sudo apt-get install --yes desktop-file-utils shellcheck
 
-      - name: Check Bash syntax
+      - name: Run validation
         run: |
-          bash -n download-video.sh
-          bash -n download-video-gui.sh
-          bash -n install-gui.sh
-          bash -n test-static.sh
-          bash -n tests/mock-integration.sh
-          bash -n tests/installer-integration.sh
-
-      - name: Run ShellCheck
-        run: |
+          ./test-static.sh
           shellcheck -o all \
             download-video.sh \
             download-video-gui.sh \
@@ -41,9 +34,46 @@ jobs:
             test-static.sh \
             tests/mock-integration.sh \
             tests/installer-integration.sh
+          ./tests/mock-integration.sh
+          ./tests/installer-integration.sh
 
-      - name: Run local tests
+  validate-fedora:
+    name: Fedora 44
+    runs-on: ubuntu-latest
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 10
+    steps:
+      - name: Install validation tools
+        run: |
+          dnf install --assumeyes \
+            bash \
+            coreutils \
+            desktop-file-utils \
+            findutils \
+            git \
+            grep \
+            ShellCheck \
+            util-linux
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run validation
         run: |
           ./test-static.sh
+          shellcheck -o all \
+            download-video.sh \
+            download-video-gui.sh \
+            install-gui.sh
+          shellcheck \
+            test-static.sh \
+            tests/mock-integration.sh \
+            tests/installer-integration.sh
           ./tests/mock-integration.sh
           ./tests/installer-integration.sh

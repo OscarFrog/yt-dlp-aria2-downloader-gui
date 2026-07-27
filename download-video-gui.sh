@@ -237,6 +237,8 @@ select_url() {
         return "${capture_status}"
     fi
 
+    entered_url=$(trim_field "${entered_url}")
+
     if [[ ${entered_url} == *$'\n'* || ${entered_url} == *$'\r'* ]]; then
         show_error "The URL must not contain line breaks."
         return 2
@@ -439,7 +441,7 @@ monitor_progress() {
     done
 
     printf '100\n' || true
-    printf '# Completed\n' || true
+    printf '# Finalizing the file...\n' || true
 }
 
 wait_for_worker_pgid() {
