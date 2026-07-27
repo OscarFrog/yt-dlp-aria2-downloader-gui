@@ -12,6 +12,16 @@ fi
 readonly APP_ID='yt-dlp-aria2-downloader'
 readonly SCRIPT_NAME="${0##*/}"
 
+TEMP_DESKTOP_FILE=''
+
+cleanup() {
+    if [[ -n ${TEMP_DESKTOP_FILE} ]]; then
+        rm -f -- "${TEMP_DESKTOP_FILE}"
+    fi
+}
+
+trap cleanup EXIT
+
 usage() {
     cat <<EOF_USAGE
 Usage:
@@ -72,7 +82,11 @@ install)
 
     mkdir -p -- "${APPLICATION_DIR}"
     desktop_exec=$(quote_desktop_exec_path "${GUI_SCRIPT}")
-    cat >"${DESKTOP_FILE}" <<EOF_DESKTOP
+    TEMP_DESKTOP_FILE=$(mktemp \
+        --tmpdir="${APPLICATION_DIR}" \
+        --suffix='.desktop' \
+        ".${APP_ID}.XXXXXX")
+    cat >"${TEMP_DESKTOP_FILE}" <<EOF_DESKTOP
 [Desktop Entry]
 Type=Application
 Version=1.0
@@ -85,7 +99,12 @@ Terminal=false
 Categories=AudioVideo;
 StartupNotify=true
 EOF_DESKTOP
-    chmod 644 -- "${DESKTOP_FILE}"
+    chmod 644 -- "${TEMP_DESKTOP_FILE}"
+    if command -v desktop-file-validate >/dev/null 2>&1; then
+        desktop-file-validate "${TEMP_DESKTOP_FILE}"
+    fi
+    mv -f -- "${TEMP_DESKTOP_FILE}" "${DESKTOP_FILE}"
+    TEMP_DESKTOP_FILE=''
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database "${APPLICATION_DIR}" >/dev/null 2>&1 || true
     fi

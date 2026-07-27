@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.1.7 - 2026-07-27
+
+### Diagnostics and interface
+
+- Delete the private download log after a successful run only when the final
+  media file can be confirmed.
+- Retain logs for failed, canceled, interrupted, or inconsistent runs.
+- Keep graphical progress monotonic after yt-dlp enters post-processing.
+- Read the last non-empty result path defensively when yt-dlp writes more than
+  one `after_move` record.
+
+### Installer and release safety
+
+- Generate, validate, and replace the `.desktop` launcher atomically.
+- Require the release workflow's validation job to succeed before publishing
+  the ZIP archive and checksum.
+- Verify script, README, and changelog versions before creating a release.
+
+### Documentation and tests
+
+- Clarify that native audio is preserved whenever possible, rather than
+  promising that FFmpeg will never be required.
+- Add integration coverage for successful-log deletion, failed-log retention,
+  monotonic post-processing progress, and launcher temporary-file cleanup.
+
 ## 2.1.6 - 2026-07-27
 
 ### Post-review maintenance

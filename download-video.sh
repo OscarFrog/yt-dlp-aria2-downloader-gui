@@ -3,14 +3,14 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.6
-# Date        : 2026-07-25
+# Version     : 2.1.7
+# Date        : 2026-07-27
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
 
 set -Eeuo pipefail
 
-readonly VERSION="2.1.6"
+readonly VERSION="2.1.7"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -27,7 +27,8 @@ Options:
   -o, --output-dir DIR       Destination directory.
   -m, --mode MODE            video or audio (default: video).
                              video: complete best-quality video in MKV.
-                             audio: best audio track in its native format.
+                             audio: best available audio track; preserve the
+                                    source codec/container whenever possible.
       --machine-progress     Emit stable YTDLP_PROGRESS records.
       --result-file FILE     Write the final media path to FILE.
   -h, --help                 Display this help.
@@ -56,6 +57,8 @@ compare_versions() {
 
     VERSION_AT_LEAST=false
 
+    # Installed versions may contain a suffix; the configured minimum below
+    # must remain a strict three-component version.
     if [[ ! ${current} =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
         return 0
     fi
@@ -396,6 +399,8 @@ YT_DLP_OPTIONS=(
     --output "${OUTPUT_DIR_TEMPLATE}/%(title).150s [%(id)s].%(ext)s"
     --continue
     --progress-delta 1
+    # Use aria2c for direct transfers, but retain yt-dlp's native downloader for
+    # fragmented DASH and HLS streams. Multiple --downloader rules are additive.
     --downloader aria2c
     --downloader 'dash,m3u8:native'
     --downloader-args "aria2c:${ARIA2_ARGUMENTS}"
