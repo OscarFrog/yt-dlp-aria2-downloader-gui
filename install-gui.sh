@@ -78,6 +78,7 @@ Type=Application
 Version=1.0
 Name=yt-dlp aria2 downloader
 Comment=Download a video or extract an audio track
+Comment[fr]=Télécharger une vidéo ou extraire une piste audio
 Exec=${desktop_exec}
 Icon=video-x-generic
 Terminal=false

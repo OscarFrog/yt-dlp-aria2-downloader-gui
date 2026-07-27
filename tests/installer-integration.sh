@@ -29,6 +29,8 @@ grep -Fxq -- "${expected_exec}" "${DESKTOP_FILE}"
 grep -Fxq -- 'Terminal=false' "${DESKTOP_FILE}"
 grep -Fxq -- 'Categories=AudioVideo;' "${DESKTOP_FILE}"
 grep -Fxq -- 'Comment=Download a video or extract an audio track' "${DESKTOP_FILE}"
+grep -Fxq -- 'Comment[fr]=Télécharger une vidéo ou extraire une piste audio' \
+    "${DESKTOP_FILE}"
 
 if command -v desktop-file-validate >/dev/null 2>&1; then
     desktop-file-validate "${DESKTOP_FILE}"
