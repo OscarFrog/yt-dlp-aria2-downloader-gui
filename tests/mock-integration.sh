@@ -4,6 +4,8 @@ set -Eeuo pipefail
 
 PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly PROJECT_DIR
+# shellcheck disable=SC1090
+source "${PROJECT_DIR}/tests/lib/assert.sh"
 TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
 trap 'rm -rf -- "${TEST_ROOT}"' EXIT
@@ -64,7 +66,7 @@ fi
 if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
     trap 'printf terminated > "${MOCK_TERMINATION_MARKER:?}"; exit 143' TERM INT
     while true; do
-        sleep 1
+        sleep 0.1
     done
 fi
 
@@ -99,11 +101,12 @@ chmod +x "${MOCK_BIN}/yt-dlp"
 cat > "${MOCK_BIN}/aria2c" <<'EOF_ARIA2'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-if [[ ${1:-} == '--version' ]]; then
+
+case ${1:-} in
+--version)
     printf 'aria2 version %s\n' "${MOCK_ARIA2_VERSION:-1.37.0}"
-    exit 0
-fi
-if [[ ${1:-} == '--help=#all' ]]; then
+    ;;
+--help=#all)
     printf '%s\n' \
         '--file-allocation=<METHOD>' \
         '--no-conf[=true|false]' \
@@ -116,7 +119,12 @@ if [[ ${1:-} == '--help=#all' ]]; then
     else
         printf '%s\n' '--stderr[=true|false]'
     fi
-fi
+    ;;
+*)
+    printf 'Unexpected aria2c mock invocation: %q\n' "$*" >&2
+    exit 64
+    ;;
+esac
 EOF_ARIA2
 chmod +x "${MOCK_BIN}/aria2c"
 
@@ -165,8 +173,7 @@ case " $* " in
             previous=''
             for argument in "$@"; do
                 if [[ ${previous} == TRUE ]]; then
-                    printf '%s
-' "${argument}"
+                    printf '%s\n' "${argument}"
                     exit 0
                 fi
                 case ${argument} in
@@ -176,8 +183,7 @@ case " $* " in
             done
             exit 2
         fi
-        printf '%s
-' "${MOCK_PROFILE:-Audio track (native format)}"
+        printf '%s\n' "${MOCK_PROFILE:-Audio track (native format)}"
         ;;
     *' --file-selection '*)
         if [[ " $* " == *' --ok-label='* ]] \
@@ -244,14 +250,21 @@ export MOCK_OUTPUT_DIR="${OUTPUT_DIR}"
 export MOCK_LIST_ARGS_LOG="${LIST_ARGS_LOG}"
 export PATH="${MOCK_BIN}:/usr/bin:/bin"
 
-for media_tool in ffmpeg ffprobe; do
-    resolved_media_tool=$(command -v "${media_tool}")
-    if [[ ${resolved_media_tool} != "${MOCK_BIN}/${media_tool}" ]]; then
+for mocked_command in yt-dlp aria2c deno zenity ffmpeg ffprobe; do
+    resolved_mock=$(command -v "${mocked_command}")
+    if [[ ${resolved_mock} != "${MOCK_BIN}/${mocked_command}" ]]; then
         printf 'The %s mock was not selected: %s\n' \
-            "${media_tool}" "${resolved_media_tool}" >&2
+            "${mocked_command}" "${resolved_mock}" >&2
         exit 1
     fi
 done
+
+count_logs() {
+    local -a logs=()
+    mapfile -t logs < <(find "${XDG_STATE_HOME}/yt-dlp-aria2-downloader" \
+        -maxdepth 1 -type f -name 'download-*.log' -print 2>/dev/null || true)
+    printf '%d\n' "${#logs[@]}"
+}
 
 result_file="${TEST_ROOT}/engine-%-result.txt"
 injection_marker="${TEST_ROOT}/must-not-exist"
@@ -263,7 +276,9 @@ malicious_url="https://example.com/watch?v=abc123&x=\$(touch ${injection_marker}
     --result-file "${result_file}" \
     -- "${malicious_url}" >/dev/null
 
-grep -Fxq -- "${OUTPUT_DIR}/Mock media [abc123].webm" "${result_file}"
+assert_file_contains "${result_file}" \
+    "${OUTPUT_DIR}/Mock media [abc123].webm" 'engine result path'
+
 if [[ -e ${injection_marker} ]]; then
     printf 'The URL was interpreted as shell code.\n' >&2
     exit 1
@@ -315,6 +330,18 @@ if grep -Fxq -- '--paths' <<< "${joined}"; then
     exit 1
 fi
 
+# A terminal -- is valid, and arguments after -- still use the same positional
+# validation path as arguments seen before it.
+"${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" \
+    --mode audio \
+    'https://example.com/watch?v=terminal-separator' -- >/dev/null
+assert_status 2 'two URLs split by -- are rejected' \
+    "${PROJECT_DIR}/download-video.sh" \
+    'https://example.com/a' -- 'https://example.com/b'
+assert_text_contains "${ASSERT_OUTPUT}" 'exactly one video URL is required.' \
+    'duplicate URL after -- diagnostic'
+
 "${PROJECT_DIR}/download-video.sh" \
     --output-dir "${OUTPUT_DIR}" \
     --mode video \
@@ -360,8 +387,7 @@ if grep -Fxq -- "  ${trimmed_gui_url}  " <<< "${gui_joined}"; then
 fi
 
 mapfile -d '' -t list_arguments < "${LIST_ARGS_LOG}"
-list_joined=$(printf '%s
-' "${list_arguments[@]}")
+list_joined=$(printf '%s\n' "${list_arguments[@]}")
 for expected_profile_label in \
     'Complete video (MKV)' \
     'Audio track (native format)'; do
@@ -372,8 +398,7 @@ for removed_profile_label in \
     'Audio - M4A' \
     'Audio - Opus'; do
     if grep -Fxq -- "${removed_profile_label}" <<< "${list_joined}"; then
-        printf 'Removed GUI profile is still present: %s
-' \
+        printf 'Removed GUI profile is still present: %s\n' \
             "${removed_profile_label}" >&2
         exit 1
     fi
@@ -384,6 +409,15 @@ MOCK_PROGRESS_CAPTURE="${YTDLP_PROGRESS_CAPTURE}" \
 grep -Fxq -- '12' "${YTDLP_PROGRESS_CAPTURE}"
 grep -Fq -- '# Download: 12.5% - 1.00MiB/s - 00:07 remaining' \
     "${YTDLP_PROGRESS_CAPTURE}"
+
+MOCK_PROFILE='Complete video (MKV)' \
+    "${PROJECT_DIR}/download-video-gui.sh"
+mapfile -d '' -t video_gui_arguments < "${ARG_LOG}"
+video_gui_joined=$(printf '%s\n' "${video_gui_arguments[@]}")
+assert_text_contains "${video_gui_joined}" 'bv*+ba/b' 'GUI video format selection'
+if grep -Fxq -- 'ba/b' <<< "${video_gui_joined}"; then
+    fail 'GUI video run used the audio-only selector.'
+fi
 
 late_progress_capture="${TEST_ROOT}/gui-progress-late.txt"
 MOCK_LATE_PROGRESS=1 \
@@ -403,13 +437,10 @@ grep -Fxq -- "output_dir=${OUTPUT_DIR}" \
 grep -Fxq -- 'profile=audio' \
     "${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf"
 
-mapfile -t gui_logs < <(find "${XDG_STATE_HOME}/yt-dlp-aria2-downloader" \
-    -maxdepth 1 -type f -name 'download-*.log' -print)
-if (( ${#gui_logs[@]} != 0 )); then
-    printf 'Successful GUI downloads retained %d log(s).\n' \
-        "${#gui_logs[@]}" >&2
-    exit 1
-fi
+successful_log_count=$(count_logs)
+assert_equals '0' "${successful_log_count}" \
+    'confirmed successful GUI downloads must not retain logs'
+
 
 cat > "${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf" <<EOF_OLD_CONFIG
 output_dir=${OUTPUT_DIR}
@@ -456,35 +487,28 @@ done
 
 # A zero worker status without a final result path is inconsistent rather than
 # a confirmed success, so its diagnostic log must remain available.
+logs_before=$(count_logs)
 MOCK_SKIP_RESULT_FILE=1 \
     "${PROJECT_DIR}/download-video-gui.sh" >/dev/null
+logs_after=$(count_logs)
+assert_equals "$((logs_before + 1))" "${logs_after}" \
+    'an inconsistent run must retain exactly one new log'
 mapfile -t inconsistent_logs < <(find "${XDG_STATE_HOME}/yt-dlp-aria2-downloader" \
     -maxdepth 1 -type f -name 'download-*.log' -print)
-if (( ${#inconsistent_logs[@]} != 1 )); then
-    printf 'Expected one retained inconsistent-run log, found %d.\n' \
-        "${#inconsistent_logs[@]}" >&2
-    exit 1
+if ! grep -Fl -- 'YTDLP_POSTPROCESS|processing|' "${inconsistent_logs[@]}" \
+    >/dev/null; then
+    fail 'No retained inconsistent-run log contains the post-processing record.'
 fi
 
-grep -Fq -- 'YTDLP_POSTPROCESS|processing|' "${inconsistent_logs[0]}"
-
-set +e
-MOCK_YTDLP_EXIT_STATUS=7 \
-    "${PROJECT_DIR}/download-video-gui.sh" >/dev/null
-failed_download_status=$?
-set -e
-if (( failed_download_status != 7 )); then
-    printf 'Expected failed download status 7, got %d.\n' \
-        "${failed_download_status}" >&2
-    exit 1
-fi
+logs_before=$(count_logs)
+assert_status 7 'failed GUI download status is propagated' \
+    env MOCK_YTDLP_EXIT_STATUS=7 \
+    "${PROJECT_DIR}/download-video-gui.sh"
+logs_after=$(count_logs)
+assert_equals "$((logs_before + 1))" "${logs_after}" \
+    'a failed download must retain exactly one new log'
 mapfile -t failed_logs < <(find "${XDG_STATE_HOME}/yt-dlp-aria2-downloader" \
     -maxdepth 1 -type f -name 'download-*.log' -print)
-if (( ${#failed_logs[@]} != 2 )); then
-    printf 'Expected two retained diagnostic logs, found %d.\n' \
-        "${#failed_logs[@]}" >&2
-    exit 1
-fi
 if ! grep -Fl -- 'Simulated yt-dlp failure.' "${failed_logs[@]}" \
     >/dev/null; then
     printf 'No retained log contains the simulated failure.\n' >&2
@@ -541,6 +565,23 @@ if (( zenity_error_status != 1 )); then
     exit 1
 fi
 grep -Fq -- "Zenity could not display" "${error_capture}"
+
+for compatible_ytdlp_version in \
+    '2026.06.09.20260727' \
+    '2026.06.09-1.fc44' \
+    '2026.06.09+custom'; do
+    MOCK_YTDLP_VERSION="${compatible_ytdlp_version}" \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" \
+        -- 'https://example.com/watch?v=version-suffix' >/dev/null
+done
+
+assert_status 1 'unparseable yt-dlp version is rejected clearly' \
+    env MOCK_YTDLP_VERSION=not-a-version \
+    "${PROJECT_DIR}/download-video.sh" \
+    -- 'https://example.com/watch?v=bad-version'
+assert_text_contains "${ASSERT_OUTPUT}" 'unable to parse the yt-dlp version' \
+    'unparseable yt-dlp diagnostic'
 
 set +e
 MOCK_YTDLP_VERSION=2026.06.08 \

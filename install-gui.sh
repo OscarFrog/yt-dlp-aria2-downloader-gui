@@ -60,6 +60,8 @@ if (($# != 1)); then
     exit 2
 fi
 
+# Capture the status explicitly. Calling the function in an if or || list
+# would disable errexit inside its body under Bash's documented rules.
 set +e
 resolve_script_dir SCRIPT_DIR
 resolve_status=$?
@@ -105,17 +107,15 @@ EOF_DESKTOP
     fi
     mv -f -- "${TEMP_DESKTOP_FILE}" "${DESKTOP_FILE}"
     TEMP_DESKTOP_FILE=''
-    if command -v update-desktop-database >/dev/null 2>&1; then
-        update-desktop-database "${APPLICATION_DIR}" >/dev/null 2>&1 || true
-    fi
     printf 'Launcher installed: %s\n' "${DESKTOP_FILE}"
     ;;
 uninstall)
-    rm -f -- "${DESKTOP_FILE}"
-    if command -v update-desktop-database >/dev/null 2>&1; then
-        update-desktop-database "${APPLICATION_DIR}" >/dev/null 2>&1 || true
+    if [[ -e ${DESKTOP_FILE} ]]; then
+        rm -f -- "${DESKTOP_FILE}"
+        printf 'Launcher removed: %s\n' "${DESKTOP_FILE}"
+    else
+        printf 'No launcher is installed at: %s\n' "${DESKTOP_FILE}"
     fi
-    printf 'Launcher removed: %s\n' "${DESKTOP_FILE}"
     ;;
 *)
     usage >&2

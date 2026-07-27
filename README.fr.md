@@ -4,7 +4,7 @@
 
 [English version](README.md)
 
-Interface graphique Zenity et moteur Bash pour Linux. Le programme télécharge
+Interface graphique Zenity et moteur Bash exclusivement pour GNU/Linux. Le programme télécharge
 une seule URL sous l'une des deux formes suivantes :
 
 - une **vidéo MKV complète**, avec les meilleures pistes vidéo et audio
@@ -15,7 +15,7 @@ une seule URL sous l'une des deux formes suivantes :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.7**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.8**.
 
 ## Fonctionnalités principales
 
@@ -87,7 +87,7 @@ setsid --version
 Téléchargez les deux fichiers publiés avec la release GitHub :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.7.zip
+yt-dlp-aria2-downloader-gui-2.1.8.zip
 SHA256SUMS
 ```
 
@@ -95,8 +95,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.7.zip
-cd yt-dlp-aria2-downloader-gui-2.1.7
+unzip yt-dlp-aria2-downloader-gui-2.1.8.zip
+cd yt-dlp-aria2-downloader-gui-2.1.8
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -186,8 +186,10 @@ yt-dlp à récupérer les composants EJS depuis npm lorsqu'ils sont nécessaires
 --remote-components ejs:npm
 ```
 
-Un téléchargement YouTube peut donc contacter npm en plus du site qui héberge
-le média.
+yt-dlp peut télécharger depuis npm les composants de résolution de défis
+yt-dlp-ejs. Ces scripts sont exécutés par Deno avec des permissions restreintes
+d'accès au système de fichiers et au réseau. Un téléchargement YouTube peut
+donc contacter npm en plus du site qui héberge le média.
 
 ### Vidéo complète
 

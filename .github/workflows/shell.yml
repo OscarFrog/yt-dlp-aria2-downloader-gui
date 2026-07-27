@@ -3,6 +3,7 @@ name: Shell validation
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -24,18 +25,7 @@ jobs:
           sudo apt-get install --yes desktop-file-utils shellcheck
 
       - name: Run validation
-        run: |
-          ./test-static.sh
-          shellcheck -o all \
-            download-video.sh \
-            download-video-gui.sh \
-            install-gui.sh
-          shellcheck \
-            test-static.sh \
-            tests/mock-integration.sh \
-            tests/installer-integration.sh
-          ./tests/mock-integration.sh
-          ./tests/installer-integration.sh
+        run: ./tests/run-all.sh
 
   validate-fedora:
     name: Fedora 44
@@ -49,7 +39,8 @@ jobs:
     steps:
       - name: Install validation tools
         run: |
-          dnf install --assumeyes \
+          dnf install --assumeyes --no-docs \
+            --setopt=install_weak_deps=False \
             bash \
             coreutils \
             desktop-file-utils \
@@ -65,15 +56,4 @@ jobs:
           persist-credentials: false
 
       - name: Run validation
-        run: |
-          ./test-static.sh
-          shellcheck -o all \
-            download-video.sh \
-            download-video-gui.sh \
-            install-gui.sh
-          shellcheck \
-            test-static.sh \
-            tests/mock-integration.sh \
-            tests/installer-integration.sh
-          ./tests/mock-integration.sh
-          ./tests/installer-integration.sh
+        run: ./tests/run-all.sh
