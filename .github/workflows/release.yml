@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to publish, for example v2.1.8
+        description: Existing version tag to publish, for example v2.1.9
         required: true
         type: string
 
@@ -87,6 +87,7 @@ jobs:
           version=${RELEASE_TAG#v}
           grep -Fqx -- "readonly VERSION=\"${version}\"" download-video.sh
           grep -Fq -- "# Version     : ${version}" download-video-gui.sh
+          grep -Fq -- "# Version     : ${version}" install-gui.sh
           grep -Fq -- "is **${version}**." README.md
           grep -Fq -- "version actuelle est la **${version}**" README.fr.md
           grep -Fq -- "## ${version} - " CHANGELOG.md

@@ -50,16 +50,17 @@ The automated suite checks, among other things:
 - native-audio selection with `ba/b`, `best`, and quality `0`;
 - absence of forced MP3, M4A, or Opus output formats;
 - MKV video selection without forced re-encoding;
-- yt-dlp and aria2c progress parsing;
+- yt-dlp and aria2c progress parsing, including transfers without a known total size;
 - a neutral final progress message instead of a premature success message;
 - monotonic progress after post-processing begins;
 - deletion of successful-download logs and retention of failure logs;
-- complete process-group cancellation and termination;
+- atomic process-group publication, complete cancellation, and termination;
 - Zenity timeout and unexpected-error handling;
 - folder-chooser fallback behavior on Zenity 4;
-- minimum versions, suffixed yt-dlp versions, and required capabilities of
-  yt-dlp, aria2c, and Deno;
-- `.desktop` launcher installation, French localization, validation, and
+- minimum versions, suffixed yt-dlp versions, required capabilities, and
+  behavior under a hostile inherited locale;
+- `.desktop` launcher installation through a stable private link, exact Exec
+  escaping, restrictive-path handling, validation, permissions, reinstall, and
   removal.
 
 ## GitHub Actions

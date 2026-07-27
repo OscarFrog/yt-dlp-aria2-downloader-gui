@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video-gui.sh
-# Version     : 2.1.8
+# Version     : 2.1.9
 # Date        : 2026-07-27
 # Description : Two-choice Zenity GUI for complete MKV video or native audio.
 # ============================================================================
@@ -125,8 +125,13 @@ stop_worker_group() {
 cleanup() {
     local status=$?
 
+    # Cleanup is a short critical section. Ignore additional termination
+    # signals so a second signal cannot interrupt worker shutdown midway.
+    trap - EXIT
+    trap '' HUP INT TERM
+
     if [[ ${CLEANUP_DONE} == true ]]; then
-        return
+        exit "${status}"
     fi
     CLEANUP_DONE=true
 
@@ -136,10 +141,10 @@ cleanup() {
     fi
 
     if [[ -n ${TEMP_DIR} && -d ${TEMP_DIR} ]]; then
-        rm -rf -- "${TEMP_DIR}"
+        rm -rf -- "${TEMP_DIR}" || true
     fi
 
-    return "${status}"
+    exit "${status}"
 }
 
 trap cleanup EXIT
@@ -377,7 +382,7 @@ monitor_progress() {
         recent=$(tail -c 65536 -- "${log_file}" 2>/dev/null |
             tr '\r' '\n' || true)
         line=$(printf '%s\n' "${recent}" |
-            grep -aE '^(YTDLP_PROGRESS\||\[#.*\([0-9]{1,3}%\).*(DL|SPD):)' |
+            grep -aE '^(YTDLP_PROGRESS\||\[#[[:xdigit:]]+[[:space:]])' |
             tail -n 1 || true)
 
         if [[ ${postprocessing} == false ]] &&
@@ -463,14 +468,15 @@ wait_for_worker_pgid() {
     local pgid_file=$1
     local worker_pid=$2
     local attempt
+    local candidate=''
 
     for ((attempt = 0; attempt < 50; attempt++)); do
-        if [[ -s ${pgid_file} ]]; then
-            read -r WORKER_PGID <"${pgid_file}"
-            if [[ ${WORKER_PGID} =~ ^[1-9][0-9]*$ ]]; then
+        if [[ -f ${pgid_file} ]]; then
+            candidate=$(<"${pgid_file}")
+            if [[ ${candidate} =~ ^[1-9][0-9]*$ ]]; then
+                WORKER_PGID=${candidate}
                 return 0
             fi
-            return 1
         fi
 
         if ! kill -0 "${worker_pid}" 2>/dev/null; then
@@ -483,7 +489,7 @@ wait_for_worker_pgid() {
     return 1
 }
 
-for command_name in zenity realpath dirname mktemp setsid tail grep tr; do
+for command_name in zenity realpath dirname mktemp setsid tail grep tr mv; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         printf 'Error: required command "%s" was not found.\n' \
             "${command_name}" >&2
@@ -669,7 +675,9 @@ COMMAND+=(-- "${URL}")
 LC_ALL=C setsid --fork --wait bash -c '
     pgid_file=$1
     shift
-    printf "%s\n" "$$" > "${pgid_file}" || exit 125
+    pgid_temporary="${pgid_file}.tmp"
+    printf "%s\n" "$$" >"${pgid_temporary}" || exit 125
+    mv -f -- "${pgid_temporary}" "${pgid_file}" || exit 125
     exec "$@"
 ' bash "${PGID_FILE}" "${COMMAND[@]}" >"${LOG_FILE}" 2>&1 &
 WORKER_PID=$!

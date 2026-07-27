@@ -15,7 +15,7 @@ une seule URL sous l'une des deux formes suivantes :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.8**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.9**.
 
 ## Fonctionnalités principales
 
@@ -87,7 +87,7 @@ setsid --version
 Téléchargez les deux fichiers publiés avec la release GitHub :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.8.zip
+yt-dlp-aria2-downloader-gui-2.1.9.zip
 SHA256SUMS
 ```
 
@@ -95,8 +95,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.8.zip
-cd yt-dlp-aria2-downloader-gui-2.1.8
+unzip yt-dlp-aria2-downloader-gui-2.1.9.zip
+cd yt-dlp-aria2-downloader-gui-2.1.9
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -118,8 +118,14 @@ Le lanceur est créé dans :
 ~/.local/share/applications/
 ```
 
-Le lanceur contient le chemin absolu du dépôt. Après avoir déplacé le dossier du
-projet, relancez `./install-gui.sh install`.
+L'entrée du menu appelle un lien de lancement stable stocké dans :
+
+```text
+~/.local/share/yt-dlp-aria2-downloader/launch
+```
+
+Ce lien privé cible le chemin absolu du script graphique dans le dépôt. Après
+avoir déplacé le dossier du projet, relancez `./install-gui.sh install`.
 
 ## Utilisation graphique
 
