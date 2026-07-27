@@ -8,9 +8,7 @@ project. It is intentionally independent of a particular release date.
 Run from the repository root:
 
 ```bash
-./test-static.sh
-./tests/mock-integration.sh
-./tests/installer-integration.sh
+./tests/run-all.sh
 ```
 
 ## Bash syntax
@@ -20,6 +18,8 @@ bash -n download-video.sh
 bash -n download-video-gui.sh
 bash -n install-gui.sh
 bash -n test-static.sh
+bash -n tests/run-all.sh
+bash -n tests/lib/assert.sh
 bash -n tests/mock-integration.sh
 bash -n tests/installer-integration.sh
 ```
@@ -34,6 +34,8 @@ shellcheck -o all \
 
 shellcheck \
   test-static.sh \
+  tests/run-all.sh \
+  tests/lib/assert.sh \
   tests/mock-integration.sh \
   tests/installer-integration.sh
 ```
@@ -42,7 +44,7 @@ shellcheck \
 
 The automated suite checks, among other things:
 
-- argument validation and exactly one URL per run;
+- argument validation, terminal `--`, and exactly one URL per run;
 - preservation of URLs containing shell metacharacters;
 - trimming of leading and trailing whitespace entered in the GUI;
 - native-audio selection with `ba/b`, `best`, and quality `0`;
@@ -55,7 +57,8 @@ The automated suite checks, among other things:
 - complete process-group cancellation and termination;
 - Zenity timeout and unexpected-error handling;
 - folder-chooser fallback behavior on Zenity 4;
-- minimum versions and required capabilities of yt-dlp, aria2c, and Deno;
+- minimum versions, suffixed yt-dlp versions, and required capabilities of
+  yt-dlp, aria2c, and Deno;
 - `.desktop` launcher installation, French localization, validation, and
   removal.
 
@@ -69,7 +72,8 @@ The automated suite checks, among other things:
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the complete Ubuntu validation job first, verifies that the tag matches the
 versions declared by the scripts and documentation, creates a versioned ZIP
-archive, generates `SHA256SUMS`, and publishes both files in a GitHub release.
+archive, verifies its checksum, extracts and retests the ZIP, then publishes
+both files in a GitHub release.
 
 ## Real-world checks on Fedora 44
 

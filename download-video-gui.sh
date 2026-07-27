@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video-gui.sh
-# Version     : 2.1.7
+# Version     : 2.1.8
 # Date        : 2026-07-27
 # Description : Two-choice Zenity GUI for complete MKV video or native audio.
 # ============================================================================
@@ -17,6 +17,8 @@ if [[ -z ${HOME:-} ]]; then
 fi
 
 readonly APP_NAME='yt-dlp aria2 downloader'
+readonly PROFILE_LABEL_VIDEO='Complete video (MKV)'
+readonly PROFILE_LABEL_AUDIO='Audio track (native format)'
 readonly CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/yt-dlp-aria2-downloader"
 readonly STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/yt-dlp-aria2-downloader"
 readonly CONFIG_FILE="${CONFIG_DIR}/gui.conf"
@@ -278,8 +280,8 @@ select_profile() {
         --cancel-label='Cancel' \
         --width=560 \
         --height=240 \
-        "${default_video}" 'Complete video (MKV)' \
-        "${default_audio}" 'Audio track (native format)'
+        "${default_video}" "${PROFILE_LABEL_VIDEO}" \
+        "${default_audio}" "${PROFILE_LABEL_AUDIO}"
     capture_status=${ZENITY_STATUS}
 
     if ((capture_status != 0)); then
@@ -287,8 +289,8 @@ select_profile() {
     fi
 
     case ${selected} in
-    'Complete video (MKV)') selected_profile='video' ;;
-    'Audio track (native format)') selected_profile='audio' ;;
+    "${PROFILE_LABEL_VIDEO}") selected_profile='video' ;;
+    "${PROFILE_LABEL_AUDIO}") selected_profile='audio' ;;
     *) return 2 ;;
     esac
 
@@ -338,7 +340,10 @@ select_output_dir() {
         return 2
     fi
 
-    resolved_dir=$(realpath -e -- "${selected_dir}") || return 2
+    if ! resolved_dir=$(realpath -e -- "${selected_dir}"); then
+        show_error 'The selected folder could not be resolved. It may have been removed or may contain an invalid symbolic link.'
+        return 2
+    fi
     printf -v "${output_variable}" '%s' "${resolved_dir}"
 }
 
@@ -363,6 +368,7 @@ monitor_progress() {
     local display_percent=0
     local message='Analyzing the webpage...'
     local postprocessing=false
+    local _
 
     while kill -0 "${worker_pid}" 2>/dev/null; do
         # aria2c refreshes its console line with carriage returns. Converting
@@ -375,7 +381,7 @@ monitor_progress() {
             tail -n 1 || true)
 
         if [[ ${postprocessing} == false ]] &&
-            grep -aq '^YTDLP_POSTPROCESS|' "${log_file}" 2>/dev/null; then
+            grep -aq '^YTDLP_POSTPROCESS|' <<<"${recent}"; then
             postprocessing=true
         fi
 
@@ -690,6 +696,8 @@ monitor_progress "${LOG_FILE}" "${WORKER_PID}" | zenity --progress \
 pipeline_status=("${PIPESTATUS[@]}")
 set -e
 
+# monitor_progress may finish with status 141 when Zenity closes its input
+# pipe. Only Zenity's status determines cancellation, timeout, or dialog error.
 zenity_status=${pipeline_status[1]:-1}
 if ((zenity_status != 0)); then
     stop_worker_group
@@ -761,9 +769,9 @@ if ((worker_status == 0)); then
     success_status=${ZENITY_STATUS}
 
     if [[ ${success_action} == 'New download' ]]; then
-        # The new process starts again at the URL entry step.
-        # The completed download's temporary directory is removed. Its log
-        # has already been deleted when the final media file was confirmed.
+        # exec does not run the EXIT trap. WORKER_PID is already empty, and the
+        # completed download's temporary directory must be removed explicitly.
+        # Its log was deleted only when the final media file was confirmed.
         if [[ -n ${TEMP_DIR} && -d ${TEMP_DIR} ]]; then
             rm -rf -- "${TEMP_DIR}"
         fi
@@ -806,7 +814,7 @@ View the log?" \
         --cancel-label='Close' \
         --width=540; then
         zenity --text-info \
-            --title="Log - ${APP_NAME}" \
+            --title="Log - ${APP_NAME} - may contain private URLs" \
             --filename="${LOG_FILE}" \
             --width=950 \
             --height=650

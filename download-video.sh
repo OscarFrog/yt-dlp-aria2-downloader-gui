@@ -3,20 +3,21 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.7
+# Version     : 2.1.8
 # Date        : 2026-07-27
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
 
 set -Eeuo pipefail
 
-readonly VERSION="2.1.7"
+readonly VERSION="2.1.8"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
 readonly SCRIPT_NAME="${0##*/}"
 
 VERSION_AT_LEAST=false
+VERSION_PARSE_VALID=false
 
 usage() {
     cat <<EOF_USAGE
@@ -56,6 +57,7 @@ compare_versions() {
     local minimum_patch
 
     VERSION_AT_LEAST=false
+    VERSION_PARSE_VALID=false
 
     # Installed versions may contain a suffix; the configured minimum below
     # must remain a strict three-component version.
@@ -72,6 +74,7 @@ compare_versions() {
     minimum_major=$((10#${BASH_REMATCH[1]}))
     minimum_minor=$((10#${BASH_REMATCH[2]}))
     minimum_patch=$((10#${BASH_REMATCH[3]}))
+    VERSION_PARSE_VALID=true
 
     if ((current_major > minimum_major || (\
         current_major == minimum_major && current_minor > minimum_minor) || (\
@@ -99,6 +102,10 @@ check_runtime_compatibility() {
     fi
     yt_dlp_version=${yt_dlp_version%%$'\n'*}
     compare_versions "${yt_dlp_version}" "${MIN_YT_DLP_VERSION}"
+    if [[ ${VERSION_PARSE_VALID} != true ]]; then
+        error "unable to parse the yt-dlp version: ${yt_dlp_version:-unknown}."
+        return 1
+    fi
     if [[ ${VERSION_AT_LEAST} != true ]]; then
         error "yt-dlp ${MIN_YT_DLP_VERSION} or later is required; found ${yt_dlp_version}."
         return 1
@@ -109,9 +116,17 @@ check_runtime_compatibility() {
         return 1
     fi
     IFS=' ' read -r deno_name deno_version _ <<<"${deno_output%%$'\n'*}"
+    if [[ ${deno_name} != deno || -z ${deno_version} ]]; then
+        error "unable to parse the Deno version: ${deno_output%%$'\n'*}."
+        return 1
+    fi
     compare_versions "${deno_version}" "${MIN_DENO_VERSION}"
-    if [[ ${deno_name} != deno || ${VERSION_AT_LEAST} != true ]]; then
-        error "Deno ${MIN_DENO_VERSION} or later is required; found ${deno_version:-unknown}."
+    if [[ ${VERSION_PARSE_VALID} != true ]]; then
+        error "unable to parse the Deno version: ${deno_version}."
+        return 1
+    fi
+    if [[ ${VERSION_AT_LEAST} != true ]]; then
+        error "Deno ${MIN_DENO_VERSION} or later is required; found ${deno_version}."
         return 1
     fi
 
@@ -142,6 +157,10 @@ check_runtime_compatibility() {
     fi
     aria2_version=${BASH_REMATCH[1]}
     compare_versions "${aria2_version}" "${MIN_ARIA2_VERSION}"
+    if [[ ${VERSION_PARSE_VALID} != true ]]; then
+        error "unable to parse the aria2c version: ${aria2_version}."
+        return 1
+    fi
     if [[ ${VERSION_AT_LEAST} != true ]]; then
         error "aria2c ${MIN_ARIA2_VERSION} or later is required; found ${aria2_version}."
         return 1
@@ -207,6 +226,7 @@ MODE='video'
 MACHINE_PROGRESS=false
 RESULT_FILE=''
 URL=''
+POSITIONAL_ARGUMENTS=()
 
 while (($# > 0)); do
     case $1 in
@@ -254,13 +274,8 @@ while (($# > 0)); do
         ;;
     --)
         shift
-        if (($# != 1)); then
-            error 'exactly one video URL is required.'
-            usage >&2
-            exit 2
-        fi
-        URL=$1
-        shift
+        POSITIONAL_ARGUMENTS+=("$@")
+        break
         ;;
     -*)
         error "unknown option: $1"
@@ -268,22 +283,23 @@ while (($# > 0)); do
         exit 2
         ;;
     *)
-        if [[ -n ${URL} ]]; then
-            error 'exactly one video URL is required.'
-            usage >&2
-            exit 2
-        fi
-        URL=$1
+        POSITIONAL_ARGUMENTS+=("$1")
         shift
         ;;
     esac
 done
 
-if [[ -z ${URL} ]]; then
+if ((${#POSITIONAL_ARGUMENTS[@]} == 0)); then
     error 'a video URL is required.'
     usage >&2
     exit 2
 fi
+if ((${#POSITIONAL_ARGUMENTS[@]} != 1)); then
+    error 'exactly one video URL is required.'
+    usage >&2
+    exit 2
+fi
+URL=${POSITIONAL_ARGUMENTS[0]}
 
 if [[ ${URL} == *$'\n'* || ${URL} == *$'\r'* ]]; then
     error 'the URL must not contain line breaks.'
@@ -310,6 +326,8 @@ for command_name in yt-dlp aria2c ffmpeg ffprobe realpath dirname deno grep; do
     fi
 done
 
+# Keep this as a simple command: placing it in an if/|| context would disable
+# errexit inside the function body under Bash's documented rules.
 check_runtime_compatibility
 
 set +e

@@ -4,7 +4,7 @@
 
 [Version française](README.fr.md)
 
-A Zenity graphical interface and Bash download engine for Linux. It downloads a
+A Zenity graphical interface and Bash download engine for GNU/Linux only. It downloads a
 single URL in one of two forms:
 
 - a **complete MKV video**, using the best available video and audio streams;
@@ -14,7 +14,7 @@ single URL in one of two forms:
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
 streams deliberately remain on yt-dlp's native downloader. The current version
-is **2.1.7**.
+is **2.1.8**.
 
 ## Main features
 
@@ -86,7 +86,7 @@ setsid --version
 Download both release assets from the GitHub release page:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.7.zip
+yt-dlp-aria2-downloader-gui-2.1.8.zip
 SHA256SUMS
 ```
 
@@ -94,8 +94,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.7.zip
-cd yt-dlp-aria2-downloader-gui-2.1.7
+unzip yt-dlp-aria2-downloader-gui-2.1.8.zip
+cd yt-dlp-aria2-downloader-gui-2.1.8
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -195,7 +195,10 @@ EJS components from npm when yt-dlp needs them:
 --remote-components ejs:npm
 ```
 
-This means a YouTube download can contact npm in addition to the media website.
+yt-dlp may download the yt-dlp-ejs challenge-solver components from npm.
+Those scripts are executed by Deno with restricted file-system and network
+permissions. A YouTube download can therefore contact npm in addition to the
+media website.
 
 ### Complete video
 

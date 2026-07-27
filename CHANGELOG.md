@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.1.8 - 2026-07-27
+
+### Argument parsing and diagnostics
+
+- Unified positional-URL handling before and after `--`.
+- Accept a harmless terminal `--` and reject duplicate URLs consistently.
+- Distinguish unparseable runtime versions from versions that are too old.
+- Use stable profile-label constants and report directory-resolution failures.
+
+### Tests and continuous integration
+
+- Added a shared `tests/run-all.sh` entry point for local, Ubuntu, Fedora, and
+  release validation.
+- Added reusable assertion helpers with named failure diagnostics.
+- Made retained-log tests independent of scenario order.
+- Added coverage for suffixed yt-dlp versions and separator edge cases.
+- Added manual workflow dispatch for CI and release recovery.
+
+### Installer and releases
+
+- Removed the unnecessary MIME database refresh for a launcher without
+  `MimeType` associations.
+- Made repeated launcher removal messages accurate.
+- Verified that a release tag resolves to the checked-out commit.
+- Extracted and ran the complete validation suite from the final ZIP before
+  publishing it.
+
+### Documentation
+
+- State the GNU/Linux-only platform requirement explicitly.
+- Explain that yt-dlp-ejs components may be downloaded from npm and executed by
+  Deno with restricted permissions.
+
 ## 2.1.7 - 2026-07-27
 
 ### Diagnostics and interface
