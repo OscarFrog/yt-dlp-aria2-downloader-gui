@@ -75,10 +75,23 @@ else
     printf 'YTDLP_PROGRESS|downloading|100.0%%|2.00MiB/s|00:00\n'
 fi
 printf 'YTDLP_POSTPROCESS|processing|FFmpegExtractAudio\n'
-sleep 0.2
+if [[ ${MOCK_LATE_PROGRESS:-0} == 1 ]]; then
+    sleep 0.8
+    printf 'YTDLP_PROGRESS|downloading| 12.0%%|512.00KiB/s|00:09\n'
+    sleep 0.8
+else
+    sleep 0.2
+fi
 
-if [[ -n ${result_file} ]]; then
-    printf '%s\n' "${MOCK_OUTPUT_DIR}/Mock media [abc123].webm" >> "${result_file}"
+if [[ ${MOCK_YTDLP_EXIT_STATUS:-0} != 0 ]]; then
+    printf 'Simulated yt-dlp failure.\n' >&2
+    exit "${MOCK_YTDLP_EXIT_STATUS}"
+fi
+
+output_path="${MOCK_OUTPUT_DIR}/Mock media [abc123].webm"
+: >"${output_path}"
+if [[ -n ${result_file} && ${MOCK_SKIP_RESULT_FILE:-0} != 1 ]]; then
+    printf '%s\n' "${output_path}" >> "${result_file}"
 fi
 EOF_YTDLP
 chmod +x "${MOCK_BIN}/yt-dlp"
@@ -372,6 +385,19 @@ grep -Fxq -- '12' "${YTDLP_PROGRESS_CAPTURE}"
 grep -Fq -- '# Download: 12.5% - 1.00MiB/s - 00:07 remaining' \
     "${YTDLP_PROGRESS_CAPTURE}"
 
+late_progress_capture="${TEST_ROOT}/gui-progress-late.txt"
+MOCK_LATE_PROGRESS=1 \
+MOCK_PROGRESS_CAPTURE="${late_progress_capture}" \
+    "${PROJECT_DIR}/download-video-gui.sh"
+grep -Fxq -- '99' "${late_progress_capture}"
+if ! awk '
+    $0 == "99" { finalizing = 1; next }
+    finalizing && $0 ~ /^[0-9]+$/ && $0 < 99 { exit 1 }
+' "${late_progress_capture}"; then
+    printf 'Progress regressed after post-processing started.\n' >&2
+    exit 1
+fi
+
 grep -Fxq -- "output_dir=${OUTPUT_DIR}" \
     "${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf"
 grep -Fxq -- 'profile=audio' \
@@ -379,8 +405,9 @@ grep -Fxq -- 'profile=audio' \
 
 mapfile -t gui_logs < <(find "${XDG_STATE_HOME}/yt-dlp-aria2-downloader" \
     -maxdepth 1 -type f -name 'download-*.log' -print)
-if (( ${#gui_logs[@]} != 2 )); then
-    printf 'Expected two GUI logs, found %d.\n' "${#gui_logs[@]}" >&2
+if (( ${#gui_logs[@]} != 0 )); then
+    printf 'Successful GUI downloads retained %d log(s).\n' \
+        "${#gui_logs[@]}" >&2
     exit 1
 fi
 
@@ -426,6 +453,43 @@ for argument in "${file_selection_arguments[@]}"; do
             ;;
     esac
 done
+
+# A zero worker status without a final result path is inconsistent rather than
+# a confirmed success, so its diagnostic log must remain available.
+MOCK_SKIP_RESULT_FILE=1 \
+    "${PROJECT_DIR}/download-video-gui.sh" >/dev/null
+mapfile -t inconsistent_logs < <(find "${XDG_STATE_HOME}/yt-dlp-aria2-downloader" \
+    -maxdepth 1 -type f -name 'download-*.log' -print)
+if (( ${#inconsistent_logs[@]} != 1 )); then
+    printf 'Expected one retained inconsistent-run log, found %d.\n' \
+        "${#inconsistent_logs[@]}" >&2
+    exit 1
+fi
+
+grep -Fq -- 'YTDLP_POSTPROCESS|processing|' "${inconsistent_logs[0]}"
+
+set +e
+MOCK_YTDLP_EXIT_STATUS=7 \
+    "${PROJECT_DIR}/download-video-gui.sh" >/dev/null
+failed_download_status=$?
+set -e
+if (( failed_download_status != 7 )); then
+    printf 'Expected failed download status 7, got %d.\n' \
+        "${failed_download_status}" >&2
+    exit 1
+fi
+mapfile -t failed_logs < <(find "${XDG_STATE_HOME}/yt-dlp-aria2-downloader" \
+    -maxdepth 1 -type f -name 'download-*.log' -print)
+if (( ${#failed_logs[@]} != 2 )); then
+    printf 'Expected two retained diagnostic logs, found %d.\n' \
+        "${#failed_logs[@]}" >&2
+    exit 1
+fi
+if ! grep -Fl -- 'Simulated yt-dlp failure.' "${failed_logs[@]}" \
+    >/dev/null; then
+    printf 'No retained log contains the simulated failure.\n' >&2
+    exit 1
+fi
 
 termination_marker="${TEST_ROOT}/terminated"
 set +e

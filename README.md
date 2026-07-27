@@ -8,13 +8,13 @@ A Zenity graphical interface and Bash download engine for Linux. It downloads a
 single URL in one of two forms:
 
 - a **complete MKV video**, using the best available video and audio streams;
-- the **best audio track in its native format**, without forcing MP3, M4A, or
-  Opus conversion.
+- the **best available audio track**, preserving its source codec and
+  container whenever yt-dlp can do so without re-encoding.
 
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
 streams deliberately remain on yt-dlp's native downloader. The current version
-is **2.1.6**.
+is **2.1.7**.
 
 ## Main features
 
@@ -23,10 +23,10 @@ is **2.1.6**.
 - one URL per run, with accidental playlist downloads disabled;
 - destination-folder selection and preference persistence;
 - MKV video download without re-encoding when the streams are compatible;
-- extraction of the best audio track in the source format;
+- extraction of the best audio track while preserving its source format when possible;
 - interrupted-download resumption when supported by the website;
 - graphical progress display and cancellation of the complete process group;
-- private log file for every run;
+- private diagnostic logs retained only for problematic runs;
 - application-menu launcher;
 - static tests, integration tests, and GitHub Actions validation on Ubuntu and
   Fedora 44.
@@ -86,7 +86,7 @@ setsid --version
 Download both release assets from the GitHub release page:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.6.zip
+yt-dlp-aria2-downloader-gui-2.1.7.zip
 SHA256SUMS
 ```
 
@@ -94,8 +94,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.6.zip
-cd yt-dlp-aria2-downloader-gui-2.1.6
+unzip yt-dlp-aria2-downloader-gui-2.1.7.zip
+cd yt-dlp-aria2-downloader-gui-2.1.7
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -215,8 +215,9 @@ Audio mode uses:
 ```
 
 It prefers the best audio-only stream. When the website does not provide one,
-it uses the best combined media file and extracts its audio. The result may be
-WebM/Opus, M4A/AAC, or another format supplied by the source.
+it uses the best combined media file and extracts its audio. yt-dlp preserves
+the source codec and container whenever possible, but may invoke FFmpeg to remux
+or convert media when the source cannot be extracted directly.
 
 ## Local data
 
@@ -232,7 +233,9 @@ Execution logs:
 ~/.local/state/yt-dlp-aria2-downloader/download-*.log
 ```
 
-Logs are private and are intentionally retained until the user removes them.
+Logs are private. A log is deleted automatically after the final media file
+is confirmed. Failed, canceled, interrupted, or inconsistent runs retain their
+logs for troubleshooting.
 
 ## Tests
 

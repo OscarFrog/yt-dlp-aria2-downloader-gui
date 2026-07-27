@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video-gui.sh
-# Version     : 2.1.6
-# Date        : 2026-07-25
+# Version     : 2.1.7
+# Date        : 2026-07-27
 # Description : Two-choice Zenity GUI for complete MKV video or native audio.
 # ============================================================================
 
@@ -359,8 +359,10 @@ monitor_progress() {
     local speed=''
     local eta=''
     local percent_number=0
+    local candidate_percent=0
     local display_percent=0
     local message='Analyzing the webpage...'
+    local postprocessing=false
 
     while kill -0 "${worker_pid}" 2>/dev/null; do
         # aria2c refreshes its console line with carriage returns. Converting
@@ -372,9 +374,16 @@ monitor_progress() {
             grep -aE '^(YTDLP_PROGRESS\||\[#.*\([0-9]{1,3}%\).*(DL|SPD):)' |
             tail -n 1 || true)
 
-        if [[ -n ${line} && ${line} != "${previous_line}" ]]; then
-            previous_line=${line}
+        if [[ ${postprocessing} == false ]] &&
+            grep -aq '^YTDLP_POSTPROCESS|' "${log_file}" 2>/dev/null; then
+            postprocessing=true
+        fi
 
+        if [[ ${postprocessing} == true ]]; then
+            display_percent=99
+            message='Finalizing the file...'
+        elif [[ -n ${line} && ${line} != "${previous_line}" ]]; then
+            previous_line=${line}
             percent_number=''
 
             if [[ ${line} == YTDLP_PROGRESS\|* ]]; then
@@ -416,11 +425,14 @@ monitor_progress() {
             fi
 
             if [[ ${percent_number} =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-                display_percent=${percent_number%%.*}
-                if ((display_percent > 98)); then
-                    display_percent=98
-                elif ((display_percent < 0)); then
-                    display_percent=0
+                candidate_percent=${percent_number%%.*}
+                if ((candidate_percent > 98)); then
+                    candidate_percent=98
+                elif ((candidate_percent < 0)); then
+                    candidate_percent=0
+                fi
+                if ((candidate_percent > display_percent)); then
+                    display_percent=${candidate_percent}
                 fi
             fi
 
@@ -430,9 +442,6 @@ monitor_progress() {
             if [[ -n ${eta} && ${eta} != 'NA' && ${eta} != 'Unknown' ]]; then
                 message+=" - ${eta} remaining"
             fi
-        elif grep -aq '^YTDLP_POSTPROCESS|' "${log_file}" 2>/dev/null; then
-            display_percent=99
-            message='Finalizing the file...'
         fi
 
         printf '%d\n' "${display_percent}" || return 0
@@ -482,7 +491,9 @@ SETSID_HELP=$(LC_ALL=C setsid --help 2>&1) || {
 }
 readonly SETSID_HELP
 for required_option in --fork --wait; do
-    if ! grep -q -- "${required_option}" <<<"${SETSID_HELP}"; then
+    if ! grep -Eq -- \
+        "^[[:space:]]*(-[^[:space:]]+,[[:space:]]+)?${required_option}([=[:space:]]|$)" \
+        <<<"${SETSID_HELP}"; then
         printf 'Error: this version of setsid does not support %s.\n' \
             "${required_option}" >&2
         exit 127
@@ -713,15 +724,30 @@ WORKER_PID=''
 
 if ((worker_status == 0)); then
     final_path=''
+    result_path=''
     if [[ -s ${RESULT_FILE} ]]; then
-        final_path=$(<"${RESULT_FILE}")
+        while IFS= read -r result_path || [[ -n ${result_path} ]]; do
+            if [[ -n ${result_path} ]]; then
+                final_path=${result_path}
+            fi
+        done <"${RESULT_FILE}"
     fi
 
     success_text='The download is complete.'
-    if [[ -n ${final_path} ]]; then
+    log_notice=''
+    if [[ -n ${final_path} && -f ${final_path} ]]; then
         success_text+=$'\n\nFile: '
         success_text+="${final_path}"
+
+        if ! rm -f -- "${LOG_FILE}"; then
+            log_notice=$'\n\nWarning: the successful-download log could not be deleted.\nLog: '
+            log_notice+="${LOG_FILE}"
+        fi
+    else
+        log_notice=$'\n\nWarning: the final media file could not be confirmed.\nThe diagnostic log was retained: '
+        log_notice+="${LOG_FILE}"
     fi
+    success_text+="${log_notice}"
 
     success_action=''
     run_zenity_capture success_action --question \
@@ -736,8 +762,8 @@ if ((worker_status == 0)); then
 
     if [[ ${success_action} == 'New download' ]]; then
         # The new process starts again at the URL entry step.
-        # The completed download's temporary directory is removed,
-        # while the log remains available in STATE_DIR.
+        # The completed download's temporary directory is removed. Its log
+        # has already been deleted when the final media file was confirmed.
         if [[ -n ${TEMP_DIR} && -d ${TEMP_DIR} ]]; then
             rm -rf -- "${TEMP_DIR}"
         fi

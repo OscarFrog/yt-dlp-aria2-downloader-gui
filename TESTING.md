@@ -50,6 +50,8 @@ The automated suite checks, among other things:
 - MKV video selection without forced re-encoding;
 - yt-dlp and aria2c progress parsing;
 - a neutral final progress message instead of a premature success message;
+- monotonic progress after post-processing begins;
+- deletion of successful-download logs and retention of failure logs;
 - complete process-group cancellation and termination;
 - Zenity timeout and unexpected-error handling;
 - folder-chooser fallback behavior on Zenity 4;
@@ -64,10 +66,10 @@ The automated suite checks, among other things:
 - `ubuntu-latest`;
 - a Fedora 44 container on a GitHub-hosted runner.
 
-`.github/workflows/release.yml` is triggered by tags matching `v*`. It verifies
-that the tag matches the version declared by the scripts, creates a versioned
-ZIP archive, generates `SHA256SUMS`, and publishes both files in a GitHub
-release.
+`.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
+the complete Ubuntu validation job first, verifies that the tag matches the
+versions declared by the scripts and documentation, creates a versioned ZIP
+archive, generates `SHA256SUMS`, and publishes both files in a GitHub release.
 
 ## Real-world checks on Fedora 44
 

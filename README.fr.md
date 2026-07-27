@@ -9,13 +9,13 @@ une seule URL sous l'une des deux formes suivantes :
 
 - une **vidéo MKV complète**, avec les meilleures pistes vidéo et audio
   disponibles ;
-- la **meilleure piste audio dans son format natif**, sans imposer une
-  conversion MP3, M4A ou Opus.
+- la **meilleure piste audio disponible**, en conservant son codec et son
+  conteneur source lorsque yt-dlp peut le faire sans réencodage.
 
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.6**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.7**.
 
 ## Fonctionnalités principales
 
@@ -25,10 +25,10 @@ téléchargeur natif de yt-dlp. La version actuelle est la **2.1.6**.
   listes de lecture ;
 - sélection du dossier de destination et mémorisation des préférences ;
 - vidéo MKV sans réencodage lorsque les flux sont compatibles ;
-- extraction de la meilleure piste audio dans le format de la source ;
+- extraction de la meilleure piste audio avec conservation du format source lorsque possible ;
 - reprise des téléchargements interrompus lorsque le site le permet ;
 - progression graphique et annulation de tout le groupe de processus ;
-- journal privé pour chaque exécution ;
+- journaux privés conservés uniquement pour les exécutions problématiques ;
 - lanceur dans le menu des applications ;
 - tests statiques, tests d'intégration et validation GitHub Actions sous Ubuntu
   et Fedora 44.
@@ -87,7 +87,7 @@ setsid --version
 Téléchargez les deux fichiers publiés avec la release GitHub :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.6.zip
+yt-dlp-aria2-downloader-gui-2.1.7.zip
 SHA256SUMS
 ```
 
@@ -95,8 +95,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.6.zip
-cd yt-dlp-aria2-downloader-gui-2.1.6
+unzip yt-dlp-aria2-downloader-gui-2.1.7.zip
+cd yt-dlp-aria2-downloader-gui-2.1.7
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -207,8 +207,9 @@ Le mode audio utilise :
 ```
 
 Il privilégie la meilleure piste audio seule. Si le site n'en fournit pas, il
-utilise le meilleur fichier combiné et en extrait l'audio. Le résultat peut être
-WebM/Opus, M4A/AAC ou un autre format fourni par la source.
+utilise le meilleur fichier combiné et en extrait l'audio. yt-dlp conserve le
+codec et le conteneur source lorsque cela est possible, mais peut utiliser
+FFmpeg pour remuxer ou convertir un média qui ne peut pas être extrait directement.
 
 ## Données locales
 
@@ -224,8 +225,9 @@ Journaux d'exécution :
 ~/.local/state/yt-dlp-aria2-downloader/download-*.log
 ```
 
-Les journaux sont privés et sont volontairement conservés jusqu'à leur
-suppression manuelle par l'utilisateur.
+Les journaux sont privés. Un journal est supprimé automatiquement dès que le
+fichier média final est confirmé. Les exécutions échouées, annulées, interrompues
+ou incohérentes conservent leur journal afin de faciliter le diagnostic.
 
 ## Tests
 
