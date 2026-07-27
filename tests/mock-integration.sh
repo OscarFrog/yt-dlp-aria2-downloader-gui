@@ -8,12 +8,14 @@ readonly PROJECT_DIR
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
-trap 'rm -rf -- "${TEST_ROOT}"' EXIT
+trap 'rm -rf -- "${TEST_ROOT}" || true' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 readonly MOCK_BIN="${TEST_ROOT}/bin"
 readonly OUTPUT_DIR="${TEST_ROOT}/output dir %"
 readonly HOME_DIR="${TEST_ROOT}/home"
-readonly ARG_LOG="${TEST_ROOT}/yt-dlp-args.bin"
 readonly PROGRESS_CAPTURE="${TEST_ROOT}/gui-progress-aria.txt"
 readonly YTDLP_PROGRESS_CAPTURE="${TEST_ROOT}/gui-progress-ytdlp.txt"
 readonly LIST_ARGS_LOG="${TEST_ROOT}/zenity-list-args.bin"
@@ -23,11 +25,13 @@ cat > "${MOCK_BIN}/yt-dlp" <<'EOF_YTDLP'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [[ ${1:-} == '--version' ]]; then
+if (($# == 1)) && [[ $1 == '--version' ]]; then
+    [[ ${LC_ALL:-} == C ]] || { printf 'localized yt-dlp version output\n'; exit 65; }
     printf '%s\n' "${MOCK_YTDLP_VERSION:-2026.06.09}"
     exit 0
 fi
-if [[ ${1:-} == '--help' ]]; then
+if (($# == 1)) && [[ $1 == '--help' ]]; then
+    [[ ${LC_ALL:-} == C ]] || { printf 'localized yt-dlp help output\n'; exit 65; }
     printf '%s\n' \
         '--js-runtimes' \
         '--remote-components' \
@@ -39,6 +43,32 @@ fi
 
 : "${MOCK_ARG_LOG:?}"
 printf '%s\0' "$@" > "${MOCK_ARG_LOG}"
+
+wait_for_progress_capture() {
+    local expected=''
+    local attempt
+
+    [[ -n ${MOCK_PROGRESS_CAPTURE:-} ]] || return 0
+
+    if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
+        expected='# aria2 download: in progress - 1.00MiB'
+    elif [[ ${MOCK_ARIA_ONLY:-0} == 1 ]]; then
+        expected='# aria2 download: 40% - 1.00MiB - 6s remaining'
+    else
+        expected='# Download: 12.5% - 1.00MiB/s - 00:07 remaining'
+    fi
+
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        if [[ -r ${MOCK_PROGRESS_CAPTURE} ]] &&
+            grep -Fq -- "${expected}" "${MOCK_PROGRESS_CAPTURE}"; then
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    printf 'Timed out waiting for progress capture: %s\n' "${expected}" >&2
+    exit 66
+}
 
 result_file=''
 previous=''
@@ -57,13 +87,19 @@ for argument in "$@"; do
     fi
 done
 
-if [[ ${MOCK_ARIA_ONLY:-0} == 1 ]]; then
+if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
+    printf '\r[#a1b2c3 4.0MiB/0B CN:8 DL:1.00MiB]\r'
+elif [[ ${MOCK_ARIA_ONLY:-0} == 1 ]]; then
     printf '\r[#a1b2c3 4.0MiB/10.0MiB(40%%) CN:8 DL:1.00MiB ETA:6s]\r'
 else
     printf 'YTDLP_PROGRESS|downloading| 12.5%%|1.00MiB/s|00:07\n'
 fi
+wait_for_progress_capture
 
 if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
+    if [[ -n ${MOCK_STARTED_MARKER:-} ]]; then
+        printf started >"${MOCK_STARTED_MARKER}"
+    fi
     trap 'printf terminated > "${MOCK_TERMINATION_MARKER:?}"; exit 143' TERM INT
     while true; do
         sleep 0.1
@@ -71,7 +107,9 @@ if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
 fi
 
 sleep 0.8
-if [[ ${MOCK_ARIA_ONLY:-0} == 1 ]]; then
+if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
+    printf '\r[#a1b2c3 10.0MiB/0B CN:1 DL:2.00MiB]\r'
+elif [[ ${MOCK_ARIA_ONLY:-0} == 1 ]]; then
     printf '\r[#a1b2c3 10.0MiB/10.0MiB(100%%) CN:1 DL:2.00MiB ETA:0s]\r'
 else
     printf 'YTDLP_PROGRESS|downloading|100.0%%|2.00MiB/s|00:00\n'
@@ -104,9 +142,11 @@ set -Eeuo pipefail
 
 case ${1:-} in
 --version)
+    [[ ${LC_ALL:-} == C ]] || { printf 'aria2 versión localizada\n'; exit 65; }
     printf 'aria2 version %s\n' "${MOCK_ARIA2_VERSION:-1.37.0}"
     ;;
 --help=#all)
+    [[ ${LC_ALL:-} == C ]] || { printf 'ayuda aria2 localizada\n'; exit 65; }
     printf '%s\n' \
         '--file-allocation=<METHOD>' \
         '--no-conf[=true|false]' \
@@ -131,6 +171,7 @@ chmod +x "${MOCK_BIN}/aria2c"
 cat > "${MOCK_BIN}/deno" <<'EOF_DENO'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+[[ ${LC_ALL:-} == C ]] || { printf 'salida Deno localizada\n'; exit 65; }
 printf 'deno %s\n' "${MOCK_DENO_VERSION:-2.3.0}"
 printf 'v8 0.0.0\n'
 printf 'typescript 0.0.0\n'
@@ -241,339 +282,427 @@ esac
 EOF_ZENITY
 chmod +x "${MOCK_BIN}/zenity"
 
+prepare_argument_log() {
+    local scenario=$1
+    MOCK_ARG_LOG="${TEST_ROOT}/yt-dlp-args-${scenario}.bin"
+    export MOCK_ARG_LOG
+    : >"${MOCK_ARG_LOG}"
+}
+
+read_arguments() {
+    local file=$1
+    local output_array=$2
+    local -n output_ref=${output_array}
+    output_ref=()
+    # shellcheck disable=SC2034 # Assigned through a nameref to the caller array.
+    mapfile -d '' -t output_ref <"${file}"
+}
+
+assert_array_contains() {
+    local array_name=$1
+    local expected=$2
+    local label=$3
+    local -n array_ref=${array_name}
+    local value
+
+    for value in "${array_ref[@]}"; do
+        [[ ${value} == "${expected}" ]] && return 0
+    done
+    fail "${label}: missing array element: ${expected}"
+}
+
+assert_array_not_contains() {
+    local array_name=$1
+    local unexpected=$2
+    local label=$3
+    local -n array_ref=${array_name}
+    local value
+
+    for value in "${array_ref[@]}"; do
+        [[ ${value} != "${unexpected}" ]] ||
+            fail "${label}: unexpected array element: ${unexpected}"
+    done
+}
+
+assert_option_value() {
+    local array_name=$1
+    local option=$2
+    local expected_value=$3
+    local label=$4
+    local desired_occurrence=${5:-1}
+    local -n array_ref=${array_name}
+    local occurrence=0
+    local index
+
+    for ((index = 0; index < ${#array_ref[@]}; index++)); do
+        if [[ ${array_ref[index]} == "${option}" ]]; then
+            ((occurrence += 1))
+            if ((occurrence == desired_occurrence)); then
+                ((index + 1 < ${#array_ref[@]})) ||
+                    fail "${label}: ${option} has no following value"
+                assert_equals "${expected_value}" "${array_ref[index + 1]}" "${label}"
+                return 0
+            fi
+        fi
+    done
+
+    fail "${label}: occurrence ${desired_occurrence} of ${option} was not found"
+}
+
+count_logs() (
+    local log_dir="${XDG_STATE_HOME}/yt-dlp-aria2-downloader"
+    local -a logs=()
+
+    if [[ ! -d ${log_dir} ]]; then
+        printf '0\n'
+        return 0
+    fi
+
+    shopt -s nullglob
+    logs=("${log_dir}"/download-*.log)
+    printf '%d\n' "${#logs[@]}"
+)
+
+wait_for_file() {
+    local path=$1
+    local timeout=$2
+    local label=$3
+    local deadline=$((SECONDS + timeout))
+
+    while ((SECONDS < deadline)); do
+        [[ -f ${path} ]] && return 0
+        sleep 0.1
+    done
+
+    fail "${label}: file did not appear within ${timeout}s: ${path}"
+}
+
 export HOME="${HOME_DIR}"
 export XDG_CONFIG_HOME="${HOME_DIR}/.config"
 export XDG_STATE_HOME="${HOME_DIR}/.local/state"
 export XDG_DATA_HOME="${HOME_DIR}/.local/share"
-export MOCK_ARG_LOG="${ARG_LOG}"
 export MOCK_OUTPUT_DIR="${OUTPUT_DIR}"
 export MOCK_LIST_ARGS_LOG="${LIST_ARGS_LOG}"
 export PATH="${MOCK_BIN}:/usr/bin:/bin"
 
 for mocked_command in yt-dlp aria2c deno zenity ffmpeg ffprobe; do
     resolved_mock=$(command -v "${mocked_command}")
-    if [[ ${resolved_mock} != "${MOCK_BIN}/${mocked_command}" ]]; then
-        printf 'The %s mock was not selected: %s\n' \
-            "${mocked_command}" "${resolved_mock}" >&2
-        exit 1
-    fi
+    assert_equals "${MOCK_BIN}/${mocked_command}" "${resolved_mock}" \
+        "${mocked_command} mock selection"
 done
 
-count_logs() {
-    local -a logs=()
-    mapfile -t logs < <(find "${XDG_STATE_HOME}/yt-dlp-aria2-downloader" \
-        -maxdepth 1 -type f -name 'download-*.log' -print 2>/dev/null || true)
-    printf '%d\n' "${#logs[@]}"
-}
-
+# Engine audio mode: quoting, locale stabilization, option/value pairing, and
+# result-path reporting.
+prepare_argument_log 'audio-engine'
 result_file="${TEST_ROOT}/engine-%-result.txt"
 injection_marker="${TEST_ROOT}/must-not-exist"
 malicious_url="https://example.com/watch?v=abc123&x=\$(touch ${injection_marker})"
-"${PROJECT_DIR}/download-video.sh" \
+assert_status 0 'audio engine succeeds under a hostile inherited locale' \
+    env LC_ALL=fr_FR.UTF-8 LANG=fr_FR.UTF-8 \
+    "${PROJECT_DIR}/download-video.sh" \
     --output-dir "${OUTPUT_DIR}" \
     --mode audio \
     --machine-progress \
     --result-file "${result_file}" \
-    -- "${malicious_url}" >/dev/null
-
-assert_file_contains "${result_file}" \
+    -- "${malicious_url}"
+assert_file_has_line "${result_file}" \
     "${OUTPUT_DIR}/Mock media [abc123].webm" 'engine result path'
+[[ ! -e ${injection_marker} ]] || fail 'The URL was interpreted as shell code.'
 
-if [[ -e ${injection_marker} ]]; then
-    printf 'The URL was interpreted as shell code.\n' >&2
-    exit 1
-fi
-
-mapfile -d '' -t arguments < "${ARG_LOG}"
-joined=$(printf '%s\n' "${arguments[@]}")
-for expected in \
-    '--ignore-config' \
-    '--no-playlist' \
-    '--remote-components' \
-    'ejs:npm' \
-    '--format' \
-    'ba/b' \
-    '--extract-audio' \
-    '--audio-format' \
-    'best' \
-    '--audio-quality' \
-    '0' \
-    'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=1 --show-console-readout=true --stderr=true'; do
-    if ! grep -Fxq -- "${expected}" <<< "${joined}"; then
-        printf 'Missing yt-dlp argument: %s\n' "${expected}" >&2
-        exit 1
-    fi
-done
-if grep -Fxq -- '--machine-progress' <<< "${joined}"; then
-    printf 'Internal wrapper option leaked to yt-dlp.\n' >&2
-    exit 1
-fi
+arguments=()
+read_arguments "${MOCK_ARG_LOG}" arguments
+assert_array_contains arguments '--ignore-config' 'yt-dlp ignores user configuration'
+assert_array_contains arguments '--no-playlist' 'yt-dlp disables playlists'
+assert_option_value arguments '--remote-components' 'ejs:npm' 'EJS remote component selector'
+assert_option_value arguments '--format' 'ba/b' 'audio format selector'
+assert_array_contains arguments '--extract-audio' 'audio extraction postprocessor'
+assert_option_value arguments '--audio-format' 'best' 'audio output format'
+assert_option_value arguments '--audio-quality' '0' 'fallback conversion quality'
+assert_option_value arguments '--downloader' 'aria2c' 'default external downloader' 1
+assert_option_value arguments '--downloader' 'dash,m3u8:native' \
+    'fragmented-stream native downloader' 2
+assert_option_value arguments '--downloader-args' \
+    'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=1 --show-console-readout=true --stderr=true' \
+    'aria2 machine-progress arguments'
+assert_array_not_contains arguments '--machine-progress' \
+    'internal wrapper option isolation'
 for forbidden_audio_format in mp3 m4a opus; do
-    if grep -Fxq -- "${forbidden_audio_format}" <<< "${joined}"; then
-        printf 'A forced audio output format leaked to yt-dlp: %s\n' \
-            "${forbidden_audio_format}" >&2
-        exit 1
-    fi
+    assert_array_not_contains arguments "${forbidden_audio_format}" \
+        "removed audio format ${forbidden_audio_format}"
 done
-if ! grep -Fxq -- "${malicious_url}" <<< "${joined}"; then
-    printf 'The URL was not preserved as one argument.\n' >&2
-    exit 1
-fi
-
+assert_array_contains arguments "${malicious_url}" 'URL preserved as one argument'
 expected_output_template="${OUTPUT_DIR//%/%%}/%(title).150s [%(id)s].%(ext)s"
-if ! grep -Fxq -- "${expected_output_template}" <<< "${joined}"; then
-    printf 'The absolute output template was not escaped correctly.\n' >&2
-    exit 1
-fi
-if grep -Fxq -- '--paths' <<< "${joined}"; then
-    printf 'The engine unexpectedly uses --paths instead of one absolute output template.\n' >&2
-    exit 1
-fi
+assert_option_value arguments '--output' "${expected_output_template}" \
+    'absolute escaped output template'
+assert_array_not_contains arguments '--paths' 'legacy path option is absent'
 
-# A terminal -- is valid, and arguments after -- still use the same positional
-# validation path as arguments seen before it.
-"${PROJECT_DIR}/download-video.sh" \
-    --output-dir "${OUTPUT_DIR}" \
-    --mode audio \
-    'https://example.com/watch?v=terminal-separator' -- >/dev/null
+# Positional separator behavior.
+prepare_argument_log 'terminal-separator'
+assert_status 0 'terminal -- is accepted' \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode audio \
+    'https://example.com/watch?v=terminal-separator' --
 assert_status 2 'two URLs split by -- are rejected' \
     "${PROJECT_DIR}/download-video.sh" \
     'https://example.com/a' -- 'https://example.com/b'
 assert_text_contains "${ASSERT_OUTPUT}" 'exactly one video URL is required.' \
     'duplicate URL after -- diagnostic'
 
-"${PROJECT_DIR}/download-video.sh" \
-    --output-dir "${OUTPUT_DIR}" \
-    --mode video \
-    -- 'https://example.com/watch?v=video' >/dev/null
-mapfile -d '' -t arguments < "${ARG_LOG}"
-joined=$(printf '%s\n' "${arguments[@]}")
-for expected in \
-    '--format' \
-    'bv*+ba/b' \
-    '--merge-output-format' \
-    'mkv' \
-    'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=0'; do
-    if ! grep -Fxq -- "${expected}" <<< "${joined}"; then
-        printf 'Missing video-mode yt-dlp argument: %s\n' "${expected}" >&2
-        exit 1
-    fi
-done
-if grep -Fq -- '--show-console-readout=true' <<< "${joined}"; then
-    printf 'aria2 machine progress was enabled in ordinary CLI mode.\n' >&2
-    exit 1
-fi
+# Engine video mode.
+prepare_argument_log 'video-engine'
+assert_status 0 'video engine invocation' \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode video \
+    -- 'https://example.com/watch?v=video'
+arguments=()
+read_arguments "${MOCK_ARG_LOG}" arguments
+assert_option_value arguments '--format' 'bv*+ba/b' 'video format selector'
+assert_option_value arguments '--merge-output-format' 'mkv' 'video merge container'
+assert_option_value arguments '--remux-video' 'mkv' 'video remux container'
+assert_option_value arguments '--downloader-args' \
+    'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=0' \
+    'ordinary CLI aria2 arguments'
+assert_text_not_contains "$(printf '%s\n' "${arguments[@]}")" \
+    '--show-console-readout=true' 'machine progress disabled in ordinary CLI mode'
 
+# Clear engine error paths before yt-dlp download invocation.
+prepare_argument_log 'invalid-output'
+assert_status 1 'nonexistent output directory is rejected' \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${TEST_ROOT}/does-not-exist" \
+    -- 'https://example.com/watch?v=bad-output'
+assert_text_contains "${ASSERT_OUTPUT}" 'destination directory does not exist' \
+    'nonexistent output diagnostic'
+
+assert_status 13 'missing result-file parent is rejected' \
+    "${PROJECT_DIR}/download-video.sh" \
+    --result-file "${TEST_ROOT}/missing-parent/result.txt" \
+    -- 'https://example.com/watch?v=bad-result-parent'
+assert_text_contains "${ASSERT_OUTPUT}" 'result-file directory is not writable' \
+    'missing result parent diagnostic'
+
+# GUI progress from aria2c, including an unknown total size.
 trimmed_gui_url='https://example.com/watch?v=trimmed'
+prepare_argument_log 'gui-aria-percent'
 MOCK_ZENITY_ENTRY_VALUE="  ${trimmed_gui_url}  " \
 MOCK_ARIA_ONLY=1 \
 MOCK_PROGRESS_CAPTURE="${PROGRESS_CAPTURE}" \
     "${PROJECT_DIR}/download-video-gui.sh"
+assert_file_has_line "${PROGRESS_CAPTURE}" '40' 'aria2 progress reaches 40 percent'
+assert_file_contains "${PROGRESS_CAPTURE}" \
+    '# aria2 download: 40% - 1.00MiB - 6s remaining' \
+    'aria2 progress message'
+assert_file_contains "${PROGRESS_CAPTURE}" '# Finalizing the file...' \
+    'post-processing message'
+assert_file_not_contains "${PROGRESS_CAPTURE}" '# Completed' \
+    'premature completion message is absent'
 
-grep -Fxq -- '40' "${PROGRESS_CAPTURE}"
-grep -Fq -- '# aria2 download: 40% - 1.00MiB - 6s remaining' \
-    "${PROGRESS_CAPTURE}"
-grep -Fq -- '# Finalizing the file...' "${PROGRESS_CAPTURE}"
-if grep -Fq -- '# Completed' "${PROGRESS_CAPTURE}"; then
-    printf 'The progress dialog displayed a premature success message.\n' >&2
-    exit 1
-fi
-mapfile -d '' -t gui_arguments < "${ARG_LOG}"
-gui_joined=$(printf '%s\n' "${gui_arguments[@]}")
-grep -Fxq -- "${trimmed_gui_url}" <<< "${gui_joined}"
-if grep -Fxq -- "  ${trimmed_gui_url}  " <<< "${gui_joined}"; then
-    printf 'The GUI did not trim surrounding URL whitespace.\n' >&2
-    exit 1
-fi
+# shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+gui_arguments=()
+read_arguments "${MOCK_ARG_LOG}" gui_arguments
+assert_array_contains gui_arguments "${trimmed_gui_url}" 'trimmed GUI URL'
+assert_array_not_contains gui_arguments "  ${trimmed_gui_url}  " \
+    'untrimmed GUI URL is absent'
 
-mapfile -d '' -t list_arguments < "${LIST_ARGS_LOG}"
-list_joined=$(printf '%s\n' "${list_arguments[@]}")
+prepare_argument_log 'gui-aria-unknown-size'
+aria_unknown_capture="${TEST_ROOT}/gui-progress-aria-unknown.txt"
+MOCK_ARIA_NO_PERCENT=1 \
+MOCK_PROGRESS_CAPTURE="${aria_unknown_capture}" \
+    "${PROJECT_DIR}/download-video-gui.sh"
+assert_file_contains "${aria_unknown_capture}" \
+    '# aria2 download: in progress - 1.00MiB' \
+    'aria2 progress without a known total size'
+
+# shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+list_arguments=()
+read_arguments "${LIST_ARGS_LOG}" list_arguments
 for expected_profile_label in \
     'Complete video (MKV)' \
     'Audio track (native format)'; do
-    grep -Fxq -- "${expected_profile_label}" <<< "${list_joined}"
+    assert_array_contains list_arguments "${expected_profile_label}" \
+        "GUI profile label ${expected_profile_label}"
 done
-for removed_profile_label in \
-    'Audio - MP3' \
-    'Audio - M4A' \
-    'Audio - Opus'; do
-    if grep -Fxq -- "${removed_profile_label}" <<< "${list_joined}"; then
-        printf 'Removed GUI profile is still present: %s\n' \
-            "${removed_profile_label}" >&2
-        exit 1
-    fi
+for removed_profile_label in 'Audio - MP3' 'Audio - M4A' 'Audio - Opus'; do
+    assert_array_not_contains list_arguments "${removed_profile_label}" \
+        "removed GUI profile ${removed_profile_label}"
 done
 
+prepare_argument_log 'gui-ytdlp-progress'
 MOCK_PROGRESS_CAPTURE="${YTDLP_PROGRESS_CAPTURE}" \
     "${PROJECT_DIR}/download-video-gui.sh"
-grep -Fxq -- '12' "${YTDLP_PROGRESS_CAPTURE}"
-grep -Fq -- '# Download: 12.5% - 1.00MiB/s - 00:07 remaining' \
-    "${YTDLP_PROGRESS_CAPTURE}"
+assert_file_has_line "${YTDLP_PROGRESS_CAPTURE}" '12' \
+    'yt-dlp progress reaches integer 12'
+assert_file_contains "${YTDLP_PROGRESS_CAPTURE}" \
+    '# Download: 12.5% - 1.00MiB/s - 00:07 remaining' \
+    'yt-dlp progress message'
 
+prepare_argument_log 'gui-video'
 MOCK_PROFILE='Complete video (MKV)' \
     "${PROJECT_DIR}/download-video-gui.sh"
-mapfile -d '' -t video_gui_arguments < "${ARG_LOG}"
-video_gui_joined=$(printf '%s\n' "${video_gui_arguments[@]}")
-assert_text_contains "${video_gui_joined}" 'bv*+ba/b' 'GUI video format selection'
-if grep -Fxq -- 'ba/b' <<< "${video_gui_joined}"; then
-    fail 'GUI video run used the audio-only selector.'
-fi
+# shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+video_gui_arguments=()
+read_arguments "${MOCK_ARG_LOG}" video_gui_arguments
+assert_option_value video_gui_arguments '--format' 'bv*+ba/b' \
+    'GUI video format selection'
+assert_array_not_contains video_gui_arguments 'ba/b' \
+    'GUI video run does not use audio-only selector'
 
+# Post-processing progress must never regress.
+prepare_argument_log 'gui-late-progress'
 late_progress_capture="${TEST_ROOT}/gui-progress-late.txt"
 MOCK_LATE_PROGRESS=1 \
 MOCK_PROGRESS_CAPTURE="${late_progress_capture}" \
     "${PROJECT_DIR}/download-video-gui.sh"
-grep -Fxq -- '99' "${late_progress_capture}"
-if ! awk '
-    $0 == "99" { finalizing = 1; next }
-    finalizing && $0 ~ /^[0-9]+$/ && $0 < 99 { exit 1 }
-' "${late_progress_capture}"; then
-    printf 'Progress regressed after post-processing started.\n' >&2
-    exit 1
-fi
+progress_check_status=0
+awk '
+    $0 == "99" { finalizing_seen = 1; next }
+    finalizing_seen && $0 ~ /^[0-9]+$/ && ($0 + 0) < 99 {
+        regression_seen = 1
+    }
+    END {
+        if (!finalizing_seen) exit 2
+        if (regression_seen) exit 1
+        exit 0
+    }
+' "${late_progress_capture}" || progress_check_status=$?
+case ${progress_check_status} in
+0) ;;
+1) fail 'Progress regressed after post-processing started.' ;;
+2) fail 'Post-processing progress value 99 was never emitted.' ;;
+*) fail "Unexpected progress-check status: ${progress_check_status}" ;;
+esac
 
-grep -Fxq -- "output_dir=${OUTPUT_DIR}" \
-    "${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf"
-grep -Fxq -- 'profile=audio' \
-    "${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf"
-
-successful_log_count=$(count_logs)
-assert_equals '0' "${successful_log_count}" \
+config_file="${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf"
+assert_file_has_line "${config_file}" "output_dir=${OUTPUT_DIR}" \
+    'saved GUI output directory'
+assert_file_has_line "${config_file}" 'profile=audio' 'saved GUI audio profile'
+current_log_count=$(count_logs)
+assert_equals '0' "${current_log_count}" \
     'confirmed successful GUI downloads must not retain logs'
 
-
-cat > "${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf" <<EOF_OLD_CONFIG
+# Legacy and malformed configuration recovery.
+cat >"${config_file}" <<EOF_OLD_CONFIG
 output_dir=${OUTPUT_DIR}
 profile=audio-mp3
 EOF_OLD_CONFIG
+prepare_argument_log 'legacy-profile'
 MOCK_USE_DEFAULT_PROFILE=1 "${PROJECT_DIR}/download-video-gui.sh"
-grep -Fxq -- 'profile=audio' \
-    "${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf"
+assert_file_has_line "${config_file}" 'profile=audio' 'legacy profile migration'
 
+cat >"${config_file}" <<'EOF_BAD_CONFIG'
+malformed line
+unknown=value
+profile=invalid
+EOF_BAD_CONFIG
+prepare_argument_log 'malformed-config'
+MOCK_USE_DEFAULT_PROFILE=1 "${PROJECT_DIR}/download-video-gui.sh"
+assert_file_has_line "${config_file}" 'profile=video' \
+    'malformed configuration falls back to video'
+
+# File chooser fallback after a GTK/Zenity initial-directory failure.
 file_selection_args_log="${TEST_ROOT}/file-selection-args.bin"
-: > "${file_selection_args_log}"
+: >"${file_selection_args_log}"
+prepare_argument_log 'file-selection-fallback'
 MOCK_ZENITY_FILE_STATUS_WITH_FILENAME=255 \
 MOCK_ZENITY_FILE_ERROR='simulated initial-folder failure' \
 MOCK_FILE_SELECTION_ARGS_LOG="${file_selection_args_log}" \
     "${PROJECT_DIR}/download-video-gui.sh" >/dev/null
-
-mapfile -d '' -t file_selection_arguments < "${file_selection_args_log}"
+file_selection_arguments=()
+read_arguments "${file_selection_args_log}" file_selection_arguments
 file_selection_calls=0
 filename_attempts=0
 for argument in "${file_selection_arguments[@]}"; do
     if [[ ${argument} == --file-selection ]]; then
-        (( file_selection_calls += 1 ))
+        ((file_selection_calls += 1))
     elif [[ ${argument} == --filename=* ]]; then
-        (( filename_attempts += 1 ))
+        ((filename_attempts += 1))
     fi
-done
-if (( file_selection_calls != 2 || filename_attempts != 1 )); then
-    printf 'Expected one failed preselected chooser and one fallback chooser; ' >&2
-    printf 'got %d chooser calls and %d --filename arguments.\n' \
-        "${file_selection_calls}" "${filename_attempts}" >&2
-    exit 1
-fi
-for argument in "${file_selection_arguments[@]}"; do
     case ${argument} in
-        --ok-label=* | --cancel-label=*)
-            printf 'Unsupported custom button label leaked into file chooser: %s\n' \
-                "${argument}" >&2
-            exit 1
-            ;;
-        *)
-            ;;
+    --ok-label=* | --cancel-label=*)
+        fail "Unsupported custom button label leaked into file chooser: ${argument}"
+        ;;
+    *) ;;
     esac
 done
+assert_equals '2' "${file_selection_calls}" 'file chooser fallback call count'
+assert_equals '1' "${filename_attempts}" 'preselected file chooser attempt count'
 
-# A zero worker status without a final result path is inconsistent rather than
-# a confirmed success, so its diagnostic log must remain available.
+# Diagnostic log policy.
 logs_before=$(count_logs)
-MOCK_SKIP_RESULT_FILE=1 \
-    "${PROJECT_DIR}/download-video-gui.sh" >/dev/null
+prepare_argument_log 'inconsistent-result'
+MOCK_SKIP_RESULT_FILE=1 "${PROJECT_DIR}/download-video-gui.sh" >/dev/null
 logs_after=$(count_logs)
 assert_equals "$((logs_before + 1))" "${logs_after}" \
-    'an inconsistent run must retain exactly one new log'
-mapfile -t inconsistent_logs < <(find "${XDG_STATE_HOME}/yt-dlp-aria2-downloader" \
-    -maxdepth 1 -type f -name 'download-*.log' -print)
-if ! grep -Fl -- 'YTDLP_POSTPROCESS|processing|' "${inconsistent_logs[@]}" \
-    >/dev/null; then
-    fail 'No retained inconsistent-run log contains the post-processing record.'
-fi
-
-logs_before=$(count_logs)
-assert_status 7 'failed GUI download status is propagated' \
-    env MOCK_YTDLP_EXIT_STATUS=7 \
-    "${PROJECT_DIR}/download-video-gui.sh"
-logs_after=$(count_logs)
-assert_equals "$((logs_before + 1))" "${logs_after}" \
-    'a failed download must retain exactly one new log'
-mapfile -t failed_logs < <(find "${XDG_STATE_HOME}/yt-dlp-aria2-downloader" \
-    -maxdepth 1 -type f -name 'download-*.log' -print)
-if ! grep -Fl -- 'Simulated yt-dlp failure.' "${failed_logs[@]}" \
-    >/dev/null; then
-    printf 'No retained log contains the simulated failure.\n' >&2
-    exit 1
-fi
-
-termination_marker="${TEST_ROOT}/terminated"
-set +e
-MOCK_LONG_DOWNLOAD=1 \
-MOCK_CANCEL=1 \
-MOCK_TERMINATION_MARKER="${termination_marker}" \
-    "${PROJECT_DIR}/download-video-gui.sh"
-cancel_status=$?
-set -e
-
-if (( cancel_status != 130 )); then
-    printf 'Expected cancellation status 130, got %d.\n' "${cancel_status}" >&2
-    exit 1
-fi
-
-for _ in {1..30}; do
-    [[ -f ${termination_marker} ]] && break
-    sleep 0.1
+    'an inconsistent run retains one new log'
+log_dir="${XDG_STATE_HOME}/yt-dlp-aria2-downloader"
+shopt -s nullglob
+inconsistent_logs=("${log_dir}"/download-*.log)
+shopt -u nullglob
+log_record_found=false
+for retained_log in "${inconsistent_logs[@]}"; do
+    if grep -Fq -- 'YTDLP_POSTPROCESS|processing|' "${retained_log}"; then
+        log_record_found=true
+        break
+    fi
 done
+[[ ${log_record_found} == true ]] ||
+    fail 'No retained inconsistent-run log contains the post-processing record.'
 
-if [[ ! -f ${termination_marker} ]]; then
-    printf 'The download process group did not receive TERM.\n' >&2
-    exit 1
-fi
+logs_before=$(count_logs)
+prepare_argument_log 'failed-download'
+assert_status 7 'failed GUI download status is propagated' \
+    env MOCK_YTDLP_EXIT_STATUS=7 "${PROJECT_DIR}/download-video-gui.sh"
+logs_after=$(count_logs)
+assert_equals "$((logs_before + 1))" "${logs_after}" \
+    'a failed download retains one new log'
+shopt -s nullglob
+failed_logs=("${log_dir}"/download-*.log)
+shopt -u nullglob
+failure_record_found=false
+for retained_log in "${failed_logs[@]}"; do
+    if grep -Fq -- 'Simulated yt-dlp failure.' "${retained_log}"; then
+        failure_record_found=true
+        break
+    fi
+done
+[[ ${failure_record_found} == true ]] ||
+    fail 'No retained log contains the simulated failure.'
 
+# User cancellation terminates the complete process group.
+termination_marker="${TEST_ROOT}/terminated"
+prepare_argument_log 'cancel-process-group'
+assert_status 130 'cancellation terminates the process group' \
+    env MOCK_LONG_DOWNLOAD=1 MOCK_CANCEL=1 \
+    MOCK_TERMINATION_MARKER="${termination_marker}" \
+    "${PROJECT_DIR}/download-video-gui.sh"
+wait_for_file "${termination_marker}" 10 'worker group receives TERM'
 
+# Zenity dialog status mapping.
 error_capture="${TEST_ROOT}/zenity-errors.txt"
-set +e
-MOCK_ZENITY_ENTRY_STATUS=5 MOCK_ERROR_CAPTURE="${error_capture}" \
+assert_status 1 'URL entry timeout is reported' \
+    env MOCK_ZENITY_ENTRY_STATUS=5 MOCK_ERROR_CAPTURE="${error_capture}" \
     "${PROJECT_DIR}/download-video-gui.sh"
-zenity_timeout_status=$?
-set -e
-if (( zenity_timeout_status != 1 )); then
-    printf 'Expected Zenity timeout status 1, got %d.\n' \
-        "${zenity_timeout_status}" >&2
-    exit 1
-fi
-grep -Fq -- "URL entry dialog timed out" "${error_capture}"
+assert_file_contains "${error_capture}" 'URL entry dialog timed out' \
+    'URL timeout dialog'
 
-: > "${error_capture}"
-set +e
-MOCK_ZENITY_ENTRY_STATUS=42 MOCK_ERROR_CAPTURE="${error_capture}" \
+: >"${error_capture}"
+assert_status 1 'unexpected Zenity entry error is reported' \
+    env MOCK_ZENITY_ENTRY_STATUS=42 MOCK_ERROR_CAPTURE="${error_capture}" \
     "${PROJECT_DIR}/download-video-gui.sh"
-zenity_error_status=$?
-set -e
-if (( zenity_error_status != 1 )); then
-    printf 'Expected Zenity error status 1, got %d.\n' \
-        "${zenity_error_status}" >&2
-    exit 1
-fi
-grep -Fq -- "Zenity could not display" "${error_capture}"
+assert_file_contains "${error_capture}" 'Zenity could not display' \
+    'Zenity entry error dialog'
 
+# Runtime versions and capabilities.
 for compatible_ytdlp_version in \
     '2026.06.09.20260727' \
     '2026.06.09-1.fc44' \
     '2026.06.09+custom'; do
-    MOCK_YTDLP_VERSION="${compatible_ytdlp_version}" \
+    prepare_argument_log "version-${compatible_ytdlp_version//[^[:alnum:]]/_}"
+    assert_status 0 "compatible yt-dlp version ${compatible_ytdlp_version}" \
+        env MOCK_YTDLP_VERSION="${compatible_ytdlp_version}" \
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${OUTPUT_DIR}" \
-        -- 'https://example.com/watch?v=version-suffix' >/dev/null
+        -- 'https://example.com/watch?v=version-suffix'
 done
 
 assert_status 1 'unparseable yt-dlp version is rejected clearly' \
@@ -583,94 +712,62 @@ assert_status 1 'unparseable yt-dlp version is rejected clearly' \
 assert_text_contains "${ASSERT_OUTPUT}" 'unable to parse the yt-dlp version' \
     'unparseable yt-dlp diagnostic'
 
-set +e
-MOCK_YTDLP_VERSION=2026.06.08 \
+assert_status 1 'old yt-dlp version is rejected' \
+    env MOCK_YTDLP_VERSION=2026.06.08 \
     "${PROJECT_DIR}/download-video.sh" \
-    -- 'https://example.com/watch?v=old-yt-dlp' >/dev/null 2>&1
-old_ytdlp_status=$?
-set -e
-if (( old_ytdlp_status != 1 )); then
-    printf 'Expected old yt-dlp status 1, got %d.\n' "${old_ytdlp_status}" >&2
-    exit 1
-fi
-
-set +e
-MOCK_DENO_VERSION=2.2.9 \
+    -- 'https://example.com/watch?v=old-yt-dlp'
+assert_status 1 'old Deno version is rejected' \
+    env MOCK_DENO_VERSION=2.2.9 \
     "${PROJECT_DIR}/download-video.sh" \
-    -- 'https://example.com/watch?v=old-deno' >/dev/null 2>&1
-old_deno_status=$?
-set -e
-if (( old_deno_status != 1 )); then
-    printf 'Expected old Deno status 1, got %d.\n' "${old_deno_status}" >&2
-    exit 1
-fi
-
-
-set +e
-MOCK_ARIA2_VERSION=1.36.0 \
+    -- 'https://example.com/watch?v=old-deno'
+assert_status 1 'old aria2c version is rejected' \
+    env MOCK_ARIA2_VERSION=1.36.0 \
     "${PROJECT_DIR}/download-video.sh" \
-    -- 'https://example.com/watch?v=old-aria2' >/dev/null 2>&1
-old_aria2_status=$?
-set -e
-if (( old_aria2_status != 1 )); then
-    printf 'Expected old aria2c status 1, got %d.\n' "${old_aria2_status}" >&2
-    exit 1
-fi
-
-set +e
-MOCK_ARIA2_DESCRIPTION_ONLY=1 \
+    -- 'https://example.com/watch?v=old-aria2'
+assert_status 1 'missing aria2c capability is rejected' \
+    env MOCK_ARIA2_DESCRIPTION_ONLY=1 \
     "${PROJECT_DIR}/download-video.sh" \
-    -- 'https://example.com/watch?v=missing-aria2-option' >/dev/null 2>&1
-aria2_capability_status=$?
-set -e
-if (( aria2_capability_status != 1 )); then
-    printf 'Expected missing aria2c option status 1, got %d.\n' \
-        "${aria2_capability_status}" >&2
-    exit 1
-fi
+    -- 'https://example.com/watch?v=missing-aria2-option'
 
+# Progress-dialog timeout and unexpected error terminate the worker group.
 progress_timeout_marker="${TEST_ROOT}/progress-timeout-terminated"
 progress_timeout_errors="${TEST_ROOT}/progress-timeout-errors.txt"
-set +e
-MOCK_LONG_DOWNLOAD=1 \
-MOCK_ZENITY_PROGRESS_STATUS=5 \
-MOCK_TERMINATION_MARKER="${progress_timeout_marker}" \
-MOCK_ERROR_CAPTURE="${progress_timeout_errors}" \
+prepare_argument_log 'progress-timeout'
+assert_status 1 'progress dialog timeout is propagated' \
+    env MOCK_LONG_DOWNLOAD=1 MOCK_ZENITY_PROGRESS_STATUS=5 \
+    MOCK_TERMINATION_MARKER="${progress_timeout_marker}" \
+    MOCK_ERROR_CAPTURE="${progress_timeout_errors}" \
     "${PROJECT_DIR}/download-video-gui.sh"
-progress_timeout_status=$?
-set -e
-if (( progress_timeout_status != 1 )); then
-    printf 'Expected progress timeout status 1, got %d.\n' \
-        "${progress_timeout_status}" >&2
-    exit 1
-fi
-for _ in {1..30}; do
-    [[ -f ${progress_timeout_marker} ]] && break
-    sleep 0.1
-done
-[[ -f ${progress_timeout_marker} ]]
-grep -Fq -- 'progress dialog timed out' "${progress_timeout_errors}"
+wait_for_file "${progress_timeout_marker}" 10 \
+    'progress-timeout worker receives TERM'
+assert_file_contains "${progress_timeout_errors}" 'progress dialog timed out' \
+    'progress-timeout diagnostic'
 
 progress_error_marker="${TEST_ROOT}/progress-error-terminated"
 progress_error_capture="${TEST_ROOT}/progress-error-errors.txt"
-set +e
-MOCK_LONG_DOWNLOAD=1 \
-MOCK_ZENITY_PROGRESS_STATUS=42 \
-MOCK_TERMINATION_MARKER="${progress_error_marker}" \
-MOCK_ERROR_CAPTURE="${progress_error_capture}" \
+prepare_argument_log 'progress-error'
+assert_status 1 'unexpected progress dialog status is reported' \
+    env MOCK_LONG_DOWNLOAD=1 MOCK_ZENITY_PROGRESS_STATUS=42 \
+    MOCK_TERMINATION_MARKER="${progress_error_marker}" \
+    MOCK_ERROR_CAPTURE="${progress_error_capture}" \
     "${PROJECT_DIR}/download-video-gui.sh"
-progress_error_status=$?
-set -e
-if (( progress_error_status != 1 )); then
-    printf 'Expected progress error status 1, got %d.\n' \
-        "${progress_error_status}" >&2
-    exit 1
-fi
-for _ in {1..30}; do
-    [[ -f ${progress_error_marker} ]] && break
-    sleep 0.1
+wait_for_file "${progress_error_marker}" 10 \
+    'progress-error worker receives TERM'
+assert_file_contains "${progress_error_capture}" 'status 42' \
+    'unexpected progress status diagnostic'
+
+# Missing Zenity is a dependency error, not a graphical crash.
+no_zenity_bin="${TEST_ROOT}/no-zenity-bin"
+mkdir -p -- "${no_zenity_bin}"
+for required_command in bash realpath dirname mktemp setsid tail grep tr mv; do
+    required_command_path=$(command -v "${required_command}")
+    ln -s -- "${required_command_path}" \
+        "${no_zenity_bin}/${required_command}"
 done
-[[ -f ${progress_error_marker} ]]
-grep -Fq -- 'status 42' "${progress_error_capture}"
+assert_status 127 'missing Zenity is reported before GUI startup' \
+    env PATH="${no_zenity_bin}" HOME="${HOME_DIR}" \
+    "${PROJECT_DIR}/download-video-gui.sh"
+assert_text_contains "${ASSERT_OUTPUT}" 'required command "zenity" was not found' \
+    'missing Zenity diagnostic'
 
 printf 'Mock integration tests passed.\n'

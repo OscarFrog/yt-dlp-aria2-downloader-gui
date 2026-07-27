@@ -44,6 +44,7 @@ jobs:
             bash \
             coreutils \
             desktop-file-utils \
+            diffutils \
             findutils \
             git \
             grep \

@@ -14,7 +14,7 @@ single URL in one of two forms:
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
 streams deliberately remain on yt-dlp's native downloader. The current version
-is **2.1.8**.
+is **2.1.9**.
 
 ## Main features
 
@@ -86,7 +86,7 @@ setsid --version
 Download both release assets from the GitHub release page:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.8.zip
+yt-dlp-aria2-downloader-gui-2.1.9.zip
 SHA256SUMS
 ```
 
@@ -94,8 +94,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.8.zip
-cd yt-dlp-aria2-downloader-gui-2.1.8
+unzip yt-dlp-aria2-downloader-gui-2.1.9.zip
+cd yt-dlp-aria2-downloader-gui-2.1.9
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -124,8 +124,14 @@ The **yt-dlp aria2 downloader** launcher is created in:
 ~/.local/share/applications/
 ```
 
-The launcher stores the repository's absolute path. After moving the project
-directory, run `./install-gui.sh install` again.
+The desktop entry calls a stable per-user launcher link stored under:
+
+```text
+~/.local/share/yt-dlp-aria2-downloader/launch
+```
+
+That private link targets the repository's absolute GUI-script path. After
+moving the project directory, run `./install-gui.sh install` again.
 
 ## Graphical usage
 

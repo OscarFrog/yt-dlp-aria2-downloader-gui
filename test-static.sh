@@ -91,4 +91,33 @@ assert_file_contains \
     'LC_ALL=C setsid --help' \
     'setsid capability probe locale stabilization'
 
+assert_file_contains \
+    "${script_dir}/download-video-gui.sh" \
+    "pgid_temporary=\"\${pgid_file}.tmp\"" \
+    'atomic PGID staging file'
+assert_file_contains \
+    "${script_dir}/download-video-gui.sh" \
+    "mv -f -- \"\${pgid_temporary}\" \"\${pgid_file}\"" \
+    'atomic PGID publication'
+assert_file_contains \
+    "${script_dir}/download-video-gui.sh" \
+    "trap '' HUP INT TERM" \
+    'cleanup signal protection'
+assert_file_contains \
+    "${script_dir}/download-video-gui.sh" \
+    '\[#[[:xdigit:]]+[[:space:]]' \
+    'aria2 progress without mandatory percentage'
+assert_file_contains \
+    "${script_dir}/install-gui.sh" \
+    "readonly LAUNCHER_LINK=\"\${LAUNCHER_DIR}/launch\"" \
+    'stable desktop launcher link'
+assert_file_contains \
+    "${script_dir}/install-gui.sh" \
+    "desktop-file-validate \\" \
+    'desktop launcher validation'
+assert_file_contains \
+    "${script_dir}/install-gui.sh" \
+    '# Version     : 2.1.9' \
+    'installer version'
+
 printf 'Static tests passed.\n'

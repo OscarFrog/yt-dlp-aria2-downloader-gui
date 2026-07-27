@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.1.9 - 2026-07-27
+
+### Process lifecycle and progress
+
+- Publish the worker process-group identifier atomically before the GUI reads it.
+- Keep retrying transient or incomplete PGID reads instead of accepting a
+  partial numeric value.
+- Protect the cleanup critical section from repeated termination signals while
+  preserving the original exit status.
+- Display aria2c transfer speed even when the server does not report a total
+  size or percentage.
+
+### Desktop launcher
+
+- Install a stable private launcher link so project paths containing Desktop
+  Entry field-code characters remain usable.
+- Apply the two required Desktop Entry escaping layers to the stable `Exec`
+  path and reject XDG data paths that cannot be represented portably.
+- Improve `desktop-file-validate` diagnostics while preserving an existing
+  launcher after validation failure.
+- Reject relative `XDG_DATA_HOME` values and clean up the stable launcher link
+  during uninstall.
+
+### Test reliability
+
+- Avoid changing the caller's `errexit` state inside assertion helpers.
+- Add exact-line assertions, readable-file checks, and explicit argument-count
+  diagnostics.
+- Verify option/value adjacency, locale stabilization, aria2c progress without
+  a percentage, and additional engine and GUI error paths.
+- Expand installer coverage for hostile project paths, exact `Exec` escaping,
+  permissions, validation failures, reinstallations, and missing GUI scripts.
+
 ## 2.1.8 - 2026-07-27
 
 ### Argument parsing and diagnostics

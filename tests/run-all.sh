@@ -25,7 +25,7 @@ shellcheck -o all \
 
 # Test scripts intentionally capture non-zero statuses. They use the standard
 # ShellCheck rules while production scripts also enable every optional rule.
-shellcheck \
+shellcheck -x -o all \
     test-static.sh \
     tests/run-all.sh \
     tests/lib/assert.sh \
