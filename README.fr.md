@@ -135,14 +135,56 @@ Démarrez **yt-dlp aria2 downloader** depuis le menu des applications ou avec :
 ./download-video-gui.sh
 ```
 
-L'interface demande successivement :
+### 1. Saisir l'URL de la vidéo
 
-1. l'URL de la vidéo ;
-2. **Complete video (MKV)** ou **Audio track (native format)** ;
-3. le dossier de destination.
+Collez l'URL de la vidéo à télécharger, puis validez la fenêtre.
+
+![Fenêtre de saisie de l'URL](docs/images/gui-url.png "Saisie de l'URL")
 
 Les espaces copiés accidentellement avant ou après l'URL sont supprimés par
 l'interface graphique.
+
+### 2. Choisir le mode de téléchargement
+
+Sélectionnez l'un des deux modes disponibles :
+
+- **Complete video (MKV)** télécharge les meilleures pistes vidéo et audio
+  disponibles, puis les rassemble dans un conteneur MKV ;
+- **Audio track (native format)** télécharge la meilleure piste audio disponible
+  en conservant son format natif chaque fois que cela est possible.
+
+![Fenêtre de sélection du mode](docs/images/gui-mode.png "Choix du mode de téléchargement")
+
+### 3. Choisir le dossier de destination
+
+Sélectionnez le dossier dans lequel le média téléchargé sera enregistré.
+
+![Fenêtre de sélection du dossier](docs/images/gui-destination.png "Choix du dossier de destination")
+
+### 4. Suivre la progression
+
+La fenêtre de progression indique l'étape actuelle du téléchargement ou du
+post-traitement. Le bouton d'annulation permet d'arrêter l'ensemble du
+processus.
+
+![Fenêtre de progression](docs/images/gui-progress.png "Progression du téléchargement")
+
+### 5. Résultat du téléchargement
+
+Après un téléchargement réussi, l'interface affiche le chemin du fichier
+multimédia terminé.
+
+![Fenêtre de téléchargement terminé](docs/images/gui-download-complete.png "Téléchargement terminé")
+
+Lorsque le téléchargement échoue, l'interface affiche une fenêtre d'erreur et
+conserve le journal de diagnostic.
+
+![Fenêtre d'échec du téléchargement](docs/images/gui-download-failed.png "Échec du téléchargement")
+
+Le journal conservé peut être ouvert depuis la fenêtre d'erreur. Il contient les
+informations nécessaires au diagnostic et peut inclure l'URL demandée.
+
+![Affichage du journal de diagnostic](docs/images/gui-log.png "Journal de diagnostic")
 
 ## Utilisation en ligne de commande
 
