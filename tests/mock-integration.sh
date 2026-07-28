@@ -322,6 +322,11 @@ chmod +x "${MOCK_BIN}/zenity"
 
 prepare_argument_log() {
     local scenario=$1
+
+    # Keep CI logs useful: if a scenario blocks, the final emitted name shows
+    # exactly which test was running.
+    printf 'Mock scenario: %s\n' "${scenario}"
+
     MOCK_ARG_LOG="${TEST_ROOT}/yt-dlp-args-${scenario}.bin"
     export MOCK_ARG_LOG
     : >"${MOCK_ARG_LOG}"
