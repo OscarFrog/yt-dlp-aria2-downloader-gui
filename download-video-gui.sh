@@ -279,6 +279,9 @@ load_settings() {
     fi
 
     while IFS='=' read -r key value || [[ -n ${key}${value} ]]; do
+        key=${key%$'\r'}
+        value=${value%$'\r'}
+
         case ${key} in
         output_dir)
             LAST_OUTPUT_DIR=${value}

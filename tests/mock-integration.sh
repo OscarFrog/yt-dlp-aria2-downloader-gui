@@ -46,31 +46,30 @@ fi
 : "${MOCK_ARG_LOG:?}"
 printf '%s\0' "$@" > "${MOCK_ARG_LOG}"
 
-wait_for_progress_capture() {
-    local expected=''
+wait_for_marker() {
+    local marker=$1
+    local label=$2
     local attempt
 
-    [[ -n ${MOCK_PROGRESS_CAPTURE:-} ]] || return 0
-
-    if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
-        expected='# aria2 download: in progress - 1.00MiB'
-    elif [[ ${MOCK_ARIA_ONLY:-0} == 1 ]]; then
-        expected='# aria2 download: 40% - 1.00MiB - 6s remaining'
-    else
-        expected='# Download: 12.5% - 1.00MiB/s - 00:07 remaining'
-    fi
-
     for ((attempt = 0; attempt < 100; attempt++)); do
-        if [[ -r ${MOCK_PROGRESS_CAPTURE} ]] &&
-            grep -Fq -- "${expected}" "${MOCK_PROGRESS_CAPTURE}"; then
+        if [[ -f ${marker} ]]; then
             return 0
         fi
         sleep 0.1
     done
 
-    printf 'Timed out waiting for progress capture: %s\n' "${expected}" >&2
+    printf 'Timed out waiting for %s marker: %s\n' \
+        "${label}" "${marker}" >&2
     exit 66
 }
+
+progress_ready_marker=''
+postprocess_ready_marker=''
+if [[ -n ${MOCK_PROGRESS_CAPTURE:-} ]]; then
+    progress_ready_marker="${MOCK_PROGRESS_CAPTURE}.progress-ready"
+    postprocess_ready_marker="${MOCK_PROGRESS_CAPTURE}.postprocess-ready"
+    rm -f -- "${progress_ready_marker}" "${postprocess_ready_marker}"
+fi
 
 result_file=''
 previous=''
@@ -96,7 +95,9 @@ elif [[ ${MOCK_ARIA_ONLY:-0} == 1 ]]; then
 else
     printf 'YTDLP_PROGRESS|downloading| 12.5%%|1.00MiB/s|00:07\n'
 fi
-wait_for_progress_capture
+if [[ -n ${progress_ready_marker} ]]; then
+    wait_for_marker "${progress_ready_marker}" 'initial progress'
+fi
 
 if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
     if [[ -n ${MOCK_STARTED_MARKER:-} ]]; then
@@ -108,7 +109,9 @@ if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
     done
 fi
 
-sleep 0.8
+if [[ -z ${progress_ready_marker} ]]; then
+    sleep 0.8
+fi
 if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
     printf '\r[#a1b2c3 10.0MiB/0B CN:1 DL:2.00MiB]\r'
 elif [[ ${MOCK_ARIA_ONLY:-0} == 1 ]]; then
@@ -117,11 +120,16 @@ else
     printf 'YTDLP_PROGRESS|downloading|100.0%%|2.00MiB/s|00:00\n'
 fi
 printf 'YTDLP_POSTPROCESS|processing|FFmpegExtractAudio\n'
-if [[ ${MOCK_LATE_PROGRESS:-0} == 1 ]]; then
+if [[ -n ${postprocess_ready_marker} ]]; then
+    wait_for_marker "${postprocess_ready_marker}" 'post-processing progress'
+elif [[ ${MOCK_LATE_PROGRESS:-0} == 1 ]]; then
     sleep 0.8
+fi
+
+if [[ ${MOCK_LATE_PROGRESS:-0} == 1 ]]; then
     printf 'YTDLP_PROGRESS|downloading| 12.0%%|512.00KiB/s|00:09\n'
     sleep 0.8
-else
+elif [[ -z ${postprocess_ready_marker} ]]; then
     sleep 0.2
 fi
 
@@ -297,11 +305,44 @@ case " $* " in
             IFS= read -r _ || true
             exit 1
         fi
+
+        progress_line=''
+        expected_progress=''
+        progress_ready_marker=''
+        postprocess_ready_marker=''
+        progress_marker_written=false
+
         if [[ -n ${MOCK_PROGRESS_CAPTURE:-} ]]; then
-            cat > "${MOCK_PROGRESS_CAPTURE}"
-        else
-            cat >/dev/null
+            : >"${MOCK_PROGRESS_CAPTURE}"
+            progress_ready_marker="${MOCK_PROGRESS_CAPTURE}.progress-ready"
+            postprocess_ready_marker="${MOCK_PROGRESS_CAPTURE}.postprocess-ready"
+
+            if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
+                expected_progress='# aria2 download: in progress - 1.00MiB'
+            elif [[ ${MOCK_ARIA_ONLY:-0} == 1 ]]; then
+                expected_progress='# aria2 download: 40% - 1.00MiB - 6s remaining'
+            else
+                expected_progress='# Download: 12.5% - 1.00MiB/s - 00:07 remaining'
+            fi
         fi
+
+        while IFS= read -r progress_line; do
+            if [[ -n ${MOCK_PROGRESS_CAPTURE:-} ]]; then
+                printf '%s\n' "${progress_line}" >>"${MOCK_PROGRESS_CAPTURE}"
+            fi
+
+            if [[ ${progress_marker_written} == false &&
+                -n ${progress_ready_marker} &&
+                ${progress_line} == "${expected_progress}" ]]; then
+                : >"${progress_ready_marker}"
+                progress_marker_written=true
+            fi
+
+            if [[ -n ${postprocess_ready_marker} &&
+                ${progress_line} == '# Finalizing the file...' ]]; then
+                : >"${postprocess_ready_marker}"
+            fi
+        done
         ;;
     *' --question '*)
         exit 1
@@ -760,6 +801,13 @@ prepare_argument_log 'config-without-final-newline'
 MOCK_USE_DEFAULT_PROFILE=1 "${PROJECT_DIR}/download-video-gui.sh"
 assert_file_has_line "${config_file}" 'profile=audio' \
     'configuration final line without newline is loaded'
+
+printf 'output_dir=%s\r\nprofile=audio\r\n' \
+    "${OUTPUT_DIR}" >"${config_file}"
+prepare_argument_log 'config-crlf'
+MOCK_USE_DEFAULT_PROFILE=1 "${PROJECT_DIR}/download-video-gui.sh"
+assert_file_has_line "${config_file}" 'profile=audio' \
+    'CRLF configuration values are normalized when loaded'
 
 # File chooser fallback after a GTK/Zenity initial-directory failure.
 file_selection_args_log="${TEST_ROOT}/file-selection-args.bin"
