@@ -141,14 +141,55 @@ Start **yt-dlp aria2 downloader** from the application menu, or run:
 ./download-video-gui.sh
 ```
 
-The interface requests, in order:
+### 1. Enter the video URL
 
-1. the video URL;
-2. **Complete video (MKV)** or **Audio track (native format)**;
-3. the destination folder.
+Paste the URL of the video to download, then validate the dialog.
+
+![Video URL entry dialog](docs/images/gui-url.png "Enter the video URL")
 
 Leading and trailing whitespace accidentally copied with the URL is removed by
 the graphical interface.
+
+### 2. Choose the download mode
+
+Select one of the two available modes:
+
+- **Complete video (MKV)** downloads the best available video and audio streams
+  and combines them in an MKV container;
+- **Audio track (native format)** downloads the best available audio track while
+  preserving its native format whenever possible.
+
+![Download mode selection dialog](docs/images/gui-mode.png "Choose the download mode")
+
+### 3. Choose the destination folder
+
+Select the folder where the downloaded media will be saved.
+
+![Destination folder selection dialog](docs/images/gui-destination.png "Choose the destination folder")
+
+### 4. Follow the download progress
+
+The progress dialog displays the current download or post-processing stage. Use
+the cancel button to stop the complete download process.
+
+![Download progress dialog](docs/images/gui-progress.png "Download progress")
+
+### 5. Download result
+
+After a successful download, the interface displays the path of the completed
+media file.
+
+![Successful download dialog](docs/images/gui-download-complete.png "Download completed")
+
+When the download fails, the interface displays an error dialog and preserves
+the diagnostic log.
+
+![Failed download dialog](docs/images/gui-download-failed.png "Download failed")
+
+The retained log can be opened from the error dialog. It contains the details
+needed to diagnose the failure and may include the requested URL.
+
+![Diagnostic log viewer](docs/images/gui-log.png "Diagnostic log")
 
 ## Command-line usage
 
