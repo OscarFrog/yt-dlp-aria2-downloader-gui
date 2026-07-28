@@ -165,6 +165,7 @@ signal_worker_tree() {
     local children=''
     local candidate
     local signaled_target=false
+    local group_signal_succeeded=false
     local -a child_pids=()
 
     if [[ -z ${WORKER_PGID} && -n ${WORKER_PID} ]]; then
@@ -173,38 +174,52 @@ signal_worker_tree() {
         recover_worker_pgid "${WORKER_PID}" || true
     fi
 
+    # Snapshot direct children before signaling anything. If the setsid
+    # supervisor exits during shutdown, its /proc children entry disappears.
+    if [[ -n ${WORKER_PID} ]]; then
+        children_file="/proc/${WORKER_PID}/task/${WORKER_PID}/children"
+        if [[ -r ${children_file} ]]; then
+            children=$(<"${children_file}")
+            read -r -a child_pids <<<"${children}"
+        fi
+    fi
+
+    # Do not treat a successful existence probe as successful delivery.
+    # kill itself is the authoritative, race-free result.
     if [[ -n ${WORKER_PGID} ]]; then
-        if kill -0 -- "-${WORKER_PGID}" 2>/dev/null; then
-            kill "-${signal_name}" -- "-${WORKER_PGID}" 2>/dev/null || true
+        if kill "-${signal_name}" -- "-${WORKER_PGID}" 2>/dev/null; then
             signaled_target=true
+            group_signal_succeeded=true
         else
             WORKER_PGID=''
         fi
     fi
 
-    if [[ ${signaled_target} == false && -n ${WORKER_PID} ]]; then
-        children_file="/proc/${WORKER_PID}/task/${WORKER_PID}/children"
-        if [[ -r ${children_file} ]]; then
-            children=$(<"${children_file}")
-            read -r -a child_pids <<<"${children}"
-            for candidate in "${child_pids[@]}"; do
-                [[ ${candidate} =~ ^[1-9][0-9]*$ ]] || continue
-                if kill "-${signal_name}" -- "-${candidate}" 2>/dev/null ||
-                    kill "-${signal_name}" -- "${candidate}" 2>/dev/null; then
-                    signaled_target=true
-                fi
-            done
-        fi
-    fi
+    # Target each direct child as a process group and then as an individual PID.
+    # This remains effective if PGID publication was stale or the group signal
+    # raced with process creation.
+    for candidate in "${child_pids[@]}"; do
+        [[ ${candidate} =~ ^[1-9][0-9]*$ ]] || continue
 
-    # When a child group was signaled, keep the setsid --wait supervisor alive
-    # so it can reap the child and propagate its status. Signal the supervisor
-    # only when no child or child group could be reached.
-    if [[ ${signaled_target} == false && -n ${WORKER_PID} ]]; then
+        if [[ ${group_signal_succeeded} == true &&
+            ${candidate} == "${WORKER_PGID}" ]]; then
+            continue
+        fi
+
+        if kill "-${signal_name}" -- "-${candidate}" 2>/dev/null ||
+            kill "-${signal_name}" -- "${candidate}" 2>/dev/null; then
+            signaled_target=true
+        fi
+    done
+
+    # For TERM, keep setsid --wait alive when a child was reached so it can reap
+    # the child and propagate its status. For KILL, stop the supervisor as the
+    # final bounded fallback so the caller's wait cannot block indefinitely.
+    if [[ ${signal_name} == KILL || ${signaled_target} == false ]] &&
+        [[ -n ${WORKER_PID} ]]; then
         kill "-${signal_name}" -- "${WORKER_PID}" 2>/dev/null || true
     fi
 }
-
 stop_worker() {
     local attempt
 

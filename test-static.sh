@@ -136,8 +136,11 @@ assert_file_contains "${script_dir}/download-video-gui.sh" \
     'process_is_running() {' \
     'zombie-aware worker liveness check'
 assert_file_contains "${script_dir}/download-video-gui.sh" \
-    'When a child group was signaled, keep the setsid --wait supervisor alive' \
-    'setsid supervisor reaping policy'
+    'kill itself is the authoritative, race-free result' \
+    'worker signal delivery is checked directly'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    'For KILL, stop the supervisor as the' \
+    'bounded setsid supervisor fallback'
 
 assert_file_contains "${script_dir}/README.md"     "is **${EXPECTED_VERSION}**." 'English README version'
 assert_file_contains "${script_dir}/README.fr.md"     "version actuelle est la **${EXPECTED_VERSION}**." 'French README version'

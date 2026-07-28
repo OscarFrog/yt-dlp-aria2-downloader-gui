@@ -832,7 +832,7 @@ done
 # User cancellation terminates the complete process group.
 termination_marker="${TEST_ROOT}/terminated"
 prepare_argument_log 'cancel-process-group'
-assert_status 130 'cancellation terminates the process group' \
+assert_status_split 130 'cancellation terminates the process group' \
     env MOCK_LONG_DOWNLOAD=1 MOCK_CANCEL=1 \
     MOCK_TERMINATION_MARKER="${termination_marker}" \
     "${PROJECT_DIR}/download-video-gui.sh"
@@ -843,7 +843,7 @@ assert_no_test_processes 'ordinary cancellation left worker processes'
 # setsid child group through the Linux /proc fallback.
 pgid_delay_marker="${TEST_ROOT}/pgid-delay-terminated"
 prepare_argument_log 'delayed-pgid-publication'
-assert_status 130 'cancellation works before PGID-file publication' \
+assert_status_split 130 'cancellation works before PGID-file publication' \
     env MOCK_DELAY_PGID_PUBLISH=1 MOCK_CANCEL=1 \
     MOCK_PGID_DELAY_TERMINATION_MARKER="${pgid_delay_marker}" \
     "${PROJECT_DIR}/download-video-gui.sh"
