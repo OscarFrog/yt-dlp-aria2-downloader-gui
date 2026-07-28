@@ -1,20 +1,14 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly script_dir
 # shellcheck disable=SC1090
 source "${script_dir}/tests/lib/assert.sh"
+# shellcheck disable=SC1090
+source "${script_dir}/tests/lib/project-files.sh"
 
-for file in \
-    download-video.sh \
-    download-video-gui.sh \
-    install-gui.sh \
-    test-static.sh \
-    tests/run-all.sh \
-    tests/lib/assert.sh \
-    tests/mock-integration.sh \
-    tests/installer-integration.sh; do
+for file in "${ALL_SHELL_FILES[@]}"; do
     bash -n "${script_dir}/${file}"
 done
 
@@ -22,6 +16,17 @@ assert_status 0 'download engine help' \
     "${script_dir}/download-video.sh" --help
 assert_status 0 'download engine version' \
     "${script_dir}/download-video.sh" --version
+
+assert_status_split 0 'help stream separation' \
+    "${script_dir}/download-video.sh" --help
+assert_text_contains "${ASSERT_STDOUT}" 'Usage:' 'help is written to stdout'
+assert_equals '' "${ASSERT_STDERR}" 'help leaves stderr empty'
+
+assert_status_split 2 'error stream separation' \
+    "${script_dir}/download-video.sh"
+assert_equals '' "${ASSERT_STDOUT}" 'missing URL leaves stdout empty'
+assert_text_contains "${ASSERT_STDERR}" 'a video URL is required.' \
+    'missing URL is written to stderr'
 
 assert_status 2 'missing URL is rejected' \
     "${script_dir}/download-video.sh"
@@ -115,9 +120,40 @@ assert_file_contains \
     "${script_dir}/install-gui.sh" \
     "desktop-file-validate \\" \
     'desktop launcher validation'
-assert_file_contains \
-    "${script_dir}/install-gui.sh" \
-    '# Version     : 2.1.9' \
-    'installer version'
+readonly EXPECTED_VERSION='2.1.10'
+assert_file_contains "${script_dir}/download-video.sh" \
+    "readonly VERSION=\"${EXPECTED_VERSION}\"" \
+    'engine version constant'
+for versioned_script in download-video.sh download-video-gui.sh install-gui.sh; do
+    assert_file_contains "${script_dir}/${versioned_script}" \
+        "# Version     : ${EXPECTED_VERSION}" \
+        "${versioned_script} version header"
+done
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    'readonly LOG_RETENTION_DAYS=15' \
+    'GUI retained-log lifetime'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    'process_is_running() {' \
+    'zombie-aware worker liveness check'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    'kill itself is the authoritative, race-free result' \
+    'worker signal delivery is checked directly'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    'For KILL, stop the supervisor as the' \
+    'bounded setsid supervisor fallback'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    'closed its input so the synchronous pipeline cannot block cancellation' \
+    'closed progress pipe terminates producer explicitly'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    "printf '%d\\n' \"\${display_percent}\" || return 0" \
+    'progress percentage stops on a closed pipe'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    "printf '# %s\\n' \"\${message}\" || return 0" \
+    'progress message stops on a closed pipe'
 
-printf 'Static tests passed.\n'
+assert_file_contains "${script_dir}/README.md"     "is **${EXPECTED_VERSION}**." 'English README version'
+assert_file_contains "${script_dir}/README.fr.md"     "version actuelle est la **${EXPECTED_VERSION}**." 'French README version'
+assert_file_contains "${script_dir}/CHANGELOG.md"     "## ${EXPECTED_VERSION} - " 'changelog version'
+
+printf 'Static tests passed.
+'

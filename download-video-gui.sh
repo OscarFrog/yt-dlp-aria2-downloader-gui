@@ -3,12 +3,12 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video-gui.sh
-# Version     : 2.1.9
-# Date        : 2026-07-27
+# Version     : 2.1.10
+# Date        : 2026-07-28
 # Description : Two-choice Zenity GUI for complete MKV video or native audio.
 # ============================================================================
 
-set -Eeuo pipefail
+set -euo pipefail
 umask 077
 
 if [[ -z ${HOME:-} ]]; then
@@ -22,6 +22,7 @@ readonly PROFILE_LABEL_AUDIO='Audio track (native format)'
 readonly CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/yt-dlp-aria2-downloader"
 readonly STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/yt-dlp-aria2-downloader"
 readonly CONFIG_FILE="${CONFIG_DIR}/gui.conf"
+readonly LOG_RETENTION_DAYS=15
 
 WORKER_PID=''
 WORKER_PGID=''
@@ -99,27 +100,141 @@ resolve_script_dir() {
 
     script_path=$(realpath -e -- "${script_source}") || return 1
     script_dir=$(dirname -- "${script_path}") || return 1
-    printf -v "${output_variable}" '%s' "${script_dir}"
+    printf -v "${output_variable}" '%s' "${script_dir}" || return 1
+    return 0
 }
 
-stop_worker_group() {
-    local attempt
+recover_worker_pgid() {
+    local worker_pid=$1
+    local children_file="/proc/${worker_pid}/task/${worker_pid}/children"
+    local children=''
+    local candidate
+    local -a child_pids=()
 
-    if [[ -z ${WORKER_PGID} ]] ||
-        ! kill -0 -- "-${WORKER_PGID}" 2>/dev/null; then
-        return 0
-    fi
+    [[ -r ${children_file} ]] || return 1
+    children=$(<"${children_file}")
+    read -r -a child_pids <<<"${children}"
 
-    kill -TERM -- "-${WORKER_PGID}" 2>/dev/null || true
-
-    for ((attempt = 0; attempt < 30; attempt++)); do
-        if ! kill -0 -- "-${WORKER_PGID}" 2>/dev/null; then
+    for candidate in "${child_pids[@]}"; do
+        [[ ${candidate} =~ ^[1-9][0-9]*$ ]] || continue
+        if kill -0 -- "-${candidate}" 2>/dev/null; then
+            WORKER_PGID=${candidate}
             return 0
         fi
+    done
+
+    return 1
+}
+
+process_is_running() {
+    local pid=$1
+    local process_stat=''
+    local process_state=''
+
+    [[ ${pid} =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 -- "${pid}" 2>/dev/null || return 1
+
+    # kill -0 also succeeds for a zombie. A zombie has already terminated and
+    # must not keep the progress producer alive while Bash is waiting to reap it.
+    if [[ -r /proc/${pid}/stat ]]; then
+        process_stat=$(<"/proc/${pid}/stat") || return 0
+        process_state=${process_stat##*) }
+        process_state=${process_state%% *}
+        [[ ${process_state} != Z && ${process_state} != X ]]
+        return
+    fi
+
+    return 0
+}
+
+worker_tree_alive() {
+    if [[ -n ${WORKER_PGID} ]] &&
+        kill -0 -- "-${WORKER_PGID}" 2>/dev/null; then
+        return 0
+    fi
+    if [[ -n ${WORKER_PID} ]]; then
+        process_is_running "${WORKER_PID}"
+        return
+    fi
+    return 1
+}
+
+signal_worker_tree() {
+    local signal_name=$1
+    local children_file
+    local children=''
+    local candidate
+    local signaled_target=false
+    local group_signal_succeeded=false
+    local -a child_pids=()
+
+    if [[ -z ${WORKER_PGID} && -n ${WORKER_PID} ]]; then
+        # A missing PGID is expected while the setsid child is not yet visible.
+        # shellcheck disable=SC2310
+        recover_worker_pgid "${WORKER_PID}" || true
+    fi
+
+    # Snapshot direct children before signaling anything. If the setsid
+    # supervisor exits during shutdown, its /proc children entry disappears.
+    if [[ -n ${WORKER_PID} ]]; then
+        children_file="/proc/${WORKER_PID}/task/${WORKER_PID}/children"
+        if [[ -r ${children_file} ]]; then
+            children=$(<"${children_file}")
+            read -r -a child_pids <<<"${children}"
+        fi
+    fi
+
+    # Do not treat a successful existence probe as successful delivery.
+    # kill itself is the authoritative, race-free result.
+    if [[ -n ${WORKER_PGID} ]]; then
+        if kill "-${signal_name}" -- "-${WORKER_PGID}" 2>/dev/null; then
+            signaled_target=true
+            group_signal_succeeded=true
+        else
+            WORKER_PGID=''
+        fi
+    fi
+
+    # Target each direct child as a process group and then as an individual PID.
+    # This remains effective if PGID publication was stale or the group signal
+    # raced with process creation.
+    for candidate in "${child_pids[@]}"; do
+        [[ ${candidate} =~ ^[1-9][0-9]*$ ]] || continue
+
+        if [[ ${group_signal_succeeded} == true &&
+            ${candidate} == "${WORKER_PGID}" ]]; then
+            continue
+        fi
+
+        if kill "-${signal_name}" -- "-${candidate}" 2>/dev/null ||
+            kill "-${signal_name}" -- "${candidate}" 2>/dev/null; then
+            signaled_target=true
+        fi
+    done
+
+    # For TERM, keep setsid --wait alive when a child was reached so it can reap
+    # the child and propagate its status. For KILL, stop the supervisor as the
+    # final bounded fallback so the caller's wait cannot block indefinitely.
+    if [[ ${signal_name} == KILL || ${signaled_target} == false ]] &&
+        [[ -n ${WORKER_PID} ]]; then
+        kill "-${signal_name}" -- "${WORKER_PID}" 2>/dev/null || true
+    fi
+}
+stop_worker() {
+    local attempt
+
+    # worker_tree_alive is a predicate: status 1 means nothing remains.
+    # shellcheck disable=SC2310
+    worker_tree_alive || return 0
+    signal_worker_tree TERM
+
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        # shellcheck disable=SC2310
+        worker_tree_alive || return 0
         sleep 0.1
     done
 
-    kill -KILL -- "-${WORKER_PGID}" 2>/dev/null || true
+    signal_worker_tree KILL
 }
 
 cleanup() {
@@ -136,7 +251,7 @@ cleanup() {
     CLEANUP_DONE=true
 
     if [[ -n ${WORKER_PID} ]] && kill -0 "${WORKER_PID}" 2>/dev/null; then
-        stop_worker_group
+        stop_worker
         wait "${WORKER_PID}" 2>/dev/null || true
     fi
 
@@ -163,7 +278,7 @@ load_settings() {
         return 0
     fi
 
-    while IFS='=' read -r key value; do
+    while IFS='=' read -r key value || [[ -n ${key}${value} ]]; do
         case ${key} in
         output_dir)
             LAST_OUTPUT_DIR=${value}
@@ -202,6 +317,49 @@ save_settings() {
     } >"${temporary_file}"
     chmod 600 -- "${temporary_file}"
     mv -f -- "${temporary_file}" "${CONFIG_FILE}"
+}
+
+prune_old_logs() {
+    local current_time
+    local cutoff
+    local log_file
+    local modified_time
+
+    if ! current_time=$(date +%s); then
+        printf 'Warning: unable to determine the current time for log cleanup.\n' >&2
+        return 0
+    fi
+    if [[ ! ${current_time} =~ ^[0-9]+$ ]]; then
+        printf 'Warning: invalid current time returned during log cleanup.\n' >&2
+        return 0
+    fi
+
+    cutoff=$((current_time - LOG_RETENTION_DAYS * 24 * 60 * 60))
+
+    for log_file in "${STATE_DIR}"/download-*.log; do
+        # Remove only regular logs created by this application. Symlinks and
+        # unrelated files in the state directory are deliberately ignored.
+        [[ -f ${log_file} && ! -L ${log_file} ]] || continue
+
+        if ! modified_time=$(stat -c '%Y' -- "${log_file}" 2>/dev/null); then
+            printf 'Warning: unable to inspect retained log: %s\n' \
+                "${log_file}" >&2
+            continue
+        fi
+        if [[ ! ${modified_time} =~ ^[0-9]+$ ]]; then
+            printf 'Warning: invalid timestamp for retained log: %s\n' \
+                "${log_file}" >&2
+            continue
+        fi
+
+        if ((modified_time <= cutoff)) &&
+            ! rm -f -- "${log_file}"; then
+            printf 'Warning: unable to remove expired log: %s\n' \
+                "${log_file}" >&2
+        fi
+    done
+
+    return 0
 }
 
 default_output_dir() {
@@ -251,12 +409,13 @@ select_url() {
         return 2
     fi
 
-    if [[ ! ${entered_url} =~ ^https?://.+ ]]; then
+    if [[ ! ${entered_url} =~ ^https?://[^[:space:]]+$ ]]; then
         show_error "The URL must start with http:// or https://."
         return 2
     fi
 
-    printf -v "${output_variable}" '%s' "${entered_url}"
+    printf -v "${output_variable}" '%s' "${entered_url}" || return 70
+    return 0
 }
 
 select_profile() {
@@ -299,7 +458,8 @@ select_profile() {
     *) return 2 ;;
     esac
 
-    printf -v "${output_variable}" '%s' "${selected_profile}"
+    printf -v "${output_variable}" '%s' "${selected_profile}" || return 70
+    return 0
 }
 
 select_output_dir() {
@@ -349,7 +509,8 @@ select_output_dir() {
         show_error 'The selected folder could not be resolved. It may have been removed or may contain an invalid symbolic link.'
         return 2
     fi
-    printf -v "${output_variable}" '%s' "${resolved_dir}"
+    printf -v "${output_variable}" '%s' "${resolved_dir}" || return 70
+    return 0
 }
 
 trim_field() {
@@ -373,14 +534,23 @@ monitor_progress() {
     local display_percent=0
     local message='Analyzing the webpage...'
     local postprocessing=false
+    local log_size=0
     local _
 
-    while kill -0 "${worker_pid}" 2>/dev/null; do
+    # process_is_running is deliberately used as a loop predicate.
+    # shellcheck disable=SC2310
+    while process_is_running "${worker_pid}"; do
         # aria2c refreshes its console line with carriage returns. Converting
         # them to newlines lets us compare its readout with yt-dlp's structured
         # progress records and retain whichever appeared last in the log.
         recent=$(tail -c 65536 -- "${log_file}" 2>/dev/null |
             tr '\r' '\n' || true)
+        if log_size=$(stat -c '%s' -- "${log_file}" 2>/dev/null) &&
+            ((log_size > 65536)); then
+            # tail -c may begin in the middle of a record. Discard only that
+            # partial first record, never the first complete line of a short log.
+            recent=${recent#*$'\n'}
+        fi
         line=$(printf '%s\n' "${recent}" |
             grep -aE '^(YTDLP_PROGRESS\||\[#[[:xdigit:]]+[[:space:]])' |
             tail -n 1 || true)
@@ -455,13 +625,17 @@ monitor_progress() {
             fi
         fi
 
+        # A Bash builtin may report EPIPE as a normal command failure instead
+        # of terminating this function, especially because the caller disables
+        # errexit while collecting PIPESTATUS. Exit explicitly when Zenity has
+        # closed its input so the synchronous pipeline cannot block cancellation.
         printf '%d\n' "${display_percent}" || return 0
         printf '# %s\n' "${message}" || return 0
         sleep 0.4
     done
 
-    printf '100\n' || true
-    printf '# Finalizing the file...\n' || true
+    printf '100\n' || return 0
+    printf '# Finalizing the file...\n' || return 0
 }
 
 wait_for_worker_pgid() {
@@ -473,13 +647,25 @@ wait_for_worker_pgid() {
     for ((attempt = 0; attempt < 50; attempt++)); do
         if [[ -f ${pgid_file} ]]; then
             candidate=$(<"${pgid_file}")
-            if [[ ${candidate} =~ ^[1-9][0-9]*$ ]]; then
+            if [[ ${candidate} =~ ^[1-9][0-9]*$ ]] &&
+                kill -0 -- "-${candidate}" 2>/dev/null; then
                 WORKER_PGID=${candidate}
                 return 0
             fi
         fi
 
-        if ! kill -0 "${worker_pid}" 2>/dev/null; then
+        # Linux exposes the direct child created by setsid --fork. This fallback
+        # prevents a delayed or failed PGID-file publication from making the GUI
+        # lose control of the download process group.
+        # A failed probe is normal until the setsid child becomes visible.
+        # shellcheck disable=SC2310
+        if recover_worker_pgid "${worker_pid}"; then
+            return 0
+        fi
+
+        # process_is_running is deliberately used as a probe.
+        # shellcheck disable=SC2310
+        if ! process_is_running "${worker_pid}"; then
             return 1
         fi
 
@@ -489,7 +675,7 @@ wait_for_worker_pgid() {
     return 1
 }
 
-for command_name in zenity realpath dirname mktemp setsid tail grep tr mv; do
+for command_name in bash chmod date dirname grep mkdir mktemp mv realpath rm setsid sleep stat tail tr zenity; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         printf 'Error: required command "%s" was not found.\n' \
             "${command_name}" >&2
@@ -637,6 +823,7 @@ fi
 
 mkdir -p -- "${STATE_DIR}"
 chmod 700 -- "${STATE_DIR}" 2>/dev/null || true
+prune_old_logs
 TEMP_DIR=$(mktemp -d --tmpdir="${TMPDIR:-/tmp}" yt-dlp-gui.XXXXXXXX)
 log_timestamp=$(date '+%Y%m%d-%H%M%S')
 LOG_FILE=$(mktemp \
@@ -687,8 +874,10 @@ wait_for_worker_pgid "${PGID_FILE}" "${WORKER_PID}"
 pgid_status=$?
 set -e
 if ((pgid_status != 0)); then
+    stop_worker
     wait "${WORKER_PID}" 2>/dev/null || true
-    show_error "The download could not start.\n\nLog: ${LOG_FILE}"
+    WORKER_PID=''
+    show_error "The download could not start."$'\n\n'"Log: ${LOG_FILE}"
     exit 1
 fi
 
@@ -707,36 +896,42 @@ set -e
 # monitor_progress may finish with status 141 when Zenity closes its input
 # pipe. Only Zenity's status determines cancellation, timeout, or dialog error.
 zenity_status=${pipeline_status[1]:-1}
+worker_status=''
 if ((zenity_status != 0)); then
-    stop_worker_group
+    stop_worker
     set +e
     wait "${WORKER_PID}"
+    worker_status=$?
     set -e
     WORKER_PID=''
 
-    if ((zenity_status == 1)); then
+    # If the worker completed successfully just before the Cancel response was
+    # processed, report the completed file instead of a misleading cancellation.
+    if ((zenity_status == 1 && worker_status == 0)); then
+        zenity_status=0
+    elif ((zenity_status == 1)); then
         zenity --info \
             --title="${APP_NAME}" \
             --text='The download was canceled.' \
             --no-markup \
             --width=420 || true
         exit 130
-    fi
-
-    if ((zenity_status == 5)); then
+    elif ((zenity_status == 5)); then
         show_error "The progress dialog timed out; the download was stopped."
         exit 1
+    else
+        show_error "The progress dialog exited with status ${zenity_status}."
+        exit 1
     fi
-
-    show_error "The progress dialog exited with status ${zenity_status}."
-    exit 1
 fi
 
-set +e
-wait "${WORKER_PID}"
-worker_status=$?
-set -e
-WORKER_PID=''
+if [[ -z ${worker_status} ]]; then
+    set +e
+    wait "${WORKER_PID}"
+    worker_status=$?
+    set -e
+    WORKER_PID=''
+fi
 
 if ((worker_status == 0)); then
     final_path=''

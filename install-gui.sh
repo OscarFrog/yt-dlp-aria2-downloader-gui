@@ -3,12 +3,13 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : install-gui.sh
-# Version     : 2.1.9
-# Date        : 2026-07-27
+# Version     : 2.1.10
+# Date        : 2026-07-28
 # Description : Install or remove the per-user desktop launcher.
 # ============================================================================
 
-set -Eeuo pipefail
+set -euo pipefail
+umask 077
 
 if [[ -z ${HOME:-} && -z ${XDG_DATA_HOME:-} ]]; then
     printf 'Error: HOME or XDG_DATA_HOME must be defined.\n' >&2
@@ -58,7 +59,8 @@ resolve_script_dir() {
     fi
     path=$(realpath -e -- "${source}") || return 1
     script_dir=$(dirname -- "${path}") || return 1
-    printf -v "${output_variable}" '%s' "${script_dir}"
+    printf -v "${output_variable}" '%s' "${script_dir}" || return 1
+    return 0
 }
 
 quote_desktop_exec_path() {
@@ -72,6 +74,15 @@ quote_desktop_exec_path() {
     value=${value//\$/\\\\\$}
     printf '"%s"' "${value}"
 }
+
+
+for command_name in cat chmod dirname ln mkdir mktemp mv readlink realpath rm rmdir; do
+    if ! command -v "${command_name}" >/dev/null 2>&1; then
+        printf 'Error: required command "%s" was not found.\n' \
+            "${command_name}" >&2
+        exit 127
+    fi
+done
 
 if (($# != 1)); then
     usage >&2
@@ -103,6 +114,23 @@ readonly LAUNCHER_DIR="${DATA_HOME}/${APP_ID}"
 readonly LAUNCHER_LINK="${LAUNCHER_DIR}/launch"
 readonly DESKTOP_FILE="${APPLICATION_DIR}/${APP_ID}.desktop"
 
+
+remove_stale_install_artifacts() {
+    local -a artifacts=()
+
+    shopt -s nullglob
+    artifacts=(
+        "${APPLICATION_DIR}/.${APP_ID}."*.tmp
+        "${LAUNCHER_DIR}/.install."*
+        "${LAUNCHER_DIR}/.validate."*.desktop
+    )
+    shopt -u nullglob
+
+    if ((${#artifacts[@]} > 0)); then
+        rm -rf -- "${artifacts[@]}"
+    fi
+}
+
 # A literal percent in a quoted Exec path is handled inconsistently by
 # desktop implementations, and '=' is forbidden in the executable path.
 # The project itself may contain these characters because Exec targets the
@@ -118,6 +146,12 @@ case $1 in
 install)
     if [[ ! -x ${GUI_SCRIPT} ]]; then
         printf 'Error: %s is absent or not executable.\n' "${GUI_SCRIPT}" >&2
+        exit 1
+    fi
+
+    if [[ -e ${LAUNCHER_LINK} && ! -L ${LAUNCHER_LINK} ]]; then
+        printf 'Error: the launcher path already exists and is not a symbolic link: %s\n' \
+            "${LAUNCHER_LINK}" >&2
         exit 1
     fi
 
@@ -158,16 +192,19 @@ EOF_DESKTOP
             --no-hints \
             "${TEMP_VALIDATION_FILE}" 2>&1) || validation_status=$?
         if ((validation_status != 0)); then
-            printf 'Error: the generated desktop launcher failed validation.\n' >&2
+            printf 'Error: the generated desktop launcher failed validation (status %d).\n' \
+                "${validation_status}" >&2
             if [[ -n ${validation_output} ]]; then
                 printf '%s\n' "${validation_output}" >&2
             fi
             printf 'The previously installed launcher, if any, was left unchanged.\n' >&2
-            exit "${validation_status}"
+            exit 1
         fi
 
         rm -f -- "${TEMP_VALIDATION_FILE}"
         TEMP_VALIDATION_FILE=''
+    else
+        printf 'Note: desktop-file-validate is unavailable; launcher validation was skipped.\n' >&2
     fi
 
     TEMP_LAUNCHER_DIR=$(mktemp -d \
@@ -177,6 +214,17 @@ EOF_DESKTOP
     mv -Tf -- "${TEMP_LAUNCHER_DIR}/launch" "${LAUNCHER_LINK}"
     rmdir -- "${TEMP_LAUNCHER_DIR}"
     TEMP_LAUNCHER_DIR=''
+
+    if [[ ! -L ${LAUNCHER_LINK} || ! -x ${LAUNCHER_LINK} ]]; then
+        printf 'Error: the published launcher link is missing or not executable.\n' >&2
+        exit 1
+    fi
+    published_target=$(readlink -- "${LAUNCHER_LINK}")
+    if [[ ${published_target} != "${GUI_SCRIPT}" ]]; then
+        printf 'Error: the published launcher target is incorrect: %s\n' \
+            "${published_target}" >&2
+        exit 1
+    fi
 
     mv -f -- "${TEMP_DESKTOP_FILE}" "${DESKTOP_FILE}"
     TEMP_DESKTOP_FILE=''
@@ -195,6 +243,7 @@ uninstall)
         rm -f -- "${LAUNCHER_LINK}"
         launcher_removed=true
     fi
+    remove_stale_install_artifacts
     rmdir -- "${LAUNCHER_DIR}" 2>/dev/null || true
 
     if [[ ${launcher_removed} == false ]]; then

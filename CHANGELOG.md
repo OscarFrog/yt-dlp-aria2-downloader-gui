@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.1.10 - 2026-07-28
+
+### Runtime robustness
+
+- Publish result paths atomically only after a successful yt-dlp run and remove
+  stale result files before starting.
+- Recover the worker process group through `/proc` when PGID-file publication is
+  delayed, and terminate the complete worker tree on startup failure.
+- Resolve the cancellation/completion race, treat zombie supervisors as
+  completed, verify actual process-group signal delivery, keep `setsid --wait`
+  alive for graceful reaping, and force-stop it after the final `KILL` fallback.
+- Exit the progress producer explicitly when Zenity closes its pipe, so
+  cancellation cannot remain blocked in a synchronous Bash pipeline.
+- Use real newlines in Zenity error dialogs.
+- Handle configuration files without a final newline and ignore only the partial
+  first record of oversized progress logs.
+- Remove retained diagnostic logs older than 15 days when the graphical
+  interface starts.
+
+### Installer and validation
+
+- Reject occupied non-symlink launcher paths, verify the published link target,
+  report skipped optional desktop validation, and normalize validation failures.
+- Remove known stale installer artifacts during uninstall and validate all
+  required installer commands explicitly.
+- Separate product failures from test-harness errors, distinguish grep failures,
+  verify command invocability, and centralize the project shell-file lists.
+
 ## 2.1.9 - 2026-07-27
 
 ### Process lifecycle and progress

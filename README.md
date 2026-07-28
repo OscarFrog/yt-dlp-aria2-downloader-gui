@@ -14,7 +14,7 @@ single URL in one of two forms:
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
 streams deliberately remain on yt-dlp's native downloader. The current version
-is **2.1.9**.
+is **2.1.10**.
 
 ## Main features
 
@@ -86,7 +86,7 @@ setsid --version
 Download both release assets from the GitHub release page:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.9.zip
+yt-dlp-aria2-downloader-gui-2.1.10.zip
 SHA256SUMS
 ```
 
@@ -94,8 +94,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.9.zip
-cd yt-dlp-aria2-downloader-gui-2.1.9
+unzip yt-dlp-aria2-downloader-gui-2.1.10.zip
+cd yt-dlp-aria2-downloader-gui-2.1.10
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -285,7 +285,8 @@ Execution logs:
 
 Logs are private. A log is deleted automatically after the final media file
 is confirmed. Failed, canceled, interrupted, or inconsistent runs retain their
-logs for troubleshooting.
+logs for troubleshooting. Retained diagnostic logs older than 15 days are
+removed automatically the next time the graphical interface starts.
 
 ## Tests
 

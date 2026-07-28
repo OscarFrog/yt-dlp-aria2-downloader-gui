@@ -22,10 +22,24 @@ jobs:
       - name: Install validation tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes desktop-file-utils shellcheck
+          sudo apt-get install --yes desktop-file-utils procps shellcheck
 
       - name: Run validation
-        run: ./tests/run-all.sh
+        run: |
+          set +e
+          timeout --signal=TERM --kill-after=10s 4m ./tests/run-all.sh
+          validation_status=$?
+          set -e
+
+          if ((validation_status != 0)); then
+            printf 'Ubuntu validation failed with status %d.\n' \
+              "${validation_status}" >&2
+            printf '%s\n' \
+              '=== Process tree at validation failure ===' >&2
+            ps -eo pid,ppid,pgid,sid,stat,etime,args --forest >&2 || true
+          fi
+
+          exit "${validation_status}"
 
   validate-fedora:
     name: Fedora 44
