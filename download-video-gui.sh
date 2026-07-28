@@ -126,12 +126,37 @@ recover_worker_pgid() {
     return 1
 }
 
+process_is_running() {
+    local pid=$1
+    local process_stat=''
+    local process_state=''
+
+    [[ ${pid} =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 -- "${pid}" 2>/dev/null || return 1
+
+    # kill -0 also succeeds for a zombie. A zombie has already terminated and
+    # must not keep the progress producer alive while Bash is waiting to reap it.
+    if [[ -r /proc/${pid}/stat ]]; then
+        process_stat=$(<"/proc/${pid}/stat") || return 0
+        process_state=${process_stat##*) }
+        process_state=${process_state%% *}
+        [[ ${process_state} != Z && ${process_state} != X ]]
+        return
+    fi
+
+    return 0
+}
+
 worker_tree_alive() {
     if [[ -n ${WORKER_PGID} ]] &&
         kill -0 -- "-${WORKER_PGID}" 2>/dev/null; then
         return 0
     fi
-    [[ -n ${WORKER_PID} ]] && kill -0 -- "${WORKER_PID}" 2>/dev/null
+    if [[ -n ${WORKER_PID} ]]; then
+        process_is_running "${WORKER_PID}"
+        return
+    fi
+    return 1
 }
 
 signal_worker_tree() {
@@ -139,6 +164,7 @@ signal_worker_tree() {
     local children_file
     local children=''
     local candidate
+    local signaled_target=false
     local -a child_pids=()
 
     if [[ -z ${WORKER_PGID} && -n ${WORKER_PID} ]]; then
@@ -148,21 +174,33 @@ signal_worker_tree() {
     fi
 
     if [[ -n ${WORKER_PGID} ]]; then
-        kill "-${signal_name}" -- "-${WORKER_PGID}" 2>/dev/null || true
-    elif [[ -n ${WORKER_PID} ]]; then
+        if kill -0 -- "-${WORKER_PGID}" 2>/dev/null; then
+            kill "-${signal_name}" -- "-${WORKER_PGID}" 2>/dev/null || true
+            signaled_target=true
+        else
+            WORKER_PGID=''
+        fi
+    fi
+
+    if [[ ${signaled_target} == false && -n ${WORKER_PID} ]]; then
         children_file="/proc/${WORKER_PID}/task/${WORKER_PID}/children"
         if [[ -r ${children_file} ]]; then
             children=$(<"${children_file}")
             read -r -a child_pids <<<"${children}"
             for candidate in "${child_pids[@]}"; do
                 [[ ${candidate} =~ ^[1-9][0-9]*$ ]] || continue
-                kill "-${signal_name}" -- "-${candidate}" 2>/dev/null ||
-                    kill "-${signal_name}" -- "${candidate}" 2>/dev/null || true
+                if kill "-${signal_name}" -- "-${candidate}" 2>/dev/null ||
+                    kill "-${signal_name}" -- "${candidate}" 2>/dev/null; then
+                    signaled_target=true
+                fi
             done
         fi
     fi
 
-    if [[ -n ${WORKER_PID} ]]; then
+    # When a child group was signaled, keep the setsid --wait supervisor alive
+    # so it can reap the child and propagate its status. Signal the supervisor
+    # only when no child or child group could be reached.
+    if [[ ${signaled_target} == false && -n ${WORKER_PID} ]]; then
         kill "-${signal_name}" -- "${WORKER_PID}" 2>/dev/null || true
     fi
 }
@@ -484,7 +522,9 @@ monitor_progress() {
     local log_size=0
     local _
 
-    while kill -0 "${worker_pid}" 2>/dev/null; do
+    # process_is_running is deliberately used as a loop predicate.
+    # shellcheck disable=SC2310
+    while process_is_running "${worker_pid}"; do
         # aria2c refreshes its console line with carriage returns. Converting
         # them to newlines lets us compare its readout with yt-dlp's structured
         # progress records and retain whichever appeared last in the log.
@@ -606,7 +646,9 @@ wait_for_worker_pgid() {
             return 0
         fi
 
-        if ! kill -0 "${worker_pid}" 2>/dev/null; then
+        # process_is_running is deliberately used as a probe.
+        # shellcheck disable=SC2310
+        if ! process_is_running "${worker_pid}"; then
             return 1
         fi
 

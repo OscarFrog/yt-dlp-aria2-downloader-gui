@@ -132,6 +132,12 @@ done
 assert_file_contains "${script_dir}/download-video-gui.sh" \
     'readonly LOG_RETENTION_DAYS=15' \
     'GUI retained-log lifetime'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    'process_is_running() {' \
+    'zombie-aware worker liveness check'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    'When a child group was signaled, keep the setsid --wait supervisor alive' \
+    'setsid supervisor reaping policy'
 
 assert_file_contains "${script_dir}/README.md"     "is **${EXPECTED_VERSION}**." 'English README version'
 assert_file_contains "${script_dir}/README.fr.md"     "version actuelle est la **${EXPECTED_VERSION}**." 'French README version'

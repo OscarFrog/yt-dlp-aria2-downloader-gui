@@ -415,6 +415,59 @@ wait_for_file() {
     fail "${label}: file did not appear within ${timeout}s: ${path}"
 }
 
+find_test_processes() {
+    local cmdline_file
+    local pid
+    local cmdline
+    TEST_PROCESS_PIDS=()
+
+    for cmdline_file in /proc/[0-9]*/cmdline; do
+        [[ -r ${cmdline_file} ]] || continue
+        pid=${cmdline_file#/proc/}
+        pid=${pid%/cmdline}
+        [[ ${pid} =~ ^[1-9][0-9]*$ ]] || continue
+        [[ ${pid} != "$$" && ${pid} != "${BASHPID}" ]] || continue
+
+        cmdline=$(tr '\0' ' ' <"${cmdline_file}" 2>/dev/null) || continue
+        [[ ${cmdline} == *"${TEST_ROOT}"* ]] || continue
+        TEST_PROCESS_PIDS+=("${pid}")
+    done
+}
+
+assert_no_test_processes() {
+    local label=$1
+    local attempt
+    local pid
+    local cmdline=''
+
+    for ((attempt = 0; attempt < 50; attempt++)); do
+        find_test_processes
+        ((${#TEST_PROCESS_PIDS[@]} == 0)) && return 0
+        sleep 0.1
+    done
+
+    printf 'FAIL: %s\n' "${label}" >&2
+    for pid in "${TEST_PROCESS_PIDS[@]}"; do
+        if [[ -r /proc/${pid}/cmdline ]]; then
+            cmdline=$(tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null || true)
+        else
+            cmdline='<unavailable>'
+        fi
+        printf 'Leaked process %s: %s\n' "${pid}" "${cmdline}" >&2
+        kill -TERM -- "-${pid}" 2>/dev/null ||
+            kill -TERM -- "${pid}" 2>/dev/null || true
+    done
+
+    sleep 0.2
+    for pid in "${TEST_PROCESS_PIDS[@]}"; do
+        kill -KILL -- "-${pid}" 2>/dev/null ||
+            kill -KILL -- "${pid}" 2>/dev/null || true
+    done
+    exit 1
+}
+
+TEST_PROCESS_PIDS=()
+
 export HOME="${HOME_DIR}"
 export XDG_CONFIG_HOME="${HOME_DIR}/.config"
 export XDG_STATE_HOME="${HOME_DIR}/.local/state"
@@ -455,6 +508,7 @@ env XDG_STATE_HOME="${rotation_state_home}" \
     XDG_CONFIG_HOME="${rotation_config_home}" \
     MOCK_USE_DEFAULT_PROFILE=1 \
     "${PROJECT_DIR}/download-video-gui.sh"
+assert_no_test_processes 'log-retention GUI run left worker processes'
 
 [[ ! -e ${old_retained_log} ]] ||
     fail 'A retained diagnostic log older than 15 days was not removed.'
@@ -778,6 +832,7 @@ assert_status 130 'cancellation terminates the process group' \
     MOCK_TERMINATION_MARKER="${termination_marker}" \
     "${PROJECT_DIR}/download-video-gui.sh"
 wait_for_file "${termination_marker}" 10 'worker group receives TERM'
+assert_no_test_processes 'ordinary cancellation left worker processes'
 
 # Delayed PGID-file publication must still leave the GUI in control of the
 # setsid child group through the Linux /proc fallback.
@@ -788,12 +843,14 @@ assert_status 130 'cancellation works before PGID-file publication' \
     MOCK_PGID_DELAY_TERMINATION_MARKER="${pgid_delay_marker}" \
     "${PROJECT_DIR}/download-video-gui.sh"
 wait_for_file "${pgid_delay_marker}" 10 'delayed PGID worker receives TERM'
+assert_no_test_processes 'delayed-PGID cancellation left worker processes'
 
 # A Cancel response received after a successful worker exit must be reported as
 # success, not as a misleading cancellation.
 prepare_argument_log 'cancel-after-worker-success'
 assert_status 0 'late cancellation does not hide completed download' \
     env MOCK_CANCEL_AFTER_EOF=1 "${PROJECT_DIR}/download-video-gui.sh"
+assert_no_test_processes 'late-cancel success left worker processes'
 
 # A failed PGID publication uses actual newline characters in the error dialog.
 pgid_error_capture="${TEST_ROOT}/pgid-start-error.txt"

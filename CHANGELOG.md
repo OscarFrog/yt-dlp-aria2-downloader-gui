@@ -8,8 +8,9 @@
   stale result files before starting.
 - Recover the worker process group through `/proc` when PGID-file publication is
   delayed, and terminate the complete worker tree on startup failure.
-- Resolve the cancellation/completion race and use real newlines in Zenity error
-  dialogs.
+- Resolve the cancellation/completion race, treat zombie supervisors as
+  completed, keep `setsid --wait` alive long enough to reap its child, and use
+  real newlines in Zenity error dialogs.
 - Handle configuration files without a final newline and ignore only the partial
   first record of oversized progress logs.
 - Remove retained diagnostic logs older than 15 days when the graphical
