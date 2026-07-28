@@ -58,8 +58,9 @@ The automated suite checks, among other things:
 - deletion of successful-download logs and retention of failure logs;
 - automatic removal of retained diagnostic logs older than 15 days while
   preserving newer logs, unrelated files, and symbolic links;
-- atomic process-group publication, complete cancellation, termination, and
-  verification that no worker process remains after GUI scenarios;
+- atomic process-group publication, bounded cancellation tests, explicit
+  progress-pipe closure, termination, and verification that no worker process
+  remains after GUI scenarios;
 - process-group recovery when PGID-file publication is delayed;
 - atomic publication and failure cleanup of the result-path file;
 - Zenity timeout and unexpected-error handling;

@@ -625,15 +625,17 @@ monitor_progress() {
             fi
         fi
 
-        # A closed Zenity pipe terminates this producer with SIGPIPE (141).
-        # The caller deliberately evaluates Zenity's status rather than this one.
-        printf '%d\n' "${display_percent}"
-        printf '# %s\n' "${message}"
+        # A Bash builtin may report EPIPE as a normal command failure instead
+        # of terminating this function, especially because the caller disables
+        # errexit while collecting PIPESTATUS. Exit explicitly when Zenity has
+        # closed its input so the synchronous pipeline cannot block cancellation.
+        printf '%d\n' "${display_percent}" || return 0
+        printf '# %s\n' "${message}" || return 0
         sleep 0.4
     done
 
-    printf '100\n' || true
-    printf '# Finalizing the file...\n' || true
+    printf '100\n' || return 0
+    printf '# Finalizing the file...\n' || return 0
 }
 
 wait_for_worker_pgid() {

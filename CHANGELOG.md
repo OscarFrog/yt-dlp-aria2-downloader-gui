@@ -11,6 +11,8 @@
 - Resolve the cancellation/completion race, treat zombie supervisors as
   completed, verify actual process-group signal delivery, keep `setsid --wait`
   alive for graceful reaping, and force-stop it after the final `KILL` fallback.
+- Exit the progress producer explicitly when Zenity closes its pipe, so
+  cancellation cannot remain blocked in a synchronous Bash pipeline.
 - Use real newlines in Zenity error dialogs.
 - Handle configuration files without a final newline and ignore only the partial
   first record of oversized progress logs.

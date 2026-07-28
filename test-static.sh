@@ -141,6 +141,15 @@ assert_file_contains "${script_dir}/download-video-gui.sh" \
 assert_file_contains "${script_dir}/download-video-gui.sh" \
     'For KILL, stop the supervisor as the' \
     'bounded setsid supervisor fallback'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    'closed its input so the synchronous pipeline cannot block cancellation' \
+    'closed progress pipe terminates producer explicitly'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    "printf '%d\\n' \"\${display_percent}\" || return 0" \
+    'progress percentage stops on a closed pipe'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    "printf '# %s\\n' \"\${message}\" || return 0" \
+    'progress message stops on a closed pipe'
 
 assert_file_contains "${script_dir}/README.md"     "is **${EXPECTED_VERSION}**." 'English README version'
 assert_file_contains "${script_dir}/README.fr.md"     "version actuelle est la **${EXPECTED_VERSION}**." 'French README version'

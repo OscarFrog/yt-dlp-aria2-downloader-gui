@@ -6,6 +6,7 @@ PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly PROJECT_DIR
 # shellcheck disable=SC1090
 source "${PROJECT_DIR}/tests/lib/assert.sh"
+require_test_command timeout
 require_test_command touch
 TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
@@ -833,6 +834,7 @@ done
 termination_marker="${TEST_ROOT}/terminated"
 prepare_argument_log 'cancel-process-group'
 assert_status_split 130 'cancellation terminates the process group' \
+    timeout --signal=TERM --kill-after=2s 15s \
     env MOCK_LONG_DOWNLOAD=1 MOCK_CANCEL=1 \
     MOCK_TERMINATION_MARKER="${termination_marker}" \
     "${PROJECT_DIR}/download-video-gui.sh"
@@ -844,6 +846,7 @@ assert_no_test_processes 'ordinary cancellation left worker processes'
 pgid_delay_marker="${TEST_ROOT}/pgid-delay-terminated"
 prepare_argument_log 'delayed-pgid-publication'
 assert_status_split 130 'cancellation works before PGID-file publication' \
+    timeout --signal=TERM --kill-after=2s 15s \
     env MOCK_DELAY_PGID_PUBLISH=1 MOCK_CANCEL=1 \
     MOCK_PGID_DELAY_TERMINATION_MARKER="${pgid_delay_marker}" \
     "${PROJECT_DIR}/download-video-gui.sh"
