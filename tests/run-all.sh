@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 
-set -Eeuo pipefail
+set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly script_dir
 project_dir=$(cd -- "${script_dir}/.." && pwd -P)
 readonly project_dir
+
+# shellcheck disable=SC1090
+source "${project_dir}/tests/lib/project-files.sh"
+
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cd -- "${project_dir}"
 
@@ -15,24 +22,24 @@ if ! command -v shellcheck >/dev/null 2>&1; then
     exit 127
 fi
 
+printf '=== ShellCheck version ===\n'
 shellcheck --version
+
+printf '\n=== Static validation ===\n'
 ./test-static.sh
 
-shellcheck -o all \
-    download-video.sh \
-    download-video-gui.sh \
-    install-gui.sh
+printf '\n=== Production ShellCheck ===\n'
+shellcheck -o all "${PRODUCTION_SHELL_FILES[@]}"
 
-# Test scripts intentionally capture non-zero statuses. They use the standard
-# ShellCheck rules while production scripts also enable every optional rule.
-shellcheck -x -o all \
-    test-static.sh \
-    tests/run-all.sh \
-    tests/lib/assert.sh \
-    tests/mock-integration.sh \
-    tests/installer-integration.sh
+printf '\n=== Test-suite ShellCheck ===\n'
+# -x follows sourced project helpers; -o all keeps the same strict optional
+# checks for production and test scripts.
+shellcheck -x -o all "${TEST_SHELL_FILES[@]}"
 
+printf '\n=== Mock integration ===\n'
 ./tests/mock-integration.sh
+
+printf '\n=== Installer integration ===\n'
 ./tests/installer-integration.sh
 
-printf 'All validation suites passed.\n'
+printf '\nAll validation suites passed.\n'

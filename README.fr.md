@@ -15,7 +15,7 @@ une seule URL sous l'une des deux formes suivantes :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.9**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.10**.
 
 ## Fonctionnalités principales
 
@@ -87,7 +87,7 @@ setsid --version
 Téléchargez les deux fichiers publiés avec la release GitHub :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.9.zip
+yt-dlp-aria2-downloader-gui-2.1.10.zip
 SHA256SUMS
 ```
 
@@ -95,8 +95,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.9.zip
-cd yt-dlp-aria2-downloader-gui-2.1.9
+unzip yt-dlp-aria2-downloader-gui-2.1.10.zip
+cd yt-dlp-aria2-downloader-gui-2.1.10
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -277,7 +277,9 @@ Journaux d'exécution :
 
 Les journaux sont privés. Un journal est supprimé automatiquement dès que le
 fichier média final est confirmé. Les exécutions échouées, annulées, interrompues
-ou incohérentes conservent leur journal afin de faciliter le diagnostic.
+ou incohérentes conservent leur journal afin de faciliter le diagnostic. Les
+journaux de diagnostic conservés depuis plus de 15 jours sont supprimés
+automatiquement au prochain démarrage de l'interface graphique.
 
 ## Tests
 

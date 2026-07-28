@@ -3,14 +3,14 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.9
-# Date        : 2026-07-27
+# Version     : 2.1.10
+# Date        : 2026-07-28
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
 
-set -Eeuo pipefail
+set -euo pipefail
 
-readonly VERSION="2.1.9"
+readonly VERSION="2.1.10"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -18,6 +18,22 @@ readonly SCRIPT_NAME="${0##*/}"
 
 VERSION_AT_LEAST=false
 VERSION_PARSE_VALID=false
+RESULT_FILE_TMP=''
+
+cleanup() {
+    local status=$?
+
+    trap - EXIT
+    if [[ -n ${RESULT_FILE_TMP} ]]; then
+        rm -f -- "${RESULT_FILE_TMP}" || true
+    fi
+    exit "${status}"
+}
+
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 usage() {
     cat <<EOF_USAGE
@@ -52,6 +68,8 @@ compare_versions() {
     local current_major
     local current_minor
     local current_patch
+    local current_suffix=''
+    local current_is_prerelease=false
     local minimum_major
     local minimum_minor
     local minimum_patch
@@ -67,6 +85,10 @@ compare_versions() {
     current_major=$((10#${BASH_REMATCH[1]}))
     current_minor=$((10#${BASH_REMATCH[2]}))
     current_patch=$((10#${BASH_REMATCH[3]}))
+    current_suffix=${current#"${BASH_REMATCH[0]}"}
+    if [[ ${current_suffix} =~ ^-(alpha|beta|pre|preview|rc)([.0-9-]|$) ]]; then
+        current_is_prerelease=true
+    fi
 
     if [[ ! ${minimum} =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
         return 0
@@ -75,6 +97,13 @@ compare_versions() {
     minimum_minor=$((10#${BASH_REMATCH[2]}))
     minimum_patch=$((10#${BASH_REMATCH[3]}))
     VERSION_PARSE_VALID=true
+
+    if [[ ${current_is_prerelease} == true ]] &&
+        ((current_major == minimum_major &&
+            current_minor == minimum_minor &&
+            current_patch == minimum_patch)); then
+        return 0
+    fi
 
     if ((current_major > minimum_major || (\
         current_major == minimum_major && current_minor > minimum_minor) || (\
@@ -151,7 +180,7 @@ check_runtime_compatibility() {
         return 1
     fi
     aria2_version_line=${aria2_version_line%%$'\n'*}
-    if [[ ! ${aria2_version_line} =~ ^aria2[[:space:]]+version[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+    if [[ ! ${aria2_version_line} =~ ^aria2[[:space:]]+version[[:space:]]+([^[:space:]]+) ]]; then
         error "unable to parse the aria2c version: ${aria2_version_line:-unknown}."
         return 1
     fi
@@ -178,7 +207,7 @@ check_runtime_compatibility() {
         --summary-interval \
         --show-console-readout \
         --stderr; do
-        if ! grep -Eq -- "^[[:space:]]*${required_option}([=[:space:]\[]|$)" <<<"${aria2_help}"; then
+        if ! grep -Eq -- "^[[:space:]]*${required_option}([=[:space:]]|\[|$)" <<<"${aria2_help}"; then
             error "this aria2c build does not support ${required_option}."
             return 1
         fi
@@ -193,32 +222,6 @@ require_value() {
         error "option ${option_name} requires a value."
         exit 2
     fi
-}
-
-resolve_script_dir() {
-    local output_variable=$1
-    local script_source=${BASH_SOURCE[0]}
-    local script_path
-    local script_dir
-
-    if [[ ${script_source} != */* ]]; then
-        if ! script_source=$(type -P -- "${script_source}"); then
-            error 'unable to locate the script in PATH.'
-            return 1
-        fi
-    fi
-
-    if ! script_path=$(realpath -e -- "${script_source}"); then
-        error 'unable to resolve the real script path.'
-        return 1
-    fi
-
-    if ! script_dir=$(dirname -- "${script_path}"); then
-        error 'unable to determine the script directory.'
-        return 1
-    fi
-
-    printf -v "${output_variable}" '%s' "${script_dir}"
 }
 
 OUTPUT_DIR=''
@@ -306,7 +309,7 @@ if [[ ${URL} == *$'\n'* || ${URL} == *$'\r'* ]]; then
     exit 2
 fi
 
-if [[ ! ${URL} =~ ^https?://.+ ]]; then
+if [[ ! ${URL} =~ ^https?://[^[:space:]]+$ ]]; then
     error 'provide a URL beginning with http:// or https://.'
     exit 2
 fi
@@ -319,7 +322,7 @@ video | audio) ;;
     ;;
 esac
 
-for command_name in yt-dlp aria2c ffmpeg ffprobe realpath dirname deno grep; do
+for command_name in yt-dlp aria2c ffmpeg ffprobe realpath deno grep mktemp mv rm; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         error "required command \"${command_name}\" was not found."
         exit 127
@@ -330,17 +333,8 @@ done
 # errexit inside the function body under Bash's documented rules.
 check_runtime_compatibility
 
-set +e
-resolve_script_dir SCRIPT_DIR
-resolve_status=$?
-set -e
-if ((resolve_status != 0)); then
-    exit 1
-fi
-readonly SCRIPT_DIR
-
 if [[ -z ${OUTPUT_DIR} ]]; then
-    OUTPUT_DIR=${SCRIPT_DIR}
+    OUTPUT_DIR=${PWD}
 fi
 
 if [[ ${OUTPUT_DIR} == *$'\n'* || ${OUTPUT_DIR} == *$'\r'* ]]; then
@@ -387,8 +381,15 @@ if [[ -n ${RESULT_FILE} ]]; then
         exit 13
     fi
 
-    if ! : >"${RESULT_FILE}"; then
-        error 'unable to initialize the result file.'
+    if ! rm -f -- "${RESULT_FILE}"; then
+        error 'unable to remove the previous result file.'
+        exit 13
+    fi
+
+    if ! RESULT_FILE_TMP=$(mktemp \
+        --tmpdir="${result_parent}" \
+        '.yt-dlp-result.XXXXXXXX'); then
+        error 'unable to create the temporary result file.'
         exit 13
     fi
 fi
@@ -426,6 +427,8 @@ YT_DLP_OPTIONS=(
 )
 
 if [[ ${MODE} == 'video' ]]; then
+    # Keep both container options. --merge-output-format covers separate
+    # video/audio streams, while --remux-video covers the combined-format fallback.
     YT_DLP_OPTIONS+=(
         --format 'bv*+ba/b'
         --merge-output-format mkv
@@ -455,14 +458,21 @@ fi
 
 if [[ -n ${RESULT_FILE} ]]; then
     # The FILE argument is itself an output template, so literal % characters
-    # in the path must be doubled.
-    result_file_template=${RESULT_FILE//%/%%}
+    # in the temporary path must be doubled.
+    result_file_template=${RESULT_FILE_TMP//%/%%}
     YT_DLP_OPTIONS+=(
         --print-to-file 'after_move:%(filepath)s' "${result_file_template}"
     )
 fi
 
 if yt-dlp "${YT_DLP_OPTIONS[@]}" -- "${URL}"; then
+    if [[ -n ${RESULT_FILE} ]]; then
+        if ! mv -f -- "${RESULT_FILE_TMP}" "${RESULT_FILE}"; then
+            error 'unable to publish the result file.'
+            exit 13
+        fi
+        RESULT_FILE_TMP=''
+    fi
     printf '\nDownload completed successfully.\n'
 else
     status=$?

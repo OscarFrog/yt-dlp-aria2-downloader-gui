@@ -20,6 +20,7 @@ bash -n install-gui.sh
 bash -n test-static.sh
 bash -n tests/run-all.sh
 bash -n tests/lib/assert.sh
+bash -n tests/lib/project-files.sh
 bash -n tests/mock-integration.sh
 bash -n tests/installer-integration.sh
 ```
@@ -32,10 +33,11 @@ shellcheck -o all \
   download-video-gui.sh \
   install-gui.sh
 
-shellcheck \
+shellcheck -x -o all \
   test-static.sh \
   tests/run-all.sh \
   tests/lib/assert.sh \
+  tests/lib/project-files.sh \
   tests/mock-integration.sh \
   tests/installer-integration.sh
 ```
@@ -54,7 +56,11 @@ The automated suite checks, among other things:
 - a neutral final progress message instead of a premature success message;
 - monotonic progress after post-processing begins;
 - deletion of successful-download logs and retention of failure logs;
+- automatic removal of retained diagnostic logs older than 15 days while
+  preserving newer logs, unrelated files, and symbolic links;
 - atomic process-group publication, complete cancellation, and termination;
+- process-group recovery when PGID-file publication is delayed;
+- atomic publication and failure cleanup of the result-path file;
 - Zenity timeout and unexpected-error handling;
 - folder-chooser fallback behavior on Zenity 4;
 - minimum versions, suffixed yt-dlp versions, required capabilities, and
