@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: shell-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate-ubuntu:
     name: Ubuntu
@@ -27,7 +31,7 @@ jobs:
       - name: Run validation
         run: |
           set +e
-          timeout --signal=TERM --kill-after=10s 4m ./tests/run-all.sh
+          timeout --signal=TERM --kill-after=10s 4m bash ./tests/run-all.sh
           validation_status=$?
           set -e
 
@@ -62,6 +66,7 @@ jobs:
             findutils \
             git \
             grep \
+            procps-ng \
             ShellCheck \
             util-linux
 
@@ -71,4 +76,18 @@ jobs:
           persist-credentials: false
 
       - name: Run validation
-        run: ./tests/run-all.sh
+        run: |
+          set +e
+          timeout --signal=TERM --kill-after=10s 4m bash ./tests/run-all.sh
+          validation_status=$?
+          set -e
+
+          if ((validation_status != 0)); then
+            printf 'Fedora validation failed with status %d.\n' \
+              "${validation_status}" >&2
+            printf '%s\n' \
+              '=== Process tree at validation failure ===' >&2
+            ps -eo pid,ppid,pgid,sid,stat,etime,args --forest >&2 || true
+          fi
+
+          exit "${validation_status}"

@@ -8,6 +8,7 @@
 PRODUCTION_SHELL_FILES=(
     download-video.sh
     download-video-gui.sh
+    progress-monitor.sh
     install-gui.sh
 )
 
@@ -18,6 +19,7 @@ TEST_SHELL_FILES=(
     tests/lib/assert.sh
     tests/lib/project-files.sh
     tests/mock-integration.sh
+    tests/progress-monitor-integration.sh
     tests/installer-integration.sh
 )
 

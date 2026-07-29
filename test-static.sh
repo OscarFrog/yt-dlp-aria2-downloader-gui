@@ -108,8 +108,8 @@ assert_file_contains \
     "trap '' HUP INT TERM" \
     'cleanup signal protection'
 assert_file_contains \
-    "${script_dir}/download-video-gui.sh" \
-    '\[#[[:xdigit:]]+[[:space:]]' \
+    "${script_dir}/progress-monitor.sh" \
+    '^\[#([[:xdigit:]]+)[[:space:]]' \
     'aria2 progress without mandatory percentage'
 assert_file_contains \
     "${script_dir}/install-gui.sh" \
@@ -119,11 +119,12 @@ assert_file_contains \
     "${script_dir}/install-gui.sh" \
     "desktop-file-validate \\" \
     'desktop launcher validation'
-readonly EXPECTED_VERSION='2.1.11'
+readonly EXPECTED_VERSION='2.1.12'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
-for versioned_script in download-video.sh download-video-gui.sh install-gui.sh; do
+for versioned_script in \
+    download-video.sh download-video-gui.sh progress-monitor.sh install-gui.sh; do
     assert_file_contains "${script_dir}/${versioned_script}" \
         "# Version     : ${EXPECTED_VERSION}" \
         "${versioned_script} version header"
@@ -135,11 +136,26 @@ assert_file_contains "${script_dir}/download-video-gui.sh" \
     'process_is_running() {' \
     'zombie-aware worker liveness check'
 assert_file_contains "${script_dir}/download-video-gui.sh" \
-    "printf '%d\\n' \"\${display_percent}\" || return 0" \
-    'progress percentage stops on a closed pipe'
-assert_file_contains "${script_dir}/download-video-gui.sh" \
-    "printf '# %s\\n' \"\${message}\" || return 0" \
-    'progress message stops on a closed pipe'
+    "bash \"\${PROGRESS_MONITOR}\"" \
+    'GUI delegates progress parsing to the unified monitor'
+assert_file_contains "${script_dir}/progress-monitor.sh" \
+    "tail --pid=\"\${WORKER_PID}\"" \
+    'progress log is consumed incrementally until worker exit'
+assert_file_contains "${script_dir}/progress-monitor.sh" \
+    "emit_progress 100 'Download complete.'" \
+    '100 percent is emitted only by final result verification'
+assert_file_contains "${script_dir}/progress-monitor.sh" \
+    "trap 'exit 0' PIPE" \
+    'closed Zenity pipe ends the monitor normally'
+assert_file_contains "${script_dir}/download-video.sh" \
+    'normalize_path_record() {' \
+    'final result path record normalization'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+    'strict semantic release tag validation'
+assert_file_contains "${script_dir}/.github/workflows/shell.yml" \
+    'cancel-in-progress: true' \
+    'outdated validation runs are cancelled'
 
 assert_file_contains "${script_dir}/README.md"     "is **${EXPECTED_VERSION}**." 'English README version'
 assert_file_contains "${script_dir}/README.fr.md"     "version actuelle est la **${EXPECTED_VERSION}**." 'French README version'

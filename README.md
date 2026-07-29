@@ -5,16 +5,18 @@
 [Version française](README.fr.md)
 
 A Zenity graphical interface and Bash download engine for GNU/Linux only. It downloads a
-single URL in one of two forms:
+single URL using one of three profiles:
 
 - a **complete MKV video**, using the best available video and audio streams;
+- an explicit **authenticated YouTube HLS video** profile that reads Firefox
+  cookies and remuxes the selected HLS stream into MKV;
 - the **best available audio track**, preserving its source codec and
   container whenever yt-dlp can do so without re-encoding.
 
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
 streams deliberately remain on yt-dlp's native downloader. The current version
-is **2.1.11**.
+is **2.1.12**.
 
 ## Main features
 
@@ -23,9 +25,12 @@ is **2.1.11**.
 - one URL per run, with accidental playlist downloads disabled;
 - destination-folder selection and preference persistence;
 - MKV video download without re-encoding when the streams are compatible;
+- optional authenticated YouTube HLS fallback using Firefox cookies;
 - extraction of the best audio track while preserving its source format when possible;
 - interrupted-download resumption when supported by the website;
-- graphical progress display and cancellation of the complete process group;
+- unified graphical progress for direct files, native HLS/DASH fragments,
+  separate video/audio streams, and FFmpeg post-processing;
+- cancellation of the complete process group;
 - private diagnostic logs retained only for problematic runs;
 - application-menu launcher;
 - static tests, integration tests, and GitHub Actions validation on Ubuntu and
@@ -41,6 +46,8 @@ The following commands must be installed and available in `PATH`:
 - FFmpeg and `ffprobe`;
 - Deno **2.3.0 or newer**;
 - Zenity for the graphical interface;
+- Firefox with an authenticated YouTube session only when using the optional
+  authenticated YouTube HLS profile;
 - GNU coreutils, GNU grep, and `setsid`, which is usually provided by
   `util-linux`.
 
@@ -86,7 +93,7 @@ setsid --version
 Download both release assets from the GitHub release page:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.10.zip
+yt-dlp-aria2-downloader-gui-2.1.12.zip
 SHA256SUMS
 ```
 
@@ -94,8 +101,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.10.zip
-cd yt-dlp-aria2-downloader-gui-2.1.10
+unzip yt-dlp-aria2-downloader-gui-2.1.12.zip
+cd yt-dlp-aria2-downloader-gui-2.1.12
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -253,6 +260,29 @@ The engine selects the best video track and the best audio track, then merges
 or remuxes them into an MKV container without re-encoding when the streams are
 compatible.
 
+### Authenticated YouTube HLS video
+
+The graphical profile `YouTube video - Firefox cookies (HLS/MKV)` is an
+explicit fallback for YouTube sessions that require sign-in and whose ordinary
+HTTPS media URLs return HTTP 403. It adds:
+
+```text
+--cookies-from-browser firefox
+--extractor-args youtube:player_client=web_safari
+--format (bv*+ba/b)[protocol^=m3u8]
+```
+
+The profile is limited to video mode and YouTube URLs. It reads the local
+Firefox cookie database through yt-dlp, but this application does not copy,
+export, or store cookie values in `gui.conf`. Successful HLS downloads are
+handled by yt-dlp's native fragmented-media downloader. yt-dlp first applies
+its MPEG-TS-in-MP4 fixup,
+then the wrapper performs a second stream-copy remux from the repaired MP4 to
+MKV. Neither stage re-encodes the audio or video.
+
+This is a compatibility fallback, not a replacement for PO Token provider
+plugins. YouTube enforcement can change independently of this project.
+
 ### Native audio track
 
 Audio mode uses:
@@ -302,7 +332,10 @@ the GitHub Actions jobs.
 ## Limitations and lawful use
 
 - playlists are disabled;
-- the graphical interface does not manage cookies or authentication;
+- Firefox cookies are read only when the explicit authenticated YouTube HLS
+  profile is selected;
+- that HLS fallback is video-only and does not preserve a separate native
+  YouTube audio track;
 - the final audio format depends on the best stream supplied by the website;
 - some websites may restrict or prohibit downloading;
 - use this software only for content that you are authorized to download.

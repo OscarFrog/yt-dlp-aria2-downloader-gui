@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video-gui.sh
-# Version     : 2.1.11
+# Version     : 2.1.12
 # Date        : 2026-07-29
-# Description : Two-choice Zenity GUI for complete MKV video or native audio.
+# Description : Zenity GUI for MKV video, authenticated YouTube HLS, or audio.
 # ============================================================================
 
 set -euo pipefail
@@ -18,6 +18,7 @@ fi
 
 readonly APP_NAME='yt-dlp aria2 downloader'
 readonly PROFILE_LABEL_VIDEO='Complete video (MKV)'
+readonly PROFILE_LABEL_YOUTUBE_HLS='YouTube video - Firefox cookies (HLS/MKV)'
 readonly PROFILE_LABEL_AUDIO='Audio track (native format)'
 readonly CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/yt-dlp-aria2-downloader"
 readonly STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/yt-dlp-aria2-downloader"
@@ -292,7 +293,7 @@ load_settings() {
             ;;
         profile)
             case ${value} in
-            video | audio)
+            video | youtube-hls | audio)
                 LAST_PROFILE=${value}
                 ;;
             audio-mp3 | audio-m4a | audio-opus)
@@ -437,6 +438,7 @@ select_url() {
 select_profile() {
     local output_variable=$1
     local default_video=FALSE
+    local default_youtube_hls=FALSE
     local default_audio=FALSE
     local selected
     local capture_status
@@ -444,6 +446,7 @@ select_profile() {
 
     case ${LAST_PROFILE} in
     video) default_video=TRUE ;;
+    youtube-hls) default_youtube_hls=TRUE ;;
     audio) default_audio=TRUE ;;
     *) default_video=TRUE ;;
     esac
@@ -458,9 +461,10 @@ select_profile() {
         --print-column=2 \
         --ok-label='Continue' \
         --cancel-label='Cancel' \
-        --width=560 \
-        --height=240 \
+        --width=620 \
+        --height=285 \
         "${default_video}" "${PROFILE_LABEL_VIDEO}" \
+        "${default_youtube_hls}" "${PROFILE_LABEL_YOUTUBE_HLS}" \
         "${default_audio}" "${PROFILE_LABEL_AUDIO}"
     capture_status=${ZENITY_STATUS}
 
@@ -470,6 +474,7 @@ select_profile() {
 
     case ${selected} in
     "${PROFILE_LABEL_VIDEO}") selected_profile='video' ;;
+    "${PROFILE_LABEL_YOUTUBE_HLS}") selected_profile='youtube-hls' ;;
     "${PROFILE_LABEL_AUDIO}") selected_profile='audio' ;;
     *) return 2 ;;
     esac
@@ -540,124 +545,10 @@ monitor_progress() {
     local log_file=$1
     local worker_pid=$2
     local result_file=$3
-    local recent=''
-    local line=''
-    local previous_line=''
-    local percent_text=''
-    local speed=''
-    local eta=''
-    local percent_number=0
-    local candidate_percent=0
-    local display_percent=0
-    local message='Analyzing the webpage...'
-    local postprocessing=false
-    local log_size=0
-    local _
+    local profile=$4
 
-    # process_is_running is deliberately used as a loop predicate.
-    # shellcheck disable=SC2310
-    while process_is_running "${worker_pid}"; do
-        # aria2c refreshes its console line with carriage returns. Converting
-        # them to newlines lets us compare its readout with yt-dlp's structured
-        # progress records and retain whichever appeared last in the log.
-        recent=$(tail -c 65536 -- "${log_file}" 2>/dev/null |
-            tr '\r' '\n' || true)
-        if log_size=$(stat -c '%s' -- "${log_file}" 2>/dev/null) &&
-            ((log_size > 65536)); then
-            # tail -c may begin in the middle of a record. Discard only that
-            # partial first record, never the first complete line of a short log.
-            recent=${recent#*$'\n'}
-        fi
-        line=$(printf '%s\n' "${recent}" |
-            grep -aE '^(YTDLP_PROGRESS\||\[#[[:xdigit:]]+[[:space:]])' |
-            tail -n 1 || true)
-
-        if [[ ${postprocessing} == false ]] &&
-            grep -aq '^YTDLP_POSTPROCESS|' <<<"${recent}"; then
-            postprocessing=true
-        fi
-
-        if [[ ${postprocessing} == true ]]; then
-            display_percent=99
-            message='Finalizing the file...'
-        elif [[ -n ${line} && ${line} != "${previous_line}" ]]; then
-            previous_line=${line}
-            percent_number=''
-
-            if [[ ${line} == YTDLP_PROGRESS\|* ]]; then
-                IFS='|' read -r _ _ percent_text speed eta <<<"${line}"
-
-                percent_text=$(trim_field "${percent_text}")
-                speed=$(trim_field "${speed}")
-                eta=$(trim_field "${eta}")
-                percent_number=${percent_text%%%}
-                percent_number=$(trim_field "${percent_number}")
-                message="Download: ${percent_text:-in progress}"
-            else
-                percent_text=''
-                speed=''
-                eta=''
-
-                if [[ ${line} =~ \(([0-9]{1,3})%\) ]]; then
-                    percent_number=${BASH_REMATCH[1]}
-                    percent_text="${percent_number}%"
-                fi
-
-                if [[ ${line} == *' DL:'* ]]; then
-                    speed=${line##* DL:}
-                    speed=${speed%% *}
-                    speed=${speed%%]*}
-                elif [[ ${line} == *' SPD:'* ]]; then
-                    speed=${line##* SPD:}
-                    speed=${speed%% *}
-                    speed=${speed%%]*}
-                fi
-
-                if [[ ${line} == *' ETA:'* ]]; then
-                    eta=${line##* ETA:}
-                    eta=${eta%%]*}
-                    eta=${eta%% *}
-                fi
-
-                message="aria2 download: ${percent_text:-in progress}"
-            fi
-
-            if [[ ${percent_number} =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-                candidate_percent=$((10#${percent_number%%.*}))
-                if ((candidate_percent > 98)); then
-                    candidate_percent=98
-                elif ((candidate_percent < 0)); then
-                    candidate_percent=0
-                fi
-                if ((candidate_percent > display_percent)); then
-                    display_percent=${candidate_percent}
-                fi
-            fi
-
-            if [[ -n ${speed} && ${speed} != 'NA' && ${speed} != 'Unknown' ]]; then
-                message+=" - ${speed}"
-            fi
-            if [[ -n ${eta} && ${eta} != 'NA' && ${eta} != 'Unknown' ]]; then
-                message+=" - ${eta} remaining"
-            fi
-        fi
-
-        # A Bash builtin may report EPIPE as a normal command failure instead
-        # of terminating this function, especially because the caller disables
-        # errexit while collecting PIPESTATUS. Exit explicitly when Zenity has
-        # closed its input so the synchronous pipeline cannot block cancellation.
-        printf '%d\n' "${display_percent}" || return 0
-        printf '# %s\n' "${message}" || return 0
-        sleep 0.4
-    done
-
-    if [[ -s ${result_file} ]]; then
-        printf '100\n' || return 0
-        printf '# Finalizing the file...\n' || return 0
-    else
-        printf '%d\n' "${display_percent}" || return 0
-        printf '# Download ended before completion.\n' || return 0
-    fi
+    bash "${PROGRESS_MONITOR}" \
+        "${log_file}" "${worker_pid}" "${result_file}" "${profile}"
 }
 
 wait_for_worker_pgid() {
@@ -697,7 +588,7 @@ wait_for_worker_pgid() {
     return 1
 }
 
-for command_name in bash chmod date dirname grep mkdir mktemp mv realpath rm setsid sleep stat tail tr zenity; do
+for command_name in bash chmod date dirname grep mkdir mktemp mv realpath rm setsid sleep stat stdbuf tail tr zenity; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         printf 'Error: required command "%s" was not found.\n' \
             "${command_name}" >&2
@@ -730,9 +621,14 @@ if ((resolve_status != 0)); then
 fi
 readonly SCRIPT_DIR
 readonly DOWNLOAD_SCRIPT="${SCRIPT_DIR}/download-video.sh"
+readonly PROGRESS_MONITOR="${SCRIPT_DIR}/progress-monitor.sh"
 
 if [[ ! -x ${DOWNLOAD_SCRIPT} ]]; then
     show_error 'download-video.sh is missing or not executable.'
+    exit 1
+fi
+if [[ ! -r ${PROGRESS_MONITOR} ]]; then
+    show_error 'progress-monitor.sh is missing or not readable.'
     exit 1
 fi
 
@@ -843,21 +739,42 @@ if ((settings_status != 0)); then
     printf 'Warning: GUI settings could not be saved.\n' >&2
 fi
 
-mkdir -p -- "${STATE_DIR}"
+if ! mkdir -p -- "${STATE_DIR}"; then
+    show_error "Unable to create the application state directory.
+
+Path: ${STATE_DIR}"
+    exit 1
+fi
 chmod 700 -- "${STATE_DIR}" 2>/dev/null || true
 prune_old_logs
-TEMP_DIR=$(mktemp -d --tmpdir="${TMPDIR:-/tmp}" yt-dlp-gui.XXXXXXXX)
-log_timestamp=$(date '+%Y%m%d-%H%M%S')
-LOG_FILE=$(mktemp \
+if ! TEMP_DIR=$(mktemp -d --tmpdir="${TMPDIR:-/tmp}" yt-dlp-gui.XXXXXXXX); then
+    show_error 'Unable to create the temporary working directory.'
+    exit 1
+fi
+if ! log_timestamp=$(date '+%Y%m%d-%H%M%S'); then
+    show_error 'Unable to determine the timestamp for the diagnostic log.'
+    exit 1
+fi
+if ! LOG_FILE=$(mktemp \
     --tmpdir="${STATE_DIR}" \
     --suffix='.log' \
-    "download-${log_timestamp}-XXXXXX")
+    "download-${log_timestamp}-XXXXXX"); then
+    show_error "Unable to create the diagnostic log.
+
+Directory: ${STATE_DIR}"
+    exit 1
+fi
 readonly LOG_FILE
 readonly RESULT_FILE="${TEMP_DIR}/result.txt"
 readonly PGID_FILE="${TEMP_DIR}/pgid"
-: >"${LOG_FILE}"
-chmod 600 -- "${LOG_FILE}"
+if ! chmod 600 -- "${LOG_FILE}"; then
+    show_error "Unable to secure the diagnostic log.
 
+Log: ${LOG_FILE}"
+    exit 1
+fi
+
+PROGRESS_PROFILE=''
 COMMAND=(
     "${DOWNLOAD_SCRIPT}"
     --output-dir "${OUTPUT_DIR}"
@@ -868,9 +785,15 @@ COMMAND=(
 case ${PROFILE} in
 video)
     COMMAND+=(--mode video)
+    PROGRESS_PROFILE='video'
+    ;;
+youtube-hls)
+    COMMAND+=(--mode video --youtube-hls-firefox)
+    PROGRESS_PROFILE='video'
     ;;
 audio)
     COMMAND+=(--mode audio)
+    PROGRESS_PROFILE='audio'
     ;;
 *)
     show_error "The internal profile '${PROFILE}' is invalid."
@@ -904,19 +827,18 @@ if ((pgid_status != 0)); then
 fi
 
 set +e
-monitor_progress "${LOG_FILE}" "${WORKER_PID}" "${RESULT_FILE}" | zenity --progress \
+monitor_progress "${LOG_FILE}" "${WORKER_PID}" "${RESULT_FILE}" "${PROGRESS_PROFILE}" | zenity --progress \
     --title="${APP_NAME}" \
     --text='Initializing...' \
     --percentage=0 \
     --auto-close \
-    --time-remaining \
     --cancel-label='Cancel' \
     --width=560
 pipeline_status=("${PIPESTATUS[@]}")
 set -e
 
-# monitor_progress may finish with status 141 when Zenity closes its input
-# pipe. Only Zenity's status determines cancellation, timeout, or dialog error.
+# The monitor handles a closed Zenity input pipe as a normal exit. Only
+# Zenity's status determines cancellation, timeout, or dialog error.
 zenity_status=${pipeline_status[1]:-1}
 worker_status=''
 if ((zenity_status != 0)); then

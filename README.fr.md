@@ -5,17 +5,19 @@
 [English version](README.md)
 
 Interface graphique Zenity et moteur Bash exclusivement pour GNU/Linux. Le programme télécharge
-une seule URL sous l'une des deux formes suivantes :
+une seule URL avec l'un des trois profils suivants :
 
 - une **vidéo MKV complète**, avec les meilleures pistes vidéo et audio
   disponibles ;
+- une **vidéo YouTube HLS authentifiée**, qui lit les cookies Firefox et
+  remuxe le flux HLS sélectionné dans un conteneur MKV ;
 - la **meilleure piste audio disponible**, en conservant son codec et son
   conteneur source lorsque yt-dlp peut le faire sans réencodage.
 
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.11**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.12**.
 
 ## Fonctionnalités principales
 
@@ -25,9 +27,12 @@ téléchargeur natif de yt-dlp. La version actuelle est la **2.1.11**.
   listes de lecture ;
 - sélection du dossier de destination et mémorisation des préférences ;
 - vidéo MKV sans réencodage lorsque les flux sont compatibles ;
+- solution de repli YouTube HLS authentifiée facultative avec les cookies Firefox ;
 - extraction de la meilleure piste audio avec conservation du format source lorsque possible ;
 - reprise des téléchargements interrompus lorsque le site le permet ;
-- progression graphique et annulation de tout le groupe de processus ;
+- progression graphique unifiée pour les fichiers directs, les fragments
+  HLS/DASH, les pistes vidéo/audio séparées et le post-traitement FFmpeg ;
+- annulation de tout le groupe de processus ;
 - journaux privés conservés uniquement pour les exécutions problématiques ;
 - lanceur dans le menu des applications ;
 - tests statiques, tests d'intégration et validation GitHub Actions sous Ubuntu
@@ -43,6 +48,8 @@ Les commandes suivantes doivent être installées et disponibles dans `PATH` :
 - FFmpeg et `ffprobe` ;
 - Deno **2.3.0 ou plus récent** ;
 - Zenity pour l'interface graphique ;
+- Firefox avec une session YouTube authentifiée uniquement pour le profil
+  YouTube HLS authentifié facultatif ;
 - GNU coreutils, GNU grep et `setsid`, généralement fourni par `util-linux`.
 
 Le moteur contrôle les versions minimales de `yt-dlp`, `aria2c` et Deno avant
@@ -87,7 +94,7 @@ setsid --version
 Téléchargez les deux fichiers publiés avec la release GitHub :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.10.zip
+yt-dlp-aria2-downloader-gui-2.1.12.zip
 SHA256SUMS
 ```
 
@@ -95,8 +102,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.10.zip
-cd yt-dlp-aria2-downloader-gui-2.1.10
+unzip yt-dlp-aria2-downloader-gui-2.1.12.zip
+cd yt-dlp-aria2-downloader-gui-2.1.12
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -239,6 +246,31 @@ yt-dlp-ejs. Ces scripts sont exécutés par Deno avec des permissions restreinte
 d'accès au système de fichiers et au réseau. Un téléchargement YouTube peut
 donc contacter npm en plus du site qui héberge le média.
 
+### Vidéo YouTube HLS authentifiée
+
+Le profil graphique `YouTube video - Firefox cookies (HLS/MKV)` constitue une
+solution de repli explicite pour les sessions YouTube qui exigent une connexion
+et dont les URL média HTTPS ordinaires répondent par une erreur HTTP 403. Il
+ajoute :
+
+```text
+--cookies-from-browser firefox
+--extractor-args youtube:player_client=web_safari
+--format (bv*+ba/b)[protocol^=m3u8]
+```
+
+Ce profil est limité au mode vidéo et aux URL YouTube. yt-dlp lit la base locale
+des cookies Firefox, mais l'application ne copie, n'exporte et ne conserve
+aucune valeur de cookie dans `gui.conf`. Les téléchargements HLS sont traités
+par le téléchargeur natif de fragments de yt-dlp. yt-dlp répare d'abord le
+MPEG-TS placé dans un fichier MP4,
+puis le moteur effectue un second remuxage par copie de flux du MP4 réparé vers
+MKV. Aucune des deux étapes ne réencode l'audio ou la vidéo.
+
+Il s'agit d'une solution de compatibilité, et non d'un remplacement des
+fournisseurs automatiques de PO Token. Les règles YouTube peuvent évoluer
+indépendamment du projet.
+
 ### Vidéo complète
 
 Le moteur sélectionne les meilleures pistes vidéo et audio, puis les fusionne ou
@@ -295,7 +327,10 @@ spécifiques à Fedora et les tâches GitHub Actions.
 ## Limites et utilisation légale
 
 - les listes de lecture sont désactivées ;
-- l'interface ne gère pas les cookies ni l'authentification ;
+- les cookies Firefox ne sont lus que lorsque le profil YouTube HLS
+  authentifié est explicitement sélectionné ;
+- ce mode HLS est réservé à la vidéo et ne préserve pas une piste audio
+  YouTube native séparée ;
 - le format audio final dépend du meilleur flux fourni par le site ;
 - certains sites limitent ou interdisent les téléchargements ;
 - utilisez ce programme uniquement pour les contenus que vous êtes autorisé à

@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.1.12 - 2026-07-29
+
+### Unified download progress
+
+- Add structured `yt-dlp` planning and progress records with format identifiers,
+  byte counts, estimated sizes, and fragment counters.
+- Aggregate separate video and audio transfers instead of treating each local
+  100% value as completion of the whole operation.
+- Preserve `aria2c` console progress as a fallback for direct transfers and use
+  a bounded animated state whenever no reliable total size is available.
+- Represent merge, remux, extraction, metadata, and final verification as
+  explicit phases; 100% is emitted only after the atomic result file exists and
+  the worker has exited.
+
+### Authenticated YouTube HLS fallback
+
+- Add an explicit video-only profile that reads Firefox cookies and selects
+  `web_safari` HLS formats for YouTube sessions affected by sign-in checks or
+  GVS HTTP 403 responses.
+- Keep ordinary video, native-audio, and non-YouTube behavior unchanged.
+- Let yt-dlp repair MPEG-TS-in-MP4 HLS output before a separate stream-copy MKV
+  remux, preventing unknown-timestamp failures in FFmpeg's Matroska muxer.
+- Ignore the native HLS bootstrap record reported as 100% at fragment 0/N.
+- Validate the selected URL, persist the GUI profile, and cover the exact
+  yt-dlp and FFmpeg argument vectors with integration tests.
+
+### Validation
+
+- Add dedicated progress-monitor integration scenarios for direct files, native
+  downloads, HLS, DASH, composite streams, post-processing, unknown sizes, late
+  output, and failure paths.
+- Keep the existing GUI cancellation and process-group tests as regression
+  coverage for interrupted downloads.
+
+### Review hardening
+
+- Normalize the final `after_move` path record to one verified regular file and
+  reject stale, empty, or missing result targets before publishing GUI success.
+- End the progress monitor cleanly when Zenity closes its input pipe and surface
+  state-directory or temporary-log initialization failures in the graphical UI.
+- Make release re-runs verify existing assets without overwriting them, validate
+  semantic version tags strictly, and align Fedora CI timeout diagnostics with
+  Ubuntu.
+
 ## 2.1.11 - 2026-07-29
 
 ### GUI and installer fixes

@@ -40,7 +40,7 @@ jobs:
           sudo apt-get install --yes desktop-file-utils shellcheck
 
       - name: Run validation
-        run: ./tests/run-all.sh
+        run: bash ./tests/run-all.sh
 
   release:
     name: Publish release
@@ -66,8 +66,9 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          if [[ ${RELEASE_TAG} != v* ]]; then
-            printf 'Release tag must begin with v: %s\n' "${RELEASE_TAG}" >&2
+          if [[ ! ${RELEASE_TAG} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Release tag must match vMAJOR.MINOR.PATCH: %s\n' \
+              "${RELEASE_TAG}" >&2
             exit 1
           fi
 
@@ -87,6 +88,7 @@ jobs:
           version=${RELEASE_TAG#v}
           grep -Fqx -- "readonly VERSION=\"${version}\"" download-video.sh
           grep -Fq -- "# Version     : ${version}" download-video-gui.sh
+          grep -Fq -- "# Version     : ${version}" progress-monitor.sh
           grep -Fq -- "# Version     : ${version}" install-gui.sh
           grep -Fq -- "is **${version}**." README.md
           grep -Fq -- "version actuelle est la **${version}**" README.fr.md
@@ -117,7 +119,7 @@ jobs:
           unzip -q "dist/${package}.zip" -d "${extracted}"
           (
             cd "${extracted}/${package}"
-            ./tests/run-all.sh
+            bash ./tests/run-all.sh
           )
 
       - name: Publish GitHub release
@@ -128,6 +130,29 @@ jobs:
           set -Eeuo pipefail
           version=${RELEASE_TAG#v}
           package="yt-dlp-aria2-downloader-gui-${version}"
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            existing_assets=$(mktemp -d)
+            trap 'rm -rf -- "${existing_assets}"' EXIT
+            if ! gh release download "${RELEASE_TAG}" \
+                --dir "${existing_assets}" \
+                --pattern "${package}.zip" \
+                --pattern SHA256SUMS; then
+              printf 'Release %s exists, but its assets could not be verified.\n' \
+                "${RELEASE_TAG}" >&2
+              exit 1
+            fi
+            if cmp -s -- \
+                "dist/${package}.zip" "${existing_assets}/${package}.zip" && \
+                cmp -s -- dist/SHA256SUMS "${existing_assets}/SHA256SUMS"; then
+              printf 'Release %s already contains the expected assets.\n' \
+                "${RELEASE_TAG}"
+              exit 0
+            fi
+            printf 'Release %s already exists with different assets; refusing to overwrite it.\n' \
+              "${RELEASE_TAG}" >&2
+            exit 1
+          fi
+
           gh release create "${RELEASE_TAG}" \
             "dist/${package}.zip" \
             dist/SHA256SUMS \
