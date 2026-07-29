@@ -15,7 +15,7 @@ une seule URL sous l'une des deux formes suivantes :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.10**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.11**.
 
 ## Fonctionnalités principales
 

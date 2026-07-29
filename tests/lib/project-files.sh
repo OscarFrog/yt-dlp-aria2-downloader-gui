@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 # Canonical project shell-file lists shared by syntax and ShellCheck validation.
+# Paths are relative to the repository root. Callers must resolve them against
+# that root or change to it before passing the lists to external tools.
 # shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
 PRODUCTION_SHELL_FILES=(
     download-video.sh

@@ -7,14 +7,18 @@ readonly PROJECT_DIR
 # shellcheck disable=SC1090
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 
+for required_command in \
+    bash cat chmod cmp cp desktop-file-validate diff dirname env grep ln mkdir \
+    mktemp mv readlink realpath rm rmdir sleep stat; do
+    require_test_command "${required_command}"
+done
+
 TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
 trap 'rm -rf -- "${TEST_ROOT}" || true' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-
-require_test_command desktop-file-validate
 
 readonly PROJECT_SUFFIX=$'Project space % $ ` quote" backslash\\ equals= apostrophe\' test'
 readonly COPIED_PROJECT="${TEST_ROOT}/${PROJECT_SUFFIX}"
@@ -68,8 +72,9 @@ chmod +x -- "${COPIED_PROJECT}/install-gui.sh"
 # shellcheck disable=SC2016 # $1 and $2 are expanded by the child bash.
 assert_status 0 'install desktop launcher from hostile project path' \
     bash -c '
+        set -euo pipefail
         umask 077
-        export XDG_DATA_HOME=$1
+        export XDG_DATA_HOME="$1"
         exec bash "$2" install
     ' bash "${DATA_HOME}" "${COPIED_PROJECT}/install-gui.sh"
 
@@ -91,7 +96,8 @@ expected_exec+='\\"'
 expected_exec+=' backslash'
 expected_exec+="\\\\\\\\"
 expected_exec+=" apostrophe' test/yt-dlp-aria2-downloader/launch\""
-actual_exec=$(grep -m1 '^Exec=' -- "${DESKTOP_FILE}")
+actual_exec=$(grep -m1 '^Exec=' -- "${DESKTOP_FILE}") ||
+    fail 'The installed desktop file has no Exec line.'
 assert_equals "${expected_exec}" "${actual_exec}" \
     'desktop Exec line uses specification-compliant escaping'
 
@@ -121,11 +127,16 @@ if command -v gio >/dev/null 2>&1; then
     rm -f -- "${EXEC_MARKER}"
     assert_status 0 'GLib launches the installed desktop entry' \
         gio launch "${DESKTOP_FILE}"
-    for _ in {1..50}; do
+    gio_timeout=${GIO_LAUNCH_TIMEOUT:-20}
+    [[ ${gio_timeout} =~ ^[1-9][0-9]*$ ]] ||
+        fail "GIO_LAUNCH_TIMEOUT must be a positive integer: ${gio_timeout}"
+    gio_deadline=$((SECONDS + gio_timeout))
+    while ((SECONDS < gio_deadline)); do
         [[ -s ${EXEC_MARKER} ]] && break
         sleep 0.1
     done
-    [[ -s ${EXEC_MARKER} ]] || fail 'gio did not launch the stable launcher link.'
+    [[ -s ${EXEC_MARKER} ]] ||
+        fail "gio did not launch the stable launcher link within ${gio_timeout}s."
     assert_equals \
         "${LAUNCHER_LINK}" \
         "$(<"${EXEC_MARKER}")" \
@@ -227,7 +238,8 @@ assert_text_contains "${ASSERT_OUTPUT}" 'cannot be represented safely' \
 no_validator_bin="${TEST_ROOT}/no-validator-bin"
 mkdir -p -- "${no_validator_bin}"
 for required_command in bash cat chmod dirname ln mkdir mktemp mv readlink realpath rm rmdir; do
-    required_command_path=$(command -v "${required_command}")
+    required_command_path=$(command -v "${required_command}") ||
+        fail "Required host command was not found: ${required_command}"
     ln -s -- "${required_command_path}" \
         "${no_validator_bin}/${required_command}"
 done

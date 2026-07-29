@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video-gui.sh
-# Version     : 2.1.10
-# Date        : 2026-07-28
+# Version     : 2.1.11
+# Date        : 2026-07-29
 # Description : Two-choice Zenity GUI for complete MKV video or native audio.
 # ============================================================================
 
@@ -95,7 +95,11 @@ resolve_script_dir() {
     local script_dir
 
     if [[ ${script_source} != */* ]]; then
-        script_source=$(type -P -- "${script_source}") || return 1
+        if [[ -e ./${script_source} ]]; then
+            script_source="./${script_source}"
+        else
+            script_source=$(type -P -- "${script_source}") || return 1
+        fi
     fi
 
     script_path=$(realpath -e -- "${script_source}") || return 1
@@ -314,12 +318,21 @@ save_settings() {
     chmod 700 -- "${CONFIG_DIR}" 2>/dev/null || true
 
     temporary_file=$(mktemp --tmpdir="${CONFIG_DIR}" gui.conf.XXXXXX) || return 1
-    {
+    if ! {
         printf 'output_dir=%s\n' "${output_dir}"
         printf 'profile=%s\n' "${profile}"
-    } >"${temporary_file}"
-    chmod 600 -- "${temporary_file}"
-    mv -f -- "${temporary_file}" "${CONFIG_FILE}"
+    } >"${temporary_file}"; then
+        rm -f -- "${temporary_file}" || true
+        return 1
+    fi
+    if ! chmod 600 -- "${temporary_file}"; then
+        rm -f -- "${temporary_file}" || true
+        return 1
+    fi
+    if ! mv -f -- "${temporary_file}" "${CONFIG_FILE}"; then
+        rm -f -- "${temporary_file}" || true
+        return 1
+    fi
 }
 
 prune_old_logs() {
@@ -526,6 +539,7 @@ trim_field() {
 monitor_progress() {
     local log_file=$1
     local worker_pid=$2
+    local result_file=$3
     local recent=''
     local line=''
     local previous_line=''
@@ -609,7 +623,7 @@ monitor_progress() {
             fi
 
             if [[ ${percent_number} =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-                candidate_percent=${percent_number%%.*}
+                candidate_percent=$((10#${percent_number%%.*}))
                 if ((candidate_percent > 98)); then
                     candidate_percent=98
                 elif ((candidate_percent < 0)); then
@@ -637,8 +651,13 @@ monitor_progress() {
         sleep 0.4
     done
 
-    printf '100\n' || return 0
-    printf '# Finalizing the file...\n' || return 0
+    if [[ -s ${result_file} ]]; then
+        printf '100\n' || return 0
+        printf '# Finalizing the file...\n' || return 0
+    else
+        printf '%d\n' "${display_percent}" || return 0
+        printf '# Download ended before completion.\n' || return 0
+    fi
 }
 
 wait_for_worker_pgid() {
@@ -885,7 +904,7 @@ if ((pgid_status != 0)); then
 fi
 
 set +e
-monitor_progress "${LOG_FILE}" "${WORKER_PID}" | zenity --progress \
+monitor_progress "${LOG_FILE}" "${WORKER_PID}" "${RESULT_FILE}" | zenity --progress \
     --title="${APP_NAME}" \
     --text='Initializing...' \
     --percentage=0 \
@@ -983,7 +1002,7 @@ if ((worker_status == 0)); then
         fi
         TEMP_DIR=''
 
-        exec "${SCRIPT_DIR}/download-video-gui.sh"
+        exec bash "${SCRIPT_DIR}/download-video-gui.sh"
     fi
 
     case ${success_status} in
@@ -1023,7 +1042,7 @@ View the log?" \
             --title="Log - ${APP_NAME} - may contain private URLs" \
             --filename="${LOG_FILE}" \
             --width=950 \
-            --height=650
+            --height=650 || true
     fi
     exit "${worker_status}"
 fi

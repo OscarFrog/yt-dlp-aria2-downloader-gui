@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.1.11 - 2026-07-29
+
+### GUI and installer fixes
+
+- Preserve the download worker's exit status when the retained log viewer is
+  closed, and avoid displaying a failed download as 100% complete.
+- Save GUI preferences transactionally, parse progress percentages explicitly
+  as base 10, and relaunch the GUI through Bash when requested.
+- Resolve scripts invoked as `bash script.sh` from the current directory.
+- Allow uninstall from XDG paths rejected for desktop-entry generation, publish
+  the desktop file with `mv -T`, and report launcher-link read failures clearly.
+
+### Test reliability
+
+- Normalize expected exit statuses as decimal values in the assertion helpers
+  and isolate split-stream commands from the test harness shell.
+- Reject missing or empty canonical file lists before running ShellCheck.
+- Replace brittle comment-presence assertions with behavioral coverage.
+- Improve integration-test dependency diagnostics, asynchronous `gio` polling,
+  interrupted-worker cleanup, and hostile newline-path coverage.
+
 ## 2.1.10 - 2026-07-28
 
 ### Runtime robustness
