@@ -130,24 +130,18 @@ postprocess_message() {
     esac
 }
 
-bounded_pulse() {
+bounded_advance() {
     local minimum=$1
     local maximum=$2
-    local tick=$3
-    local span=$((maximum - minimum))
-    local period
-    local position
+    local current=$3
 
-    if ((span <= 0)); then
-        printf '%d' "${minimum}"
-        return 0
+    if ((current < minimum)); then
+        current=${minimum}
+    elif ((current < maximum)); then
+        current=$((current + 1))
     fi
-    period=$((span * 2))
-    position=$((tick % period))
-    if ((position > span)); then
-        position=$((period - position))
-    fi
-    printf '%d' "$((minimum + position))"
+
+    printf '%d' "${current}"
 }
 
 declare -A ITEM_PERCENT=()
@@ -167,7 +161,6 @@ display_percent=0
 message='Analyzing the webpage...'
 phase='analyzing'
 postprocessor=''
-tick=0
 last_line=''
 RESOLVED_KEY=''
 
@@ -637,18 +630,21 @@ result_file_confirms_output() {
 render_tick() {
     local rendered=${stable_percent}
 
-    ((tick += 1))
     case ${phase} in
     analyzing)
-        rendered=$(bounded_pulse 0 3 "${tick}")
+        rendered=$(bounded_advance 0 3 "${display_percent}")
         ;;
     downloading)
         if [[ ${message} == *'size unknown'* ]]; then
-            rendered=$(bounded_pulse "${stable_percent}" "$((stable_percent + 2 > DOWNLOAD_END ? DOWNLOAD_END : stable_percent + 2))" "${tick}")
+            rendered=$(bounded_advance \
+                "${stable_percent}" \
+                "$((stable_percent + 2 > DOWNLOAD_END ? DOWNLOAD_END : stable_percent + 2))" \
+                "${display_percent}")
         fi
         ;;
     postprocessing)
-        rendered=$(bounded_pulse "${POSTPROCESS_START}" "${POSTPROCESS_END}" "${tick}")
+        rendered=$(bounded_advance \
+            "${POSTPROCESS_START}" "${POSTPROCESS_END}" "${display_percent}")
         ;;
     verifying)
         rendered=${VERIFY_PERCENT}
@@ -656,6 +652,9 @@ render_tick() {
     *)
         ;;
     esac
+    if ((rendered < display_percent)); then
+        rendered=${display_percent}
+    fi
     if ((rendered > VERIFY_PERCENT)); then
         rendered=${VERIFY_PERCENT}
     fi

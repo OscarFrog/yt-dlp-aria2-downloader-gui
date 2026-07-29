@@ -89,6 +89,8 @@ finish_success() {
     ACTIVE_MONITOR=''
     assert_equals '0' "${monitor_status}" 'successful monitor exit status'
     assert_file_has_line "${CAPTURE_FILE}" '100' 'successful progress reaches 100%'
+    assert_percentages_never_decrease \
+        "${CAPTURE_FILE}" 'successful progress'
 }
 
 finish_failure() {
@@ -101,10 +103,36 @@ finish_failure() {
     ACTIVE_MONITOR=''
     assert_equals '0' "${monitor_status}" 'incomplete monitor exit status'
     assert_file_has_no_line "${CAPTURE_FILE}" '100' 'failed progress never reaches 100%'
+    assert_percentages_never_decrease \
+        "${CAPTURE_FILE}" 'incomplete progress'
 }
 
 max_percentage() {
     grep -E '^[0-9]+$' "$1" | sort -n | tail -n 1 || true
+}
+
+assert_percentages_never_decrease() {
+    local file=$1
+    local label=$2
+    local previous=-1
+    local current=''
+    local line_number=0
+    local numeric_count=0
+
+    while IFS= read -r current || [[ -n ${current} ]]; do
+        line_number=$((line_number + 1))
+        [[ ${current} =~ ^[0-9]+$ ]] || continue
+        numeric_count=$((numeric_count + 1))
+
+        if ((previous >= 0 && current < previous)); then
+            fail "${label}: progress decreased from ${previous} to ${current} at capture line ${line_number}"
+        fi
+        previous=${current}
+    done <"${file}"
+
+    if ((numeric_count == 0)); then
+        fail "${label}: no numeric progress values were captured"
+    fi
 }
 
 # Closing the Zenity side of the pipe must end the monitor normally instead of
@@ -198,6 +226,34 @@ printf '%s\n' \
 wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 2%' \
     'HLS media fragments advance normally after bootstrap'
 finish_success '/tmp/hls-bootstrap.mkv'
+
+# An unknown-size transfer may animate within a narrow range, but every
+# percentage sent to Zenity must remain greater than or equal to the previous
+# one. The former triangular pulse regressed within a few ticks.
+start_scenario unknown-size-monotonic video
+printf '%s\n' \
+    'YTDLP_PLAN|media|unknown-size|unknown-size|' \
+    'YTDLP_PROGRESS_V2|media|unknown-size|downloading|0|0|0|0|0|||Unknown' \
+    >>"${LOG_FILE}"
+wait_for_text "${CAPTURE_FILE}" 'Downloading the media - size unknown' \
+    'unknown-size monotonic phase'
+sleep 2
+finish_success '/tmp/unknown-size.mkv'
+
+# A long remux must move only forward through the post-processing envelope.
+# Waiting here makes the regression deterministic: the former bounded pulse
+# reached its upper bound and then emitted smaller percentages.
+start_scenario postprocess-monotonic video
+printf '%s\n' \
+    'YTDLP_PLAN|media|22|22|' \
+    'YTDLP_PROGRESS_V2|media|22|finished|1000|1000|0|0|0|100.0%|2MiB/s|00:00' \
+    'YTDLP_POSTPROCESS|started|FFmpegVideoRemuxer' \
+    >>"${LOG_FILE}"
+wait_for_text "${CAPTURE_FILE}" \
+    'Remuxing the media into an MKV container...' \
+    'long remux monotonic phase'
+sleep 5
+finish_success '/tmp/postprocess-monotonic.mkv'
 
 # Fragmented DASH with an estimated size.
 start_scenario dash-fragments video
