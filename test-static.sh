@@ -133,6 +133,12 @@ assert_file_contains "${script_dir}/download-video-gui.sh" \
     'readonly LOG_RETENTION_DAYS=15' \
     'GUI retained-log lifetime'
 assert_file_contains "${script_dir}/download-video-gui.sh" \
+    '--width=620' \
+    'profile dialog width'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    '--height=305' \
+    'profile dialog height'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
     'process_is_running() {' \
     'zombie-aware worker liveness check'
 assert_file_contains "${script_dir}/download-video-gui.sh" \

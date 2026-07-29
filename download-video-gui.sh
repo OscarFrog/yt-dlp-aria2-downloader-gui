@@ -462,7 +462,7 @@ select_profile() {
         --ok-label='Continue' \
         --cancel-label='Cancel' \
         --width=620 \
-        --height=285 \
+        --height=305 \
         "${default_video}" "${PROFILE_LABEL_VIDEO}" \
         "${default_youtube_hls}" "${PROFILE_LABEL_YOUTUBE_HLS}" \
         "${default_audio}" "${PROFILE_LABEL_AUDIO}"
