@@ -3,7 +3,8 @@
 
 # This file is sourced by the test scripts. It intentionally does not change
 # the caller's shell options. Command substitutions remove trailing newlines;
-# ASSERT_OUTPUT therefore represents textual output, not byte-exact output.
+# ASSERT_OUTPUT, ASSERT_STDOUT, and ASSERT_STDERR therefore represent textual
+# output, not byte-exact output.
 # Assertion helpers must be invoked as simple commands, not from a pipeline or
 # command substitution where exit would terminate only a subshell.
 
@@ -68,6 +69,9 @@ assert_status() {
 
     [[ ${expected} =~ ^[0-9]+$ ]] ||
         test_error "${label}: expected status is not an integer: ${expected}"
+    expected=$((10#${expected}))
+    ((expected <= 255)) ||
+        test_error "${label}: expected status is outside 0-255: ${expected}"
     assert_invocable_command "$1" "${label}"
 
     ASSERT_OUTPUT=''
@@ -99,6 +103,9 @@ assert_status_split() {
 
     [[ ${expected} =~ ^[0-9]+$ ]] ||
         test_error "${label}: expected status is not an integer: ${expected}"
+    expected=$((10#${expected}))
+    ((expected <= 255)) ||
+        test_error "${label}: expected status is outside 0-255: ${expected}"
     assert_invocable_command "$1" "${label}"
 
     temporary_dir=$(mktemp -d) ||
@@ -108,7 +115,7 @@ assert_status_split() {
 
     ASSERT_STDOUT=''
     ASSERT_STDERR=''
-    "$@" >"${stdout_file}" 2>"${stderr_file}" || actual=$?
+    ( "$@" ) >"${stdout_file}" 2>"${stderr_file}" || actual=$?
     ASSERT_STDOUT=$(<"${stdout_file}")
     ASSERT_STDERR=$(<"${stderr_file}")
     rm -rf -- "${temporary_dir}"

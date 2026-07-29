@@ -6,8 +6,13 @@ PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly PROJECT_DIR
 # shellcheck disable=SC1090
 source "${PROJECT_DIR}/tests/lib/assert.sh"
-require_test_command timeout
-require_test_command touch
+for required_command in \
+    awk bash cat chmod date dirname env grep ln mkdir mktemp mv readlink \
+    realpath rm setsid sleep stat tail timeout touch tr; do
+    require_test_command "${required_command}"
+done
+[[ -r /proc/self/cmdline ]] ||
+    test_error 'mock integration tests require a readable Linux /proc filesystem.'
 TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
 trap 'rm -rf -- "${TEST_ROOT}" || true' EXIT
@@ -379,6 +384,7 @@ read_arguments() {
     local output_array=$2
     local -n output_ref=${output_array}
     output_ref=()
+    [[ -f ${file} ]] || fail "Argument log is missing: ${file}"
     # shellcheck disable=SC2034 # Assigned through a nameref to the caller array.
     mapfile -d '' -t output_ref <"${file}"
 }
@@ -501,17 +507,44 @@ assert_no_test_processes() {
             cmdline='<unavailable>'
         fi
         printf 'Leaked process %s: %s\n' "${pid}" "${cmdline}" >&2
-        kill -TERM -- "-${pid}" 2>/dev/null ||
-            kill -TERM -- "${pid}" 2>/dev/null || true
+        kill -TERM -- "${pid}" 2>/dev/null || true
     done
 
     sleep 0.2
     for pid in "${TEST_PROCESS_PIDS[@]}"; do
-        kill -KILL -- "-${pid}" 2>/dev/null ||
-            kill -KILL -- "${pid}" 2>/dev/null || true
+        kill -KILL -- "${pid}" 2>/dev/null || true
     done
     exit 1
 }
+
+cleanup_test_processes() {
+    local pid
+
+    set +e
+    find_test_processes
+    for pid in "${TEST_PROCESS_PIDS[@]}"; do
+        kill -TERM -- "${pid}" 2>/dev/null || true
+    done
+    sleep 0.2
+    find_test_processes
+    for pid in "${TEST_PROCESS_PIDS[@]}"; do
+        kill -KILL -- "${pid}" 2>/dev/null || true
+    done
+    set -e
+}
+
+cleanup_test_root() {
+    local status=$?
+
+    trap - EXIT HUP INT TERM
+    cleanup_test_processes
+    if [[ -n ${TEST_ROOT:-} && ${TEST_ROOT} == /* && ${TEST_ROOT} != / ]]; then
+        rm -rf -- "${TEST_ROOT}" || true
+    fi
+    exit "${status}"
+}
+
+trap cleanup_test_root EXIT
 
 TEST_PROCESS_PIDS=()
 
@@ -660,7 +693,7 @@ assert_text_contains "${ASSERT_OUTPUT}" 'result-file directory is not writable' 
 
 assert_status 2 'result-file line breaks are rejected' \
     "${PROJECT_DIR}/download-video.sh" \
-    --result-file $'${TEST_ROOT}/bad\nresult.txt' \
+    --result-file "${TEST_ROOT}/bad"$'\n'"result.txt" \
     -- 'https://example.com/watch?v=bad-result-linebreak'
 assert_text_contains "${ASSERT_OUTPUT}" \
     'result-file path must not contain line breaks' \
@@ -1012,7 +1045,8 @@ assert_file_contains "${progress_error_capture}" 'status 42' \
 no_zenity_bin="${TEST_ROOT}/no-zenity-bin"
 mkdir -p -- "${no_zenity_bin}"
 for required_command in bash chmod date dirname grep mkdir mktemp mv realpath rm setsid sleep stat tail tr; do
-    required_command_path=$(command -v "${required_command}")
+    required_command_path=$(command -v "${required_command}") ||
+        fail "Required host command was not found: ${required_command}"
     ln -s -- "${required_command_path}" \
         "${no_zenity_bin}/${required_command}"
 done

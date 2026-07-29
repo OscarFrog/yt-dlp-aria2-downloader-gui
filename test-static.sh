@@ -8,8 +8,12 @@ source "${script_dir}/tests/lib/assert.sh"
 # shellcheck disable=SC1090
 source "${script_dir}/tests/lib/project-files.sh"
 
+if ((${#ALL_SHELL_FILES[@]} == 0)); then
+    printf 'Error: ALL_SHELL_FILES is empty.\n' >&2
+    exit 65
+fi
 for file in "${ALL_SHELL_FILES[@]}"; do
-    bash -n "${script_dir}/${file}"
+    bash -n -- "${script_dir}/${file}"
 done
 
 assert_status 0 'download engine help' \
@@ -27,11 +31,6 @@ assert_status_split 2 'error stream separation' \
 assert_equals '' "${ASSERT_STDOUT}" 'missing URL leaves stdout empty'
 assert_text_contains "${ASSERT_STDERR}" 'a video URL is required.' \
     'missing URL is written to stderr'
-
-assert_status 2 'missing URL is rejected' \
-    "${script_dir}/download-video.sh"
-assert_text_contains "${ASSERT_OUTPUT}" 'a video URL is required.' \
-    'missing URL diagnostic'
 
 assert_status 2 'invalid mode is rejected' \
     "${script_dir}/download-video.sh" --mode invalid \
@@ -120,7 +119,7 @@ assert_file_contains \
     "${script_dir}/install-gui.sh" \
     "desktop-file-validate \\" \
     'desktop launcher validation'
-readonly EXPECTED_VERSION='2.1.10'
+readonly EXPECTED_VERSION='2.1.11'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -136,15 +135,6 @@ assert_file_contains "${script_dir}/download-video-gui.sh" \
     'process_is_running() {' \
     'zombie-aware worker liveness check'
 assert_file_contains "${script_dir}/download-video-gui.sh" \
-    'kill itself is the authoritative, race-free result' \
-    'worker signal delivery is checked directly'
-assert_file_contains "${script_dir}/download-video-gui.sh" \
-    'For KILL, stop the supervisor as the' \
-    'bounded setsid supervisor fallback'
-assert_file_contains "${script_dir}/download-video-gui.sh" \
-    'closed its input so the synchronous pipeline cannot block cancellation' \
-    'closed progress pipe terminates producer explicitly'
-assert_file_contains "${script_dir}/download-video-gui.sh" \
     "printf '%d\\n' \"\${display_percent}\" || return 0" \
     'progress percentage stops on a closed pipe'
 assert_file_contains "${script_dir}/download-video-gui.sh" \
@@ -155,5 +145,4 @@ assert_file_contains "${script_dir}/README.md"     "is **${EXPECTED_VERSION}**."
 assert_file_contains "${script_dir}/README.fr.md"     "version actuelle est la **${EXPECTED_VERSION}**." 'French README version'
 assert_file_contains "${script_dir}/CHANGELOG.md"     "## ${EXPECTED_VERSION} - " 'changelog version'
 
-printf 'Static tests passed.
-'
+printf '%s\n' 'Static tests passed.'

@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : install-gui.sh
-# Version     : 2.1.10
-# Date        : 2026-07-28
+# Version     : 2.1.11
+# Date        : 2026-07-29
 # Description : Install or remove the per-user desktop launcher.
 # ============================================================================
 
@@ -55,7 +55,11 @@ resolve_script_dir() {
     local script_dir
 
     if [[ ${source} != */* ]]; then
-        source=$(type -P -- "${source}") || return 1
+        if [[ -e ./${source} ]]; then
+            source="./${source}"
+        else
+            source=$(type -P -- "${source}") || return 1
+        fi
     fi
     path=$(realpath -e -- "${source}") || return 1
     script_dir=$(dirname -- "${path}") || return 1
@@ -131,21 +135,21 @@ remove_stale_install_artifacts() {
     fi
 }
 
-# A literal percent in a quoted Exec path is handled inconsistently by
-# desktop implementations, and '=' is forbidden in the executable path.
-# The project itself may contain these characters because Exec targets the
-# stable launcher link below; only the XDG launcher path must be representable.
-if [[ ${LAUNCHER_LINK} == *'%'* || ${LAUNCHER_LINK} == *'='* ||
-    ${LAUNCHER_LINK} == *$'\n'* || ${LAUNCHER_LINK} == *$'\r'* ]]; then
-    printf 'Error: the XDG data path cannot be represented safely in a desktop Exec key: %s\n' \
-        "${LAUNCHER_LINK}" >&2
-    exit 1
-fi
-
 case $1 in
 install)
     if [[ ! -x ${GUI_SCRIPT} ]]; then
         printf 'Error: %s is absent or not executable.\n' "${GUI_SCRIPT}" >&2
+        exit 1
+    fi
+
+    # A literal percent in a quoted Exec path is handled inconsistently by
+    # desktop implementations, and '=' is forbidden in the executable path.
+    # The project itself may contain these characters because Exec targets the
+    # stable launcher link below; only the XDG launcher path must be representable.
+    if [[ ${LAUNCHER_LINK} == *'%'* || ${LAUNCHER_LINK} == *'='* ||
+        ${LAUNCHER_LINK} == *$'\n'* || ${LAUNCHER_LINK} == *$'\r'* ]]; then
+        printf 'Error: the XDG data path cannot be represented safely in a desktop Exec key: %s\n' \
+            "${LAUNCHER_LINK}" >&2
         exit 1
     fi
 
@@ -219,14 +223,18 @@ EOF_DESKTOP
         printf 'Error: the published launcher link is missing or not executable.\n' >&2
         exit 1
     fi
-    published_target=$(readlink -- "${LAUNCHER_LINK}")
+    if ! published_target=$(readlink -- "${LAUNCHER_LINK}"); then
+        printf 'Error: unable to read the published launcher link: %s\n' \
+            "${LAUNCHER_LINK}" >&2
+        exit 1
+    fi
     if [[ ${published_target} != "${GUI_SCRIPT}" ]]; then
         printf 'Error: the published launcher target is incorrect: %s\n' \
             "${published_target}" >&2
         exit 1
     fi
 
-    mv -f -- "${TEMP_DESKTOP_FILE}" "${DESKTOP_FILE}"
+    mv -Tf -- "${TEMP_DESKTOP_FILE}" "${DESKTOP_FILE}"
     TEMP_DESKTOP_FILE=''
     printf 'Launcher installed: %s\n' "${DESKTOP_FILE}"
     printf 'Launcher target:    %s\n' "${GUI_SCRIPT}"
