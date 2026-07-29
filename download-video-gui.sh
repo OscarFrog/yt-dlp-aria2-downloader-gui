@@ -20,6 +20,7 @@ readonly APP_NAME='yt-dlp aria2 downloader'
 readonly PROFILE_LABEL_VIDEO='Complete video (MKV)'
 readonly PROFILE_LABEL_YOUTUBE_HLS='YouTube video - Firefox cookies (HLS/MKV)'
 readonly PROFILE_LABEL_AUDIO='Audio track (native format)'
+readonly PROGRESS_DIALOG_WIDTH=700
 readonly CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/yt-dlp-aria2-downloader"
 readonly STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/yt-dlp-aria2-downloader"
 readonly CONFIG_FILE="${CONFIG_DIR}/gui.conf"
@@ -833,7 +834,7 @@ monitor_progress "${LOG_FILE}" "${WORKER_PID}" "${RESULT_FILE}" "${PROGRESS_PROF
     --percentage=0 \
     --auto-close \
     --cancel-label='Cancel' \
-    --width=560
+    --width="${PROGRESS_DIALOG_WIDTH}"
 pipeline_status=("${PIPESTATUS[@]}")
 set -e
 

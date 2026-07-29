@@ -139,6 +139,9 @@ assert_file_contains "${script_dir}/download-video-gui.sh" \
     '--height=305' \
     'profile dialog height'
 assert_file_contains "${script_dir}/download-video-gui.sh" \
+    'readonly PROGRESS_DIALOG_WIDTH=700' \
+    'progress dialog width'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
     'process_is_running() {' \
     'zombie-aware worker liveness check'
 assert_file_contains "${script_dir}/download-video-gui.sh" \
