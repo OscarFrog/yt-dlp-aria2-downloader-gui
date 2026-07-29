@@ -10,6 +10,13 @@
 
 set -euo pipefail
 
+cleanup() {
+    exec 3<&- 2>/dev/null || true
+}
+
+trap cleanup EXIT
+trap 'exit 0' PIPE
+
 readonly DOWNLOAD_START=5
 readonly DOWNLOAD_END=90
 readonly POSTPROCESS_START=92
@@ -107,8 +114,8 @@ emit_progress() {
     local percent=$1
     local message=$2
 
-    printf '%d\n' "${percent}" || return 1
-    printf '# %s\n' "${message}" || return 1
+    printf '%d\n' "${percent}" 2>/dev/null || return 1
+    printf '# %s\n' "${message}" 2>/dev/null || return 1
 }
 
 postprocess_message() {
@@ -307,24 +314,24 @@ calculate_download_percent() {
     if ((${#PLANNED_KEYS[@]} > 0)); then
         for key in "${PLANNED_KEYS[@]}"; do
             value=${ITEM_PERCENT[${key}]:-0}
-            ((sum_percent += value))
+            sum_percent=$((sum_percent + value))
             value=${ITEM_TOTAL[${key}]:-0}
             if ((value <= 0)); then
                 all_totals_known=false
             else
-                ((sum_total += value))
-                ((sum_downloaded += ${ITEM_DOWNLOADED[${key}]:-0}))
+                sum_total=$((sum_total + value))
+                sum_downloaded=$((sum_downloaded + ${ITEM_DOWNLOADED[${key}]:-0}))
             fi
         done
     else
         for key in "${!ITEM_PERCENT[@]}"; do
-            ((sum_percent += ITEM_PERCENT[${key}]))
+            sum_percent=$((sum_percent + ITEM_PERCENT[${key}]))
             value=${ITEM_TOTAL[${key}]:-0}
             if ((value <= 0)); then
                 all_totals_known=false
             else
-                ((sum_total += value))
-                ((sum_downloaded += ${ITEM_DOWNLOADED[${key}]:-0}))
+                sum_total=$((sum_total + value))
+                sum_downloaded=$((sum_downloaded + ${ITEM_DOWNLOADED[${key}]:-0}))
             fi
         done
     fi

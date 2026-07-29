@@ -144,6 +144,18 @@ assert_file_contains "${script_dir}/progress-monitor.sh" \
 assert_file_contains "${script_dir}/progress-monitor.sh" \
     "emit_progress 100 'Download complete.'" \
     '100 percent is emitted only by final result verification'
+assert_file_contains "${script_dir}/progress-monitor.sh" \
+    "trap 'exit 0' PIPE" \
+    'closed Zenity pipe ends the monitor normally'
+assert_file_contains "${script_dir}/download-video.sh" \
+    'normalize_path_record() {' \
+    'final result path record normalization'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+    'strict semantic release tag validation'
+assert_file_contains "${script_dir}/.github/workflows/shell.yml" \
+    'cancel-in-progress: true' \
+    'outdated validation runs are cancelled'
 
 assert_file_contains "${script_dir}/README.md"     "is **${EXPECTED_VERSION}**." 'English README version'
 assert_file_contains "${script_dir}/README.fr.md"     "version actuelle est la **${EXPECTED_VERSION}**." 'French README version'

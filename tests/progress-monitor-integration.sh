@@ -8,7 +8,7 @@ readonly PROJECT_DIR
 # shellcheck disable=SC1090
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 
-for required_command in bash grep mkdir mktemp rm sleep sort stdbuf tail tr wc; do
+for required_command in bash grep head mkdir mktemp rm sleep sort stdbuf tail timeout tr wc; do
     require_test_command "${required_command}"
 done
 
@@ -17,7 +17,6 @@ assert_readable_file "${MONITOR}" 'progress monitor'
 
 TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
-trap 'rm -rf -- "${TEST_ROOT}" || true' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -79,29 +78,57 @@ start_scenario() {
 finish_success() {
     local requested_path=$1
     local final_path="${SCENARIO_DIR}/${requested_path##*/}"
+    local monitor_status=0
 
     : >"${final_path}"
     printf '%s\n' "${final_path}" >"${RESULT_FILE}"
-    kill -- "${ACTIVE_WORKER}"
+    kill -- "${ACTIVE_WORKER}" 2>/dev/null || true
     wait "${ACTIVE_WORKER}" 2>/dev/null || true
     ACTIVE_WORKER=''
-    wait "${ACTIVE_MONITOR}"
+    wait "${ACTIVE_MONITOR}" || monitor_status=$?
     ACTIVE_MONITOR=''
+    assert_equals '0' "${monitor_status}" 'successful monitor exit status'
     assert_file_has_line "${CAPTURE_FILE}" '100' 'successful progress reaches 100%'
 }
 
 finish_failure() {
-    kill -- "${ACTIVE_WORKER}"
+    local monitor_status=0
+
+    kill -- "${ACTIVE_WORKER}" 2>/dev/null || true
     wait "${ACTIVE_WORKER}" 2>/dev/null || true
     ACTIVE_WORKER=''
-    wait "${ACTIVE_MONITOR}"
+    wait "${ACTIVE_MONITOR}" || monitor_status=$?
     ACTIVE_MONITOR=''
+    assert_equals '0' "${monitor_status}" 'incomplete monitor exit status'
     assert_file_has_no_line "${CAPTURE_FILE}" '100' 'failed progress never reaches 100%'
 }
 
 max_percentage() {
-    grep -E '^[0-9]+$' "$1" | sort -n | tail -n 1
+    grep -E '^[0-9]+$' "$1" | sort -n | tail -n 1 || true
 }
+
+# Closing the Zenity side of the pipe must end the monitor normally instead of
+# leaking a SIGPIPE status to the GUI pipeline.
+pipe_scenario_dir="${TEST_ROOT}/closed-progress-pipe"
+pipe_log="${pipe_scenario_dir}/download.log"
+pipe_result="${pipe_scenario_dir}/result.txt"
+mkdir -p -- "${pipe_scenario_dir}"
+: >"${pipe_log}"
+sleep 30 &
+pipe_worker=$!
+pipe_status=0
+set +e
+# The positional parameters are intentionally expanded by the inner Bash.
+# shellcheck disable=SC2016
+timeout --signal=TERM --kill-after=1s 5s \
+    bash -o pipefail -c '
+        bash "$1" "$2" "$3" "$4" video | head -n 2 >/dev/null
+    ' bash "${MONITOR}" "${pipe_log}" "${pipe_worker}" "${pipe_result}"
+pipe_status=$?
+set -e
+kill -- "${pipe_worker}" 2>/dev/null || true
+wait "${pipe_worker}" 2>/dev/null || true
+assert_equals '0' "${pipe_status}" 'closed progress pipe exits normally'
 
 # Direct video transfer handled by aria2c.
 start_scenario direct-aria-video video
@@ -163,6 +190,7 @@ printf '%s\n' \
 wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 0%' \
     'HLS bootstrap record is ignored'
 bootstrap_max=$(max_percentage "${CAPTURE_FILE}")
+[[ ${bootstrap_max} =~ ^[0-9]+$ ]] || fail 'HLS bootstrap capture has no numeric progress'
 ((bootstrap_max <= 5)) || fail 'HLS fragment 0/N must not advance the transfer phase'
 printf '%s\n' \
     'YTDLP_PROGRESS_V2|media|96-21|downloading|23528240|0|1000442128|10|473|2.4%|24MiB/s|00:30' \
@@ -188,6 +216,7 @@ printf '\r[#aaa111 10MiB/10MiB(100%%) CN:8 DL:2MiB ETA:0s]\r' >>"${LOG_FILE}"
 wait_for_text "${CAPTURE_FILE}" 'Downloading item 1/2 - 100%' \
     'first composite item completion'
 first_max=$(max_percentage "${CAPTURE_FILE}")
+[[ ${first_max} =~ ^[0-9]+$ ]] || fail 'composite capture has no numeric progress'
 ((first_max < 90)) || fail 'first stream must not fill the global download range'
 printf '\r[#bbb222 1MiB/10MiB(10%%) CN:8 DL:1MiB ETA:9s]\r' >>"${LOG_FILE}"
 wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 10%' \
@@ -290,7 +319,7 @@ wait_for_text "${CAPTURE_FILE}" 'Remuxing the media into an MKV container...' \
     'post-process error setup'
 finish_failure
 
-# A published result path that does not name a file is not successful completion.
+# A published path whose target file is absent is not successful completion.
 start_scenario missing-final-file video
 printf '%s\n' "${SCENARIO_DIR}/missing-output.mkv" >"${RESULT_FILE}"
 finish_failure

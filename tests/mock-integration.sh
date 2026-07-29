@@ -8,7 +8,7 @@ readonly PROJECT_DIR
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 for required_command in \
     awk bash cat chmod date dirname env grep ln mkdir mktemp mv readlink \
-    realpath rm setsid sleep stat tail timeout touch tr; do
+    realpath rm setsid sleep stat stdbuf tail timeout touch tr; do
     require_test_command "${required_command}"
 done
 [[ -r /proc/self/cmdline ]] ||
@@ -160,9 +160,14 @@ if [[ ${MOCK_YTDLP_EXIT_STATUS:-0} != 0 ]]; then
     exit "${MOCK_YTDLP_EXIT_STATUS}"
 fi
 
-: >"${output_path}"
+if [[ ${MOCK_RESULT_TARGET_MISSING:-0} != 1 ]]; then
+    : >"${output_path}"
+fi
 if [[ -n ${result_file} && ${MOCK_SKIP_RESULT_FILE:-0} != 1 ]]; then
-    printf '%s\n' "${output_path}" >> "${result_file}"
+    if [[ ${MOCK_PREPEND_STALE_RESULT:-0} == 1 ]]; then
+        printf '%s\n' "${MOCK_OUTPUT_DIR}/stale-result.webm" >>"${result_file}"
+    fi
+    printf '%s\n' "${output_path}" >>"${result_file}"
 fi
 EOF_YTDLP
 chmod +x "${MOCK_BIN}/yt-dlp"
@@ -675,6 +680,34 @@ assert_option_value arguments '--output' "${expected_output_template}" \
     'absolute escaped output template'
 assert_array_not_contains arguments '--paths' 'legacy path option is absent'
 
+prepare_argument_log 'result-path-normalization'
+normalized_result_file="${TEST_ROOT}/normalized-result.txt"
+assert_status 0 'result path record is normalized to one valid line' \
+    env MOCK_PREPEND_STALE_RESULT=1 \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode audio \
+    --result-file "${normalized_result_file}" \
+    -- 'https://example.com/watch?v=result-normalization'
+normalized_result=$(<"${normalized_result_file}")
+assert_equals "${OUTPUT_DIR}/Mock media [abc123].webm" \
+    "${normalized_result}" 'normalized result path content'
+
+rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+missing_target_result="${TEST_ROOT}/missing-target-result.txt"
+prepare_argument_log 'missing-result-target'
+assert_status 1 'a result path whose target is absent is rejected' \
+    env MOCK_RESULT_TARGET_MISSING=1 \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode audio \
+    --result-file "${missing_target_result}" \
+    -- 'https://example.com/watch?v=missing-result-target'
+assert_text_contains "${ASSERT_OUTPUT}" \
+    'yt-dlp did not report a valid final media path.' \
+    'missing result target diagnostic'
+[[ ! -e ${missing_target_result} ]] || \
+    fail 'An invalid result path was published.'
+
+
 # Positional separator behavior.
 prepare_argument_log 'terminal-separator'
 assert_status 0 'terminal -- is accepted' \
@@ -1020,7 +1053,8 @@ assert_equals '1' "${filename_attempts}" 'preselected file chooser attempt count
 # Diagnostic log policy.
 logs_before=$(count_logs)
 prepare_argument_log 'inconsistent-result'
-MOCK_SKIP_RESULT_FILE=1 "${PROJECT_DIR}/download-video-gui.sh" >/dev/null
+assert_status 1 'missing final path is reported as a failed GUI run' \
+    env MOCK_SKIP_RESULT_FILE=1 "${PROJECT_DIR}/download-video-gui.sh"
 logs_after=$(count_logs)
 assert_equals "$((logs_before + 1))" "${logs_after}" \
     'an inconsistent run retains one new log'
@@ -1057,6 +1091,20 @@ for retained_log in "${failed_logs[@]}"; do
 done
 [[ ${failure_record_found} == true ]] ||
     fail 'No retained log contains the simulated failure.'
+
+# Initialization failures must be visible when the GUI is launched without a terminal.
+blocked_state_home="${TEST_ROOT}/blocked-state-home"
+: >"${blocked_state_home}"
+state_error_capture="${TEST_ROOT}/state-init-error.txt"
+prepare_argument_log 'state-directory-error'
+assert_status 1 'state-directory creation failure is reported in the GUI' \
+    env XDG_STATE_HOME="${blocked_state_home}" \
+    MOCK_USE_DEFAULT_PROFILE=1 \
+    MOCK_ERROR_CAPTURE="${state_error_capture}" \
+    "${PROJECT_DIR}/download-video-gui.sh"
+assert_file_contains "${state_error_capture}" \
+    'Unable to create the application state directory.' \
+    'state-directory GUI diagnostic'
 
 # User cancellation terminates the complete process group.
 termination_marker="${TEST_ROOT}/terminated"

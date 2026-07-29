@@ -34,6 +34,16 @@
 - Keep the existing GUI cancellation and process-group tests as regression
   coverage for interrupted downloads.
 
+### Review hardening
+
+- Normalize the final `after_move` path record to one verified regular file and
+  reject stale, empty, or missing result targets before publishing GUI success.
+- End the progress monitor cleanly when Zenity closes its input pipe and surface
+  state-directory or temporary-log initialization failures in the graphical UI.
+- Make release re-runs verify existing assets without overwriting them, validate
+  semantic version tags strictly, and align Fedora CI timeout diagnostics with
+  Ubuntu.
+
 ## 2.1.11 - 2026-07-29
 
 ### GUI and installer fixes

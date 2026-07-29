@@ -25,7 +25,7 @@ HLS_REMUX_TMP=''
 cleanup() {
     local status=$?
 
-    trap - EXIT
+    trap - EXIT HUP INT TERM
     if [[ -n ${RESULT_FILE_TMP} ]]; then
         rm -f -- "${RESULT_FILE_TMP}" || true
     fi
@@ -239,6 +239,23 @@ require_value() {
     fi
 }
 
+normalize_path_record() {
+    local record_file=$1
+    local candidate=''
+    local final_path=''
+
+    [[ -f ${record_file} ]] || return 1
+    while IFS= read -r candidate || [[ -n ${candidate} ]]; do
+        if [[ -n ${candidate} ]]; then
+            final_path=${candidate}
+        fi
+    done <"${record_file}"
+
+    [[ -n ${final_path} && -f ${final_path} ]] || return 1
+    printf '%s\n' "${final_path}" >"${record_file}" || return 2
+    return 0
+}
+
 OUTPUT_DIR=''
 MODE='video'
 MACHINE_PROGRESS=false
@@ -367,7 +384,7 @@ if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
     esac
 fi
 
-for command_name in yt-dlp aria2c ffmpeg ffprobe realpath deno grep mktemp mv rm; do
+for command_name in yt-dlp aria2c ffmpeg realpath deno grep mktemp mv rm; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         error "required command \"${command_name}\" was not found."
         exit 127
@@ -613,6 +630,24 @@ if yt-dlp "${YT_DLP_OPTIONS[@]}" -- "${URL}"; then
             error 'unable to record the final MKV path.'
             exit 13
         fi
+    fi
+
+    if [[ -n ${PATH_RECORD_TMP} ]]; then
+        set +e
+        normalize_path_record "${PATH_RECORD_TMP}"
+        path_record_status=$?
+        set -e
+        case ${path_record_status} in
+        0) ;;
+        1)
+            error 'yt-dlp did not report a valid final media path.'
+            exit 1
+            ;;
+        *)
+            error 'unable to normalize the final media path record.'
+            exit 13
+            ;;
+        esac
     fi
 
     if [[ -n ${RESULT_FILE} ]]; then

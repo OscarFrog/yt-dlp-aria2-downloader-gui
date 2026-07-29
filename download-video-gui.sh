@@ -739,20 +739,40 @@ if ((settings_status != 0)); then
     printf 'Warning: GUI settings could not be saved.\n' >&2
 fi
 
-mkdir -p -- "${STATE_DIR}"
+if ! mkdir -p -- "${STATE_DIR}"; then
+    show_error "Unable to create the application state directory.
+
+Path: ${STATE_DIR}"
+    exit 1
+fi
 chmod 700 -- "${STATE_DIR}" 2>/dev/null || true
 prune_old_logs
-TEMP_DIR=$(mktemp -d --tmpdir="${TMPDIR:-/tmp}" yt-dlp-gui.XXXXXXXX)
-log_timestamp=$(date '+%Y%m%d-%H%M%S')
-LOG_FILE=$(mktemp \
+if ! TEMP_DIR=$(mktemp -d --tmpdir="${TMPDIR:-/tmp}" yt-dlp-gui.XXXXXXXX); then
+    show_error 'Unable to create the temporary working directory.'
+    exit 1
+fi
+if ! log_timestamp=$(date '+%Y%m%d-%H%M%S'); then
+    show_error 'Unable to determine the timestamp for the diagnostic log.'
+    exit 1
+fi
+if ! LOG_FILE=$(mktemp \
     --tmpdir="${STATE_DIR}" \
     --suffix='.log' \
-    "download-${log_timestamp}-XXXXXX")
+    "download-${log_timestamp}-XXXXXX"); then
+    show_error "Unable to create the diagnostic log.
+
+Directory: ${STATE_DIR}"
+    exit 1
+fi
 readonly LOG_FILE
 readonly RESULT_FILE="${TEMP_DIR}/result.txt"
 readonly PGID_FILE="${TEMP_DIR}/pgid"
-: >"${LOG_FILE}"
-chmod 600 -- "${LOG_FILE}"
+if ! chmod 600 -- "${LOG_FILE}"; then
+    show_error "Unable to secure the diagnostic log.
+
+Log: ${LOG_FILE}"
+    exit 1
+fi
 
 PROGRESS_PROFILE=''
 COMMAND=(
@@ -817,8 +837,8 @@ monitor_progress "${LOG_FILE}" "${WORKER_PID}" "${RESULT_FILE}" "${PROGRESS_PROF
 pipeline_status=("${PIPESTATUS[@]}")
 set -e
 
-# monitor_progress may finish with status 141 when Zenity closes its input
-# pipe. Only Zenity's status determines cancellation, timeout, or dialog error.
+# The monitor handles a closed Zenity input pipe as a normal exit. Only
+# Zenity's status determines cancellation, timeout, or dialog error.
 zenity_status=${pipeline_status[1]:-1}
 worker_status=''
 if ((zenity_status != 0)); then
