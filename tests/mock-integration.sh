@@ -42,8 +42,12 @@ if (($# == 1)) && [[ $1 == '--help' ]]; then
     printf '%s\n' \
         '--js-runtimes' \
         '--remote-components' \
+        '--cookies-from-browser BROWSER[:PROFILE]' \
+        '--extractor-args KEY:ARGS' \
+        '-O, --print [WHEN:]TEMPLATE' \
         '--progress-template' \
         '--print-to-file' \
+        '--fixup POLICY' \
         '--downloader-args'
     exit 0
 fi
@@ -77,8 +81,12 @@ if [[ -n ${MOCK_PROGRESS_CAPTURE:-} ]]; then
 fi
 
 result_file=''
+youtube_hls_mode=false
 previous=''
 for argument in "$@"; do
+    if [[ ${argument} == '--cookies-from-browser' ]]; then
+        youtube_hls_mode=true
+    fi
     if [[ ${previous} == '--print-to-file' ]]; then
         previous='print-template'
         continue
@@ -138,7 +146,12 @@ elif [[ -z ${postprocess_ready_marker} ]]; then
     sleep 0.2
 fi
 
-output_path="${MOCK_OUTPUT_DIR}/Mock media [abc123].webm"
+if [[ ${youtube_hls_mode} == true ]]; then
+    output_path="${MOCK_OUTPUT_DIR}/Mock media [abc123].mp4"
+    printf 'YTDLP_POSTPROCESS|started|FixupM3u8\n'
+else
+    output_path="${MOCK_OUTPUT_DIR}/Mock media [abc123].webm"
+fi
 if [[ ${MOCK_YTDLP_EXIT_STATUS:-0} != 0 ]]; then
     if [[ ${MOCK_WRITE_RESULT_BEFORE_FAILURE:-0} == 1 && -n ${result_file} ]]; then
         printf '%s\n' "${output_path}" >> "${result_file}"
@@ -196,21 +209,37 @@ printf 'typescript 0.0.0\n'
 EOF_DENO
 chmod +x "${MOCK_BIN}/deno"
 
-for media_tool in ffmpeg ffprobe; do
-    cat > "${MOCK_BIN}/${media_tool}" <<'EOF_MEDIA_TOOL'
+cat > "${MOCK_BIN}/ffmpeg" <<'EOF_FFMPEG'
 #!/usr/bin/env bash
 set -euo pipefail
 
 case ${1:-} in
-    -version|--version)
-        printf '%s mock version 1.0\n' "${0##*/}"
-        ;;
-    *)
-        ;;
+-version | --version)
+    printf 'ffmpeg mock version 1.0\n'
+    exit 0
+    ;;
 esac
-EOF_MEDIA_TOOL
-    chmod +x "${MOCK_BIN}/${media_tool}"
-done
+
+if [[ -n ${MOCK_FFMPEG_ARG_LOG:-} ]]; then
+    printf '%s\0' "$@" >"${MOCK_FFMPEG_ARG_LOG}"
+fi
+if [[ ${MOCK_FFMPEG_EXIT_STATUS:-0} != 0 ]]; then
+    printf 'Simulated FFmpeg remux failure.\n' >&2
+    exit "${MOCK_FFMPEG_EXIT_STATUS}"
+fi
+output_path=${!#}
+: >"${output_path}"
+EOF_FFMPEG
+chmod +x "${MOCK_BIN}/ffmpeg"
+
+cat > "${MOCK_BIN}/ffprobe" <<'EOF_FFPROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+case ${1:-} in
+-version | --version) printf 'ffprobe mock version 1.0\n' ;;
+esac
+EOF_FFPROBE
+chmod +x "${MOCK_BIN}/ffprobe"
 
 REAL_MV=$(command -v mv)
 REAL_SETSID=$(command -v setsid)
@@ -323,11 +352,11 @@ case " $* " in
             postprocess_ready_marker="${MOCK_PROGRESS_CAPTURE}.postprocess-ready"
 
             if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
-                expected_progress='# aria2 download: in progress - 1.00MiB'
+                expected_progress='# Downloading the audio track - size unknown (aria2c) - 1.00MiB'
             elif [[ ${MOCK_ARIA_ONLY:-0} == 1 ]]; then
-                expected_progress='# aria2 download: 40% - 1.00MiB - 6s remaining'
+                expected_progress='# Downloading the audio track - 40% (aria2c) - 1.00MiB - 6s remaining'
             else
-                expected_progress='# Download: 12.5% - 1.00MiB/s - 00:07 remaining'
+                expected_progress='# Downloading the audio track - 12% - 1.00MiB/s - 00:07 remaining'
             fi
         fi
 
@@ -344,7 +373,7 @@ case " $* " in
             fi
 
             if [[ -n ${postprocess_ready_marker} &&
-                ${progress_line} == '# Finalizing the file...' ]]; then
+                ${progress_line} == '# Extracting the native audio track...' ]]; then
                 : >"${postprocess_ready_marker}"
             fi
         done
@@ -632,7 +661,7 @@ assert_option_value arguments '--downloader' 'aria2c' 'default external download
 assert_option_value arguments '--downloader' 'dash,m3u8:native' \
     'fragmented-stream native downloader' 2
 assert_option_value arguments '--downloader-args' \
-    'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=1 --show-console-readout=true --stderr=true' \
+    'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=1 --show-console-readout=true --stderr=false' \
     'aria2 machine-progress arguments'
 assert_array_not_contains arguments '--machine-progress' \
     'internal wrapper option isolation'
@@ -674,6 +703,93 @@ assert_option_value arguments '--downloader-args' \
     'ordinary CLI aria2 arguments'
 assert_text_not_contains "$(printf '%s\n' "${arguments[@]}")" \
     '--show-console-readout=true' 'machine progress disabled in ordinary CLI mode'
+
+# Explicit authenticated YouTube HLS profile.
+prepare_argument_log 'youtube-hls-engine'
+youtube_hls_result="${TEST_ROOT}/youtube-hls-result.txt"
+youtube_hls_ffmpeg_args="${TEST_ROOT}/youtube-hls-ffmpeg-args.bin"
+assert_status 0 'authenticated YouTube HLS engine invocation' \
+    env MOCK_FFMPEG_ARG_LOG="${youtube_hls_ffmpeg_args}" \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode video \
+    --youtube-hls-firefox \
+    --result-file "${youtube_hls_result}" \
+    -- 'https://www.youtube.com/watch?v=youtube-hls'
+# shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+youtube_hls_arguments=()
+read_arguments "${MOCK_ARG_LOG}" youtube_hls_arguments
+assert_option_value youtube_hls_arguments '--cookies-from-browser' 'firefox' \
+    'YouTube HLS Firefox cookies'
+assert_option_value youtube_hls_arguments '--extractor-args' \
+    'youtube:player_client=web_safari' 'YouTube HLS player client'
+assert_option_value youtube_hls_arguments '--format' \
+    '(bv*+ba/b)[protocol^=m3u8]' 'YouTube HLS format selector'
+assert_option_value youtube_hls_arguments '--fixup' 'force' \
+    'YouTube HLS MPEG-TS fixup policy'
+assert_option_value youtube_hls_arguments '--downloader' 'dash,m3u8:native' \
+    'YouTube HLS native downloader' 2
+assert_array_not_contains youtube_hls_arguments '--remux-video' \
+    'yt-dlp remux is deferred until after HLS fixup'
+assert_array_not_contains youtube_hls_arguments '--merge-output-format' \
+    'YouTube HLS combined stream does not request an early merge'
+assert_file_has_line "${youtube_hls_result}" \
+    "${OUTPUT_DIR}/Mock media [abc123].mkv" \
+    'YouTube HLS result publishes the final MKV path'
+[[ -f "${OUTPUT_DIR}/Mock media [abc123].mkv" ]] ||
+    fail 'The custom YouTube HLS remux did not create the MKV file.'
+[[ ! -e "${OUTPUT_DIR}/Mock media [abc123].mp4" ]] ||
+    fail 'The repaired YouTube HLS MP4 intermediate was not removed.'
+# shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+youtube_hls_ffmpeg_arguments=()
+read_arguments "${youtube_hls_ffmpeg_args}" youtube_hls_ffmpeg_arguments
+assert_option_value youtube_hls_ffmpeg_arguments '-c' 'copy' \
+    'YouTube HLS final remux uses stream copy'
+assert_array_contains youtube_hls_ffmpeg_arguments \
+    "${OUTPUT_DIR}/Mock media [abc123].mp4" \
+    'YouTube HLS remux reads the fixed MP4 intermediate'
+
+prepare_argument_log 'youtube-hls-remux-failure'
+youtube_hls_failed_result="${TEST_ROOT}/youtube-hls-failed-result.txt"
+assert_status 9 'YouTube HLS remux failure is propagated' \
+    env MOCK_FFMPEG_EXIT_STATUS=9 \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode video \
+    --youtube-hls-firefox \
+    --result-file "${youtube_hls_failed_result}" \
+    -- 'https://www.youtube.com/watch?v=youtube-hls-failure'
+[[ ! -e ${youtube_hls_failed_result} ]] ||
+    fail 'A failed YouTube HLS remux published a result file.'
+[[ -f "${OUTPUT_DIR}/Mock media [abc123].mp4" ]] ||
+    fail 'A failed YouTube HLS remux did not preserve the fixed MP4 intermediate.'
+rm -f -- "${OUTPUT_DIR}/Mock media [abc123].mp4"
+
+prepare_argument_log 'youtube-hls-cli-no-result'
+assert_status 0 'YouTube HLS CLI invocation without a result file' \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode video \
+    --youtube-hls-firefox \
+    -- 'https://www.youtube.com/watch?v=youtube-hls-no-result'
+shopt -s nullglob
+youtube_hls_path_files=("${OUTPUT_DIR}"/.yt-dlp-path.*)
+shopt -u nullglob
+((${#youtube_hls_path_files[@]} == 0)) ||
+    fail 'The YouTube HLS CLI run left an internal result-path file.'
+
+assert_status 2 'YouTube HLS profile rejects audio mode' \
+    "${PROJECT_DIR}/download-video.sh" \
+    --mode audio --youtube-hls-firefox \
+    -- 'https://www.youtube.com/watch?v=youtube-audio'
+assert_text_contains "${ASSERT_OUTPUT}" \
+    '--youtube-hls-firefox is available only with --mode video.' \
+    'YouTube HLS audio-mode diagnostic'
+
+assert_status 2 'YouTube HLS profile rejects non-YouTube URLs' \
+    "${PROJECT_DIR}/download-video.sh" \
+    --mode video --youtube-hls-firefox \
+    -- 'https://example.com/video'
+assert_text_contains "${ASSERT_OUTPUT}" \
+    '--youtube-hls-firefox requires a YouTube URL.' \
+    'YouTube HLS URL diagnostic'
 
 # Clear engine error paths before yt-dlp download invocation.
 prepare_argument_log 'invalid-output'
@@ -718,11 +834,11 @@ MOCK_ZENITY_ENTRY_VALUE="  ${trimmed_gui_url}  " \
 MOCK_ARIA_ONLY=1 \
 MOCK_PROGRESS_CAPTURE="${PROGRESS_CAPTURE}" \
     "${PROJECT_DIR}/download-video-gui.sh"
-assert_file_has_line "${PROGRESS_CAPTURE}" '40' 'aria2 progress reaches 40 percent'
+assert_file_has_line "${PROGRESS_CAPTURE}" '39' 'aria2 progress maps into the global download phase'
 assert_file_contains "${PROGRESS_CAPTURE}" \
-    '# aria2 download: 40% - 1.00MiB - 6s remaining' \
+    '# Downloading the audio track - 40% (aria2c) - 1.00MiB - 6s remaining' \
     'aria2 progress message'
-assert_file_contains "${PROGRESS_CAPTURE}" '# Finalizing the file...' \
+assert_file_contains "${PROGRESS_CAPTURE}" '# Extracting the native audio track...' \
     'post-processing message'
 assert_file_not_contains "${PROGRESS_CAPTURE}" '# Completed' \
     'premature completion message is absent'
@@ -730,6 +846,9 @@ assert_file_not_contains "${PROGRESS_CAPTURE}" '# Completed' \
 # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
 gui_arguments=()
 read_arguments "${MOCK_ARG_LOG}" gui_arguments
+assert_option_value gui_arguments '--downloader-args' \
+    'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=1 --show-console-readout=true --stderr=false' \
+    'machine-progress aria2 readout remains visible on stdout'
 assert_array_contains gui_arguments "${trimmed_gui_url}" 'trimmed GUI URL'
 assert_array_not_contains gui_arguments "  ${trimmed_gui_url}  " \
     'untrimmed GUI URL is absent'
@@ -740,7 +859,7 @@ MOCK_ARIA_NO_PERCENT=1 \
 MOCK_PROGRESS_CAPTURE="${aria_unknown_capture}" \
     "${PROJECT_DIR}/download-video-gui.sh"
 assert_file_contains "${aria_unknown_capture}" \
-    '# aria2 download: in progress - 1.00MiB' \
+    '# Downloading the audio track - size unknown (aria2c) - 1.00MiB' \
     'aria2 progress without a known total size'
 
 # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
@@ -748,6 +867,7 @@ list_arguments=()
 read_arguments "${LIST_ARGS_LOG}" list_arguments
 for expected_profile_label in \
     'Complete video (MKV)' \
+    'YouTube video - Firefox cookies (HLS/MKV)' \
     'Audio track (native format)'; do
     assert_array_contains list_arguments "${expected_profile_label}" \
         "GUI profile label ${expected_profile_label}"
@@ -760,10 +880,10 @@ done
 prepare_argument_log 'gui-ytdlp-progress'
 MOCK_PROGRESS_CAPTURE="${YTDLP_PROGRESS_CAPTURE}" \
     "${PROJECT_DIR}/download-video-gui.sh"
-assert_file_has_line "${YTDLP_PROGRESS_CAPTURE}" '12' \
-    'yt-dlp progress reaches integer 12'
+assert_file_has_line "${YTDLP_PROGRESS_CAPTURE}" '15' \
+    'yt-dlp progress maps into the global download phase'
 assert_file_contains "${YTDLP_PROGRESS_CAPTURE}" \
-    '# Download: 12.5% - 1.00MiB/s - 00:07 remaining' \
+    '# Downloading the audio track - 12% - 1.00MiB/s - 00:07 remaining' \
     'yt-dlp progress message'
 
 prepare_argument_log 'gui-video'
@@ -776,6 +896,33 @@ assert_option_value video_gui_arguments '--format' 'bv*+ba/b' \
     'GUI video format selection'
 assert_array_not_contains video_gui_arguments 'ba/b' \
     'GUI video run does not use audio-only selector'
+
+prepare_argument_log 'gui-youtube-hls'
+MOCK_PROFILE='YouTube video - Firefox cookies (HLS/MKV)' \
+MOCK_ZENITY_ENTRY_VALUE='https://www.youtube.com/watch?v=gui-youtube-hls' \
+    "${PROJECT_DIR}/download-video-gui.sh"
+# shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+youtube_hls_gui_arguments=()
+read_arguments "${MOCK_ARG_LOG}" youtube_hls_gui_arguments
+assert_option_value youtube_hls_gui_arguments '--cookies-from-browser' 'firefox' \
+    'GUI YouTube HLS Firefox cookies'
+assert_option_value youtube_hls_gui_arguments '--extractor-args' \
+    'youtube:player_client=web_safari' 'GUI YouTube HLS player client'
+assert_option_value youtube_hls_gui_arguments '--format' \
+    '(bv*+ba/b)[protocol^=m3u8]' 'GUI YouTube HLS format selector'
+config_file="${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf"
+assert_file_has_line "${config_file}" 'profile=youtube-hls' \
+    'saved GUI YouTube HLS profile'
+
+prepare_argument_log 'gui-youtube-hls-default'
+MOCK_USE_DEFAULT_PROFILE=1 \
+MOCK_ZENITY_ENTRY_VALUE='https://youtu.be/gui-youtube-hls-default' \
+    "${PROJECT_DIR}/download-video-gui.sh"
+# shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+youtube_hls_default_arguments=()
+read_arguments "${MOCK_ARG_LOG}" youtube_hls_default_arguments
+assert_option_value youtube_hls_default_arguments '--cookies-from-browser' 'firefox' \
+    'persisted GUI YouTube HLS profile'
 
 # Post-processing progress must never regress.
 prepare_argument_log 'gui-late-progress'
@@ -1044,7 +1191,7 @@ assert_file_contains "${progress_error_capture}" 'status 42' \
 # Missing Zenity is a dependency error, not a graphical crash.
 no_zenity_bin="${TEST_ROOT}/no-zenity-bin"
 mkdir -p -- "${no_zenity_bin}"
-for required_command in bash chmod date dirname grep mkdir mktemp mv realpath rm setsid sleep stat tail tr; do
+for required_command in bash chmod date dirname grep mkdir mktemp mv realpath rm setsid sleep stat stdbuf tail tr; do
     required_command_path=$(command -v "${required_command}") ||
         fail "Required host command was not found: ${required_command}"
     ln -s -- "${required_command_path}" \

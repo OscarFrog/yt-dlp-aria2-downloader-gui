@@ -87,6 +87,7 @@ jobs:
           version=${RELEASE_TAG#v}
           grep -Fqx -- "readonly VERSION=\"${version}\"" download-video.sh
           grep -Fq -- "# Version     : ${version}" download-video-gui.sh
+          grep -Fq -- "# Version     : ${version}" progress-monitor.sh
           grep -Fq -- "# Version     : ${version}" install-gui.sh
           grep -Fq -- "is **${version}**." README.md
           grep -Fq -- "version actuelle est la **${version}**" README.fr.md

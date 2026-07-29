@@ -16,12 +16,14 @@ Run from the repository root:
 ```bash
 bash -n download-video.sh
 bash -n download-video-gui.sh
+bash -n progress-monitor.sh
 bash -n install-gui.sh
 bash -n test-static.sh
 bash -n tests/run-all.sh
 bash -n tests/lib/assert.sh
 bash -n tests/lib/project-files.sh
 bash -n tests/mock-integration.sh
+bash -n tests/progress-monitor-integration.sh
 bash -n tests/installer-integration.sh
 ```
 
@@ -31,6 +33,7 @@ bash -n tests/installer-integration.sh
 shellcheck -o all \
   download-video.sh \
   download-video-gui.sh \
+  progress-monitor.sh \
   install-gui.sh
 
 shellcheck -x -o all \
@@ -39,6 +42,7 @@ shellcheck -x -o all \
   tests/lib/assert.sh \
   tests/lib/project-files.sh \
   tests/mock-integration.sh \
+  tests/progress-monitor-integration.sh \
   tests/installer-integration.sh
 ```
 
@@ -52,9 +56,12 @@ The automated suite checks, among other things:
 - native-audio selection with `ba/b`, `best`, and quality `0`;
 - absence of forced MP3, M4A, or Opus output formats;
 - MKV video selection without forced re-encoding;
-- yt-dlp and aria2c progress parsing, including transfers without a known total size;
-- a neutral final progress message instead of a premature success message;
-- monotonic progress after post-processing begins;
+- structured yt-dlp planning and progress records, aria2c console fallback,
+  byte-weighted progress, fragment progress, and unknown-size animation;
+- separate video/audio transfers, direct audio, HLS, DASH, merge, remux,
+  extraction, late progress, and error paths;
+- verification that a local transfer reaching 100% does not complete the global
+  operation and that global 100% appears only after final-result publication;
 - deletion of successful-download logs and retention of failure logs;
 - automatic removal of retained diagnostic logs older than 15 days while
   preserving newer logs, unrelated files, and symbolic links;

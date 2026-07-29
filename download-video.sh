@@ -3,14 +3,14 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.11
+# Version     : 2.1.12
 # Date        : 2026-07-29
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
 
 set -euo pipefail
 
-readonly VERSION="2.1.11"
+readonly VERSION="2.1.12"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -19,6 +19,8 @@ readonly SCRIPT_NAME="${0##*/}"
 VERSION_AT_LEAST=false
 VERSION_PARSE_VALID=false
 RESULT_FILE_TMP=''
+INTERNAL_PATH_FILE_TMP=''
+HLS_REMUX_TMP=''
 
 cleanup() {
     local status=$?
@@ -26,6 +28,12 @@ cleanup() {
     trap - EXIT
     if [[ -n ${RESULT_FILE_TMP} ]]; then
         rm -f -- "${RESULT_FILE_TMP}" || true
+    fi
+    if [[ -n ${INTERNAL_PATH_FILE_TMP} ]]; then
+        rm -f -- "${INTERNAL_PATH_FILE_TMP}" || true
+    fi
+    if [[ -n ${HLS_REMUX_TMP} ]]; then
+        rm -f -- "${HLS_REMUX_TMP}" || true
     fi
     exit "${status}"
 }
@@ -46,7 +54,9 @@ Options:
                              video: complete best-quality video in MKV.
                              audio: best available audio track; preserve the
                                     source codec/container whenever possible.
-      --machine-progress     Emit stable YTDLP_PROGRESS records.
+      --machine-progress     Emit stable YTDLP_PLAN and progress records.
+      --youtube-hls-firefox  For YouTube video mode, use Firefox cookies and
+                             web_safari HLS formats before remuxing to MKV.
       --result-file FILE     Write the final media path to FILE.
   -h, --help                 Display this help.
   -V, --version              Display the version.
@@ -166,10 +176,15 @@ check_runtime_compatibility() {
     for required_option in \
         --js-runtimes \
         --remote-components \
+        --cookies-from-browser \
+        --extractor-args \
+        --print \
         --progress-template \
         --print-to-file \
+        --fixup \
         --downloader-args; do
-        if ! grep -Eq -- "^[[:space:]]*${required_option}([=[:space:]]|$)" <<<"${yt_dlp_help}"; then
+        if ! grep -Eq -- \
+            "^[[:space:]]*(-[^,[:space:]]+,[[:space:]]+)?${required_option}([=[:space:]]|$)" <<<"${yt_dlp_help}"; then
             error "this yt-dlp build does not support ${required_option}."
             return 1
         fi
@@ -227,6 +242,7 @@ require_value() {
 OUTPUT_DIR=''
 MODE='video'
 MACHINE_PROGRESS=false
+YOUTUBE_HLS_FIREFOX=false
 RESULT_FILE=''
 URL=''
 POSITIONAL_ARGUMENTS=()
@@ -263,6 +279,10 @@ while (($# > 0)); do
         ;;
     --machine-progress)
         MACHINE_PROGRESS=true
+        shift
+        ;;
+    --youtube-hls-firefox)
+        YOUTUBE_HLS_FIREFOX=true
         shift
         ;;
     --result-file)
@@ -321,6 +341,31 @@ video | audio) ;;
     exit 2
     ;;
 esac
+
+if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
+    if [[ ${MODE} != video ]]; then
+        error '--youtube-hls-firefox is available only with --mode video.'
+        exit 2
+    fi
+
+    youtube_authority=${URL#*://}
+    youtube_authority=${youtube_authority%%/*}
+    youtube_authority=${youtube_authority%%\?*}
+    youtube_authority=${youtube_authority%%\#*}
+    youtube_authority=${youtube_authority##*@}
+    youtube_host=${youtube_authority%%:*}
+    youtube_host=${youtube_host,,}
+    youtube_host=${youtube_host%.}
+
+    case ${youtube_host} in
+    youtube.com | *.youtube.com | youtu.be | *.youtu.be | \
+        youtube-nocookie.com | *.youtube-nocookie.com) ;;
+    *)
+        error '--youtube-hls-firefox requires a YouTube URL.'
+        exit 2
+        ;;
+    esac
+fi
 
 for command_name in yt-dlp aria2c ffmpeg ffprobe realpath deno grep mktemp mv rm; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
@@ -394,16 +439,29 @@ if [[ -n ${RESULT_FILE} ]]; then
     fi
 fi
 
+if [[ ${YOUTUBE_HLS_FIREFOX} == true && -z ${RESULT_FILE_TMP} ]]; then
+    if ! INTERNAL_PATH_FILE_TMP=$(mktemp \
+        --tmpdir="${OUTPUT_DIR}" \
+        '.yt-dlp-path.XXXXXXXX'); then
+        error 'unable to create the internal result-path file.'
+        exit 13
+    fi
+fi
+
 printf '%s version %s\n' "${SCRIPT_NAME}" "${VERSION}"
 printf 'Download directory: %s\n' "${OUTPUT_DIR}"
 printf 'Mode: %s\n' "${MODE}"
+if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
+    printf '%s\n' 'YouTube access: Firefox cookies with web_safari HLS'
+fi
 
 ARIA2_ARGUMENTS='-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --console-log-level=warn --enable-color=false --truncate-console-readout=false'
 if [[ ${MACHINE_PROGRESS} == true ]]; then
     # yt-dlp does not currently expose aria2c transfer progress through its
-    # own progress hooks. Keep aria2c's documented console readout enabled so
-    # the GUI can display the active HTTP(S) transfer percentage.
-    ARIA2_ARGUMENTS+=' --summary-interval=1 --show-console-readout=true --stderr=true'
+    # own progress hooks. yt-dlp captures stderr from external downloaders and
+    # normally replays it only on failure, so aria2c's periodic readout must
+    # remain on stdout to reach the GUI log during a successful transfer.
+    ARIA2_ARGUMENTS+=' --summary-interval=1 --show-console-readout=true --stderr=false'
 else
     ARIA2_ARGUMENTS+=' --summary-interval=0'
 fi
@@ -426,14 +484,35 @@ YT_DLP_OPTIONS=(
     --concurrent-fragments 8
 )
 
+if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
+    # This explicit profile reads the authenticated Firefox session and asks
+    # YouTube's web_safari client for HLS formats. Current yt-dlp guidance notes
+    # that these HLS URLs do not require a GVS PO Token at this time.
+    YT_DLP_OPTIONS+=(
+        --cookies-from-browser firefox
+        --extractor-args 'youtube:player_client=web_safari'
+        --fixup force
+    )
+fi
+
 if [[ ${MODE} == 'video' ]]; then
     # Keep both container options. --merge-output-format covers separate
     # video/audio streams, while --remux-video covers the combined-format fallback.
-    YT_DLP_OPTIONS+=(
-        --format 'bv*+ba/b'
-        --merge-output-format mkv
-        --remux-video mkv
-    )
+    if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
+        VIDEO_FORMAT='(bv*+ba/b)[protocol^=m3u8]'
+    else
+        VIDEO_FORMAT='bv*+ba/b'
+    fi
+    YT_DLP_OPTIONS+=(--format "${VIDEO_FORMAT}")
+    # The authenticated HLS profile must let yt-dlp run FixupM3u8 before this
+    # wrapper performs its final MKV remux. Scheduling VideoRemuxer here would
+    # make yt-dlp treat the fixup as redundant and skip it.
+    if [[ ${YOUTUBE_HLS_FIREFOX} != true ]]; then
+        YT_DLP_OPTIONS+=(
+            --merge-output-format mkv
+            --remux-video mkv
+        )
+    fi
 else
     # Match the dedicated download-audio.sh behavior: select the best
     # audio-only stream, fall back to the best combined stream when necessary,
@@ -451,27 +530,103 @@ if [[ ${MACHINE_PROGRESS} == true ]]; then
         --newline
         --progress
         --color never
-        --progress-template 'download:YTDLP_PROGRESS|%(progress.status)s|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s'
+        --print 'before_dl:YTDLP_PLAN|%(id|unknown)s|%(format_id|unknown)s|%(requested_formats.0.format_id|)s|%(requested_formats.1.format_id|)s'
+        --progress-template 'download:YTDLP_PROGRESS_V2|%(info.id|unknown)s|%(info.format_id|unknown)s|%(progress.status|unknown)s|%(progress.downloaded_bytes|0)s|%(progress.total_bytes|0)s|%(progress.total_bytes_estimate|0)s|%(progress.fragment_index|0)s|%(progress.fragment_count|0)s|%(progress._percent_str|)s|%(progress._speed_str|)s|%(progress._eta_str|)s'
         --progress-template 'postprocess:YTDLP_POSTPROCESS|%(progress.status)s|%(progress.postprocessor)s'
     )
 fi
 
-if [[ -n ${RESULT_FILE} ]]; then
+PATH_RECORD_TMP=${RESULT_FILE_TMP:-${INTERNAL_PATH_FILE_TMP}}
+if [[ -n ${PATH_RECORD_TMP} ]]; then
     # The FILE argument is itself an output template, so literal % characters
     # in the temporary path must be doubled.
-    result_file_template=${RESULT_FILE_TMP//%/%%}
+    path_record_template=${PATH_RECORD_TMP//%/%%}
     YT_DLP_OPTIONS+=(
-        --print-to-file 'after_move:%(filepath)s' "${result_file_template}"
+        --print-to-file 'after_move:%(filepath)s' "${path_record_template}"
     )
 fi
 
 if yt-dlp "${YT_DLP_OPTIONS[@]}" -- "${URL}"; then
+    if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
+        hls_source_path=''
+        candidate_path=''
+        while IFS= read -r candidate_path || [[ -n ${candidate_path} ]]; do
+            if [[ -n ${candidate_path} ]]; then
+                hls_source_path=${candidate_path}
+            fi
+        done <"${PATH_RECORD_TMP}"
+
+        if [[ -z ${hls_source_path} || ! -f ${hls_source_path} ]]; then
+            error 'yt-dlp did not publish the repaired HLS file path.'
+            exit 1
+        fi
+
+        hls_source_dir=${hls_source_path%/*}
+        if [[ ${hls_source_dir} == "${hls_source_path}" ]]; then
+            hls_source_dir='.'
+        fi
+        hls_source_name=${hls_source_path##*/}
+        hls_source_stem=${hls_source_name%.*}
+        if [[ ${hls_source_stem} == "${hls_source_name}" ]]; then
+            hls_source_stem=${hls_source_name}
+        fi
+        hls_final_path="${hls_source_dir}/${hls_source_stem}.mkv"
+
+        if [[ ${MACHINE_PROGRESS} == true ]]; then
+            printf '%s\n' 'YTDLP_POSTPROCESS|started|FFmpegVideoRemuxer'
+        fi
+        if ! HLS_REMUX_TMP=$(mktemp \
+            --tmpdir="${hls_source_dir}" \
+            --suffix='.mkv' \
+            '.yt-dlp-remux.XXXXXXXX'); then
+            error 'unable to create the temporary MKV file.'
+            exit 13
+        fi
+
+        ffmpeg_status=0
+        ffmpeg \
+            -hide_banner \
+            -loglevel warning \
+            -i "${hls_source_path}" \
+            -map 0 \
+            -dn \
+            -ignore_unknown \
+            -c copy \
+            -y \
+            "${HLS_REMUX_TMP}" || ffmpeg_status=$?
+        if ((ffmpeg_status != 0)); then
+            error "unable to remux the repaired HLS file into MKV (FFmpeg status ${ffmpeg_status})."
+            exit "${ffmpeg_status}"
+        fi
+
+        if ! mv -f -- "${HLS_REMUX_TMP}" "${hls_final_path}"; then
+            error 'unable to publish the final MKV file.'
+            exit 13
+        fi
+        HLS_REMUX_TMP=''
+        if [[ ${hls_source_path} != "${hls_final_path}" ]] &&
+            ! rm -f -- "${hls_source_path}"; then
+            printf 'Warning: unable to remove the repaired HLS intermediate: %s\n' \
+                "${hls_source_path}" >&2
+        fi
+        if ! printf '%s\n' "${hls_final_path}" >"${PATH_RECORD_TMP}"; then
+            error 'unable to record the final MKV path.'
+            exit 13
+        fi
+    fi
+
     if [[ -n ${RESULT_FILE} ]]; then
         if ! mv -f -- "${RESULT_FILE_TMP}" "${RESULT_FILE}"; then
             error 'unable to publish the result file.'
             exit 13
         fi
         RESULT_FILE_TMP=''
+    elif [[ -n ${INTERNAL_PATH_FILE_TMP} ]]; then
+        if ! rm -f -- "${INTERNAL_PATH_FILE_TMP}"; then
+            error 'unable to remove the internal result-path file.'
+            exit 13
+        fi
+        INTERNAL_PATH_FILE_TMP=''
     fi
     printf '\nDownload completed successfully.\n'
 else
