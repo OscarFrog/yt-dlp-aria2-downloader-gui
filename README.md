@@ -40,7 +40,7 @@ is **2.1.12**.
 
 The following commands must be installed and available in `PATH`:
 
-- Bash;
+- Bash **4.4 or newer**;
 - `yt-dlp` **2026.06.09 or newer**;
 - `aria2c` **1.37.0 or newer**;
 - FFmpeg and `ffprobe`;

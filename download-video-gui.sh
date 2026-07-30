@@ -25,6 +25,9 @@ readonly CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/yt-dlp-aria2-downloader
 readonly STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/yt-dlp-aria2-downloader"
 readonly CONFIG_FILE="${CONFIG_DIR}/gui.conf"
 readonly LOG_RETENTION_DAYS=15
+readonly PGID_WAIT_ATTEMPTS=50
+readonly WORKER_TERM_ATTEMPTS=30
+readonly WORKER_KILL_ATTEMPTS=20
 
 WORKER_PID=''
 WORKER_PGID=''
@@ -32,6 +35,23 @@ TEMP_DIR=''
 CLEANUP_DONE=false
 ZENITY_STATUS=0
 ZENITY_ERROR=''
+RUNTIME_TMPDIR=''
+WAITED_WORKER_STATUS=''
+
+resolve_runtime_tmpdir() {
+    local output_variable=$1
+    local candidate=${TMPDIR:-/tmp}
+
+    if [[ ! -d ${candidate} || ! -w ${candidate} || ! -x ${candidate} ]]; then
+        candidate=/tmp
+    fi
+    if [[ ! -d ${candidate} || ! -w ${candidate} || ! -x ${candidate} ]]; then
+        return 1
+    fi
+
+    printf -v "${output_variable}" '%s' "${candidate}" || return 1
+    return 0
+}
 
 show_error() {
     local message=$1
@@ -56,7 +76,7 @@ run_zenity_capture() {
 
     ZENITY_ERROR=''
 
-    error_file=$(mktemp --tmpdir="${TMPDIR:-/tmp}" zenity-error.XXXXXXXX) || {
+    error_file=$(mktemp --tmpdir="${RUNTIME_TMPDIR}" zenity-error.XXXXXXXX) || {
         ZENITY_STATUS=70
         ZENITY_ERROR='Unable to create the temporary Zenity diagnostic file.'
         printf -v "${output_variable}" '%s' ''
@@ -118,7 +138,9 @@ recover_worker_pgid() {
     local -a child_pids=()
 
     [[ -r ${children_file} ]] || return 1
-    children=$(<"${children_file}")
+    if ! { IFS= read -r children <"${children_file}" || [[ -n ${children} ]]; } 2>/dev/null; then
+        return 1
+    fi
     read -r -a child_pids <<<"${children}"
 
     for candidate in "${child_pids[@]}"; do
@@ -143,7 +165,9 @@ process_is_running() {
     # kill -0 also succeeds for a zombie. A zombie has already terminated and
     # must not keep the progress producer alive while Bash is waiting to reap it.
     if [[ -r /proc/${pid}/stat ]]; then
-        process_stat=$(<"/proc/${pid}/stat") || return 0
+        if ! { IFS= read -r process_stat <"/proc/${pid}/stat"; } 2>/dev/null; then
+            return 0
+        fi
         process_state=${process_stat##*) }
         process_state=${process_state%% *}
         [[ ${process_state} != Z && ${process_state} != X ]]
@@ -185,8 +209,10 @@ signal_worker_tree() {
     if [[ -n ${WORKER_PID} ]]; then
         children_file="/proc/${WORKER_PID}/task/${WORKER_PID}/children"
         if [[ -r ${children_file} ]]; then
-            children=$(<"${children_file}")
-            read -r -a child_pids <<<"${children}"
+            children=''
+            if { IFS= read -r children <"${children_file}" || [[ -n ${children} ]]; } 2>/dev/null; then
+                read -r -a child_pids <<<"${children}"
+            fi
         fi
     fi
 
@@ -226,21 +252,50 @@ signal_worker_tree() {
         kill "-${signal_name}" -- "${WORKER_PID}" 2>/dev/null || true
     fi
 }
-stop_worker() {
+wait_for_worker_exit() {
+    local attempts=$1
     local attempt
+    local status=0
 
-    # worker_tree_alive is a predicate: status 1 means nothing remains.
-    # shellcheck disable=SC2310
-    worker_tree_alive || return 0
-    signal_worker_tree TERM
-
-    for ((attempt = 0; attempt < 30; attempt++)); do
+    WAITED_WORKER_STATUS=''
+    for ((attempt = 0; attempt < attempts; attempt++)); do
+        # process_is_running returns false for a terminated zombie, at which
+        # point wait can reap the child without blocking.
         # shellcheck disable=SC2310
-        worker_tree_alive || return 0
+        if ! process_is_running "${WORKER_PID}"; then
+            set +e
+            wait "${WORKER_PID}" 2>/dev/null
+            status=$?
+            set -e
+            WAITED_WORKER_STATUS=${status}
+            WORKER_PID=''
+            WORKER_PGID=''
+            return 0
+        fi
         sleep 0.1
     done
 
+    return 1
+}
+
+stop_worker() {
+    # worker_tree_alive is a predicate: status 1 means nothing remains.
+    # shellcheck disable=SC2310
+    if ! worker_tree_alive; then
+        # shellcheck disable=SC2310
+        wait_for_worker_exit 1 || true
+        return 0
+    fi
+
+    signal_worker_tree TERM
+    # wait_for_worker_exit is a bounded predicate with explicit status handling.
+    # shellcheck disable=SC2310
+    if wait_for_worker_exit "${WORKER_TERM_ATTEMPTS}"; then
+        return 0
+    fi
+
     signal_worker_tree KILL
+    wait_for_worker_exit "${WORKER_KILL_ATTEMPTS}"
 }
 
 cleanup() {
@@ -256,9 +311,14 @@ cleanup() {
     fi
     CLEANUP_DONE=true
 
-    if [[ -n ${WORKER_PID} ]] && kill -0 "${WORKER_PID}" 2>/dev/null; then
-        stop_worker
-        wait "${WORKER_PID}" 2>/dev/null || true
+    if [[ -n ${WORKER_PID} ]] && kill -0 -- "${WORKER_PID}" 2>/dev/null; then
+        # stop_worker handles all expected failures explicitly.
+        # shellcheck disable=SC2310
+        if ! stop_worker; then
+            printf 'Warning: the worker did not terminate after SIGKILL; cleanup will continue.\n' >&2
+            WORKER_PID=''
+            WORKER_PGID=''
+        fi
     fi
 
     if [[ -n ${TEMP_DIR} && -d ${TEMP_DIR} ]]; then
@@ -558,10 +618,11 @@ wait_for_worker_pgid() {
     local attempt
     local candidate=''
 
-    for ((attempt = 0; attempt < 50; attempt++)); do
+    for ((attempt = 0; attempt < PGID_WAIT_ATTEMPTS; attempt++)); do
         if [[ -f ${pgid_file} ]]; then
-            candidate=$(<"${pgid_file}")
-            if [[ ${candidate} =~ ^[1-9][0-9]*$ ]] &&
+            candidate=''
+            if { IFS= read -r candidate <"${pgid_file}"; } 2>/dev/null &&
+                [[ ${candidate} =~ ^[1-9][0-9]*$ ]] &&
                 kill -0 -- "-${candidate}" 2>/dev/null; then
                 WORKER_PGID=${candidate}
                 return 0
@@ -589,7 +650,7 @@ wait_for_worker_pgid() {
     return 1
 }
 
-for command_name in bash chmod date dirname grep mkdir mktemp mv realpath rm setsid sleep stat stdbuf tail tr zenity; do
+for command_name in bash chmod date dirname grep mkdir mktemp mv realpath rm setsid sleep stat zenity; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         printf 'Error: required command "%s" was not found.\n' \
             "${command_name}" >&2
@@ -611,6 +672,14 @@ for required_option in --fork --wait; do
         exit 127
     fi
 done
+
+# resolve_runtime_tmpdir validates both the preferred and fallback paths.
+# shellcheck disable=SC2310
+if ! resolve_runtime_tmpdir RUNTIME_TMPDIR; then
+    printf '%s\n' 'Error: no usable temporary directory is available.' >&2
+    exit 1
+fi
+readonly RUNTIME_TMPDIR
 
 set +e
 resolve_script_dir SCRIPT_DIR
@@ -748,7 +817,7 @@ Path: ${STATE_DIR}"
 fi
 chmod 700 -- "${STATE_DIR}" 2>/dev/null || true
 prune_old_logs
-if ! TEMP_DIR=$(mktemp -d --tmpdir="${TMPDIR:-/tmp}" yt-dlp-gui.XXXXXXXX); then
+if ! TEMP_DIR=$(mktemp -d --tmpdir="${RUNTIME_TMPDIR}" yt-dlp-gui.XXXXXXXX); then
     show_error 'Unable to create the temporary working directory.'
     exit 1
 fi
@@ -820,9 +889,12 @@ wait_for_worker_pgid "${PGID_FILE}" "${WORKER_PID}"
 pgid_status=$?
 set -e
 if ((pgid_status != 0)); then
-    stop_worker
-    wait "${WORKER_PID}" 2>/dev/null || true
-    WORKER_PID=''
+    # shellcheck disable=SC2310
+    if ! stop_worker; then
+        printf 'Warning: the failed worker could not be reaped after SIGKILL.\n' >&2
+        WORKER_PID=''
+        WORKER_PGID=''
+    fi
     show_error "The download could not start."$'\n\n'"Log: ${LOG_FILE}"
     exit 1
 fi
@@ -838,17 +910,31 @@ monitor_progress "${LOG_FILE}" "${WORKER_PID}" "${RESULT_FILE}" "${PROGRESS_PROF
 pipeline_status=("${PIPESTATUS[@]}")
 set -e
 
-# The monitor handles a closed Zenity input pipe as a normal exit. Only
-# Zenity's status determines cancellation, timeout, or dialog error.
+# A closed Zenity input pipe is a normal monitor exit. Any other non-zero
+# monitor status is a technical failure and must not be hidden by Zenity's EOF.
+monitor_status=${pipeline_status[0]:-1}
 zenity_status=${pipeline_status[1]:-1}
 worker_status=''
+if ((monitor_status != 0)); then
+    # shellcheck disable=SC2310
+    if ! stop_worker; then
+        printf 'Warning: the worker could not be reaped after a monitor failure.\n' >&2
+        WORKER_PID=''
+        WORKER_PGID=''
+    fi
+    show_error "The progress monitor failed with status ${monitor_status}."$'\n\n'"Log: ${LOG_FILE}"
+    exit 1
+fi
 if ((zenity_status != 0)); then
-    stop_worker
-    set +e
-    wait "${WORKER_PID}"
-    worker_status=$?
-    set -e
-    WORKER_PID=''
+    # shellcheck disable=SC2310
+    if stop_worker; then
+        worker_status=${WAITED_WORKER_STATUS:-143}
+    else
+        printf 'Warning: the canceled worker did not terminate after SIGKILL.\n' >&2
+        worker_status=143
+        WORKER_PID=''
+        WORKER_PGID=''
+    fi
 
     # If the worker completed successfully just before the Cancel response was
     # processed, report the completed file instead of a misleading cancellation.
@@ -871,11 +957,19 @@ if ((zenity_status != 0)); then
 fi
 
 if [[ -z ${worker_status} ]]; then
-    set +e
-    wait "${WORKER_PID}"
-    worker_status=$?
-    set -e
-    WORKER_PID=''
+    # shellcheck disable=SC2310
+    if wait_for_worker_exit 100; then
+        worker_status=${WAITED_WORKER_STATUS}
+    else
+        # shellcheck disable=SC2310
+        if ! stop_worker; then
+            printf 'Warning: the worker did not terminate after the progress dialog closed.\n' >&2
+            WORKER_PID=''
+            WORKER_PGID=''
+        fi
+        show_error "The worker did not terminate cleanly."$'\n\n'"Log: ${LOG_FILE}"
+        exit 1
+    fi
 fi
 
 if ((worker_status == 0)); then
@@ -889,18 +983,30 @@ if ((worker_status == 0)); then
         done <"${RESULT_FILE}"
     fi
 
-    success_text='The download is complete.'
-    log_notice=''
-    if [[ -n ${final_path} && -f ${final_path} ]]; then
-        success_text+=$'\n\nFile: '
-        success_text+="${final_path}"
+    resolved_final_path=''
+    if [[ -n ${final_path} ]]; then
+        resolved_final_path=$(realpath -e -- "${final_path}" 2>/dev/null || true)
+    fi
 
-        if ! rm -f -- "${LOG_FILE}"; then
-            log_notice=$'\n\nWarning: the successful-download log could not be deleted.\nLog: '
-            log_notice+="${LOG_FILE}"
+    result_is_valid=false
+    if [[ -n ${resolved_final_path} && -f ${resolved_final_path} ]]; then
+        if [[ ${OUTPUT_DIR} == / || ${resolved_final_path} == "${OUTPUT_DIR}"/* ]]; then
+            result_is_valid=true
+            final_path=${resolved_final_path}
         fi
-    else
-        log_notice=$'\n\nWarning: the final media file could not be confirmed.\nThe diagnostic log was retained: '
+    fi
+
+    if [[ ${result_is_valid} != true ]]; then
+        show_error "The downloader completed, but the final media file could not be confirmed inside the selected destination folder."$'\n\n'"Log: ${LOG_FILE}"
+        exit 1
+    fi
+
+    success_text='The download is complete.'
+    success_text+=$'\n\nFile: '
+    success_text+="${final_path}"
+    log_notice=''
+    if ! rm -f -- "${LOG_FILE}"; then
+        log_notice=$'\n\nWarning: the successful-download log could not be deleted.\nLog: '
         log_notice+="${LOG_FILE}"
     fi
     success_text+="${log_notice}"

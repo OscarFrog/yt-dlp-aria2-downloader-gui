@@ -8,7 +8,7 @@ readonly PROJECT_DIR
 # shellcheck disable=SC1090
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 
-for required_command in bash grep head mkdir mktemp rm sleep sort stdbuf tail timeout tr wc; do
+for required_command in bash grep head mkdir mktemp rm sleep sort tail timeout wc; do
     require_test_command "${required_command}"
 done
 
@@ -21,18 +21,103 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Per-scenario state shared by start_scenario and finish_*.
+SCENARIO_DIR=''
+LOG_FILE=''
+RESULT_FILE=''
+CAPTURE_FILE=''
 ACTIVE_WORKER=''
 ACTIVE_MONITOR=''
+WAITED_PROCESS_STATUS=''
+
+process_is_running() {
+    local pid=$1
+    local process_stat=''
+    local process_state=''
+
+    [[ ${pid} =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 -- "${pid}" 2>/dev/null || return 1
+    if [[ -r /proc/${pid}/stat ]]; then
+        if ! { IFS= read -r process_stat <"/proc/${pid}/stat"; } 2>/dev/null; then
+            return 0
+        fi
+        process_state=${process_stat##*) }
+        process_state=${process_state%% *}
+        [[ ${process_state} != Z && ${process_state} != X ]]
+        return
+    fi
+    return 0
+}
+
+wait_for_process_exit() {
+    local pid=$1
+    local label=$2
+    local attempts=${3:-300}
+    local attempt
+    local status=0
+
+    WAITED_PROCESS_STATUS=''
+    for ((attempt = 0; attempt < attempts; attempt++)); do
+        # shellcheck disable=SC2310 # Predicate failure means the child exited.
+        if ! process_is_running "${pid}"; then
+            wait "${pid}" 2>/dev/null || status=$?
+            WAITED_PROCESS_STATUS=${status}
+            return 0
+        fi
+        sleep 0.05
+    done
+
+    kill -TERM -- "${pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 20; attempt++)); do
+        # shellcheck disable=SC2310
+        if ! process_is_running "${pid}"; then
+            wait "${pid}" 2>/dev/null || true
+            fail "${label}: process timed out and required SIGTERM"
+        fi
+        sleep 0.05
+    done
+    kill -KILL -- "${pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 20; attempt++)); do
+        # shellcheck disable=SC2310
+        if ! process_is_running "${pid}"; then
+            wait "${pid}" 2>/dev/null || true
+            fail "${label}: process timed out and required SIGKILL"
+        fi
+        sleep 0.05
+    done
+    fail "${label}: process did not exit after SIGKILL"
+}
+
+stop_process_bounded() {
+    local pid=$1
+    local attempt
+
+    [[ ${pid} =~ ^[1-9][0-9]*$ ]] || return 0
+    kill -TERM -- "${pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 20; attempt++)); do
+        # shellcheck disable=SC2310
+        process_is_running "${pid}" || { wait "${pid}" 2>/dev/null || true; return 0; }
+        sleep 0.05
+    done
+    kill -KILL -- "${pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 20; attempt++)); do
+        # shellcheck disable=SC2310
+        if ! process_is_running "${pid}"; then
+            wait "${pid}" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.05
+    done
+    return 0
+}
 
 stop_active_processes() {
     if [[ -n ${ACTIVE_MONITOR} ]]; then
-        kill -- "${ACTIVE_MONITOR}" 2>/dev/null || true
-        wait "${ACTIVE_MONITOR}" 2>/dev/null || true
+        stop_process_bounded "${ACTIVE_MONITOR}"
         ACTIVE_MONITOR=''
     fi
     if [[ -n ${ACTIVE_WORKER} ]]; then
-        kill -- "${ACTIVE_WORKER}" 2>/dev/null || true
-        wait "${ACTIVE_WORKER}" 2>/dev/null || true
+        stop_process_bounded "${ACTIVE_WORKER}"
         ACTIVE_WORKER=''
     fi
 }
@@ -42,15 +127,36 @@ wait_for_text() {
     local file=$1
     local text=$2
     local label=$3
+    local attempts=${4:-300}
     local attempt
+    local diagnostic=''
 
-    for ((attempt = 0; attempt < 100; attempt++)); do
+    for ((attempt = 0; attempt < attempts; attempt++)); do
         if [[ -r ${file} ]] && grep -Fq -- "${text}" "${file}"; then
             return 0
         fi
         sleep 0.05
     done
-    fail "${label}: timed out waiting for '${text}' in ${file}"
+    diagnostic=$(tail -n 50 -- "${file}" 2>/dev/null || true)
+    fail "${label}: timed out waiting for '${text}' in ${file}"$'\n'"${diagnostic}"
+}
+
+wait_for_numeric_occurrences() {
+    local file=$1
+    local value=$2
+    local expected=$3
+    local label=$4
+    local attempt
+    local count=0
+
+    for ((attempt = 0; attempt < 300; attempt++)); do
+        count=$(grep -Fxc -- "${value}" "${file}" 2>/dev/null || true)
+        if [[ ${count} =~ ^[0-9]+$ ]] && ((count >= expected)); then
+            return 0
+        fi
+        sleep 0.05
+    done
+    fail "${label}: expected ${expected} occurrences of ${value}; found ${count}"
 }
 
 start_scenario() {
@@ -65,7 +171,7 @@ start_scenario() {
     : >"${LOG_FILE}"
     : >"${CAPTURE_FILE}"
 
-    sleep 30 &
+    sleep 300 &
     ACTIVE_WORKER=$!
     bash "${MONITOR}" \
         "${LOG_FILE}" "${ACTIVE_WORKER}" "${RESULT_FILE}" "${profile}" \
@@ -82,10 +188,10 @@ finish_success() {
 
     : >"${final_path}"
     printf '%s\n' "${final_path}" >"${RESULT_FILE}"
-    kill -- "${ACTIVE_WORKER}" 2>/dev/null || true
-    wait "${ACTIVE_WORKER}" 2>/dev/null || true
+    stop_process_bounded "${ACTIVE_WORKER}"
     ACTIVE_WORKER=''
-    wait "${ACTIVE_MONITOR}" || monitor_status=$?
+    wait_for_process_exit "${ACTIVE_MONITOR}" 'successful monitor exit'
+    monitor_status=${WAITED_PROCESS_STATUS}
     ACTIVE_MONITOR=''
     assert_equals '0' "${monitor_status}" 'successful monitor exit status'
     assert_file_has_line "${CAPTURE_FILE}" '100' 'successful progress reaches 100%'
@@ -96,10 +202,10 @@ finish_success() {
 finish_failure() {
     local monitor_status=0
 
-    kill -- "${ACTIVE_WORKER}" 2>/dev/null || true
-    wait "${ACTIVE_WORKER}" 2>/dev/null || true
+    stop_process_bounded "${ACTIVE_WORKER}"
     ACTIVE_WORKER=''
-    wait "${ACTIVE_MONITOR}" || monitor_status=$?
+    wait_for_process_exit "${ACTIVE_MONITOR}" 'incomplete monitor exit'
+    monitor_status=${WAITED_PROCESS_STATUS}
     ACTIVE_MONITOR=''
     assert_equals '0' "${monitor_status}" 'incomplete monitor exit status'
     assert_file_has_no_line "${CAPTURE_FILE}" '100' 'failed progress never reaches 100%'
@@ -142,8 +248,9 @@ pipe_log="${pipe_scenario_dir}/download.log"
 pipe_result="${pipe_scenario_dir}/result.txt"
 mkdir -p -- "${pipe_scenario_dir}"
 : >"${pipe_log}"
-sleep 30 &
-pipe_worker=$!
+sleep 300 &
+ACTIVE_WORKER=$!
+pipe_worker=${ACTIVE_WORKER}
 pipe_status=0
 set +e
 # The positional parameters are intentionally expanded by the inner Bash.
@@ -154,9 +261,46 @@ timeout --signal=TERM --kill-after=1s 5s \
     ' bash "${MONITOR}" "${pipe_log}" "${pipe_worker}" "${pipe_result}"
 pipe_status=$?
 set -e
-kill -- "${pipe_worker}" 2>/dev/null || true
-wait "${pipe_worker}" 2>/dev/null || true
-assert_equals '0' "${pipe_status}" 'closed progress pipe exits normally'
+stop_process_bounded "${pipe_worker}"
+ACTIVE_WORKER=''
+assert_equals '0' "${pipe_status}" \
+    "closed progress pipe exits normally (status ${pipe_status})"
+
+# A partial record must be retained until its terminating newline arrives.
+start_scenario partial-progress-record audio
+printf '%s' 'YTDLP_PROGRESS_V2|media|251|downloa' >>"${LOG_FILE}"
+sleep 0.6
+printf '%s\n' 'ding|250|1000|0|0|0|25.0%|500KiB/s|00:06' >>"${LOG_FILE}"
+wait_for_text "${CAPTURE_FILE}" 'Downloading the audio track - 25%' \
+    'partial progress record is reconstructed'
+finish_success '/tmp/partial-record.webm'
+
+# Removing the log path while the worker is alive must not create a busy loop.
+# The already-open descriptor remains safe, but no new records can arrive.
+start_scenario reader-unavailable video
+wait_for_text "${CAPTURE_FILE}" 'Analyzing the webpage...' \
+    'reader opens the progress log before its path is removed'
+rm -f -- "${LOG_FILE}"
+wait_for_text "${CAPTURE_FILE}" \
+    'Progress information is unavailable; the download continues...' \
+    'missing progress log diagnostic'
+sleep 1
+reader_value_count=$(grep -Ec '^[0-9]+$' "${CAPTURE_FILE}" || true)
+[[ ${reader_value_count} =~ ^[0-9]+$ ]] || reader_value_count=0
+((reader_value_count <= 8)) || \
+    fail "missing progress log produced an unbounded loop: ${reader_value_count} values"
+finish_failure
+
+# Records appended immediately before worker exit must be drained from the
+# regular log file before the monitor performs final result verification.
+start_scenario final-log-drain video
+printf '%s\n' \
+    'YTDLP_PLAN|media|22|22|' \
+    'YTDLP_PROGRESS_V2|media|22|downloading|750|1000|0|0|0|75.0%|2MiB/s|00:01' \
+    >>"${LOG_FILE}"
+finish_success '/tmp/final-log-drain.mkv'
+assert_file_contains "${CAPTURE_FILE}" 'Downloading the media - 75%' \
+    'final log bytes are drained after worker exit'
 
 # Direct video transfer handled by aria2c.
 start_scenario direct-aria-video video
@@ -237,7 +381,8 @@ printf '%s\n' \
     >>"${LOG_FILE}"
 wait_for_text "${CAPTURE_FILE}" 'Downloading the media - size unknown' \
     'unknown-size monotonic phase'
-sleep 2
+wait_for_numeric_occurrences "${CAPTURE_FILE}" 7 1 \
+    'unknown-size progress reaches its bounded plateau'
 finish_success '/tmp/unknown-size.mkv'
 
 # A long remux must move only forward through the post-processing envelope.
@@ -252,7 +397,8 @@ printf '%s\n' \
 wait_for_text "${CAPTURE_FILE}" \
     'Remuxing the media into an MKV container...' \
     'long remux monotonic phase'
-sleep 5
+wait_for_numeric_occurrences "${CAPTURE_FILE}" 98 3 \
+    'post-processing progress remains at its upper plateau'
 finish_success '/tmp/postprocess-monotonic.mkv'
 
 # Fragmented DASH with an estimated size.
@@ -341,7 +487,9 @@ printf '%s\n' 'YTDLP_PLAN|media|18|18|' >>"${LOG_FILE}"
 printf '\r[#c0ffee 4MiB/0B CN:8 DL:1MiB]\r' >>"${LOG_FILE}"
 wait_for_text "${CAPTURE_FILE}" 'size unknown (aria2c)' 'unknown-size fallback'
 sleep 0.8
-unknown_values=$(grep -E '^[0-9]+$' "${CAPTURE_FILE}" | sort -u | wc -l)
+unknown_values=$(grep -E '^[0-9]+$' "${CAPTURE_FILE}" | sort -u | wc -l) || \
+    unknown_values=0
+[[ ${unknown_values} =~ ^[0-9]+$ ]] || unknown_values=0
 ((unknown_values >= 2)) || fail 'unknown-size progress must remain animated'
 finish_success '/tmp/unknown.mkv'
 

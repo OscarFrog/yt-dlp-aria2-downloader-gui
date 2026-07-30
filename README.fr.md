@@ -42,7 +42,7 @@ téléchargeur natif de yt-dlp. La version actuelle est la **2.1.12**.
 
 Les commandes suivantes doivent être installées et disponibles dans `PATH` :
 
-- Bash ;
+- Bash **4.4 ou plus récent** ;
 - `yt-dlp` **2026.06.09 ou plus récent** ;
 - `aria2c` **1.37.0 ou plus récent** ;
 - FFmpeg et `ffprobe` ;

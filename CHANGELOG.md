@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Reliability and data safety
+
+- Read the progress log directly and preserve partial records, eliminating the
+  asynchronous reader pipeline and preventing busy loops at end of input.
+- Refuse to overwrite an existing machine result file or a pre-existing final
+  HLS MKV, and emit symmetric remux completion/error records.
+- Bound GUI worker shutdown, protect procfs/PGID reads against races, validate
+  that reported results remain inside the selected destination, and surface
+  technical progress-monitor failures.
+- Strengthen integration tests with bounded process waits, fragmented-record
+  coverage, result-collision checks, and deterministic monotonic-progress
+  assertions.
+
 ## 2.1.12 - 2026-07-29
 
 ### Unified download progress

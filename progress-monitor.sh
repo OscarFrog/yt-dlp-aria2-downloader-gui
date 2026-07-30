@@ -48,8 +48,8 @@ video | audio) ;;
     exit 2
     ;;
 esac
-if [[ ! -f ${LOG_FILE} ]]; then
-    printf 'Error: progress log does not exist: %s\n' "${LOG_FILE}" >&2
+if [[ ! -f ${LOG_FILE} || ! -r ${LOG_FILE} ]]; then
+    printf 'Error: progress log is missing or unreadable: %s\n' "${LOG_FILE}" >&2
     exit 66
 fi
 
@@ -60,7 +60,9 @@ process_is_running() {
 
     kill -0 -- "${pid}" 2>/dev/null || return 1
     if [[ -r /proc/${pid}/stat ]]; then
-        process_stat=$(<"/proc/${pid}/stat") || return 0
+        if ! { IFS= read -r process_stat <"/proc/${pid}/stat"; } 2>/dev/null; then
+            return 0
+        fi
         process_state=${process_stat##*) }
         process_state=${process_state%% *}
         [[ ${process_state} != Z && ${process_state} != X ]]
@@ -662,35 +664,75 @@ render_tick() {
     emit_progress "${display_percent}" "${message}"
 }
 
-# Read each appended record once. aria2c refreshes with carriage returns, so
-# normalize CR and LF to one line-oriented event stream. --pid makes tail stop
-# after the worker exits while still allowing its last buffered records through.
-# The reader pipeline is intentionally attached to FD 3.
-# shellcheck disable=SC2312
-exec 3< <(tail --pid="${WORKER_PID}" -n +1 -F -- "${LOG_FILE}" 2>/dev/null |
-    stdbuf -oL tr '\r' '\n')
+# Read the regular log file directly through a persistent descriptor. Bash's
+# read -N returns all bytes currently available at EOF, including a partial
+# record, so no asynchronous tail/tr pipeline or timed-read fragment can be
+# lost. Carriage-return console updates are normalized in memory.
+if ! exec 3<"${LOG_FILE}"; then
+    printf 'Error: unable to open progress log: %s\n' "${LOG_FILE}" >&2
+    exit 66
+fi
 
-reader_eof=false
-while [[ ${reader_eof} == false ]]; do
-    line=''
-    if IFS= read -r -t 0.4 line <&3; then
+pending_data=''
+consume_log_data() {
+    local chunk=$1
+    local line
+
+    pending_data+=${chunk}
+    pending_data=${pending_data//$'\r'/$'\n'}
+    while [[ ${pending_data} == *$'\n'* ]]; do
+        line=${pending_data%%$'\n'*}
+        pending_data=${pending_data#*$'\n'}
         process_line "${line}"
-    else
-        read_status=$?
-        if ((read_status == 1)); then
-            reader_eof=true
-        fi
+    done
+}
+
+while true; do
+    chunk=''
+    read_status=0
+    IFS= read -r -N 65536 chunk <&3 || read_status=$?
+    if [[ -n ${chunk} ]]; then
+        consume_log_data "${chunk}"
     fi
 
-    # Liveness is a predicate; status 1 means the worker ended.
-    # shellcheck disable=SC2310
-    if [[ ${reader_eof} == true ]] && process_is_running "${WORKER_PID}"; then
-        reader_eof=false
+    # A regular file reports status 1 at its current EOF. That is expected
+    # while the worker is still appending; poll at a bounded rate rather than
+    # spinning. Any other read failure is surfaced but does not abort the
+    # download worker.
+    if ((read_status != 0 && read_status != 1)); then
+        message='Progress information is unavailable; the download continues...'
+    elif [[ ! -r ${LOG_FILE} ]]; then
+        message='Progress information is unavailable; the download continues...'
     fi
+
+    # process_is_running is deliberately used as a liveness predicate.
+    # shellcheck disable=SC2310
+    if ! process_is_running "${WORKER_PID}"; then
+        # The worker has stopped, but it may have appended bytes after the read
+        # at the top of this iteration. Drain the regular file to its final EOF
+        # before processing a last unterminated record.
+        while true; do
+            chunk=''
+            IFS= read -r -N 65536 chunk <&3 || true
+            [[ -n ${chunk} ]] || break
+            consume_log_data "${chunk}"
+        done
+        if [[ -n ${pending_data} ]]; then
+            process_line "${pending_data}"
+            pending_data=''
+        fi
+        # A closed Zenity pipe ends the monitor normally.
+        # shellcheck disable=SC2310
+        render_tick || exit 0
+        break
+    fi
+
     # A closed Zenity pipe ends the monitor normally.
     # shellcheck disable=SC2310
     render_tick || exit 0
-
+    if [[ -z ${chunk} ]]; then
+        sleep 0.4
+    fi
 done
 
 # The atomic result file is necessary but not sufficient: confirm that its

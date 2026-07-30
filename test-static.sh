@@ -148,8 +148,11 @@ assert_file_contains "${script_dir}/download-video-gui.sh" \
     "bash \"\${PROGRESS_MONITOR}\"" \
     'GUI delegates progress parsing to the unified monitor'
 assert_file_contains "${script_dir}/progress-monitor.sh" \
-    "tail --pid=\"\${WORKER_PID}\"" \
-    'progress log is consumed incrementally until worker exit'
+    'IFS= read -r -N 65536 chunk <&3' \
+    'progress log is consumed incrementally without an asynchronous reader pipeline'
+assert_file_contains "${script_dir}/progress-monitor.sh" \
+    "pending_data+=\${chunk}" \
+    'partial progress records are retained across reads'
 assert_file_contains "${script_dir}/progress-monitor.sh" \
     "emit_progress 100 'Download complete.'" \
     '100 percent is emitted only by final result verification'
@@ -159,6 +162,18 @@ assert_file_contains "${script_dir}/progress-monitor.sh" \
 assert_file_contains "${script_dir}/download-video.sh" \
     'normalize_path_record() {' \
     'final result path record normalization'
+assert_file_contains "${script_dir}/download-video.sh" \
+    'the result-file already exists; refusing to overwrite it.' \
+    'existing result files are protected'
+assert_file_contains "${script_dir}/download-video.sh" \
+    'the final MKV already exists; refusing to overwrite it:' \
+    'existing HLS MKV files are protected'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    "monitor_status=\${pipeline_status[0]:-1}" \
+    'technical progress-monitor status is checked'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    'final media file could not be confirmed inside the selected destination folder' \
+    'GUI result path is constrained to the selected destination'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     '^v[0-9]+\.[0-9]+\.[0-9]+$' \
     'strict semantic release tag validation'
