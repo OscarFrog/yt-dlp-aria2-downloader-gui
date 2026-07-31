@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.1.13 - 2026-07-31
+
+### Interface and progress
+
+- Increase the profile-selection dialog to 620 by 305 pixels and the progress
+  dialog width to 700 pixels.
+- Keep every percentage sent to Zenity monotonic during webpage analysis,
+  unknown-size transfers, and long post-processing operations.
+
+### Reliability and data safety
+
+- Read the progress log directly and preserve partial records, eliminating the
+  asynchronous reader pipeline and preventing busy loops at end of input.
+- Refuse to overwrite an existing machine result file or a pre-existing final
+  HLS MKV, and emit symmetric remux completion/error records.
+- Bound GUI worker shutdown, protect procfs and PGID reads against races,
+  validate that reported results remain inside the selected destination, and
+  surface technical progress-monitor failures.
+- Strengthen integration tests with bounded process waits, fragmented-record
+  coverage, result-collision checks, and deterministic monotonic-progress
+  assertions.
+- Isolate the procfs visibility probe from the suite cleanup trap so a
+  terminated probe cannot remove the complete integration-test root.
+
 ## 2.1.12 - 2026-07-29
 
 ### Unified download progress

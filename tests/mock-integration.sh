@@ -8,7 +8,7 @@ readonly PROJECT_DIR
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 for required_command in \
     awk bash cat chmod date dirname env grep ln mkdir mktemp mv readlink \
-    realpath rm setsid sleep stat stdbuf tail timeout touch tr; do
+    realpath rm setsid sleep stat timeout touch tr; do
     require_test_command "${required_command}"
 done
 [[ -r /proc/self/cmdline ]] ||
@@ -151,6 +151,9 @@ if [[ ${youtube_hls_mode} == true ]]; then
     printf 'YTDLP_POSTPROCESS|started|FixupM3u8\n'
 else
     output_path="${MOCK_OUTPUT_DIR}/Mock media [abc123].webm"
+fi
+if [[ ${MOCK_RESULT_OUTSIDE_OUTPUT:-0} == 1 ]]; then
+    output_path=${MOCK_OUTSIDE_RESULT_PATH:?}
 fi
 if [[ ${MOCK_YTDLP_EXIT_STATUS:-0} != 0 ]]; then
     if [[ ${MOCK_WRITE_RESULT_BEFORE_FAILURE:-0} == 1 && -n ${result_file} ]]; then
@@ -502,6 +505,31 @@ wait_for_file() {
     fail "${label}: file did not appear within ${timeout}s: ${path}"
 }
 
+proc_children_fallback_is_observable() {
+    local probe_pid
+    local children_file="/proc/${BASHPID}/task/${BASHPID}/children"
+    local children=''
+
+    (
+        # This asynchronous probe must not inherit the test suite's EXIT trap.
+        # Otherwise, terminating the probe removes the complete TEST_ROOT.
+        trap - EXIT HUP INT TERM
+        exec sleep 5
+    ) &
+    probe_pid=$!
+    if [[ -r ${children_file} ]] &&
+        { IFS= read -r children <"${children_file}" || [[ -n ${children} ]]; } &&
+        [[ " ${children} " == *" ${probe_pid} "* ]]; then
+        kill -TERM -- "${probe_pid}" 2>/dev/null || true
+        wait "${probe_pid}" 2>/dev/null || true
+        return 0
+    fi
+
+    kill -TERM -- "${probe_pid}" 2>/dev/null || true
+    wait "${probe_pid}" 2>/dev/null || true
+    return 1
+}
+
 find_test_processes() {
     local cmdline_file
     local pid
@@ -745,7 +773,7 @@ assert_status 0 'authenticated YouTube HLS engine invocation' \
     env MOCK_FFMPEG_ARG_LOG="${youtube_hls_ffmpeg_args}" \
     "${PROJECT_DIR}/download-video.sh" \
     --output-dir "${OUTPUT_DIR}" --mode video \
-    --youtube-hls-firefox \
+    --youtube-hls-firefox --machine-progress \
     --result-file "${youtube_hls_result}" \
     -- 'https://www.youtube.com/watch?v=youtube-hls'
 # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
@@ -768,6 +796,9 @@ assert_array_not_contains youtube_hls_arguments '--merge-output-format' \
 assert_file_has_line "${youtube_hls_result}" \
     "${OUTPUT_DIR}/Mock media [abc123].mkv" \
     'YouTube HLS result publishes the final MKV path'
+assert_text_contains "${ASSERT_OUTPUT}" \
+    'YTDLP_POSTPROCESS|finished|FFmpegVideoRemuxer' \
+    'YouTube HLS remux emits a finished machine record'
 [[ -f "${OUTPUT_DIR}/Mock media [abc123].mkv" ]] ||
     fail 'The custom YouTube HLS remux did not create the MKV file.'
 [[ ! -e "${OUTPUT_DIR}/Mock media [abc123].mp4" ]] ||
@@ -781,15 +812,39 @@ assert_array_contains youtube_hls_ffmpeg_arguments \
     "${OUTPUT_DIR}/Mock media [abc123].mp4" \
     'YouTube HLS remux reads the fixed MP4 intermediate'
 
+hls_existing_target="${OUTPUT_DIR}/Mock media [abc123].mkv"
+printf 'preserve existing MKV\n' >"${hls_existing_target}"
+hls_collision_result="${TEST_ROOT}/youtube-hls-collision-result.txt"
+prepare_argument_log 'youtube-hls-existing-target'
+assert_status 13 'YouTube HLS refuses to overwrite an existing MKV' \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode video \
+    --youtube-hls-firefox \
+    --result-file "${hls_collision_result}" \
+    -- 'https://www.youtube.com/watch?v=youtube-hls-collision'
+assert_file_has_line "${hls_existing_target}" 'preserve existing MKV' \
+    'existing YouTube HLS MKV is preserved'
+assert_text_contains "${ASSERT_OUTPUT}" \
+    'final MKV already exists; refusing to overwrite it' \
+    'existing YouTube HLS MKV diagnostic'
+[[ ! -e ${hls_collision_result} ]] ||
+    fail 'An HLS target collision published a result file.'
+[[ -f "${OUTPUT_DIR}/Mock media [abc123].mp4" ]] ||
+    fail 'An HLS target collision did not retain the repaired MP4.'
+rm -f -- "${hls_existing_target}" "${OUTPUT_DIR}/Mock media [abc123].mp4"
+
 prepare_argument_log 'youtube-hls-remux-failure'
 youtube_hls_failed_result="${TEST_ROOT}/youtube-hls-failed-result.txt"
 assert_status 9 'YouTube HLS remux failure is propagated' \
     env MOCK_FFMPEG_EXIT_STATUS=9 \
     "${PROJECT_DIR}/download-video.sh" \
     --output-dir "${OUTPUT_DIR}" --mode video \
-    --youtube-hls-firefox \
+    --youtube-hls-firefox --machine-progress \
     --result-file "${youtube_hls_failed_result}" \
     -- 'https://www.youtube.com/watch?v=youtube-hls-failure'
+assert_text_contains "${ASSERT_OUTPUT}" \
+    'YTDLP_POSTPROCESS|error|FFmpegVideoRemuxer' \
+    'YouTube HLS remux failure emits an error machine record'
 [[ ! -e ${youtube_hls_failed_result} ]] ||
     fail 'A failed YouTube HLS remux published a result file.'
 [[ -f "${OUTPUT_DIR}/Mock media [abc123].mp4" ]] ||
@@ -807,6 +862,7 @@ youtube_hls_path_files=("${OUTPUT_DIR}"/.yt-dlp-path.*)
 shopt -u nullglob
 ((${#youtube_hls_path_files[@]} == 0)) ||
     fail 'The YouTube HLS CLI run left an internal result-path file.'
+rm -f -- "${OUTPUT_DIR}/Mock media [abc123].mkv"
 
 assert_status 2 'YouTube HLS profile rejects audio mode' \
     "${PROJECT_DIR}/download-video.sh" \
@@ -835,6 +891,7 @@ assert_text_contains "${ASSERT_OUTPUT}" 'destination directory does not exist' \
 
 assert_status 13 'missing result-file parent is rejected' \
     "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" \
     --result-file "${TEST_ROOT}/missing-parent/result.txt" \
     -- 'https://example.com/watch?v=bad-result-parent'
 assert_text_contains "${ASSERT_OUTPUT}" 'result-file directory is not writable' \
@@ -842,14 +899,28 @@ assert_text_contains "${ASSERT_OUTPUT}" 'result-file directory is not writable' 
 
 assert_status 2 'result-file line breaks are rejected' \
     "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" \
     --result-file "${TEST_ROOT}/bad"$'\n'"result.txt" \
     -- 'https://example.com/watch?v=bad-result-linebreak'
 assert_text_contains "${ASSERT_OUTPUT}" \
     'result-file path must not contain line breaks' \
     'result-file line-break diagnostic'
 
+existing_result_file="${TEST_ROOT}/existing-result.txt"
+printf 'preserve this result\n' >"${existing_result_file}"
+prepare_argument_log 'existing-result-refusal'
+assert_status 13 'an existing result file is never overwritten' \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" \
+    --result-file "${existing_result_file}" \
+    -- 'https://example.com/watch?v=existing-result'
+assert_file_has_line "${existing_result_file}" 'preserve this result' \
+    'existing result content is preserved'
+assert_text_contains "${ASSERT_OUTPUT}" \
+    'result-file already exists; refusing to overwrite it' \
+    'existing result refusal diagnostic'
+
 atomic_result_file="${TEST_ROOT}/atomic-result.txt"
-printf 'stale result\n' >"${atomic_result_file}"
 prepare_argument_log 'atomic-result-failure'
 assert_status 7 'failed engine run does not publish a result path' \
     env MOCK_YTDLP_EXIT_STATUS=7 MOCK_WRITE_RESULT_BEFORE_FAILURE=1 \
@@ -858,7 +929,7 @@ assert_status 7 'failed engine run does not publish a result path' \
     --result-file "${atomic_result_file}" \
     -- 'https://example.com/watch?v=atomic-result'
 [[ ! -e ${atomic_result_file} ]] ||
-    fail 'A failed engine run left a stale or partial result file.'
+    fail 'A failed engine run published a stale or partial result file.'
 
 # GUI progress from aria2c, including an unknown total size.
 trimmed_gui_url='https://example.com/watch?v=trimmed'
@@ -943,6 +1014,7 @@ assert_option_value youtube_hls_gui_arguments '--extractor-args' \
     'youtube:player_client=web_safari' 'GUI YouTube HLS player client'
 assert_option_value youtube_hls_gui_arguments '--format' \
     '(bv*+ba/b)[protocol^=m3u8]' 'GUI YouTube HLS format selector'
+rm -f -- "${OUTPUT_DIR}/Mock media [abc123].mkv"
 config_file="${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf"
 assert_file_has_line "${config_file}" 'profile=youtube-hls' \
     'saved GUI YouTube HLS profile'
@@ -956,6 +1028,7 @@ youtube_hls_default_arguments=()
 read_arguments "${MOCK_ARG_LOG}" youtube_hls_default_arguments
 assert_option_value youtube_hls_default_arguments '--cookies-from-browser' 'firefox' \
     'persisted GUI YouTube HLS profile'
+rm -f -- "${OUTPUT_DIR}/Mock media [abc123].mkv"
 
 # Post-processing progress must never regress.
 prepare_argument_log 'gui-late-progress'
@@ -1072,6 +1145,20 @@ done
 [[ ${log_record_found} == true ]] ||
     fail 'No retained inconsistent-run log contains the post-processing record.'
 
+outside_result_path="${TEST_ROOT}/outside-result.webm"
+logs_before=$(count_logs)
+prepare_argument_log 'result-outside-output-dir'
+assert_status 1 'GUI rejects a result outside the selected destination folder' \
+    env MOCK_RESULT_OUTSIDE_OUTPUT=1 \
+    MOCK_OUTSIDE_RESULT_PATH="${outside_result_path}" \
+    "${PROJECT_DIR}/download-video-gui.sh"
+logs_after=$(count_logs)
+assert_equals "$((logs_before + 1))" "${logs_after}" \
+    'an outside-directory result retains one diagnostic log'
+[[ -f ${outside_result_path} ]] ||
+    fail 'The outside-directory mock result was not created.'
+rm -f -- "${outside_result_path}"
+
 logs_before=$(count_logs)
 prepare_argument_log 'failed-download'
 assert_status 7 'failed GUI download status is propagated' \
@@ -1118,16 +1205,24 @@ wait_for_file "${termination_marker}" 10 'worker group receives TERM'
 assert_no_test_processes 'ordinary cancellation left worker processes'
 
 # Delayed PGID-file publication must still leave the GUI in control of the
-# setsid child group through the Linux /proc fallback.
-pgid_delay_marker="${TEST_ROOT}/pgid-delay-terminated"
-prepare_argument_log 'delayed-pgid-publication'
-assert_status_split 130 'cancellation works before PGID-file publication' \
-    timeout --signal=TERM --kill-after=2s 15s \
-    env MOCK_DELAY_PGID_PUBLISH=1 MOCK_CANCEL=1 \
-    MOCK_PGID_DELAY_TERMINATION_MARKER="${pgid_delay_marker}" \
-    "${PROJECT_DIR}/download-video-gui.sh"
-wait_for_file "${pgid_delay_marker}" 10 'delayed PGID worker receives TERM'
-assert_no_test_processes 'delayed-PGID cancellation left worker processes'
+# setsid child group through the Linux /proc fallback. Some nested container
+# PID namespaces do not expose the shell's child PIDs through this procfs view;
+# skip only this environment-specific fallback test in that case.
+# This predicate determines whether the current procfs can exercise the fallback.
+# shellcheck disable=SC2310
+if proc_children_fallback_is_observable; then
+    pgid_delay_marker="${TEST_ROOT}/pgid-delay-terminated"
+    prepare_argument_log 'delayed-pgid-publication'
+    assert_status_split 130 'cancellation works before PGID-file publication' \
+        timeout --signal=TERM --kill-after=2s 15s \
+        env MOCK_DELAY_PGID_PUBLISH=1 MOCK_CANCEL=1 \
+        MOCK_PGID_DELAY_TERMINATION_MARKER="${pgid_delay_marker}" \
+        "${PROJECT_DIR}/download-video-gui.sh"
+    wait_for_file "${pgid_delay_marker}" 10 'delayed PGID worker receives TERM'
+    assert_no_test_processes 'delayed-PGID cancellation left worker processes'
+else
+    printf '%s\n' 'Mock scenario: delayed-pgid-publication (skipped: procfs child visibility unavailable)'
+fi
 
 # A Cancel response received after a successful worker exit must be reported as
 # success, not as a misleading cancellation.
@@ -1239,7 +1334,7 @@ assert_file_contains "${progress_error_capture}" 'status 42' \
 # Missing Zenity is a dependency error, not a graphical crash.
 no_zenity_bin="${TEST_ROOT}/no-zenity-bin"
 mkdir -p -- "${no_zenity_bin}"
-for required_command in bash chmod date dirname grep mkdir mktemp mv realpath rm setsid sleep stat stdbuf tail tr; do
+for required_command in bash chmod date dirname grep mkdir mktemp mv realpath rm setsid sleep stat; do
     required_command_path=$(command -v "${required_command}") ||
         fail "Required host command was not found: ${required_command}"
     ln -s -- "${required_command_path}" \

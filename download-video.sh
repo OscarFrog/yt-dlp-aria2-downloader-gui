@@ -3,14 +3,14 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.12
-# Date        : 2026-07-29
+# Version     : 2.1.13
+# Date        : 2026-07-31
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
 
 set -euo pipefail
 
-readonly VERSION="2.1.12"
+readonly VERSION="2.1.13"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -70,6 +70,15 @@ EOF_USAGE
 
 error() {
     printf 'Error: %s\n' "$*" >&2
+}
+
+emit_machine_postprocess() {
+    local status=$1
+    local processor=$2
+
+    if [[ ${MACHINE_PROGRESS} == true ]]; then
+        printf 'YTDLP_POSTPROCESS|%s|%s\n' "${status}" "${processor}"
+    fi
 }
 
 compare_versions() {
@@ -443,8 +452,8 @@ if [[ -n ${RESULT_FILE} ]]; then
         exit 13
     fi
 
-    if ! rm -f -- "${RESULT_FILE}"; then
-        error 'unable to remove the previous result file.'
+    if [[ -e ${RESULT_FILE} || -L ${RESULT_FILE} ]]; then
+        error 'the result-file already exists; refusing to overwrite it.'
         exit 13
     fi
 
@@ -549,7 +558,7 @@ if [[ ${MACHINE_PROGRESS} == true ]]; then
         --color never
         --print 'before_dl:YTDLP_PLAN|%(id|unknown)s|%(format_id|unknown)s|%(requested_formats.0.format_id|)s|%(requested_formats.1.format_id|)s'
         --progress-template 'download:YTDLP_PROGRESS_V2|%(info.id|unknown)s|%(info.format_id|unknown)s|%(progress.status|unknown)s|%(progress.downloaded_bytes|0)s|%(progress.total_bytes|0)s|%(progress.total_bytes_estimate|0)s|%(progress.fragment_index|0)s|%(progress.fragment_count|0)s|%(progress._percent_str|)s|%(progress._speed_str|)s|%(progress._eta_str|)s'
-        --progress-template 'postprocess:YTDLP_POSTPROCESS|%(progress.status)s|%(progress.postprocessor)s'
+        --progress-template 'postprocess:YTDLP_POSTPROCESS|%(progress.status|unknown)s|%(progress.postprocessor|unknown)s'
     )
 fi
 
@@ -564,74 +573,6 @@ if [[ -n ${PATH_RECORD_TMP} ]]; then
 fi
 
 if yt-dlp "${YT_DLP_OPTIONS[@]}" -- "${URL}"; then
-    if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
-        hls_source_path=''
-        candidate_path=''
-        while IFS= read -r candidate_path || [[ -n ${candidate_path} ]]; do
-            if [[ -n ${candidate_path} ]]; then
-                hls_source_path=${candidate_path}
-            fi
-        done <"${PATH_RECORD_TMP}"
-
-        if [[ -z ${hls_source_path} || ! -f ${hls_source_path} ]]; then
-            error 'yt-dlp did not publish the repaired HLS file path.'
-            exit 1
-        fi
-
-        hls_source_dir=${hls_source_path%/*}
-        if [[ ${hls_source_dir} == "${hls_source_path}" ]]; then
-            hls_source_dir='.'
-        fi
-        hls_source_name=${hls_source_path##*/}
-        hls_source_stem=${hls_source_name%.*}
-        if [[ ${hls_source_stem} == "${hls_source_name}" ]]; then
-            hls_source_stem=${hls_source_name}
-        fi
-        hls_final_path="${hls_source_dir}/${hls_source_stem}.mkv"
-
-        if [[ ${MACHINE_PROGRESS} == true ]]; then
-            printf '%s\n' 'YTDLP_POSTPROCESS|started|FFmpegVideoRemuxer'
-        fi
-        if ! HLS_REMUX_TMP=$(mktemp \
-            --tmpdir="${hls_source_dir}" \
-            --suffix='.mkv' \
-            '.yt-dlp-remux.XXXXXXXX'); then
-            error 'unable to create the temporary MKV file.'
-            exit 13
-        fi
-
-        ffmpeg_status=0
-        ffmpeg \
-            -hide_banner \
-            -loglevel warning \
-            -i "${hls_source_path}" \
-            -map 0 \
-            -dn \
-            -ignore_unknown \
-            -c copy \
-            -y \
-            "${HLS_REMUX_TMP}" || ffmpeg_status=$?
-        if ((ffmpeg_status != 0)); then
-            error "unable to remux the repaired HLS file into MKV (FFmpeg status ${ffmpeg_status})."
-            exit "${ffmpeg_status}"
-        fi
-
-        if ! mv -f -- "${HLS_REMUX_TMP}" "${hls_final_path}"; then
-            error 'unable to publish the final MKV file.'
-            exit 13
-        fi
-        HLS_REMUX_TMP=''
-        if [[ ${hls_source_path} != "${hls_final_path}" ]] &&
-            ! rm -f -- "${hls_source_path}"; then
-            printf 'Warning: unable to remove the repaired HLS intermediate: %s\n' \
-                "${hls_source_path}" >&2
-        fi
-        if ! printf '%s\n' "${hls_final_path}" >"${PATH_RECORD_TMP}"; then
-            error 'unable to record the final MKV path.'
-            exit 13
-        fi
-    fi
-
     if [[ -n ${PATH_RECORD_TMP} ]]; then
         set +e
         normalize_path_record "${PATH_RECORD_TMP}"
@@ -648,6 +589,77 @@ if yt-dlp "${YT_DLP_OPTIONS[@]}" -- "${URL}"; then
             exit 13
             ;;
         esac
+    fi
+
+    if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
+        hls_source_path=$(<"${PATH_RECORD_TMP}") || {
+            error 'unable to read the repaired HLS file path.'
+            exit 13
+        }
+
+        hls_source_dir=${hls_source_path%/*}
+        if [[ ${hls_source_dir} == "${hls_source_path}" ]]; then
+            hls_source_dir='.'
+        fi
+        hls_source_name=${hls_source_path##*/}
+        hls_source_stem=${hls_source_name%.*}
+        hls_final_path="${hls_source_dir}/${hls_source_stem}.mkv"
+
+        if [[ -e ${hls_final_path} || -L ${hls_final_path} ]]; then
+            error "the final MKV already exists; refusing to overwrite it: ${hls_final_path}"
+            exit 13
+        fi
+
+        emit_machine_postprocess started FFmpegVideoRemuxer
+        if ! HLS_REMUX_TMP=$(mktemp \
+            --tmpdir="${hls_source_dir}" \
+            --suffix='.mkv' \
+            '.yt-dlp-remux.XXXXXXXX'); then
+            emit_machine_postprocess error FFmpegVideoRemuxer
+            error 'unable to create the temporary MKV file.'
+            exit 13
+        fi
+
+        ffmpeg_status=0
+        ffmpeg \
+            -hide_banner \
+            -loglevel warning \
+            -i "${hls_source_path}" \
+            -map 0 \
+            -dn \
+            -ignore_unknown \
+            -c copy \
+            -y \
+            "${HLS_REMUX_TMP}" || ffmpeg_status=$?
+        if ((ffmpeg_status != 0)); then
+            emit_machine_postprocess error FFmpegVideoRemuxer
+            error "unable to remux the repaired HLS file into MKV (FFmpeg status ${ffmpeg_status})."
+            printf 'The repaired HLS intermediate was retained at: %s\n' \
+                "${hls_source_path}" >&2
+            exit "${ffmpeg_status}"
+        fi
+
+        if ! mv -n -- "${HLS_REMUX_TMP}" "${hls_final_path}"; then
+            emit_machine_postprocess error FFmpegVideoRemuxer
+            error 'unable to publish the final MKV file.'
+            exit 13
+        fi
+        if [[ -e ${HLS_REMUX_TMP} || -L ${HLS_REMUX_TMP} ]]; then
+            emit_machine_postprocess error FFmpegVideoRemuxer
+            error "the final MKV appeared during publication; refusing to overwrite it: ${hls_final_path}"
+            exit 13
+        fi
+        HLS_REMUX_TMP=''
+        emit_machine_postprocess finished FFmpegVideoRemuxer
+        if [[ ${hls_source_path} != "${hls_final_path}" ]] &&
+            ! rm -f -- "${hls_source_path}"; then
+            printf 'Warning: unable to remove the repaired HLS intermediate: %s\n' \
+                "${hls_source_path}" >&2
+        fi
+        if ! printf '%s\n' "${hls_final_path}" >"${PATH_RECORD_TMP}"; then
+            error 'unable to record the final MKV path.'
+            exit 13
+        fi
     fi
 
     if [[ -n ${RESULT_FILE} ]]; then
