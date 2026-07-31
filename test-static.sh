@@ -119,7 +119,7 @@ assert_file_contains \
     "${script_dir}/install-gui.sh" \
     "desktop-file-validate \\" \
     'desktop launcher validation'
-readonly EXPECTED_VERSION='2.1.12'
+readonly EXPECTED_VERSION='2.1.13'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'

@@ -510,7 +510,12 @@ proc_children_fallback_is_observable() {
     local children_file="/proc/${BASHPID}/task/${BASHPID}/children"
     local children=''
 
-    sleep 5 &
+    (
+        # This asynchronous probe must not inherit the test suite's EXIT trap.
+        # Otherwise, terminating the probe removes the complete TEST_ROOT.
+        trap - EXIT HUP INT TERM
+        exec sleep 5
+    ) &
     probe_pid=$!
     if [[ -r ${children_file} ]] &&
         { IFS= read -r children <"${children_file}" || [[ -n ${children} ]]; } &&

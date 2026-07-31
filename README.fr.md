@@ -17,7 +17,7 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.12**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.13**.
 
 ## Fonctionnalités principales
 
@@ -94,7 +94,7 @@ setsid --version
 Téléchargez les deux fichiers publiés avec la release GitHub :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.12.zip
+yt-dlp-aria2-downloader-gui-2.1.13.zip
 SHA256SUMS
 ```
 
@@ -102,8 +102,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.12.zip
-cd yt-dlp-aria2-downloader-gui-2.1.12
+unzip yt-dlp-aria2-downloader-gui-2.1.13.zip
+cd yt-dlp-aria2-downloader-gui-2.1.13
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
