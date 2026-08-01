@@ -20,6 +20,7 @@ Requires:       aria2 >= 1.37.0
 Requires:       yt-dlp >= 2026.06.09
 Requires:       ffmpeg
 Requires:       zenity
+Requires:       hicolor-icon-theme
 Recommends:     deno >= 2.3.0
 Suggests:       firefox
 
@@ -53,6 +54,7 @@ test "$("%{buildroot}%{_bindir}/yt-dlp-aria2-downloader" --version)" = \
 %{_libexecdir}/yt-dlp-aria2-downloader/download-video-gui.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/progress-monitor.sh
 %{_datadir}/applications/yt-dlp-aria2-downloader.desktop
+%{_datadir}/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg
 %doc %{_docdir}/%{name}/README.md
 %doc %{_docdir}/%{name}/README.fr.md
 %doc %{_docdir}/%{name}/CHANGELOG.md
@@ -60,4 +62,7 @@ test "$("%{buildroot}%{_bindir}/yt-dlp-aria2-downloader" --version)" = \
 
 %changelog
 * Sat Aug 01 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - %{version}-1
+- Improve package installation, removal testing, documentation, and icon integration.
+
+* Sat Aug 01 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.1.18-1
 - Add native noarch RPM packaging.

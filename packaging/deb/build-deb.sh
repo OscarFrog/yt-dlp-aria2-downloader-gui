@@ -60,7 +60,7 @@ Priority: optional
 Architecture: all
 Maintainer: OscarFrog <151366285+OscarFrog@users.noreply.github.com>
 Installed-Size: ${installed_size}
-Depends: bash (>= 4.4), coreutils, grep, util-linux, aria2 (>= 1.37.0), ffmpeg, zenity
+Depends: bash (>= 4.4), coreutils, grep, util-linux, aria2 (>= 1.37.0), ffmpeg, zenity, hicolor-icon-theme
 Recommends: yt-dlp
 Suggests: deno, firefox | firefox-esr
 Homepage: https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui
@@ -91,6 +91,7 @@ packaged_version=$(
 [[ ${packaged_version} == "yt-dlp-aria2-downloader version ${VERSION}" ]]
 desktop-file-validate --no-hints \
     "${extracted}/usr/share/applications/yt-dlp-aria2-downloader.desktop"
+[[ -f ${extracted}/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg ]]
 engine_mode=$(stat -c '%a' -- \
     "${extracted}/usr/lib/yt-dlp-aria2-downloader/download-video.sh")
 [[ ${engine_mode} == 755 ]]

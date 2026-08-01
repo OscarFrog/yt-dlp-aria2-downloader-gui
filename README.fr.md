@@ -17,7 +17,24 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.18**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.19**.
+
+## Installation recommandée
+
+Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest)
+et téléchargez le fichier correspondant à votre système :
+
+- **Fedora 44 ou version plus récente :** le RPM `2.1.19`,
+  `yt-dlp-aria2-downloader-gui-2.1.19-1.fc44.noarch.rpm` ;
+- **Debian ou Ubuntu :** le DEB `2.1.19`,
+  `yt-dlp-aria2-downloader-gui_2.1.19-1_all.deb` ;
+- **autre distribution GNU/Linux ou utilisation portable :** l’archive ZIP
+  versionnée.
+
+Avec une installation RPM ou DEB, le lanceur graphique et son icône sont
+installés automatiquement dans le menu des applications. **Ne lancez pas
+`install-gui.sh` après l’installation d’un paquet.** Cet outil est réservé aux
+installations depuis le ZIP ou Git.
 
 ## Fonctionnalités principales
 
@@ -65,9 +82,10 @@ chaque téléchargement.
 ## Installation par paquet
 
 Les releases GitHub publient un RPM Fedora, un paquet Debian, l'archive ZIP
-portable et un fichier `SHA256SUMS` commun. Les paquets installent les commandes
-et le lanceur graphique au niveau du système ; leur fonctionnement ne dépend
-pas du dossier dans lequel le paquet a été téléchargé.
+portable et un fichier `SHA256SUMS` commun. Les paquets installent les commandes,
+l’icône dédiée et le lanceur graphique au niveau du système ; leur fonctionnement
+ne dépend pas du dossier dans lequel le paquet a été téléchargé. Aucune exécution
+séparée de `install-gui.sh` n’est nécessaire avec un RPM ou un DEB.
 
 Avant de migrer depuis une installation ZIP ou Git, supprimez l'ancien lanceur
 utilisateur afin qu'il ne masque pas l'entrée installée par le paquet :
@@ -89,7 +107,7 @@ sudo dnf install \
 Téléchargez les fichiers suivants depuis la release :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.18-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.19-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -97,7 +115,7 @@ Vérifiez puis installez le RPM :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo dnf install ./yt-dlp-aria2-downloader-gui-2.1.18-1.fc44.noarch.rpm
+sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.19-1.fc44.noarch.rpm
 ```
 
 Le RPM déclare les dépendances Fedora pour Bash, yt-dlp, aria2, FFmpeg, Zenity,
@@ -110,7 +128,7 @@ téléchargement.
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui_2.1.18-1_all.deb
+yt-dlp-aria2-downloader-gui_2.1.19-1_all.deb
 SHA256SUMS
 ```
 
@@ -118,7 +136,7 @@ Vérifiez puis installez le paquet :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.18-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.19-1_all.deb
 ```
 
 Le DEB installe l'application et les dépendances système communes. Les versions
@@ -141,12 +159,31 @@ Le moteur en ligne de commande est installé sous le nom :
 yt-dlp-aria2-downloader --help
 ```
 
+### Désinstaller une installation par paquet
+
+Fedora :
+
+```bash
+sudo dnf remove yt-dlp-aria2-downloader-gui
+```
+
+Debian ou Ubuntu :
+
+```bash
+sudo apt remove yt-dlp-aria2-downloader-gui
+```
+
+Le gestionnaire de paquets supprime les commandes système, le lanceur graphique
+et l’icône de l’application. `install-gui.sh uninstall` sert uniquement à
+nettoyer une ancienne installation ZIP ou Git créée dans le dossier personnel
+de l’utilisateur courant.
+
 ## Installation depuis une archive de release portable
 
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.18.zip
+yt-dlp-aria2-downloader-gui-2.1.19.zip
 SHA256SUMS
 ```
 
@@ -154,8 +191,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.18.zip
-cd yt-dlp-aria2-downloader-gui-2.1.18
+unzip yt-dlp-aria2-downloader-gui-2.1.19.zip
+cd yt-dlp-aria2-downloader-gui-2.1.19
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install

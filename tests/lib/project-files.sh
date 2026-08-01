@@ -16,7 +16,9 @@ PRODUCTION_SHELL_FILES=(
 PACKAGING_SHELL_FILES=(
     packaging/install-tree.sh
     packaging/deb/build-deb.sh
+    packaging/deb/test-package-lifecycle.sh
     packaging/rpm/build-rpm.sh
+    packaging/rpm/test-package-lifecycle.sh
 )
 
 # shellcheck disable=SC2034 # Arrays are read by scripts that source this file.

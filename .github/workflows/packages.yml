@@ -38,6 +38,18 @@ jobs:
           version=${version##* }
           bash packaging/deb/build-deb.sh "${version}" dist
 
+      - name: Install and remove DEB
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version=$(./download-video.sh --version)
+          version=${version##* }
+          shopt -s nullglob
+          packages=(dist/*.deb)
+          shopt -u nullglob
+          ((${#packages[@]} == 1))
+          sudo bash packaging/deb/test-package-lifecycle.sh             "${packages[0]}" "${version}"
+
       - name: Retain DEB build
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -70,6 +82,22 @@ jobs:
           version=$(./download-video.sh --version)
           version=${version##* }
           bash packaging/rpm/build-rpm.sh "${version}" dist
+
+      - name: Enable RPM Fusion Free
+        run: |
+          dnf install --assumeyes             "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
+
+      - name: Install and remove RPM
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version=$(./download-video.sh --version)
+          version=${version##* }
+          shopt -s nullglob
+          packages=(dist/*.rpm)
+          shopt -u nullglob
+          ((${#packages[@]} == 1))
+          bash packaging/rpm/test-package-lifecycle.sh             "${packages[0]}" "${version}"
 
       - name: Retain RPM build
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

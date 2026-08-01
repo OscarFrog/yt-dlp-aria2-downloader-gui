@@ -62,6 +62,14 @@ assert_file_contains "${desktop_file}" \
     'Exec=/usr/bin/yt-dlp-aria2-downloader-gui' 'system desktop Exec'
 assert_file_contains "${desktop_file}" \
     'TryExec=/usr/bin/yt-dlp-aria2-downloader-gui' 'system desktop TryExec'
+assert_file_contains "${desktop_file}" \
+    'Icon=yt-dlp-aria2-downloader' 'dedicated packaged icon name'
+
+icon_file="${root}/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg"
+[[ -f ${icon_file} && ! -L ${icon_file} ]] ||
+    fail 'Missing packaged application icon.'
+icon_mode=$(stat -c '%a' -- "${icon_file}")
+assert_equals '644' "${icon_mode}" 'packaged icon permissions'
 
 for document in README.md README.fr.md CHANGELOG.md; do
     document_path="${root}/usr/share/doc/yt-dlp-aria2-downloader-gui/${document}"

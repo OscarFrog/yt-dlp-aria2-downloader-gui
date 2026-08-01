@@ -40,12 +40,14 @@ readonly project_dir
 readonly private_target="${DESTDIR}${PRIVATE_DIR}"
 readonly bin_dir="${DESTDIR}/usr/bin"
 readonly applications_dir="${DESTDIR}/usr/share/applications"
+readonly icon_dir="${DESTDIR}/usr/share/icons/hicolor/scalable/apps"
 readonly doc_dir="${DESTDIR}/usr/share/doc/${PACKAGE_NAME}"
 
 for required_file in \
     download-video.sh download-video-gui.sh progress-monitor.sh \
     README.md README.fr.md CHANGELOG.md \
-    packaging/yt-dlp-aria2-downloader.desktop; do
+    packaging/yt-dlp-aria2-downloader.desktop \
+    packaging/icons/yt-dlp-aria2-downloader.svg; do
     [[ -f ${project_dir}/${required_file} ]] || {
         printf 'Error: required packaging input is absent: %s\n' \
             "${required_file}" >&2
@@ -54,7 +56,8 @@ for required_file in \
 done
 
 install -d -m 0755 -- \
-    "${private_target}" "${bin_dir}" "${applications_dir}" "${doc_dir}"
+    "${private_target}" "${bin_dir}" "${applications_dir}" \
+    "${icon_dir}" "${doc_dir}"
 install -m 0755 -- \
     "${project_dir}/download-video.sh" \
     "${project_dir}/download-video-gui.sh" \
@@ -68,6 +71,9 @@ install -m 0644 -- \
 install -m 0644 -- \
     "${project_dir}/packaging/yt-dlp-aria2-downloader.desktop" \
     "${applications_dir}/yt-dlp-aria2-downloader.desktop"
+install -m 0644 -- \
+    "${project_dir}/packaging/icons/yt-dlp-aria2-downloader.svg" \
+    "${icon_dir}/yt-dlp-aria2-downloader.svg"
 
 relative_private="../${PRIVATE_DIR#/usr/}"
 ln -s -- \
