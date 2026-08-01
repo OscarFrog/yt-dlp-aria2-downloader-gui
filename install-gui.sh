@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : install-gui.sh
-# Version     : 2.1.15
+# Version     : 2.1.16
 # Date        : 2026-08-01
 # Description : Install or remove the per-user desktop launcher.
 # ============================================================================

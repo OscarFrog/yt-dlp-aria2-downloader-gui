@@ -17,7 +17,7 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.15**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.16**.
 
 ## Fonctionnalités principales
 
@@ -34,7 +34,9 @@ téléchargeur natif de yt-dlp. La version actuelle est la **2.1.15**.
 - reprise des téléchargements interrompus lorsque le site le permet ;
 - progression graphique unifiée pour les fichiers directs, les fragments
   HLS/DASH, les pistes vidéo/audio séparées et le post-traitement FFmpeg ;
-- annulation de tout le groupe de processus ;
+- annulation de tout le groupe de processus au sein d’une session GUI unique ;
+- supervision de yt-dlp et des commandes FFmpeg exécutées par le moteur, avec arrêt borné ;
+- validation FFprobe de la piste audio ou vidéo attendue avant la publication du succès ;
 - une seule instance en écriture par dossier de destination, afin
   d'empêcher le partage concurrent de fichiers partiels ou de
   post-traitement ;
@@ -99,7 +101,7 @@ setsid --version
 Téléchargez les deux fichiers publiés avec la release GitHub :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.15.zip
+yt-dlp-aria2-downloader-gui-2.1.16.zip
 SHA256SUMS
 ```
 
@@ -107,8 +109,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.15.zip
-cd yt-dlp-aria2-downloader-gui-2.1.15
+unzip yt-dlp-aria2-downloader-gui-2.1.16.zip
+cd yt-dlp-aria2-downloader-gui-2.1.16
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -141,6 +143,8 @@ avoir déplacé le dossier du projet, relancez `./install-gui.sh install`.
 
 ## Utilisation graphique
 
+Le parcours graphique utilise une succession de fenêtres Zenity natives. Les étapes ci-dessous décrivent entièrement l’interface sans dépendre de captures d’écran, afin que la documentation reste exacte lorsque les dimensions des fenêtres ou le thème du bureau évoluent.
+
 Démarrez **yt-dlp aria2 downloader** depuis le menu des applications ou avec :
 
 ```bash
@@ -151,7 +155,6 @@ Démarrez **yt-dlp aria2 downloader** depuis le menu des applications ou avec :
 
 Collez l'URL de la vidéo à télécharger, puis validez la fenêtre.
 
-![Fenêtre de saisie de l'URL](docs/images/gui-url.png "Saisie de l'URL")
 
 Les espaces copiés accidentellement avant ou après l'URL sont supprimés par
 l'interface graphique.
@@ -168,13 +171,11 @@ Sélectionnez l'un des trois profils disponibles :
 - **Audio track (native format)** télécharge la meilleure piste audio disponible
   en conservant son format natif chaque fois que cela est possible.
 
-![Fenêtre de sélection du mode](docs/images/gui-mode.png "Choix du mode de téléchargement")
 
 ### 3. Choisir le dossier de destination
 
 Sélectionnez le dossier dans lequel le média téléchargé sera enregistré.
 
-![Fenêtre de sélection du dossier](docs/images/gui-destination.png "Choix du dossier de destination")
 
 ### 4. Suivre la progression
 
@@ -182,24 +183,20 @@ La fenêtre de progression indique l'étape actuelle du téléchargement ou du
 post-traitement. Le bouton d'annulation permet d'arrêter l'ensemble du
 processus.
 
-![Fenêtre de progression](docs/images/gui-progress.png "Progression du téléchargement")
 
 ### 5. Résultat du téléchargement
 
 Après un téléchargement réussi, l'interface affiche le chemin du fichier
 multimédia terminé.
 
-![Fenêtre de téléchargement terminé](docs/images/gui-download-complete.png "Téléchargement terminé")
 
 Lorsque le téléchargement échoue, l'interface affiche une fenêtre d'erreur et
 conserve le journal de diagnostic.
 
-![Fenêtre d'échec du téléchargement](docs/images/gui-download-failed.png "Échec du téléchargement")
 
 Le journal conservé peut être ouvert depuis la fenêtre d'erreur. Il contient les
 informations nécessaires au diagnostic et peut inclure l'URL demandée.
 
-![Affichage du journal de diagnostic](docs/images/gui-log.png "Journal de diagnostic")
 
 ## Utilisation en ligne de commande
 
@@ -242,7 +239,8 @@ Placez toujours les URL entre apostrophes ou guillemets, car elles peuvent
 contenir des métacaractères du shell comme `&`.
 
 Le moteur utilise volontairement `--ignore-config`, désactive les plugins yt-dlp
-avec `YTDLP_NO_PLUGINS=1` et applique une politique explicite de non-écrasement.
+avec `YTDLP_NO_PLUGINS=1`, applique une politique explicite de non-écrasement
+et empêche aria2c d’hériter des identifiants d’un fichier `.netrc` personnel.
 Les fichiers `.part` interrompus peuvent toujours être repris, mais un média
 terminé ou post-traité déjà présent est conservé et l'exécution échoue au lieu
 de le remplacer.

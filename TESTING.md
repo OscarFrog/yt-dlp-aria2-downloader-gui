@@ -75,6 +75,12 @@ The automated suite checks, among other things:
   preserving interrupted-download resume behavior;
 - disabling of inherited yt-dlp plugins and personal configuration;
 - forwarding of HUP, INT, and TERM sent only to the CLI wrapper PID;
+- forwarding of termination signals during the wrapper-managed HLS FFmpeg remux;
+- preservation of immediate command failure statuses before PGID observation;
+- one shared process session for GUI, engine, yt-dlp, aria2c, FFmpeg, and Deno;
+- FFprobe rejection of missing or structurally invalid expected media streams;
+- canonical destination validation before the progress monitor emits 100 percent;
+- no-target-directory publication when a destination changes into a directory;
 - private XDG runtime locks and fallback permissions;
 - byte-bounded Unicode output templates;
 - fallback from relative XDG configuration and state paths;
@@ -111,7 +117,10 @@ After the automated suite passes, perform lawful manual tests:
 4. cancel one direct transfer and one fragmented HLS transfer;
 5. test a destination containing spaces, Unicode characters, and `%`;
 6. verify that a second concurrent download targeting the same output cannot
-   corrupt files created by the first one.
+   corrupt files created by the first one;
+7. interrupt the authenticated HLS profile during the final FFmpeg remux and
+   verify that no FFmpeg process remains;
+8. verify one audio and one video result with FFprobe before opening them.
 
 Verify that cancellation stops the download, the final files open correctly,
 the audio extension was not forced by the interface, and no worker process is

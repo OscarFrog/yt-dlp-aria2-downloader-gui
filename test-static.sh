@@ -101,7 +101,7 @@ assert_file_contains \
     'atomic PGID staging file'
 assert_file_contains \
     "${script_dir}/download-video-gui.sh" \
-    "mv -f -- \"\${pgid_temporary}\" \"\${pgid_file}\"" \
+    "mv -Tf -- \"\${pgid_temporary}\" \"\${pgid_file}\"" \
     'atomic PGID publication'
 assert_file_contains \
     "${script_dir}/download-video-gui.sh" \
@@ -128,7 +128,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.15'
+readonly EXPECTED_VERSION='2.1.16'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -179,7 +179,7 @@ assert_file_contains "${script_dir}/download-video.sh" \
 # shellcheck disable=SC2016
 # The assertion searches for literal shell source code.
 assert_file_contains "${script_dir}/download-video.sh" \
-    'mv -n -- "${RESULT_FILE_TMP}" "${RESULT_FILE}"' \
+    'mv -nT -- "${RESULT_FILE_TMP}" "${RESULT_FILE}"' \
     'result-file no-clobber publication'
 # shellcheck disable=SC2016
 # The assertion searches for literal shell source code.
@@ -266,5 +266,43 @@ assert_file_contains "${script_dir}/download-video.sh" \
 assert_file_contains "${script_dir}/download-video.sh" \
     '%(title).160B [%(id).64B].%(ext)s' \
     'byte-bounded output filename'
+
+
+assert_file_contains "${script_dir}/download-video.sh" \
+    'run_supervised_command() {' \
+    'generic long-running command supervisor'
+assert_file_contains "${script_dir}/download-video.sh" \
+    'run_supervised_command yt-dlp' \
+    'yt-dlp uses the generic supervisor'
+assert_file_contains "${script_dir}/download-video.sh" \
+    '--no-netrc=true' \
+    'aria2 netrc inheritance disabled'
+assert_file_contains "${script_dir}/download-video.sh" \
+    'validate_final_media_file() {' \
+    'final media FFprobe validation'
+# This assertion deliberately searches for literal shell source.
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/download-video.sh" \
+    '-select_streams "${stream_selector}"' \
+    'mode-specific FFprobe stream validation'
+# This assertion deliberately searches for literal shell source.
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/download-video.sh" \
+    'mv -nT -- "${HLS_REMUX_TMP}" "${hls_final_path}"' \
+    'HLS publication never treats the target as a directory'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    '--supervised-session' \
+    'GUI requests reuse of its single process session'
+assert_file_contains "${script_dir}/progress-monitor.sh" \
+    'PROFILE OUTPUT_DIR' \
+    'progress monitor receives the canonical destination'
+README_EN_TEXT=$(<"${script_dir}/README.md")
+README_FR_TEXT=$(<"${script_dir}/README.fr.md")
+readonly README_EN_TEXT README_FR_TEXT
+
+assert_text_not_contains "${README_EN_TEXT}" \
+    'docs/images/' 'English README has no embedded screenshots'
+assert_text_not_contains "${README_FR_TEXT}" \
+    'docs/images/' 'French README has no embedded screenshots'
 
 printf '%s\n' 'Static tests passed.'

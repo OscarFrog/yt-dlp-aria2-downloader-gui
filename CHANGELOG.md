@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.1.16 - 2026-08-01
+
+### Reliability
+
+- Supervise both yt-dlp and the wrapper-managed HLS FFmpeg remux with one
+  reusable bounded command supervisor.
+- Reuse the GUI process session instead of creating a nested yt-dlp session,
+  keeping every descendant reachable during emergency shutdown.
+- Preserve the real exit status of commands that fail before PGID observation.
+- Validate the final audio or video stream with FFprobe before publishing a
+  successful result.
+- Use no-target-directory moves for no-clobber result and MKV publication.
+- Prevent aria2c from reading credentials from a personal `.netrc` file.
+- Give the progress monitor the canonical destination directory so its final
+  100 percent contract matches the engine and GUI validation.
+- Remove all embedded screenshots from the English and French README files and
+  replace them with theme-independent procedural descriptions.
+
+### Tests
+
+- Add immediate-worker-failure, FFprobe-rejection, FFmpeg signal-forwarding,
+  single-session GUI, and canonical progress-result coverage.
+
 ## 2.1.15 - 2026-08-01
 
 ### Security and data integrity
