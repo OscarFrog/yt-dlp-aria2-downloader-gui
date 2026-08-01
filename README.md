@@ -16,7 +16,7 @@ single URL using one of three profiles:
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
 streams deliberately remain on yt-dlp's native downloader. The current version
-is **2.1.16**.
+is **2.1.17**.
 
 ## Main features
 
@@ -99,7 +99,7 @@ setsid --version
 Download both release assets from the GitHub release page:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.16.zip
+yt-dlp-aria2-downloader-gui-2.1.17.zip
 SHA256SUMS
 ```
 
@@ -107,8 +107,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.16.zip
-cd yt-dlp-aria2-downloader-gui-2.1.16
+unzip yt-dlp-aria2-downloader-gui-2.1.17.zip
+cd yt-dlp-aria2-downloader-gui-2.1.17
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -243,8 +243,11 @@ Always quote URLs with single or double quotation marks because they may
 contain shell metacharacters such as `&`.
 
 The engine deliberately uses `--ignore-config`, disables yt-dlp plugins through
-`YTDLP_NO_PLUGINS=1`, enables explicit no-overwrite policies, and prevents
-aria2c from inheriting credentials from a personal `.netrc` file. Interrupted
+`YTDLP_NO_PLUGINS=1`, and enables explicit no-overwrite policies. When the
+installed aria2c build advertises `--no-netrc`, the engine enables it to avoid
+loading credentials from a personal `.netrc` file. Builds that omit this
+optional capability are accepted and are not passed an unsupported option.
+Interrupted
 `.part` files may still be resumed, but an existing completed or post-processed
 media file is preserved and the run fails instead of replacing it.
 

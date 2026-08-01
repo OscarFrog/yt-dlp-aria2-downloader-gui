@@ -89,6 +89,8 @@ The automated suite checks, among other things:
 - folder-chooser fallback behavior on Zenity 4;
 - minimum versions, suffixed yt-dlp versions, required capabilities, and
   behavior under a hostile inherited locale;
+- aria2 help lines containing short-option aliases and builds that omit the
+  optional netrc capability;
 - `.desktop` launcher installation through a stable private link, exact Exec
   escaping, restrictive-path handling, validation, permissions, reinstall, and
   removal.

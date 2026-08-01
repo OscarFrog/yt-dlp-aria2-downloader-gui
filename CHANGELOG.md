@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.17 - 2026-08-01
+
+### Urgent compatibility hotfix
+
+- Accept aria2 capability lines that include a short-option alias, notably
+  `-n, --no-netrc`.
+- Treat netrc disabling as an optional aria2 build capability and pass
+  `--no-netrc=true` only when the installed build advertises it.
+- Add regression coverage for both the real short-alias help format and builds
+  compiled without optional netrc support.
+- Update English and French documentation to describe the conditional policy.
+
 ## 2.1.16 - 2026-08-01
 
 ### Reliability

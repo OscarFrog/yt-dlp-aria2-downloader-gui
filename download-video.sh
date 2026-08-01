@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.16
+# Version     : 2.1.17
 # Date        : 2026-08-01
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
@@ -11,7 +11,7 @@
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.1.16"
+readonly VERSION="2.1.17"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -21,6 +21,7 @@ export YTDLP_NO_PLUGINS
 
 VERSION_AT_LEAST=false
 VERSION_PARSE_VALID=false
+ARIA2_SUPPORTS_NO_NETRC=false
 RESULT_FILE_TMP=''
 INTERNAL_PATH_FILE_TMP=''
 HLS_REMUX_TMP=''
@@ -280,7 +281,6 @@ check_runtime_compatibility() {
     for required_option in \
         --file-allocation \
         --no-conf \
-        --no-netrc \
         --enable-color \
         --truncate-console-readout \
         --summary-interval \
@@ -291,6 +291,16 @@ check_runtime_compatibility() {
             return 1
         fi
     done
+
+    # aria2 may display this option as '-n, --no-netrc'. Some builds
+    # compile without the optional netrc capability and omit it entirely.
+    # Accept both cases and only pass the option when it is advertised.
+    ARIA2_SUPPORTS_NO_NETRC=false
+    if grep -Eq -- \
+        '^[[:space:]]*(-[^,[:space:]]+,[[:space:]]+)?--no-netrc([=[:space:]]|\[|$)' \
+        <<<"${aria2_help}"; then
+        ARIA2_SUPPORTS_NO_NETRC=true
+    fi
 
     if ! setsid_help=$(LC_ALL=C setsid --help 2>&1); then
         error 'unable to inspect setsid capabilities.'
@@ -842,6 +852,7 @@ done
 # Keep this as a simple command: placing it in an if/|| context would disable
 # errexit inside the function body under Bash's documented rules.
 check_runtime_compatibility
+readonly ARIA2_SUPPORTS_NO_NETRC
 
 if [[ -z ${OUTPUT_DIR} ]]; then
     OUTPUT_DIR=${PWD}
@@ -927,7 +938,11 @@ if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
     printf '%s\n' 'YouTube access: Firefox cookies with web_safari HLS'
 fi
 
-ARIA2_ARGUMENTS='-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --no-netrc=true --console-log-level=warn --enable-color=false --truncate-console-readout=false'
+ARIA2_ARGUMENTS='-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true'
+if [[ ${ARIA2_SUPPORTS_NO_NETRC} == true ]]; then
+    ARIA2_ARGUMENTS+=' --no-netrc=true'
+fi
+ARIA2_ARGUMENTS+=' --console-log-level=warn --enable-color=false --truncate-console-readout=false'
 if [[ ${MACHINE_PROGRESS} == true ]]; then
     # yt-dlp does not currently expose aria2c transfer progress through its
     # own progress hooks. yt-dlp captures stderr from external downloaders and
