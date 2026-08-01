@@ -70,6 +70,8 @@ The automated suite checks, among other things:
   remains after GUI scenarios;
 - process-group recovery when PGID-file publication is delayed;
 - atomic publication and failure cleanup of the result-path file;
+- rejection of a second writer targeting the same canonical output directory;
+- retention of process-group control until every descendant has exited;
 - Zenity timeout and unexpected-error handling;
 - folder-chooser fallback behavior on Zenity 4;
 - minimum versions, suffixed yt-dlp versions, required capabilities, and
@@ -80,26 +82,33 @@ The automated suite checks, among other things:
 
 ## GitHub Actions
 
-`.github/workflows/shell.yml` runs the same validation in two environments:
+`.github/workflows/shell.yml` runs the same validation for pull requests and
+for pushes to `main`, in two environments:
 
 - `ubuntu-latest`;
 - a Fedora 44 container on a GitHub-hosted runner.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
-the complete Ubuntu validation job first, verifies that the tag matches the
+the complete Ubuntu validation job first, verifies that the tag belongs to the history of `main` and matches the
 versions declared by the scripts and documentation, creates a versioned ZIP
 archive, verifies its checksum, extracts and retests the ZIP, then publishes
 both files in a GitHub release.
 
 ## Real-world checks on Fedora 44
 
-After the automated suite passes, perform two lawful manual tests:
+After the automated suite passes, perform lawful manual tests:
 
 1. download one complete MKV video;
-2. download one native audio track.
+2. download one native audio track;
+3. download one YouTube video with the authenticated Firefox HLS profile;
+4. cancel one direct transfer and one fragmented HLS transfer;
+5. test a destination containing spaces, Unicode characters, and `%`;
+6. verify that a second concurrent download targeting the same output cannot
+   corrupt files created by the first one.
 
-Verify that cancellation stops the download, the final file opens correctly,
-and the audio extension was not forced by the interface.
+Verify that cancellation stops the download, the final files open correctly,
+the audio extension was not forced by the interface, and no worker process is
+left behind.
 
 ## Locale-stabilized probes
 

@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : progress-monitor.sh
-# Version     : 2.1.13
-# Date        : 2026-07-31
+# Version     : 2.1.14
+# Date        : 2026-08-01
 # Description : Convert downloader events into a unified Zenity progress stream.
 # ============================================================================
 
@@ -22,6 +22,7 @@ readonly DOWNLOAD_END=90
 readonly POSTPROCESS_START=92
 readonly POSTPROCESS_END=98
 readonly VERIFY_PERCENT=99
+readonly MAX_PENDING_CHARS=1048576
 
 usage() {
     printf 'Usage: %s LOG_FILE WORKER_PID RESULT_FILE PROFILE\n' "${0##*/}" >&2
@@ -154,6 +155,9 @@ declare -A ARIA_GID_ITEM=()
 declare -A ARIA_KEY_ASSIGNED=()
 
 declare -a PLANNED_KEYS=()
+declare -a PLANNED_FORMAT_IDS=()
+declare -a NATIVE_FORMAT_IDS=()
+declare -a NATIVE_FORMAT_KEYS=()
 
 planned_items=0
 seen_items=0
@@ -165,6 +169,7 @@ phase='analyzing'
 postprocessor=''
 last_line=''
 RESOLVED_KEY=''
+SANITIZED_IDENTIFIER=''
 
 register_item() {
     local key=$1
@@ -182,30 +187,45 @@ register_item() {
     fi
 }
 
+sanitize_identifier() {
+    local value=${1:-}
+
+    SANITIZED_IDENTIFIER=''
+    if [[ ${value} =~ ^[A-Za-z0-9_.:+-]+$ ]]; then
+        SANITIZED_IDENTIFIER=${value}
+    fi
+}
+
 set_plan() {
     local combined_id=$1
     local first_id=$2
     local second_id=$3
     local key
+    local slot=0
 
     PLANNED_KEYS=()
-    # Predicate: status 1 means the field is usable.
-    # shellcheck disable=SC2310
-    if ! is_unknown_field "${first_id}"; then
-        PLANNED_KEYS+=("format:${first_id}")
+    PLANNED_FORMAT_IDS=()
+
+    sanitize_identifier "${first_id}"
+    first_id=${SANITIZED_IDENTIFIER}
+    sanitize_identifier "${second_id}"
+    second_id=${SANITIZED_IDENTIFIER}
+    sanitize_identifier "${combined_id}"
+    combined_id=${SANITIZED_IDENTIFIER}
+
+    if [[ -n ${first_id} ]]; then
+        ((slot += 1))
+        PLANNED_KEYS+=("plan:${slot}")
+        PLANNED_FORMAT_IDS+=("${first_id}")
     fi
-    # Predicate: status 1 means the field is usable.
-    # shellcheck disable=SC2310
-    if ! is_unknown_field "${second_id}"; then
-        PLANNED_KEYS+=("format:${second_id}")
+    if [[ -n ${second_id} ]]; then
+        ((slot += 1))
+        PLANNED_KEYS+=("plan:${slot}")
+        PLANNED_FORMAT_IDS+=("${second_id}")
     fi
     if ((${#PLANNED_KEYS[@]} == 0)); then
-        # An unknown combined ID needs a fallback.
-        # shellcheck disable=SC2310
-        if is_unknown_field "${combined_id}"; then
-            combined_id='combined'
-        fi
-        PLANNED_KEYS+=("format:${combined_id}")
+        PLANNED_KEYS=('plan:1')
+        PLANNED_FORMAT_IDS=("${combined_id}")
     fi
 
     planned_items=${#PLANNED_KEYS[@]}
@@ -220,21 +240,34 @@ set_plan() {
 
 resolve_native_key() {
     local format_id=$1
-    local candidate="format:${format_id}"
+    local index
     local key
 
     RESOLVED_KEY=''
-    # Predicate: status 1 means a concrete format ID.
-    # shellcheck disable=SC2310
-    if ! is_unknown_field "${format_id}"; then
-        for key in "${PLANNED_KEYS[@]}"; do
-            if [[ ${key} == "${candidate}" ]]; then
+    sanitize_identifier "${format_id}"
+    format_id=${SANITIZED_IDENTIFIER}
+
+    if [[ -n ${format_id} ]]; then
+        for index in "${!PLANNED_KEYS[@]}"; do
+            key=${PLANNED_KEYS[index]}
+            if [[ ${PLANNED_FORMAT_IDS[index]} == "${format_id}" ]] &&
+                (( ${ITEM_PERCENT[${key}]:-0} < 100 )); then
                 RESOLVED_KEY=${key}
                 return 0
             fi
         done
-        RESOLVED_KEY=${candidate}
-        return 0
+        for index in "${!PLANNED_KEYS[@]}"; do
+            if [[ ${PLANNED_FORMAT_IDS[index]} == "${format_id}" ]]; then
+                RESOLVED_KEY=${PLANNED_KEYS[index]}
+                return 0
+            fi
+        done
+        for index in "${!NATIVE_FORMAT_IDS[@]}"; do
+            if [[ ${NATIVE_FORMAT_IDS[index]} == "${format_id}" ]]; then
+                RESOLVED_KEY=${NATIVE_FORMAT_KEYS[index]}
+                return 0
+            fi
+        done
     fi
 
     for key in "${PLANNED_KEYS[@]}"; do
@@ -243,7 +276,15 @@ resolve_native_key() {
             return 0
         fi
     done
+
+    if [[ -z ${format_id} && ${#NATIVE_FORMAT_KEYS[@]} -gt 0 ]]; then
+        RESOLVED_KEY=${NATIVE_FORMAT_KEYS[-1]}
+        return 0
+    fi
+
     RESOLVED_KEY="native:$((seen_items + 1))"
+    NATIVE_FORMAT_IDS+=("${format_id}")
+    NATIVE_FORMAT_KEYS+=("${RESOLVED_KEY}")
 }
 
 resolve_aria_key() {
@@ -590,21 +631,25 @@ process_line() {
     case ${line} in
     YTDLP_PLAN\|*)
         IFS='|' read -r -a fields <<<"${line}"
+        ((${#fields[@]} <= 5)) || return 0
         while ((${#fields[@]} < 5)); do fields+=(''); done
         handle_plan "${fields[@]:0:5}"
         ;;
     YTDLP_PROGRESS_V2\|*)
         IFS='|' read -r -a fields <<<"${line}"
+        ((${#fields[@]} <= 12)) || return 0
         while ((${#fields[@]} < 12)); do fields+=(''); done
         handle_v2_progress "${fields[@]:0:12}"
         ;;
     YTDLP_PROGRESS\|*)
         IFS='|' read -r -a fields <<<"${line}"
+        ((${#fields[@]} <= 5)) || return 0
         while ((${#fields[@]} < 5)); do fields+=(''); done
         handle_legacy_progress "${fields[@]:0:5}"
         ;;
     YTDLP_POSTPROCESS\|*)
         IFS='|' read -r -a fields <<<"${line}"
+        ((${#fields[@]} <= 3)) || return 0
         while ((${#fields[@]} < 3)); do fields+=(''); done
         handle_postprocess "${fields[@]:0:3}"
         ;;
@@ -679,6 +724,11 @@ consume_log_data() {
     local line
 
     pending_data+=${chunk}
+    if ((${#pending_data} > MAX_PENDING_CHARS)); then
+        pending_data=''
+        message='Progress information contained an oversized record; the download continues...'
+        return 0
+    fi
     pending_data=${pending_data//$'\r'/$'\n'}
     while [[ ${pending_data} == *$'\n'* ]]; do
         line=${pending_data%%$'\n'*}

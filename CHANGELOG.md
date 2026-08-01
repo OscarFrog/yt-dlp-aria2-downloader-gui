@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.1.14 - 2026-08-01
+
+### Security and data safety
+
+- Replace untrusted yt-dlp format identifiers with opaque internal progress
+  keys and reject malformed records containing extra protocol delimiters.
+- Canonicalize every reported final media path and require it to remain inside
+  the selected destination before remuxing, deleting, or publishing it.
+- Publish machine result files without overwriting a destination that appears
+  concurrently.
+- Bound unterminated progress records to prevent unbounded monitor memory use.
+- Check `ffprobe` explicitly alongside FFmpeg.
+- Prevent concurrent engine instances from writing into the same canonical
+  destination directory.
+- Keep the worker process-group identifier until every descendant has exited,
+  even if the direct `setsid` supervisor terminates first.
+- Restrict integration-suite root cleanup to the Bash process that created
+  it, preventing timeout or asynchronous shell copies from deleting the
+  complete workspace during later scenarios.
+
+### CI and release
+
+- Run push validation only on `main` while retaining pull-request validation,
+  avoiding duplicate branch and pull-request jobs for the same change.
+- Refuse to publish a release tag whose commit is not reachable from
+  `origin/main`.
+
 ## 2.1.13 - 2026-07-31
 
 ### Interface and progress

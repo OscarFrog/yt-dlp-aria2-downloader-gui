@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video-gui.sh
-# Version     : 2.1.13
-# Date        : 2026-07-31
+# Version     : 2.1.14
+# Date        : 2026-08-01
 # Description : Zenity GUI for MKV video, authenticated YouTube HLS, or audio.
 # ============================================================================
 
@@ -256,20 +256,43 @@ wait_for_worker_exit() {
     local attempts=$1
     local attempt
     local status=0
+    local supervisor_alive=false
+    local group_alive=false
 
-    WAITED_WORKER_STATUS=''
     for ((attempt = 0; attempt < attempts; attempt++)); do
-        # process_is_running returns false for a terminated zombie, at which
-        # point wait can reap the child without blocking.
-        # shellcheck disable=SC2310
-        if ! process_is_running "${WORKER_PID}"; then
-            set +e
-            wait "${WORKER_PID}" 2>/dev/null
-            status=$?
-            set -e
-            WAITED_WORKER_STATUS=${status}
-            WORKER_PID=''
-            WORKER_PGID=''
+        supervisor_alive=false
+        group_alive=false
+
+        if [[ -n ${WORKER_PID} ]]; then
+            # process_is_running returns false for a terminated zombie, at
+            # which point wait can reap the direct supervisor without blocking.
+            # shellcheck disable=SC2310
+            if process_is_running "${WORKER_PID}"; then
+                supervisor_alive=true
+            else
+                set +e
+                wait "${WORKER_PID}" 2>/dev/null
+                status=$?
+                set -e
+                if [[ -z ${WAITED_WORKER_STATUS} ]]; then
+                    WAITED_WORKER_STATUS=${status}
+                fi
+                WORKER_PID=''
+            fi
+        fi
+
+        # The setsid supervisor can disappear before a grandchild. Retain the
+        # PGID until the complete process group is gone so TERM/KILL can still
+        # reach surviving yt-dlp, aria2c, FFmpeg, or Deno descendants.
+        if [[ -n ${WORKER_PGID} ]]; then
+            if kill -0 -- "-${WORKER_PGID}" 2>/dev/null; then
+                group_alive=true
+            else
+                WORKER_PGID=''
+            fi
+        fi
+
+        if [[ ${supervisor_alive} == false && ${group_alive} == false ]]; then
             return 0
         fi
         sleep 0.1
@@ -311,11 +334,12 @@ cleanup() {
     fi
     CLEANUP_DONE=true
 
-    if [[ -n ${WORKER_PID} ]] && kill -0 -- "${WORKER_PID}" 2>/dev/null; then
-        # stop_worker handles all expected failures explicitly.
+    if [[ -n ${WORKER_PID} || -n ${WORKER_PGID} ]]; then
+        # stop_worker reaps the supervisor and retains control of a surviving
+        # process group until every descendant has exited.
         # shellcheck disable=SC2310
         if ! stop_worker; then
-            printf 'Warning: the worker did not terminate after SIGKILL; cleanup will continue.\n' >&2
+            printf 'Warning: the worker group did not terminate after SIGKILL; cleanup will continue.\n' >&2
             WORKER_PID=''
             WORKER_PGID=''
         fi
