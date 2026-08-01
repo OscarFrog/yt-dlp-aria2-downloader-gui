@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.15
+# Version     : 2.1.16
 # Date        : 2026-08-01
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
@@ -11,7 +11,7 @@
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.1.15"
+readonly VERSION="2.1.16"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -33,6 +33,7 @@ DOWNLOAD_PGID_FILE=''
 DOWNLOAD_STATUS=125
 REQUESTED_EXIT_STATUS=''
 SHUTDOWN_REQUESTED=false
+REUSE_CURRENT_SESSION=false
 
 cleanup() {
     local status=$?
@@ -279,6 +280,7 @@ check_runtime_compatibility() {
     for required_option in \
         --file-allocation \
         --no-conf \
+        --no-netrc \
         --enable-color \
         --truncate-console-readout \
         --summary-interval \
@@ -449,6 +451,16 @@ signal_download_worker() {
     local signal_name=$1
     local group_signaled=false
 
+    # When the GUI already created the session, the entire outer process group
+    # receives its signal directly. Avoid signaling our own group recursively;
+    # target the direct child only as a best-effort fallback.
+    if [[ ${REUSE_CURRENT_SESSION} == true ]]; then
+        if [[ -n ${DOWNLOAD_WORKER_PID} ]]; then
+            kill "-${signal_name}" -- "${DOWNLOAD_WORKER_PID}" 2>/dev/null || true
+        fi
+        return 0
+    fi
+
     if [[ -z ${DOWNLOAD_WORKER_PGID} ]]; then
         # shellcheck disable=SC2310 # A missing PGID is an expected race.
         recover_download_pgid || true
@@ -541,56 +553,87 @@ stop_download_worker() {
     wait_for_download_exit 20
 }
 
-run_download_worker() {
+run_supervised_command() {
     local worker_status=0
+    local -a worker_command=("$@")
 
     DOWNLOAD_STATUS=125
-    if ! DOWNLOAD_PGID_FILE=$(mktemp \
-        --tmpdir="${OUTPUT_LOCK_ROOT}" \
-        '.worker-pgid.XXXXXXXX'); then
-        error 'unable to create the download process-group file.'
-        return 0
-    fi
+    DOWNLOAD_WORKER_PID=''
+    DOWNLOAD_WORKER_PGID=''
+    DOWNLOAD_PGID_FILE=''
 
-    # Run yt-dlp in a dedicated session so a signal sent only to this wrapper
-    # can still be relayed to yt-dlp, aria2c, FFmpeg, Deno, and their descendants.
-    # shellcheck disable=SC2016
-    LC_ALL=C setsid --fork --wait bash -c '
-        set -euo pipefail
-        pgid_file=$1
-        shift
-        pgid_temporary="${pgid_file}.tmp"
-        printf "%s\n" "$$" >"${pgid_temporary}" || exit 125
-        mv -f -- "${pgid_temporary}" "${pgid_file}" || exit 125
-        exec "$@"
-    ' bash "${DOWNLOAD_PGID_FILE}" \
-        yt-dlp "${YT_DLP_OPTIONS[@]}" -- "${URL}" &
-    DOWNLOAD_WORKER_PID=$!
+    if [[ ${REUSE_CURRENT_SESSION} == true ]]; then
+        # The GUI has already placed this engine and every descendant in one
+        # dedicated session. Do not create a nested session that the GUI could
+        # lose after an emergency SIGKILL of this wrapper.
+        LC_ALL=C "${worker_command[@]}" &
+        DOWNLOAD_WORKER_PID=$!
+    else
+        if ! DOWNLOAD_PGID_FILE=$(mktemp \
+            --tmpdir="${OUTPUT_LOCK_ROOT}" \
+            '.worker-pgid.XXXXXXXX'); then
+            error 'unable to create the command process-group file.'
+            return 0
+        fi
 
-    # shellcheck disable=SC2310 # Startup failure is handled explicitly.
-    if ! wait_for_download_pgid; then
-        if [[ ${SHUTDOWN_REQUESTED} != true ]]; then
-            error 'unable to determine the download process group.'
+        # Standalone CLI mode needs its own session so signals sent only to the
+        # wrapper PID can be relayed to the complete command tree.
+        # shellcheck disable=SC2016
+        LC_ALL=C setsid --fork --wait bash -c '
+            set -euo pipefail
+            pgid_file=$1
+            shift
+            pgid_temporary="${pgid_file}.tmp"
+            printf "%s\n" "$$" >"${pgid_temporary}" || exit 125
+            mv -Tf -- "${pgid_temporary}" "${pgid_file}" || exit 125
+            exec "$@"
+        ' bash "${DOWNLOAD_PGID_FILE}" "${worker_command[@]}" &
+        DOWNLOAD_WORKER_PID=$!
+
+        # A command may fail before the PGID probe observes its group. Preserve
+        # the real command status instead of converting a legitimate fast
+        # failure into the internal startup status 125.
+        # shellcheck disable=SC2310
+        if ! wait_for_download_pgid; then
+            worker_status=0
+            # shellcheck disable=SC2310
+            if ! process_is_running "${DOWNLOAD_WORKER_PID}"; then
+                wait "${DOWNLOAD_WORKER_PID}" 2>/dev/null || worker_status=$?
+                DOWNLOAD_WORKER_PID=''
+                DOWNLOAD_WORKER_PGID=''
+                DOWNLOAD_STATUS=${worker_status}
+                rm -f -- \
+                    "${DOWNLOAD_PGID_FILE}" \
+                    "${DOWNLOAD_PGID_FILE}.tmp" || true
+                DOWNLOAD_PGID_FILE=''
+                return 0
+            fi
+
+            if [[ ${SHUTDOWN_REQUESTED} != true ]]; then
+                error 'unable to determine the command process group.'
+            fi
+            # shellcheck disable=SC2310
+            stop_download_worker || true
+            if [[ -n ${REQUESTED_EXIT_STATUS} ]]; then
+                DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS}
+            fi
+            rm -f -- \
+                "${DOWNLOAD_PGID_FILE}" \
+                "${DOWNLOAD_PGID_FILE}.tmp" || true
+            DOWNLOAD_PGID_FILE=''
+            return 0
         fi
-        # shellcheck disable=SC2310 # Startup cleanup is best effort.
-        stop_download_worker || true
-        if [[ -n ${REQUESTED_EXIT_STATUS} ]]; then
-            DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS}
-        fi
-        rm -f -- "${DOWNLOAD_PGID_FILE}" "${DOWNLOAD_PGID_FILE}.tmp" || true
-        DOWNLOAD_PGID_FILE=''
-        return 0
     fi
 
     worker_status=0
     wait "${DOWNLOAD_WORKER_PID}" || worker_status=$?
 
     if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
-        # shellcheck disable=SC2310 # Escalate only after the bounded wait fails.
-        if ! wait_for_download_exit 30; then
+        # shellcheck disable=SC2310
+        if ! wait_for_download_exit 100; then
             signal_download_worker KILL
-            # shellcheck disable=SC2310 # Final reap is best effort after SIGKILL.
-            wait_for_download_exit 20 || true
+            # shellcheck disable=SC2310
+            wait_for_download_exit 30 || true
         fi
         DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS:-143}
     else
@@ -599,9 +642,35 @@ run_download_worker() {
         DOWNLOAD_STATUS=${worker_status}
     fi
 
-    rm -f -- "${DOWNLOAD_PGID_FILE}" "${DOWNLOAD_PGID_FILE}.tmp" || true
-    DOWNLOAD_PGID_FILE=''
+    if [[ -n ${DOWNLOAD_PGID_FILE} ]]; then
+        rm -f -- \
+            "${DOWNLOAD_PGID_FILE}" \
+            "${DOWNLOAD_PGID_FILE}.tmp" || true
+        DOWNLOAD_PGID_FILE=''
+    fi
     return 0
+}
+
+validate_final_media_file() {
+    local final_path=$1
+    local stream_selector=$2
+    local probe_output=''
+
+    [[ -f ${final_path} && -s ${final_path} ]] || return 1
+
+    if ! probe_output=$(
+        timeout --signal=TERM --kill-after=2s 15s \
+            ffprobe \
+            -v error \
+            -select_streams "${stream_selector}" \
+            -show_entries stream=index \
+            -of csv=p=0 \
+            "${final_path}" 2>/dev/null
+    ); then
+        return 1
+    fi
+
+    grep -Eq '^[0-9]+$' <<<"${probe_output}"
 }
 
 normalize_path_record() {
@@ -674,6 +743,11 @@ while (($# > 0)); do
         ;;
     --youtube-hls-firefox)
         YOUTUBE_HLS_FIREFOX=true
+        shift
+        ;;
+    --supervised-session)
+        # Internal GUI contract: reuse the session already created by the GUI.
+        REUSE_CURRENT_SESSION=true
         shift
         ;;
     --result-file)
@@ -758,7 +832,7 @@ if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
     esac
 fi
 
-for command_name in yt-dlp aria2c ffmpeg ffprobe realpath deno grep mktemp mv rm chmod flock mkdir sha256sum stat setsid sleep; do
+for command_name in yt-dlp aria2c ffmpeg ffprobe realpath deno grep mktemp mv rm chmod flock mkdir sha256sum stat setsid sleep timeout; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         error "required command \"${command_name}\" was not found."
         exit 127
@@ -835,7 +909,9 @@ if [[ -n ${RESULT_FILE} ]]; then
     fi
 fi
 
-if [[ ${YOUTUBE_HLS_FIREFOX} == true && -z ${RESULT_FILE_TMP} ]]; then
+if [[ -z ${RESULT_FILE_TMP} ]]; then
+    # Always retain the final yt-dlp path internally. This permits uniform
+    # FFprobe validation for ordinary CLI runs as well as GUI and HLS runs.
     if ! INTERNAL_PATH_FILE_TMP=$(mktemp \
         --tmpdir="${OUTPUT_DIR}" \
         '.yt-dlp-path.XXXXXXXX'); then
@@ -851,7 +927,7 @@ if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
     printf '%s\n' 'YouTube access: Firefox cookies with web_safari HLS'
 fi
 
-ARIA2_ARGUMENTS='-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --console-log-level=warn --enable-color=false --truncate-console-readout=false'
+ARIA2_ARGUMENTS='-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --no-netrc=true --console-log-level=warn --enable-color=false --truncate-console-readout=false'
 if [[ ${MACHINE_PROGRESS} == true ]]; then
     # yt-dlp does not currently expose aria2c transfer progress through its
     # own progress hooks. yt-dlp captures stderr from external downloaders and
@@ -944,7 +1020,7 @@ if [[ -n ${PATH_RECORD_TMP} ]]; then
     )
 fi
 
-run_download_worker
+run_supervised_command yt-dlp "${YT_DLP_OPTIONS[@]}" -- "${URL}"
 if ((DOWNLOAD_STATUS == 0)); then
     if [[ -n ${PATH_RECORD_TMP} ]]; then
         set +e
@@ -993,8 +1069,8 @@ if ((DOWNLOAD_STATUS == 0)); then
             exit 13
         fi
 
-        ffmpeg_status=0
-        ffmpeg \
+        run_supervised_command \
+            ffmpeg \
             -hide_banner \
             -loglevel warning \
             -i "${hls_source_path}" \
@@ -1003,7 +1079,8 @@ if ((DOWNLOAD_STATUS == 0)); then
             -ignore_unknown \
             -c copy \
             -y \
-            "${HLS_REMUX_TMP}" || ffmpeg_status=$?
+            "${HLS_REMUX_TMP}"
+        ffmpeg_status=${DOWNLOAD_STATUS}
         if ((ffmpeg_status != 0)); then
             emit_machine_postprocess error FFmpegVideoRemuxer
             error "unable to remux the repaired HLS file into MKV (FFmpeg status ${ffmpeg_status})."
@@ -1012,7 +1089,7 @@ if ((DOWNLOAD_STATUS == 0)); then
             exit "${ffmpeg_status}"
         fi
 
-        if ! mv -n -- "${HLS_REMUX_TMP}" "${hls_final_path}"; then
+        if ! mv -nT -- "${HLS_REMUX_TMP}" "${hls_final_path}"; then
             emit_machine_postprocess error FFmpegVideoRemuxer
             error 'unable to publish the final MKV file.'
             exit 13
@@ -1037,8 +1114,41 @@ if ((DOWNLOAD_STATUS == 0)); then
         fi
     fi
 
+    final_media_path=''
+    if ! { IFS= read -r final_media_path <"${PATH_RECORD_TMP}"; } 2>/dev/null ||
+        [[ -z ${final_media_path} ]]; then
+        error 'unable to read the final media path for validation.'
+        exit 13
+    fi
+
+    if [[ ${MODE} == video ]]; then
+        final_stream_selector='v:0'
+    else
+        final_stream_selector='a:0'
+    fi
+
+    emit_machine_postprocess started MediaValidation
+
+    # Call the validation function outside a conditional context. Bash disables
+    # errexit throughout a function invoked by if, !, &&, or ||, which could
+    # otherwise hide an unexpected failure inside the validation routine.
+    set +e
+    validate_final_media_file \
+        "${final_media_path}" "${final_stream_selector}"
+    validation_status=$?
+    set -e
+
+    if ((validation_status != 0)); then
+        emit_machine_postprocess error MediaValidation
+        error "the final media file failed FFprobe validation: ${final_media_path}"
+        printf '%s\n' \
+            'The media file was retained for diagnosis and was not published as a successful result.' >&2
+        exit 65
+    fi
+    emit_machine_postprocess finished MediaValidation
+
     if [[ -n ${RESULT_FILE} ]]; then
-        if ! mv -n -- "${RESULT_FILE_TMP}" "${RESULT_FILE}"; then
+        if ! mv -nT -- "${RESULT_FILE_TMP}" "${RESULT_FILE}"; then
             error 'unable to publish the result file.'
             exit 13
         fi

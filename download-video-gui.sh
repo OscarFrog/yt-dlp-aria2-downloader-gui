@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video-gui.sh
-# Version     : 2.1.15
+# Version     : 2.1.16
 # Date        : 2026-08-01
 # Description : Zenity GUI for MKV video, authenticated YouTube HLS, or audio.
 # ============================================================================
@@ -429,7 +429,7 @@ save_settings() {
         rm -f -- "${temporary_file}" || true
         return 1
     fi
-    if ! mv -f -- "${temporary_file}" "${CONFIG_FILE}"; then
+    if ! mv -Tf -- "${temporary_file}" "${CONFIG_FILE}"; then
         rm -f -- "${temporary_file}" || true
         return 1
     fi
@@ -645,9 +645,11 @@ monitor_progress() {
     local worker_pid=$2
     local result_file=$3
     local profile=$4
+    local output_dir=$5
 
     bash "${PROGRESS_MONITOR}" \
-        "${log_file}" "${worker_pid}" "${result_file}" "${profile}"
+        "${log_file}" "${worker_pid}" "${result_file}" "${profile}" \
+        "${output_dir}"
 }
 
 wait_for_worker_pgid() {
@@ -888,6 +890,7 @@ COMMAND=(
     --output-dir "${OUTPUT_DIR}"
     --machine-progress
     --result-file "${RESULT_FILE}"
+    --supervised-session
 )
 
 case ${PROFILE} in
@@ -917,7 +920,7 @@ LC_ALL=C setsid --fork --wait bash -c '
     shift
     pgid_temporary="${pgid_file}.tmp"
     printf "%s\n" "$$" >"${pgid_temporary}" || exit 125
-    mv -f -- "${pgid_temporary}" "${pgid_file}" || exit 125
+    mv -Tf -- "${pgid_temporary}" "${pgid_file}" || exit 125
     exec "$@"
 ' bash "${PGID_FILE}" "${COMMAND[@]}" >"${LOG_FILE}" 2>&1 &
 WORKER_PID=$!
@@ -938,7 +941,9 @@ if ((pgid_status != 0)); then
 fi
 
 set +e
-monitor_progress "${LOG_FILE}" "${WORKER_PID}" "${RESULT_FILE}" "${PROGRESS_PROFILE}" | zenity --progress \
+monitor_progress \
+    "${LOG_FILE}" "${WORKER_PID}" "${RESULT_FILE}" \
+    "${PROGRESS_PROFILE}" "${OUTPUT_DIR}" | zenity --progress \
     --title="${APP_NAME}" \
     --text='Initializing...' \
     --percentage=0 \

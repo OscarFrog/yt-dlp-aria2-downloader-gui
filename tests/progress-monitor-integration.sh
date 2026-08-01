@@ -175,7 +175,7 @@ start_scenario() {
     ACTIVE_WORKER=$!
     bash "${MONITOR}" \
         "${LOG_FILE}" "${ACTIVE_WORKER}" "${RESULT_FILE}" "${profile}" \
-        >"${CAPTURE_FILE}" &
+        "${SCENARIO_DIR}" >"${CAPTURE_FILE}" &
     ACTIVE_MONITOR=$!
     wait_for_text "${CAPTURE_FILE}" 'Analyzing the webpage...' \
         "${name} monitor startup"
@@ -257,8 +257,9 @@ set +e
 # shellcheck disable=SC2016
 timeout --signal=TERM --kill-after=1s 5s \
     bash -o pipefail -c '
-        bash "$1" "$2" "$3" "$4" video | head -n 2 >/dev/null
-    ' bash "${MONITOR}" "${pipe_log}" "${pipe_worker}" "${pipe_result}"
+        bash "$1" "$2" "$3" "$4" video "$5" | head -n 2 >/dev/null
+    ' bash "${MONITOR}" "${pipe_log}" "${pipe_worker}" "${pipe_result}" \
+        "${pipe_scenario_dir}"
 pipe_status=$?
 set -e
 stop_process_bounded "${pipe_worker}"

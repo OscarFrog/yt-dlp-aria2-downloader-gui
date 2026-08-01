@@ -3,12 +3,13 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : progress-monitor.sh
-# Version     : 2.1.15
+# Version     : 2.1.16
 # Date        : 2026-08-01
 # Description : Convert downloader events into a unified Zenity progress stream.
 # ============================================================================
 
 set -euo pipefail
+export LC_ALL=C
 
 cleanup() {
     exec 3<&- 2>/dev/null || true
@@ -25,10 +26,10 @@ readonly VERIFY_PERCENT=99
 readonly MAX_PENDING_CHARS=1048576
 
 usage() {
-    printf 'Usage: %s LOG_FILE WORKER_PID RESULT_FILE PROFILE\n' "${0##*/}" >&2
+    printf 'Usage: %s LOG_FILE WORKER_PID RESULT_FILE PROFILE OUTPUT_DIR\n' "${0##*/}" >&2
 }
 
-if (($# != 4)); then
+if (($# != 5)); then
     usage
     exit 2
 fi
@@ -37,6 +38,14 @@ readonly LOG_FILE=$1
 readonly WORKER_PID=$2
 readonly RESULT_FILE=$3
 readonly PROFILE=$4
+OUTPUT_DIR=$5
+
+if ! OUTPUT_DIR=$(realpath -e -- "${OUTPUT_DIR}" 2>/dev/null) ||
+    [[ ! -d ${OUTPUT_DIR} ]]; then
+    printf 'Error: invalid output directory: %s\n' "$5" >&2
+    exit 2
+fi
+readonly OUTPUT_DIR
 
 if [[ ! ${WORKER_PID} =~ ^[1-9][0-9]*$ ]]; then
     printf 'Error: invalid worker PID: %s\n' "${WORKER_PID}" >&2
@@ -664,6 +673,7 @@ process_line() {
 result_file_confirms_output() {
     local candidate=''
     local final_path=''
+    local resolved_path=''
 
     [[ -s ${RESULT_FILE} ]] || return 1
     while IFS= read -r candidate || [[ -n ${candidate} ]]; do
@@ -671,7 +681,11 @@ result_file_confirms_output() {
             final_path=${candidate}
         fi
     done <"${RESULT_FILE}"
-    [[ -n ${final_path} && -f ${final_path} ]]
+
+    [[ -n ${final_path} ]] || return 1
+    resolved_path=$(realpath -e -- "${final_path}" 2>/dev/null) || return 1
+    [[ -f ${resolved_path} ]] || return 1
+    [[ ${OUTPUT_DIR} == / || ${resolved_path} == "${OUTPUT_DIR}"/* ]]
 }
 
 render_tick() {

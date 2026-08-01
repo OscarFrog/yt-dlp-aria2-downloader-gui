@@ -8,7 +8,7 @@ readonly PROJECT_DIR
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 for required_command in \
     awk bash cat chmod date dirname env grep ln mkdir mktemp mv readlink \
-    realpath rm setsid sleep stat timeout touch tr flock sha256sum; do
+    realpath rm setsid sleep stat timeout touch tr flock sha256sum wc; do
     require_test_command "${required_command}"
 done
 [[ -r /proc/self/cmdline ]] ||
@@ -194,7 +194,7 @@ if [[ ${MOCK_ENFORCE_NO_OVERWRITE:-0} == 1 && -e ${output_path} ]]; then
     exit 1
 fi
 if [[ ${MOCK_RESULT_TARGET_MISSING:-0} != 1 ]]; then
-    : >"${output_path}"
+    printf '%s\n' 'mock media payload' >"${output_path}"
 fi
 if [[ -n ${result_file} && ${MOCK_SKIP_RESULT_FILE:-0} != 1 ]]; then
     if [[ ${MOCK_PREPEND_STALE_RESULT:-0} == 1 ]]; then
@@ -219,6 +219,7 @@ case ${1:-} in
     printf '%s\n' \
         '--file-allocation=<METHOD>' \
         '--no-conf[=true|false]' \
+        '--no-netrc[=true|false]' \
         '--enable-color[=true|false]' \
         '--truncate-console-readout[=true|false]' \
         '--summary-interval=<SEC>' \
@@ -261,21 +262,45 @@ esac
 if [[ -n ${MOCK_FFMPEG_ARG_LOG:-} ]]; then
     printf '%s\0' "$@" >"${MOCK_FFMPEG_ARG_LOG}"
 fi
+if [[ ${MOCK_LONG_FFMPEG:-0} == 1 ]]; then
+    if [[ -n ${MOCK_FFMPEG_STARTED_MARKER:-} ]]; then
+        printf started >"${MOCK_FFMPEG_STARTED_MARKER}"
+    fi
+    trap 'printf terminated >"${MOCK_FFMPEG_TERMINATION_MARKER:?}"; exit 143' TERM INT
+    while true; do
+        sleep 0.1
+    done
+fi
 if [[ ${MOCK_FFMPEG_EXIT_STATUS:-0} != 0 ]]; then
     printf 'Simulated FFmpeg remux failure.\n' >&2
     exit "${MOCK_FFMPEG_EXIT_STATUS}"
 fi
 output_path=${!#}
-: >"${output_path}"
+printf '%s\n' 'mock remuxed media payload' >"${output_path}"
 EOF_FFMPEG
 chmod +x "${MOCK_BIN}/ffmpeg"
 
 cat > "${MOCK_BIN}/ffprobe" <<'EOF_FFPROBE'
 #!/usr/bin/env bash
 set -euo pipefail
+
 case ${1:-} in
--version | --version) printf 'ffprobe mock version 1.0\n' ;;
+-version | --version)
+    printf 'ffprobe mock version 1.0\n'
+    exit 0
+    ;;
 esac
+
+if [[ -n ${MOCK_FFPROBE_ARG_LOG:-} ]]; then
+    printf '%s\0' "$@" >"${MOCK_FFPROBE_ARG_LOG}"
+fi
+if [[ ${MOCK_FFPROBE_EXIT_STATUS:-0} != 0 ]]; then
+    printf 'Simulated FFprobe validation failure.\n' >&2
+    exit "${MOCK_FFPROBE_EXIT_STATUS}"
+fi
+if [[ ${MOCK_FFPROBE_EMPTY:-0} != 1 ]]; then
+    printf '0\n'
+fi
 EOF_FFPROBE
 chmod +x "${MOCK_BIN}/ffprobe"
 
@@ -304,6 +329,9 @@ if (($# == 1)) && [[ $1 == '--help' ]]; then
 fi
 if [[ -n ${MOCK_SETSID_START_STATUS:-} ]]; then
     exit "${MOCK_SETSID_START_STATUS}"
+fi
+if [[ -n ${MOCK_SETSID_LOG:-} ]]; then
+    printf 'call\n' >>"${MOCK_SETSID_LOG}"
 fi
 exec "${REAL_SETSID:?}" "$@"
 EOF_SETSID
@@ -716,10 +744,12 @@ assert_no_test_processes 'log-retention GUI run left worker processes'
 # result-path reporting.
 prepare_argument_log 'audio-engine'
 result_file="${TEST_ROOT}/engine-%-result.txt"
+ffprobe_argument_log="${TEST_ROOT}/ffprobe-audio-args.bin"
 injection_marker="${TEST_ROOT}/must-not-exist"
 malicious_url="https://example.com/watch?v=abc123&x=\$(touch\$IFS${injection_marker})"
 assert_status 0 'audio engine succeeds under a hostile inherited locale' \
     env LC_ALL=fr_FR.UTF-8 LANG=fr_FR.UTF-8 \
+    MOCK_FFPROBE_ARG_LOG="${ffprobe_argument_log}" \
     "${PROJECT_DIR}/download-video.sh" \
     --output-dir "${OUTPUT_DIR}" \
     --mode audio \
@@ -728,6 +758,11 @@ assert_status 0 'audio engine succeeds under a hostile inherited locale' \
     -- "${malicious_url}"
 assert_file_has_line "${result_file}" \
     "${OUTPUT_DIR}/Mock media [abc123].webm" 'engine result path'
+# shellcheck disable=SC2034 # Read indirectly through nameref assertion helpers.
+ffprobe_arguments=()
+read_arguments "${ffprobe_argument_log}" ffprobe_arguments
+assert_option_value ffprobe_arguments '-select_streams' 'a:0' \
+    'audio result FFprobe stream validation'
 [[ ! -e ${injection_marker} ]] || fail 'The URL was interpreted as shell code.'
 
 arguments=()
@@ -736,6 +771,7 @@ assert_array_contains arguments '--ignore-config' 'yt-dlp ignores user configura
 assert_array_contains arguments '--no-playlist' 'yt-dlp disables playlists'
 assert_array_contains arguments '--no-overwrites' 'yt-dlp final-file overwrite protection'
 assert_array_contains arguments '--no-post-overwrites' 'yt-dlp post-processing overwrite protection'
+assert_array_not_contains arguments '--supervised-session' 'internal session option isolation'
 assert_option_value arguments '--remote-components' 'ejs:npm' 'EJS remote component selector'
 assert_option_value arguments '--format' 'ba/b' 'audio format selector'
 assert_array_contains arguments '--extract-audio' 'audio extraction postprocessor'
@@ -745,7 +781,7 @@ assert_option_value arguments '--downloader' 'aria2c' 'default external download
 assert_option_value arguments '--downloader' 'dash,m3u8:native' \
     'fragmented-stream native downloader' 2
 assert_option_value arguments '--downloader-args' \
-    'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=1 --show-console-readout=true --stderr=false' \
+    'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --no-netrc=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=1 --show-console-readout=true --stderr=false' \
     'aria2 machine-progress arguments'
 assert_array_not_contains arguments '--machine-progress' \
     'internal wrapper option isolation'
@@ -829,7 +865,7 @@ assert_option_value arguments '--format' 'bv*+ba/b' 'video format selector'
 assert_option_value arguments '--merge-output-format' 'mkv' 'video merge container'
 assert_option_value arguments '--remux-video' 'mkv' 'video remux container'
 assert_option_value arguments '--downloader-args' \
-    'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=0' \
+    'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --no-netrc=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=0' \
     'ordinary CLI aria2 arguments'
 assert_text_not_contains "$(printf '%s\n' "${arguments[@]}")" \
     '--show-console-readout=true' 'machine progress disabled in ordinary CLI mode'
@@ -1063,7 +1099,7 @@ assert_file_not_contains "${PROGRESS_CAPTURE}" '# Completed' \
 gui_arguments=()
 read_arguments "${MOCK_ARG_LOG}" gui_arguments
 assert_option_value gui_arguments '--downloader-args' \
-    'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=1 --show-console-readout=true --stderr=false' \
+    'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --no-netrc=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=1 --show-console-readout=true --stderr=false' \
     'machine-progress aria2 readout remains visible on stdout'
 assert_array_contains gui_arguments "${trimmed_gui_url}" 'trimmed GUI URL'
 assert_array_not_contains gui_arguments "  ${trimmed_gui_url}  " \
@@ -1345,6 +1381,40 @@ assert_equals '143' "${cli_engine_status}" 'CLI TERM exit status'
 wait_for_file "${cli_termination_marker}" 10 'CLI child process receives TERM'
 assert_no_test_processes 'CLI signal forwarding left worker processes'
 
+
+# A signal sent only to the CLI wrapper during the custom HLS FFmpeg remux must
+# reach FFmpeg and preserve the requested shell exit status.
+ffmpeg_started_marker="${TEST_ROOT}/ffmpeg-worker-started"
+ffmpeg_termination_marker="${TEST_ROOT}/ffmpeg-worker-terminated"
+ffmpeg_signal_log="${TEST_ROOT}/ffmpeg-signal.log"
+prepare_argument_log 'cli-ffmpeg-signal-forwarding'
+env MOCK_LONG_FFMPEG=1 \
+    MOCK_FFMPEG_STARTED_MARKER="${ffmpeg_started_marker}" \
+    MOCK_FFMPEG_TERMINATION_MARKER="${ffmpeg_termination_marker}" \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode video \
+    --youtube-hls-firefox \
+    -- 'https://www.youtube.com/watch?v=cli-ffmpeg-signal' \
+    >"${ffmpeg_signal_log}" 2>&1 &
+ffmpeg_engine_pid=$!
+wait_for_file "${ffmpeg_started_marker}" 15 'CLI FFmpeg worker startup'
+kill -TERM -- "${ffmpeg_engine_pid}"
+ffmpeg_engine_status=0
+wait "${ffmpeg_engine_pid}" || ffmpeg_engine_status=$?
+assert_equals '143' "${ffmpeg_engine_status}" 'CLI FFmpeg TERM exit status'
+wait_for_file "${ffmpeg_termination_marker}" 10 'CLI FFmpeg receives TERM'
+assert_no_test_processes 'CLI FFmpeg signal forwarding left worker processes'
+
+# The GUI owns exactly one setsid session; the engine must reuse it.
+single_session_log="${TEST_ROOT}/single-session-setsid.log"
+prepare_argument_log 'single-session-gui'
+assert_status 0 'GUI and engine use one shared process session' \
+    env MOCK_SETSID_LOG="${single_session_log}" \
+    "${PROJECT_DIR}/download-video-gui.sh"
+single_session_calls=$(wc -l <"${single_session_log}")
+assert_equals '1' "${single_session_calls}" \
+    'one setsid invocation per GUI download'
+
 # User cancellation terminates the complete process group.
 termination_marker="${TEST_ROOT}/terminated"
 prepare_argument_log 'cancel-process-group'
@@ -1430,6 +1500,30 @@ assert_status 1 'unparseable yt-dlp version is rejected clearly' \
     -- 'https://example.com/watch?v=bad-version'
 assert_text_contains "${ASSERT_OUTPUT}" 'unable to parse the yt-dlp version' \
     'unparseable yt-dlp diagnostic'
+
+prepare_argument_log 'immediate-worker-failure'
+assert_status 23 'an immediate yt-dlp failure preserves its real status' \
+    env MOCK_YTDLP_EXIT_STATUS=23 \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode audio \
+    -- 'https://example.com/watch?v=immediate-worker-failure'
+assert_text_contains "${ASSERT_OUTPUT}" \
+    'Download failed with exit code 23.' \
+    'immediate worker status diagnostic'
+
+prepare_argument_log 'ffprobe-validation-failure'
+invalid_probe_result="${TEST_ROOT}/invalid-probe-result.txt"
+assert_status 65 'a media file rejected by FFprobe is not published as success' \
+    env MOCK_FFPROBE_EXIT_STATUS=1 \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode audio \
+    --result-file "${invalid_probe_result}" \
+    -- 'https://example.com/watch?v=invalid-probe'
+[[ ! -e ${invalid_probe_result} ]] || \
+    fail 'A result file was published after FFprobe validation failed.'
+assert_text_contains "${ASSERT_OUTPUT}" \
+    'final media file failed FFprobe validation' \
+    'FFprobe failure diagnostic'
 
 assert_status 1 'old yt-dlp version is rejected' \
     env MOCK_YTDLP_VERSION=2026.06.08 \

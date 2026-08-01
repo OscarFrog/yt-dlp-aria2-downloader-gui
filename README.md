@@ -16,7 +16,7 @@ single URL using one of three profiles:
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
 streams deliberately remain on yt-dlp's native downloader. The current version
-is **2.1.15**.
+is **2.1.16**.
 
 ## Main features
 
@@ -32,7 +32,9 @@ is **2.1.15**.
 - interrupted-download resumption when supported by the website;
 - unified graphical progress for direct files, native HLS/DASH fragments,
   separate video/audio streams, and FFmpeg post-processing;
-- cancellation of the complete process group;
+- cancellation of the complete process group through one shared GUI session;
+- supervised yt-dlp and wrapper-managed FFmpeg commands, including bounded shutdown;
+- FFprobe validation of the expected audio or video stream before success is published;
 - one active writer per destination directory, preventing concurrent
   instances from sharing partial or post-processing files;
 - private diagnostic logs retained only for problematic runs;
@@ -97,7 +99,7 @@ setsid --version
 Download both release assets from the GitHub release page:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.15.zip
+yt-dlp-aria2-downloader-gui-2.1.16.zip
 SHA256SUMS
 ```
 
@@ -105,8 +107,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.15.zip
-cd yt-dlp-aria2-downloader-gui-2.1.15
+unzip yt-dlp-aria2-downloader-gui-2.1.16.zip
+cd yt-dlp-aria2-downloader-gui-2.1.16
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -146,6 +148,8 @@ moving the project directory, run `./install-gui.sh install` again.
 
 ## Graphical usage
 
+The graphical workflow uses a sequence of native Zenity dialogs. The steps below describe the complete interface without relying on screenshots, so the documentation remains accurate when dialog dimensions or desktop themes change.
+
 Start **yt-dlp aria2 downloader** from the application menu, or run:
 
 ```bash
@@ -156,7 +160,6 @@ Start **yt-dlp aria2 downloader** from the application menu, or run:
 
 Paste the URL of the video to download, then validate the dialog.
 
-![Video URL entry dialog](docs/images/gui-url.png "Enter the video URL")
 
 Leading and trailing whitespace accidentally copied with the URL is removed by
 the graphical interface.
@@ -173,37 +176,31 @@ Select one of the three available profiles:
 - **Audio track (native format)** downloads the best available audio track while
   preserving its native format whenever possible.
 
-![Download mode selection dialog](docs/images/gui-mode.png "Choose the download mode")
 
 ### 3. Choose the destination folder
 
 Select the folder where the downloaded media will be saved.
 
-![Destination folder selection dialog](docs/images/gui-destination.png "Choose the destination folder")
 
 ### 4. Follow the download progress
 
 The progress dialog displays the current download or post-processing stage. Use
 the cancel button to stop the complete download process.
 
-![Download progress dialog](docs/images/gui-progress.png "Download progress")
 
 ### 5. Download result
 
 After a successful download, the interface displays the path of the completed
 media file.
 
-![Successful download dialog](docs/images/gui-download-complete.png "Download completed")
 
 When the download fails, the interface displays an error dialog and preserves
 the diagnostic log.
 
-![Failed download dialog](docs/images/gui-download-failed.png "Download failed")
 
 The retained log can be opened from the error dialog. It contains the details
 needed to diagnose the failure and may include the requested URL.
 
-![Diagnostic log viewer](docs/images/gui-log.png "Diagnostic log")
 
 ## Command-line usage
 
@@ -246,7 +243,8 @@ Always quote URLs with single or double quotation marks because they may
 contain shell metacharacters such as `&`.
 
 The engine deliberately uses `--ignore-config`, disables yt-dlp plugins through
-`YTDLP_NO_PLUGINS=1`, and enables explicit no-overwrite policies. Interrupted
+`YTDLP_NO_PLUGINS=1`, enables explicit no-overwrite policies, and prevents
+aria2c from inheriting credentials from a personal `.netrc` file. Interrupted
 `.part` files may still be resumed, but an existing completed or post-processed
 media file is preserved and the run fails instead of replacing it.
 
