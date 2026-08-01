@@ -218,8 +218,11 @@ case ${1:-} in
     [[ ${LC_ALL:-} == C ]] || { printf 'ayuda aria2 localizada\n'; exit 65; }
     printf '%s\n' \
         '--file-allocation=<METHOD>' \
-        '--no-conf[=true|false]' \
-        '--no-netrc[=true|false]' \
+        '--no-conf[=true|false]'
+    if [[ ${MOCK_ARIA2_NO_NETRC_UNAVAILABLE:-0} != 1 ]]; then
+        printf '%s\n' '-n, --no-netrc[=true|false]'
+    fi
+    printf '%s\n' \
         '--enable-color[=true|false]' \
         '--truncate-console-readout[=true|false]' \
         '--summary-interval=<SEC>' \
@@ -795,6 +798,21 @@ assert_option_value arguments '--output' "${expected_output_template}" \
     'absolute escaped output template'
 assert_array_not_contains arguments '--paths' 'legacy path option is absent'
 
+
+# A distro build may omit the optional netrc feature entirely. Such a build
+# must remain usable and must not receive an unsupported --no-netrc argument.
+prepare_argument_log 'aria2-without-netrc-capability'
+assert_status 0 'aria2 build without optional netrc support remains usable' \
+    env MOCK_ARIA2_NO_NETRC_UNAVAILABLE=1 \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode audio --machine-progress \
+    -- 'https://example.com/watch?v=aria2-without-netrc'
+# shellcheck disable=SC2034 # Read indirectly through nameref assertion helpers.
+aria_without_netrc_arguments=()
+read_arguments "${MOCK_ARG_LOG}" aria_without_netrc_arguments
+assert_option_value aria_without_netrc_arguments '--downloader-args' \
+    'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=1 --show-console-readout=true --stderr=false' \
+    'aria2 arguments omit unsupported optional netrc capability'
 
 runtime_lock_dir="${XDG_RUNTIME_DIR}/yt-dlp-aria2-downloader"
 [[ -d ${runtime_lock_dir} && ! -L ${runtime_lock_dir} ]] ||

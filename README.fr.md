@@ -17,7 +17,7 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.16**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.17**.
 
 ## Fonctionnalités principales
 
@@ -101,7 +101,7 @@ setsid --version
 Téléchargez les deux fichiers publiés avec la release GitHub :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.16.zip
+yt-dlp-aria2-downloader-gui-2.1.17.zip
 SHA256SUMS
 ```
 
@@ -109,8 +109,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.16.zip
-cd yt-dlp-aria2-downloader-gui-2.1.16
+unzip yt-dlp-aria2-downloader-gui-2.1.17.zip
+cd yt-dlp-aria2-downloader-gui-2.1.17
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -239,8 +239,11 @@ Placez toujours les URL entre apostrophes ou guillemets, car elles peuvent
 contenir des métacaractères du shell comme `&`.
 
 Le moteur utilise volontairement `--ignore-config`, désactive les plugins yt-dlp
-avec `YTDLP_NO_PLUGINS=1`, applique une politique explicite de non-écrasement
-et empêche aria2c d’hériter des identifiants d’un fichier `.netrc` personnel.
+avec `YTDLP_NO_PLUGINS=1` et applique une politique explicite de
+non-écrasement. Lorsque le build aria2c installé annonce `--no-netrc`, le
+moteur active cette option afin d’éviter la lecture des identifiants d’un
+fichier `.netrc` personnel. Les builds qui n’exposent pas cette capacité
+facultative restent acceptés et ne reçoivent pas une option non prise en charge.
 Les fichiers `.part` interrompus peuvent toujours être repris, mais un média
 terminé ou post-traité déjà présent est conservé et l'exécution échoue au lieu
 de le remplacer.

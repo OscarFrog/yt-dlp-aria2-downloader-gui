@@ -128,7 +128,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.16'
+readonly EXPECTED_VERSION='2.1.17'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -275,8 +275,13 @@ assert_file_contains "${script_dir}/download-video.sh" \
     'run_supervised_command yt-dlp' \
     'yt-dlp uses the generic supervisor'
 assert_file_contains "${script_dir}/download-video.sh" \
-    '--no-netrc=true' \
-    'aria2 netrc inheritance disabled'
+    'ARIA2_SUPPORTS_NO_NETRC=false' \
+    'aria2 netrc support is detected as an optional capability'
+# This assertion deliberately searches for literal shell source.
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/download-video.sh" \
+    'if [[ ${ARIA2_SUPPORTS_NO_NETRC} == true ]]; then' \
+    'aria2 receives no-netrc only when the build advertises it'
 assert_file_contains "${script_dir}/download-video.sh" \
     'validate_final_media_file() {' \
     'final media FFprobe validation'
