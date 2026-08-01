@@ -331,4 +331,14 @@ assert_file_contains "${script_dir}/packaging/rpm/build-rpm.sh" \
 [[ ! -e ${script_dir}/docs/images ]] || \
     fail 'Obsolete screenshot directory remains in the project.'
 
+# These assertions deliberately search for literal workflow source.
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'git config --global --add safe.directory "${GITHUB_WORKSPACE}"' \
+    'Fedora package-validation container trusts only its checked-out workspace'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'git config --global --add safe.directory "${GITHUB_WORKSPACE}"' \
+    'Fedora release container trusts only its checked-out workspace'
+
 printf '%s\n' 'Static tests passed.'

@@ -66,6 +66,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           version=$(./download-video.sh --version)
           version=${version##* }
           bash packaging/rpm/build-rpm.sh "${version}" dist
