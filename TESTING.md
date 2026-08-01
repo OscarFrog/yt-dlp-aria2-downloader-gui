@@ -25,6 +25,10 @@ bash -n tests/lib/project-files.sh
 bash -n tests/mock-integration.sh
 bash -n tests/progress-monitor-integration.sh
 bash -n tests/installer-integration.sh
+bash -n tests/packaging-integration.sh
+bash -n packaging/install-tree.sh
+bash -n packaging/deb/build-deb.sh
+bash -n packaging/rpm/build-rpm.sh
 ```
 
 ## ShellCheck
@@ -43,7 +47,11 @@ shellcheck -x -o all \
   tests/lib/project-files.sh \
   tests/mock-integration.sh \
   tests/progress-monitor-integration.sh \
-  tests/installer-integration.sh
+  tests/installer-integration.sh \
+  tests/packaging-integration.sh \
+  packaging/install-tree.sh \
+  packaging/deb/build-deb.sh \
+  packaging/rpm/build-rpm.sh
 ```
 
 ## Covered behavior
@@ -93,7 +101,9 @@ The automated suite checks, among other things:
   optional netrc capability;
 - `.desktop` launcher installation through a stable private link, exact Exec
   escaping, restrictive-path handling, validation, permissions, reinstall, and
-  removal.
+  removal;
+- package install-tree layout, stable command symlinks, system desktop entry,
+  documentation permissions, and exclusion of tests and obsolete images.
 
 ## GitHub Actions
 
@@ -103,11 +113,14 @@ for pushes to `main`, in two environments:
 - `ubuntu-24.04`;
 - a Fedora 44 container on a GitHub-hosted runner.
 
+`.github/workflows/packages.yml` builds and inspects a DEB on Ubuntu and a
+noarch RPM in a Fedora 44 container for every pull request and push to `main`.
+
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
-the complete Ubuntu validation job first, verifies that the tag belongs to the history of `main` and matches the
-versions declared by the scripts and documentation, creates a versioned ZIP
-archive, verifies its checksum, extracts and retests the ZIP, then publishes
-both files in a GitHub release.
+the complete validation first, verifies tag ancestry and project versions,
+builds the ZIP, DEB, and RPM in separate read-only jobs, downloads the exact
+tested artifacts into one publication job, generates a shared SHA256SUMS file,
+and publishes all four assets. Only the final job receives `contents: write`.
 
 ## Real-world checks on Fedora 44
 

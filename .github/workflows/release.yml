@@ -1,4 +1,4 @@
-name: Release archive
+name: Release packages
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to publish, for example v2.1.9
+        description: Existing version tag to publish, for example v2.1.18
         required: true
         type: string
 
@@ -25,7 +25,7 @@ jobs:
   validate:
     name: Validate release source
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -37,32 +37,10 @@ jobs:
       - name: Install validation tools
         run: |
           sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes desktop-file-utils shellcheck
+          sudo apt-get -o Acquire::Retries=3 install --yes \
+            desktop-file-utils shellcheck
 
-      - name: Run validation
-        run: bash ./tests/run-all.sh
-
-  release:
-    name: Publish release
-    needs: validate
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - name: Check out tagged source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Install archive validation tools
-        run: |
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes desktop-file-utils shellcheck unzip
-
-      - name: Verify tag and project versions
+      - name: Verify tag, ancestry, and project versions
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -74,22 +52,12 @@ jobs:
 
           tag_commit=$(git rev-parse "${RELEASE_TAG}^{commit}")
           checked_out_commit=$(git rev-parse HEAD)
-
-          git fetch --no-tags origin             '+refs/heads/main:refs/remotes/origin/main'
-          if ! git merge-base --is-ancestor "${tag_commit}" origin/main; then
-            printf 'Tag %s does not belong to the history of origin/main.\n'               "${RELEASE_TAG}" >&2
-            exit 1
-          fi
-
-          if [[ ${tag_commit} != "${checked_out_commit}" ]]; then
-            printf 'Tag %s resolves to %s, but checkout is %s.\n' \
-              "${RELEASE_TAG}" "${tag_commit}" "${checked_out_commit}" >&2
-            exit 1
-          fi
-          if [[ ${GITHUB_EVENT_NAME} == push && ${tag_commit} != "${GITHUB_SHA}" ]]; then
-            printf 'Tag %s resolves to %s, but the push event used %s.\n' \
-              "${RELEASE_TAG}" "${tag_commit}" "${GITHUB_SHA}" >&2
-            exit 1
+          git fetch --no-tags origin \
+            '+refs/heads/main:refs/remotes/origin/main'
+          git merge-base --is-ancestor "${tag_commit}" origin/main
+          [[ ${tag_commit} == "${checked_out_commit}" ]]
+          if [[ ${GITHUB_EVENT_NAME} == push ]]; then
+            [[ ${tag_commit} == "${GITHUB_SHA}" ]]
           fi
 
           version=${RELEASE_TAG#v}
@@ -101,7 +69,29 @@ jobs:
           grep -Fq -- "version actuelle est la **${version}**" README.fr.md
           grep -Fq -- "## ${version} - " CHANGELOG.md
 
-      - name: Build and test ZIP archive
+      - name: Run complete validation
+        run: bash ./tests/run-all.sh
+
+  zip:
+    name: Portable ZIP
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install ZIP validation tools
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install --yes \
+            desktop-file-utils shellcheck unzip
+
+      - name: Build and retest ZIP
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -114,13 +104,7 @@ jobs:
             --prefix="${package}/" \
             --output="dist/${package}.zip" \
             "${commit}"
-          (
-            cd dist
-            sha256sum "${package}.zip" > SHA256SUMS
-            sha256sum --check SHA256SUMS
-            unzip -t "${package}.zip"
-          )
-
+          unzip -t "dist/${package}.zip"
           extracted=$(mktemp -d)
           trap 'rm -rf -- "${extracted}"' EXIT
           unzip -q "dist/${package}.zip" -d "${extracted}"
@@ -129,40 +113,146 @@ jobs:
             bash ./tests/run-all.sh
           )
 
-      - name: Publish GitHub release
+      - name: Upload tested ZIP
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-zip
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  deb:
+    name: Debian package
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install DEB build tools
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install --yes \
+            desktop-file-utils dpkg-dev
+
+      - name: Build and inspect DEB
+        run: bash packaging/deb/build-deb.sh "${RELEASE_TAG#v}" dist
+
+      - name: Upload tested DEB
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-deb
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  rpm:
+    name: Fedora 44 RPM
+    needs: validate
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    timeout-minutes: 15
+    steps:
+      - name: Install RPM build tools
+        run: |
+          dnf install --assumeyes \
+            cpio desktop-file-utils findutils git gzip rpm-build tar
+
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build and inspect RPM
+        run: bash packaging/rpm/build-rpm.sh "${RELEASE_TAG#v}" dist
+
+      - name: Upload tested RPM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish release
+    needs:
+      - zip
+      - deb
+      - rpm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          persist-credentials: false
+
+      - name: Download tested artifacts
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify payloads and generate checksums
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          payloads=(dist/*.zip dist/*.deb dist/*.rpm)
+          shopt -u nullglob
+          if ((${#payloads[@]} != 3)); then
+            printf 'Expected ZIP, DEB, and RPM; found %d payloads.\n' \
+              "${#payloads[@]}" >&2
+            printf '%s\n' "${payloads[@]}" >&2
+            exit 1
+          fi
+          (
+            cd dist
+            sha256sum -- *.zip *.deb *.rpm > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: Publish immutable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          version=${RELEASE_TAG#v}
-          package="yt-dlp-aria2-downloader-gui-${version}"
+          shopt -s nullglob
+          payloads=(dist/*.zip dist/*.deb dist/*.rpm)
+          shopt -u nullglob
+
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            existing_assets=$(mktemp -d)
-            trap 'rm -rf -- "${existing_assets}"' EXIT
-            if ! gh release download "${RELEASE_TAG}" \
-                --dir "${existing_assets}" \
-                --pattern "${package}.zip" \
-                --pattern SHA256SUMS; then
-              printf 'Release %s exists, but its assets could not be verified.\n' \
-                "${RELEASE_TAG}" >&2
-              exit 1
-            fi
-            if cmp -s -- \
-                "dist/${package}.zip" "${existing_assets}/${package}.zip" && \
-                cmp -s -- dist/SHA256SUMS "${existing_assets}/SHA256SUMS"; then
-              printf 'Release %s already contains the expected assets.\n' \
-                "${RELEASE_TAG}"
-              exit 0
-            fi
-            printf 'Release %s already exists with different assets; refusing to overwrite it.\n' \
-              "${RELEASE_TAG}" >&2
-            exit 1
+            existing=$(mktemp -d)
+            trap 'rm -rf -- "${existing}"' EXIT
+            for payload in "${payloads[@]}" dist/SHA256SUMS; do
+              name=${payload##*/}
+              gh release download "${RELEASE_TAG}" \
+                --dir "${existing}" --pattern "${name}"
+              cmp -s -- "${payload}" "${existing}/${name}" || {
+                printf 'Existing release asset differs: %s\n' "${name}" >&2
+                exit 1
+              }
+            done
+            printf 'Release %s already contains the expected assets.\n' \
+              "${RELEASE_TAG}"
+            exit 0
           fi
 
           gh release create "${RELEASE_TAG}" \
-            "dist/${package}.zip" \
-            dist/SHA256SUMS \
+            "${payloads[@]}" dist/SHA256SUMS \
             --verify-tag \
             --generate-notes \
-            --title "yt-dlp aria2 downloader ${version}"
+            --title "yt-dlp aria2 downloader ${RELEASE_TAG#v}"

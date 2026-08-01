@@ -128,7 +128,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.17'
+readonly EXPECTED_VERSION='2.1.18'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -309,5 +309,26 @@ assert_text_not_contains "${README_EN_TEXT}" \
     'docs/images/' 'English README has no embedded screenshots'
 assert_text_not_contains "${README_FR_TEXT}" \
     'docs/images/' 'French README has no embedded screenshots'
+
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'name: Debian package' 'DEB package validation job'
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'name: Fedora 44 RPM' 'RPM package validation job'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'dist/*.deb' 'release publishes a DEB payload'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'dist/*.rpm' 'release publishes an RPM payload'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'dist/*.zip' 'release preserves the portable ZIP payload'
+assert_file_contains "${script_dir}/packaging/yt-dlp-aria2-downloader.desktop" \
+    'TryExec=/usr/bin/yt-dlp-aria2-downloader-gui' \
+    'packaged desktop launcher command'
+assert_file_contains "${script_dir}/packaging/deb/build-deb.sh" \
+    'dpkg-deb --root-owner-group --build' 'native DEB construction'
+assert_file_contains "${script_dir}/packaging/rpm/build-rpm.sh" \
+    'rpmbuild -bb' 'native RPM construction'
+[[ ! -e ${script_dir}/docs/images ]] || \
+    fail 'Obsolete screenshot directory remains in the project.'
 
 printf '%s\n' 'Static tests passed.'

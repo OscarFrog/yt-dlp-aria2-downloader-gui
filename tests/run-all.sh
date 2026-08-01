@@ -20,7 +20,7 @@ fi
 # shellcheck source=lib/project-files.sh
 source "${project_files}"
 
-for array_name in PRODUCTION_SHELL_FILES TEST_SHELL_FILES; do
+for array_name in PRODUCTION_SHELL_FILES PACKAGING_SHELL_FILES TEST_SHELL_FILES; do
     if ! array_declaration=$(declare -p "${array_name}" 2>/dev/null) ||
         [[ ${array_declaration} != 'declare -a '* ]]; then
         printf 'Error: %s is not an indexed array in %s.\n' \
@@ -29,6 +29,7 @@ for array_name in PRODUCTION_SHELL_FILES TEST_SHELL_FILES; do
     fi
 done
 if ((${#PRODUCTION_SHELL_FILES[@]} == 0 ||
+    ${#PACKAGING_SHELL_FILES[@]} == 0 ||
     ${#TEST_SHELL_FILES[@]} == 0)); then
     printf 'Error: project-files.sh returned an empty shell-file list.\n' >&2
     exit 65
@@ -54,6 +55,9 @@ bash -- ./test-static.sh
 printf '\n=== Production ShellCheck ===\n'
 shellcheck -o all "${PRODUCTION_SHELL_FILES[@]}"
 
+printf '\n=== Packaging ShellCheck ===\n'
+shellcheck -x -o all "${PACKAGING_SHELL_FILES[@]}"
+
 printf '\n=== Test-suite ShellCheck ===\n'
 # -x follows sourced project helpers; -o all keeps the same strict optional
 # checks for production and test scripts.
@@ -67,5 +71,8 @@ bash -- ./tests/progress-monitor-integration.sh
 
 printf '\n=== Installer integration ===\n'
 bash -- ./tests/installer-integration.sh
+
+printf '\n=== Packaging integration ===\n'
+bash -- ./tests/packaging-integration.sh
 
 printf '\nAll validation suites passed.\n'

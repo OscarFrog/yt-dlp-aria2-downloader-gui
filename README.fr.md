@@ -17,7 +17,7 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.17**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.18**.
 
 ## Fonctionnalités principales
 
@@ -62,55 +62,100 @@ Les commandes suivantes doivent être installées et disponibles dans `PATH` :
 Le moteur contrôle les versions minimales de `yt-dlp`, `aria2c` et Deno avant
 chaque téléchargement.
 
-## Installation sous Fedora 44
+## Installation par paquet
 
-Le paquet `ffmpeg` complet est fourni par le dépôt RPM Fusion Free. Activez ce
-dépôt s'il n'est pas encore configuré :
+Les releases GitHub publient un RPM Fedora, un paquet Debian, l'archive ZIP
+portable et un fichier `SHA256SUMS` commun. Les paquets installent les commandes
+et le lanceur graphique au niveau du système ; leur fonctionnement ne dépend
+pas du dossier dans lequel le paquet a été téléchargé.
+
+Avant de migrer depuis une installation ZIP ou Git, supprimez l'ancien lanceur
+utilisateur afin qu'il ne masque pas l'entrée installée par le paquet :
+
+```bash
+./install-gui.sh uninstall
+```
+
+### Fedora 44 et versions suivantes
+
+Le paquet `ffmpeg` complet est fourni par RPM Fusion Free. Activez ce dépôt
+avant l'installation du RPM s'il n'est pas déjà configuré :
 
 ```bash
 sudo dnf install \
   "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
 ```
 
-Installez ensuite les paquets requis :
-
-```bash
-sudo dnf install yt-dlp aria2 ffmpeg zenity
-```
-
-Installez Deno s'il n'est pas déjà disponible :
-
-```bash
-curl -fsSL https://deno.land/install.sh | sh
-```
-
-Ouvrez un nouveau terminal, puis vérifiez les dépendances :
-
-```bash
-yt-dlp --version
-aria2c --version
-ffmpeg -version
-ffprobe -version
-deno --version
-zenity --version
-setsid --version
-```
-
-## Installation depuis une archive de release
-
-Téléchargez les deux fichiers publiés avec la release GitHub :
+Téléchargez les fichiers suivants depuis la release :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.17.zip
+yt-dlp-aria2-downloader-gui-2.1.18-1.fc44.noarch.rpm
+SHA256SUMS
+```
+
+Vérifiez puis installez le RPM :
+
+```bash
+sha256sum --ignore-missing --check SHA256SUMS
+sudo dnf install ./yt-dlp-aria2-downloader-gui-2.1.18-1.fc44.noarch.rpm
+```
+
+Le RPM déclare les dépendances Fedora pour Bash, yt-dlp, aria2, FFmpeg, Zenity,
+coreutils, grep et util-linux. Deno reste un moteur d'exécution géré séparément ;
+le programme contrôle la présence de Deno 2.3.0 ou plus récent avant le
+téléchargement.
+
+### Debian et Ubuntu
+
+Téléchargez les fichiers suivants :
+
+```text
+yt-dlp-aria2-downloader-gui_2.1.18-1_all.deb
+SHA256SUMS
+```
+
+Vérifiez puis installez le paquet :
+
+```bash
+sha256sum --ignore-missing --check SHA256SUMS
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.18-1_all.deb
+```
+
+Le DEB installe l'application et les dépendances système communes. Les versions
+de yt-dlp et Deno fournies par certaines distributions peuvent être plus
+anciennes que les minima exigés par ce projet ; le moteur conserve ses contrôles
+au démarrage et indique précisément la dépendance à mettre à jour.
+
+### Commandes installées par les paquets
+
+Après l'installation du RPM ou du DEB, démarrez l'interface depuis le menu des
+applications ou avec :
+
+```bash
+yt-dlp-aria2-downloader-gui
+```
+
+Le moteur en ligne de commande est installé sous le nom :
+
+```bash
+yt-dlp-aria2-downloader --help
+```
+
+## Installation depuis une archive de release portable
+
+Téléchargez les fichiers suivants :
+
+```text
+yt-dlp-aria2-downloader-gui-2.1.18.zip
 SHA256SUMS
 ```
 
 Vérifiez puis extrayez l'archive :
 
 ```bash
-sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.17.zip
-cd yt-dlp-aria2-downloader-gui-2.1.17
+sha256sum --ignore-missing --check SHA256SUMS
+unzip yt-dlp-aria2-downloader-gui-2.1.18.zip
+cd yt-dlp-aria2-downloader-gui-2.1.18
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -145,7 +190,10 @@ avoir déplacé le dossier du projet, relancez `./install-gui.sh install`.
 
 Le parcours graphique utilise une succession de fenêtres Zenity natives. Les étapes ci-dessous décrivent entièrement l’interface sans dépendre de captures d’écran, afin que la documentation reste exacte lorsque les dimensions des fenêtres ou le thème du bureau évoluent.
 
-Démarrez **yt-dlp aria2 downloader** depuis le menu des applications ou avec :
+Démarrez **yt-dlp aria2 downloader** depuis le menu des applications. Une
+installation par paquet fournit également la commande
+`yt-dlp-aria2-downloader-gui` ; depuis une archive ZIP ou un clone Git,
+utilisez :
 
 ```bash
 ./download-video-gui.sh
