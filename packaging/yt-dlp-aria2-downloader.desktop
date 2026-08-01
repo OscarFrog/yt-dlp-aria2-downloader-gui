@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=yt-dlp aria2 downloader
+Comment=Download a video or extract an audio track
+Comment[fr]=Télécharger une vidéo ou extraire une piste audio
+Exec=/usr/bin/yt-dlp-aria2-downloader-gui
+TryExec=/usr/bin/yt-dlp-aria2-downloader-gui
+Icon=video-x-generic
+Terminal=false
+Categories=AudioVideo;Network;
+StartupNotify=false

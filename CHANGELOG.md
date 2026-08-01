@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.1.18 - 2026-08-01
+
+### Native packages and release automation
+
+- Add architecture-independent Fedora RPM and Debian DEB packages.
+- Install stable CLI and GUI commands plus a system desktop entry.
+- Build and validate packages in dedicated Ubuntu and Fedora CI jobs.
+- Publish the tested RPM, DEB, portable ZIP, and a shared SHA256SUMS file for
+  every release tag.
+- Keep release write permission restricted to the final publication job.
+- Add a common install-tree implementation and package-layout integration tests.
+- Remove the obsolete screenshot files from the repository and release ZIP.
+- Document package installation, upgrades from source installations, runtime
+  dependency limits, and the portable ZIP fallback in English and French.
+
 ## 2.1.17 - 2026-08-01
 
 ### Urgent compatibility hotfix

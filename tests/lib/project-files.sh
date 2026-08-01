@@ -13,6 +13,13 @@ PRODUCTION_SHELL_FILES=(
 )
 
 # shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
+PACKAGING_SHELL_FILES=(
+    packaging/install-tree.sh
+    packaging/deb/build-deb.sh
+    packaging/rpm/build-rpm.sh
+)
+
+# shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
 TEST_SHELL_FILES=(
     test-static.sh
     tests/run-all.sh
@@ -21,10 +28,12 @@ TEST_SHELL_FILES=(
     tests/mock-integration.sh
     tests/progress-monitor-integration.sh
     tests/installer-integration.sh
+    tests/packaging-integration.sh
 )
 
 # shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
 ALL_SHELL_FILES=(
     "${PRODUCTION_SHELL_FILES[@]}"
+    "${PACKAGING_SHELL_FILES[@]}"
     "${TEST_SHELL_FILES[@]}"
 )
