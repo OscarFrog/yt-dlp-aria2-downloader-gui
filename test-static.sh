@@ -119,7 +119,16 @@ assert_file_contains \
     "${script_dir}/install-gui.sh" \
     "desktop-file-validate \\" \
     'desktop launcher validation'
-readonly EXPECTED_VERSION='2.1.13'
+# shellcheck disable=SC2016
+# These assertions deliberately search for literal shell source code.
+assert_file_contains "${script_dir}/tests/mock-integration.sh" \
+    'readonly TEST_OWNER_BASHPID=${BASHPID}' \
+    'mock-suite cleanup owner identity'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/tests/mock-integration.sh" \
+    '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
+    'non-owner test cleanup protection'
+readonly EXPECTED_VERSION='2.1.14'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -162,6 +171,39 @@ assert_file_contains "${script_dir}/progress-monitor.sh" \
 assert_file_contains "${script_dir}/download-video.sh" \
     'normalize_path_record() {' \
     'final result path record normalization'
+# shellcheck disable=SC2016
+# The assertion searches for literal shell source code.
+assert_file_contains "${script_dir}/download-video.sh" \
+    'normalize_path_record "${PATH_RECORD_TMP}" "${OUTPUT_DIR}"' \
+    'final result path confinement to the destination directory'
+# shellcheck disable=SC2016
+# The assertion searches for literal shell source code.
+assert_file_contains "${script_dir}/download-video.sh" \
+    'mv -n -- "${RESULT_FILE_TMP}" "${RESULT_FILE}"' \
+    'result-file no-clobber publication'
+# shellcheck disable=SC2016
+# The assertion searches for literal shell source code.
+assert_file_contains "${script_dir}/progress-monitor.sh" \
+    'RESOLVED_KEY="native:$((seen_items + 1))"' \
+    'progress uses opaque internal item keys'
+assert_file_contains "${script_dir}/progress-monitor.sh" \
+    'MAX_PENDING_CHARS=1048576' \
+    'progress pending-record memory bound'
+# shellcheck disable=SC2016
+# This assertion deliberately searches for literal shell source code.
+assert_file_contains "${script_dir}/download-video.sh" \
+    'acquire_output_lock "${OUTPUT_DIR}"' \
+    'engine destination-directory lock'
+# shellcheck disable=SC2016
+# This assertion deliberately searches for literal shell source code.
+assert_file_contains "${script_dir}/download-video.sh" \
+    'flock --exclusive --nonblock "${OUTPUT_LOCK_FD}"' \
+    'nonblocking destination lock acquisition'
+# shellcheck disable=SC2016
+# This assertion deliberately searches for literal shell source code.
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    'kill -0 -- "-${WORKER_PGID}"' \
+    'worker group remains tracked after supervisor exit'
 assert_file_contains "${script_dir}/download-video.sh" \
     'the result-file already exists; refusing to overwrite it.' \
     'existing result files are protected'
@@ -184,5 +226,17 @@ assert_file_contains "${script_dir}/.github/workflows/shell.yml" \
 assert_file_contains "${script_dir}/README.md"     "is **${EXPECTED_VERSION}**." 'English README version'
 assert_file_contains "${script_dir}/README.fr.md"     "version actuelle est la **${EXPECTED_VERSION}**." 'French README version'
 assert_file_contains "${script_dir}/CHANGELOG.md"     "## ${EXPECTED_VERSION} - " 'changelog version'
+
+assert_file_contains "${script_dir}/.github/workflows/shell.yml" \
+    '    branches:' \
+    'push validation branch filter'
+assert_file_contains "${script_dir}/.github/workflows/shell.yml" \
+    '      - main' \
+    'push validation main branch'
+# shellcheck disable=SC2016
+# The assertion deliberately searches for literal workflow shell source.
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'git merge-base --is-ancestor "${tag_commit}" origin/main' \
+    'release tag ancestry validation'
 
 printf '%s\n' 'Static tests passed.'

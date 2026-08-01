@@ -74,6 +74,13 @@ jobs:
 
           tag_commit=$(git rev-parse "${RELEASE_TAG}^{commit}")
           checked_out_commit=$(git rev-parse HEAD)
+
+          git fetch --no-tags origin             '+refs/heads/main:refs/remotes/origin/main'
+          if ! git merge-base --is-ancestor "${tag_commit}" origin/main; then
+            printf 'Tag %s does not belong to the history of origin/main.\n'               "${RELEASE_TAG}" >&2
+            exit 1
+          fi
+
           if [[ ${tag_commit} != "${checked_out_commit}" ]]; then
             printf 'Tag %s resolves to %s, but checkout is %s.\n' \
               "${RELEASE_TAG}" "${tag_commit}" "${checked_out_commit}" >&2

@@ -17,7 +17,7 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.13**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.14**.
 
 ## Fonctionnalités principales
 
@@ -33,6 +33,9 @@ téléchargeur natif de yt-dlp. La version actuelle est la **2.1.13**.
 - progression graphique unifiée pour les fichiers directs, les fragments
   HLS/DASH, les pistes vidéo/audio séparées et le post-traitement FFmpeg ;
 - annulation de tout le groupe de processus ;
+- une seule instance en écriture par dossier de destination, afin
+  d'empêcher le partage concurrent de fichiers partiels ou de
+  post-traitement ;
 - journaux privés conservés uniquement pour les exécutions problématiques ;
 - lanceur dans le menu des applications ;
 - tests statiques, tests d'intégration et validation GitHub Actions sous Ubuntu
@@ -94,7 +97,7 @@ setsid --version
 Téléchargez les deux fichiers publiés avec la release GitHub :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.13.zip
+yt-dlp-aria2-downloader-gui-2.1.14.zip
 SHA256SUMS
 ```
 
@@ -102,8 +105,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.13.zip
-cd yt-dlp-aria2-downloader-gui-2.1.13
+unzip yt-dlp-aria2-downloader-gui-2.1.14.zip
+cd yt-dlp-aria2-downloader-gui-2.1.14
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -153,10 +156,13 @@ l'interface graphique.
 
 ### 2. Choisir le mode de téléchargement
 
-Sélectionnez l'un des deux modes disponibles :
+Sélectionnez l'un des trois profils disponibles :
 
 - **Complete video (MKV)** télécharge les meilleures pistes vidéo et audio
   disponibles, puis les rassemble dans un conteneur MKV ;
+- **YouTube video - Firefox cookies (HLS/MKV)** constitue un mode de repli
+  authentifié réservé à YouTube : il lit la session Firefox locale, télécharge
+  un flux HLS puis le remuxe en MKV ;
 - **Audio track (native format)** télécharge la meilleure piste audio disponible
   en conservant son format natif chaque fois que cela est possible.
 
@@ -211,6 +217,16 @@ Meilleure piste audio native :
   --mode audio \
   --output-dir "${HOME}/Music" \
   'https://example.com/video'
+```
+
+Mode de repli YouTube HLS authentifié :
+
+```bash
+./download-video.sh \
+  --mode video \
+  --youtube-hls-firefox \
+  --output-dir "${HOME}/Videos" \
+  'https://www.youtube.com/watch?v=VIDEO_ID'
 ```
 
 Aide et version :
@@ -312,6 +328,12 @@ fichier média final est confirmé. Les exécutions échouées, annulées, inter
 ou incohérentes conservent leur journal afin de faciliter le diagnostic. Les
 journaux de diagnostic conservés depuis plus de 15 jours sont supprimés
 automatiquement au prochain démarrage de l'interface graphique.
+
+Un verrou consultatif par utilisateur et par dossier de destination est
+conservé sous `/tmp` pendant le téléchargement. Il ne contient ni URL, ni
+cookie, ni chemin de média, et le noyau le libère automatiquement à la fin du
+moteur. Des téléchargements vers des dossiers différents peuvent s'exécuter
+simultanément.
 
 ## Tests
 

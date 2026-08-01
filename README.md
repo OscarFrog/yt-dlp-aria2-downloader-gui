@@ -16,7 +16,7 @@ single URL using one of three profiles:
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
 streams deliberately remain on yt-dlp's native downloader. The current version
-is **2.1.13**.
+is **2.1.14**.
 
 ## Main features
 
@@ -31,6 +31,8 @@ is **2.1.13**.
 - unified graphical progress for direct files, native HLS/DASH fragments,
   separate video/audio streams, and FFmpeg post-processing;
 - cancellation of the complete process group;
+- one active writer per destination directory, preventing concurrent
+  instances from sharing partial or post-processing files;
 - private diagnostic logs retained only for problematic runs;
 - application-menu launcher;
 - static tests, integration tests, and GitHub Actions validation on Ubuntu and
@@ -93,7 +95,7 @@ setsid --version
 Download both release assets from the GitHub release page:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.13.zip
+yt-dlp-aria2-downloader-gui-2.1.14.zip
 SHA256SUMS
 ```
 
@@ -101,8 +103,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.13.zip
-cd yt-dlp-aria2-downloader-gui-2.1.13
+unzip yt-dlp-aria2-downloader-gui-2.1.14.zip
+cd yt-dlp-aria2-downloader-gui-2.1.14
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -159,10 +161,13 @@ the graphical interface.
 
 ### 2. Choose the download mode
 
-Select one of the two available modes:
+Select one of the three available profiles:
 
 - **Complete video (MKV)** downloads the best available video and audio streams
   and combines them in an MKV container;
+- **YouTube video - Firefox cookies (HLS/MKV)** is an explicit authenticated
+  fallback for YouTube and reads the local Firefox session before downloading
+  an HLS stream and remuxing it to MKV;
 - **Audio track (native format)** downloads the best available audio track while
   preserving its native format whenever possible.
 
@@ -216,6 +221,16 @@ Download the best native audio track:
   --mode audio \
   --output-dir "${HOME}/Music" \
   'https://example.com/video'
+```
+
+Use the authenticated YouTube HLS fallback:
+
+```bash
+./download-video.sh \
+  --mode video \
+  --youtube-hls-firefox \
+  --output-dir "${HOME}/Videos" \
+  'https://www.youtube.com/watch?v=VIDEO_ID'
 ```
 
 Display help or version information:
@@ -317,6 +332,11 @@ Logs are private. A log is deleted automatically after the final media file
 is confirmed. Failed, canceled, interrupted, or inconsistent runs retain their
 logs for troubleshooting. Retained diagnostic logs older than 15 days are
 removed automatically the next time the graphical interface starts.
+
+A same-user, per-destination advisory lock is kept under `/tmp` while a
+download is active. It contains no URL, cookie, or media path, and the kernel
+releases it automatically when the engine exits. Downloads to different
+destination directories may run concurrently.
 
 ## Tests
 

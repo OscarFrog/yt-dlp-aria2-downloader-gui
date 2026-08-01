@@ -523,6 +523,33 @@ wait_for_text "${CAPTURE_FILE}" 'Remuxing the media into an MKV container...' \
     'post-process error setup'
 finish_failure
 
+# Untrusted yt-dlp identifiers must never become Bash syntax or array
+# subscripts. Invalid identifiers fall back to an internal opaque item key.
+start_scenario hostile-format-identifier audio
+hostile_marker="${TEST_ROOT}/hostile-format-id-executed"
+# shellcheck disable=SC2016
+# This command substitution is deliberately kept literal as an attack payload.
+hostile_id='$(touch$IFS'"${hostile_marker}"')'
+printf '%s\n' \
+    "YTDLP_PLAN|media|${hostile_id}|${hostile_id}|" \
+    "YTDLP_PROGRESS_V2|media|${hostile_id}|downloading|250|1000|0|0|0|25.0%|500KiB/s|00:06" \
+    >>"${LOG_FILE}"
+wait_for_text "${CAPTURE_FILE}" 'Downloading the audio track - 25%' \
+    'hostile format identifier uses an internal progress key'
+[[ ! -e ${hostile_marker} ]] ||
+    fail 'A hostile format identifier was evaluated as shell syntax.'
+finish_success '/tmp/hostile-format-id.webm'
+
+# Extra protocol delimiters are rejected instead of shifting structured fields.
+start_scenario malformed-delimited-record audio
+printf '%s\n' \
+    'YTDLP_PROGRESS_V2|media|bad|identifier|downloading|250|1000|0|0|0|25.0%|500KiB/s|00:06' \
+    'YTDLP_PROGRESS_V2|media|251|downloading|500|1000|0|0|0|50.0%|1MiB/s|00:03' \
+    >>"${LOG_FILE}"
+wait_for_text "${CAPTURE_FILE}" 'Downloading the audio track - 50%' \
+    'malformed delimited progress record is ignored'
+finish_success '/tmp/malformed-delimiter.webm'
+
 # A published path whose target file is absent is not successful completion.
 start_scenario missing-final-file video
 printf '%s\n' "${SCENARIO_DIR}/missing-output.mkv" >"${RESULT_FILE}"

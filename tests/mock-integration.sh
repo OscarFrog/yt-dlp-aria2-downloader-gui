@@ -15,7 +15,12 @@ done
     test_error 'mock integration tests require a readable Linux /proc filesystem.'
 TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
-trap 'rm -rf -- "${TEST_ROOT}" || true' EXIT
+readonly TEST_OWNER_BASHPID=${BASHPID}
+trap '
+    if [[ ${BASHPID} == "${TEST_OWNER_BASHPID}" ]]; then
+        rm -rf -- "${TEST_ROOT}" || true
+    fi
+' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -599,6 +604,14 @@ cleanup_test_root() {
     local status=$?
 
     trap - EXIT HUP INT TERM
+
+    # Only the Bash process that created TEST_ROOT may remove it. A shell copy
+    # used by a subshell, timeout wrapper, or asynchronous probe must never
+    # destroy the complete test workspace when that copy exits.
+    if [[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]; then
+        exit "${status}"
+    fi
+
     cleanup_test_processes
     if [[ -n ${TEST_ROOT:-} && ${TEST_ROOT} == /* && ${TEST_ROOT} != / ]]; then
         rm -rf -- "${TEST_ROOT}" || true
@@ -607,6 +620,16 @@ cleanup_test_root() {
 }
 
 trap cleanup_test_root EXIT
+
+# Exercise the ownership guard explicitly. This subshell installs the same
+# cleanup trap, but it must not remove the parent suite's workspace.
+printf '%s\n' 'Mock scenario: cleanup-owner-guard'
+(
+    trap cleanup_test_root EXIT
+    :
+)
+[[ -d ${TEST_ROOT} ]] ||
+    fail 'A non-owner Bash process removed the complete test root.'
 
 TEST_PROCESS_PIDS=()
 
@@ -730,8 +753,8 @@ assert_status 1 'a result path whose target is absent is rejected' \
     --result-file "${missing_target_result}" \
     -- 'https://example.com/watch?v=missing-result-target'
 assert_text_contains "${ASSERT_OUTPUT}" \
-    'yt-dlp did not report a valid final media path.' \
-    'missing result target diagnostic'
+    'yt-dlp did not report a valid final media path inside the destination directory.' \
+    'missing or outside result target diagnostic'
 [[ ! -e ${missing_target_result} ]] || \
     fail 'An invalid result path was published.'
 
@@ -930,6 +953,30 @@ assert_status 7 'failed engine run does not publish a result path' \
     -- 'https://example.com/watch?v=atomic-result'
 [[ ! -e ${atomic_result_file} ]] ||
     fail 'A failed engine run published a stale or partial result file.'
+
+
+# A second engine instance targeting the same canonical destination must fail
+# before yt-dlp can manipulate shared .part, merge, or remux files.
+lock_root="/tmp/yt-dlp-aria2-downloader-${EUID}"
+mkdir -p -- "${lock_root}"
+chmod 700 -- "${lock_root}"
+lock_key=$(printf '%s\0' "${OUTPUT_DIR}" | sha256sum)
+lock_key=${lock_key%% *}
+lock_file="${lock_root}/${lock_key}.lock"
+exec {held_lock_fd}>>"${lock_file}"
+chmod 600 -- "${lock_file}"
+flock --exclusive --nonblock "${held_lock_fd}"
+prepare_argument_log 'concurrent-output-lock'
+assert_status 75 'a concurrent writer to the same output directory is rejected' \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" \
+    --mode audio \
+    -- 'https://example.com/watch?v=concurrent-output-lock'
+assert_text_contains "${ASSERT_OUTPUT}" \
+    'another download is already using the destination directory:' \
+    'concurrent output lock diagnostic'
+flock --unlock "${held_lock_fd}"
+exec {held_lock_fd}>&-
 
 # GUI progress from aria2c, including an unknown total size.
 trimmed_gui_url='https://example.com/watch?v=trimmed'
@@ -1334,7 +1381,7 @@ assert_file_contains "${progress_error_capture}" 'status 42' \
 # Missing Zenity is a dependency error, not a graphical crash.
 no_zenity_bin="${TEST_ROOT}/no-zenity-bin"
 mkdir -p -- "${no_zenity_bin}"
-for required_command in bash chmod date dirname grep mkdir mktemp mv realpath rm setsid sleep stat; do
+for required_command in bash chmod date dirname grep mkdir mktemp mv realpath rm setsid sleep stat flock sha256sum; do
     required_command_path=$(command -v "${required_command}") ||
         fail "Required host command was not found: ${required_command}"
     ln -s -- "${required_command_path}" \

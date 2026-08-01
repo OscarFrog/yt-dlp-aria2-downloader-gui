@@ -3,14 +3,14 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.13
-# Date        : 2026-07-31
+# Version     : 2.1.14
+# Date        : 2026-08-01
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
 
 set -euo pipefail
 
-readonly VERSION="2.1.13"
+readonly VERSION="2.1.14"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -21,6 +21,8 @@ VERSION_PARSE_VALID=false
 RESULT_FILE_TMP=''
 INTERNAL_PATH_FILE_TMP=''
 HLS_REMUX_TMP=''
+OUTPUT_LOCK_FD=''
+OUTPUT_LOCK_FILE=''
 
 cleanup() {
     local status=$?
@@ -34,6 +36,10 @@ cleanup() {
     fi
     if [[ -n ${HLS_REMUX_TMP} ]]; then
         rm -f -- "${HLS_REMUX_TMP}" || true
+    fi
+    if [[ -n ${OUTPUT_LOCK_FD} ]]; then
+        flock --unlock "${OUTPUT_LOCK_FD}" 2>/dev/null || true
+        exec {OUTPUT_LOCK_FD}>&- 2>/dev/null || true
     fi
     exit "${status}"
 }
@@ -248,8 +254,65 @@ require_value() {
     fi
 }
 
+acquire_output_lock() {
+    local output_dir=$1
+    local lock_root="/tmp/yt-dlp-aria2-downloader-${EUID}"
+    local lock_owner
+    local lock_key
+
+    if mkdir -- "${lock_root}" 2>/dev/null; then
+        if ! chmod 700 -- "${lock_root}"; then
+            error 'unable to secure the download-lock directory.'
+            return 73
+        fi
+    elif [[ ! -d ${lock_root} || -L ${lock_root} ]]; then
+        error 'the download-lock path exists but is not a safe directory.'
+        return 73
+    fi
+
+    if ! lock_owner=$(stat -c '%u' -- "${lock_root}" 2>/dev/null); then
+        error 'unable to inspect the download-lock directory.'
+        return 73
+    fi
+    if [[ ${lock_owner} != "${EUID}" ]]; then
+        error 'the download-lock directory is not owned by the current user.'
+        return 73
+    fi
+    if ! chmod 700 -- "${lock_root}"; then
+        error 'unable to secure the download-lock directory.'
+        return 73
+    fi
+
+    if ! lock_key=$(printf '%s\0' "${output_dir}" | sha256sum); then
+        error 'unable to derive the destination lock identifier.'
+        return 73
+    fi
+    lock_key=${lock_key%% *}
+    if [[ ! ${lock_key} =~ ^[[:xdigit:]]{64}$ ]]; then
+        error 'invalid destination lock identifier.'
+        return 73
+    fi
+
+    OUTPUT_LOCK_FILE="${lock_root}/${lock_key}.lock"
+    if ! exec {OUTPUT_LOCK_FD}>>"${OUTPUT_LOCK_FILE}"; then
+        error 'unable to open the destination lock.'
+        return 73
+    fi
+    if ! chmod 600 -- "${OUTPUT_LOCK_FILE}"; then
+        error 'unable to secure the destination lock.'
+        return 73
+    fi
+    if ! flock --exclusive --nonblock "${OUTPUT_LOCK_FD}"; then
+        error "another download is already using the destination directory: ${output_dir}"
+        return 75
+    fi
+
+    return 0
+}
+
 normalize_path_record() {
     local record_file=$1
+    local output_dir=$2
     local candidate=''
     local final_path=''
 
@@ -260,7 +323,15 @@ normalize_path_record() {
         fi
     done <"${record_file}"
 
-    [[ -n ${final_path} && -f ${final_path} ]] || return 1
+    [[ -n ${final_path} ]] || return 1
+    if ! final_path=$(realpath -e -- "${final_path}" 2>/dev/null); then
+        return 1
+    fi
+    [[ -f ${final_path} ]] || return 1
+    if [[ ${output_dir} != / && ${final_path} != "${output_dir}"/* ]]; then
+        return 1
+    fi
+
     printf '%s\n' "${final_path}" >"${record_file}" || return 2
     return 0
 }
@@ -393,7 +464,7 @@ if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
     esac
 fi
 
-for command_name in yt-dlp aria2c ffmpeg realpath deno grep mktemp mv rm; do
+for command_name in yt-dlp aria2c ffmpeg ffprobe realpath deno grep mktemp mv rm chmod flock mkdir sha256sum stat; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         error "required command \"${command_name}\" was not found."
         exit 127
@@ -433,6 +504,11 @@ if [[ ! -w ${OUTPUT_DIR} || ! -x ${OUTPUT_DIR} ]]; then
     error "destination directory is not writable: ${OUTPUT_DIR}"
     exit 13
 fi
+
+# Keep one same-user writer per canonical destination directory. The lock is
+# stored in a private local runtime directory, so no marker is written into the
+# user's media directory and an interrupted process releases it automatically.
+acquire_output_lock "${OUTPUT_DIR}"
 
 if [[ -n ${RESULT_FILE} ]]; then
     if [[ ${RESULT_FILE} == *$'\n'* || ${RESULT_FILE} == *$'\r'* ]]; then
@@ -575,13 +651,13 @@ fi
 if yt-dlp "${YT_DLP_OPTIONS[@]}" -- "${URL}"; then
     if [[ -n ${PATH_RECORD_TMP} ]]; then
         set +e
-        normalize_path_record "${PATH_RECORD_TMP}"
+        normalize_path_record "${PATH_RECORD_TMP}" "${OUTPUT_DIR}"
         path_record_status=$?
         set -e
         case ${path_record_status} in
         0) ;;
         1)
-            error 'yt-dlp did not report a valid final media path.'
+            error 'yt-dlp did not report a valid final media path inside the destination directory.'
             exit 1
             ;;
         *)
@@ -663,8 +739,12 @@ if yt-dlp "${YT_DLP_OPTIONS[@]}" -- "${URL}"; then
     fi
 
     if [[ -n ${RESULT_FILE} ]]; then
-        if ! mv -f -- "${RESULT_FILE_TMP}" "${RESULT_FILE}"; then
+        if ! mv -n -- "${RESULT_FILE_TMP}" "${RESULT_FILE}"; then
             error 'unable to publish the result file.'
+            exit 13
+        fi
+        if [[ -e ${RESULT_FILE_TMP} || -L ${RESULT_FILE_TMP} ]]; then
+            error 'the result file appeared during publication; refusing to overwrite it.'
             exit 13
         fi
         RESULT_FILE_TMP=''
