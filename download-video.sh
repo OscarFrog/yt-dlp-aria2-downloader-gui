@@ -3,18 +3,21 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.14
+# Version     : 2.1.15
 # Date        : 2026-08-01
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
 
 set -euo pipefail
+umask 077
 
-readonly VERSION="2.1.14"
+readonly VERSION="2.1.15"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
 readonly SCRIPT_NAME="${0##*/}"
+readonly YTDLP_NO_PLUGINS=1
+export YTDLP_NO_PLUGINS
 
 VERSION_AT_LEAST=false
 VERSION_PARSE_VALID=false
@@ -23,11 +26,29 @@ INTERNAL_PATH_FILE_TMP=''
 HLS_REMUX_TMP=''
 OUTPUT_LOCK_FD=''
 OUTPUT_LOCK_FILE=''
+OUTPUT_LOCK_ROOT=''
+DOWNLOAD_WORKER_PID=''
+DOWNLOAD_WORKER_PGID=''
+DOWNLOAD_PGID_FILE=''
+DOWNLOAD_STATUS=125
+REQUESTED_EXIT_STATUS=''
+SHUTDOWN_REQUESTED=false
 
 cleanup() {
     local status=$?
 
     trap - EXIT HUP INT TERM
+    trap '' HUP INT TERM
+
+    if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]]; then
+        if declare -F stop_download_worker >/dev/null 2>&1; then
+            # shellcheck disable=SC2310 # Cleanup intentionally tolerates failure.
+            stop_download_worker || true
+        fi
+    fi
+    if [[ -n ${DOWNLOAD_PGID_FILE} ]]; then
+        rm -f -- "${DOWNLOAD_PGID_FILE}" "${DOWNLOAD_PGID_FILE}.tmp" || true
+    fi
     if [[ -n ${RESULT_FILE_TMP} ]]; then
         rm -f -- "${RESULT_FILE_TMP}" || true
     fi
@@ -44,10 +65,33 @@ cleanup() {
     exit "${status}"
 }
 
+request_shutdown() {
+    local signal_name=$1
+    local exit_status=$2
+
+    if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
+        if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]] &&
+            declare -F signal_download_worker >/dev/null 2>&1; then
+            signal_download_worker KILL
+        fi
+        return 0
+    fi
+
+    SHUTDOWN_REQUESTED=true
+    REQUESTED_EXIT_STATUS=${exit_status}
+    if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]] &&
+        declare -F signal_download_worker >/dev/null 2>&1; then
+        signal_download_worker "${signal_name}"
+        return 0
+    fi
+
+    exit "${exit_status}"
+}
+
 trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'request_shutdown HUP 129' HUP
+trap 'request_shutdown INT 130' INT
+trap 'request_shutdown TERM 143' TERM
 
 usage() {
     cat <<EOF_USAGE
@@ -149,6 +193,7 @@ check_runtime_compatibility() {
     local aria2_version
     local aria2_help
     local required_option
+    local setsid_help
 
     if ! yt_dlp_version=$(LC_ALL=C yt-dlp --version 2>/dev/null); then
         error 'unable to determine the yt-dlp version.'
@@ -197,7 +242,9 @@ check_runtime_compatibility() {
         --progress-template \
         --print-to-file \
         --fixup \
-        --downloader-args; do
+        --downloader-args \
+        --no-overwrites \
+        --no-post-overwrites; do
         if ! grep -Eq -- \
             "^[[:space:]]*(-[^,[:space:]]+,[[:space:]]+)?${required_option}([=[:space:]]|$)" <<<"${yt_dlp_help}"; then
             error "this yt-dlp build does not support ${required_option}."
@@ -242,6 +289,19 @@ check_runtime_compatibility() {
             return 1
         fi
     done
+
+    if ! setsid_help=$(LC_ALL=C setsid --help 2>&1); then
+        error 'unable to inspect setsid capabilities.'
+        return 1
+    fi
+    for required_option in --fork --wait; do
+        if ! grep -Eq -- \
+            "^[[:space:]]*(-[^[:space:]]+,[[:space:]]+)?${required_option}([=[:space:]]|$)" \
+            <<<"${setsid_help}"; then
+            error "this version of setsid does not support ${required_option}."
+            return 1
+        fi
+    done
 }
 
 require_value() {
@@ -254,34 +314,50 @@ require_value() {
     fi
 }
 
-acquire_output_lock() {
-    local output_dir=$1
-    local lock_root="/tmp/yt-dlp-aria2-downloader-${EUID}"
-    local lock_owner
-    local lock_key
+resolve_lock_root() {
+    local candidate=''
+    local owner=''
+    local mode=''
 
-    if mkdir -- "${lock_root}" 2>/dev/null; then
-        if ! chmod 700 -- "${lock_root}"; then
-            error 'unable to secure the download-lock directory.'
-            return 73
+    if [[ -n ${XDG_RUNTIME_DIR:-} && ${XDG_RUNTIME_DIR} == /* &&
+        -d ${XDG_RUNTIME_DIR} && ! -L ${XDG_RUNTIME_DIR} ]]; then
+        owner=$(stat -c '%u' -- "${XDG_RUNTIME_DIR}" 2>/dev/null || true)
+        mode=$(stat -c '%a' -- "${XDG_RUNTIME_DIR}" 2>/dev/null || true)
+        if [[ ${owner} == "${EUID}" && ${mode} == 700 ]]; then
+            candidate="${XDG_RUNTIME_DIR}/yt-dlp-aria2-downloader"
         fi
-    elif [[ ! -d ${lock_root} || -L ${lock_root} ]]; then
+    fi
+
+    if [[ -z ${candidate} ]]; then
+        candidate="/tmp/yt-dlp-aria2-downloader-${EUID}"
+    fi
+
+    if mkdir -m 700 -- "${candidate}" 2>/dev/null; then
+        :
+    elif [[ ! -d ${candidate} || -L ${candidate} ]]; then
         error 'the download-lock path exists but is not a safe directory.'
         return 73
     fi
 
-    if ! lock_owner=$(stat -c '%u' -- "${lock_root}" 2>/dev/null); then
-        error 'unable to inspect the download-lock directory.'
-        return 73
-    fi
-    if [[ ${lock_owner} != "${EUID}" ]]; then
+    owner=$(stat -c '%u' -- "${candidate}" 2>/dev/null || true)
+    if [[ ${owner} != "${EUID}" ]]; then
         error 'the download-lock directory is not owned by the current user.'
         return 73
     fi
-    if ! chmod 700 -- "${lock_root}"; then
+    if ! chmod 700 -- "${candidate}"; then
         error 'unable to secure the download-lock directory.'
         return 73
     fi
+
+    OUTPUT_LOCK_ROOT=${candidate}
+    return 0
+}
+
+acquire_output_lock() {
+    local output_dir=$1
+    local lock_key
+
+    resolve_lock_root
 
     if ! lock_key=$(printf '%s\0' "${output_dir}" | sha256sum); then
         error 'unable to derive the destination lock identifier.'
@@ -293,7 +369,12 @@ acquire_output_lock() {
         return 73
     fi
 
-    OUTPUT_LOCK_FILE="${lock_root}/${lock_key}.lock"
+    OUTPUT_LOCK_FILE="${OUTPUT_LOCK_ROOT}/${lock_key}.lock"
+    if [[ -L ${OUTPUT_LOCK_FILE} ||
+        ( -e ${OUTPUT_LOCK_FILE} && ! -f ${OUTPUT_LOCK_FILE} ) ]]; then
+        error 'the destination lock exists but is not a regular file.'
+        return 73
+    fi
     if ! exec {OUTPUT_LOCK_FD}>>"${OUTPUT_LOCK_FILE}"; then
         error 'unable to open the destination lock.'
         return 73
@@ -307,6 +388,219 @@ acquire_output_lock() {
         return 75
     fi
 
+    return 0
+}
+
+process_is_running() {
+    local pid=$1
+    local process_stat=''
+    local process_state=''
+
+    [[ ${pid} =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 -- "${pid}" 2>/dev/null || return 1
+
+    if [[ -r /proc/${pid}/stat ]]; then
+        if ! { IFS= read -r process_stat <"/proc/${pid}/stat"; } 2>/dev/null; then
+            return 0
+        fi
+        process_state=${process_stat##*) }
+        process_state=${process_state%% *}
+        [[ ${process_state} != Z && ${process_state} != X ]]
+        return
+    fi
+
+    return 0
+}
+
+recover_download_pgid() {
+    local candidate=''
+    local children=''
+    local children_file=''
+    local -a child_pids=()
+
+    if [[ -n ${DOWNLOAD_PGID_FILE} && -f ${DOWNLOAD_PGID_FILE} ]]; then
+        if { IFS= read -r candidate <"${DOWNLOAD_PGID_FILE}"; } 2>/dev/null &&
+            [[ ${candidate} =~ ^[1-9][0-9]*$ ]] &&
+            kill -0 -- "-${candidate}" 2>/dev/null; then
+            DOWNLOAD_WORKER_PGID=${candidate}
+            return 0
+        fi
+    fi
+
+    if [[ -n ${DOWNLOAD_WORKER_PID} ]]; then
+        children_file="/proc/${DOWNLOAD_WORKER_PID}/task/${DOWNLOAD_WORKER_PID}/children"
+        if [[ -r ${children_file} ]] &&
+            { IFS= read -r children <"${children_file}" || [[ -n ${children} ]]; } 2>/dev/null; then
+            read -r -a child_pids <<<"${children}"
+            for candidate in "${child_pids[@]}"; do
+                [[ ${candidate} =~ ^[1-9][0-9]*$ ]] || continue
+                if kill -0 -- "-${candidate}" 2>/dev/null; then
+                    DOWNLOAD_WORKER_PGID=${candidate}
+                    return 0
+                fi
+            done
+        fi
+    fi
+
+    return 1
+}
+
+signal_download_worker() {
+    local signal_name=$1
+    local group_signaled=false
+
+    if [[ -z ${DOWNLOAD_WORKER_PGID} ]]; then
+        # shellcheck disable=SC2310 # A missing PGID is an expected race.
+        recover_download_pgid || true
+    fi
+
+    if [[ -n ${DOWNLOAD_WORKER_PGID} ]]; then
+        if kill "-${signal_name}" -- "-${DOWNLOAD_WORKER_PGID}" 2>/dev/null; then
+            group_signaled=true
+        else
+            DOWNLOAD_WORKER_PGID=''
+        fi
+    fi
+
+    if [[ ${signal_name} == KILL || ${group_signaled} == false ]] &&
+        [[ -n ${DOWNLOAD_WORKER_PID} ]]; then
+        kill "-${signal_name}" -- "${DOWNLOAD_WORKER_PID}" 2>/dev/null || true
+    fi
+
+    return 0
+}
+
+wait_for_download_pgid() {
+    local attempt
+
+    for ((attempt = 0; attempt < 50; attempt++)); do
+        # shellcheck disable=SC2310 # Predicate success means the PGID is ready.
+        if recover_download_pgid; then
+            return 0
+        fi
+        # shellcheck disable=SC2310 # Predicate failure means the supervisor exited.
+        if [[ -n ${DOWNLOAD_WORKER_PID} ]] &&
+            ! process_is_running "${DOWNLOAD_WORKER_PID}"; then
+            return 1
+        fi
+        sleep 0.1
+    done
+
+    return 1
+}
+
+wait_for_download_exit() {
+    local attempts=$1
+    local attempt
+    local supervisor_alive=false
+    local group_alive=false
+
+    for ((attempt = 0; attempt < attempts; attempt++)); do
+        supervisor_alive=false
+        group_alive=false
+
+        if [[ -n ${DOWNLOAD_WORKER_PID} ]]; then
+            # shellcheck disable=SC2310 # Predicate success means it is still alive.
+            if process_is_running "${DOWNLOAD_WORKER_PID}"; then
+                supervisor_alive=true
+            else
+                wait "${DOWNLOAD_WORKER_PID}" 2>/dev/null || true
+                DOWNLOAD_WORKER_PID=''
+            fi
+        fi
+
+        if [[ -n ${DOWNLOAD_WORKER_PGID} ]]; then
+            if kill -0 -- "-${DOWNLOAD_WORKER_PGID}" 2>/dev/null; then
+                group_alive=true
+            else
+                DOWNLOAD_WORKER_PGID=''
+            fi
+        fi
+
+        if [[ ${supervisor_alive} == false && ${group_alive} == false ]]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    return 1
+}
+
+stop_download_worker() {
+    if [[ -z ${DOWNLOAD_WORKER_PID} && -z ${DOWNLOAD_WORKER_PGID} ]]; then
+        return 0
+    fi
+
+    signal_download_worker TERM
+    # shellcheck disable=SC2310 # Bounded wait is intentionally a predicate.
+    if wait_for_download_exit 30; then
+        return 0
+    fi
+
+    signal_download_worker KILL
+    wait_for_download_exit 20
+}
+
+run_download_worker() {
+    local worker_status=0
+
+    DOWNLOAD_STATUS=125
+    if ! DOWNLOAD_PGID_FILE=$(mktemp \
+        --tmpdir="${OUTPUT_LOCK_ROOT}" \
+        '.worker-pgid.XXXXXXXX'); then
+        error 'unable to create the download process-group file.'
+        return 0
+    fi
+
+    # Run yt-dlp in a dedicated session so a signal sent only to this wrapper
+    # can still be relayed to yt-dlp, aria2c, FFmpeg, Deno, and their descendants.
+    # shellcheck disable=SC2016
+    LC_ALL=C setsid --fork --wait bash -c '
+        set -euo pipefail
+        pgid_file=$1
+        shift
+        pgid_temporary="${pgid_file}.tmp"
+        printf "%s\n" "$$" >"${pgid_temporary}" || exit 125
+        mv -f -- "${pgid_temporary}" "${pgid_file}" || exit 125
+        exec "$@"
+    ' bash "${DOWNLOAD_PGID_FILE}" \
+        yt-dlp "${YT_DLP_OPTIONS[@]}" -- "${URL}" &
+    DOWNLOAD_WORKER_PID=$!
+
+    # shellcheck disable=SC2310 # Startup failure is handled explicitly.
+    if ! wait_for_download_pgid; then
+        if [[ ${SHUTDOWN_REQUESTED} != true ]]; then
+            error 'unable to determine the download process group.'
+        fi
+        # shellcheck disable=SC2310 # Startup cleanup is best effort.
+        stop_download_worker || true
+        if [[ -n ${REQUESTED_EXIT_STATUS} ]]; then
+            DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS}
+        fi
+        rm -f -- "${DOWNLOAD_PGID_FILE}" "${DOWNLOAD_PGID_FILE}.tmp" || true
+        DOWNLOAD_PGID_FILE=''
+        return 0
+    fi
+
+    worker_status=0
+    wait "${DOWNLOAD_WORKER_PID}" || worker_status=$?
+
+    if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
+        # shellcheck disable=SC2310 # Escalate only after the bounded wait fails.
+        if ! wait_for_download_exit 30; then
+            signal_download_worker KILL
+            # shellcheck disable=SC2310 # Final reap is best effort after SIGKILL.
+            wait_for_download_exit 20 || true
+        fi
+        DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS:-143}
+    else
+        DOWNLOAD_WORKER_PID=''
+        DOWNLOAD_WORKER_PGID=''
+        DOWNLOAD_STATUS=${worker_status}
+    fi
+
+    rm -f -- "${DOWNLOAD_PGID_FILE}" "${DOWNLOAD_PGID_FILE}.tmp" || true
+    DOWNLOAD_PGID_FILE=''
     return 0
 }
 
@@ -464,7 +758,7 @@ if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
     esac
 fi
 
-for command_name in yt-dlp aria2c ffmpeg ffprobe realpath deno grep mktemp mv rm chmod flock mkdir sha256sum stat; do
+for command_name in yt-dlp aria2c ffmpeg ffprobe realpath deno grep mktemp mv rm chmod flock mkdir sha256sum stat setsid sleep; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         error "required command \"${command_name}\" was not found."
         exit 127
@@ -572,10 +866,12 @@ readonly ARIA2_ARGUMENTS
 YT_DLP_OPTIONS=(
     --ignore-config
     --no-playlist
+    --no-overwrites
+    --no-post-overwrites
     --js-runtimes deno
     --remote-components ejs:npm
     --embed-metadata
-    --output "${OUTPUT_DIR_TEMPLATE}/%(title).150s [%(id)s].%(ext)s"
+    --output "${OUTPUT_DIR_TEMPLATE}/%(title).160B [%(id).64B].%(ext)s"
     --continue
     --progress-delta 1
     # Use aria2c for direct transfers, but retain yt-dlp's native downloader for
@@ -648,7 +944,8 @@ if [[ -n ${PATH_RECORD_TMP} ]]; then
     )
 fi
 
-if yt-dlp "${YT_DLP_OPTIONS[@]}" -- "${URL}"; then
+run_download_worker
+if ((DOWNLOAD_STATUS == 0)); then
     if [[ -n ${PATH_RECORD_TMP} ]]; then
         set +e
         normalize_path_record "${PATH_RECORD_TMP}" "${OUTPUT_DIR}"
@@ -726,15 +1023,17 @@ if yt-dlp "${YT_DLP_OPTIONS[@]}" -- "${URL}"; then
             exit 13
         fi
         HLS_REMUX_TMP=''
+        if ! printf '%s\n' "${hls_final_path}" >"${PATH_RECORD_TMP}"; then
+            error 'unable to record the final MKV path.'
+            printf 'The repaired HLS intermediate was retained at: %s\n' \
+                "${hls_source_path}" >&2
+            exit 13
+        fi
         emit_machine_postprocess finished FFmpegVideoRemuxer
         if [[ ${hls_source_path} != "${hls_final_path}" ]] &&
             ! rm -f -- "${hls_source_path}"; then
             printf 'Warning: unable to remove the repaired HLS intermediate: %s\n' \
                 "${hls_source_path}" >&2
-        fi
-        if ! printf '%s\n' "${hls_final_path}" >"${PATH_RECORD_TMP}"; then
-            error 'unable to record the final MKV path.'
-            exit 13
         fi
     fi
 
@@ -757,7 +1056,7 @@ if yt-dlp "${YT_DLP_OPTIONS[@]}" -- "${URL}"; then
     fi
     printf '\nDownload completed successfully.\n'
 else
-    status=$?
+    status=${DOWNLOAD_STATUS}
     printf '\nDownload failed with exit code %d.\n' "${status}" >&2
     exit "${status}"
 fi

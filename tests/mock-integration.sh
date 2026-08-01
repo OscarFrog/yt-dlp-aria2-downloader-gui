@@ -8,7 +8,7 @@ readonly PROJECT_DIR
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 for required_command in \
     awk bash cat chmod date dirname env grep ln mkdir mktemp mv readlink \
-    realpath rm setsid sleep stat timeout touch tr; do
+    realpath rm setsid sleep stat timeout touch tr flock sha256sum; do
     require_test_command "${required_command}"
 done
 [[ -r /proc/self/cmdline ]] ||
@@ -28,14 +28,21 @@ trap 'exit 143' TERM
 readonly MOCK_BIN="${TEST_ROOT}/bin"
 readonly OUTPUT_DIR="${TEST_ROOT}/output dir %"
 readonly HOME_DIR="${TEST_ROOT}/home"
+readonly RUNTIME_DIR="${TEST_ROOT}/runtime"
 readonly PROGRESS_CAPTURE="${TEST_ROOT}/gui-progress-aria.txt"
 readonly YTDLP_PROGRESS_CAPTURE="${TEST_ROOT}/gui-progress-ytdlp.txt"
 readonly LIST_ARGS_LOG="${TEST_ROOT}/zenity-list-args.bin"
-mkdir -p -- "${MOCK_BIN}" "${OUTPUT_DIR}" "${HOME_DIR}"
+mkdir -p -- "${MOCK_BIN}" "${OUTPUT_DIR}" "${HOME_DIR}" "${RUNTIME_DIR}"
+chmod 700 -- "${RUNTIME_DIR}"
 
 cat > "${MOCK_BIN}/yt-dlp" <<'EOF_YTDLP'
 #!/usr/bin/env bash
 set -euo pipefail
+
+if [[ ${YTDLP_NO_PLUGINS:-} != 1 ]]; then
+    printf 'yt-dlp plugins were not disabled by the wrapper.\n' >&2
+    exit 67
+fi
 
 if (($# == 1)) && [[ $1 == '--version' ]]; then
     [[ ${LC_ALL:-} == C ]] || { printf 'localized yt-dlp version output\n'; exit 65; }
@@ -53,7 +60,9 @@ if (($# == 1)) && [[ $1 == '--help' ]]; then
         '--progress-template' \
         '--print-to-file' \
         '--fixup POLICY' \
-        '--downloader-args'
+        '--downloader-args' \
+        '--no-overwrites' \
+        '--no-post-overwrites'
     exit 0
 fi
 
@@ -87,8 +96,15 @@ fi
 
 result_file=''
 youtube_hls_mode=false
+no_overwrites=false
+no_post_overwrites=false
 previous=''
 for argument in "$@"; do
+    case ${argument} in
+    --no-overwrites) no_overwrites=true ;;
+    --no-post-overwrites) no_post_overwrites=true ;;
+    *) ;;
+    esac
     if [[ ${argument} == '--cookies-from-browser' ]]; then
         youtube_hls_mode=true
     fi
@@ -168,6 +184,15 @@ if [[ ${MOCK_YTDLP_EXIT_STATUS:-0} != 0 ]]; then
     exit "${MOCK_YTDLP_EXIT_STATUS}"
 fi
 
+if [[ ${MOCK_ENFORCE_NO_OVERWRITE:-0} == 1 && -e ${output_path} ]]; then
+    if [[ ${no_overwrites} != true || ${no_post_overwrites} != true ]]; then
+        printf 'The wrapper omitted an explicit no-overwrite policy.\n' >&2
+        : >"${output_path}"
+        exit 68
+    fi
+    printf 'Simulated refusal to overwrite an existing final media file.\n' >&2
+    exit 1
+fi
 if [[ ${MOCK_RESULT_TARGET_MISSING:-0} != 1 ]]; then
     : >"${output_path}"
 fi
@@ -637,6 +662,7 @@ export HOME="${HOME_DIR}"
 export XDG_CONFIG_HOME="${HOME_DIR}/.config"
 export XDG_STATE_HOME="${HOME_DIR}/.local/state"
 export XDG_DATA_HOME="${HOME_DIR}/.local/share"
+export XDG_RUNTIME_DIR="${RUNTIME_DIR}"
 export MOCK_OUTPUT_DIR="${OUTPUT_DIR}"
 export MOCK_LIST_ARGS_LOG="${LIST_ARGS_LOG}"
 export PATH="${MOCK_BIN}:/usr/bin:/bin"
@@ -708,6 +734,8 @@ arguments=()
 read_arguments "${MOCK_ARG_LOG}" arguments
 assert_array_contains arguments '--ignore-config' 'yt-dlp ignores user configuration'
 assert_array_contains arguments '--no-playlist' 'yt-dlp disables playlists'
+assert_array_contains arguments '--no-overwrites' 'yt-dlp final-file overwrite protection'
+assert_array_contains arguments '--no-post-overwrites' 'yt-dlp post-processing overwrite protection'
 assert_option_value arguments '--remote-components' 'ejs:npm' 'EJS remote component selector'
 assert_option_value arguments '--format' 'ba/b' 'audio format selector'
 assert_array_contains arguments '--extract-audio' 'audio extraction postprocessor'
@@ -726,10 +754,28 @@ for forbidden_audio_format in mp3 m4a opus; do
         "removed audio format ${forbidden_audio_format}"
 done
 assert_array_contains arguments "${malicious_url}" 'URL preserved as one argument'
-expected_output_template="${OUTPUT_DIR//%/%%}/%(title).150s [%(id)s].%(ext)s"
+expected_output_template="${OUTPUT_DIR//%/%%}/%(title).160B [%(id).64B].%(ext)s"
 assert_option_value arguments '--output' "${expected_output_template}" \
     'absolute escaped output template'
 assert_array_not_contains arguments '--paths' 'legacy path option is absent'
+
+
+runtime_lock_dir="${XDG_RUNTIME_DIR}/yt-dlp-aria2-downloader"
+[[ -d ${runtime_lock_dir} && ! -L ${runtime_lock_dir} ]] ||
+    fail 'The engine did not create a private XDG runtime lock directory.'
+runtime_lock_mode=$(stat -c '%a' -- "${runtime_lock_dir}")
+assert_equals '700' "${runtime_lock_mode}" 'XDG runtime lock-directory permissions'
+shopt -s nullglob
+runtime_lock_files=("${runtime_lock_dir}"/*.lock)
+shopt -u nullglob
+((${#runtime_lock_files[@]} > 0)) ||
+    fail 'The engine did not create a destination lock file.'
+for runtime_lock_file in "${runtime_lock_files[@]}"; do
+    [[ -f ${runtime_lock_file} && ! -L ${runtime_lock_file} ]] ||
+        fail "Unsafe runtime lock entry: ${runtime_lock_file}"
+    runtime_lock_mode=$(stat -c '%a' -- "${runtime_lock_file}")
+    assert_equals '600' "${runtime_lock_mode}" 'destination lock-file permissions'
+done
 
 prepare_argument_log 'result-path-normalization'
 normalized_result_file="${TEST_ROOT}/normalized-result.txt"
@@ -787,6 +833,22 @@ assert_option_value arguments '--downloader-args' \
     'ordinary CLI aria2 arguments'
 assert_text_not_contains "$(printf '%s\n' "${arguments[@]}")" \
     '--show-console-readout=true' 'machine progress disabled in ordinary CLI mode'
+
+
+existing_audio_path="${OUTPUT_DIR}/Mock media [abc123].webm"
+printf '%s\n' 'preserve existing audio result' >"${existing_audio_path}"
+prepare_argument_log 'existing-media-no-overwrite'
+assert_status 1 'engine refuses to overwrite an existing final media file' \
+    env MOCK_ENFORCE_NO_OVERWRITE=1 \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode audio \
+    -- 'https://example.com/watch?v=existing-media'
+assert_file_has_line "${existing_audio_path}" 'preserve existing audio result' \
+    'existing final media is preserved'
+assert_text_contains "${ASSERT_OUTPUT}" \
+    'Simulated refusal to overwrite an existing final media file.' \
+    'existing media collision diagnostic'
+rm -f -- "${existing_audio_path}"
 
 # Explicit authenticated YouTube HLS profile.
 prepare_argument_log 'youtube-hls-engine'
@@ -957,7 +1019,10 @@ assert_status 7 'failed engine run does not publish a result path' \
 
 # A second engine instance targeting the same canonical destination must fail
 # before yt-dlp can manipulate shared .part, merge, or remux files.
-lock_root="/tmp/yt-dlp-aria2-downloader-${EUID}"
+# Use the exact runtime lock directory selected by the engine. Locking the
+# historical /tmp fallback would exercise a different inode whenever the
+# validated XDG_RUNTIME_DIR is available.
+lock_root="${XDG_RUNTIME_DIR}/yt-dlp-aria2-downloader"
 mkdir -p -- "${lock_root}"
 chmod 700 -- "${lock_root}"
 lock_key=$(printf '%s\0' "${OUTPUT_DIR}" | sha256sum)
@@ -1142,6 +1207,23 @@ MOCK_USE_DEFAULT_PROFILE=1 "${PROJECT_DIR}/download-video-gui.sh"
 assert_file_has_line "${config_file}" 'profile=audio' \
     'CRLF configuration values are normalized when loaded'
 
+
+# Relative XDG configuration/state paths are invalid and must fall back to HOME.
+relative_config_dir="${PROJECT_DIR}/relative-config-home"
+relative_state_dir="${PROJECT_DIR}/relative-state-home"
+rm -rf -- "${relative_config_dir}" "${relative_state_dir}"
+prepare_argument_log 'relative-xdg-home-fallback'
+env XDG_CONFIG_HOME='relative-config-home' \
+    XDG_STATE_HOME='relative-state-home' \
+    MOCK_USE_DEFAULT_PROFILE=1 \
+    "${PROJECT_DIR}/download-video-gui.sh"
+[[ ! -e ${relative_config_dir} && ! -e ${relative_state_dir} ]] ||
+    fail 'The GUI used a relative XDG configuration or state path.'
+assert_file_has_line \
+    "${HOME}/.config/yt-dlp-aria2-downloader/gui.conf" \
+    "output_dir=${OUTPUT_DIR}" \
+    'relative XDG homes fall back to HOME'
+
 # File chooser fallback after a GTK/Zenity initial-directory failure.
 file_selection_args_log="${TEST_ROOT}/file-selection-args.bin"
 : >"${file_selection_args_log}"
@@ -1239,6 +1321,29 @@ assert_status 1 'state-directory creation failure is reported in the GUI' \
 assert_file_contains "${state_error_capture}" \
     'Unable to create the application state directory.' \
     'state-directory GUI diagnostic'
+
+
+# A signal sent only to the CLI wrapper PID must reach the isolated yt-dlp
+# process group and must not leave aria2c/FFmpeg-style descendants behind.
+cli_started_marker="${TEST_ROOT}/cli-worker-started"
+cli_termination_marker="${TEST_ROOT}/cli-worker-terminated"
+cli_signal_log="${TEST_ROOT}/cli-signal.log"
+prepare_argument_log 'cli-signal-forwarding'
+env MOCK_LONG_DOWNLOAD=1 \
+    MOCK_STARTED_MARKER="${cli_started_marker}" \
+    MOCK_TERMINATION_MARKER="${cli_termination_marker}" \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode audio \
+    -- 'https://example.com/watch?v=cli-signal' \
+    >"${cli_signal_log}" 2>&1 &
+cli_engine_pid=$!
+wait_for_file "${cli_started_marker}" 10 'CLI worker startup'
+kill -TERM -- "${cli_engine_pid}"
+cli_engine_status=0
+wait "${cli_engine_pid}" || cli_engine_status=$?
+assert_equals '143' "${cli_engine_status}" 'CLI TERM exit status'
+wait_for_file "${cli_termination_marker}" 10 'CLI child process receives TERM'
+assert_no_test_processes 'CLI signal forwarding left worker processes'
 
 # User cancellation terminates the complete process group.
 termination_marker="${TEST_ROOT}/terminated"

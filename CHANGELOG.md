@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.1.15 - 2026-08-01
+
+### Security and data integrity
+
+- Disable inherited yt-dlp plugins and keep personal yt-dlp configuration
+  ignored for deterministic execution.
+- Refuse to overwrite completed media files and post-processed outputs while
+  retaining interrupted `.part` resume support.
+- Run yt-dlp in a dedicated process group and relay CLI HUP, INT, and TERM
+  signals to yt-dlp, aria2c, FFmpeg, Deno, and their descendants.
+- Create destination locks under a validated private XDG runtime directory,
+  with a restrictive `/tmp` fallback and `umask 077`.
+
+### Reliability and portability
+
+- Bound output-template title and identifier fields by encoded byte length for
+  long Unicode filenames.
+- Ignore relative XDG configuration and state paths and fall back to the
+  standard locations under HOME.
+- Record the final HLS MKV path before deleting the repaired intermediate.
+- Pin Ubuntu validation to 24.04 and add bounded APT retries.
+
+### Validation and documentation
+
+- Add regression tests for existing-media preservation, CLI-only signal
+  delivery, plugin isolation, runtime-lock permissions, byte-bounded output
+  templates, and relative XDG paths.
+- Update both README files and the testing guide for the new policies.
+
 ## 2.1.14 - 2026-08-01
 
 ### Security and data safety
