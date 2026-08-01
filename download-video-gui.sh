@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video-gui.sh
-# Version     : 2.1.14
+# Version     : 2.1.15
 # Date        : 2026-08-01
 # Description : Zenity GUI for MKV video, authenticated YouTube HLS, or audio.
 # ============================================================================
@@ -15,15 +15,29 @@ if [[ -z ${HOME:-} ]]; then
     printf 'Error: the HOME environment variable is not defined.\n' >&2
     exit 1
 fi
+if [[ ${HOME} != /* ]]; then
+    printf 'Error: the HOME environment variable must be an absolute path.\n' >&2
+    exit 1
+fi
 
 readonly APP_NAME='yt-dlp aria2 downloader'
 readonly PROFILE_LABEL_VIDEO='Complete video (MKV)'
 readonly PROFILE_LABEL_YOUTUBE_HLS='YouTube video - Firefox cookies (HLS/MKV)'
 readonly PROFILE_LABEL_AUDIO='Audio track (native format)'
 readonly PROGRESS_DIALOG_WIDTH=700
-readonly CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/yt-dlp-aria2-downloader"
-readonly STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/yt-dlp-aria2-downloader"
+
+config_home=${XDG_CONFIG_HOME:-${HOME}/.config}
+state_home=${XDG_STATE_HOME:-${HOME}/.local/state}
+if [[ ${config_home} != /* ]]; then
+    config_home="${HOME}/.config"
+fi
+if [[ ${state_home} != /* ]]; then
+    state_home="${HOME}/.local/state"
+fi
+readonly CONFIG_DIR="${config_home}/yt-dlp-aria2-downloader"
+readonly STATE_DIR="${state_home}/yt-dlp-aria2-downloader"
 readonly CONFIG_FILE="${CONFIG_DIR}/gui.conf"
+unset config_home state_home
 readonly LOG_RETENTION_DAYS=15
 readonly PGID_WAIT_ATTEMPTS=50
 readonly WORKER_TERM_ATTEMPTS=30

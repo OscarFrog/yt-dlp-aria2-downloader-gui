@@ -16,13 +16,15 @@ single URL using one of three profiles:
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
 streams deliberately remain on yt-dlp's native downloader. The current version
-is **2.1.14**.
+is **2.1.15**.
 
 ## Main features
 
 - simple Zenity graphical interface;
 - download engine that can also be used from a terminal;
 - one URL per run, with accidental playlist downloads disabled;
+- personal yt-dlp configuration and plugins are disabled for deterministic execution;
+- completed media and post-processed outputs are never overwritten silently;
 - destination-folder selection and preference persistence;
 - MKV video download without re-encoding when the streams are compatible;
 - optional authenticated YouTube HLS fallback using Firefox cookies;
@@ -95,7 +97,7 @@ setsid --version
 Download both release assets from the GitHub release page:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.14.zip
+yt-dlp-aria2-downloader-gui-2.1.15.zip
 SHA256SUMS
 ```
 
@@ -103,8 +105,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.14.zip
-cd yt-dlp-aria2-downloader-gui-2.1.14
+unzip yt-dlp-aria2-downloader-gui-2.1.15.zip
+cd yt-dlp-aria2-downloader-gui-2.1.15
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -243,6 +245,15 @@ Display help or version information:
 Always quote URLs with single or double quotation marks because they may
 contain shell metacharacters such as `&`.
 
+The engine deliberately uses `--ignore-config`, disables yt-dlp plugins through
+`YTDLP_NO_PLUGINS=1`, and enables explicit no-overwrite policies. Interrupted
+`.part` files may still be resumed, but an existing completed or post-processed
+media file is preserved and the run fails instead of replacing it.
+
+The output template limits the title and media identifier by encoded byte
+length, reducing filename failures with long Unicode titles on filesystems that
+limit one path component to 255 bytes.
+
 ## Downloader behavior
 
 The engine configures aria2c for direct HTTP/FTP transfers and explicitly uses
@@ -333,10 +344,13 @@ is confirmed. Failed, canceled, interrupted, or inconsistent runs retain their
 logs for troubleshooting. Retained diagnostic logs older than 15 days are
 removed automatically the next time the graphical interface starts.
 
-A same-user, per-destination advisory lock is kept under `/tmp` while a
-download is active. It contains no URL, cookie, or media path, and the kernel
-releases it automatically when the engine exits. Downloads to different
-destination directories may run concurrently.
+A same-user, per-destination advisory lock is kept under
+`$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader` when that runtime directory is
+absolute, private, and owned by the current user. Otherwise, the engine uses a
+private `/tmp/yt-dlp-aria2-downloader-UID` fallback. Lock files contain no URL,
+cookie, or media path, and the kernel releases the lock automatically when the
+engine exits. Downloads to different destination directories may run
+concurrently.
 
 ## Tests
 

@@ -71,6 +71,13 @@ The automated suite checks, among other things:
 - process-group recovery when PGID-file publication is delayed;
 - atomic publication and failure cleanup of the result-path file;
 - rejection of a second writer targeting the same canonical output directory;
+- explicit refusal to overwrite completed or post-processed media files while
+  preserving interrupted-download resume behavior;
+- disabling of inherited yt-dlp plugins and personal configuration;
+- forwarding of HUP, INT, and TERM sent only to the CLI wrapper PID;
+- private XDG runtime locks and fallback permissions;
+- byte-bounded Unicode output templates;
+- fallback from relative XDG configuration and state paths;
 - retention of process-group control until every descendant has exited;
 - Zenity timeout and unexpected-error handling;
 - folder-chooser fallback behavior on Zenity 4;
@@ -85,7 +92,7 @@ The automated suite checks, among other things:
 `.github/workflows/shell.yml` runs the same validation for pull requests and
 for pushes to `main`, in two environments:
 
-- `ubuntu-latest`;
+- `ubuntu-24.04`;
 - a Fedora 44 container on a GitHub-hosted runner.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs

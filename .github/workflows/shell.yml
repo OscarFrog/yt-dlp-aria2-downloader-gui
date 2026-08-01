@@ -17,7 +17,7 @@ concurrency:
 jobs:
   validate-ubuntu:
     name: Ubuntu
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Check out repository
@@ -27,8 +27,8 @@ jobs:
 
       - name: Install validation tools
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes desktop-file-utils procps shellcheck
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install --yes desktop-file-utils procps shellcheck
 
       - name: Run validation
         run: |
@@ -49,7 +49,7 @@ jobs:
 
   validate-fedora:
     name: Fedora 44
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container:
       image: registry.fedoraproject.org/fedora:44
     defaults:

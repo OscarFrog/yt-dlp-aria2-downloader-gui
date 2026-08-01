@@ -17,7 +17,7 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.14**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.15**.
 
 ## Fonctionnalités principales
 
@@ -25,6 +25,8 @@ téléchargeur natif de yt-dlp. La version actuelle est la **2.1.14**.
 - moteur utilisable également depuis un terminal ;
 - une URL par exécution, avec désactivation des téléchargements accidentels de
   listes de lecture ;
+- configuration personnelle et plugins yt-dlp désactivés pour une exécution déterministe ;
+- médias terminés et sorties de post-traitement jamais écrasés silencieusement ;
 - sélection du dossier de destination et mémorisation des préférences ;
 - vidéo MKV sans réencodage lorsque les flux sont compatibles ;
 - solution de repli YouTube HLS authentifiée facultative avec les cookies Firefox ;
@@ -97,7 +99,7 @@ setsid --version
 Téléchargez les deux fichiers publiés avec la release GitHub :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.14.zip
+yt-dlp-aria2-downloader-gui-2.1.15.zip
 SHA256SUMS
 ```
 
@@ -105,8 +107,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.14.zip
-cd yt-dlp-aria2-downloader-gui-2.1.14
+unzip yt-dlp-aria2-downloader-gui-2.1.15.zip
+cd yt-dlp-aria2-downloader-gui-2.1.15
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -239,6 +241,16 @@ Aide et version :
 Placez toujours les URL entre apostrophes ou guillemets, car elles peuvent
 contenir des métacaractères du shell comme `&`.
 
+Le moteur utilise volontairement `--ignore-config`, désactive les plugins yt-dlp
+avec `YTDLP_NO_PLUGINS=1` et applique une politique explicite de non-écrasement.
+Les fichiers `.part` interrompus peuvent toujours être repris, mais un média
+terminé ou post-traité déjà présent est conservé et l'exécution échoue au lieu
+de le remplacer.
+
+Le modèle de sortie limite le titre et l'identifiant du média selon leur taille
+encodée en octets, ce qui réduit les échecs avec de longs titres Unicode sur les
+systèmes de fichiers limitant un composant de chemin à 255 octets.
+
 ## Fonctionnement des téléchargeurs
 
 Le moteur utilise aria2c pour les transferts directs HTTP/FTP et le téléchargeur
@@ -330,10 +342,12 @@ journaux de diagnostic conservés depuis plus de 15 jours sont supprimés
 automatiquement au prochain démarrage de l'interface graphique.
 
 Un verrou consultatif par utilisateur et par dossier de destination est
-conservé sous `/tmp` pendant le téléchargement. Il ne contient ni URL, ni
-cookie, ni chemin de média, et le noyau le libère automatiquement à la fin du
-moteur. Des téléchargements vers des dossiers différents peuvent s'exécuter
-simultanément.
+conservé sous `$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader` lorsque ce dossier
+d'exécution est absolu, privé et appartient à l'utilisateur courant. Sinon, le
+moteur utilise le repli privé `/tmp/yt-dlp-aria2-downloader-UID`. Les fichiers
+de verrou ne contiennent ni URL, ni cookie, ni chemin de média, et le noyau
+libère automatiquement le verrou à la fin du moteur. Des téléchargements vers
+des dossiers différents peuvent s'exécuter simultanément.
 
 ## Tests
 

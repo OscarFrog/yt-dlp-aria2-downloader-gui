@@ -128,7 +128,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.14'
+readonly EXPECTED_VERSION='2.1.15'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -238,5 +238,33 @@ assert_file_contains "${script_dir}/.github/workflows/shell.yml" \
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'git merge-base --is-ancestor "${tag_commit}" origin/main' \
     'release tag ancestry validation'
+
+assert_file_contains "${script_dir}/download-video.sh" \
+    'umask 077' \
+    'engine restrictive umask'
+assert_file_contains "${script_dir}/download-video.sh" \
+    'readonly YTDLP_NO_PLUGINS=1' \
+    'yt-dlp plugins disabled by default'
+assert_file_contains "${script_dir}/download-video.sh" \
+    '--no-overwrites' \
+    'yt-dlp final-file overwrite protection'
+assert_file_contains "${script_dir}/download-video.sh" \
+    '--no-post-overwrites' \
+    'yt-dlp post-processing overwrite protection'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/download-video.sh" \
+    'LC_ALL=C setsid --fork --wait bash -c' \
+    'CLI worker isolated for signal forwarding'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/download-video.sh" \
+    'signal_download_worker "${signal_name}"' \
+    'CLI signals relayed to worker group'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/download-video.sh" \
+    'candidate="${XDG_RUNTIME_DIR}/yt-dlp-aria2-downloader"' \
+    'XDG runtime lock location'
+assert_file_contains "${script_dir}/download-video.sh" \
+    '%(title).160B [%(id).64B].%(ext)s' \
+    'byte-bounded output filename'
 
 printf '%s\n' 'Static tests passed.'
