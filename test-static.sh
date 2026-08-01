@@ -128,7 +128,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.18'
+readonly EXPECTED_VERSION='2.1.19'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -340,5 +340,45 @@ assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'git config --global --add safe.directory "${GITHUB_WORKSPACE}"' \
     'Fedora release container trusts only its checked-out workspace'
+
+assert_file_contains "${script_dir}/README.md" \
+    '## Recommended installation' 'prominent English package installation'
+assert_file_contains "${script_dir}/README.fr.md" \
+    '## Installation recommandée' 'prominent French package installation'
+assert_file_contains "${script_dir}/README.md" \
+    'are installed automatically in the desktop application menu.' \
+    'English automatic package launcher installation'
+assert_file_contains "${script_dir}/README.md" \
+    "\`install-gui.sh\` after installing a package." \
+    'English package installer exclusion'
+assert_file_contains "${script_dir}/README.fr.md" \
+    'installés automatiquement dans le menu des applications.' \
+    'French automatic package launcher installation'
+assert_file_contains "${script_dir}/README.fr.md" \
+    "\`install-gui.sh\` après l’installation d’un paquet." \
+    'French package installer exclusion'
+assert_file_contains "${script_dir}/packaging/yt-dlp-aria2-downloader.desktop" \
+    'Icon=yt-dlp-aria2-downloader' 'dedicated desktop icon name'
+[[ -f ${script_dir}/packaging/icons/yt-dlp-aria2-downloader.svg ]] || \
+    fail 'Dedicated application icon is absent.'
+assert_file_contains "${script_dir}/packaging/install-tree.sh" \
+    'usr/share/icons/hicolor/scalable/apps' \
+    'Freedesktop hicolor icon installation'
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'packaging/deb/test-package-lifecycle.sh' \
+    'DEB installation and removal validation'
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'packaging/rpm/test-package-lifecycle.sh' \
+    'RPM installation and removal validation'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'packaging/deb/test-package-lifecycle.sh' \
+    'release DEB installation and removal validation'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'packaging/rpm/test-package-lifecycle.sh' \
+    'release RPM installation and removal validation'
+assert_file_not_contains "${script_dir}/packaging/deb/build-deb.sh" \
+    'install-gui.sh' 'DEB does not run the per-user launcher installer'
+assert_file_not_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+    'install-gui.sh' 'RPM does not run the per-user launcher installer'
 
 printf '%s\n' 'Static tests passed.'

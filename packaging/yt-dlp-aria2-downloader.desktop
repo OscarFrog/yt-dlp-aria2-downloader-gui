@@ -2,11 +2,15 @@
 Type=Application
 Version=1.0
 Name=yt-dlp aria2 downloader
+GenericName=Video and audio downloader
+GenericName[fr]=Téléchargeur vidéo et audio
 Comment=Download a video or extract an audio track
 Comment[fr]=Télécharger une vidéo ou extraire une piste audio
+Keywords=video;audio;download;yt-dlp;aria2;
+Keywords[fr]=vidéo;audio;téléchargement;yt-dlp;aria2;
 Exec=/usr/bin/yt-dlp-aria2-downloader-gui
 TryExec=/usr/bin/yt-dlp-aria2-downloader-gui
-Icon=video-x-generic
+Icon=yt-dlp-aria2-downloader
 Terminal=false
 Categories=AudioVideo;Network;
 StartupNotify=false

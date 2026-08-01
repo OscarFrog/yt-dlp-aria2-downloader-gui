@@ -28,7 +28,9 @@ bash -n tests/installer-integration.sh
 bash -n tests/packaging-integration.sh
 bash -n packaging/install-tree.sh
 bash -n packaging/deb/build-deb.sh
+bash -n packaging/deb/test-package-lifecycle.sh
 bash -n packaging/rpm/build-rpm.sh
+bash -n packaging/rpm/test-package-lifecycle.sh
 ```
 
 ## ShellCheck
@@ -51,7 +53,9 @@ shellcheck -x -o all \
   tests/packaging-integration.sh \
   packaging/install-tree.sh \
   packaging/deb/build-deb.sh \
-  packaging/rpm/build-rpm.sh
+  packaging/deb/test-package-lifecycle.sh \
+  packaging/rpm/build-rpm.sh \
+  packaging/rpm/test-package-lifecycle.sh
 ```
 
 ## Covered behavior
@@ -103,7 +107,10 @@ The automated suite checks, among other things:
   escaping, restrictive-path handling, validation, permissions, reinstall, and
   removal;
 - package install-tree layout, stable command symlinks, system desktop entry,
-  documentation permissions, and exclusion of tests and obsolete images.
+  dedicated hicolor icon, documentation permissions, and exclusion of tests
+  and obsolete images;
+- real privileged installation and removal of the generated DEB and RPM in
+  disposable GitHub Actions environments, including launcher and icon cleanup.
 
 ## GitHub Actions
 
@@ -113,14 +120,18 @@ for pushes to `main`, in two environments:
 - `ubuntu-24.04`;
 - a Fedora 44 container on a GitHub-hosted runner.
 
-`.github/workflows/packages.yml` builds and inspects a DEB on Ubuntu and a
-noarch RPM in a Fedora 44 container for every pull request and push to `main`.
+`.github/workflows/packages.yml` builds a DEB on Ubuntu and a noarch RPM in a
+Fedora 44 container for every pull request and push to `main`. Each generated
+package is installed with its native package manager, its commands, desktop
+entry, icon, and version are checked, then the package is removed and the
+absence of all application-owned files is verified.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the complete validation first, verifies tag ancestry and project versions,
-builds the ZIP, DEB, and RPM in separate read-only jobs, downloads the exact
-tested artifacts into one publication job, generates a shared SHA256SUMS file,
-and publishes all four assets. Only the final job receives `contents: write`.
+builds the ZIP, DEB, and RPM in separate read-only jobs, performs the same real
+package installation and removal checks, downloads the exact tested artifacts
+into one publication job, generates a shared SHA256SUMS file, and publishes all
+four assets. Only the final job receives `contents: write`.
 
 ## Real-world checks on Fedora 44
 

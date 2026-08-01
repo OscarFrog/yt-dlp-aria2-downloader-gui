@@ -88,5 +88,6 @@ packaged_version=$(
 [[ ${packaged_version} == "yt-dlp-aria2-downloader version ${VERSION}" ]]
 desktop-file-validate --no-hints \
     "${extracted}/usr/share/applications/yt-dlp-aria2-downloader.desktop"
+[[ -f ${extracted}/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg ]]
 
 printf 'RPM package created: %s\n' "${rpm_path}"

@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.1.19 - 2026-08-01
+
+### Package usability
+
+- Add a prominent RPM/DEB/ZIP installation chooser near the top of both README
+  files.
+- State explicitly that RPM and DEB installations create the graphical menu
+  launcher automatically and must not run the per-user `install-gui.sh` helper.
+- Add package removal commands and clarify migration from older ZIP or Git
+  installations.
+- Install a dedicated application icon in the Freedesktop hicolor theme and
+  reference it from the system desktop entry.
+- Add the hicolor icon-theme runtime dependency to RPM and DEB metadata.
+- Install and remove the generated DEB and RPM with their native package
+  managers in both package-validation and release workflows.
+- Verify commands, version output, desktop entry, icon, and complete application
+  file cleanup during package lifecycle tests.
+
 ## 2.1.18 - 2026-08-01
 
 ### Native packages and release automation

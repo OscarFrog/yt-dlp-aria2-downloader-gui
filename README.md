@@ -16,7 +16,23 @@ single URL using one of three profiles:
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
 streams deliberately remain on yt-dlp's native downloader. The current version
-is **2.1.18**.
+is **2.1.19**.
+
+## Recommended installation
+
+Open the [latest GitHub release](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest)
+and download the file matching your system:
+
+- **Fedora 44 or newer:** `2.1.19` RPM,
+  `yt-dlp-aria2-downloader-gui-2.1.19-1.fc44.noarch.rpm`;
+- **Debian or Ubuntu:** `2.1.19` DEB,
+  `yt-dlp-aria2-downloader-gui_2.1.19-1_all.deb`;
+- **other GNU/Linux distributions or portable use:** the versioned ZIP.
+
+For an RPM or DEB installation, the graphical launcher and its application icon
+are installed automatically in the desktop application menu. **Do not run
+`install-gui.sh` after installing a package.** That helper is only for ZIP and
+Git installations.
 
 ## Main features
 
@@ -63,9 +79,10 @@ starting a download.
 ## Package installation
 
 GitHub releases publish a Fedora RPM, a Debian package, the portable ZIP, and a
-single `SHA256SUMS` file. Package installations place the commands and desktop
-launcher system-wide; they do not depend on the directory where the downloaded
-package was stored.
+single `SHA256SUMS` file. Package installations place the commands, dedicated
+application icon, and desktop launcher system-wide; they do not depend on the
+directory where the downloaded package was stored. No separate
+`install-gui.sh` command is required for RPM or DEB installations.
 
 When upgrading from a ZIP or Git installation, remove the old per-user launcher
 first so it cannot override the packaged desktop entry:
@@ -87,7 +104,7 @@ sudo dnf install \
 Download these release assets:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.18-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.19-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -95,7 +112,7 @@ Verify the downloaded RPM and install it:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo dnf install ./yt-dlp-aria2-downloader-gui-2.1.18-1.fc44.noarch.rpm
+sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.19-1.fc44.noarch.rpm
 ```
 
 The RPM declares Fedora dependencies for Bash, yt-dlp, aria2, FFmpeg, Zenity,
@@ -107,7 +124,7 @@ engine checks that Deno 2.3.0 or newer is available before downloading.
 Download these release assets:
 
 ```text
-yt-dlp-aria2-downloader-gui_2.1.18-1_all.deb
+yt-dlp-aria2-downloader-gui_2.1.19-1_all.deb
 SHA256SUMS
 ```
 
@@ -115,7 +132,7 @@ Verify and install the package:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.18-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.19-1_all.deb
 ```
 
 The DEB installs the application and common system dependencies. Distribution
@@ -138,12 +155,30 @@ The terminal engine is installed as:
 yt-dlp-aria2-downloader --help
 ```
 
+### Removing a package installation
+
+Fedora:
+
+```bash
+sudo dnf remove yt-dlp-aria2-downloader-gui
+```
+
+Debian or Ubuntu:
+
+```bash
+sudo apt remove yt-dlp-aria2-downloader-gui
+```
+
+The package manager removes the system commands, desktop launcher, and
+application icon. `install-gui.sh uninstall` is only needed to clean up an
+older ZIP or Git installation created in the current user's home directory.
+
 ## Installation from a portable release archive
 
 Download these release assets:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.18.zip
+yt-dlp-aria2-downloader-gui-2.1.19.zip
 SHA256SUMS
 ```
 
@@ -151,8 +186,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.18.zip
-cd yt-dlp-aria2-downloader-gui-2.1.18
+unzip yt-dlp-aria2-downloader-gui-2.1.19.zip
+cd yt-dlp-aria2-downloader-gui-2.1.19
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install

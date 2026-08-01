@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="256" height="256" viewBox="0 0 256 256">
+  <title>yt-dlp aria2 downloader</title>
+  <rect x="16" y="16" width="224" height="224" rx="48"
+        fill="#2864dc"/>
+  <path d="M83 68v92l78-46z" fill="#ffffff"/>
+  <path d="M128 136v48m-24-24 24 24 24-24"
+        fill="none" stroke="#ffffff" stroke-width="16"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M88 204h80" fill="none" stroke="#ffffff"
+        stroke-width="14" stroke-linecap="round"/>
+</svg>
