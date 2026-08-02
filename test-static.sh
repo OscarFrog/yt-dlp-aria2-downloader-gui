@@ -429,4 +429,7 @@ assert_status 2 'URL user information is rejected' \
     'https://user:password@example.com/video'
 assert_text_contains "${ASSERT_OUTPUT}" 'user information' \
     'URL user-information rejection reason'
+assert_file_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+    '%dir %{_licensedir}/%{name}' \
+    'RPM owns its private license directory'
 printf '%s\n' 'Static tests passed.'

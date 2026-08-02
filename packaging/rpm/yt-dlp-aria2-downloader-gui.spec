@@ -49,6 +49,7 @@ test "$("%{buildroot}%{_bindir}/yt-dlp-aria2-downloader" --version)" = "yt-dlp-a
 %doc %{_docdir}/%{name}/README.md
 %doc %{_docdir}/%{name}/README.fr.md
 %doc %{_docdir}/%{name}/CHANGELOG.md
+%dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
 * Sun Aug 02 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - %{version}-1
