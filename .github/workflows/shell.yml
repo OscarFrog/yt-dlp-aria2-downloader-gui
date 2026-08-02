@@ -1,95 +1,45 @@
 name: Shell validation
-
 on:
   push:
     branches:
       - main
   pull_request:
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
   group: shell-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   validate-ubuntu:
     name: Ubuntu
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
       - name: Install validation tools
         run: |
           sudo apt-get -o Acquire::Retries=3 update
           sudo apt-get -o Acquire::Retries=3 install --yes desktop-file-utils procps shellcheck
-
       - name: Run validation
-        run: |
-          set +e
-          timeout --signal=TERM --kill-after=10s 4m bash ./tests/run-all.sh
-          validation_status=$?
-          set -e
-
-          if ((validation_status != 0)); then
-            printf 'Ubuntu validation failed with status %d.\n' \
-              "${validation_status}" >&2
-            printf '%s\n' \
-              '=== Process tree at validation failure ===' >&2
-            ps -eo pid,ppid,pgid,sid,stat,etime,args --forest >&2 || true
-          fi
-
-          exit "${validation_status}"
-
+        run: timeout --signal=TERM --kill-after=10s 4m bash ./tests/run-all.sh
   validate-fedora:
     name: Fedora 44
     runs-on: ubuntu-24.04
-    container:
-      image: registry.fedoraproject.org/fedora:44
+    container: registry.fedoraproject.org/fedora:44
+    timeout-minutes: 10
     defaults:
       run:
         shell: bash
-    timeout-minutes: 10
     steps:
       - name: Install validation tools
         run: |
-          dnf install --assumeyes --no-docs \
-            --setopt=install_weak_deps=False \
-            bash \
-            coreutils \
-            desktop-file-utils \
-            diffutils \
-            findutils \
-            git \
-            grep \
-            procps-ng \
-            ShellCheck \
-            util-linux
-
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+          dnf install --assumeyes --no-docs --setopt=install_weak_deps=False \
+            bash coreutils desktop-file-utils diffutils findutils git grep procps-ng sed ShellCheck util-linux
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
       - name: Run validation
-        run: |
-          set +e
-          timeout --signal=TERM --kill-after=10s 4m bash ./tests/run-all.sh
-          validation_status=$?
-          set -e
-
-          if ((validation_status != 0)); then
-            printf 'Fedora validation failed with status %d.\n' \
-              "${validation_status}" >&2
-            printf '%s\n' \
-              '=== Process tree at validation failure ===' >&2
-            ps -eo pid,ppid,pgid,sid,stat,etime,args --forest >&2 || true
-          fi
-
-          exit "${validation_status}"
+        run: timeout --signal=TERM --kill-after=10s 4m bash ./tests/run-all.sh

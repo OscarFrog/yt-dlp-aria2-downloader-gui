@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : progress-monitor.sh
-# Version     : 2.1.19
-# Date        : 2026-08-01
+# Version     : 2.1.20
+# Date        : 2026-08-02
 # Description : Convert downloader events into a unified Zenity progress stream.
 # ============================================================================
 
@@ -24,6 +24,7 @@ readonly POSTPROCESS_START=92
 readonly POSTPROCESS_END=98
 readonly VERIFY_PERCENT=99
 readonly MAX_PENDING_CHARS=1048576
+readonly MAX_SAFE_COUNTER=9000000000000000
 
 usage() {
     printf 'Usage: %s LOG_FILE WORKER_PID RESULT_FILE PROFILE OUTPUT_DIR\n' "${0##*/}" >&2
@@ -97,23 +98,35 @@ is_unknown_field() {
 
 sanitize_integer() {
     local value=${1:-0}
-    if [[ ${value} =~ ^[0-9]+$ ]]; then
+    if [[ ${value} =~ ^[0-9]{1,16}$ ]] &&
+        ((10#${value} <= MAX_SAFE_COUNTER)); then
         printf '%d' "$((10#${value}))"
     else
         printf '0'
     fi
 }
 
+saturating_add() {
+    local left=$1
+    local right=$2
+    if ((right > MAX_SAFE_COUNTER - left)); then
+        printf '%d' "${MAX_SAFE_COUNTER}"
+    else
+        printf '%d' "$((left + right))"
+    fi
+}
+
 sanitize_percent() {
     local value
+    local integer_part
+
     value=$(trim_field "${1:-}")
     value=${value%%%}
     value=$(trim_field "${value}")
-    if [[ ${value} =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-        value=$((10#${value%%.*}))
-        if ((value < 0)); then
-            value=0
-        elif ((value > 100)); then
+    if [[ ${value} =~ ^([0-9]{1,3})([.][0-9]{1,6})?$ ]]; then
+        integer_part=${BASH_REMATCH[1]}
+        value=$((10#${integer_part}))
+        if ((value > 100)); then
             value=100
         fi
         printf '%d' "${value}"
@@ -176,6 +189,8 @@ display_percent=0
 message='Analyzing the webpage...'
 phase='analyzing'
 postprocessor=''
+ffmpeg_duration_us=0
+ffmpeg_out_time_us=0
 last_line=''
 RESOLVED_KEY=''
 SANITIZED_IDENTIFIER=''
@@ -200,7 +215,8 @@ sanitize_identifier() {
     local value=${1:-}
 
     SANITIZED_IDENTIFIER=''
-    if [[ ${value} =~ ^[A-Za-z0-9_.:+-]+$ ]]; then
+    if ((${#value} <= 128)) &&
+        [[ ${value} =~ ^[A-Za-z0-9_.:+-]+$ ]]; then
         SANITIZED_IDENTIFIER=${value}
     fi
 }
@@ -359,30 +375,36 @@ calculate_download_percent() {
     if ((${#PLANNED_KEYS[@]} > 0)); then
         for key in "${PLANNED_KEYS[@]}"; do
             value=${ITEM_PERCENT[${key}]:-0}
-            sum_percent=$((sum_percent + value))
+            sum_percent=$(saturating_add "${sum_percent}" "${value}")
             value=${ITEM_TOTAL[${key}]:-0}
             if ((value <= 0)); then
                 all_totals_known=false
             else
-                sum_total=$((sum_total + value))
-                sum_downloaded=$((sum_downloaded + ${ITEM_DOWNLOADED[${key}]:-0}))
+                sum_total=$(saturating_add "${sum_total}" "${value}")
+                sum_downloaded=$(saturating_add "${sum_downloaded}" "${ITEM_DOWNLOADED[${key}]:-0}")
             fi
         done
     else
         for key in "${!ITEM_PERCENT[@]}"; do
-            sum_percent=$((sum_percent + ITEM_PERCENT[${key}]))
+            sum_percent=$(saturating_add "${sum_percent}" "${ITEM_PERCENT[${key}]}")
             value=${ITEM_TOTAL[${key}]:-0}
             if ((value <= 0)); then
                 all_totals_known=false
             else
-                sum_total=$((sum_total + value))
-                sum_downloaded=$((sum_downloaded + ${ITEM_DOWNLOADED[${key}]:-0}))
+                sum_total=$(saturating_add "${sum_total}" "${value}")
+                sum_downloaded=$(saturating_add "${sum_downloaded}" "${ITEM_DOWNLOADED[${key}]:-0}")
             fi
         done
     fi
 
     if [[ ${all_totals_known} == true ]] && ((sum_total > 0)); then
-        value=$((sum_downloaded * 100 / sum_total))
+        if ((sum_downloaded >= sum_total)); then
+            value=100
+        elif ((sum_total <= MAX_SAFE_COUNTER / 100)); then
+            value=$((sum_downloaded * 100 / sum_total))
+        else
+            value=$((sum_downloaded / (sum_total / 100 + 1)))
+        fi
     else
         value=$((sum_percent / item_count))
     fi
@@ -616,6 +638,45 @@ handle_aria_progress() {
     message=$(format_download_message "${key}" aria2 "${percent}" "${speed}" "${eta}")
 }
 
+handle_ffmpeg_duration() {
+    local _prefix=$1
+    local duration_text=${2:-0}
+
+    ffmpeg_duration_us=$(sanitize_integer "${duration_text}")
+    ffmpeg_out_time_us=0
+    phase='postprocessing'
+    postprocessor='FFmpegVideoRemuxer'
+    if ((stable_percent < POSTPROCESS_START)); then
+        stable_percent=${POSTPROCESS_START}
+    fi
+    message='Remuxing the media into an MKV container...'
+}
+
+handle_ffmpeg_progress() {
+    local value_text=$1
+    local value
+    local candidate
+
+    [[ ${phase} == postprocessing ]] || return 0
+    ((ffmpeg_duration_us > 0)) || return 0
+    value=$(sanitize_integer "${value_text}")
+    ((value > ffmpeg_out_time_us)) || return 0
+    ffmpeg_out_time_us=${value}
+    if ((value >= ffmpeg_duration_us)); then
+        candidate=${POSTPROCESS_END}
+    elif ((ffmpeg_duration_us <= MAX_SAFE_COUNTER / 100)); then
+        candidate=$((POSTPROCESS_START + value * (POSTPROCESS_END - POSTPROCESS_START) / ffmpeg_duration_us))
+    else
+        candidate=$((POSTPROCESS_START + value / (ffmpeg_duration_us / (POSTPROCESS_END - POSTPROCESS_START) + 1)))
+    fi
+    if ((candidate > POSTPROCESS_END)); then
+        candidate=${POSTPROCESS_END}
+    fi
+    if ((candidate > stable_percent)); then
+        stable_percent=${candidate}
+    fi
+}
+
 handle_postprocess() {
     local _prefix=$1
     local _status=$2
@@ -662,6 +723,14 @@ process_line() {
         while ((${#fields[@]} < 3)); do fields+=(''); done
         handle_postprocess "${fields[@]:0:3}"
         ;;
+    FFMPEG_PROGRESS_DURATION\|*)
+        IFS='|' read -r -a fields <<<"${line}"
+        ((${#fields[@]} == 2)) || return 0
+        handle_ffmpeg_duration "${fields[@]:0:2}"
+        ;;
+    out_time_us=*)
+        handle_ffmpeg_progress "${line#out_time_us=}"
+        ;;
     \[#*)
         handle_aria_progress "${line}"
         ;;
@@ -704,8 +773,12 @@ render_tick() {
         fi
         ;;
     postprocessing)
-        rendered=$(bounded_advance \
-            "${POSTPROCESS_START}" "${POSTPROCESS_END}" "${display_percent}")
+        if ((ffmpeg_duration_us > 0)); then
+            rendered=${stable_percent}
+        else
+            rendered=$(bounded_advance \
+                "${POSTPROCESS_START}" "${POSTPROCESS_END}" "${display_percent}")
+        fi
         ;;
     verifying)
         rendered=${VERIFY_PERCENT}

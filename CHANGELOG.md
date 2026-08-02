@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.1.20 - 2026-08-02
+
+### Security, correctness, and stable-release qualification
+
+- Keep GUI-entered URLs out of GUI, engine, and yt-dlp command-line arguments by using private URL and batch files.
+- Reject URLs containing embedded user information and redact URL-like values from retained failure logs.
+- Bound retained logs to the last 8 MiB and reject symbolic-link state/config directories.
+- Require both a video and an audio stream before publishing a complete-video result.
+- Make Deno conditional for generic extraction while retaining the required minimum for YouTube extraction.
+- Restrict remote EJS activation to YouTube and provide a strict opt-out environment variable.
+- Add explicit network retry and socket-timeout policy.
+- Add `-nostdin` and measured FFmpeg remux progress through `-progress`.
+- Harden progress arithmetic against oversized and overflowing counters.
+- Remove stale application-owned temporary files after acquiring the exclusive destination lock.
+- Declare yt-dlp and all mandatory runtime commands as package dependencies.
+- Verify every package-owned file is removed during DEB and RPM lifecycle tests.
+- Install the dedicated application icon for ZIP and Git per-user installations.
+- Add hermetic real-tool integration tests with locally generated media and a local HTTP server.
+- Add GitHub artifact provenance attestations to the release workflow.
+
 ## 2.1.19 - 2026-08-01
 
 ### Package usability

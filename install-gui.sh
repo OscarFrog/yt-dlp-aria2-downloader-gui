@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : install-gui.sh
-# Version     : 2.1.19
-# Date        : 2026-08-01
-# Description : Install or remove the per-user desktop launcher.
+# Version     : 2.1.20
+# Date        : 2026-08-02
+# Description : Install or remove the per-user desktop launcher and icon.
 # ============================================================================
 
 set -euo pipefail
@@ -22,6 +22,7 @@ readonly SCRIPT_NAME="${0##*/}"
 TEMP_DESKTOP_FILE=''
 TEMP_LAUNCHER_DIR=''
 TEMP_VALIDATION_FILE=''
+TEMP_ICON_FILE=''
 
 cleanup() {
     if [[ -n ${TEMP_DESKTOP_FILE} ]]; then
@@ -32,6 +33,9 @@ cleanup() {
     fi
     if [[ -n ${TEMP_VALIDATION_FILE} ]]; then
         rm -f -- "${TEMP_VALIDATION_FILE}" || true
+    fi
+    if [[ -n ${TEMP_ICON_FILE} ]]; then
+        rm -f -- "${TEMP_ICON_FILE}" || true
     fi
 }
 
@@ -79,6 +83,25 @@ quote_desktop_exec_path() {
     printf '"%s"' "${value}"
 }
 
+write_embedded_icon() {
+    local destination=$1
+
+    cat >"${destination}" <<'EOF_ICON'
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="256" height="256" viewBox="0 0 256 256">
+  <title>yt-dlp aria2 downloader</title>
+  <rect x="16" y="16" width="224" height="224" rx="48"
+        fill="#2864dc"/>
+  <path d="M83 68v92l78-46z" fill="#ffffff"/>
+  <path d="M128 136v48m-24-24 24 24 24-24"
+        fill="none" stroke="#ffffff" stroke-width="16"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M88 204h80" fill="none" stroke="#ffffff"
+        stroke-width="14" stroke-linecap="round"/>
+</svg>
+EOF_ICON
+}
 
 for command_name in cat chmod dirname ln mkdir mktemp mv readlink realpath rm rmdir; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
@@ -93,8 +116,6 @@ if (($# != 1)); then
     exit 2
 fi
 
-# Capture the status explicitly. Calling the function in an if or || list
-# would disable errexit inside its body under Bash's documented rules.
 set +e
 resolve_script_dir SCRIPT_DIR
 resolve_status=$?
@@ -105,6 +126,7 @@ if ((resolve_status != 0)); then
 fi
 readonly SCRIPT_DIR
 readonly GUI_SCRIPT="${SCRIPT_DIR}/download-video-gui.sh"
+readonly ICON_SOURCE="${SCRIPT_DIR}/packaging/icons/${APP_ID}.svg"
 
 data_home=${XDG_DATA_HOME:-${HOME}/.local/share}
 if [[ ${data_home} != /* ]]; then
@@ -117,7 +139,8 @@ readonly APPLICATION_DIR="${DATA_HOME}/applications"
 readonly LAUNCHER_DIR="${DATA_HOME}/${APP_ID}"
 readonly LAUNCHER_LINK="${LAUNCHER_DIR}/launch"
 readonly DESKTOP_FILE="${APPLICATION_DIR}/${APP_ID}.desktop"
-
+readonly ICON_DIR="${DATA_HOME}/icons/hicolor/scalable/apps"
+readonly ICON_FILE="${ICON_DIR}/${APP_ID}.svg"
 
 remove_stale_install_artifacts() {
     local -a artifacts=()
@@ -127,12 +150,24 @@ remove_stale_install_artifacts() {
         "${APPLICATION_DIR}/.${APP_ID}."*.tmp
         "${LAUNCHER_DIR}/.install."*
         "${LAUNCHER_DIR}/.validate."*.desktop
+        "${ICON_DIR}/.${APP_ID}."*.tmp
     )
     shopt -u nullglob
 
     if ((${#artifacts[@]} > 0)); then
         rm -rf -- "${artifacts[@]}"
     fi
+}
+
+reject_symlink_directory() {
+    local directory=$1
+
+    if [[ -L ${directory} ]]; then
+        printf 'Error: refusing a symbolic-link installation directory: %s\n' \
+            "${directory}" >&2
+        return 1
+    fi
+    return 0
 }
 
 case $1 in
@@ -142,10 +177,6 @@ install)
         exit 1
     fi
 
-    # A literal percent in a quoted Exec path is handled inconsistently by
-    # desktop implementations, and '=' is forbidden in the executable path.
-    # The project itself may contain these characters because Exec targets the
-    # stable launcher link below; only the XDG launcher path must be representable.
     if [[ ${LAUNCHER_LINK} == *'%'* || ${LAUNCHER_LINK} == *'='* ||
         ${LAUNCHER_LINK} == *$'\n'* || ${LAUNCHER_LINK} == *$'\r'* ]]; then
         printf 'Error: the XDG data path cannot be represented safely in a desktop Exec key: %s\n' \
@@ -159,8 +190,12 @@ install)
         exit 1
     fi
 
-    mkdir -p -- "${APPLICATION_DIR}" "${LAUNCHER_DIR}"
+    reject_symlink_directory "${APPLICATION_DIR}"
+    reject_symlink_directory "${LAUNCHER_DIR}"
+    reject_symlink_directory "${ICON_DIR}"
+    mkdir -p -- "${APPLICATION_DIR}" "${LAUNCHER_DIR}" "${ICON_DIR}"
     chmod 700 -- "${LAUNCHER_DIR}"
+    remove_stale_install_artifacts
 
     desktop_exec=$(quote_desktop_exec_path "${LAUNCHER_LINK}")
     TEMP_DESKTOP_FILE=$(mktemp \
@@ -174,7 +209,7 @@ Name=yt-dlp aria2 downloader
 Comment=Download a video or extract an audio track
 Comment[fr]=Télécharger une vidéo ou extraire une piste audio
 Exec=${desktop_exec}
-Icon=video-x-generic
+Icon=${APP_ID}
 Terminal=false
 Categories=AudioVideo;
 StartupNotify=true
@@ -182,10 +217,6 @@ EOF_DESKTOP
     chmod 644 -- "${TEMP_DESKTOP_FILE}"
 
     if command -v desktop-file-validate >/dev/null 2>&1; then
-        # desktop-file-validate requires a filename ending in .desktop.
-        # Keep that temporary copy in the private launcher directory rather
-        # than in applications/, so menu scanners never see an incomplete
-        # desktop entry before the final atomic publication.
         TEMP_VALIDATION_FILE=$(mktemp \
             --tmpdir="${LAUNCHER_DIR}" \
             '.validate.XXXXXXXX.desktop')
@@ -215,6 +246,18 @@ EOF_DESKTOP
         --tmpdir="${LAUNCHER_DIR}" \
         '.install.XXXXXXXX')
     ln -s -- "${GUI_SCRIPT}" "${TEMP_LAUNCHER_DIR}/launch"
+
+    TEMP_ICON_FILE=$(mktemp \
+        --tmpdir="${ICON_DIR}" \
+        ".${APP_ID}.XXXXXXXX.tmp")
+    if [[ -f ${ICON_SOURCE} && ! -L ${ICON_SOURCE} ]]; then
+        cat -- "${ICON_SOURCE}" >"${TEMP_ICON_FILE}"
+    else
+        # Keep source-tree installer tests and minimal portable copies usable.
+        write_embedded_icon "${TEMP_ICON_FILE}"
+    fi
+    chmod 644 -- "${TEMP_ICON_FILE}"
+
     mv -Tf -- "${TEMP_LAUNCHER_DIR}/launch" "${LAUNCHER_LINK}"
     rmdir -- "${TEMP_LAUNCHER_DIR}"
     TEMP_LAUNCHER_DIR=''
@@ -234,10 +277,13 @@ EOF_DESKTOP
         exit 1
     fi
 
+    mv -Tf -- "${TEMP_ICON_FILE}" "${ICON_FILE}"
+    TEMP_ICON_FILE=''
     mv -Tf -- "${TEMP_DESKTOP_FILE}" "${DESKTOP_FILE}"
     TEMP_DESKTOP_FILE=''
     printf 'Launcher installed: %s\n' "${DESKTOP_FILE}"
     printf 'Launcher target:    %s\n' "${GUI_SCRIPT}"
+    printf 'Application icon:   %s\n' "${ICON_FILE}"
     printf 'Reinstall the launcher if the project directory is moved.\n'
     ;;
 uninstall)
@@ -249,6 +295,10 @@ uninstall)
     fi
     if [[ -e ${LAUNCHER_LINK} || -L ${LAUNCHER_LINK} ]]; then
         rm -f -- "${LAUNCHER_LINK}"
+        launcher_removed=true
+    fi
+    if [[ -e ${ICON_FILE} || -L ${ICON_FILE} ]]; then
+        rm -f -- "${ICON_FILE}"
         launcher_removed=true
     fi
     remove_stale_install_artifacts

@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video-gui.sh
-# Version     : 2.1.19
-# Date        : 2026-08-01
+# Version     : 2.1.20
+# Date        : 2026-08-02
 # Description : Zenity GUI for MKV video, authenticated YouTube HLS, or audio.
 # ============================================================================
 
@@ -39,6 +39,7 @@ readonly STATE_DIR="${state_home}/yt-dlp-aria2-downloader"
 readonly CONFIG_FILE="${CONFIG_DIR}/gui.conf"
 unset config_home state_home
 readonly LOG_RETENTION_DAYS=15
+readonly LOG_MAX_BYTES=8388608
 readonly PGID_WAIT_ATTEMPTS=50
 readonly WORKER_TERM_ATTEMPTS=30
 readonly WORKER_KILL_ATTEMPTS=20
@@ -51,6 +52,9 @@ ZENITY_STATUS=0
 ZENITY_ERROR=''
 RUNTIME_TMPDIR=''
 WAITED_WORKER_STATUS=''
+LOG_FILE=''
+LOG_RETAINED=false
+LOG_TIMESTAMP=''
 
 resolve_runtime_tmpdir() {
     local output_variable=$1
@@ -335,6 +339,37 @@ stop_worker() {
     wait_for_worker_exit "${WORKER_KILL_ATTEMPTS}"
 }
 
+retain_sanitized_log() {
+    local retained_file=''
+
+    [[ ${LOG_RETAINED} == false ]] || return 0
+    [[ -n ${LOG_FILE} && -f ${LOG_FILE} && ! -L ${LOG_FILE} ]] || return 0
+    [[ -d ${STATE_DIR} && ! -L ${STATE_DIR} ]] || return 0
+
+    retained_file=$(mktemp \
+        --tmpdir="${STATE_DIR}" \
+        --suffix='.log' \
+        "download-${LOG_TIMESTAMP:-unknown}-XXXXXX") || {
+        printf 'Warning: unable to create a sanitized diagnostic log.\n' >&2
+        return 0
+    }
+    if ! tail -c "${LOG_MAX_BYTES}" -- "${LOG_FILE}" 2>/dev/null |
+        sed -E 's#https?://[^[:space:]]+#[REDACTED_URL]#g' >"${retained_file}"; then
+        rm -f -- "${retained_file}" || true
+        printf 'Warning: unable to sanitize the diagnostic log.\n' >&2
+        return 0
+    fi
+    if ! chmod 600 -- "${retained_file}"; then
+        rm -f -- "${retained_file}" || true
+        printf 'Warning: unable to secure the sanitized diagnostic log.\n' >&2
+        return 0
+    fi
+    rm -f -- "${LOG_FILE}" || true
+    LOG_FILE=${retained_file}
+    LOG_RETAINED=true
+    return 0
+}
+
 cleanup() {
     local status=$?
 
@@ -358,6 +393,8 @@ cleanup() {
             WORKER_PGID=''
         fi
     fi
+
+    retain_sanitized_log
 
     if [[ -n ${TEMP_DIR} && -d ${TEMP_DIR} ]]; then
         rm -rf -- "${TEMP_DIR}" || true
@@ -414,7 +451,11 @@ save_settings() {
     local profile=$2
     local temporary_file
 
+    if [[ -L ${CONFIG_DIR} ]]; then
+        return 1
+    fi
     mkdir -p -- "${CONFIG_DIR}" || return 1
+    [[ ! -L ${CONFIG_DIR} ]] || return 1
     chmod 700 -- "${CONFIG_DIR}" 2>/dev/null || true
 
     temporary_file=$(mktemp --tmpdir="${CONFIG_DIR}" gui.conf.XXXXXX) || return 1
@@ -504,6 +545,7 @@ default_output_dir() {
 select_url() {
     local output_variable=$1
     local entered_url
+    local entered_authority=''
     local capture_status
 
     run_zenity_capture entered_url --entry \
@@ -527,6 +569,14 @@ select_url() {
 
     if [[ ! ${entered_url} =~ ^https?://[^[:space:]]+$ ]]; then
         show_error "The URL must start with http:// or https://."
+        return 2
+    fi
+    entered_authority=${entered_url#*://}
+    entered_authority=${entered_authority%%/*}
+    entered_authority=${entered_authority%%\?*}
+    entered_authority=${entered_authority%%\#*}
+    if [[ ${entered_authority} == *@* ]]; then
+        show_error 'URLs containing user information are not accepted.'
         return 2
     fi
 
@@ -690,7 +740,7 @@ wait_for_worker_pgid() {
     return 1
 }
 
-for command_name in bash chmod date dirname grep mkdir mktemp mv realpath rm setsid sleep stat zenity; do
+for command_name in bash chmod date dirname grep mkdir mktemp mv realpath rm sed setsid sleep stat tail zenity; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         printf 'Error: required command "%s" was not found.\n' \
             "${command_name}" >&2
@@ -849,6 +899,12 @@ if ((settings_status != 0)); then
     printf 'Warning: GUI settings could not be saved.\n' >&2
 fi
 
+if [[ -L ${STATE_DIR} ]]; then
+    show_error "The application state path must not be a symbolic link.
+
+Path: ${STATE_DIR}"
+    exit 1
+fi
 if ! mkdir -p -- "${STATE_DIR}"; then
     show_error "Unable to create the application state directory.
 
@@ -861,28 +917,30 @@ if ! TEMP_DIR=$(mktemp -d --tmpdir="${RUNTIME_TMPDIR}" yt-dlp-gui.XXXXXXXX); the
     show_error 'Unable to create the temporary working directory.'
     exit 1
 fi
-if ! log_timestamp=$(date '+%Y%m%d-%H%M%S'); then
+if ! LOG_TIMESTAMP=$(date '+%Y%m%d-%H%M%S'); then
     show_error 'Unable to determine the timestamp for the diagnostic log.'
     exit 1
 fi
 if ! LOG_FILE=$(mktemp \
-    --tmpdir="${STATE_DIR}" \
-    --suffix='.log' \
-    "download-${log_timestamp}-XXXXXX"); then
-    show_error "Unable to create the diagnostic log.
-
-Directory: ${STATE_DIR}"
+    --tmpdir="${TEMP_DIR}" \
+    'live-download-log.XXXXXXXX'); then
+    show_error 'Unable to create the private live diagnostic log.'
     exit 1
 fi
-readonly LOG_FILE
 readonly RESULT_FILE="${TEMP_DIR}/result.txt"
 readonly PGID_FILE="${TEMP_DIR}/pgid"
 if ! chmod 600 -- "${LOG_FILE}"; then
-    show_error "Unable to secure the diagnostic log.
-
-Log: ${LOG_FILE}"
+    show_error "Unable to secure the private live diagnostic log."
     exit 1
 fi
+
+readonly URL_FILE="${TEMP_DIR}/url.txt"
+if ! printf '%s\n' "${URL}" >"${URL_FILE}" ||
+    ! chmod 600 -- "${URL_FILE}"; then
+    show_error 'Unable to create the private URL transfer file.'
+    exit 1
+fi
+URL=''
 
 PROGRESS_PROFILE=''
 COMMAND=(
@@ -890,7 +948,7 @@ COMMAND=(
     --output-dir "${OUTPUT_DIR}"
     --machine-progress
     --result-file "${RESULT_FILE}"
-    --supervised-session
+    --url-file "${URL_FILE}"
 )
 
 case ${PROFILE} in
@@ -912,10 +970,8 @@ audio)
     ;;
 esac
 
-COMMAND+=(-- "${URL}")
-
 # shellcheck disable=SC2016  # Variables are expanded by the intentionally nested shell.
-LC_ALL=C setsid --fork --wait bash -c '
+YTDLP_ARIA2_SUPERVISED_SESSION=true LC_ALL=C setsid --fork --wait bash -c '
     pgid_file=$1
     shift
     pgid_temporary="${pgid_file}.tmp"
@@ -936,6 +992,7 @@ if ((pgid_status != 0)); then
         WORKER_PID=''
         WORKER_PGID=''
     fi
+    retain_sanitized_log
     show_error "The download could not start."$'\n\n'"Log: ${LOG_FILE}"
     exit 1
 fi
@@ -965,6 +1022,7 @@ if ((monitor_status != 0)); then
         WORKER_PID=''
         WORKER_PGID=''
     fi
+    retain_sanitized_log
     show_error "The progress monitor failed with status ${monitor_status}."$'\n\n'"Log: ${LOG_FILE}"
     exit 1
 fi
@@ -1010,6 +1068,7 @@ if [[ -z ${worker_status} ]]; then
             WORKER_PID=''
             WORKER_PGID=''
         fi
+        retain_sanitized_log
         show_error "The worker did not terminate cleanly."$'\n\n'"Log: ${LOG_FILE}"
         exit 1
     fi
@@ -1040,6 +1099,7 @@ if ((worker_status == 0)); then
     fi
 
     if [[ ${result_is_valid} != true ]]; then
+        retain_sanitized_log
         show_error "The downloader completed, but the final media file could not be confirmed inside the selected destination folder."$'\n\n'"Log: ${LOG_FILE}"
         exit 1
     fi
@@ -1048,7 +1108,10 @@ if ((worker_status == 0)); then
     success_text+=$'\n\nFile: '
     success_text+="${final_path}"
     log_notice=''
-    if ! rm -f -- "${LOG_FILE}"; then
+    if rm -f -- "${LOG_FILE}"; then
+        LOG_FILE=''
+    else
+        retain_sanitized_log
         log_notice=$'\n\nWarning: the successful-download log could not be deleted.\nLog: '
         log_notice+="${LOG_FILE}"
     fi
@@ -1101,6 +1164,7 @@ ${ZENITY_ERROR}"
         ;;
     esac
 else
+    retain_sanitized_log
     if zenity --question \
         --title="Download failed" \
         --text="The download failed with status ${worker_status}.
@@ -1111,7 +1175,7 @@ View the log?" \
         --cancel-label='Close' \
         --width=540; then
         zenity --text-info \
-            --title="Log - ${APP_NAME} - may contain private URLs" \
+            --title="Sanitized diagnostic log - ${APP_NAME}" \
             --filename="${LOG_FILE}" \
             --width=950 \
             --height=650 || true

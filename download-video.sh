@@ -3,15 +3,15 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.19
-# Date        : 2026-08-01
+# Version     : 2.1.20
+# Date        : 2026-08-02
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
 
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.1.19"
+readonly VERSION="2.1.20"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -22,9 +22,11 @@ export YTDLP_NO_PLUGINS
 VERSION_AT_LEAST=false
 VERSION_PARSE_VALID=false
 ARIA2_SUPPORTS_NO_NETRC=false
+JS_RUNTIME_AVAILABLE=false
 RESULT_FILE_TMP=''
 INTERNAL_PATH_FILE_TMP=''
 HLS_REMUX_TMP=''
+YTDLP_BATCH_FILE_TMP=''
 OUTPUT_LOCK_FD=''
 OUTPUT_LOCK_FILE=''
 OUTPUT_LOCK_ROOT=''
@@ -34,7 +36,11 @@ DOWNLOAD_PGID_FILE=''
 DOWNLOAD_STATUS=125
 REQUESTED_EXIT_STATUS=''
 SHUTDOWN_REQUESTED=false
-REUSE_CURRENT_SESSION=false
+REUSE_CURRENT_SESSION=${YTDLP_ARIA2_SUPERVISED_SESSION:-false}
+case ${REUSE_CURRENT_SESSION} in
+true | false) ;;
+*) REUSE_CURRENT_SESSION=false ;;
+esac
 
 cleanup() {
     local status=$?
@@ -59,6 +65,9 @@ cleanup() {
     fi
     if [[ -n ${HLS_REMUX_TMP} ]]; then
         rm -f -- "${HLS_REMUX_TMP}" || true
+    fi
+    if [[ -n ${YTDLP_BATCH_FILE_TMP} ]]; then
+        rm -f -- "${YTDLP_BATCH_FILE_TMP}" || true
     fi
     if [[ -n ${OUTPUT_LOCK_FD} ]]; then
         flock --unlock "${OUTPUT_LOCK_FD}" 2>/dev/null || true
@@ -110,6 +119,8 @@ Options:
       --youtube-hls-firefox  For YouTube video mode, use Firefox cookies and
                              web_safari HLS formats before remuxing to MKV.
       --result-file FILE     Write the final media path to FILE.
+      --url-file FILE        Read the single URL from a private regular file.
+                             This avoids exposing it in the GUI process list.
   -h, --help                 Display this help.
   -V, --version              Display the version.
 
@@ -186,10 +197,10 @@ compare_versions() {
 
 check_runtime_compatibility() {
     local yt_dlp_version
-    local deno_name
-    local deno_version
-    local deno_output
-    local _
+    local deno_name=''
+    local deno_version=''
+    local deno_output=''
+    local _=''
     local yt_dlp_help
     local aria2_version_line
     local aria2_version
@@ -212,22 +223,20 @@ check_runtime_compatibility() {
         return 1
     fi
 
-    if ! deno_output=$(LC_ALL=C deno --version 2>/dev/null); then
-        error 'unable to determine the Deno version.'
-        return 1
+    JS_RUNTIME_AVAILABLE=false
+    if command -v deno >/dev/null 2>&1; then
+        if deno_output=$(LC_ALL=C deno --version 2>/dev/null); then
+            IFS=' ' read -r deno_name deno_version _ <<<"${deno_output%%$'\n'*}"
+            if [[ ${deno_name} == deno && -n ${deno_version} ]]; then
+                compare_versions "${deno_version}" "${MIN_DENO_VERSION}"
+                if [[ ${VERSION_PARSE_VALID} == true && ${VERSION_AT_LEAST} == true ]]; then
+                    JS_RUNTIME_AVAILABLE=true
+                fi
+            fi
+        fi
     fi
-    IFS=' ' read -r deno_name deno_version _ <<<"${deno_output%%$'\n'*}"
-    if [[ ${deno_name} != deno || -z ${deno_version} ]]; then
-        error "unable to parse the Deno version: ${deno_output%%$'\n'*}."
-        return 1
-    fi
-    compare_versions "${deno_version}" "${MIN_DENO_VERSION}"
-    if [[ ${VERSION_PARSE_VALID} != true ]]; then
-        error "unable to parse the Deno version: ${deno_version}."
-        return 1
-    fi
-    if [[ ${VERSION_AT_LEAST} != true ]]; then
-        error "Deno ${MIN_DENO_VERSION} or later is required; found ${deno_version}."
+    if [[ ${IS_YOUTUBE_URL} == true && ${JS_RUNTIME_AVAILABLE} != true ]]; then
+        error "Deno ${MIN_DENO_VERSION} or later is required for YouTube extraction."
         return 1
     fi
 
@@ -236,8 +245,6 @@ check_runtime_compatibility() {
         return 1
     fi
     for required_option in \
-        --js-runtimes \
-        --remote-components \
         --cookies-from-browser \
         --extractor-args \
         --print \
@@ -245,6 +252,12 @@ check_runtime_compatibility() {
         --print-to-file \
         --fixup \
         --downloader-args \
+        --batch-file \
+        --socket-timeout \
+        --retries \
+        --fragment-retries \
+        --extractor-retries \
+        --retry-sleep \
         --no-overwrites \
         --no-post-overwrites; do
         if ! grep -Eq -- \
@@ -253,6 +266,15 @@ check_runtime_compatibility() {
             return 1
         fi
     done
+    if [[ ${JS_RUNTIME_AVAILABLE} == true ]]; then
+        for required_option in --js-runtimes --remote-components; do
+            if ! grep -Eq -- \
+                "^[[:space:]]*(-[^,[:space:]]+,[[:space:]]+)?${required_option}([=[:space:]]|$)" <<<"${yt_dlp_help}"; then
+                error "this yt-dlp build does not support ${required_option}."
+                return 1
+            fi
+        done
+    fi
 
     if ! aria2_version_line=$(LC_ALL=C aria2c --version 2>/dev/null); then
         error 'unable to determine the aria2c version.'
@@ -292,9 +314,6 @@ check_runtime_compatibility() {
         fi
     done
 
-    # aria2 may display this option as '-n, --no-netrc'. Some builds
-    # compile without the optional netrc capability and omit it entirely.
-    # Accept both cases and only pass the option when it is advertised.
     ARIA2_SUPPORTS_NO_NETRC=false
     if grep -Eq -- \
         '^[[:space:]]*(-[^,[:space:]]+,[[:space:]]+)?--no-netrc([=[:space:]]|\[|$)' \
@@ -661,26 +680,104 @@ run_supervised_command() {
     return 0
 }
 
-validate_final_media_file() {
-    local final_path=$1
-    local stream_selector=$2
+cleanup_stale_temporary_files() {
+    local stale_file
+    local -a stale_files=()
+
+    while IFS= read -r -d '' stale_file; do
+        stale_files+=("${stale_file}")
+    done < <(
+        # Stale-file cleanup is best-effort. An inaccessible destination must
+        # not abort an otherwise valid download session.
+        find "${OUTPUT_DIR}" -maxdepth 1 -type f -uid "${EUID}" \
+            \( -name '.yt-dlp-remux.*.mkv' -o -name '.yt-dlp-path.*' \) \
+            -mmin +1440 -print0 2>/dev/null || true
+    )
+    if ((${#stale_files[@]} > 0)); then
+        rm -f -- "${stale_files[@]}" || true
+    fi
+}
+
+probe_stream() {
+    local output_variable=$1
+    local final_path=$2
+    local stream_selector=$3
     local probe_output=''
+    local detected_present=false
 
-    [[ -f ${final_path} && -s ${final_path} ]] || return 1
-
-    if ! probe_output=$(
+    if probe_output=$(
         timeout --signal=TERM --kill-after=2s 15s \
-            ffprobe \
-            -v error \
+            ffprobe -v error \
             -select_streams "${stream_selector}" \
             -show_entries stream=index \
             -of csv=p=0 \
             "${final_path}" 2>/dev/null
-    ); then
-        return 1
+    ) && grep -Eq '^[0-9]+$' <<<"${probe_output}"; then
+        detected_present=true
     fi
 
-    grep -Eq '^[0-9]+$' <<<"${probe_output}"
+    # Bash variables are dynamically scoped. The callee must not declare a
+    # local variable with the caller-provided output name, otherwise printf -v
+    # updates the callee's shadowing variable instead of the caller's result.
+    printf -v "${output_variable}" '%s' "${detected_present}"
+    return 0
+}
+
+probe_duration_microseconds() {
+    local output_variable=$1
+    local media_path=$2
+    local duration=''
+    local seconds=''
+    local fraction=''
+    local duration_microseconds=''
+
+    if duration=$(
+        timeout --signal=TERM --kill-after=2s 15s \
+            ffprobe -v error -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            "${media_path}" 2>/dev/null
+    ); then
+        duration=${duration%%$'\n'*}
+        if [[ ${duration} =~ ^([0-9]+)(\.([0-9]+))?$ ]]; then
+            seconds=${BASH_REMATCH[1]}
+            fraction=${BASH_REMATCH[3]:-0}
+            fraction="${fraction}000000"
+            fraction=${fraction:0:6}
+            if ((10#${seconds} <= 9000000000000)); then
+                duration_microseconds=$((
+                    10#${seconds} * 1000000 + 10#${fraction}
+                ))
+            fi
+        fi
+    fi
+
+    printf -v "${output_variable}" '%s' "${duration_microseconds}"
+    return 0
+}
+
+validate_final_media_file() {
+    local final_path=$1
+    local mode=$2
+    local stream_present=false
+
+    [[ -f ${final_path} && -s ${final_path} ]] || return 1
+
+    case ${mode} in
+    video)
+        probe_stream stream_present "${final_path}" 'v:0'
+        [[ ${stream_present} == true ]] || return 1
+        probe_stream stream_present "${final_path}" 'a:0'
+        [[ ${stream_present} == true ]] || return 1
+        ;;
+    audio)
+        probe_stream stream_present "${final_path}" 'a:0'
+        [[ ${stream_present} == true ]] || return 1
+        ;;
+    *)
+        return 2
+        ;;
+    esac
+    return 0
 }
 
 normalize_path_record() {
@@ -714,7 +811,9 @@ MODE='video'
 MACHINE_PROGRESS=false
 YOUTUBE_HLS_FIREFOX=false
 RESULT_FILE=''
+URL_FILE=''
 URL=''
+IS_YOUTUBE_URL=false
 POSITIONAL_ARGUMENTS=()
 
 while (($# > 0)); do
@@ -755,11 +854,6 @@ while (($# > 0)); do
         YOUTUBE_HLS_FIREFOX=true
         shift
         ;;
-    --supervised-session)
-        # Internal GUI contract: reuse the session already created by the GUI.
-        REUSE_CURRENT_SESSION=true
-        shift
-        ;;
     --result-file)
         require_value "$1" "${2-}"
         RESULT_FILE=$2
@@ -768,6 +862,16 @@ while (($# > 0)); do
     --result-file=*)
         RESULT_FILE=${1#*=}
         require_value '--result-file' "${RESULT_FILE}"
+        shift
+        ;;
+    --url-file)
+        require_value "$1" "${2-}"
+        URL_FILE=$2
+        shift 2
+        ;;
+    --url-file=*)
+        URL_FILE=${1#*=}
+        require_value '--url-file' "${URL_FILE}"
         shift
         ;;
     --)
@@ -787,27 +891,76 @@ while (($# > 0)); do
     esac
 done
 
-if ((${#POSITIONAL_ARGUMENTS[@]} == 0)); then
-    error 'a video URL is required.'
-    usage >&2
-    exit 2
+if [[ -n ${URL_FILE} ]]; then
+    if ((${#POSITIONAL_ARGUMENTS[@]} != 0)); then
+        error 'do not combine --url-file with a positional URL.'
+        exit 2
+    fi
+    if [[ -L ${URL_FILE} || ! -f ${URL_FILE} || ! -r ${URL_FILE} ]]; then
+        error 'the URL file must be a readable regular file and not a symbolic link.'
+        exit 2
+    fi
+    url_file_owner=$(stat -c '%u' -- "${URL_FILE}" 2>/dev/null || true)
+    if [[ ${url_file_owner} != "${EUID}" ]]; then
+        error 'the URL file must be owned by the current user.'
+        exit 2
+    fi
+    URL=''
+    url_line_count=0
+    while IFS= read -r url_line || [[ -n ${url_line} ]]; do
+        ((url_line_count += 1))
+        if ((url_line_count == 1)); then
+            URL=${url_line}
+        fi
+    done <"${URL_FILE}"
+    if ((url_line_count != 1)); then
+        error 'the URL file must contain exactly one line.'
+        exit 2
+    fi
+else
+    if ((${#POSITIONAL_ARGUMENTS[@]} == 0)); then
+        error 'a video URL is required.'
+        usage >&2
+        exit 2
+    fi
+    if ((${#POSITIONAL_ARGUMENTS[@]} != 1)); then
+        error 'exactly one video URL is required.'
+        usage >&2
+        exit 2
+    fi
+    URL=${POSITIONAL_ARGUMENTS[0]}
 fi
-if ((${#POSITIONAL_ARGUMENTS[@]} != 1)); then
-    error 'exactly one video URL is required.'
-    usage >&2
-    exit 2
-fi
-URL=${POSITIONAL_ARGUMENTS[0]}
 
 if [[ ${URL} == *$'\n'* || ${URL} == *$'\r'* ]]; then
     error 'the URL must not contain line breaks.'
     exit 2
 fi
-
 if [[ ! ${URL} =~ ^https?://[^[:space:]]+$ ]]; then
     error 'provide a URL beginning with http:// or https://.'
     exit 2
 fi
+
+url_authority=${URL#*://}
+url_authority=${url_authority%%/*}
+url_authority=${url_authority%%\?*}
+url_authority=${url_authority%%\#*}
+if [[ ${url_authority} == *@* ]]; then
+    error 'URLs containing user information are not accepted.'
+    exit 2
+fi
+URL_HOST=${url_authority%%:*}
+URL_HOST=${URL_HOST,,}
+URL_HOST=${URL_HOST%.}
+case ${URL_HOST} in
+    youtube.com | *.youtube.com | youtu.be | *.youtu.be | \
+        youtube-nocookie.com | *.youtube-nocookie.com)
+        IS_YOUTUBE_URL=true
+        ;;
+    *)
+        IS_YOUTUBE_URL=false
+        ;;
+esac
+readonly URL_HOST IS_YOUTUBE_URL
 
 case ${MODE} in
 video | audio) ;;
@@ -823,26 +976,13 @@ if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
         exit 2
     fi
 
-    youtube_authority=${URL#*://}
-    youtube_authority=${youtube_authority%%/*}
-    youtube_authority=${youtube_authority%%\?*}
-    youtube_authority=${youtube_authority%%\#*}
-    youtube_authority=${youtube_authority##*@}
-    youtube_host=${youtube_authority%%:*}
-    youtube_host=${youtube_host,,}
-    youtube_host=${youtube_host%.}
-
-    case ${youtube_host} in
-    youtube.com | *.youtube.com | youtu.be | *.youtu.be | \
-        youtube-nocookie.com | *.youtube-nocookie.com) ;;
-    *)
+    if [[ ${IS_YOUTUBE_URL} != true ]]; then
         error '--youtube-hls-firefox requires a YouTube URL.'
         exit 2
-        ;;
-    esac
+    fi
 fi
 
-for command_name in yt-dlp aria2c ffmpeg ffprobe realpath deno grep mktemp mv rm chmod flock mkdir sha256sum stat setsid sleep timeout; do
+for command_name in yt-dlp aria2c ffmpeg ffprobe realpath grep mktemp mv rm chmod flock mkdir sha256sum stat setsid sleep timeout find; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         error "required command \"${command_name}\" was not found."
         exit 127
@@ -888,6 +1028,7 @@ fi
 # stored in a private local runtime directory, so no marker is written into the
 # user's media directory and an interrupted process releases it automatically.
 acquire_output_lock "${OUTPUT_DIR}"
+cleanup_stale_temporary_files
 
 if [[ -n ${RESULT_FILE} ]]; then
     if [[ ${RESULT_FILE} == *$'\n'* || ${RESULT_FILE} == *$'\r'* ]]; then
@@ -931,6 +1072,20 @@ if [[ -z ${RESULT_FILE_TMP} ]]; then
     fi
 fi
 
+
+if ! YTDLP_BATCH_FILE_TMP=$(mktemp \
+    --tmpdir="${OUTPUT_LOCK_ROOT}" \
+    '.url-batch.XXXXXXXX'); then
+    error 'unable to create the private yt-dlp URL batch file.'
+    exit 13
+fi
+if ! printf '%s\n' "${URL}" >"${YTDLP_BATCH_FILE_TMP}" ||
+    ! chmod 600 -- "${YTDLP_BATCH_FILE_TMP}"; then
+    error 'unable to secure the private yt-dlp URL batch file.'
+    exit 13
+fi
+unset URL
+
 printf '%s version %s\n' "${SCRIPT_NAME}" "${VERSION}"
 printf 'Download directory: %s\n' "${OUTPUT_DIR}"
 printf 'Mode: %s\n' "${MODE}"
@@ -959,9 +1114,12 @@ YT_DLP_OPTIONS=(
     --no-playlist
     --no-overwrites
     --no-post-overwrites
-    --js-runtimes deno
-    --remote-components ejs:npm
     --embed-metadata
+    --socket-timeout 30
+    --retries 10
+    --fragment-retries 10
+    --extractor-retries 3
+    --retry-sleep 2
     --output "${OUTPUT_DIR_TEMPLATE}/%(title).160B [%(id).64B].%(ext)s"
     --continue
     --progress-delta 1
@@ -972,6 +1130,13 @@ YT_DLP_OPTIONS=(
     --downloader-args "aria2c:${ARIA2_ARGUMENTS}"
     --concurrent-fragments 8
 )
+
+if [[ ${JS_RUNTIME_AVAILABLE} == true ]]; then
+    YT_DLP_OPTIONS+=(--js-runtimes deno)
+    if [[ ${IS_YOUTUBE_URL} == true && ${YTDLP_DISABLE_REMOTE_EJS:-0} != 1 ]]; then
+        YT_DLP_OPTIONS+=(--remote-components ejs:npm)
+    fi
+fi
 
 if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
     # This explicit profile reads the authenticated Firefox session and asks
@@ -1035,7 +1200,12 @@ if [[ -n ${PATH_RECORD_TMP} ]]; then
     )
 fi
 
-run_supervised_command yt-dlp "${YT_DLP_OPTIONS[@]}" -- "${URL}"
+run_supervised_command yt-dlp "${YT_DLP_OPTIONS[@]}" --batch-file "${YTDLP_BATCH_FILE_TMP}"
+if ! rm -f -- "${YTDLP_BATCH_FILE_TMP}"; then
+    error 'unable to remove the private yt-dlp URL batch file.'
+    exit 13
+fi
+YTDLP_BATCH_FILE_TMP=''
 if ((DOWNLOAD_STATUS == 0)); then
     if [[ -n ${PATH_RECORD_TMP} ]]; then
         set +e
@@ -1075,6 +1245,12 @@ if ((DOWNLOAD_STATUS == 0)); then
         fi
 
         emit_machine_postprocess started FFmpegVideoRemuxer
+        ffmpeg_duration_us=''
+        probe_duration_microseconds \
+            ffmpeg_duration_us "${hls_source_path}" 2>/dev/null
+        if [[ ${MACHINE_PROGRESS} == true && ${ffmpeg_duration_us} =~ ^[1-9][0-9]*$ ]]; then
+            printf 'FFMPEG_PROGRESS_DURATION|%s\n' "${ffmpeg_duration_us}"
+        fi
         if ! HLS_REMUX_TMP=$(mktemp \
             --tmpdir="${hls_source_dir}" \
             --suffix='.mkv' \
@@ -1088,6 +1264,10 @@ if ((DOWNLOAD_STATUS == 0)); then
             ffmpeg \
             -hide_banner \
             -loglevel warning \
+            -nostdin \
+            -nostats \
+            -stats_period 0.5 \
+            -progress pipe:1 \
             -i "${hls_source_path}" \
             -map 0 \
             -dn \
@@ -1136,12 +1316,6 @@ if ((DOWNLOAD_STATUS == 0)); then
         exit 13
     fi
 
-    if [[ ${MODE} == video ]]; then
-        final_stream_selector='v:0'
-    else
-        final_stream_selector='a:0'
-    fi
-
     emit_machine_postprocess started MediaValidation
 
     # Call the validation function outside a conditional context. Bash disables
@@ -1149,7 +1323,7 @@ if ((DOWNLOAD_STATUS == 0)); then
     # otherwise hide an unexpected failure inside the validation routine.
     set +e
     validate_final_media_file \
-        "${final_media_path}" "${final_stream_selector}"
+        "${final_media_path}" "${MODE}"
     validation_status=$?
     set -e
 

@@ -69,6 +69,9 @@ bash -- ./tests/mock-integration.sh
 printf '\n=== Progress monitor integration ===\n'
 bash -- ./tests/progress-monitor-integration.sh
 
+printf '\n=== Measured FFmpeg progress integration ===\n'
+bash -- ./tests/ffmpeg-progress-integration.sh
+
 printf '\n=== Installer integration ===\n'
 bash -- ./tests/installer-integration.sh
 

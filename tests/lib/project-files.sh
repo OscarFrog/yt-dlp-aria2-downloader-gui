@@ -31,6 +31,8 @@ TEST_SHELL_FILES=(
     tests/progress-monitor-integration.sh
     tests/installer-integration.sh
     tests/packaging-integration.sh
+    tests/ffmpeg-progress-integration.sh
+    tests/real-tools-integration.sh
 )
 
 # shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
