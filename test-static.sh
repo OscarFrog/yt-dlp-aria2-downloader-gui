@@ -128,7 +128,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.19'
+readonly EXPECTED_VERSION='2.1.20'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -296,8 +296,8 @@ assert_file_contains "${script_dir}/download-video.sh" \
     'mv -nT -- "${HLS_REMUX_TMP}" "${hls_final_path}"' \
     'HLS publication never treats the target as a directory'
 assert_file_contains "${script_dir}/download-video-gui.sh" \
-    '--supervised-session' \
-    'GUI requests reuse of its single process session'
+    'YTDLP_ARIA2_SUPERVISED_SESSION=true' \
+    'GUI requests reuse of its single process session without a public option'
 assert_file_contains "${script_dir}/progress-monitor.sh" \
     'PROFILE OUTPUT_DIR' \
     'progress monitor receives the canonical destination'
@@ -381,4 +381,52 @@ assert_file_not_contains "${script_dir}/packaging/deb/build-deb.sh" \
 assert_file_not_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
     'install-gui.sh' 'RPM does not run the per-user launcher installer'
 
+
+
+# Version 2.1.20 privacy, validation, and supply-chain contracts.
+assert_file_contains "${script_dir}/download-video.sh" \
+    '--url-file FILE' 'private URL-file input'
+assert_file_contains "${script_dir}/download-video.sh" \
+    "--batch-file \"\${YTDLP_BATCH_FILE_TMP}\"" 'private yt-dlp batch file'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    "--url-file \"\${URL_FILE}\"" 'GUI private URL transfer'
+assert_file_not_contains "${script_dir}/download-video-gui.sh" \
+    "COMMAND+=(-- \"\${URL}\")" 'GUI URL is absent from process arguments'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    'LOG_MAX_BYTES=8388608' 'retained diagnostic log size bound'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    '[REDACTED_URL]' 'retained diagnostic URL redaction'
+assert_file_contains "${script_dir}/download-video-gui.sh" \
+    'live-download-log.' 'live log remains in the private runtime directory'
+assert_file_contains "${script_dir}/download-video.sh" \
+    "probe_stream stream_present \"\${final_path}\" 'v:0'" 'complete-video video stream validation'
+assert_file_contains "${script_dir}/download-video.sh" \
+    "probe_stream stream_present \"\${final_path}\" 'a:0'" 'complete-video audio stream validation'
+assert_file_contains "${script_dir}/download-video.sh" \
+    '-nostdin' 'FFmpeg standard-input isolation'
+assert_file_contains "${script_dir}/download-video.sh" \
+    '-progress pipe:1' 'FFmpeg machine progress output'
+assert_file_contains "${script_dir}/progress-monitor.sh" \
+    'FFMPEG_PROGRESS_DURATION' 'measured FFmpeg progress parsing'
+assert_file_contains "${script_dir}/progress-monitor.sh" \
+    'MAX_SAFE_COUNTER=9000000000000000' 'bounded progress arithmetic'
+assert_file_contains "${script_dir}/packaging/deb/build-deb.sh" \
+    'ffmpeg, yt-dlp, zenity' 'DEB strict runtime dependencies'
+assert_file_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+    'Requires:       yt-dlp' 'RPM strict yt-dlp dependency'
+assert_file_contains "${script_dir}/install-gui.sh" \
+    'readonly ICON_FILE=' 'per-user dedicated icon installation'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26' \
+    'release provenance attestation action'
+assert_file_contains "${script_dir}/.github/workflows/real-tools.yml" \
+    'tests/real-tools-integration.sh' 'hermetic real-tool CI validation'
+assert_file_contains "${script_dir}/tests/run-all.sh" \
+    'tests/ffmpeg-progress-integration.sh' 'measured FFmpeg progress regression suite'
+
+assert_status 2 'URL user information is rejected' \
+    "${script_dir}/download-video.sh" \
+    'https://user:password@example.com/video'
+assert_text_contains "${ASSERT_OUTPUT}" 'user information' \
+    'URL user-information rejection reason'
 printf '%s\n' 'Static tests passed.'

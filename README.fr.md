@@ -17,17 +17,17 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.19**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.20**.
 
 ## Installation recommandée
 
 Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest)
 et téléchargez le fichier correspondant à votre système :
 
-- **Fedora 44 ou version plus récente :** le RPM `2.1.19`,
-  `yt-dlp-aria2-downloader-gui-2.1.19-1.fc44.noarch.rpm` ;
-- **Debian ou Ubuntu :** le DEB `2.1.19`,
-  `yt-dlp-aria2-downloader-gui_2.1.19-1_all.deb` ;
+- **Fedora 44 ou version plus récente :** le RPM `2.1.20`,
+  `yt-dlp-aria2-downloader-gui-2.1.20-1.fc44.noarch.rpm` ;
+- **Debian ou Ubuntu :** le DEB `2.1.20`,
+  `yt-dlp-aria2-downloader-gui_2.1.20-1_all.deb` ;
 - **autre distribution GNU/Linux ou utilisation portable :** l’archive ZIP
   versionnée.
 
@@ -53,11 +53,11 @@ installations depuis le ZIP ou Git.
   HLS/DASH, les pistes vidéo/audio séparées et le post-traitement FFmpeg ;
 - annulation de tout le groupe de processus au sein d’une session GUI unique ;
 - supervision de yt-dlp et des commandes FFmpeg exécutées par le moteur, avec arrêt borné ;
-- validation FFprobe de la piste audio ou vidéo attendue avant la publication du succès ;
+- validation FFprobe des pistes vidéo et audio pour une vidéo complète, et de la piste audio pour le mode audio, avant la publication du succès ;
 - une seule instance en écriture par dossier de destination, afin
   d'empêcher le partage concurrent de fichiers partiels ou de
   post-traitement ;
-- journaux privés conservés uniquement pour les exécutions problématiques ;
+- journaux privés conservés uniquement pour les exécutions problématiques, avec expurgation des URL et limite de 8 Mio ;
 - lanceur dans le menu des applications ;
 - tests statiques, tests d'intégration et validation GitHub Actions sous Ubuntu
   et Fedora 44.
@@ -70,14 +70,13 @@ Les commandes suivantes doivent être installées et disponibles dans `PATH` :
 - `yt-dlp` **2026.06.09 ou plus récent** ;
 - `aria2c` **1.37.0 ou plus récent** ;
 - FFmpeg et `ffprobe` ;
-- Deno **2.3.0 ou plus récent** ;
+- Deno **2.3.0 ou plus récent pour l’extraction YouTube** ; les autres sites pris en charge peuvent fonctionner sans Deno ;
 - Zenity pour l'interface graphique ;
 - Firefox avec une session YouTube authentifiée uniquement pour le profil
   YouTube HLS authentifié facultatif ;
 - GNU coreutils, GNU grep et `setsid`, généralement fourni par `util-linux`.
 
-Le moteur contrôle les versions minimales de `yt-dlp`, `aria2c` et Deno avant
-chaque téléchargement.
+Le moteur contrôle toujours les versions minimales de `yt-dlp` et `aria2c`. Deno n’est contrôlé que lorsqu’il est installé ou lorsque l’extraction YouTube l’exige.
 
 ## Installation par paquet
 
@@ -107,7 +106,7 @@ sudo dnf install \
 Téléchargez les fichiers suivants depuis la release :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.19-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.20-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -115,20 +114,17 @@ Vérifiez puis installez le RPM :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.19-1.fc44.noarch.rpm
+sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.20-1.fc44.noarch.rpm
 ```
 
-Le RPM déclare les dépendances Fedora pour Bash, yt-dlp, aria2, FFmpeg, Zenity,
-coreutils, grep et util-linux. Deno reste un moteur d'exécution géré séparément ;
-le programme contrôle la présence de Deno 2.3.0 ou plus récent avant le
-téléchargement.
+Le RPM déclare yt-dlp, aria2, FFmpeg/FFprobe, Zenity et les outils GNU nécessaires comme dépendances strictes. Deno reste géré séparément et n’est obligatoire que pour l’extraction YouTube.
 
 ### Debian et Ubuntu
 
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui_2.1.19-1_all.deb
+yt-dlp-aria2-downloader-gui_2.1.20-1_all.deb
 SHA256SUMS
 ```
 
@@ -136,13 +132,10 @@ Vérifiez puis installez le paquet :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.19-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.20-1_all.deb
 ```
 
-Le DEB installe l'application et les dépendances système communes. Les versions
-de yt-dlp et Deno fournies par certaines distributions peuvent être plus
-anciennes que les minima exigés par ce projet ; le moteur conserve ses contrôles
-au démarrage et indique précisément la dépendance à mettre à jour.
+Le DEB installe yt-dlp, aria2, FFmpeg/FFprobe, Zenity et les outils GNU nécessaires comme dépendances strictes. Deno est facultatif pour l’extraction générique, mais obligatoire pour YouTube. Le moteur vérifie encore les versions et indique tout composant à mettre à jour.
 
 ### Commandes installées par les paquets
 
@@ -183,7 +176,7 @@ de l’utilisateur courant.
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.19.zip
+yt-dlp-aria2-downloader-gui-2.1.20.zip
 SHA256SUMS
 ```
 
@@ -191,8 +184,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.19.zip
-cd yt-dlp-aria2-downloader-gui-2.1.19
+unzip yt-dlp-aria2-downloader-gui-2.1.20.zip
+cd yt-dlp-aria2-downloader-gui-2.1.20
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -264,8 +257,7 @@ Sélectionnez le dossier dans lequel le média téléchargé sera enregistré.
 
 ### 4. Suivre la progression
 
-La fenêtre de progression indique l'étape actuelle du téléchargement ou du
-post-traitement. Le bouton d'annulation permet d'arrêter l'ensemble du
+La fenêtre de progression indique l’étape actuelle du téléchargement ou du post-traitement. Le remuxage FFmpeg géré par le moteur utilise la sortie de progression machine de FFmpeg et la durée de la source, et non un compteur artificiel. Le bouton d'annulation permet d'arrêter l'ensemble du
 processus.
 
 
@@ -279,9 +271,13 @@ Lorsque le téléchargement échoue, l'interface affiche une fenêtre d'erreur e
 conserve le journal de diagnostic.
 
 
-Le journal conservé peut être ouvert depuis la fenêtre d'erreur. Il contient les
-informations nécessaires au diagnostic et peut inclure l'URL demandée.
+Le journal conservé peut être ouvert depuis la fenêtre d’erreur. Avant sa conservation, les valeurs ressemblant à des URL sont remplacées par `[REDACTED_URL]` et seuls les 8 derniers Mio sont gardés. Le journal actif reste privé (`0600`) pendant l’exécution.
 
+
+
+### Confidentialité des URL dans l’interface graphique
+
+La GUI écrit l’URL demandée dans un fichier temporaire privé et ne transmet au moteur que le chemin de ce fichier. Le moteur fournit ensuite l’URL à yt-dlp via son interface de fichier batch privé : l’URL n’apparaît donc pas dans les arguments de ligne de commande de la GUI, du moteur ou de yt-dlp. Les URL contenant `utilisateur:motdepasse@hôte` sont refusées. L’utilisation CLI directe avec une URL positionnelle reste possible ; comme pour toute commande, cette URL peut alors être visible dans les arguments du processus appelant.
 
 ## Utilisation en ligne de commande
 
@@ -347,18 +343,14 @@ natif de yt-dlp pour les manifestes DASH et HLS :
 --downloader dash,m3u8:native
 ```
 
-Pour l'extraction YouTube actuelle, le moteur active également Deno et autorise
-yt-dlp à récupérer les composants EJS depuis npm lorsqu'ils sont nécessaires :
+Pour l’extraction YouTube actuelle, le moteur active Deno. yt-dlp utilise les composants EJS locaux compatibles lorsqu’ils sont présents et peut récupérer les composants officiels depuis npm comme solution de repli :
 
 ```text
 --js-runtimes deno
 --remote-components ejs:npm
 ```
 
-yt-dlp peut télécharger depuis npm les composants de résolution de défis
-yt-dlp-ejs. Ces scripts sont exécutés par Deno avec des permissions restreintes
-d'accès au système de fichiers et au réseau. Un téléchargement YouTube peut
-donc contacter npm en plus du site qui héberge le média.
+yt-dlp peut télécharger depuis npm les composants de résolution de défis yt-dlp-ejs lorsque les composants locaux compatibles sont absents. Définissez `YTDLP_DISABLE_REMOTE_EJS=1` pour interdire cette solution de repli ; l’extraction YouTube échouera alors plutôt que de récupérer un composant distant.
 
 ### Vidéo YouTube HLS authentifiée
 
@@ -421,11 +413,13 @@ Journaux d'exécution :
 ~/.local/state/yt-dlp-aria2-downloader/download-*.log
 ```
 
-Les journaux sont privés. Un journal est supprimé automatiquement dès que le
-fichier média final est confirmé. Les exécutions échouées, annulées, interrompues
-ou incohérentes conservent leur journal afin de faciliter le diagnostic. Les
-journaux de diagnostic conservés depuis plus de 15 jours sont supprimés
-automatiquement au prochain démarrage de l'interface graphique.
+Le journal actif du processus est créé en mode `0600` dans le dossier
+temporaire d’exécution privé, puis supprimé après un succès. Pour une exécution
+échouée, annulée, interrompue ou incohérente, seule une copie de diagnostic
+expurgée est publiée dans le dossier d’état : les valeurs ressemblant à des URL
+sont remplacées, seuls les 8 derniers Mio sont conservés et le fichier final
+reste en mode `0600`. Les journaux de diagnostic conservés depuis plus de 15
+jours sont supprimés automatiquement au prochain démarrage de l’interface.
 
 Un verrou consultatif par utilisateur et par dossier de destination est
 conservé sous `$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader` lorsque ce dossier

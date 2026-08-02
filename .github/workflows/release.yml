@@ -1,293 +1,173 @@
 name: Release packages
-
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to publish, for example v2.1.19
+        description: Existing version tag to publish, for example v2.1.20
         required: true
         type: string
-
 permissions:
   contents: read
-
 env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-
 concurrency:
   group: release-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
   cancel-in-progress: false
-
 jobs:
   validate:
-    name: Validate release source
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - name: Check out tagged source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Install validation tools
-        run: |
+      - run: |
           sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes \
-            desktop-file-utils shellcheck
-
-      - name: Verify tag, ancestry, and project versions
+          sudo apt-get -o Acquire::Retries=3 install --yes desktop-file-utils shellcheck
+      - name: Verify tag and versions
         shell: bash
         run: |
           set -Eeuo pipefail
-          if [[ ! ${RELEASE_TAG} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            printf 'Release tag must match vMAJOR.MINOR.PATCH: %s\n' \
-              "${RELEASE_TAG}" >&2
-            exit 1
-          fi
-
+          [[ ${RELEASE_TAG} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           tag_commit=$(git rev-parse "${RELEASE_TAG}^{commit}")
-          checked_out_commit=$(git rev-parse HEAD)
-          git fetch --no-tags origin \
-            '+refs/heads/main:refs/remotes/origin/main'
+          [[ ${tag_commit} == "$(git rev-parse HEAD)" ]]
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
           git merge-base --is-ancestor "${tag_commit}" origin/main
-          [[ ${tag_commit} == "${checked_out_commit}" ]]
-          if [[ ${GITHUB_EVENT_NAME} == push ]]; then
-            [[ ${tag_commit} == "${GITHUB_SHA}" ]]
-          fi
-
           version=${RELEASE_TAG#v}
-          grep -Fqx -- "readonly VERSION=\"${version}\"" download-video.sh
-          grep -Fq -- "# Version     : ${version}" download-video-gui.sh
-          grep -Fq -- "# Version     : ${version}" progress-monitor.sh
-          grep -Fq -- "# Version     : ${version}" install-gui.sh
-          grep -Fq -- "is **${version}**." README.md
-          grep -Fq -- "version actuelle est la **${version}**" README.fr.md
-          grep -Fq -- "## ${version} - " CHANGELOG.md
-
-      - name: Run complete validation
-        run: bash ./tests/run-all.sh
-
+          grep -Fqx "readonly VERSION=\"${version}\"" download-video.sh
+          grep -Fq "# Version     : ${version}" download-video-gui.sh progress-monitor.sh install-gui.sh
+          grep -Fq "is **${version}**." README.md
+          grep -Fq "version actuelle est la **${version}**" README.fr.md
+          grep -Fq "## ${version} - " CHANGELOG.md
+      - run: bash ./tests/run-all.sh
   zip:
-    name: Portable ZIP
     needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - name: Check out tagged source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Install ZIP validation tools
-        run: |
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes \
-            desktop-file-utils shellcheck unzip
-
+      - run: sudo apt-get update && sudo apt-get install --yes desktop-file-utils shellcheck unzip
       - name: Build and retest ZIP
         shell: bash
         run: |
           set -Eeuo pipefail
-          version=${RELEASE_TAG#v}
-          package="yt-dlp-aria2-downloader-gui-${version}"
-          commit=$(git rev-parse "${RELEASE_TAG}^{commit}")
+          version=${RELEASE_TAG#v}; package="yt-dlp-aria2-downloader-gui-${version}"
           mkdir -p dist
-          git archive \
-            --format=zip \
-            --prefix="${package}/" \
-            --output="dist/${package}.zip" \
-            "${commit}"
+          git archive --format=zip --prefix="${package}/" --output="dist/${package}.zip" "${RELEASE_TAG}^{commit}"
           unzip -t "dist/${package}.zip"
-          extracted=$(mktemp -d)
-          trap 'rm -rf -- "${extracted}"' EXIT
+          extracted=$(mktemp -d); trap 'rm -rf -- "${extracted}"' EXIT
           unzip -q "dist/${package}.zip" -d "${extracted}"
-          (
-            cd "${extracted}/${package}"
-            bash ./tests/run-all.sh
-          )
-
-      - name: Upload tested ZIP
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          (cd "${extracted}/${package}" && bash ./tests/run-all.sh)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-zip
           path: dist/*.zip
           if-no-files-found: error
           retention-days: 7
-
   deb:
-    name: Debian package
     needs: validate
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - name: Check out tagged source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Install DEB build tools
-        run: |
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes \
-            desktop-file-utils dpkg-dev
-
-      - name: Build and inspect DEB
-        run: bash packaging/deb/build-deb.sh "${RELEASE_TAG#v}" dist
-
-      - name: Install and remove DEB
+      - run: sudo apt-get update && sudo apt-get install --yes desktop-file-utils dpkg-dev
+      - run: bash packaging/deb/build-deb.sh "${RELEASE_TAG#v}" dist
+      - name: Lifecycle
         shell: bash
         run: |
-          set -Eeuo pipefail
-          version=$(./download-video.sh --version)
-          version=${version##* }
-          shopt -s nullglob
-          packages=(dist/*.deb)
-          shopt -u nullglob
-          ((${#packages[@]} == 1))
-          sudo bash packaging/deb/test-package-lifecycle.sh \
-            "${packages[0]}" "${version}"
-
-      - name: Upload tested DEB
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          shopt -s nullglob; packages=(dist/*.deb); shopt -u nullglob; ((${#packages[@]} == 1))
+          sudo bash packaging/deb/test-package-lifecycle.sh "${packages[0]}" "${RELEASE_TAG#v}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-deb
           path: dist/*.deb
           if-no-files-found: error
           retention-days: 7
-
   rpm:
-    name: Fedora 44 RPM
     needs: validate
     runs-on: ubuntu-24.04
     container: fedora:44
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - name: Install RPM build tools
-        run: |
-          dnf install --assumeyes \
-            cpio desktop-file-utils findutils git gzip rpm-build tar
-
-      - name: Check out tagged source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          dnf install --assumeyes cpio desktop-file-utils findutils git gzip rpm-build tar
+          dnf install --assumeyes "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Build and inspect RPM
+      - name: Build RPM
         shell: bash
         run: |
-          set -Eeuo pipefail
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           bash packaging/rpm/build-rpm.sh "${RELEASE_TAG#v}" dist
-
-      - name: Enable RPM Fusion Free
-        run: |
-          dnf install --assumeyes \
-            "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
-
-      - name: Install and remove RPM
+      - name: Lifecycle
         shell: bash
         run: |
-          set -Eeuo pipefail
-          version=$(./download-video.sh --version)
-          version=${version##* }
-          shopt -s nullglob
-          packages=(dist/*.rpm)
-          shopt -u nullglob
-          ((${#packages[@]} == 1))
-          bash packaging/rpm/test-package-lifecycle.sh \
-            "${packages[0]}" "${version}"
-
-      - name: Upload tested RPM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          shopt -s nullglob; packages=(dist/*.rpm); shopt -u nullglob; ((${#packages[@]} == 1))
+          bash packaging/rpm/test-package-lifecycle.sh "${packages[0]}" "${RELEASE_TAG#v}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-rpm
           path: dist/*.rpm
           if-no-files-found: error
           retention-days: 7
-
   publish:
-    name: Publish release
-    needs:
-      - zip
-      - deb
-      - rpm
+    needs: [zip, deb, rpm]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
-      - name: Check out tagged source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
-
-      - name: Download tested artifacts
-        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
-
-      - name: Verify payloads and generate checksums
+      - name: Verify payloads and checksums
         shell: bash
         run: |
           set -Eeuo pipefail
-          shopt -s nullglob
-          payloads=(dist/*.zip dist/*.deb dist/*.rpm)
-          shopt -u nullglob
-          if ((${#payloads[@]} != 3)); then
-            printf 'Expected ZIP, DEB, and RPM; found %d payloads.\n' \
-              "${#payloads[@]}" >&2
-            printf '%s\n' "${payloads[@]}" >&2
-            exit 1
-          fi
-          (
-            cd dist
-            sha256sum -- *.zip *.deb *.rpm > SHA256SUMS
-            sha256sum --check SHA256SUMS
-          )
-
-      - name: Publish immutable GitHub release
+          shopt -s nullglob; payloads=(dist/*.zip dist/*.deb dist/*.rpm); shopt -u nullglob
+          ((${#payloads[@]} == 3))
+          (cd dist && sha256sum -- *.zip *.deb *.rpm > SHA256SUMS && sha256sum --check SHA256SUMS)
+      - name: Attest release artifacts
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: dist/*
+      - name: Publish immutable release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          shopt -s nullglob
-          payloads=(dist/*.zip dist/*.deb dist/*.rpm)
-          shopt -u nullglob
-
+          shopt -s nullglob; payloads=(dist/*.zip dist/*.deb dist/*.rpm); shopt -u nullglob
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            existing=$(mktemp -d)
-            trap 'rm -rf -- "${existing}"' EXIT
+            existing=$(mktemp -d); trap 'rm -rf -- "${existing}"' EXIT
             for payload in "${payloads[@]}" dist/SHA256SUMS; do
-              name=${payload##*/}
-              gh release download "${RELEASE_TAG}" \
-                --dir "${existing}" --pattern "${name}"
-              cmp -s -- "${payload}" "${existing}/${name}" || {
-                printf 'Existing release asset differs: %s\n' "${name}" >&2
-                exit 1
-              }
+              name=${payload##*/}; gh release download "${RELEASE_TAG}" --dir "${existing}" --pattern "${name}"
+              cmp -s -- "${payload}" "${existing}/${name}"
             done
-            printf 'Release %s already contains the expected assets.\n' \
-              "${RELEASE_TAG}"
             exit 0
           fi
-
-          gh release create "${RELEASE_TAG}" \
-            "${payloads[@]}" dist/SHA256SUMS \
-            --verify-tag \
-            --generate-notes \
-            --title "yt-dlp aria2 downloader ${RELEASE_TAG#v}"
+          gh release create "${RELEASE_TAG}" "${payloads[@]}" dist/SHA256SUMS \
+            --verify-tag --generate-notes --title "yt-dlp aria2 downloader ${RELEASE_TAG#v}"

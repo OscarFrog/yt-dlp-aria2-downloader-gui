@@ -1,0 +1,31 @@
+name: Real tool integration
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: real-tools-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  local-media:
+    name: Local HTTP media
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install real engines
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install --yes aria2 ffmpeg python3-venv
+          python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
+            --disable-pip-version-check 'yt-dlp==2026.6.9'
+          echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >> "${GITHUB_PATH}"
+      - name: Run hermetic integration
+        run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/real-tools-integration.sh

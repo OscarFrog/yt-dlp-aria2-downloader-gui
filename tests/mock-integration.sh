@@ -62,12 +62,37 @@ if (($# == 1)) && [[ $1 == '--help' ]]; then
         '--fixup POLICY' \
         '--downloader-args' \
         '--no-overwrites' \
-        '--no-post-overwrites'
+        '--no-post-overwrites' \
+        '--batch-file FILE' \
+        '--socket-timeout SECONDS' \
+        '--retries RETRIES' \
+        '--fragment-retries RETRIES' \
+        '--extractor-retries RETRIES' \
+        '--retry-sleep [TYPE:]EXPR'
     exit 0
 fi
 
 : "${MOCK_ARG_LOG:?}"
 printf '%s\0' "$@" > "${MOCK_ARG_LOG}"
+
+
+batch_file=''
+batch_previous=''
+for argument in "$@"; do
+    if [[ ${batch_previous} == '--batch-file' ]]; then
+        batch_file=${argument}
+        batch_previous=''
+        continue
+    fi
+    if [[ ${argument} == '--batch-file' ]]; then
+        batch_previous='--batch-file'
+    fi
+done
+if [[ -n ${batch_file} && -n ${MOCK_URL_SEEN_LOG:-} ]]; then
+    batch_url=''
+    IFS= read -r batch_url <"${batch_file}"
+    printf '%s\n' "${batch_url}" >"${MOCK_URL_SEEN_LOG}"
+fi
 
 wait_for_marker() {
     local marker=$1
@@ -244,6 +269,9 @@ chmod +x "${MOCK_BIN}/aria2c"
 cat > "${MOCK_BIN}/deno" <<'EOF_DENO'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ ${MOCK_DENO_UNAVAILABLE:-0} == 1 ]]; then
+    exit 127
+fi
 [[ ${LC_ALL:-} == C ]] || { printf 'salida Deno localizada\n'; exit 65; }
 printf 'deno %s\n' "${MOCK_DENO_VERSION:-2.3.0}"
 printf 'v8 0.0.0\n'
@@ -296,6 +324,22 @@ esac
 
 if [[ -n ${MOCK_FFPROBE_ARG_LOG:-} ]]; then
     printf '%s\0' "$@" >"${MOCK_FFPROBE_ARG_LOG}"
+fi
+
+selector=''
+probe_previous=''
+for argument in "$@"; do
+    if [[ ${probe_previous} == '-select_streams' ]]; then
+        selector=${argument}
+        probe_previous=''
+        continue
+    fi
+    if [[ ${argument} == '-select_streams' ]]; then
+        probe_previous='-select_streams'
+    fi
+done
+if [[ ${MOCK_FFPROBE_MISSING_AUDIO:-0} == 1 && ${selector} == 'a:0' ]]; then
+    exit 0
 fi
 if [[ ${MOCK_FFPROBE_EXIT_STATUS:-0} != 0 ]]; then
     printf 'Simulated FFprobe validation failure.\n' >&2
@@ -748,11 +792,13 @@ assert_no_test_processes 'log-retention GUI run left worker processes'
 prepare_argument_log 'audio-engine'
 result_file="${TEST_ROOT}/engine-%-result.txt"
 ffprobe_argument_log="${TEST_ROOT}/ffprobe-audio-args.bin"
+url_seen_log="${TEST_ROOT}/private-url-seen.txt"
 injection_marker="${TEST_ROOT}/must-not-exist"
 malicious_url="https://example.com/watch?v=abc123&x=\$(touch\$IFS${injection_marker})"
 assert_status 0 'audio engine succeeds under a hostile inherited locale' \
     env LC_ALL=fr_FR.UTF-8 LANG=fr_FR.UTF-8 \
     MOCK_FFPROBE_ARG_LOG="${ffprobe_argument_log}" \
+    MOCK_URL_SEEN_LOG="${url_seen_log}" \
     "${PROJECT_DIR}/download-video.sh" \
     --output-dir "${OUTPUT_DIR}" \
     --mode audio \
@@ -775,7 +821,7 @@ assert_array_contains arguments '--no-playlist' 'yt-dlp disables playlists'
 assert_array_contains arguments '--no-overwrites' 'yt-dlp final-file overwrite protection'
 assert_array_contains arguments '--no-post-overwrites' 'yt-dlp post-processing overwrite protection'
 assert_array_not_contains arguments '--supervised-session' 'internal session option isolation'
-assert_option_value arguments '--remote-components' 'ejs:npm' 'EJS remote component selector'
+assert_array_not_contains arguments '--remote-components' 'generic extraction avoids remote EJS'
 assert_option_value arguments '--format' 'ba/b' 'audio format selector'
 assert_array_contains arguments '--extract-audio' 'audio extraction postprocessor'
 assert_option_value arguments '--audio-format' 'best' 'audio output format'
@@ -792,7 +838,11 @@ for forbidden_audio_format in mp3 m4a opus; do
     assert_array_not_contains arguments "${forbidden_audio_format}" \
         "removed audio format ${forbidden_audio_format}"
 done
-assert_array_contains arguments "${malicious_url}" 'URL preserved as one argument'
+assert_array_not_contains arguments "${malicious_url}" \
+    'private URL is absent from yt-dlp arguments'
+assert_array_contains arguments '--batch-file' 'yt-dlp receives a private URL batch file'
+assert_file_has_line "${url_seen_log}" "${malicious_url}" \
+    'private URL batch file preserves the exact URL'
 expected_output_template="${OUTPUT_DIR//%/%%}/%(title).160B [%(id).64B].%(ext)s"
 assert_option_value arguments '--output' "${expected_output_template}" \
     'absolute escaped output template'
@@ -889,6 +939,17 @@ assert_text_not_contains "$(printf '%s\n' "${arguments[@]}")" \
     '--show-console-readout=true' 'machine progress disabled in ordinary CLI mode'
 
 
+prepare_argument_log 'video-missing-audio-validation'
+assert_status 65 'complete-video mode rejects a result without audio' \
+    env MOCK_FFPROBE_MISSING_AUDIO=1 \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode video \
+    -- 'https://example.com/watch?v=video-without-audio'
+assert_text_contains "${ASSERT_OUTPUT}" \
+    'final media file failed FFprobe validation' \
+    'missing-audio validation diagnostic'
+
+
 existing_audio_path="${OUTPUT_DIR}/Mock media [abc123].webm"
 printf '%s\n' 'preserve existing audio result' >"${existing_audio_path}"
 prepare_argument_log 'existing-media-no-overwrite'
@@ -922,6 +983,8 @@ assert_option_value youtube_hls_arguments '--cookies-from-browser' 'firefox' \
     'YouTube HLS Firefox cookies'
 assert_option_value youtube_hls_arguments '--extractor-args' \
     'youtube:player_client=web_safari' 'YouTube HLS player client'
+assert_option_value youtube_hls_arguments '--remote-components' 'ejs:npm' \
+    'YouTube HLS remote EJS fallback'
 assert_option_value youtube_hls_arguments '--format' \
     '(bv*+ba/b)[protocol^=m3u8]' 'YouTube HLS format selector'
 assert_option_value youtube_hls_arguments '--fixup' 'force' \
@@ -1099,8 +1162,10 @@ exec {held_lock_fd}>&-
 
 # GUI progress from aria2c, including an unknown total size.
 trimmed_gui_url='https://example.com/watch?v=trimmed'
+gui_url_seen_log="${TEST_ROOT}/gui-private-url-seen.txt"
 prepare_argument_log 'gui-aria-percent'
 MOCK_ZENITY_ENTRY_VALUE="  ${trimmed_gui_url}  " \
+MOCK_URL_SEEN_LOG="${gui_url_seen_log}" \
 MOCK_ARIA_ONLY=1 \
 MOCK_PROGRESS_CAPTURE="${PROGRESS_CAPTURE}" \
     "${PROJECT_DIR}/download-video-gui.sh"
@@ -1119,7 +1184,10 @@ read_arguments "${MOCK_ARG_LOG}" gui_arguments
 assert_option_value gui_arguments '--downloader-args' \
     'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --no-netrc=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=1 --show-console-readout=true --stderr=false' \
     'machine-progress aria2 readout remains visible on stdout'
-assert_array_contains gui_arguments "${trimmed_gui_url}" 'trimmed GUI URL'
+assert_array_not_contains gui_arguments "${trimmed_gui_url}" \
+    'trimmed GUI URL is absent from process arguments'
+assert_file_has_line "${gui_url_seen_log}" "${trimmed_gui_url}" \
+    'trimmed GUI URL is transferred through the private batch file'
 assert_array_not_contains gui_arguments "  ${trimmed_gui_url}  " \
     'untrimmed GUI URL is absent'
 
@@ -1547,10 +1615,20 @@ assert_status 1 'old yt-dlp version is rejected' \
     env MOCK_YTDLP_VERSION=2026.06.08 \
     "${PROJECT_DIR}/download-video.sh" \
     -- 'https://example.com/watch?v=old-yt-dlp'
+assert_status 0 'generic extraction remains usable without Deno' \
+    env MOCK_DENO_UNAVAILABLE=1 \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" \
+    -- 'https://example.com/watch?v=no-deno-generic'
+assert_status 1 'YouTube extraction requires Deno' \
+    env MOCK_DENO_UNAVAILABLE=1 \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" \
+    -- 'https://www.youtube.com/watch?v=no-deno-youtube'
 assert_status 1 'old Deno version is rejected' \
     env MOCK_DENO_VERSION=2.2.9 \
     "${PROJECT_DIR}/download-video.sh" \
-    -- 'https://example.com/watch?v=old-deno'
+    -- 'https://www.youtube.com/watch?v=old-deno'
 assert_status 1 'old aria2c version is rejected' \
     env MOCK_ARIA2_VERSION=1.36.0 \
     "${PROJECT_DIR}/download-video.sh" \
@@ -1558,7 +1636,7 @@ assert_status 1 'old aria2c version is rejected' \
 assert_status 1 'minimum Deno prerelease is rejected' \
     env MOCK_DENO_VERSION=2.3.0-beta \
     "${PROJECT_DIR}/download-video.sh" \
-    -- 'https://example.com/watch?v=prerelease-deno'
+    -- 'https://www.youtube.com/watch?v=prerelease-deno'
 assert_status 1 'minimum aria2 prerelease is rejected' \
     env MOCK_ARIA2_VERSION=1.37.0-beta \
     "${PROJECT_DIR}/download-video.sh" \
@@ -1598,7 +1676,9 @@ assert_file_contains "${progress_error_capture}" 'status 42' \
 # Missing Zenity is a dependency error, not a graphical crash.
 no_zenity_bin="${TEST_ROOT}/no-zenity-bin"
 mkdir -p -- "${no_zenity_bin}"
-for required_command in bash chmod date dirname grep mkdir mktemp mv realpath rm setsid sleep stat flock sha256sum; do
+for required_command in \
+    bash chmod date dirname grep mkdir mktemp mv realpath rm sed setsid sleep \
+    stat tail flock sha256sum; do
     required_command_path=$(command -v "${required_command}") ||
         fail "Required host command was not found: ${required_command}"
     ln -s -- "${required_command_path}" \

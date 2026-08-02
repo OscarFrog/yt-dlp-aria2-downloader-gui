@@ -26,6 +26,8 @@ bash -n tests/mock-integration.sh
 bash -n tests/progress-monitor-integration.sh
 bash -n tests/installer-integration.sh
 bash -n tests/packaging-integration.sh
+bash -n tests/ffmpeg-progress-integration.sh
+bash -n tests/real-tools-integration.sh
 bash -n packaging/install-tree.sh
 bash -n packaging/deb/build-deb.sh
 bash -n packaging/deb/test-package-lifecycle.sh
@@ -51,6 +53,8 @@ shellcheck -x -o all \
   tests/progress-monitor-integration.sh \
   tests/installer-integration.sh \
   tests/packaging-integration.sh \
+  tests/ffmpeg-progress-integration.sh \
+  tests/real-tools-integration.sh \
   packaging/install-tree.sh \
   packaging/deb/build-deb.sh \
   packaging/deb/test-package-lifecycle.sh \
@@ -112,6 +116,15 @@ The automated suite checks, among other things:
 - real privileged installation and removal of the generated DEB and RPM in
   disposable GitHub Actions environments, including launcher and icon cleanup.
 
+- private GUI URL transfer through owner-only URL and yt-dlp batch files, with
+  the requested URL absent from GUI, engine, and yt-dlp process arguments;
+- retained-log URL redaction, an 8 MiB retained-size limit, and private live
+  diagnostics kept under the runtime temporary directory;
+- complete-video rejection when either the video or audio stream is absent;
+- conditional Deno requirements and YouTube-only remote EJS fallback;
+- measured wrapper-managed FFmpeg remux progress and bounded progress arithmetic;
+- hermetic real-tool transfers using generated media and a loopback HTTP server.
+
 ## GitHub Actions
 
 `.github/workflows/shell.yml` runs the same validation for pull requests and
@@ -125,6 +138,12 @@ Fedora 44 container for every pull request and push to `main`. Each generated
 package is installed with its native package manager, its commands, desktop
 entry, icon, and version are checked, then the package is removed and the
 absence of all application-owned files is verified.
+
+
+`.github/workflows/real-tools.yml` installs actual yt-dlp, aria2c, FFmpeg, and
+FFprobe on Ubuntu. It generates tiny media fixtures locally, serves them over a
+loopback HTTP server, validates a complete video with audio, and rejects a
+video-only result without contacting a public media service.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the complete validation first, verifies tag ancestry and project versions,

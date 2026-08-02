@@ -20,17 +20,21 @@ readonly PACKAGE_REVISION='1'
 }
 
 for command_name in \
-    awk desktop-file-validate dpkg-deb du git install mktemp realpath stat; do
+    awk bash cat chmod date desktop-file-validate dirname dpkg-deb du git \
+    install mkdir mktemp realpath rm stat; do
     command -v "${command_name}" >/dev/null 2>&1 || {
-        printf 'Error: required command is absent: %s\n' "${command_name}" >&2
+        printf 'Error: required command is absent: %s\n' \
+            "${command_name}" >&2
         exit 127
     }
 done
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+script_parent=$(dirname -- "${BASH_SOURCE[0]}")
+script_dir=$(cd -- "${script_parent}" && pwd -P)
 readonly script_dir
 project_dir=$(cd -- "${script_dir}/../.." && pwd -P)
 readonly project_dir
+
 mkdir -p -- "${OUTPUT_DIR}"
 output_dir=$(realpath -m -- "${OUTPUT_DIR}")
 readonly output_dir
@@ -60,23 +64,29 @@ Priority: optional
 Architecture: all
 Maintainer: OscarFrog <151366285+OscarFrog@users.noreply.github.com>
 Installed-Size: ${installed_size}
-Depends: bash (>= 4.4), coreutils, grep, util-linux, aria2 (>= 1.37.0), ffmpeg, zenity, hicolor-icon-theme
-Recommends: yt-dlp
-Suggests: deno, firefox | firefox-esr
+Depends: bash (>= 4.4), coreutils, findutils, grep, sed, util-linux, aria2, ffmpeg, yt-dlp, zenity, hicolor-icon-theme
+Suggests: deno (>= 2.3.0), firefox | firefox-esr
 Homepage: https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui
 Description: Zenity interface and Bash engine for yt-dlp and aria2
- Download one complete MKV video, an authenticated YouTube HLS video, or the
- best native audio track with yt-dlp, aria2c, FFmpeg, and Zenity on GNU/Linux.
+ Download one complete MKV video or the best native audio track with yt-dlp,
+ aria2c, FFmpeg, and Zenity on GNU/Linux.
 EOF_CONTROL
 chmod 0644 -- "${root}/DEBIAN/control"
 
 package_path="${output_dir}/${PACKAGE_NAME}_${VERSION}-${PACKAGE_REVISION}_all.deb"
 rm -f -- "${package_path}"
+
 source_date_epoch=${SOURCE_DATE_EPOCH:-}
 if [[ -z ${source_date_epoch} ]]; then
     source_date_epoch=$(git -C "${project_dir}" show -s --format=%ct HEAD)
 fi
+[[ ${source_date_epoch} =~ ^[0-9]+$ ]] || {
+    printf 'Error: invalid SOURCE_DATE_EPOCH: %s\n' \
+        "${source_date_epoch}" >&2
+    exit 65
+}
 readonly source_date_epoch
+
 SOURCE_DATE_EPOCH=${source_date_epoch} \
     dpkg-deb --root-owner-group --build "${root}" "${package_path}"
 
@@ -88,7 +98,8 @@ dpkg-deb --extract "${package_path}" "${extracted}"
 packaged_version=$(
     "${extracted}/usr/bin/yt-dlp-aria2-downloader" --version
 )
-[[ ${packaged_version} == "yt-dlp-aria2-downloader version ${VERSION}" ]]
+[[ ${packaged_version} == \
+    "yt-dlp-aria2-downloader version ${VERSION}" ]]
 desktop-file-validate --no-hints \
     "${extracted}/usr/share/applications/yt-dlp-aria2-downloader.desktop"
 [[ -f ${extracted}/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg ]]

@@ -19,18 +19,21 @@ readonly PACKAGE_NAME='yt-dlp-aria2-downloader-gui'
 }
 
 for command_name in \
-    basename cp cpio desktop-file-validate find git gzip mkdir mktemp \
-    realpath rm rpm rpm2cpio rpmbuild; do
+    basename cp cpio desktop-file-validate dirname find git gzip mkdir \
+    mktemp realpath rm rpm rpm2cpio rpmbuild; do
     command -v "${command_name}" >/dev/null 2>&1 || {
-        printf 'Error: required command is absent: %s\n' "${command_name}" >&2
+        printf 'Error: required command is absent: %s\n' \
+            "${command_name}" >&2
         exit 127
     }
 done
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+script_parent=$(dirname -- "${BASH_SOURCE[0]}")
+script_dir=$(cd -- "${script_parent}" && pwd -P)
 readonly script_dir
 project_dir=$(cd -- "${script_dir}/../.." && pwd -P)
 readonly project_dir
+
 mkdir -p -- "${OUTPUT_DIR}"
 output_dir=$(realpath -m -- "${OUTPUT_DIR}")
 readonly output_dir
@@ -66,10 +69,12 @@ rpm_list_file="${work_dir}/rpm-files"
 find "${topdir}/RPMS" -type f -name '*.rpm' -print >"${rpm_list_file}"
 mapfile -t rpm_files <"${rpm_list_file}"
 ((${#rpm_files[@]} == 1)) || {
-    printf 'Error: expected one RPM, found %d.\n' "${#rpm_files[@]}" >&2
+    printf 'Error: expected one RPM, found %d.\n' \
+        "${#rpm_files[@]}" >&2
     exit 65
 }
-rpm_path="${output_dir}/$(basename -- "${rpm_files[0]}")"
+rpm_name=$(basename -- "${rpm_files[0]}")
+rpm_path="${output_dir}/${rpm_name}"
 cp -- "${rpm_files[0]}" "${rpm_path}"
 
 rpm -qpi -- "${rpm_path}"
@@ -85,7 +90,8 @@ mkdir -p -- "${extracted}"
 packaged_version=$(
     "${extracted}/usr/bin/yt-dlp-aria2-downloader" --version
 )
-[[ ${packaged_version} == "yt-dlp-aria2-downloader version ${VERSION}" ]]
+[[ ${packaged_version} == \
+    "yt-dlp-aria2-downloader version ${VERSION}" ]]
 desktop-file-validate --no-hints \
     "${extracted}/usr/share/applications/yt-dlp-aria2-downloader.desktop"
 [[ -f ${extracted}/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg ]]

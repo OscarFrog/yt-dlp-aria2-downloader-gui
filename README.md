@@ -16,17 +16,17 @@ single URL using one of three profiles:
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
 streams deliberately remain on yt-dlp's native downloader. The current version
-is **2.1.19**.
+is **2.1.20**.
 
 ## Recommended installation
 
 Open the [latest GitHub release](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest)
 and download the file matching your system:
 
-- **Fedora 44 or newer:** `2.1.19` RPM,
-  `yt-dlp-aria2-downloader-gui-2.1.19-1.fc44.noarch.rpm`;
-- **Debian or Ubuntu:** `2.1.19` DEB,
-  `yt-dlp-aria2-downloader-gui_2.1.19-1_all.deb`;
+- **Fedora 44 or newer:** `2.1.20` RPM,
+  `yt-dlp-aria2-downloader-gui-2.1.20-1.fc44.noarch.rpm`;
+- **Debian or Ubuntu:** `2.1.20` DEB,
+  `yt-dlp-aria2-downloader-gui_2.1.20-1_all.deb`;
 - **other GNU/Linux distributions or portable use:** the versioned ZIP.
 
 For an RPM or DEB installation, the graphical launcher and its application icon
@@ -50,10 +50,10 @@ Git installations.
   separate video/audio streams, and FFmpeg post-processing;
 - cancellation of the complete process group through one shared GUI session;
 - supervised yt-dlp and wrapper-managed FFmpeg commands, including bounded shutdown;
-- FFprobe validation of the expected audio or video stream before success is published;
+- FFprobe validation of both video and audio streams for complete-video results, and of the audio stream for audio results, before success is published;
 - one active writer per destination directory, preventing concurrent
   instances from sharing partial or post-processing files;
-- private diagnostic logs retained only for problematic runs;
+- private diagnostic logs retained only for problematic runs, with URL redaction and an 8 MiB retained-size cap;
 - application-menu launcher;
 - static tests, integration tests, and GitHub Actions validation on Ubuntu and
   Fedora 44.
@@ -66,15 +66,14 @@ The following commands must be installed and available in `PATH`:
 - `yt-dlp` **2026.06.09 or newer**;
 - `aria2c` **1.37.0 or newer**;
 - FFmpeg and `ffprobe`;
-- Deno **2.3.0 or newer**;
+- Deno **2.3.0 or newer for YouTube extraction**; other supported sites can run without Deno;
 - Zenity for the graphical interface;
 - Firefox with an authenticated YouTube session only when using the optional
   authenticated YouTube HLS profile;
 - GNU coreutils, GNU grep, and `setsid`, which is usually provided by
   `util-linux`.
 
-The engine checks the minimum versions of `yt-dlp`, `aria2c`, and Deno before
-starting a download.
+The engine always checks the minimum versions of `yt-dlp` and `aria2c`. Deno is checked only when it is installed or when YouTube extraction requires it.
 
 ## Package installation
 
@@ -104,7 +103,7 @@ sudo dnf install \
 Download these release assets:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.19-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.20-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -112,19 +111,17 @@ Verify the downloaded RPM and install it:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.19-1.fc44.noarch.rpm
+sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.20-1.fc44.noarch.rpm
 ```
 
-The RPM declares Fedora dependencies for Bash, yt-dlp, aria2, FFmpeg, Zenity,
-coreutils, grep, and util-linux. Deno remains a separately managed runtime; the
-engine checks that Deno 2.3.0 or newer is available before downloading.
+The RPM declares yt-dlp, aria2, FFmpeg/FFprobe, Zenity, and the required GNU command-line tools as hard dependencies. Deno remains a separately managed runtime and is required only for YouTube extraction.
 
 ### Debian and Ubuntu
 
 Download these release assets:
 
 ```text
-yt-dlp-aria2-downloader-gui_2.1.19-1_all.deb
+yt-dlp-aria2-downloader-gui_2.1.20-1_all.deb
 SHA256SUMS
 ```
 
@@ -132,13 +129,10 @@ Verify and install the package:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.19-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.20-1_all.deb
 ```
 
-The DEB installs the application and common system dependencies. Distribution
-versions of yt-dlp and Deno can be older than the minimum versions required by
-this project; the engine performs its normal runtime checks and reports the
-exact dependency that must be updated.
+The DEB installs yt-dlp, aria2, FFmpeg/FFprobe, Zenity, and the required GNU command-line tools as hard dependencies. Deno is optional for generic extraction but required for YouTube. The engine still verifies runtime versions and reports any component that must be updated.
 
 ### Packaged commands
 
@@ -178,7 +172,7 @@ older ZIP or Git installation created in the current user's home directory.
 Download these release assets:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.19.zip
+yt-dlp-aria2-downloader-gui-2.1.20.zip
 SHA256SUMS
 ```
 
@@ -186,8 +180,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.19.zip
-cd yt-dlp-aria2-downloader-gui-2.1.19
+unzip yt-dlp-aria2-downloader-gui-2.1.20.zip
+cd yt-dlp-aria2-downloader-gui-2.1.20
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -265,7 +259,7 @@ Select the folder where the downloaded media will be saved.
 
 ### 4. Follow the download progress
 
-The progress dialog displays the current download or post-processing stage. Use
+The progress dialog displays transfer progress and post-processing stages. Wrapper-managed FFmpeg remuxing uses FFmpeg machine progress and the source duration instead of an artificial timer. Use
 the cancel button to stop the complete download process.
 
 
@@ -279,9 +273,13 @@ When the download fails, the interface displays an error dialog and preserves
 the diagnostic log.
 
 
-The retained log can be opened from the error dialog. It contains the details
-needed to diagnose the failure and may include the requested URL.
+The retained log can be opened from the error dialog. Before retention, URL-like values are replaced with `[REDACTED_URL]` and only the last 8 MiB are kept. The live log is private (`0600`) while the worker is running.
 
+
+
+### Privacy of URLs in the graphical interface
+
+The GUI writes the requested URL to a private temporary file and passes only that file path to the engine. The engine then supplies yt-dlp through its private batch-file interface, so the URL is not exposed in the GUI, engine, or yt-dlp command-line arguments. URLs containing `user:password@host` are rejected. Direct CLI use with a positional URL remains supported; as with any command-line program, that positional URL can be visible in the invoking process arguments.
 
 ## Command-line usage
 
@@ -349,18 +347,14 @@ yt-dlp's native downloader for DASH and HLS manifests:
 This keeps segmented media handling inside yt-dlp while retaining aria2c's
 multi-connection acceleration where it is appropriate.
 
-For current YouTube extraction, the engine also enables Deno and requests the
-EJS components from npm when yt-dlp needs them:
+For current YouTube extraction, the engine enables Deno. yt-dlp uses locally installed EJS components when available and may request the official EJS components from npm as a fallback:
 
 ```text
 --js-runtimes deno
 --remote-components ejs:npm
 ```
 
-yt-dlp may download the yt-dlp-ejs challenge-solver components from npm.
-Those scripts are executed by Deno with restricted file-system and network
-permissions. A YouTube download can therefore contact npm in addition to the
-media website.
+yt-dlp may download the yt-dlp-ejs challenge-solver components from npm when compatible local components are unavailable. Set `YTDLP_DISABLE_REMOTE_EJS=1` to prohibit that fallback. In strict mode, YouTube extraction fails rather than downloading remote components.
 
 ### Complete video
 
@@ -421,10 +415,12 @@ Execution logs:
 ~/.local/state/yt-dlp-aria2-downloader/download-*.log
 ```
 
-Logs are private. A log is deleted automatically after the final media file
-is confirmed. Failed, canceled, interrupted, or inconsistent runs retain their
-logs for troubleshooting. Retained diagnostic logs older than 15 days are
-removed automatically the next time the graphical interface starts.
+The live worker log is created with mode `0600` inside the private runtime
+temporary directory and is removed after success. Failed, canceled, interrupted,
+or inconsistent runs publish only a sanitized diagnostic copy in the state
+directory: URL-like values are replaced, only the last 8 MiB are retained, and
+the resulting file remains mode `0600`. Retained diagnostic logs older than 15
+days are removed automatically the next time the graphical interface starts.
 
 A same-user, per-destination advisory lock is kept under
 `$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader` when that runtime directory is

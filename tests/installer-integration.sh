@@ -28,6 +28,7 @@ readonly APPLICATION_DIR="${DATA_HOME}/applications"
 readonly DESKTOP_FILE="${APPLICATION_DIR}/yt-dlp-aria2-downloader.desktop"
 readonly LAUNCHER_DIR="${DATA_HOME}/yt-dlp-aria2-downloader"
 readonly LAUNCHER_LINK="${LAUNCHER_DIR}/launch"
+readonly ICON_FILE="${DATA_HOME}/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg"
 readonly EXEC_MARKER="${TEST_ROOT}/gio-launch-marker"
 
 assert_no_install_temporary_files() {
@@ -113,6 +114,12 @@ assert_file_has_line "${DESKTOP_FILE}" \
 assert_file_has_line "${DESKTOP_FILE}" \
     'Comment[fr]=Télécharger une vidéo ou extraire une piste audio' \
     'French desktop comment'
+assert_file_has_line "${DESKTOP_FILE}" 'Icon=yt-dlp-aria2-downloader' \
+    'dedicated per-user desktop icon name'
+[[ -f ${ICON_FILE} && ! -L ${ICON_FILE} ]] || \
+    fail 'The dedicated per-user application icon was not installed.'
+icon_mode=$(stat -c '%a' -- "${ICON_FILE}")
+assert_equals '644' "${icon_mode}" 'per-user application icon permissions'
 
 assert_status 0 'installed launcher passes desktop-file-validate' \
     desktop-file-validate --no-hints "${DESKTOP_FILE}"
@@ -258,6 +265,8 @@ assert_text_contains "${ASSERT_OUTPUT}" 'Launcher removed:' \
 [[ ! -e ${DESKTOP_FILE} ]] || fail 'The desktop launcher was not removed.'
 [[ ! -e ${LAUNCHER_LINK} && ! -L ${LAUNCHER_LINK} ]] ||
     fail 'The stable launcher link was not removed.'
+[[ ! -e ${ICON_FILE} && ! -L ${ICON_FILE} ]] ||
+    fail 'The dedicated per-user application icon was not removed.'
 
 # Uninstall also removes known temporary artifacts left by an unclean stop.
 mkdir -p -- "${LAUNCHER_DIR}/.install.stale"
