@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to publish, for example v2.1.24
+        description: Existing version tag to publish, for example v2.1.25
         required: true
         type: string
 permissions:
@@ -25,15 +25,10 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Install validation and real-tool dependencies
+      - name: Install validation dependencies
         run: |
           sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes \
-            aria2 curl desktop-file-utils ffmpeg gnupg python3-venv shellcheck unzip
-          python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
-          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
-            --disable-pip-version-check 'yt-dlp==2026.6.9'
-          echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >> "${GITHUB_PATH}"
+          sudo apt-get -o Acquire::Retries=3 install --yes curl desktop-file-utils gnupg shellcheck unzip
       - name: Verify tag and versions
         shell: bash
         run: |
@@ -50,11 +45,33 @@ jobs:
           grep -Fq "version actuelle est la **${version}**" README.fr.md
           grep -Fq "## ${version} - " CHANGELOG.md
       - run: bash ./tests/run-all.sh
+
+  real-tools:
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        yt_dlp_version: ['2026.6.9', '2026.8.19']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - name: Install real engines
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install --yes aria2 ffmpeg python3-venv
+          python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
+            --disable-pip-version-check "yt-dlp==${{ matrix.yt_dlp_version }}"
+          echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >> "${GITHUB_PATH}"
       - name: Run hermetic real-tool integration
         run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/real-tools-integration.sh
 
   zip:
-    needs: validate
+    needs: [validate, real-tools]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -84,17 +101,43 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  rpm:
-    needs: validate
+  rpm-build:
+    needs: [validate, real-tools]
     runs-on: ubuntu-24.04
     container: fedora:44
-    timeout-minutes: 30
+    timeout-minutes: 20
+    steps:
+      - name: Install RPM build tools
+        run: dnf install --assumeyes cpio desktop-file-utils findutils git gzip rpm-build tar
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build release RPM once
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          bash packaging/rpm/build-rpm.sh "${RELEASE_TAG#v}" dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+          retention-days: 7
+
+  rpm-test:
+    needs: rpm-build
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
         scenario: [fresh, ffmpeg-free]
     steps:
-      - name: Install RPM build tools
+      - name: Install RPM test tools
         run: |
           dnf install --assumeyes cpio desktop-file-utils findutils git gzip rpm-build tar
           if [[ '${{ matrix.scenario }}' == 'ffmpeg-free' ]]; then
@@ -105,13 +148,11 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Build RPM
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-          bash packaging/rpm/build-rpm.sh "${RELEASE_TAG#v}" dist
-      - name: Install through supported Fedora bootstrap
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: release-rpm
+          path: dist
+      - name: Install exact shared RPM through supported Fedora bootstrap
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -130,28 +171,33 @@ jobs:
           runtime_manager=/usr/libexec/yt-dlp-aria2-downloader/runtime-manager.sh
           "${runtime_manager}" versions
           /usr/bin/yt-dlp-aria2-downloader --version
-      - name: Remove application and verify RPM ownership
+      - name: Remove and re-run exact RPM lifecycle
         shell: bash
         run: |
           set -Eeuo pipefail
           dnf remove --assumeyes yt-dlp-aria2-downloader-gui
-          ! rpm -q yt-dlp-aria2-downloader-gui
-          test ! -e /usr/libexec/yt-dlp-aria2-downloader
           shopt -s nullglob; packages=(dist/*.rpm); shopt -u nullglob
           ((${#packages[@]} == 1))
           bash packaging/rpm/test-package-lifecycle.sh "${packages[0]}" "${RELEASE_TAG#v}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Test v2.1.24 -> release RPM upgrade
         if: matrix.scenario == 'fresh'
-        with:
-          name: release-rpm
-          path: dist/*.rpm
-          if-no-files-found: error
-          retention-days: 7
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          old_root=$(mktemp -d); old_tree="${old_root}/tree"; old_dist="${old_root}/dist"; mkdir -p -- "${old_dist}"
+          trap 'git worktree remove --force "${old_tree}" >/dev/null 2>&1 || true; rm -rf -- "${old_root}"' EXIT
+          git worktree add --detach "${old_tree}" v2.1.24
+          git config --global --add safe.directory "${old_tree}"
+          bash "${old_tree}/packaging/rpm/build-rpm.sh" 2.1.24 "${old_dist}"
+          shopt -s nullglob; old=("${old_dist}"/*.rpm); current=(dist/*.rpm); shopt -u nullglob
+          ((${#old[@]} == 1 && ${#current[@]} == 1))
+          bash packaging/rpm/test-package-upgrade.sh "${old[0]}" "${current[0]}" 2.1.24 "${RELEASE_TAG#v}"
 
   deb:
-    needs: validate
+    needs: [validate, real-tools]
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -162,7 +208,7 @@ jobs:
         run: |
           sudo apt-get -o Acquire::Retries=3 update
           sudo apt-get -o Acquire::Retries=3 install --yes desktop-file-utils
-      - name: Build and validate DEB
+      - name: Build, lifecycle, reinstall, and upgrade DEB
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -170,6 +216,13 @@ jobs:
           shopt -s nullglob; packages=(dist/*.deb); shopt -u nullglob
           ((${#packages[@]} == 1))
           sudo bash packaging/deb/test-package-lifecycle.sh "${packages[0]}" "${RELEASE_TAG#v}"
+          old_root=$(mktemp -d); old_tree="${old_root}/tree"; old_dist="${old_root}/dist"; mkdir -p -- "${old_dist}"
+          trap 'git worktree remove --force "${old_tree}" >/dev/null 2>&1 || true; rm -rf -- "${old_root}"' EXIT
+          git worktree add --detach "${old_tree}" v2.1.24
+          bash "${old_tree}/packaging/deb/build-deb.sh" 2.1.24 "${old_dist}"
+          shopt -s nullglob; old=("${old_dist}"/*.deb); shopt -u nullglob
+          ((${#old[@]} == 1))
+          sudo bash packaging/deb/test-package-upgrade.sh "${old[0]}" "${packages[0]}" 2.1.24 "${RELEASE_TAG#v}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-deb
@@ -178,7 +231,7 @@ jobs:
           retention-days: 7
 
   publish:
-    needs: [zip, rpm, deb]
+    needs: [zip, rpm-test, deb]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -207,20 +260,61 @@ jobs:
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-path: dist/*
-      - name: Publish immutable release
+      - name: Publish and verify immutable release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -Eeuo pipefail
           shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/*.deb dist/install-fedora.sh); shopt -u nullglob
+          expected=$(mktemp); actual=$(mktemp); existing=$(mktemp -d)
+          trap 'rm -f -- "${expected}" "${actual}"; rm -rf -- "${existing}"' EXIT
+          for payload in "${payloads[@]}" dist/SHA256SUMS; do
+            printf '%s\n' "${payload##*/}"
+          done | LC_ALL=C sort >"${expected}"
+
+          created_release=false
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            existing=$(mktemp -d); trap 'rm -rf -- "${existing}"' EXIT
+            gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name' | LC_ALL=C sort >"${actual}"
+            if ! cmp -s -- "${expected}" "${actual}"; then
+              printf '%s\n' 'Error: existing release asset inventory differs from the expected immutable set.' >&2
+              diff -u -- "${expected}" "${actual}" >&2 || true
+              exit 65
+            fi
             for payload in "${payloads[@]}" dist/SHA256SUMS; do
-              name=${payload##*/}; gh release download "${RELEASE_TAG}" --dir "${existing}" --pattern "${name}"
+              name=${payload##*/}
+              gh release download "${RELEASE_TAG}" --dir "${existing}" --pattern "${name}"
               cmp -s -- "${payload}" "${existing}/${name}"
             done
-            exit 0
+          else
+            gh release create "${RELEASE_TAG}" "${payloads[@]}" dist/SHA256SUMS \
+              --verify-tag --generate-notes --title "yt-dlp aria2 downloader ${RELEASE_TAG#v}"
+            created_release=true
           fi
-          gh release create "${RELEASE_TAG}" "${payloads[@]}" dist/SHA256SUMS \
-            --verify-tag --generate-notes --title "yt-dlp aria2 downloader ${RELEASE_TAG#v}"
+
+          immutable=false
+          for _ in {1..10}; do
+            immutable=$(gh release view "${RELEASE_TAG}" --json isImmutable --jq '.isImmutable' 2>/dev/null || true)
+            [[ ${immutable} == true ]] && break
+            sleep 2
+          done
+          if [[ ${immutable} != true ]]; then
+            printf '%s\n' 'Error: repository Immutable Releases must be enabled before tagging/publishing.' >&2
+            if [[ ${created_release} == true ]]; then
+              gh release delete "${RELEASE_TAG}" --yes >/dev/null 2>&1 || true
+            fi
+            exit 78
+          fi
+
+          verify_with_retry() {
+            local attempt
+            for ((attempt = 1; attempt <= 10; attempt++)); do
+              "$@" && return 0
+              sleep 3
+            done
+            return 1
+          }
+          verify_with_retry gh release verify "${RELEASE_TAG}"
+          for payload in "${payloads[@]}" dist/SHA256SUMS; do
+            verify_with_retry gh release verify-asset "${RELEASE_TAG}" "${payload}"
+          done

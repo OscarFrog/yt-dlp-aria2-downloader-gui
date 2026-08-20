@@ -35,6 +35,35 @@ readonly script_dir
 project_dir=$(cd -- "${script_dir}/../.." && pwd -P)
 readonly project_dir
 
+
+source_status=''
+if ! source_status=$(
+    git -C "${project_dir}" status --porcelain=v1 --untracked-files=normal
+); then
+    printf 'Error: unable to inspect the package source worktree.\n' >&2
+    exit 65
+fi
+if [[ -n ${source_status} ]]; then
+    printf '%s\n' \
+        'Error: package sources contain uncommitted changes.' >&2
+    printf '%s\n' \
+        'Commit the intended release changes before building a package.' >&2
+    exit 65
+fi
+
+source_version_output=''
+if ! source_version_output=$("${project_dir}/download-video.sh" --version); then
+    printf 'Error: unable to read the source-tree version.\n' >&2
+    exit 65
+fi
+source_version=${source_version_output##* }
+if [[ ${source_version} != "${VERSION}" ]]; then
+    printf 'Error: source version does not match requested package version.\n' >&2
+    printf 'Source:    %s\n' "${source_version_output}" >&2
+    printf 'Requested: %s\n' "${VERSION}" >&2
+    exit 65
+fi
+
 mkdir -p -- "${OUTPUT_DIR}"
 output_dir=$(realpath -m -- "${OUTPUT_DIR}")
 readonly output_dir

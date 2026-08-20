@@ -17,7 +17,7 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.24**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.25**.
 
 ## Installation recommandée
 
@@ -27,7 +27,7 @@ Pour **Fedora 44 ou une version plus récente**, téléchargez ces trois fichier
 
 ```text
 install-fedora.sh
-yt-dlp-aria2-downloader-gui-2.1.24-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.25-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -35,7 +35,7 @@ Vérifiez les fichiers téléchargés puis lancez le bootstrap Fedora officiel :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.24-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.25-1.fc44.noarch.rpm
 ```
 
 Le bootstrap active RPM Fusion Free si nécessaire, remplace `ffmpeg-free` par
@@ -45,7 +45,7 @@ runtimes yt-dlp et Deno propres à l'utilisateur.
 
 Pour **Debian ou Ubuntu**, téléchargez le DEB versionné et `SHA256SUMS`,
 vérifiez-les puis installez le paquet avec `sudo apt install
-./yt-dlp-aria2-downloader-gui_2.1.24-1_all.deb`. Pour **les autres distributions
+./yt-dlp-aria2-downloader-gui_2.1.25-1_all.deb`. Pour **les autres distributions
 GNU/Linux ou une utilisation portable**, utilisez le ZIP versionné ou un clone
 Git. Les runtimes yt-dlp et Deno gérés automatiquement prennent actuellement en
 charge Linux `x86_64` et `aarch64`.
@@ -105,19 +105,49 @@ opérations réseau sont bornées ; si le contrôle de mise à jour échoue, le
 dernier runtime vérifié reste actif.
 
 Définissez `YTDLP_ARIA2_YTDLP_CHANNEL=nightly` pour utiliser volontairement les
-nightly yt-dlp. Définissez `YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE=0` pour ne pas
-contrôler les mises à jour tout en exigeant des runtimes vérifiés déjà installés.
-`runtime-manager.sh rollback yt-dlp` et `runtime-manager.sh rollback deno`
-réactivent un runtime précédent après validation lorsqu'il existe.
+nightly yt-dlp. Définissez `YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE=0` pour un **mode
+strictement sans réseau** : seuls les runtimes déjà installés sont validés ; un
+runtime absent ou invalide provoque un échec clair sans appel à `curl`. Utilisez
+`runtime-manager.sh ensure` lorsqu'un bootstrap sans contrôle de mise à jour est
+explicitement souhaité. `runtime-manager.sh rollback yt-dlp` et
+`runtime-manager.sh rollback deno` réactivent un runtime précédent après
+validation lorsqu'il existe.
 
-Le runtime yt-dlp est authentifié avec le manifeste SHA-256 signé par upstream.
-Les archives Deno sont vérifiées avec le checksum publié avec la même release
-officielle avant extraction et validation.
+Le gestionnaire résout d'abord le tag exact de la release, puis télécharge tous
+les fichiers depuis cette coordonnée immuable, ce qui élimine la course où
+`latest` changerait entre deux téléchargements. yt-dlp est authentifié avec le
+manifeste SHA-256 signé par upstream. Les archives Deno sont vérifiées avec le
+checksum SHA-256 publié à côté de la même release exacte avant extraction et
+validation. L'exécution des runtimes candidats est elle aussi bornée dans le
+temps. Les appels réseau individuels sont bornés ; un bootstrap complet en
+chaîne plusieurs, il ne faut donc pas interpréter ces limites comme un délai
+global unique.
 
 Les paquets système comme FFmpeg, aria2 et Zenity restent gérés par le
 gestionnaire de paquets de la distribution. Sous Fedora, le bootstrap officiel
 installe les versions les plus récentes disponibles dans les dépôts
 Fedora/RPM Fusion activés au moment de l'installation.
+
+## Provenance et immuabilité des releases
+
+Les **Immutable Releases** GitHub doivent être activées dans les paramètres du
+dépôt avant de pousser le tag de release. Le workflow contrôle l'inventaire
+exact des noms d'assets, compare octet par octet une release déjà existante lors
+d'un rerun, confirme que la release obtenue est immuable, puis vérifie
+l'attestation GitHub et chaque asset local. Une nouvelle release restée mutable
+est supprimée et le workflow échoue au lieu de l'accepter.
+
+Avec GitHub CLI, il est possible de vérifier en plus la provenance du build et
+l'identité de la release :
+
+```bash
+gh attestation verify ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.1.25 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.1.25 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+```
+
+`SHA256SUMS` reste utile pour un contrôle local ou hors ligne ; les attestations
+et l'immuabilité ajoutent la preuve de provenance et d'identité de release.
 
 ## Installation par paquet
 
@@ -144,7 +174,7 @@ Téléchargez :
 
 ```text
 install-fedora.sh
-yt-dlp-aria2-downloader-gui-2.1.24-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.25-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -157,7 +187,7 @@ sha256sum --ignore-missing --check SHA256SUMS
 Puis lancez :
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.24-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.25-1.fc44.noarch.rpm
 ```
 
 Le bootstrap :
@@ -176,11 +206,11 @@ de l'utilisateur et vérifiés avant activation.
 
 ### Debian et Ubuntu
 
-La release 2.1.24 publie un DEB indépendant de l'architecture, aligné sur le
+La release 2.1.25 publie un DEB indépendant de l'architecture, aligné sur le
 même modèle de runtimes gérés que Fedora. Téléchargez :
 
 ```text
-yt-dlp-aria2-downloader-gui_2.1.24-1_all.deb
+yt-dlp-aria2-downloader-gui_2.1.25-1_all.deb
 SHA256SUMS
 ```
 
@@ -188,7 +218,7 @@ Vérifiez puis installez :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.24-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.25-1_all.deb
 ```
 
 Le DEB dépend des outils système habituels (`aria2c`, FFmpeg/FFprobe, Zenity,
@@ -243,7 +273,7 @@ ZIP ou Git créée dans le dossier personnel de l’utilisateur courant.
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.24.zip
+yt-dlp-aria2-downloader-gui-2.1.25.zip
 SHA256SUMS
 ```
 
@@ -251,8 +281,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.24.zip
-cd yt-dlp-aria2-downloader-gui-2.1.24
+unzip yt-dlp-aria2-downloader-gui-2.1.25.zip
+cd yt-dlp-aria2-downloader-gui-2.1.25
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install

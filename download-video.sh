@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.24
+# Version     : 2.1.25
 # Date        : 2026-08-20
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
@@ -11,7 +11,7 @@
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.1.24"
+readonly VERSION="2.1.25"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -1007,7 +1007,7 @@ else
     runtime_action='update'
     case ${YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE:-1} in
     1 | '') ;;
-    0) runtime_action='ensure' ;;
+    0) runtime_action='require' ;;
     *)
         error 'YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE must be 0 or 1.'
         exit 64

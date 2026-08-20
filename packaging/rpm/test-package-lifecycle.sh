@@ -147,4 +147,29 @@ for private_path in \
     }
 done
 
-printf 'RPM lifecycle passed for %s.\n' "${VERSION}"
+# Reinstall the exact same RPM after complete removal to verify that no stale
+# package state prevents a deterministic second lifecycle.
+dnf install --assumeyes --allowerasing --nogpgcheck \
+    --setopt=install_weak_deps=False "${package_path}"
+package_installed=true
+installed_version=$(/usr/bin/yt-dlp-aria2-downloader --version)
+[[ ${installed_version} == "yt-dlp-aria2-downloader version ${VERSION}" ]]
+dnf remove --assumeyes "${PACKAGE_NAME}"
+package_installed=false
+for path in "${package_files[@]}"; do
+    [[ ! -e ${path} && ! -L ${path} ]] || {
+        printf 'Error: RPM reinstall/removal left a file: %s\n' "${path}" >&2
+        exit 65
+    }
+done
+for private_path in \
+    /usr/libexec/yt-dlp-aria2-downloader \
+    "/usr/share/doc/${PACKAGE_NAME}" \
+    "/usr/share/licenses/${PACKAGE_NAME}"; do
+    [[ ! -e ${private_path} && ! -L ${private_path} ]] || {
+        printf 'Error: RPM reinstall/removal left a private path: %s\n' "${private_path}" >&2
+        exit 65
+    }
+done
+
+printf 'RPM lifecycle and reinstall passed for %s.\n' "${VERSION}"

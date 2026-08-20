@@ -66,6 +66,9 @@ shellcheck -x -o all "${TEST_SHELL_FILES[@]}"
 printf '\n=== Runtime-manager integration ===\n'
 bash -- ./tests/runtime-manager-integration.sh
 
+printf '\n=== Runtime-manager hardening integration ===\n'
+bash -- ./tests/runtime-manager-hardening-integration.sh
+
 printf '\n=== Mock integration ===\n'
 bash -- ./tests/mock-integration.sh
 

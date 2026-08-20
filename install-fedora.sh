@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 022
 
 readonly PACKAGE_NAME='yt-dlp-aria2-downloader-gui'
-readonly APP_VERSION='2.1.24'
+readonly APP_VERSION='2.1.25'
 readonly PRIVATE_DIR='/usr/libexec/yt-dlp-aria2-downloader'
 
 error() {

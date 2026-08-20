@@ -156,4 +156,26 @@ for private_path in \
     }
 done
 
-printf 'DEB lifecycle passed for %s.\n' "${VERSION}"
+# Reinstall the exact same package after a complete removal. This catches
+# stale maintainer-script state and incomplete ownership cleanup that a single
+# install/remove cycle can miss.
+DEBIAN_FRONTEND=noninteractive apt-get install --yes "${package_path}"
+package_installed=true
+installed_version=$(/usr/bin/yt-dlp-aria2-downloader --version)
+[[ ${installed_version} == "yt-dlp-aria2-downloader version ${VERSION}" ]]
+DEBIAN_FRONTEND=noninteractive apt-get remove --yes "${PACKAGE_NAME}"
+package_installed=false
+for path in "${package_files[@]}"; do
+    [[ ! -e ${path} && ! -L ${path} ]] || {
+        printf 'Error: DEB reinstall/removal left a file: %s\n' "${path}" >&2
+        exit 65
+    }
+done
+for private_path in "${PRIVATE_DIR}" "/usr/share/doc/${PACKAGE_NAME}"; do
+    [[ ! -e ${private_path} && ! -L ${private_path} ]] || {
+        printf 'Error: DEB reinstall/removal left a private path: %s\n' "${private_path}" >&2
+        exit 65
+    }
+done
+
+printf 'DEB lifecycle and reinstall passed for %s.\n' "${VERSION}"

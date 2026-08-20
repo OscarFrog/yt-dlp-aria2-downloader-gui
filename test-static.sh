@@ -134,7 +134,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.24'
+readonly EXPECTED_VERSION='2.1.25'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -396,7 +396,7 @@ assert_file_not_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gu
 
 
 
-# Version 2.1.24 runtime-update, Fedora bootstrap, playlist, HLS, packaging, and supply-chain contracts.
+# Version 2.1.25 runtime, release, playlist, HLS, packaging, and supply-chain contracts.
 assert_file_contains "${script_dir}/download-video.sh" \
     '--url-file FILE' 'private URL-file input'
 assert_file_contains "${script_dir}/download-video.sh" \
@@ -490,8 +490,11 @@ assert_file_contains "${script_dir}/runtime-manager.sh" \
 # shellcheck disable=SC2016
 # This assertion deliberately searches for literal shell source.
 assert_file_contains "${script_dir}/runtime-manager.sh" \
-    'upgrade --dry-run "${DENO_CHANNEL}"' \
-    'managed Deno checks the stable channel on launch'
+    'latest_deno_version latest_version' \
+    'managed Deno resolves the exact current stable release before download'
+assert_file_contains "${script_dir}/runtime-manager.sh" \
+    "releases/download/v\${version}" \
+    'managed Deno downloads from an exact release tag'
 # shellcheck disable=SC2016
 # This assertion deliberately searches for literal shell source.
 assert_file_contains "${script_dir}/runtime-manager.sh" \
@@ -550,5 +553,41 @@ assert_file_not_contains "${script_dir}/.github/workflows/packages.yml"     'gro
 assert_file_contains "${script_dir}/runtime-manager.sh" \
     "mktemp -d --tmpdir=/tmp '.yt-dlp-bootstrap.XXXXXXXX'" \
     'yt-dlp bootstrap keeps the GnuPG socket path short'
+assert_file_contains "${script_dir}/runtime-manager.sh" \
+    'require)' 'runtime manager exposes strict no-network require mode'
+assert_file_contains "${script_dir}/download-video.sh" \
+    "0) runtime_action='require'" 'managed update=0 never bootstraps runtimes'
+assert_file_contains "${script_dir}/runtime-manager.sh" \
+    '.activation-journal' 'runtime activation transaction journal'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'gh release verify-asset' 'release assets are verified against immutable release attestation'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    "gh release view \"\${RELEASE_TAG}\" --json assets" 'existing release asset inventory is exact'
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3' \
+    'RPM matrix downloads one shared artifact'
+assert_file_contains "${script_dir}/tests/run-all.sh" \
+    'runtime-manager-hardening-integration.sh' 'runtime hardening suite is mandatory'
+assert_file_contains "${script_dir}/packaging/rpm/test-package-upgrade.sh" \
+    'RPM upgrade passed:' 'RPM previous-to-current upgrade test'
+assert_file_contains "${script_dir}/packaging/deb/test-package-upgrade.sh" \
+    'DEB upgrade passed:' 'DEB previous-to-current upgrade test'
+
+assert_file_contains \
+    "${script_dir}/packaging/rpm/build-rpm.sh" \
+    'status --porcelain=v1 --untracked-files=normal' \
+    'RPM build rejects a dirty package source tree'
+assert_file_contains \
+    "${script_dir}/packaging/deb/build-deb.sh" \
+    'status --porcelain=v1 --untracked-files=normal' \
+    'DEB build rejects a dirty package source tree'
+assert_file_contains \
+    "${script_dir}/packaging/rpm/build-rpm.sh" \
+    'source version does not match requested package version' \
+    'RPM build validates its requested source version'
+assert_file_contains \
+    "${script_dir}/packaging/deb/build-deb.sh" \
+    'source version does not match requested package version' \
+    'DEB build validates its requested source version'
 
 printf '%s\n' 'Static tests passed.'
