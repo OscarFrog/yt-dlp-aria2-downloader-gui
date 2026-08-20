@@ -40,6 +40,17 @@ readonly package_path
     exit 2
 }
 
+package_requires=$(rpm -qpR -- "${package_path}")
+for required_dependency in \
+    'aria2 >= 1.37.0' \
+    'yt-dlp >= 2026.06.09'; do
+    if ! grep -Fqx -- "${required_dependency}" <<<"${package_requires}"; then
+        printf 'Error: RPM dependency is missing or too weak: %s\n' \
+            "${required_dependency}" >&2
+        exit 65
+    fi
+done
+
 if rpm -q "${PACKAGE_NAME}" >/dev/null 2>&1; then
     printf 'Error: %s is already installed.\n' "${PACKAGE_NAME}" >&2
     exit 65

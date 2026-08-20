@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.1.21 - 2026-08-20
+
+### Release qualification, packaging, and progress
+
+- Express the engine's minimum yt-dlp and aria2 versions in DEB and RPM metadata.
+- Keep the DEB tooling and strict dependency metadata in-tree, but suspend DEB publication because the currently available Debian 13 backports binary is below the secure yt-dlp minimum.
+- Direct Debian and Ubuntu users to the portable ZIP or Git installation while their supported repositories remain below the required yt-dlp version.
+- Publish only the qualified RPM, portable ZIP, and shared SHA256SUMS assets for 2.1.21.
+- Make package lifecycle tests reject missing or weakened minimum-version dependencies.
+- Gate release publication on the hermetic real-tool integration suite.
+- Weight multiple aria2 direct transfers by parsed byte counters when their sizes are available.
+- Add regression coverage for strongly asymmetric aria2 stream sizes.
+
 ## 2.1.20 - 2026-08-02
 
 ### Security, correctness, and stable-release qualification

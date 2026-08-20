@@ -17,21 +17,20 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.20**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.21**.
 
 ## Installation recommandée
 
 Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest)
 et téléchargez le fichier correspondant à votre système :
 
-- **Fedora 44 ou version plus récente :** le RPM `2.1.20`,
-  `yt-dlp-aria2-downloader-gui-2.1.20-1.fc44.noarch.rpm` ;
-- **Debian ou Ubuntu :** le DEB `2.1.20`,
-  `yt-dlp-aria2-downloader-gui_2.1.20-1_all.deb` ;
-- **autre distribution GNU/Linux ou utilisation portable :** l’archive ZIP
-  versionnée.
+- **Fedora 44 ou version plus récente :** le RPM `2.1.21`,
+  `yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noarch.rpm` ;
+- **Debian, Ubuntu, autre distribution GNU/Linux ou utilisation portable :**
+  l’archive ZIP versionnée. Vérifiez que `yt-dlp` et `aria2c` respectent les
+  versions minimales indiquées ci-dessous.
 
-Avec une installation RPM ou DEB, le lanceur graphique et son icône sont
+Avec une installation RPM, le lanceur graphique et son icône sont
 installés automatiquement dans le menu des applications. **Ne lancez pas
 `install-gui.sh` après l’installation d’un paquet.** Cet outil est réservé aux
 installations depuis le ZIP ou Git.
@@ -80,11 +79,11 @@ Le moteur contrôle toujours les versions minimales de `yt-dlp` et `aria2c`. Den
 
 ## Installation par paquet
 
-Les releases GitHub publient un RPM Fedora, un paquet Debian, l'archive ZIP
-portable et un fichier `SHA256SUMS` commun. Les paquets installent les commandes,
-l’icône dédiée et le lanceur graphique au niveau du système ; leur fonctionnement
-ne dépend pas du dossier dans lequel le paquet a été téléchargé. Aucune exécution
-séparée de `install-gui.sh` n’est nécessaire avec un RPM ou un DEB.
+Les releases GitHub publient un RPM Fedora, l'archive ZIP portable et un
+fichier `SHA256SUMS` commun. Le RPM installe les commandes, l’icône dédiée et le
+lanceur graphique au niveau du système ; son fonctionnement ne dépend pas du
+dossier dans lequel le paquet a été téléchargé. Aucune exécution séparée de
+`install-gui.sh` n’est nécessaire avec un RPM.
 
 Avant de migrer depuis une installation ZIP ou Git, supprimez l'ancien lanceur
 utilisateur afin qu'il ne masque pas l'entrée installée par le paquet :
@@ -106,7 +105,7 @@ sudo dnf install \
 Téléchargez les fichiers suivants depuis la release :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.20-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -114,32 +113,23 @@ Vérifiez puis installez le RPM :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.20-1.fc44.noarch.rpm
+sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noarch.rpm
 ```
 
 Le RPM déclare yt-dlp, aria2, FFmpeg/FFprobe, Zenity et les outils GNU nécessaires comme dépendances strictes. Deno reste géré séparément et n’est obligatoire que pour l’extraction YouTube.
 
 ### Debian et Ubuntu
 
-Téléchargez les fichiers suivants :
-
-```text
-yt-dlp-aria2-downloader-gui_2.1.20-1_all.deb
-SHA256SUMS
-```
-
-Vérifiez puis installez le paquet :
-
-```bash
-sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.20-1_all.deb
-```
-
-Le DEB installe yt-dlp, aria2, FFmpeg/FFprobe, Zenity et les outils GNU nécessaires comme dépendances strictes. Deno est facultatif pour l’extraction générique, mais obligatoire pour YouTube. Le moteur vérifie encore les versions et indique tout composant à mettre à jour.
+La release 2.1.21 ne publie pas de DEB. Le binaire yt-dlp actuellement
+disponible dans `trixie-backports` pour Debian 13 est antérieur au minimum de
+sécurité exigé par ce projet (`2026.06.09`). Les dépôts Ubuntu sont également
+sous ce minimum. Utilisez l’archive ZIP portable ou l’installation Git et
+fournissez séparément une version compatible de yt-dlp. N’abaissez pas la
+version minimale et ne forcez pas l’installation d’un ancien yt-dlp.
 
 ### Commandes installées par les paquets
 
-Après l'installation du RPM ou du DEB, démarrez l'interface depuis le menu des
+Après l'installation du RPM, démarrez l'interface depuis le menu des
 applications ou avec :
 
 ```bash
@@ -160,12 +150,6 @@ Fedora :
 sudo dnf remove yt-dlp-aria2-downloader-gui
 ```
 
-Debian ou Ubuntu :
-
-```bash
-sudo apt remove yt-dlp-aria2-downloader-gui
-```
-
 Le gestionnaire de paquets supprime les commandes système, le lanceur graphique
 et l’icône de l’application. `install-gui.sh uninstall` sert uniquement à
 nettoyer une ancienne installation ZIP ou Git créée dans le dossier personnel
@@ -176,7 +160,7 @@ de l’utilisateur courant.
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.20.zip
+yt-dlp-aria2-downloader-gui-2.1.21.zip
 SHA256SUMS
 ```
 
@@ -184,8 +168,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.20.zip
-cd yt-dlp-aria2-downloader-gui-2.1.20
+unzip yt-dlp-aria2-downloader-gui-2.1.21.zip
+cd yt-dlp-aria2-downloader-gui-2.1.21
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install

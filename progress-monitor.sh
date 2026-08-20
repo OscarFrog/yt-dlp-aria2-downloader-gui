@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : progress-monitor.sh
-# Version     : 2.1.20
-# Date        : 2026-08-02
+# Version     : 2.1.21
+# Date        : 2026-08-20
 # Description : Convert downloader events into a unified Zenity progress stream.
 # ============================================================================
 
@@ -104,6 +104,49 @@ sanitize_integer() {
     else
         printf '0'
     fi
+}
+
+parse_aria_size() {
+    local value=${1:-}
+    local whole
+    local fraction
+    local unit
+    local multiplier=1
+    local bytes
+    local fractional_bytes
+
+    if [[ ! ${value} =~ ^([0-9]{1,16})([.]([0-9]{1,3}))?(B|KiB|Ki|MiB|Mi|GiB|Gi|TiB|Ti)?$ ]]; then
+        printf '0'
+        return 0
+    fi
+
+    whole=$((10#${BASH_REMATCH[1]}))
+    fraction=${BASH_REMATCH[3]:-0}
+    unit=${BASH_REMATCH[4]:-}
+    case ${unit} in
+    '' | B) multiplier=1 ;;
+    Ki | KiB) multiplier=1024 ;;
+    Mi | MiB) multiplier=1048576 ;;
+    Gi | GiB) multiplier=1073741824 ;;
+    Ti | TiB) multiplier=1099511627776 ;;
+    *) printf '0'; return 0 ;;
+    esac
+
+    if ((whole > MAX_SAFE_COUNTER / multiplier)); then
+        printf '0'
+        return 0
+    fi
+    bytes=$((whole * multiplier))
+
+    fraction="${fraction}000"
+    fraction=${fraction:0:3}
+    fractional_bytes=$((10#${fraction} * multiplier / 1000))
+    if ((fractional_bytes > MAX_SAFE_COUNTER - bytes)); then
+        bytes=${MAX_SAFE_COUNTER}
+    else
+        bytes=$((bytes + fractional_bytes))
+    fi
+    printf '%d' "${bytes}"
 }
 
 saturating_add() {
@@ -591,6 +634,10 @@ handle_aria_progress() {
     local percent=-1
     local speed=''
     local eta=''
+    local downloaded_text=''
+    local total_text=''
+    local downloaded=0
+    local total=0
 
     if [[ ${phase} == postprocessing || ${phase} == verifying ]]; then
         return 0
@@ -610,15 +657,29 @@ handle_aria_progress() {
         fi
     fi
 
-    if [[ ${line} =~ \(([0-9]{1,3})%\) ]]; then
+    if [[ ${line} =~ [[:space:]]([^/[:space:]]+)/([^()[:space:]]+)\(([0-9]{1,3})%\) ]]; then
+        downloaded_text=${BASH_REMATCH[1]}
+        total_text=${BASH_REMATCH[2]}
+        percent=$((10#${BASH_REMATCH[3]}))
+        downloaded=$(parse_aria_size "${downloaded_text}")
+        total=$(parse_aria_size "${total_text}")
+    elif [[ ${line} =~ \(([0-9]{1,3})%\) ]]; then
         percent=$((10#${BASH_REMATCH[1]}))
-        if ((percent > 100)); then
-            percent=100
-        fi
-        if ((percent > ${ITEM_PERCENT[${key}]:-0})); then
-            ITEM_PERCENT[${key}]=${percent}
-        fi
     fi
+
+    if ((percent > 100)); then
+        percent=100
+    fi
+    if ((percent >= 0 && percent > ${ITEM_PERCENT[${key}]:-0})); then
+        ITEM_PERCENT[${key}]=${percent}
+    fi
+    if ((downloaded > ${ITEM_DOWNLOADED[${key}]:-0})); then
+        ITEM_DOWNLOADED[${key}]=${downloaded}
+    fi
+    if ((total > 0)); then
+        ITEM_TOTAL[${key}]=${total}
+    fi
+
     if [[ ${line} == *' DL:'* ]]; then
         speed=${line##* DL:}
         speed=${speed%% *}

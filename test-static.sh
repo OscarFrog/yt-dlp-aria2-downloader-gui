@@ -112,6 +112,10 @@ assert_file_contains \
     '^\[#([[:xdigit:]]+)[[:space:]]' \
     'aria2 progress without mandatory percentage'
 assert_file_contains \
+    "${script_dir}/progress-monitor.sh" \
+    'parse_aria_size() {' \
+    'aria2 human-readable byte counters are parsed for weighted progress'
+assert_file_contains \
     "${script_dir}/install-gui.sh" \
     "readonly LAUNCHER_LINK=\"\${LAUNCHER_DIR}/launch\"" \
     'stable desktop launcher link'
@@ -128,7 +132,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.20'
+readonly EXPECTED_VERSION='2.1.21'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -223,6 +227,11 @@ assert_file_contains "${script_dir}/.github/workflows/shell.yml" \
     'cancel-in-progress: true' \
     'outdated validation runs are cancelled'
 
+assert_file_contains \
+    "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+    '%dir %{_docdir}/%{name}' \
+    'RPM owns its application documentation directory'
+
 assert_file_contains "${script_dir}/README.md"     "is **${EXPECTED_VERSION}**." 'English README version'
 assert_file_contains "${script_dir}/README.fr.md"     "version actuelle est la **${EXPECTED_VERSION}**." 'French README version'
 assert_file_contains "${script_dir}/CHANGELOG.md"     "## ${EXPECTED_VERSION} - " 'changelog version'
@@ -311,12 +320,12 @@ assert_text_not_contains "${README_FR_TEXT}" \
     'docs/images/' 'French README has no embedded screenshots'
 
 
-assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
-    'name: Debian package' 'DEB package validation job'
+assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
+    'name: Debian package' 'unsupported DEB validation is disabled'
 assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
     'name: Fedora 44 RPM' 'RPM package validation job'
-assert_file_contains "${script_dir}/.github/workflows/release.yml" \
-    'dist/*.deb' 'release publishes a DEB payload'
+assert_file_not_contains "${script_dir}/.github/workflows/release.yml" \
+    'dist/*.deb' 'release does not publish an unsupported DEB payload'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'dist/*.rpm' 'release publishes an RPM payload'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
@@ -364,15 +373,15 @@ assert_file_contains "${script_dir}/packaging/yt-dlp-aria2-downloader.desktop" \
 assert_file_contains "${script_dir}/packaging/install-tree.sh" \
     'usr/share/icons/hicolor/scalable/apps' \
     'Freedesktop hicolor icon installation'
-assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
     'packaging/deb/test-package-lifecycle.sh' \
-    'DEB installation and removal validation'
+    'unsupported DEB lifecycle is not run in package CI'
 assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
     'packaging/rpm/test-package-lifecycle.sh' \
     'RPM installation and removal validation'
-assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+assert_file_not_contains "${script_dir}/.github/workflows/release.yml" \
     'packaging/deb/test-package-lifecycle.sh' \
-    'release DEB installation and removal validation'
+    'unsupported DEB lifecycle is not run during release'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'packaging/rpm/test-package-lifecycle.sh' \
     'release RPM installation and removal validation'
@@ -383,7 +392,7 @@ assert_file_not_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gu
 
 
 
-# Version 2.1.20 privacy, validation, and supply-chain contracts.
+# Version 2.1.21 privacy, validation, packaging, and supply-chain contracts.
 assert_file_contains "${script_dir}/download-video.sh" \
     '--url-file FILE' 'private URL-file input'
 assert_file_contains "${script_dir}/download-video.sh" \
@@ -411,9 +420,12 @@ assert_file_contains "${script_dir}/progress-monitor.sh" \
 assert_file_contains "${script_dir}/progress-monitor.sh" \
     'MAX_SAFE_COUNTER=9000000000000000' 'bounded progress arithmetic'
 assert_file_contains "${script_dir}/packaging/deb/build-deb.sh" \
-    'ffmpeg, yt-dlp, zenity' 'DEB strict runtime dependencies'
+    'aria2 (>= 1.37.0), ffmpeg, yt-dlp (>= 2026.06.09), zenity' \
+    'DEB versioned runtime dependencies'
 assert_file_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
-    'Requires:       yt-dlp' 'RPM strict yt-dlp dependency'
+    'Requires:       aria2 >= 1.37.0' 'RPM minimum aria2 dependency'
+assert_file_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+    'Requires:       yt-dlp >= 2026.06.09' 'RPM minimum yt-dlp dependency'
 assert_file_contains "${script_dir}/install-gui.sh" \
     'readonly ICON_FILE=' 'per-user dedicated icon installation'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
@@ -421,6 +433,12 @@ assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'release provenance attestation action'
 assert_file_contains "${script_dir}/.github/workflows/real-tools.yml" \
     'tests/real-tools-integration.sh' 'hermetic real-tool CI validation'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'tests/real-tools-integration.sh' 'release is gated by hermetic real-tool validation'
+assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
+    'container: debian:13-slim' 'unsupported Debian package job is absent'
+assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
+    'trixie-backports' 'package CI does not rely on insufficient Debian backports'
 assert_file_contains "${script_dir}/tests/run-all.sh" \
     'tests/ffmpeg-progress-integration.sh' 'measured FFmpeg progress regression suite'
 
