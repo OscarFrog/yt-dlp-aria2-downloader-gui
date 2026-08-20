@@ -127,6 +127,7 @@ recent yt-dlp through `trixie-backports`. Enable backports first:
 printf '%s\n' 'deb http://deb.debian.org/debian trixie-backports main' | \
   sudo tee /etc/apt/sources.list.d/trixie-backports.list >/dev/null
 sudo apt update
+sudo apt install -t trixie-backports yt-dlp
 ```
 
 Download these release assets:

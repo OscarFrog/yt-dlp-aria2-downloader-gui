@@ -130,6 +130,7 @@ récente de yt-dlp via `trixie-backports`. Activez d’abord les backports :
 printf '%s\n' 'deb http://deb.debian.org/debian trixie-backports main' | \
   sudo tee /etc/apt/sources.list.d/trixie-backports.list >/dev/null
 sudo apt update
+sudo apt install -t trixie-backports yt-dlp
 ```
 
 Téléchargez les fichiers suivants :
