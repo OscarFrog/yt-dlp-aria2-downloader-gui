@@ -21,6 +21,7 @@ if [[ ${HOME} != /* ]]; then
 fi
 
 readonly APP_NAME='yt-dlp aria2 downloader'
+APP_DIALOG_TITLE=${APP_NAME}
 readonly PROFILE_LABEL_VIDEO='Complete video (MKV)'
 readonly PROFILE_LABEL_YOUTUBE_HLS='YouTube video - Firefox cookies (HLS/MKV)'
 readonly PROFILE_LABEL_AUDIO='Audio track (native format)'
@@ -75,7 +76,7 @@ show_error() {
     local message=$1
 
     if ! zenity --error \
-        --title="${APP_NAME}" \
+        --title="${APP_DIALOG_TITLE}" \
         --text="${message}" \
         --no-markup \
         --width=520; then
@@ -549,7 +550,7 @@ select_url() {
     local capture_status
 
     run_zenity_capture entered_url --entry \
-        --title="${APP_NAME}" \
+        --title="${APP_DIALOG_TITLE}" \
         --text="Paste the video URL to download:" \
         --ok-label='Continue' \
         --cancel-label='Cancel' \
@@ -602,7 +603,7 @@ select_profile() {
 
     run_zenity_capture selected --list \
         --radiolist \
-        --title="${APP_NAME}" \
+        --title="${APP_DIALOG_TITLE}" \
         --text='Choose the output type:' \
         --column='Select' \
         --column='Profile' \
@@ -791,6 +792,17 @@ if [[ ! -r ${PROGRESS_MONITOR} ]]; then
     show_error 'progress-monitor.sh is missing or not readable.'
     exit 1
 fi
+
+version_output=''
+version_value=''
+if version_output=$("${DOWNLOAD_SCRIPT}" --version 2>/dev/null); then
+    version_value=${version_output##* }
+    if [[ ${version_value} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        APP_DIALOG_TITLE="${APP_NAME} — v${version_value}"
+    fi
+fi
+readonly APP_DIALOG_TITLE
+unset version_output version_value
 
 load_settings
 
@@ -1001,7 +1013,7 @@ set +e
 monitor_progress \
     "${LOG_FILE}" "${WORKER_PID}" "${RESULT_FILE}" \
     "${PROGRESS_PROFILE}" "${OUTPUT_DIR}" | zenity --progress \
-    --title="${APP_NAME}" \
+    --title="${APP_DIALOG_TITLE}" \
     --text='Initializing...' \
     --percentage=0 \
     --auto-close \
@@ -1043,7 +1055,7 @@ if ((zenity_status != 0)); then
         zenity_status=0
     elif ((zenity_status == 1)); then
         zenity --info \
-            --title="${APP_NAME}" \
+            --title="${APP_DIALOG_TITLE}" \
             --text='The download was canceled.' \
             --no-markup \
             --width=420 || true
@@ -1119,7 +1131,7 @@ if ((worker_status == 0)); then
 
     success_action=''
     run_zenity_capture success_action --question \
-        --title="${APP_NAME}" \
+        --title="${APP_DIALOG_TITLE}" \
         --text="${success_text}" \
         --no-markup \
         --extra-button='New download' \
