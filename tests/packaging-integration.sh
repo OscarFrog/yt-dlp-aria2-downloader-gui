@@ -35,7 +35,7 @@ bash "${project_dir}/packaging/install-tree.sh" \
     "${root}" "${version}" '/usr/lib/yt-dlp-aria2-downloader'
 
 private_dir="${root}/usr/lib/yt-dlp-aria2-downloader"
-for executable in download-video.sh download-video-gui.sh progress-monitor.sh; do
+for executable in download-video.sh download-video-gui.sh progress-monitor.sh runtime-manager.sh; do
     [[ -x ${private_dir}/${executable} && ! -L ${private_dir}/${executable} ]] ||
         fail "Missing packaged executable: ${executable}"
     mode=$(stat -c '%a' -- "${private_dir}/${executable}")
@@ -85,5 +85,10 @@ done
     fail 'Package tree contains obsolete screenshots.'
 [[ ! -e ${private_dir}/install-gui.sh ]] ||
     fail 'System package contains the source-tree launcher installer.'
+key_file="${private_dir}/keys/yt-dlp-public.key"
+[[ -f ${key_file} && ! -L ${key_file} ]] ||
+    fail 'Package tree is missing the yt-dlp signing key.'
+key_mode=$(stat -c '%a' -- "${key_file}")
+assert_equals '644' "${key_mode}" 'packaged yt-dlp signing-key permissions'
 
 printf 'Packaging integration tests passed.\n'

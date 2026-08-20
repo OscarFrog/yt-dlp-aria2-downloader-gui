@@ -64,12 +64,12 @@ Priority: optional
 Architecture: all
 Maintainer: OscarFrog <151366285+OscarFrog@users.noreply.github.com>
 Installed-Size: ${installed_size}
-Depends: bash (>= 4.4), coreutils, findutils, grep, sed, util-linux, aria2 (>= 1.37.0), ffmpeg, yt-dlp (>= 2026.06.09), zenity, hicolor-icon-theme
-Suggests: deno (>= 2.3.0), firefox | firefox-esr
+Depends: bash (>= 4.4), coreutils, curl, findutils, grep, sed, util-linux, aria2 (>= 1.37.0), ffmpeg, gnupg, unzip, zenity, hicolor-icon-theme
+Suggests: firefox | firefox-esr
 Homepage: https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui
 Description: Zenity interface and Bash engine for yt-dlp and aria2
- Download one complete MKV video or the best native audio track with yt-dlp,
- aria2c, FFmpeg, and Zenity on GNU/Linux.
+ Download one complete MKV video or the best native audio track with managed
+ verified yt-dlp and Deno runtimes, aria2c, FFmpeg, and Zenity on GNU/Linux.
 EOF_CONTROL
 chmod 0644 -- "${root}/DEBIAN/control"
 
@@ -103,6 +103,8 @@ packaged_version=$(
 desktop-file-validate --no-hints \
     "${extracted}/usr/share/applications/yt-dlp-aria2-downloader.desktop"
 [[ -f ${extracted}/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg ]]
+[[ -x ${extracted}/usr/lib/yt-dlp-aria2-downloader/runtime-manager.sh ]]
+[[ -f ${extracted}/usr/lib/yt-dlp-aria2-downloader/keys/yt-dlp-public.key ]]
 engine_mode=$(stat -c '%a' -- \
     "${extracted}/usr/lib/yt-dlp-aria2-downloader/download-video.sh")
 [[ ${engine_mode} == 755 ]]

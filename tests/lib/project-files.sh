@@ -30,6 +30,7 @@ TEST_SHELL_FILES=(
     tests/lib/assert.sh
     tests/lib/project-files.sh
     tests/mock-integration.sh
+    tests/runtime-manager-integration.sh
     tests/progress-monitor-integration.sh
     tests/installer-integration.sh
     tests/packaging-integration.sh

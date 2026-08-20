@@ -134,7 +134,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.23'
+readonly EXPECTED_VERSION='2.1.24'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -324,12 +324,12 @@ assert_text_not_contains "${README_FR_TEXT}" \
     'docs/images/' 'French README has no embedded screenshots'
 
 
-assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
-    'name: Debian package' 'unsupported DEB validation is disabled'
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'name: Ubuntu 24.04 DEB' 'DEB package validation job'
 assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
     'name: Fedora 44 RPM' 'RPM package validation job'
-assert_file_not_contains "${script_dir}/.github/workflows/release.yml" \
-    'dist/*.deb' 'release does not publish an unsupported DEB payload'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'dist/*.deb' 'release publishes a DEB payload'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'dist/*.rpm' 'release publishes an RPM payload'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
@@ -377,15 +377,15 @@ assert_file_contains "${script_dir}/packaging/yt-dlp-aria2-downloader.desktop" \
 assert_file_contains "${script_dir}/packaging/install-tree.sh" \
     'usr/share/icons/hicolor/scalable/apps' \
     'Freedesktop hicolor icon installation'
-assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
     'packaging/deb/test-package-lifecycle.sh' \
-    'unsupported DEB lifecycle is not run in package CI'
+    'DEB installation and removal validation'
 assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
     'packaging/rpm/test-package-lifecycle.sh' \
     'RPM installation and removal validation'
-assert_file_not_contains "${script_dir}/.github/workflows/release.yml" \
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'packaging/deb/test-package-lifecycle.sh' \
-    'unsupported DEB lifecycle is not run during release'
+    'release DEB installation and removal validation'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'packaging/rpm/test-package-lifecycle.sh' \
     'release RPM installation and removal validation'
@@ -396,7 +396,7 @@ assert_file_not_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gu
 
 
 
-# Version 2.1.23 runtime-update, Fedora bootstrap, playlist, HLS, packaging, and supply-chain contracts.
+# Version 2.1.24 runtime-update, Fedora bootstrap, playlist, HLS, packaging, and supply-chain contracts.
 assert_file_contains "${script_dir}/download-video.sh" \
     '--url-file FILE' 'private URL-file input'
 assert_file_contains "${script_dir}/download-video.sh" \
@@ -424,8 +424,11 @@ assert_file_contains "${script_dir}/progress-monitor.sh" \
 assert_file_contains "${script_dir}/progress-monitor.sh" \
     'MAX_SAFE_COUNTER=9000000000000000' 'bounded progress arithmetic'
 assert_file_contains "${script_dir}/packaging/deb/build-deb.sh" \
-    'aria2 (>= 1.37.0), ffmpeg, yt-dlp (>= 2026.06.09), zenity' \
-    'DEB versioned runtime dependencies'
+    'aria2 (>= 1.37.0), ffmpeg, gnupg, unzip, zenity' \
+    'DEB managed-runtime system dependencies'
+assert_file_not_contains "${script_dir}/packaging/deb/build-deb.sh" \
+    'yt-dlp (>= 2026.06.09)' \
+    'DEB does not depend on distribution yt-dlp'
 assert_file_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
     'Requires:       aria2 >= 1.37.0' 'RPM minimum aria2 dependency'
 assert_file_contains "${script_dir}/install-gui.sh" \
@@ -468,8 +471,22 @@ assert_file_contains "${script_dir}/download-video.sh" \
     '--js-runtimes "deno:${DENO_BIN}"' \
     'managed Deno path is passed explicitly to yt-dlp'
 assert_file_contains "${script_dir}/runtime-manager.sh" \
-    'yt-dlp/yt-dlp-nightly-builds/releases/latest' \
-    'managed yt-dlp checks the nightly release channel'
+    "readonly DEFAULT_YTDLP_CHANNEL='stable'" \
+    'managed yt-dlp defaults to the stable channel'
+assert_file_contains "${script_dir}/runtime-manager.sh" \
+    "YTDLP_RELEASE_REPOSITORY='yt-dlp/yt-dlp'" \
+    'managed yt-dlp stable release repository'
+# shellcheck disable=SC2016 # Literal source contract: do not expand runtime-manager variables here.
+assert_file_contains "${script_dir}/runtime-manager.sh" \
+    'flock --exclusive --wait "${RUNTIME_LOCK_WAIT_SECONDS}"' \
+    'runtime update lock wait is bounded'
+# shellcheck disable=SC2016 # Literal source contract: do not expand runtime-manager variables here.
+assert_file_contains "${script_dir}/runtime-manager.sh" \
+    '--retry-max-time "${CURL_RETRY_MAX_TIME_SECONDS}"' \
+    'runtime network retry time is bounded'
+assert_file_contains "${script_dir}/runtime-manager.sh" \
+    'rollback)' \
+    'runtime manager exposes verified rollback'
 # shellcheck disable=SC2016
 # This assertion deliberately searches for literal shell source.
 assert_file_contains "${script_dir}/runtime-manager.sh" \
@@ -496,6 +513,9 @@ assert_file_contains "${script_dir}/install-fedora.sh" \
 assert_file_contains "${script_dir}/install-fedora.sh" \
     "ffmpeg_vendor" \
     'Fedora bootstrap validates the FFmpeg vendor'
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    "rpm -qp --qf '%{NAME}\n%{VERSION}\n%{ARCH}\n'" \
+    'Fedora bootstrap validates RPM identity before installation'
 assert_file_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
     'Requires:       gnupg2' \
     'RPM installs signature-verification tooling'

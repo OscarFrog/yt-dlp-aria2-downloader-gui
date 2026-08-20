@@ -63,6 +63,9 @@ printf '\n=== Test-suite ShellCheck ===\n'
 # checks for production and test scripts.
 shellcheck -x -o all "${TEST_SHELL_FILES[@]}"
 
+printf '\n=== Runtime-manager integration ===\n'
+bash -- ./tests/runtime-manager-integration.sh
+
 printf '\n=== Mock integration ===\n'
 bash -- ./tests/mock-integration.sh
 

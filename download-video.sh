@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.23
+# Version     : 2.1.24
 # Date        : 2026-08-20
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
@@ -11,7 +11,7 @@
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.1.23"
+readonly VERSION="2.1.24"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -224,14 +224,13 @@ check_runtime_compatibility() {
     fi
 
     JS_RUNTIME_AVAILABLE=false
-    if command -v deno >/dev/null 2>&1; then
-        if [[ -x ${DENO_BIN} ]] && deno_output=$(LC_ALL=C "${DENO_BIN}" --version 2>/dev/null); then
-            IFS=' ' read -r deno_name deno_version _ <<<"${deno_output%%$'\n'*}"
-            if [[ ${deno_name} == deno && -n ${deno_version} ]]; then
-                compare_versions "${deno_version}" "${MIN_DENO_VERSION}"
-                if [[ ${VERSION_PARSE_VALID} == true && ${VERSION_AT_LEAST} == true ]]; then
-                    JS_RUNTIME_AVAILABLE=true
-                fi
+    if [[ -n ${DENO_BIN:-} && -x ${DENO_BIN} ]] &&
+        deno_output=$(LC_ALL=C "${DENO_BIN}" --version 2>/dev/null); then
+        IFS=' ' read -r deno_name deno_version _ <<<"${deno_output%%$'\n'*}"
+        if [[ ${deno_name} == deno && -n ${deno_version} ]]; then
+            compare_versions "${deno_version}" "${MIN_DENO_VERSION}"
+            if [[ ${VERSION_PARSE_VALID} == true && ${VERSION_AT_LEAST} == true ]]; then
+                JS_RUNTIME_AVAILABLE=true
             fi
         fi
     fi
@@ -1005,7 +1004,16 @@ else
         error "runtime manager is missing: ${runtime_manager}"
         exit 66
     fi
-    if ! "${runtime_manager}" update; then
+    runtime_action='update'
+    case ${YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE:-1} in
+    1 | '') ;;
+    0) runtime_action='ensure' ;;
+    *)
+        error 'YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE must be 0 or 1.'
+        exit 64
+        ;;
+    esac
+    if ! "${runtime_manager}" "${runtime_action}"; then
         error 'unable to initialize the managed yt-dlp and Deno runtimes.'
         exit 69
     fi

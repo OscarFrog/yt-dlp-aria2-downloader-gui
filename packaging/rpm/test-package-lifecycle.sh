@@ -104,7 +104,7 @@ installed_version=$(
 [[ -f ${ICON_FILE} && ! -L ${ICON_FILE} ]]
 desktop-file-validate --no-hints "${DESKTOP_FILE}"
 grep -Fqx -- 'Icon=yt-dlp-aria2-downloader' "${DESKTOP_FILE}"
-for runtime_command in aria2c ffmpeg ffprobe; do
+for runtime_command in aria2c ffmpeg ffprobe curl gpg unzip flock timeout; do
     command -v "${runtime_command}" >/dev/null 2>&1 || {
         printf 'Error: package dependency command is absent: %s\n' \
             "${runtime_command}" >&2
@@ -113,6 +113,12 @@ for runtime_command in aria2c ffmpeg ffprobe; do
 done
 [[ -x /usr/libexec/yt-dlp-aria2-downloader/runtime-manager.sh ]] || {
     printf 'Error: packaged runtime manager is absent.
+' >&2
+    exit 65
+}
+[[ -f /usr/libexec/yt-dlp-aria2-downloader/keys/yt-dlp-public.key &&
+   ! -L /usr/libexec/yt-dlp-aria2-downloader/keys/yt-dlp-public.key ]] || {
+    printf 'Error: packaged yt-dlp signing key is absent or unsafe.
 ' >&2
     exit 65
 }
