@@ -488,8 +488,8 @@ assert_file_contains "${script_dir}/runtime-manager.sh" \
 # shellcheck disable=SC2016
 # This assertion deliberately searches for literal shell source.
 assert_file_contains "${script_dir}/runtime-manager.sh" \
-    '"${work}/SHA2-256SUMS" >/dev/null 2>&1' \
-    'yt-dlp signed SHA-256 manifest is verified'
+    '"${work}/SHA2-256SUMS" 2>&1); then' \
+    'yt-dlp signed SHA-256 manifest is verified with diagnostics preserved'
 assert_file_contains "${script_dir}/install-fedora.sh" \
     'dnf swap --assumeyes --allowerasing ffmpeg-free ffmpeg' \
     'Fedora bootstrap replaces ffmpeg-free'

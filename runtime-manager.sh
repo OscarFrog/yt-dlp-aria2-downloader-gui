@@ -126,21 +126,41 @@ validate_ytdlp() {
     local help=''
     local impersonation=''
     local option
+    local version_output=''
 
-    [[ -x ${candidate} ]] || return 1
-    LC_ALL=C "${candidate}" --version >/dev/null 2>&1 || return 1
-    help=$(LC_ALL=C "${candidate}" --help 2>&1) || return 1
+    if [[ ! -x ${candidate} ]]; then
+        error "yt-dlp runtime validation failed: candidate is not executable: ${candidate}"
+        return 1
+    fi
+
+    if ! version_output=$(LC_ALL=C "${candidate}" --version 2>&1); then
+        error 'yt-dlp runtime validation failed: --version could not run.'
+        printf '%s\n' "${version_output}" >&2
+        return 1
+    fi
+
+    if ! help=$(LC_ALL=C "${candidate}" --help 2>&1); then
+        error 'yt-dlp runtime validation failed: --help could not run.'
+        return 1
+    fi
 
     for option in \
         --break-match-filters \
         --js-runtimes \
         --list-impersonate-targets \
         --no-update; do
-        grep -Fq -- "${option}" <<<"${help}" || return 1
+        if ! grep -Fq -- "${option}" <<<"${help}"; then
+            error "yt-dlp runtime validation failed: required option is absent: ${option}"
+            return 1
+        fi
     done
 
-    impersonation=$(LC_ALL=C "${candidate}" --list-impersonate-targets 2>&1) ||
+    if ! impersonation=$(LC_ALL=C "${candidate}" --list-impersonate-targets 2>&1); then
+        error 'yt-dlp runtime validation failed: unable to enumerate impersonation targets.'
+        printf '%s\n' "${impersonation}" >&2
         return 1
+    fi
+
     # Current yt-dlp renders concrete targets as versioned client names such
     # as Chrome-133 or Firefox-147. Validate the table structurally instead of
     # assuming an unversioned browser-family token.
@@ -148,6 +168,8 @@ validate_ytdlp() {
         '^[[:space:]]*[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+curl_cffi[^[:space:]]*([[:space:]]|$)' \
         <<<"${impersonation}" |
         grep -Eiv '\((unavailable|not available)\)' >/dev/null; then
+        error 'yt-dlp runtime validation failed: no usable curl_cffi impersonation target.'
+        printf '%s\n' "${impersonation}" >&2
         return 1
     fi
 
@@ -300,11 +322,21 @@ bootstrap_ytdlp() {
         return 1
     fi
 
-    if ! gpg --batch --homedir "${gpg_home}" \
-        --import "${YTDLP_PUBLIC_KEY}" >/dev/null 2>&1 ||
-       ! gpg --batch --homedir "${gpg_home}" \
+    local gpg_output=''
+
+    if ! gpg_output=$(gpg --batch --homedir "${gpg_home}" \
+        --import "${YTDLP_PUBLIC_KEY}" 2>&1); then
+        error 'yt-dlp bootstrap failed: unable to import the signing key.'
+        printf '%s\n' "${gpg_output}" >&2
+        rm -rf -- "${work}" || true
+        return 1
+    fi
+
+    if ! gpg_output=$(gpg --batch --homedir "${gpg_home}" \
         --verify "${work}/SHA2-256SUMS.sig" \
-        "${work}/SHA2-256SUMS" >/dev/null 2>&1; then
+        "${work}/SHA2-256SUMS" 2>&1); then
+        error 'yt-dlp bootstrap failed: SHA-256 manifest signature verification failed.'
+        printf '%s\n' "${gpg_output}" >&2
         rm -rf -- "${work}" || true
         return 1
     fi
@@ -313,23 +345,27 @@ bootstrap_ytdlp() {
         "^[[:xdigit:]]{64}[[:space:]]+\*?${YTDLP_ASSET}$" \
         "${work}/SHA2-256SUMS" || true)
     if [[ -z ${sums_line} ]]; then
+        error "yt-dlp bootstrap failed: SHA-256 manifest has no entry for ${YTDLP_ASSET}."
         rm -rf -- "${work}" || true
         return 1
     fi
 
     if ! printf '%s\n' "${sums_line}" >"${work}/CHECKSUM"; then
+        error 'yt-dlp bootstrap failed: unable to create the local checksum file.'
         rm -rf -- "${work}" || true
         return 1
     fi
     if ! (
         cd -- "${work}" &&
-        sha256sum --check CHECKSUM >/dev/null
+        sha256sum --check CHECKSUM
     ); then
+        error "yt-dlp bootstrap failed: SHA-256 verification failed for ${YTDLP_ASSET}."
         rm -rf -- "${work}" || true
         return 1
     fi
 
     if ! chmod 0755 -- "${work}/${YTDLP_ASSET}"; then
+        error 'yt-dlp bootstrap failed: unable to make the downloaded executable runnable.'
         rm -rf -- "${work}" || true
         return 1
     fi
@@ -337,6 +373,7 @@ bootstrap_ytdlp() {
     # install_ytdlp_candidate validates the candidate and handles failures.
     # shellcheck disable=SC2310
     if ! install_ytdlp_candidate "${work}/${YTDLP_ASSET}"; then
+        error 'yt-dlp bootstrap failed: downloaded runtime failed validation or activation.'
         rm -rf -- "${work}" || true
         return 1
     fi
