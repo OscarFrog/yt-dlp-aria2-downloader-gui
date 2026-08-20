@@ -506,4 +506,17 @@ assert_file_not_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gu
     'Recommends:     deno' \
     'Deno is managed explicitly instead of weakly recommended'
 
+
+# shellcheck disable=SC2016
+# This assertion deliberately searches for a literal shell variable reference.
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    '"${runtime_manager}" update' \
+    'Fedora installer delegates managed-runtime validation to runtime manager'
+assert_file_not_contains "${script_dir}/install-fedora.sh" \
+    '--list-impersonate-targets' \
+    'Fedora installer does not duplicate yt-dlp impersonation parsing'
+assert_file_contains "${script_dir}/runtime-manager.sh" \
+    '--list-impersonate-targets' \
+    'runtime manager owns yt-dlp impersonation validation'
+
 printf '%s\n' 'Static tests passed.'

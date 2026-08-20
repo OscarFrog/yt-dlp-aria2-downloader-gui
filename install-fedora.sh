@@ -105,20 +105,11 @@ deno_bin=$("${runtime_manager}" path deno)
 "${ytdlp_bin}" --version
 "${deno_bin}" --version | head -n 1
 
-impersonation_output=$(
-    LC_ALL=C "${ytdlp_bin}" --list-impersonate-targets 2>&1
-) || {
-    error 'unable to query yt-dlp impersonation targets.'
-    exit 65
-}
-if ! grep -E \
-    '^[[:space:]]*(Chrome|Edge|Firefox|Safari|Tor)[[:space:]]' \
-    <<<"${impersonation_output}" |
-    grep -Eiv '\((unavailable|not available)\)' >/dev/null; then
-    error 'the managed yt-dlp runtime has no usable browser impersonation target.'
-    exit 65
-fi
-
+# runtime-manager.sh is the single source of truth for managed-runtime
+# integrity and functional validation. The successful "update" call above has
+# already validated yt-dlp, including at least one usable curl_cffi
+# impersonation target. Do not duplicate parsing of yt-dlp human-readable
+# output here; duplicated parsers can drift independently.
 application_version=$(/usr/bin/yt-dlp-aria2-downloader --version) || {
     error 'unable to read the installed application version.'
     exit 65
