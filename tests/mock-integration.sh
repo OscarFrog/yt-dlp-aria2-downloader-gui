@@ -748,6 +748,12 @@ export YTDLP_ARIA2_SKIP_RUNTIME_UPDATE=1
 export YTDLP_ARIA2_YTDLP_BIN="${MOCK_BIN}/yt-dlp"
 export YTDLP_ARIA2_DENO_BIN="${MOCK_BIN}/deno"
 
+readonly MOCK_NO_DENO_BIN="${TEST_ROOT}/bin-no-deno"
+mkdir -p -- "${MOCK_NO_DENO_BIN}"
+for managed_mock in yt-dlp aria2c zenity ffmpeg ffprobe mv setsid; do
+    ln -s -- "${MOCK_BIN}/${managed_mock}" "${MOCK_NO_DENO_BIN}/${managed_mock}"
+done
+
 for mocked_command in yt-dlp aria2c deno zenity ffmpeg ffprobe mv setsid; do
     resolved_mock=$(command -v "${mocked_command}")
     assert_equals "${MOCK_BIN}/${mocked_command}" "${resolved_mock}" \
@@ -1621,6 +1627,23 @@ assert_status 1 'old yt-dlp version is rejected' \
     env MOCK_YTDLP_VERSION=2026.06.08 \
     "${PROJECT_DIR}/download-video.sh" \
     -- 'https://example.com/watch?v=old-yt-dlp'
+managed_deno_output="${TEST_ROOT}/managed-deno-output"
+managed_deno_args="${TEST_ROOT}/managed-deno-args.bin"
+mkdir -p -- "${managed_deno_output}"
+: >"${managed_deno_args}"
+assert_status 0 'YouTube accepts managed Deno outside PATH' \
+    env PATH="${MOCK_NO_DENO_BIN}:/usr/bin:/bin" \
+    YTDLP_ARIA2_DENO_BIN="${MOCK_BIN}/deno" \
+    MOCK_ARG_LOG="${managed_deno_args}" \
+    MOCK_OUTPUT_DIR="${managed_deno_output}" \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${managed_deno_output}" \
+    -- 'https://www.youtube.com/watch?v=managed-deno-outside-path'
+# shellcheck disable=SC2034 # Accessed indirectly by name through read/assert helper APIs.
+managed_deno_arguments=()
+read_arguments "${managed_deno_args}" managed_deno_arguments
+assert_option_value managed_deno_arguments '--js-runtimes' \
+    "deno:${MOCK_BIN}/deno" 'managed Deno absolute path outside PATH'
 assert_status 0 'generic extraction remains usable without Deno' \
     env MOCK_DENO_UNAVAILABLE=1 \
     "${PROJECT_DIR}/download-video.sh" \

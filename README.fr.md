@@ -17,7 +17,7 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.23**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.24**.
 
 ## Installation recommandée
 
@@ -27,7 +27,7 @@ Pour **Fedora 44 ou une version plus récente**, téléchargez ces trois fichier
 
 ```text
 install-fedora.sh
-yt-dlp-aria2-downloader-gui-2.1.23-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.24-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -35,7 +35,7 @@ Vérifiez les fichiers téléchargés puis lancez le bootstrap Fedora officiel :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.23-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.24-1.fc44.noarch.rpm
 ```
 
 Le bootstrap active RPM Fusion Free si nécessaire, remplace `ffmpeg-free` par
@@ -43,10 +43,12 @@ le `ffmpeg` complet de RPM Fusion, installe les paquets Fedora requis, installe
 le RPM de l'application, vérifie le fournisseur de FFmpeg puis initialise les
 runtimes yt-dlp et Deno propres à l'utilisateur.
 
-Pour **Debian, Ubuntu, les autres distributions GNU/Linux ou une utilisation
-portable**, utilisez le ZIP versionné ou un clone Git. Les runtimes yt-dlp et
-Deno gérés automatiquement prennent actuellement en charge Linux `x86_64` et
-`aarch64`.
+Pour **Debian ou Ubuntu**, téléchargez le DEB versionné et `SHA256SUMS`,
+vérifiez-les puis installez le paquet avec `sudo apt install
+./yt-dlp-aria2-downloader-gui_2.1.24-1_all.deb`. Pour **les autres distributions
+GNU/Linux ou une utilisation portable**, utilisez le ZIP versionné ou un clone
+Git. Les runtimes yt-dlp et Deno gérés automatiquement prennent actuellement en
+charge Linux `x86_64` et `aarch64`.
 
 Avec le RPM, le lanceur graphique et son icône sont installés automatiquement dans le menu des applications. **Ne lancez pas `install-gui.sh` après l’installation d’un paquet.** Cet outil est réservé aux installations ZIP et Git.
 ## Fonctionnalités principales
@@ -96,10 +98,21 @@ L'application maintient des runtimes vérifiés propres à l'utilisateur dans :
 ~/.local/share/yt-dlp-aria2-downloader/runtime/
 ```
 
-À chaque lancement du moteur, le gestionnaire de runtimes contrôle le canal
-nightly officiel de yt-dlp et le canal stable de Deno. Toute nouvelle version
-est préparée séparément, validée puis activée atomiquement. Si le contrôle de
-mise à jour échoue, le dernier runtime vérifié reste actif.
+Par défaut, chaque lancement du moteur contrôle le canal **stable** signé de
+yt-dlp et le canal stable de Deno. Toute nouvelle version est préparée
+séparément, validée puis activée atomiquement. Les attentes de verrou et les
+opérations réseau sont bornées ; si le contrôle de mise à jour échoue, le
+dernier runtime vérifié reste actif.
+
+Définissez `YTDLP_ARIA2_YTDLP_CHANNEL=nightly` pour utiliser volontairement les
+nightly yt-dlp. Définissez `YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE=0` pour ne pas
+contrôler les mises à jour tout en exigeant des runtimes vérifiés déjà installés.
+`runtime-manager.sh rollback yt-dlp` et `runtime-manager.sh rollback deno`
+réactivent un runtime précédent après validation lorsqu'il existe.
+
+Le runtime yt-dlp est authentifié avec le manifeste SHA-256 signé par upstream.
+Les archives Deno sont vérifiées avec le checksum publié avec la même release
+officielle avant extraction et validation.
 
 Les paquets système comme FFmpeg, aria2 et Zenity restent gérés par le
 gestionnaire de paquets de la distribution. Sous Fedora, le bootstrap officiel
@@ -108,11 +121,11 @@ Fedora/RPM Fusion activés au moment de l'installation.
 
 ## Installation par paquet
 
-Les releases GitHub publient un RPM Fedora, l'archive ZIP portable et un
-fichier `SHA256SUMS` commun. Le RPM installe les commandes, l’icône dédiée et le
-lanceur graphique au niveau du système ; son fonctionnement ne dépend pas du
-dossier dans lequel le paquet a été téléchargé. Aucune exécution séparée de
-`install-gui.sh` n’est nécessaire avec un RPM.
+Les releases GitHub publient un RPM Fedora, un DEB Debian/Ubuntu, l'archive
+ZIP portable, le bootstrap Fedora et un fichier `SHA256SUMS` commun. Les paquets
+RPM et DEB installent les commandes, l’icône dédiée et le lanceur graphique au
+niveau du système. Aucune exécution séparée de `install-gui.sh` n’est nécessaire
+avec une installation par paquet.
 
 Avant de migrer depuis une installation ZIP ou Git, supprimez l'ancien lanceur
 utilisateur afin qu'il ne masque pas l'entrée installée par le paquet :
@@ -131,7 +144,7 @@ Téléchargez :
 
 ```text
 install-fedora.sh
-yt-dlp-aria2-downloader-gui-2.1.23-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.24-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -144,7 +157,7 @@ sha256sum --ignore-missing --check SHA256SUMS
 Puis lancez :
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.23-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.24-1.fc44.noarch.rpm
 ```
 
 Le bootstrap :
@@ -154,7 +167,7 @@ Le bootstrap :
 - installe les dépendances système requises ;
 - installe le RPM de l'application ;
 - vérifie que `ffmpeg` provient de RPM Fusion et que `ffmpeg-free` est absent ;
-- initialise et valide les runtimes yt-dlp nightly et Deno stable pour
+- initialise et valide les runtimes yt-dlp stable et Deno stable pour
   l'utilisateur courant.
 
 Le RPM lui-même ne télécharge aucun runtime tiers depuis un scriptlet RPM.
@@ -163,19 +176,30 @@ de l'utilisateur et vérifiés avant activation.
 
 ### Debian et Ubuntu
 
-La release 2.1.23 ne publie pas de DEB. Utilisez le ZIP portable ou un clone
-Git. L'application n'exige plus de yt-dlp ou Deno fourni par la distribution :
-sur Linux `x86_64` et `aarch64`, le même gestionnaire de runtimes vérifiés est
-utilisé que sous Fedora.
+La release 2.1.24 publie un DEB indépendant de l'architecture, aligné sur le
+même modèle de runtimes gérés que Fedora. Téléchargez :
 
-Les outils système habituels (`aria2c`, FFmpeg/FFprobe, Zenity pour la GUI,
-curl, GnuPG, unzip, coreutils, grep, findutils et util-linux) doivent toujours
-être fournis par le gestionnaire de paquets de la distribution.
+```text
+yt-dlp-aria2-downloader-gui_2.1.24-1_all.deb
+SHA256SUMS
+```
+
+Vérifiez puis installez :
+
+```bash
+sha256sum --ignore-missing --check SHA256SUMS
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.24-1_all.deb
+```
+
+Le DEB dépend des outils système habituels (`aria2c`, FFmpeg/FFprobe, Zenity,
+curl, GnuPG, unzip, coreutils, grep, findutils et util-linux), mais **ne dépend
+pas de paquets yt-dlp ou Deno fournis par la distribution**. yt-dlp et Deno sont
+installés et vérifiés dans le runtime de l'utilisateur au premier lancement.
 
 ### Commandes installées par les paquets
 
-Après l'installation du RPM, démarrez l'interface depuis le menu des
-applications ou avec :
+Après l'installation du RPM ou du DEB, démarrez l'interface depuis le menu
+des applications ou avec :
 
 ```bash
 yt-dlp-aria2-downloader-gui
@@ -195,17 +219,31 @@ Fedora :
 sudo dnf remove yt-dlp-aria2-downloader-gui
 ```
 
+Debian/Ubuntu :
+
+```bash
+sudo apt remove yt-dlp-aria2-downloader-gui
+```
+
 Le gestionnaire de paquets supprime les commandes système, le lanceur graphique
-et l’icône de l’application. `install-gui.sh uninstall` sert uniquement à
-nettoyer une ancienne installation ZIP ou Git créée dans le dossier personnel
-de l’utilisateur courant.
+et l’icône de l’application. Les runtimes gérés propres à l'utilisateur ne sont
+volontairement pas des fichiers appartenant au paquet et restent sous
+`~/.local/share/yt-dlp-aria2-downloader/runtime/`. Après suppression de
+l'application, vous pouvez éventuellement les purger avec :
+
+```bash
+rm -rf -- ~/.local/share/yt-dlp-aria2-downloader/runtime/
+```
+
+`install-gui.sh uninstall` sert uniquement à nettoyer une ancienne installation
+ZIP ou Git créée dans le dossier personnel de l’utilisateur courant.
 
 ## Installation depuis une archive de release portable
 
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.23.zip
+yt-dlp-aria2-downloader-gui-2.1.24.zip
 SHA256SUMS
 ```
 
@@ -213,8 +251,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.23.zip
-cd yt-dlp-aria2-downloader-gui-2.1.23
+unzip yt-dlp-aria2-downloader-gui-2.1.24.zip
+cd yt-dlp-aria2-downloader-gui-2.1.24
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install

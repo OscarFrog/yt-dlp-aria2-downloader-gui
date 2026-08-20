@@ -14,6 +14,7 @@ readonly VERSION=$2
 readonly PACKAGE_NAME='yt-dlp-aria2-downloader-gui'
 readonly DESKTOP_FILE='/usr/share/applications/yt-dlp-aria2-downloader.desktop'
 readonly ICON_FILE='/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg'
+readonly PRIVATE_DIR='/usr/lib/yt-dlp-aria2-downloader'
 
 [[ ${VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
     printf 'Error: invalid package version: %s\n' "${VERSION}" >&2
@@ -43,13 +44,20 @@ readonly package_path
 package_depends=$(dpkg-deb --field "${package_path}" Depends)
 for required_dependency in \
     'aria2 (>= 1.37.0)' \
-    'yt-dlp (>= 2026.06.09)'; do
+    'ffmpeg' \
+    'curl' \
+    'gnupg' \
+    'unzip'; do
     if [[ ${package_depends} != *"${required_dependency}"* ]]; then
         printf 'Error: DEB dependency is missing or too weak: %s\n' \
             "${required_dependency}" >&2
         exit 65
     fi
 done
+if [[ ${package_depends} == *'yt-dlp'* || ${package_depends} == *'deno'* ]]; then
+    printf 'Error: DEB must use managed yt-dlp and Deno runtimes, not system package dependencies.\n' >&2
+    exit 65
+fi
 
 if dpkg-query -W -f='${Status}' "${PACKAGE_NAME}" 2>/dev/null |
     grep -Fqx -- 'install ok installed'; then
@@ -89,9 +97,7 @@ package_installed=true
 
 installed_status=$(dpkg-query -W -f='${Status}' "${PACKAGE_NAME}")
 [[ ${installed_status} == 'install ok installed' ]]
-installed_version=$(
-    /usr/bin/yt-dlp-aria2-downloader --version
-)
+installed_version=$(/usr/bin/yt-dlp-aria2-downloader --version)
 [[ ${installed_version} == \
     "yt-dlp-aria2-downloader version ${VERSION}" ]]
 [[ -x /usr/bin/yt-dlp-aria2-downloader-gui ]]
@@ -99,20 +105,22 @@ installed_version=$(
 [[ -f ${ICON_FILE} && ! -L ${ICON_FILE} ]]
 desktop-file-validate --no-hints "${DESKTOP_FILE}"
 grep -Fqx -- 'Icon=yt-dlp-aria2-downloader' "${DESKTOP_FILE}"
-for runtime_command in yt-dlp aria2c ffmpeg ffprobe; do
+for runtime_command in aria2c ffmpeg ffprobe curl gpg unzip flock timeout; do
     command -v "${runtime_command}" >/dev/null 2>&1 || {
         printf 'Error: package dependency command is absent: %s\n' \
             "${runtime_command}" >&2
         exit 65
     }
 done
-
-yt_dlp_package_version=$(dpkg-query -W -f='${Version}' yt-dlp)
-if ! dpkg --compare-versions "${yt_dlp_package_version}" ge '2026.06.09'; then
-    printf 'Error: installed yt-dlp package is too old: %s\n' \
-        "${yt_dlp_package_version}" >&2
+[[ -x ${PRIVATE_DIR}/runtime-manager.sh ]] || {
+    printf 'Error: packaged runtime manager is absent.\n' >&2
     exit 65
-fi
+}
+[[ -f ${PRIVATE_DIR}/keys/yt-dlp-public.key && ! -L ${PRIVATE_DIR}/keys/yt-dlp-public.key ]] || {
+    printf 'Error: packaged yt-dlp public key is absent or unsafe.\n' >&2
+    exit 65
+}
+
 aria2_package_version=$(dpkg-query -W -f='${Version}' aria2)
 if ! dpkg --compare-versions "${aria2_package_version}" ge '1.37.0'; then
     printf 'Error: installed aria2 package is too old: %s\n' \
@@ -139,7 +147,7 @@ for path in "${package_files[@]}"; do
     }
 done
 for private_path in \
-    /usr/lib/yt-dlp-aria2-downloader \
+    "${PRIVATE_DIR}" \
     "/usr/share/doc/${PACKAGE_NAME}"; do
     [[ ! -e ${private_path} && ! -L ${private_path} ]] || {
         printf 'Error: package removal left a private path: %s\n' \

@@ -17,12 +17,15 @@ Run from the repository root:
 bash -n download-video.sh
 bash -n download-video-gui.sh
 bash -n progress-monitor.sh
+bash -n runtime-manager.sh
+bash -n install-fedora.sh
 bash -n install-gui.sh
 bash -n test-static.sh
 bash -n tests/run-all.sh
 bash -n tests/lib/assert.sh
 bash -n tests/lib/project-files.sh
 bash -n tests/mock-integration.sh
+bash -n tests/runtime-manager-integration.sh
 bash -n tests/progress-monitor-integration.sh
 bash -n tests/installer-integration.sh
 bash -n tests/packaging-integration.sh
@@ -42,6 +45,7 @@ shellcheck -o all \
   download-video.sh \
   download-video-gui.sh \
   progress-monitor.sh \
+  runtime-manager.sh \
   install-gui.sh
 
 shellcheck -x -o all \
@@ -49,7 +53,9 @@ shellcheck -x -o all \
   tests/run-all.sh \
   tests/lib/assert.sh \
   tests/lib/project-files.sh \
+  install-fedora.sh \
   tests/mock-integration.sh \
+  tests/runtime-manager-integration.sh \
   tests/progress-monitor-integration.sh \
   tests/installer-integration.sh \
   tests/packaging-integration.sh \
@@ -113,10 +119,11 @@ The automated suite checks, among other things:
 - package install-tree layout, stable command symlinks, system desktop entry,
   dedicated hicolor icon, documentation permissions, and exclusion of tests
   and obsolete images;
-- real privileged installation and removal of the generated RPM in a
-  disposable Fedora 44 GitHub Actions environment, including launcher and icon
-  cleanup; DEB publication remains suspended while supported Debian repositories
-  cannot satisfy the secure yt-dlp minimum.
+- real privileged installation and removal of the generated RPM in Fedora 44
+  `fresh` and `ffmpeg-free` GitHub Actions environments, including launcher and
+  icon cleanup;
+- real build, APT installation, removal, and ownership validation of the DEB on
+  Ubuntu 24.04 without system yt-dlp or Deno package dependencies.
 
 - private GUI URL transfer through owner-only URL and yt-dlp batch files, with
   the requested URL absent from GUI, engine, and yt-dlp process arguments;
@@ -125,7 +132,10 @@ The automated suite checks, among other things:
 - complete-video rejection when either the video or audio stream is absent;
 - conditional Deno requirements and YouTube-only remote EJS fallback;
 - measured wrapper-managed FFmpeg remux progress and bounded progress arithmetic;
-- hermetic real-tool transfers using generated media and a loopback HTTP server.
+- hermetic real-tool transfers using generated media and a loopback HTTP server;
+- managed-runtime operation with Deno outside PATH, bounded lock/network waits,
+  offline fallback, lock-descriptor isolation, explicit/automatic rollback, and
+  x86_64/aarch64 asset mapping.
 
 ## GitHub Actions
 
@@ -135,13 +145,12 @@ for pushes to `main`, in two environments:
 - `ubuntu-24.04`;
 - a Fedora 44 container on a GitHub-hosted runner.
 
-`.github/workflows/packages.yml` builds the noarch RPM in a Fedora 44
-container for every pull request and push to `main`. The generated package is
-installed with DNF, its versioned runtime dependencies, commands, desktop entry,
-icon, and version are checked, then the package is removed and the absence of
-all application-owned files is verified. DEB tooling remains in the repository
-but is not qualified or published while supported Debian repositories cannot
-satisfy `yt-dlp >= 2026.06.09`.
+`.github/workflows/packages.yml` validates both package formats. The noarch RPM
+is built and installed on Fedora 44 in `fresh` and `ffmpeg-free` scenarios
+through the supported RPM Fusion bootstrap. The architecture-independent DEB is
+built on Ubuntu 24.04, installed with APT, and removed again. Both lifecycle
+checks verify the managed-runtime manager and embedded yt-dlp signing key; the
+DEB no longer depends on distribution yt-dlp or Deno packages.
 
 
 `.github/workflows/real-tools.yml` installs actual yt-dlp, aria2c, FFmpeg, and
@@ -151,11 +160,12 @@ video-only result without contacting a public media service.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the complete validation and the hermetic real-tool integration first, verifies
-tag ancestry and project versions, builds the ZIP and RPM in separate
-read-only jobs, performs the real RPM installation and removal checks, downloads
-the exact tested artifacts into one publication job, generates a shared
-SHA256SUMS file, and publishes the ZIP, RPM, and checksum file. Only the final
-job receives `contents: write`.
+tag ancestry and project versions, builds the ZIP, RPM, and DEB in separate
+read-only jobs, requalifies the exact release-tag RPM in Fedora `fresh` and
+`ffmpeg-free` scenarios, downloads the exact tested artifacts into one
+publication job, generates a shared SHA256SUMS file, and publishes the ZIP, RPM,
+DEB, Fedora bootstrap, and checksum file. Only the final job receives
+`contents: write`.
 
 ## Real-world checks on Fedora 44
 

@@ -57,5 +57,8 @@ test "$("%{buildroot}%{_bindir}/yt-dlp-aria2-downloader" --version)" = "yt-dlp-a
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Thu Aug 20 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - %{version}-1
+- Fix managed Deno discovery, bound runtime updates, add rollback, and requalify DEB packaging.
+
 * Sun Aug 02 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - %{version}-1
 - Harden privacy, media validation, progress, dependencies, and release tests.

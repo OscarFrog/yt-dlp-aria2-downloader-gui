@@ -1,3 +1,28 @@
+## 2.1.24 - 2026-08-20
+
+### Runtime reliability and DEB requalification
+
+- Fix YouTube extraction when the verified managed Deno runtime is not present
+  in the system PATH; pass the managed absolute path directly to yt-dlp.
+- Default managed yt-dlp to the signed stable release channel while retaining
+  an explicit nightly opt-in through `YTDLP_ARIA2_YTDLP_CHANNEL=nightly`.
+- Bound runtime lock waits, curl connection/transfer/retry time, and Deno update
+  checks; keep read-only runtime lookups independent of the update lock.
+- Prevent long-running child processes from inheriting the runtime update lock
+  and add verified rollback to the previous yt-dlp or Deno runtime.
+- Add `YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE=0` for launches that must use already
+  verified runtimes without performing update checks.
+- Validate Fedora RPM name, version, and architecture before any privileged DNF
+  transaction.
+- Realign the Debian package with the managed-runtime architecture: remove
+  system yt-dlp/Deno dependencies, declare curl/GnuPG/unzip, restore DEB
+  lifecycle CI, and publish DEB release artifacts again.
+- Add hermetic runtime-manager regression tests for lock contention, offline
+  fallback, rollback, timeout options, lock-FD inheritance, and aarch64 asset
+  mapping, plus the exact managed-Deno-outside-PATH regression test.
+- Re-run Fedora fresh and ffmpeg-free bootstrap qualification on the exact
+  release tag before publication.
+
 ## 2.1.23 - 2026-08-20
 
 ### Runtime and Fedora installation hardening

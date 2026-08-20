@@ -3,6 +3,7 @@ set -Eeuo pipefail
 umask 022
 
 readonly PACKAGE_NAME='yt-dlp-aria2-downloader-gui'
+readonly APP_VERSION='2.1.24'
 readonly PRIVATE_DIR='/usr/libexec/yt-dlp-aria2-downloader'
 
 error() {
@@ -29,6 +30,20 @@ rpm_path=$(realpath -e -- "$1") || {
     error "not an RPM file: ${rpm_path}"
     exit 64
 }
+
+rpm_identity_output=''
+if ! rpm_identity_output=$(rpm -qp --qf '%{NAME}\n%{VERSION}\n%{ARCH}\n' -- "${rpm_path}"); then
+    error 'unable to inspect the RPM metadata.'
+    exit 65
+fi
+mapfile -t rpm_identity <<<"${rpm_identity_output}"
+if ((${#rpm_identity[@]} != 3)) ||
+    [[ ${rpm_identity[0]} != "${PACKAGE_NAME}" ||
+       ${rpm_identity[1]} != "${APP_VERSION}" ||
+       ${rpm_identity[2]} != 'noarch' ]]; then
+    error "unexpected RPM identity: name=${rpm_identity[0]:-unknown} version=${rpm_identity[1]:-unknown} arch=${rpm_identity[2]:-unknown}"
+    exit 65
+fi
 
 fedora_version=$(rpm -E %fedora)
 [[ ${fedora_version} =~ ^[0-9]+$ ]] || {
@@ -96,7 +111,7 @@ runtime_manager="${PRIVATE_DIR}/runtime-manager.sh"
     exit 65
 }
 
-printf 'Installing/updating yt-dlp and Deno runtimes for the current user...\n'
+printf 'Installing/updating verified yt-dlp stable and Deno stable runtimes for the current user...\n'
 "${runtime_manager}" update
 
 ytdlp_bin=$("${runtime_manager}" path yt-dlp)

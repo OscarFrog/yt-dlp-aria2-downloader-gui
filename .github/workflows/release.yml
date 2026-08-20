@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to publish, for example v2.1.20
+        description: Existing version tag to publish, for example v2.1.24
         required: true
         type: string
 permissions:
@@ -52,6 +52,7 @@ jobs:
       - run: bash ./tests/run-all.sh
       - name: Run hermetic real-tool integration
         run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/real-tools-integration.sh
+
   zip:
     needs: validate
     runs-on: ubuntu-24.04
@@ -62,7 +63,9 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install --yes desktop-file-utils shellcheck unzip
+      - run: |
+          sudo apt-get update
+          sudo apt-get install --yes curl desktop-file-utils gnupg shellcheck unzip
       - name: Build and retest ZIP
         shell: bash
         run: |
@@ -80,15 +83,23 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
           retention-days: 7
+
   rpm:
     needs: validate
     runs-on: ubuntu-24.04
     container: fedora:44
-    timeout-minutes: 20
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [fresh, ffmpeg-free]
     steps:
-      - run: |
+      - name: Install RPM build tools
+        run: |
           dnf install --assumeyes cpio desktop-file-utils findutils git gzip rpm-build tar
-          dnf install --assumeyes "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
+          if [[ '${{ matrix.scenario }}' == 'ffmpeg-free' ]]; then
+            dnf install --assumeyes ffmpeg-free
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_TAG }}
@@ -97,21 +108,77 @@ jobs:
       - name: Build RPM
         shell: bash
         run: |
+          set -Eeuo pipefail
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           bash packaging/rpm/build-rpm.sh "${RELEASE_TAG#v}" dist
-      - name: Lifecycle
+      - name: Install through supported Fedora bootstrap
         shell: bash
         run: |
-          shopt -s nullglob; packages=(dist/*.rpm); shopt -u nullglob; ((${#packages[@]} == 1))
+          set -Eeuo pipefail
+          shopt -s nullglob; packages=(dist/*.rpm); shopt -u nullglob
+          ((${#packages[@]} == 1))
+          bash ./install-fedora.sh "${packages[0]}"
+      - name: Validate installed environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rpm -q yt-dlp-aria2-downloader-gui ffmpeg aria2 zenity
+          ! rpm -q ffmpeg-free
+          vendor=$(rpm -q --qf '%{VENDOR}\n' ffmpeg)
+          [[ ${vendor} == *'RPM Fusion'* ]]
+          ! command -v deno >/dev/null 2>&1
+          runtime_manager=/usr/libexec/yt-dlp-aria2-downloader/runtime-manager.sh
+          "${runtime_manager}" versions
+          /usr/bin/yt-dlp-aria2-downloader --version
+      - name: Remove application and verify RPM ownership
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dnf remove --assumeyes yt-dlp-aria2-downloader-gui
+          ! rpm -q yt-dlp-aria2-downloader-gui
+          test ! -e /usr/libexec/yt-dlp-aria2-downloader
+          shopt -s nullglob; packages=(dist/*.rpm); shopt -u nullglob
+          ((${#packages[@]} == 1))
           bash packaging/rpm/test-package-lifecycle.sh "${packages[0]}" "${RELEASE_TAG#v}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: matrix.scenario == 'fresh'
         with:
           name: release-rpm
           path: dist/*.rpm
           if-no-files-found: error
           retention-days: 7
+
+  deb:
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install DEB build tools
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install --yes desktop-file-utils
+      - name: Build and validate DEB
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash packaging/deb/build-deb.sh "${RELEASE_TAG#v}" dist
+          shopt -s nullglob; packages=(dist/*.deb); shopt -u nullglob
+          ((${#packages[@]} == 1))
+          sudo bash packaging/deb/test-package-lifecycle.sh "${packages[0]}" "${RELEASE_TAG#v}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-deb
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
-    needs: [zip, rpm]
+    needs: [zip, rpm, deb]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -133,9 +200,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           install -m 0755 -- install-fedora.sh dist/install-fedora.sh
-          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/install-fedora.sh); shopt -u nullglob
-          ((${#payloads[@]} == 3))
-          (cd dist && sha256sum -- *.zip *.rpm install-fedora.sh > SHA256SUMS && sha256sum --check SHA256SUMS)
+          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/*.deb dist/install-fedora.sh); shopt -u nullglob
+          ((${#payloads[@]} == 4))
+          (cd dist && sha256sum -- *.zip *.rpm *.deb install-fedora.sh > SHA256SUMS && sha256sum --check SHA256SUMS)
       - name: Attest release artifacts
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
@@ -146,7 +213,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/install-fedora.sh); shopt -u nullglob
+          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/*.deb dist/install-fedora.sh); shopt -u nullglob
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
             existing=$(mktemp -d); trap 'rm -rf -- "${existing}"' EXIT
             for payload in "${payloads[@]}" dist/SHA256SUMS; do
