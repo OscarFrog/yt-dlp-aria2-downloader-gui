@@ -17,19 +17,20 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.20**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.21**.
 
 ## Installation recommandée
 
 Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest)
 et téléchargez le fichier correspondant à votre système :
 
-- **Fedora 44 ou version plus récente :** le RPM `2.1.20`,
-  `yt-dlp-aria2-downloader-gui-2.1.20-1.fc44.noarch.rpm` ;
-- **Debian ou Ubuntu :** le DEB `2.1.20`,
-  `yt-dlp-aria2-downloader-gui_2.1.20-1_all.deb` ;
-- **autre distribution GNU/Linux ou utilisation portable :** l’archive ZIP
-  versionnée.
+- **Fedora 44 ou version plus récente :** le RPM `2.1.21`,
+  `yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noarch.rpm` ;
+- **Debian 13 (Trixie) avec `trixie-backports` activé :** le DEB `2.1.21`,
+  `yt-dlp-aria2-downloader-gui_2.1.21-1_all.deb` ;
+- **Ubuntu, autre distribution GNU/Linux ou utilisation portable :** l’archive
+  ZIP versionnée. Vérifiez que `yt-dlp` et `aria2c` respectent les versions
+  minimales indiquées ci-dessous.
 
 Avec une installation RPM ou DEB, le lanceur graphique et son icône sont
 installés automatiquement dans le menu des applications. **Ne lancez pas
@@ -59,8 +60,8 @@ installations depuis le ZIP ou Git.
   post-traitement ;
 - journaux privés conservés uniquement pour les exécutions problématiques, avec expurgation des URL et limite de 8 Mio ;
 - lanceur dans le menu des applications ;
-- tests statiques, tests d'intégration et validation GitHub Actions sous Ubuntu
-  et Fedora 44.
+- tests statiques, tests d'intégration et validation GitHub Actions sous Ubuntu,
+  Debian 13 et Fedora 44.
 
 ## Prérequis
 
@@ -106,7 +107,7 @@ sudo dnf install \
 Téléchargez les fichiers suivants depuis la release :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.20-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -114,17 +115,27 @@ Vérifiez puis installez le RPM :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.20-1.fc44.noarch.rpm
+sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noarch.rpm
 ```
 
 Le RPM déclare yt-dlp, aria2, FFmpeg/FFprobe, Zenity et les outils GNU nécessaires comme dépendances strictes. Deno reste géré séparément et n’est obligatoire que pour l’extraction YouTube.
 
-### Debian et Ubuntu
+### Debian 13 (Trixie)
+
+Le DEB exige `aria2 >= 1.37.0` et `yt-dlp >= 2026.06.09`. Debian 13 fournit
+la version requise d’aria2 dans la distribution de base et une version assez
+récente de yt-dlp via `trixie-backports`. Activez d’abord les backports :
+
+```bash
+printf '%s\n' 'deb http://deb.debian.org/debian trixie-backports main' | \
+  sudo tee /etc/apt/sources.list.d/trixie-backports.list >/dev/null
+sudo apt update
+```
 
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui_2.1.20-1_all.deb
+yt-dlp-aria2-downloader-gui_2.1.21-1_all.deb
 SHA256SUMS
 ```
 
@@ -132,10 +143,21 @@ Vérifiez puis installez le paquet :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.20-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.21-1_all.deb
 ```
 
-Le DEB installe yt-dlp, aria2, FFmpeg/FFprobe, Zenity et les outils GNU nécessaires comme dépendances strictes. Deno est facultatif pour l’extraction générique, mais obligatoire pour YouTube. Le moteur vérifie encore les versions et indique tout composant à mettre à jour.
+APT refuse désormais l’installation si les dépôts configurés ne peuvent pas
+satisfaire les mêmes versions minimales de yt-dlp et aria2 que celles imposées
+par le moteur.
+
+### Ubuntu
+
+Le DEB n’est actuellement pas présenté comme un paquet Ubuntu clé en main, car
+les dépôts Ubuntu pris en charge ne fournissent pas la version minimale de
+yt-dlp exigée par cette release. Utilisez plutôt l’archive ZIP ou l’installation
+Git et installez séparément une version compatible de `yt-dlp`. Vérifiez-la
+avec `yt-dlp --version` avant utilisation ; ne forcez pas l’installation du DEB
+en ignorant ses dépendances.
 
 ### Commandes installées par les paquets
 
@@ -160,7 +182,7 @@ Fedora :
 sudo dnf remove yt-dlp-aria2-downloader-gui
 ```
 
-Debian ou Ubuntu :
+Debian :
 
 ```bash
 sudo apt remove yt-dlp-aria2-downloader-gui
@@ -176,7 +198,7 @@ de l’utilisateur courant.
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.20.zip
+yt-dlp-aria2-downloader-gui-2.1.21.zip
 SHA256SUMS
 ```
 
@@ -184,8 +206,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.20.zip
-cd yt-dlp-aria2-downloader-gui-2.1.20
+unzip yt-dlp-aria2-downloader-gui-2.1.21.zip
+cd yt-dlp-aria2-downloader-gui-2.1.21
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install

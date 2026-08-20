@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.21 - 2026-08-20
+
+### Release qualification, packaging, and progress
+
+- Express the engine's minimum yt-dlp and aria2 versions in DEB and RPM metadata.
+- Qualify the DEB on Debian 13 with `trixie-backports`, where the required yt-dlp is available.
+- Stop advertising the DEB as a turnkey Ubuntu package while supported Ubuntu repositories remain below the required yt-dlp version.
+- Make package lifecycle tests reject missing or weakened minimum-version dependencies.
+- Gate release publication on the hermetic real-tool integration suite.
+- Weight multiple aria2 direct transfers by parsed byte counters when their sizes are available.
+- Add regression coverage for strongly asymmetric aria2 stream sizes.
+
 ## 2.1.20 - 2026-08-02
 
 ### Security, correctness, and stable-release qualification

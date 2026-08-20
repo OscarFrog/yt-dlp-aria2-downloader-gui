@@ -16,8 +16,8 @@ Requires:       findutils
 Requires:       grep
 Requires:       sed
 Requires:       util-linux
-Requires:       aria2
-Requires:       yt-dlp
+Requires:       aria2 >= 1.37.0
+Requires:       yt-dlp >= 2026.06.09
 Requires:       ffmpeg
 Requires:       zenity
 Requires:       hicolor-icon-theme
@@ -46,6 +46,7 @@ test "$("%{buildroot}%{_bindir}/yt-dlp-aria2-downloader" --version)" = "yt-dlp-a
 %{_libexecdir}/yt-dlp-aria2-downloader/progress-monitor.sh
 %{_datadir}/applications/yt-dlp-aria2-downloader.desktop
 %{_datadir}/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg
+%dir %{_docdir}/%{name}
 %doc %{_docdir}/%{name}/README.md
 %doc %{_docdir}/%{name}/README.fr.md
 %doc %{_docdir}/%{name}/CHANGELOG.md

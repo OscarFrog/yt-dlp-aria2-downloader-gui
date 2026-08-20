@@ -311,6 +311,20 @@ wait_for_text "${CAPTURE_FILE}" '40% (aria2c)' 'direct aria percentage'
 assert_file_has_no_line "${CAPTURE_FILE}" '100' 'aria local percentage is not global completion'
 finish_success '/tmp/direct-video.mkv'
 
+# Two direct aria2 streams with very different sizes must be aggregated by
+# transferred bytes instead of averaging their local percentages equally.
+start_scenario aria-weighted-video video
+{
+    printf '%s\n' 'YTDLP_PLAN|media||137|140'
+    printf '\r[#a1b2c3 900.0MiB/1000.0MiB(90%%) CN:8 DL:8MiB ETA:12s]\r'
+    printf '\r[#d4e5f6 1.0MiB/10.0MiB(10%%) CN:2 DL:1MiB ETA:9s]\r'
+} >>"${LOG_FILE}"
+wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 10% (aria2c)' \
+    'second aria stream is rendered'
+weighted_max=$(max_percentage "${CAPTURE_FILE}")
+assert_equals '80' "${weighted_max}" 'aria progress is weighted by transferred bytes'
+finish_success '/tmp/aria-weighted-video.mkv'
+
 # aria2c fallback without a YTDLP_PLAN record. This is the compatibility path
 # used by legacy or incomplete event streams and must still update Zenity.
 start_scenario aria-without-plan-audio audio

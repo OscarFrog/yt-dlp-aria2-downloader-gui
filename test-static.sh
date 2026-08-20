@@ -112,6 +112,10 @@ assert_file_contains \
     '^\[#([[:xdigit:]]+)[[:space:]]' \
     'aria2 progress without mandatory percentage'
 assert_file_contains \
+    "${script_dir}/progress-monitor.sh" \
+    'parse_aria_size() {' \
+    'aria2 human-readable byte counters are parsed for weighted progress'
+assert_file_contains \
     "${script_dir}/install-gui.sh" \
     "readonly LAUNCHER_LINK=\"\${LAUNCHER_DIR}/launch\"" \
     'stable desktop launcher link'
@@ -128,7 +132,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.20'
+readonly EXPECTED_VERSION='2.1.21'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -222,6 +226,11 @@ assert_file_contains "${script_dir}/.github/workflows/release.yml" \
 assert_file_contains "${script_dir}/.github/workflows/shell.yml" \
     'cancel-in-progress: true' \
     'outdated validation runs are cancelled'
+
+assert_file_contains \
+    "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+    '%dir %{_docdir}/%{name}' \
+    'RPM owns its application documentation directory'
 
 assert_file_contains "${script_dir}/README.md"     "is **${EXPECTED_VERSION}**." 'English README version'
 assert_file_contains "${script_dir}/README.fr.md"     "version actuelle est la **${EXPECTED_VERSION}**." 'French README version'
@@ -383,7 +392,7 @@ assert_file_not_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gu
 
 
 
-# Version 2.1.20 privacy, validation, and supply-chain contracts.
+# Version 2.1.21 privacy, validation, packaging, and supply-chain contracts.
 assert_file_contains "${script_dir}/download-video.sh" \
     '--url-file FILE' 'private URL-file input'
 assert_file_contains "${script_dir}/download-video.sh" \
@@ -411,9 +420,12 @@ assert_file_contains "${script_dir}/progress-monitor.sh" \
 assert_file_contains "${script_dir}/progress-monitor.sh" \
     'MAX_SAFE_COUNTER=9000000000000000' 'bounded progress arithmetic'
 assert_file_contains "${script_dir}/packaging/deb/build-deb.sh" \
-    'ffmpeg, yt-dlp, zenity' 'DEB strict runtime dependencies'
+    'aria2 (>= 1.37.0), ffmpeg, yt-dlp (>= 2026.06.09), zenity' \
+    'DEB versioned runtime dependencies'
 assert_file_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
-    'Requires:       yt-dlp' 'RPM strict yt-dlp dependency'
+    'Requires:       aria2 >= 1.37.0' 'RPM minimum aria2 dependency'
+assert_file_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+    'Requires:       yt-dlp >= 2026.06.09' 'RPM minimum yt-dlp dependency'
 assert_file_contains "${script_dir}/install-gui.sh" \
     'readonly ICON_FILE=' 'per-user dedicated icon installation'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
@@ -421,6 +433,12 @@ assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'release provenance attestation action'
 assert_file_contains "${script_dir}/.github/workflows/real-tools.yml" \
     'tests/real-tools-integration.sh' 'hermetic real-tool CI validation'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'tests/real-tools-integration.sh' 'release is gated by hermetic real-tool validation'
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'container: debian:13-slim' 'DEB lifecycle uses Debian 13'
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'trixie-backports' 'DEB lifecycle enables Debian 13 backports'
 assert_file_contains "${script_dir}/tests/run-all.sh" \
     'tests/ffmpeg-progress-integration.sh' 'measured FFmpeg progress regression suite'
 

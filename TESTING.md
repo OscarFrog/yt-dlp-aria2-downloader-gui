@@ -133,11 +133,12 @@ for pushes to `main`, in two environments:
 - `ubuntu-24.04`;
 - a Fedora 44 container on a GitHub-hosted runner.
 
-`.github/workflows/packages.yml` builds a DEB on Ubuntu and a noarch RPM in a
-Fedora 44 container for every pull request and push to `main`. Each generated
-package is installed with its native package manager, its commands, desktop
-entry, icon, and version are checked, then the package is removed and the
-absence of all application-owned files is verified.
+`.github/workflows/packages.yml` builds and installs the DEB in a Debian 13
+container with `trixie-backports` enabled, and builds the noarch RPM in a
+Fedora 44 container, for every pull request and push to `main`. Each generated
+package is installed with its native package manager, its versioned runtime
+dependencies, commands, desktop entry, icon, and version are checked, then the
+package is removed and the absence of all application-owned files is verified.
 
 
 `.github/workflows/real-tools.yml` installs actual yt-dlp, aria2c, FFmpeg, and
@@ -146,11 +147,12 @@ loopback HTTP server, validates a complete video with audio, and rejects a
 video-only result without contacting a public media service.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
-the complete validation first, verifies tag ancestry and project versions,
-builds the ZIP, DEB, and RPM in separate read-only jobs, performs the same real
-package installation and removal checks, downloads the exact tested artifacts
-into one publication job, generates a shared SHA256SUMS file, and publishes all
-four assets. Only the final job receives `contents: write`.
+the complete validation and the hermetic real-tool integration first, verifies
+tag ancestry and project versions, builds the ZIP, DEB, and RPM in separate
+read-only jobs, performs the same real package installation and removal checks,
+downloads the exact tested artifacts into one publication job, generates a
+shared SHA256SUMS file, and publishes all four assets. Only the final job
+receives `contents: write`.
 
 ## Real-world checks on Fedora 44
 

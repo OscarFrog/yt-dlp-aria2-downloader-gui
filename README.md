@@ -16,18 +16,19 @@ single URL using one of three profiles:
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
 streams deliberately remain on yt-dlp's native downloader. The current version
-is **2.1.20**.
+is **2.1.21**.
 
 ## Recommended installation
 
 Open the [latest GitHub release](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest)
 and download the file matching your system:
 
-- **Fedora 44 or newer:** `2.1.20` RPM,
-  `yt-dlp-aria2-downloader-gui-2.1.20-1.fc44.noarch.rpm`;
-- **Debian or Ubuntu:** `2.1.20` DEB,
-  `yt-dlp-aria2-downloader-gui_2.1.20-1_all.deb`;
-- **other GNU/Linux distributions or portable use:** the versioned ZIP.
+- **Fedora 44 or newer:** `2.1.21` RPM,
+  `yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noarch.rpm`;
+- **Debian 13 (Trixie) with `trixie-backports` enabled:** `2.1.21` DEB,
+  `yt-dlp-aria2-downloader-gui_2.1.21-1_all.deb`;
+- **Ubuntu, other GNU/Linux distributions, or portable use:** the versioned ZIP.
+  Ensure that `yt-dlp` and `aria2c` satisfy the minimum versions listed below.
 
 For an RPM or DEB installation, the graphical launcher and its application icon
 are installed automatically in the desktop application menu. **Do not run
@@ -55,8 +56,8 @@ Git installations.
   instances from sharing partial or post-processing files;
 - private diagnostic logs retained only for problematic runs, with URL redaction and an 8 MiB retained-size cap;
 - application-menu launcher;
-- static tests, integration tests, and GitHub Actions validation on Ubuntu and
-  Fedora 44.
+- static tests, integration tests, and GitHub Actions validation on Ubuntu,
+  Debian 13, and Fedora 44.
 
 ## Requirements
 
@@ -103,7 +104,7 @@ sudo dnf install \
 Download these release assets:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.20-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -111,17 +112,27 @@ Verify the downloaded RPM and install it:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.20-1.fc44.noarch.rpm
+sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noarch.rpm
 ```
 
 The RPM declares yt-dlp, aria2, FFmpeg/FFprobe, Zenity, and the required GNU command-line tools as hard dependencies. Deno remains a separately managed runtime and is required only for YouTube extraction.
 
-### Debian and Ubuntu
+### Debian 13 (Trixie)
+
+The DEB requires `aria2 >= 1.37.0` and `yt-dlp >= 2026.06.09`. Debian 13
+provides the required aria2 version in the base distribution and a sufficiently
+recent yt-dlp through `trixie-backports`. Enable backports first:
+
+```bash
+printf '%s\n' 'deb http://deb.debian.org/debian trixie-backports main' | \
+  sudo tee /etc/apt/sources.list.d/trixie-backports.list >/dev/null
+sudo apt update
+```
 
 Download these release assets:
 
 ```text
-yt-dlp-aria2-downloader-gui_2.1.20-1_all.deb
+yt-dlp-aria2-downloader-gui_2.1.21-1_all.deb
 SHA256SUMS
 ```
 
@@ -129,10 +140,19 @@ Verify and install the package:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.20-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.21-1_all.deb
 ```
 
-The DEB installs yt-dlp, aria2, FFmpeg/FFprobe, Zenity, and the required GNU command-line tools as hard dependencies. Deno is optional for generic extraction but required for YouTube. The engine still verifies runtime versions and reports any component that must be updated.
+APT now rejects the installation if the configured repositories cannot satisfy
+the same yt-dlp and aria2 minimum versions enforced by the engine.
+
+### Ubuntu
+
+The DEB is not currently advertised as a turnkey Ubuntu package because the
+supported Ubuntu repositories do not provide the yt-dlp minimum required by
+this release. Use the portable ZIP or Git installation instead and install a
+compatible `yt-dlp` separately. Verify it with `yt-dlp --version` before use;
+do not force-install the DEB while ignoring package dependencies.
 
 ### Packaged commands
 
@@ -157,7 +177,7 @@ Fedora:
 sudo dnf remove yt-dlp-aria2-downloader-gui
 ```
 
-Debian or Ubuntu:
+Debian:
 
 ```bash
 sudo apt remove yt-dlp-aria2-downloader-gui
@@ -172,7 +192,7 @@ older ZIP or Git installation created in the current user's home directory.
 Download these release assets:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.20.zip
+yt-dlp-aria2-downloader-gui-2.1.21.zip
 SHA256SUMS
 ```
 
@@ -180,8 +200,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.20.zip
-cd yt-dlp-aria2-downloader-gui-2.1.20
+unzip yt-dlp-aria2-downloader-gui-2.1.21.zip
+cd yt-dlp-aria2-downloader-gui-2.1.21
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install

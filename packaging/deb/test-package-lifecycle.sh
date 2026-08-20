@@ -25,7 +25,7 @@ readonly ICON_FILE='/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-download
 }
 
 for command_name in \
-    apt-get desktop-file-validate dpkg-deb dpkg-query find grep \
+    apt-get desktop-file-validate dpkg dpkg-deb dpkg-query find grep \
     mktemp realpath rm sort; do
     command -v "${command_name}" >/dev/null 2>&1 || {
         printf 'Error: required command is absent: %s\n' "${command_name}" >&2
@@ -39,6 +39,17 @@ readonly package_path
     printf 'Error: not a DEB package: %s\n' "${package_path}" >&2
     exit 2
 }
+
+package_depends=$(dpkg-deb --field "${package_path}" Depends)
+for required_dependency in \
+    'aria2 (>= 1.37.0)' \
+    'yt-dlp (>= 2026.06.09)'; do
+    if [[ ${package_depends} != *"${required_dependency}"* ]]; then
+        printf 'Error: DEB dependency is missing or too weak: %s\n' \
+            "${required_dependency}" >&2
+        exit 65
+    fi
+done
 
 if dpkg-query -W -f='${Status}' "${PACKAGE_NAME}" 2>/dev/null |
     grep -Fqx -- 'install ok installed'; then
@@ -95,6 +106,19 @@ for runtime_command in yt-dlp aria2c ffmpeg ffprobe; do
         exit 65
     }
 done
+
+yt_dlp_package_version=$(dpkg-query -W -f='${Version}' yt-dlp)
+if ! dpkg --compare-versions "${yt_dlp_package_version}" ge '2026.06.09'; then
+    printf 'Error: installed yt-dlp package is too old: %s\n' \
+        "${yt_dlp_package_version}" >&2
+    exit 65
+fi
+aria2_package_version=$(dpkg-query -W -f='${Version}' aria2)
+if ! dpkg --compare-versions "${aria2_package_version}" ge '1.37.0'; then
+    printf 'Error: installed aria2 package is too old: %s\n' \
+        "${aria2_package_version}" >&2
+    exit 65
+fi
 
 DEBIAN_FRONTEND=noninteractive \
     apt-get remove --yes "${PACKAGE_NAME}"
