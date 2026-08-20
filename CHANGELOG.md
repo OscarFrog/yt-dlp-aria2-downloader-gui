@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.22 - 2026-08-20
+
+### GUI version display
+
+- Show the current application version in the Zenity dialog titles.
+- Keep `download-video.sh --version` as the single source of truth for the GUI-displayed version.
+- Retain the 2.1.21 packaging policy: qualified Fedora RPM and portable ZIP publication, with DEB publication suspended.
+
 ## 2.1.21 - 2026-08-20
 
 ### Release qualification, packaging, and progress
