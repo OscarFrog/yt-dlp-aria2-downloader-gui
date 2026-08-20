@@ -298,7 +298,11 @@ bootstrap_ytdlp() {
     local gpg_home=''
     local sums_line=''
 
-    work=$(mktemp -d --tmpdir="${RUNTIME_ROOT}" '.yt-dlp-bootstrap.XXXXXXXX') ||
+    # Keep the temporary GnuPG home deliberately short. gpg-agent creates
+    # AF_UNIX sockets below GNUPGHOME, whose pathname length is limited on
+    # Linux. Deep XDG/GitHub Actions HOME paths can otherwise prevent the
+    # agent from starting even though gpg-agent is installed.
+    work=$(mktemp -d --tmpdir=/tmp '.yt-dlp-bootstrap.XXXXXXXX') ||
         return 1
     gpg_home="${work}/gnupg"
     if ! mkdir -m 700 -- "${gpg_home}"; then
