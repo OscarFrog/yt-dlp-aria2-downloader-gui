@@ -25,12 +25,11 @@ and download the file matching your system:
 
 - **Fedora 44 or newer:** `2.1.21` RPM,
   `yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noarch.rpm`;
-- **Debian 13 (Trixie) with `trixie-backports` enabled:** `2.1.21` DEB,
-  `yt-dlp-aria2-downloader-gui_2.1.21-1_all.deb`;
-- **Ubuntu, other GNU/Linux distributions, or portable use:** the versioned ZIP.
-  Ensure that `yt-dlp` and `aria2c` satisfy the minimum versions listed below.
+- **Debian, Ubuntu, other GNU/Linux distributions, or portable use:** the
+  versioned ZIP. Ensure that `yt-dlp` and `aria2c` satisfy the minimum versions
+  listed below.
 
-For an RPM or DEB installation, the graphical launcher and its application icon
+For an RPM installation, the graphical launcher and its application icon
 are installed automatically in the desktop application menu. **Do not run
 `install-gui.sh` after installing a package.** That helper is only for ZIP and
 Git installations.
@@ -56,8 +55,8 @@ Git installations.
   instances from sharing partial or post-processing files;
 - private diagnostic logs retained only for problematic runs, with URL redaction and an 8 MiB retained-size cap;
 - application-menu launcher;
-- static tests, integration tests, and GitHub Actions validation on Ubuntu,
-  Debian 13, and Fedora 44.
+- static tests, integration tests, and GitHub Actions validation on Ubuntu
+  and Fedora 44.
 
 ## Requirements
 
@@ -78,11 +77,11 @@ The engine always checks the minimum versions of `yt-dlp` and `aria2c`. Deno is 
 
 ## Package installation
 
-GitHub releases publish a Fedora RPM, a Debian package, the portable ZIP, and a
-single `SHA256SUMS` file. Package installations place the commands, dedicated
-application icon, and desktop launcher system-wide; they do not depend on the
-directory where the downloaded package was stored. No separate
-`install-gui.sh` command is required for RPM or DEB installations.
+GitHub releases publish a Fedora RPM, the portable ZIP, and a single
+`SHA256SUMS` file. The RPM places the commands, dedicated application icon, and
+desktop launcher system-wide; it does not depend on the directory where the
+downloaded package was stored. No separate `install-gui.sh` command is required
+for an RPM installation.
 
 When upgrading from a ZIP or Git installation, remove the old per-user launcher
 first so it cannot override the packaged desktop entry:
@@ -117,47 +116,17 @@ sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noar
 
 The RPM declares yt-dlp, aria2, FFmpeg/FFprobe, Zenity, and the required GNU command-line tools as hard dependencies. Deno remains a separately managed runtime and is required only for YouTube extraction.
 
-### Debian 13 (Trixie)
+### Debian and Ubuntu
 
-The DEB requires `aria2 >= 1.37.0` and `yt-dlp >= 2026.06.09`. Debian 13
-provides the required aria2 version in the base distribution and a sufficiently
-recent yt-dlp through `trixie-backports`. Enable backports first:
-
-```bash
-printf '%s\n' 'deb http://deb.debian.org/debian trixie-backports main' | \
-  sudo tee /etc/apt/sources.list.d/trixie-backports.list >/dev/null
-sudo apt update
-sudo apt install -t trixie-backports yt-dlp
-```
-
-Download these release assets:
-
-```text
-yt-dlp-aria2-downloader-gui_2.1.21-1_all.deb
-SHA256SUMS
-```
-
-Verify and install the package:
-
-```bash
-sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.21-1_all.deb
-```
-
-APT now rejects the installation if the configured repositories cannot satisfy
-the same yt-dlp and aria2 minimum versions enforced by the engine.
-
-### Ubuntu
-
-The DEB is not currently advertised as a turnkey Ubuntu package because the
-supported Ubuntu repositories do not provide the yt-dlp minimum required by
-this release. Use the portable ZIP or Git installation instead and install a
-compatible `yt-dlp` separately. Verify it with `yt-dlp --version` before use;
-do not force-install the DEB while ignoring package dependencies.
+Release 2.1.21 does not publish a DEB. The currently available Debian 13
+`trixie-backports` binary for yt-dlp is older than the security minimum required
+by this project (`2026.06.09`). Ubuntu repositories are also below that minimum.
+Use the portable ZIP or Git installation and provide a compatible yt-dlp
+separately. Do not lower the minimum version or force-install an older yt-dlp.
 
 ### Packaged commands
 
-After RPM or DEB installation, start the graphical interface from the
+After RPM installation, start the graphical interface from the
 application menu or run:
 
 ```bash
@@ -176,12 +145,6 @@ Fedora:
 
 ```bash
 sudo dnf remove yt-dlp-aria2-downloader-gui
-```
-
-Debian:
-
-```bash
-sudo apt remove yt-dlp-aria2-downloader-gui
 ```
 
 The package manager removes the system commands, desktop launcher, and

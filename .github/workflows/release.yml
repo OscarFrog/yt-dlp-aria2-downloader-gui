@@ -80,44 +80,6 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
           retention-days: 7
-  deb:
-    needs: validate
-    runs-on: ubuntu-24.04
-    container: debian:13-slim
-    timeout-minutes: 20
-    steps:
-      - name: Prepare Debian 13 with backports
-        run: |
-          printf '%s\n' 'deb http://deb.debian.org/debian trixie-backports main' \
-            > /etc/apt/sources.list.d/trixie-backports.list
-          apt-get -o Acquire::Retries=3 update
-          DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install --yes \
-            bash ca-certificates coreutils desktop-file-utils dpkg-dev findutils \
-            git grep sed util-linux
-          DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install --yes \
-            -t trixie-backports yt-dlp
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Build DEB
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-          bash packaging/deb/build-deb.sh "${RELEASE_TAG#v}" dist
-      - name: Lifecycle
-        shell: bash
-        run: |
-          shopt -s nullglob; packages=(dist/*.deb); shopt -u nullglob; ((${#packages[@]} == 1))
-          bash packaging/deb/test-package-lifecycle.sh "${packages[0]}" "${RELEASE_TAG#v}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-deb
-          path: dist/*.deb
-          if-no-files-found: error
-          retention-days: 7
   rpm:
     needs: validate
     runs-on: ubuntu-24.04
@@ -149,7 +111,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   publish:
-    needs: [zip, deb, rpm]
+    needs: [zip, rpm]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -170,9 +132,9 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          shopt -s nullglob; payloads=(dist/*.zip dist/*.deb dist/*.rpm); shopt -u nullglob
-          ((${#payloads[@]} == 3))
-          (cd dist && sha256sum -- *.zip *.deb *.rpm > SHA256SUMS && sha256sum --check SHA256SUMS)
+          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm); shopt -u nullglob
+          ((${#payloads[@]} == 2))
+          (cd dist && sha256sum -- *.zip *.rpm > SHA256SUMS && sha256sum --check SHA256SUMS)
       - name: Attest release artifacts
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
@@ -183,7 +145,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          shopt -s nullglob; payloads=(dist/*.zip dist/*.deb dist/*.rpm); shopt -u nullglob
+          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm); shopt -u nullglob
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
             existing=$(mktemp -d); trap 'rm -rf -- "${existing}"' EXIT
             for payload in "${payloads[@]}" dist/SHA256SUMS; do

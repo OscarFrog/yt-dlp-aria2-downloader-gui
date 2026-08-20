@@ -113,8 +113,10 @@ The automated suite checks, among other things:
 - package install-tree layout, stable command symlinks, system desktop entry,
   dedicated hicolor icon, documentation permissions, and exclusion of tests
   and obsolete images;
-- real privileged installation and removal of the generated DEB and RPM in
-  disposable GitHub Actions environments, including launcher and icon cleanup.
+- real privileged installation and removal of the generated RPM in a
+  disposable Fedora 44 GitHub Actions environment, including launcher and icon
+  cleanup; DEB publication remains suspended while supported Debian repositories
+  cannot satisfy the secure yt-dlp minimum.
 
 - private GUI URL transfer through owner-only URL and yt-dlp batch files, with
   the requested URL absent from GUI, engine, and yt-dlp process arguments;
@@ -133,12 +135,13 @@ for pushes to `main`, in two environments:
 - `ubuntu-24.04`;
 - a Fedora 44 container on a GitHub-hosted runner.
 
-`.github/workflows/packages.yml` builds and installs the DEB in a Debian 13
-container with `trixie-backports` enabled, and builds the noarch RPM in a
-Fedora 44 container, for every pull request and push to `main`. Each generated
-package is installed with its native package manager, its versioned runtime
-dependencies, commands, desktop entry, icon, and version are checked, then the
-package is removed and the absence of all application-owned files is verified.
+`.github/workflows/packages.yml` builds the noarch RPM in a Fedora 44
+container for every pull request and push to `main`. The generated package is
+installed with DNF, its versioned runtime dependencies, commands, desktop entry,
+icon, and version are checked, then the package is removed and the absence of
+all application-owned files is verified. DEB tooling remains in the repository
+but is not qualified or published while supported Debian repositories cannot
+satisfy `yt-dlp >= 2026.06.09`.
 
 
 `.github/workflows/real-tools.yml` installs actual yt-dlp, aria2c, FFmpeg, and
@@ -148,11 +151,11 @@ video-only result without contacting a public media service.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the complete validation and the hermetic real-tool integration first, verifies
-tag ancestry and project versions, builds the ZIP, DEB, and RPM in separate
-read-only jobs, performs the same real package installation and removal checks,
-downloads the exact tested artifacts into one publication job, generates a
-shared SHA256SUMS file, and publishes all four assets. Only the final job
-receives `contents: write`.
+tag ancestry and project versions, builds the ZIP and RPM in separate
+read-only jobs, performs the real RPM installation and removal checks, downloads
+the exact tested artifacts into one publication job, generates a shared
+SHA256SUMS file, and publishes the ZIP, RPM, and checksum file. Only the final
+job receives `contents: write`.
 
 ## Real-world checks on Fedora 44
 

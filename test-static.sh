@@ -320,12 +320,12 @@ assert_text_not_contains "${README_FR_TEXT}" \
     'docs/images/' 'French README has no embedded screenshots'
 
 
-assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
-    'name: Debian package' 'DEB package validation job'
+assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
+    'name: Debian package' 'unsupported DEB validation is disabled'
 assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
     'name: Fedora 44 RPM' 'RPM package validation job'
-assert_file_contains "${script_dir}/.github/workflows/release.yml" \
-    'dist/*.deb' 'release publishes a DEB payload'
+assert_file_not_contains "${script_dir}/.github/workflows/release.yml" \
+    'dist/*.deb' 'release does not publish an unsupported DEB payload'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'dist/*.rpm' 'release publishes an RPM payload'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
@@ -373,15 +373,15 @@ assert_file_contains "${script_dir}/packaging/yt-dlp-aria2-downloader.desktop" \
 assert_file_contains "${script_dir}/packaging/install-tree.sh" \
     'usr/share/icons/hicolor/scalable/apps' \
     'Freedesktop hicolor icon installation'
-assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
     'packaging/deb/test-package-lifecycle.sh' \
-    'DEB installation and removal validation'
+    'unsupported DEB lifecycle is not run in package CI'
 assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
     'packaging/rpm/test-package-lifecycle.sh' \
     'RPM installation and removal validation'
-assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+assert_file_not_contains "${script_dir}/.github/workflows/release.yml" \
     'packaging/deb/test-package-lifecycle.sh' \
-    'release DEB installation and removal validation'
+    'unsupported DEB lifecycle is not run during release'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'packaging/rpm/test-package-lifecycle.sh' \
     'release RPM installation and removal validation'
@@ -435,10 +435,10 @@ assert_file_contains "${script_dir}/.github/workflows/real-tools.yml" \
     'tests/real-tools-integration.sh' 'hermetic real-tool CI validation'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'tests/real-tools-integration.sh' 'release is gated by hermetic real-tool validation'
-assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
-    'container: debian:13-slim' 'DEB lifecycle uses Debian 13'
-assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
-    'trixie-backports' 'DEB lifecycle enables Debian 13 backports'
+assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
+    'container: debian:13-slim' 'unsupported Debian package job is absent'
+assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
+    'trixie-backports' 'package CI does not rely on insufficient Debian backports'
 assert_file_contains "${script_dir}/tests/run-all.sh" \
     'tests/ffmpeg-progress-integration.sh' 'measured FFmpeg progress regression suite'
 

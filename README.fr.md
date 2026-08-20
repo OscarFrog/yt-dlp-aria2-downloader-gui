@@ -26,13 +26,11 @@ et téléchargez le fichier correspondant à votre système :
 
 - **Fedora 44 ou version plus récente :** le RPM `2.1.21`,
   `yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noarch.rpm` ;
-- **Debian 13 (Trixie) avec `trixie-backports` activé :** le DEB `2.1.21`,
-  `yt-dlp-aria2-downloader-gui_2.1.21-1_all.deb` ;
-- **Ubuntu, autre distribution GNU/Linux ou utilisation portable :** l’archive
-  ZIP versionnée. Vérifiez que `yt-dlp` et `aria2c` respectent les versions
-  minimales indiquées ci-dessous.
+- **Debian, Ubuntu, autre distribution GNU/Linux ou utilisation portable :**
+  l’archive ZIP versionnée. Vérifiez que `yt-dlp` et `aria2c` respectent les
+  versions minimales indiquées ci-dessous.
 
-Avec une installation RPM ou DEB, le lanceur graphique et son icône sont
+Avec une installation RPM, le lanceur graphique et son icône sont
 installés automatiquement dans le menu des applications. **Ne lancez pas
 `install-gui.sh` après l’installation d’un paquet.** Cet outil est réservé aux
 installations depuis le ZIP ou Git.
@@ -60,8 +58,8 @@ installations depuis le ZIP ou Git.
   post-traitement ;
 - journaux privés conservés uniquement pour les exécutions problématiques, avec expurgation des URL et limite de 8 Mio ;
 - lanceur dans le menu des applications ;
-- tests statiques, tests d'intégration et validation GitHub Actions sous Ubuntu,
-  Debian 13 et Fedora 44.
+- tests statiques, tests d'intégration et validation GitHub Actions sous Ubuntu
+  et Fedora 44.
 
 ## Prérequis
 
@@ -81,11 +79,11 @@ Le moteur contrôle toujours les versions minimales de `yt-dlp` et `aria2c`. Den
 
 ## Installation par paquet
 
-Les releases GitHub publient un RPM Fedora, un paquet Debian, l'archive ZIP
-portable et un fichier `SHA256SUMS` commun. Les paquets installent les commandes,
-l’icône dédiée et le lanceur graphique au niveau du système ; leur fonctionnement
-ne dépend pas du dossier dans lequel le paquet a été téléchargé. Aucune exécution
-séparée de `install-gui.sh` n’est nécessaire avec un RPM ou un DEB.
+Les releases GitHub publient un RPM Fedora, l'archive ZIP portable et un
+fichier `SHA256SUMS` commun. Le RPM installe les commandes, l’icône dédiée et le
+lanceur graphique au niveau du système ; son fonctionnement ne dépend pas du
+dossier dans lequel le paquet a été téléchargé. Aucune exécution séparée de
+`install-gui.sh` n’est nécessaire avec un RPM.
 
 Avant de migrer depuis une installation ZIP ou Git, supprimez l'ancien lanceur
 utilisateur afin qu'il ne masque pas l'entrée installée par le paquet :
@@ -120,49 +118,18 @@ sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noar
 
 Le RPM déclare yt-dlp, aria2, FFmpeg/FFprobe, Zenity et les outils GNU nécessaires comme dépendances strictes. Deno reste géré séparément et n’est obligatoire que pour l’extraction YouTube.
 
-### Debian 13 (Trixie)
+### Debian et Ubuntu
 
-Le DEB exige `aria2 >= 1.37.0` et `yt-dlp >= 2026.06.09`. Debian 13 fournit
-la version requise d’aria2 dans la distribution de base et une version assez
-récente de yt-dlp via `trixie-backports`. Activez d’abord les backports :
-
-```bash
-printf '%s\n' 'deb http://deb.debian.org/debian trixie-backports main' | \
-  sudo tee /etc/apt/sources.list.d/trixie-backports.list >/dev/null
-sudo apt update
-sudo apt install -t trixie-backports yt-dlp
-```
-
-Téléchargez les fichiers suivants :
-
-```text
-yt-dlp-aria2-downloader-gui_2.1.21-1_all.deb
-SHA256SUMS
-```
-
-Vérifiez puis installez le paquet :
-
-```bash
-sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.21-1_all.deb
-```
-
-APT refuse désormais l’installation si les dépôts configurés ne peuvent pas
-satisfaire les mêmes versions minimales de yt-dlp et aria2 que celles imposées
-par le moteur.
-
-### Ubuntu
-
-Le DEB n’est actuellement pas présenté comme un paquet Ubuntu clé en main, car
-les dépôts Ubuntu pris en charge ne fournissent pas la version minimale de
-yt-dlp exigée par cette release. Utilisez plutôt l’archive ZIP ou l’installation
-Git et installez séparément une version compatible de `yt-dlp`. Vérifiez-la
-avec `yt-dlp --version` avant utilisation ; ne forcez pas l’installation du DEB
-en ignorant ses dépendances.
+La release 2.1.21 ne publie pas de DEB. Le binaire yt-dlp actuellement
+disponible dans `trixie-backports` pour Debian 13 est antérieur au minimum de
+sécurité exigé par ce projet (`2026.06.09`). Les dépôts Ubuntu sont également
+sous ce minimum. Utilisez l’archive ZIP portable ou l’installation Git et
+fournissez séparément une version compatible de yt-dlp. N’abaissez pas la
+version minimale et ne forcez pas l’installation d’un ancien yt-dlp.
 
 ### Commandes installées par les paquets
 
-Après l'installation du RPM ou du DEB, démarrez l'interface depuis le menu des
+Après l'installation du RPM, démarrez l'interface depuis le menu des
 applications ou avec :
 
 ```bash
@@ -181,12 +148,6 @@ Fedora :
 
 ```bash
 sudo dnf remove yt-dlp-aria2-downloader-gui
-```
-
-Debian :
-
-```bash
-sudo apt remove yt-dlp-aria2-downloader-gui
 ```
 
 Le gestionnaire de paquets supprime les commandes système, le lanceur graphique
