@@ -31,6 +31,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           version=$(./download-video.sh --version); version=${version##* }
           bash packaging/deb/build-deb.sh "${version}" dist
       - name: Install and remove DEB
