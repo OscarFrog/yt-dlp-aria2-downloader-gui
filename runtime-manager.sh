@@ -609,16 +609,16 @@ install_deno_candidate() {
 latest_ytdlp_version() {
     local output_variable=$1
     local effective_url=''
-    local version=''
+    local resolved_version=''
 
     if ! effective_url=$(run_curl --silent --show-error \
         --output /dev/null --write-out '%{url_effective}' \
         "https://github.com/${YTDLP_RELEASE_REPOSITORY}/releases/latest"); then
         return 1
     fi
-    version=${effective_url##*/}
-    [[ ${version} =~ ${YTDLP_CHANNEL_VERSION_PATTERN} ]] || return 1
-    printf -v "${output_variable}" '%s' "${version}" || return 1
+    resolved_version=${effective_url##*/}
+    [[ ${resolved_version} =~ ${YTDLP_CHANNEL_VERSION_PATTERN} ]] || return 1
+    printf -v "${output_variable}" '%s' "${resolved_version}" || return 1
     return 0
 }
 
@@ -626,7 +626,7 @@ latest_deno_version() {
     local output_variable=$1
     local effective_url=''
     local tag=''
-    local version=''
+    local resolved_version=''
 
     if ! effective_url=$(run_curl --silent --show-error \
         --output /dev/null --write-out '%{url_effective}' \
@@ -635,8 +635,8 @@ latest_deno_version() {
     fi
     tag=${effective_url##*/}
     [[ ${tag} =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || return 1
-    version=${BASH_REMATCH[1]}
-    printf -v "${output_variable}" '%s' "${version}" || return 1
+    resolved_version=${BASH_REMATCH[1]}
+    printf -v "${output_variable}" '%s' "${resolved_version}" || return 1
     return 0
 }
 
@@ -713,9 +713,9 @@ bootstrap_ytdlp_version() {
 }
 
 bootstrap_ytdlp() {
-    local version=''
-    latest_ytdlp_version version || return 1
-    bootstrap_ytdlp_version "${version}"
+    local latest_version=''
+    latest_ytdlp_version latest_version || return 1
+    bootstrap_ytdlp_version "${latest_version}"
 }
 
 bootstrap_deno_version() {
@@ -769,9 +769,9 @@ bootstrap_deno_version() {
 }
 
 bootstrap_deno() {
-    local version=''
-    latest_deno_version version || return 1
-    bootstrap_deno_version "${version}"
+    local latest_version=''
+    latest_deno_version latest_version || return 1
+    bootstrap_deno_version "${latest_version}"
 }
 
 update_ytdlp() {

@@ -234,6 +234,45 @@ runtime_env=(env HOME="${HOME_DIR}" XDG_DATA_HOME="${DATA_HOME}" PATH="${MOCK_BI
     YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS=2 YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS=10
     YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS=10 YTDLP_ARIA2_RUNTIME_VALIDATE_TIMEOUT_SECONDS=5)
 
+# A completely empty managed-runtime tree must bootstrap both components.
+# This specifically exercises ensure_runtime -> bootstrap_ytdlp/bootstrap_deno,
+# rather than only the already-installed update paths.
+FRESH_DATA_HOME="${TEST_ROOT}/fresh-data"
+fresh_runtime_root="${FRESH_DATA_HOME}/yt-dlp-aria2-downloader/runtime"
+fresh_ytdlp_root="${fresh_runtime_root}/yt-dlp"
+fresh_deno_root="${fresh_runtime_root}/deno"
+
+rm -rf -- "${FRESH_DATA_HOME}"
+: >"${URL_LOG}"
+rm -f -- "${FD_LEAK_MARKER}" "${NETWORK_MARKER}"
+
+"${runtime_env[@]}" \
+    XDG_DATA_HOME="${FRESH_DATA_HOME}" \
+    "${RUNTIME_MANAGER}" ensure >/dev/null
+
+assert_link_target \
+    "${fresh_ytdlp_root}/current" \
+    2026.07.04 \
+    'fresh yt-dlp bootstrap failed'
+
+assert_link_target \
+    "${fresh_deno_root}/current" \
+    2.9.5 \
+    'fresh Deno bootstrap failed'
+
+grep -Fq \
+    '/yt-dlp/yt-dlp/releases/download/2026.07.04/' \
+    "${URL_LOG}" ||
+    fail 'fresh yt-dlp bootstrap did not use its exact release tag'
+
+grep -Fq \
+    '/denoland/deno/releases/download/v2.9.5/' \
+    "${URL_LOG}" ||
+    fail 'fresh Deno bootstrap did not use its exact release tag'
+
+[[ ! -e ${FD_LEAK_MARKER} ]] ||
+    fail 'fresh bootstrap leaked the runtime lock to a child process'
+
 # Strict no-network require mode: both success and missing-runtime failure must
 # happen without invoking curl.
 rm -f -- "${NETWORK_MARKER}" "${URL_LOG}"
