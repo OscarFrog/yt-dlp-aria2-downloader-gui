@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: packages-${{ github.workflow }}-${{ github.ref }}-${{ matrix.scenario }}
+  group: packages-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   rpm:

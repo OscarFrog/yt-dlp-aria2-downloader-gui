@@ -519,4 +519,12 @@ assert_file_contains "${script_dir}/runtime-manager.sh" \
     '--list-impersonate-targets' \
     'runtime manager owns yt-dlp impersonation validation'
 
+
+# shellcheck disable=SC2016
+# Workflow-level concurrency may use github/inputs/vars, but not matrix.
+assert_file_contains "${script_dir}/.github/workflows/packages.yml"     'group: packages-${{ github.workflow }}-${{ github.ref }}'     'package workflow uses valid workflow-level concurrency contexts'
+# shellcheck disable=SC2016
+# This assertion deliberately searches for literal GitHub expression syntax.
+assert_file_not_contains "${script_dir}/.github/workflows/packages.yml"     'group: packages-${{ github.workflow }}-${{ github.ref }}-${{ matrix.scenario }}'     'package workflow does not use matrix at workflow-level concurrency'
+
 printf '%s\n' 'Static tests passed.'
