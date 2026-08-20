@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video-gui.sh
-# Version     : 2.1.22
+# Version     : 2.1.23
 # Date        : 2026-08-20
 # Description : Zenity GUI for MKV video, authenticated YouTube HLS, or audio.
 # ============================================================================

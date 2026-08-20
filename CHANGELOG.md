@@ -1,3 +1,25 @@
+## 2.1.23 - 2026-08-20
+
+### Runtime and Fedora installation hardening
+
+- Add a Fedora bootstrap installer that enables RPM Fusion Free, replaces
+  `ffmpeg-free` with the full RPM Fusion `ffmpeg`, installs required system
+  dependencies, installs the application RPM, and validates the resulting
+  environment.
+- Add a per-user managed runtime for yt-dlp and Deno. Every launch checks for
+  yt-dlp nightly and Deno stable updates, stages updates separately, validates
+  them, and only then switches the active runtime atomically.
+- Verify yt-dlp downloads against the upstream signed SHA-256 manifest and use
+  Deno's official checksum-verified upgrade mechanism.
+- Keep the last verified runtime when an update check fails, allowing continued
+  use during upstream or network outages.
+- Prevent collection URLs from silently downloading multiple entries by
+  rejecting playlist-indexed entries.
+- Reduce native HLS/DASH fragment concurrency to one for reliability while
+  retaining aria2c multi-connection acceleration for direct transfers.
+- Use the official yt-dlp executable's bundled EJS support instead of allowing
+  runtime EJS downloads.
+
 # Changelog
 
 ## 2.1.22 - 2026-08-20

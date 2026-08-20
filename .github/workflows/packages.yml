@@ -11,16 +11,22 @@ concurrency:
   cancel-in-progress: true
 jobs:
   rpm:
-    name: Fedora 44 RPM
+    name: Fedora 44 RPM (${{ matrix.scenario }})
     runs-on: ubuntu-24.04
     container: fedora:44
-    timeout-minutes: 20
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [fresh, ffmpeg-free]
     steps:
-      - name: Install RPM build tools and repositories
+      - name: Install RPM build tools
         run: |
-          dnf install --assumeyes cpio desktop-file-utils findutils git gzip rpm-build tar
           dnf install --assumeyes \
-            "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
+            cpio desktop-file-utils findutils git gzip rpm-build tar
+          if [[ '${{ matrix.scenario }}' == 'ffmpeg-free' ]]; then
+            dnf install --assumeyes ffmpeg-free
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -31,17 +37,56 @@ jobs:
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           version=$(./download-video.sh --version); version=${version##* }
           bash packaging/rpm/build-rpm.sh "${version}" dist
-      - name: Install and remove RPM
+      - name: Install through the supported Fedora bootstrap
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          packages=(dist/*.rpm)
+          shopt -u nullglob
+          ((${#packages[@]} == 1))
+          bash ./install-fedora.sh "${packages[0]}"
+      - name: Validate installed environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rpm -q yt-dlp-aria2-downloader-gui
+          rpm -q ffmpeg
+          ! rpm -q ffmpeg-free
+          rpm -q aria2 zenity
+          vendor=$(rpm -q --qf '%{VENDOR}\n' ffmpeg)
+          [[ ${vendor} == *'RPM Fusion'* ]]
+          command -v ffmpeg
+          command -v ffprobe
+          command -v aria2c
+          command -v zenity
+          runtime_manager=/usr/libexec/yt-dlp-aria2-downloader/runtime-manager.sh
+          ytdlp=$("${runtime_manager}" path yt-dlp)
+          deno=$("${runtime_manager}" path deno)
+          "${ytdlp}" --version
+          "${deno}" --version
+          "${ytdlp}" --list-impersonate-targets
+          /usr/bin/yt-dlp-aria2-downloader --version
+      - name: Remove application RPM
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dnf remove --assumeyes yt-dlp-aria2-downloader-gui
+          ! rpm -q yt-dlp-aria2-downloader-gui
+          test ! -e /usr/libexec/yt-dlp-aria2-downloader
+      - name: Re-run RPM ownership lifecycle
         shell: bash
         run: |
           set -Eeuo pipefail
           version=$(./download-video.sh --version); version=${version##* }
-          shopt -s nullglob; packages=(dist/*.rpm); shopt -u nullglob
+          shopt -s nullglob
+          packages=(dist/*.rpm)
+          shopt -u nullglob
           ((${#packages[@]} == 1))
           bash packaging/rpm/test-package-lifecycle.sh "${packages[0]}" "${version}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rpm-${{ github.sha }}
+          name: rpm-${{ matrix.scenario }}-${{ github.sha }}
           path: dist/*.rpm
           if-no-files-found: error
           retention-days: 7

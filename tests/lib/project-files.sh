@@ -9,11 +9,13 @@ PRODUCTION_SHELL_FILES=(
     download-video.sh
     download-video-gui.sh
     progress-monitor.sh
+    runtime-manager.sh
     install-gui.sh
 )
 
 # shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
 PACKAGING_SHELL_FILES=(
+    install-fedora.sh
     packaging/install-tree.sh
     packaging/deb/build-deb.sh
     packaging/deb/test-package-lifecycle.sh

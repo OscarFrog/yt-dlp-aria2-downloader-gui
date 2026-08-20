@@ -43,7 +43,10 @@ readonly package_path
 package_requires=$(rpm -qpR -- "${package_path}")
 for required_dependency in \
     'aria2 >= 1.37.0' \
-    'yt-dlp >= 2026.06.09'; do
+    'ffmpeg' \
+    'curl' \
+    'gnupg2' \
+    'unzip'; do
     if ! grep -Fqx -- "${required_dependency}" <<<"${package_requires}"; then
         printf 'Error: RPM dependency is missing or too weak: %s\n' \
             "${required_dependency}" >&2
@@ -101,13 +104,18 @@ installed_version=$(
 [[ -f ${ICON_FILE} && ! -L ${ICON_FILE} ]]
 desktop-file-validate --no-hints "${DESKTOP_FILE}"
 grep -Fqx -- 'Icon=yt-dlp-aria2-downloader' "${DESKTOP_FILE}"
-for runtime_command in yt-dlp aria2c ffmpeg ffprobe; do
+for runtime_command in aria2c ffmpeg ffprobe; do
     command -v "${runtime_command}" >/dev/null 2>&1 || {
         printf 'Error: package dependency command is absent: %s\n' \
             "${runtime_command}" >&2
         exit 65
     }
 done
+[[ -x /usr/libexec/yt-dlp-aria2-downloader/runtime-manager.sh ]] || {
+    printf 'Error: packaged runtime manager is absent.
+' >&2
+    exit 65
+}
 
 dnf remove --assumeyes "${PACKAGE_NAME}"
 package_installed=false

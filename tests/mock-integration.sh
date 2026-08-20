@@ -54,6 +54,8 @@ if (($# == 1)) && [[ $1 == '--help' ]]; then
     printf '%s\n' \
         '--js-runtimes' \
         '--remote-components' \
+        '--break-match-filters FILTER' \
+        '--no-update' \
         '--cookies-from-browser BROWSER[:PROFILE]' \
         '--extractor-args KEY:ARGS' \
         '-O, --print [WHEN:]TEMPLATE' \
@@ -273,7 +275,8 @@ if [[ ${MOCK_DENO_UNAVAILABLE:-0} == 1 ]]; then
     exit 127
 fi
 [[ ${LC_ALL:-} == C ]] || { printf 'salida Deno localizada\n'; exit 65; }
-printf 'deno %s\n' "${MOCK_DENO_VERSION:-2.3.0}"
+printf 'deno %s (stable, release, x86_64-unknown-linux-gnu)\n' \
+    "${MOCK_DENO_VERSION:-2.3.0}"
 printf 'v8 0.0.0\n'
 printf 'typescript 0.0.0\n'
 EOF_DENO
@@ -741,6 +744,9 @@ export XDG_RUNTIME_DIR="${RUNTIME_DIR}"
 export MOCK_OUTPUT_DIR="${OUTPUT_DIR}"
 export MOCK_LIST_ARGS_LOG="${LIST_ARGS_LOG}"
 export PATH="${MOCK_BIN}:/usr/bin:/bin"
+export YTDLP_ARIA2_SKIP_RUNTIME_UPDATE=1
+export YTDLP_ARIA2_YTDLP_BIN="${MOCK_BIN}/yt-dlp"
+export YTDLP_ARIA2_DENO_BIN="${MOCK_BIN}/deno"
 
 for mocked_command in yt-dlp aria2c deno zenity ffmpeg ffprobe mv setsid; do
     resolved_mock=$(command -v "${mocked_command}")
@@ -983,8 +989,8 @@ assert_option_value youtube_hls_arguments '--cookies-from-browser' 'firefox' \
     'YouTube HLS Firefox cookies'
 assert_option_value youtube_hls_arguments '--extractor-args' \
     'youtube:player_client=web_safari' 'YouTube HLS player client'
-assert_option_value youtube_hls_arguments '--remote-components' 'ejs:npm' \
-    'YouTube HLS remote EJS fallback'
+assert_array_not_contains youtube_hls_arguments '--remote-components' \
+    'YouTube HLS uses bundled EJS instead of remote components'
 assert_option_value youtube_hls_arguments '--format' \
     '(bv*+ba/b)[protocol^=m3u8]' 'YouTube HLS format selector'
 assert_option_value youtube_hls_arguments '--fixup' 'force' \
