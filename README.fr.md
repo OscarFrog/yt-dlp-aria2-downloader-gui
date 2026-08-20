@@ -17,15 +17,15 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.21**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.22**.
 
 ## Installation recommandée
 
 Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest)
 et téléchargez le fichier correspondant à votre système :
 
-- **Fedora 44 ou version plus récente :** le RPM `2.1.21`,
-  `yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noarch.rpm` ;
+- **Fedora 44 ou version plus récente :** le RPM `2.1.22`,
+  `yt-dlp-aria2-downloader-gui-2.1.22-1.fc44.noarch.rpm` ;
 - **Debian, Ubuntu, autre distribution GNU/Linux ou utilisation portable :**
   l’archive ZIP versionnée. Vérifiez que `yt-dlp` et `aria2c` respectent les
   versions minimales indiquées ci-dessous.
@@ -105,7 +105,7 @@ sudo dnf install \
 Téléchargez les fichiers suivants depuis la release :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.22-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -113,14 +113,14 @@ Vérifiez puis installez le RPM :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.21-1.fc44.noarch.rpm
+sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.22-1.fc44.noarch.rpm
 ```
 
 Le RPM déclare yt-dlp, aria2, FFmpeg/FFprobe, Zenity et les outils GNU nécessaires comme dépendances strictes. Deno reste géré séparément et n’est obligatoire que pour l’extraction YouTube.
 
 ### Debian et Ubuntu
 
-La release 2.1.21 ne publie pas de DEB. Le binaire yt-dlp actuellement
+La release 2.1.22 ne publie pas de DEB. Le binaire yt-dlp actuellement
 disponible dans `trixie-backports` pour Debian 13 est antérieur au minimum de
 sécurité exigé par ce projet (`2026.06.09`). Les dépôts Ubuntu sont également
 sous ce minimum. Utilisez l’archive ZIP portable ou l’installation Git et
@@ -160,7 +160,7 @@ de l’utilisateur courant.
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.21.zip
+yt-dlp-aria2-downloader-gui-2.1.22.zip
 SHA256SUMS
 ```
 
@@ -168,8 +168,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.21.zip
-cd yt-dlp-aria2-downloader-gui-2.1.21
+unzip yt-dlp-aria2-downloader-gui-2.1.22.zip
+cd yt-dlp-aria2-downloader-gui-2.1.22
 chmod +x download-video.sh download-video-gui.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
