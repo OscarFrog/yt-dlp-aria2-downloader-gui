@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.22
+# Version     : 2.1.23
 # Date        : 2026-08-20
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
@@ -11,7 +11,7 @@
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.1.22"
+readonly VERSION="2.1.23"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -208,7 +208,7 @@ check_runtime_compatibility() {
     local required_option
     local setsid_help
 
-    if ! yt_dlp_version=$(LC_ALL=C yt-dlp --version 2>/dev/null); then
+    if ! yt_dlp_version=$(LC_ALL=C "${YTDLP_BIN}" --version 2>/dev/null); then
         error 'unable to determine the yt-dlp version.'
         return 1
     fi
@@ -225,7 +225,7 @@ check_runtime_compatibility() {
 
     JS_RUNTIME_AVAILABLE=false
     if command -v deno >/dev/null 2>&1; then
-        if deno_output=$(LC_ALL=C deno --version 2>/dev/null); then
+        if [[ -x ${DENO_BIN} ]] && deno_output=$(LC_ALL=C "${DENO_BIN}" --version 2>/dev/null); then
             IFS=' ' read -r deno_name deno_version _ <<<"${deno_output%%$'\n'*}"
             if [[ ${deno_name} == deno && -n ${deno_version} ]]; then
                 compare_versions "${deno_version}" "${MIN_DENO_VERSION}"
@@ -240,7 +240,7 @@ check_runtime_compatibility() {
         return 1
     fi
 
-    if ! yt_dlp_help=$(LC_ALL=C yt-dlp --help 2>&1); then
+    if ! yt_dlp_help=$(LC_ALL=C "${YTDLP_BIN}" --help 2>&1); then
         error 'unable to inspect yt-dlp capabilities.'
         return 1
     fi
@@ -259,7 +259,9 @@ check_runtime_compatibility() {
         --extractor-retries \
         --retry-sleep \
         --no-overwrites \
-        --no-post-overwrites; do
+        --no-post-overwrites \
+        --break-match-filters \
+        --no-update; do
         if ! grep -Eq -- \
             "^[[:space:]]*(-[^,[:space:]]+,[[:space:]]+)?${required_option}([=[:space:]]|$)" <<<"${yt_dlp_help}"; then
             error "this yt-dlp build does not support ${required_option}."
@@ -267,13 +269,12 @@ check_runtime_compatibility() {
         fi
     done
     if [[ ${JS_RUNTIME_AVAILABLE} == true ]]; then
-        for required_option in --js-runtimes --remote-components; do
-            if ! grep -Eq -- \
-                "^[[:space:]]*(-[^,[:space:]]+,[[:space:]]+)?${required_option}([=[:space:]]|$)" <<<"${yt_dlp_help}"; then
-                error "this yt-dlp build does not support ${required_option}."
-                return 1
-            fi
-        done
+        required_option='--js-runtimes'
+        if ! grep -Eq -- \
+            "^[[:space:]]*(-[^,[:space:]]+,[[:space:]]+)?${required_option}([=[:space:]]|$)" <<<"${yt_dlp_help}"; then
+            error "this yt-dlp build does not support ${required_option}."
+            return 1
+        fi
     fi
 
     if ! aria2_version_line=$(LC_ALL=C aria2c --version 2>/dev/null); then
@@ -982,12 +983,47 @@ if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
     fi
 fi
 
-for command_name in yt-dlp aria2c ffmpeg ffprobe realpath grep mktemp mv rm chmod flock mkdir sha256sum stat setsid sleep timeout find; do
+for command_name in aria2c ffmpeg ffprobe realpath grep mktemp mv rm chmod flock mkdir sha256sum stat setsid sleep timeout find; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         error "required command \"${command_name}\" was not found."
         exit 127
     fi
 done
+
+script_path=$(realpath -e -- "${BASH_SOURCE[0]}") || {
+    error 'unable to resolve the engine path.'
+    exit 66
+}
+script_dir=${script_path%/*}
+runtime_manager="${script_dir}/runtime-manager.sh"
+
+if [[ ${YTDLP_ARIA2_SKIP_RUNTIME_UPDATE:-0} == 1 ]]; then
+    YTDLP_BIN=${YTDLP_ARIA2_YTDLP_BIN:-$(command -v yt-dlp 2>/dev/null || true)}
+    DENO_BIN=${YTDLP_ARIA2_DENO_BIN:-$(command -v deno 2>/dev/null || true)}
+else
+    if [[ ! -x ${runtime_manager} ]]; then
+        error "runtime manager is missing: ${runtime_manager}"
+        exit 66
+    fi
+    if ! "${runtime_manager}" update; then
+        error 'unable to initialize the managed yt-dlp and Deno runtimes.'
+        exit 69
+    fi
+    YTDLP_BIN=$("${runtime_manager}" path yt-dlp) || {
+        error 'unable to resolve the managed yt-dlp runtime.'
+        exit 69
+    }
+    DENO_BIN=$("${runtime_manager}" path deno) || {
+        error 'unable to resolve the managed Deno runtime.'
+        exit 69
+    }
+fi
+readonly YTDLP_BIN DENO_BIN
+
+if [[ ! -x ${YTDLP_BIN} ]]; then
+    error 'the selected yt-dlp runtime is not executable.'
+    exit 127
+fi
 
 # Keep this as a simple command: placing it in an if/|| context would disable
 # errexit inside the function body under Bash's documented rules.
@@ -1111,7 +1147,9 @@ readonly ARIA2_ARGUMENTS
 
 YT_DLP_OPTIONS=(
     --ignore-config
+    --no-update
     --no-playlist
+    --break-match-filters '!playlist_index'
     --no-overwrites
     --no-post-overwrites
     --embed-metadata
@@ -1128,14 +1166,11 @@ YT_DLP_OPTIONS=(
     --downloader aria2c
     --downloader 'dash,m3u8:native'
     --downloader-args "aria2c:${ARIA2_ARGUMENTS}"
-    --concurrent-fragments 8
+    --concurrent-fragments 1
 )
 
 if [[ ${JS_RUNTIME_AVAILABLE} == true ]]; then
-    YT_DLP_OPTIONS+=(--js-runtimes deno)
-    if [[ ${IS_YOUTUBE_URL} == true && ${YTDLP_DISABLE_REMOTE_EJS:-0} != 1 ]]; then
-        YT_DLP_OPTIONS+=(--remote-components ejs:npm)
-    fi
+    YT_DLP_OPTIONS+=(--js-runtimes "deno:${DENO_BIN}")
 fi
 
 if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
@@ -1200,7 +1235,7 @@ if [[ -n ${PATH_RECORD_TMP} ]]; then
     )
 fi
 
-run_supervised_command yt-dlp "${YT_DLP_OPTIONS[@]}" --batch-file "${YTDLP_BATCH_FILE_TMP}"
+run_supervised_command "${YTDLP_BIN}" "${YT_DLP_OPTIONS[@]}" --batch-file "${YTDLP_BATCH_FILE_TMP}"
 if ! rm -f -- "${YTDLP_BATCH_FILE_TMP}"; then
     error 'unable to remove the private yt-dlp URL batch file.'
     exit 13

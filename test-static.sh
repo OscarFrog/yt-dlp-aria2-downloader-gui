@@ -75,10 +75,12 @@ assert_file_contains \
     'LC_ALL=C setsid --fork --wait bash -c' \
     'GUI worker locale stabilization'
 
+# shellcheck disable=SC2016
+# These probes deliberately search for literal variable references in source.
 engine_locale_probes=(
-    'LC_ALL=C yt-dlp --version'
-    'LC_ALL=C yt-dlp --help'
-    'LC_ALL=C deno --version'
+    'LC_ALL=C "${YTDLP_BIN}" --version'
+    'LC_ALL=C "${YTDLP_BIN}" --help'
+    'LC_ALL=C "${DENO_BIN}" --version'
     'LC_ALL=C aria2c --version'
     'LC_ALL=C aria2c --help=#all'
 )
@@ -132,7 +134,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.22'
+readonly EXPECTED_VERSION='2.1.23'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -280,8 +282,10 @@ assert_file_contains "${script_dir}/download-video.sh" \
 assert_file_contains "${script_dir}/download-video.sh" \
     'run_supervised_command() {' \
     'generic long-running command supervisor'
+# shellcheck disable=SC2016
+# This assertion deliberately searches for literal shell source.
 assert_file_contains "${script_dir}/download-video.sh" \
-    'run_supervised_command yt-dlp' \
+    'run_supervised_command "${YTDLP_BIN}"' \
     'yt-dlp uses the generic supervisor'
 assert_file_contains "${script_dir}/download-video.sh" \
     'ARIA2_SUPPORTS_NO_NETRC=false' \
@@ -392,7 +396,7 @@ assert_file_not_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gu
 
 
 
-# Version 2.1.22 privacy, validation, packaging, and supply-chain contracts.
+# Version 2.1.23 runtime-update, Fedora bootstrap, playlist, HLS, packaging, and supply-chain contracts.
 assert_file_contains "${script_dir}/download-video.sh" \
     '--url-file FILE' 'private URL-file input'
 assert_file_contains "${script_dir}/download-video.sh" \
@@ -424,8 +428,6 @@ assert_file_contains "${script_dir}/packaging/deb/build-deb.sh" \
     'DEB versioned runtime dependencies'
 assert_file_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
     'Requires:       aria2 >= 1.37.0' 'RPM minimum aria2 dependency'
-assert_file_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
-    'Requires:       yt-dlp >= 2026.06.09' 'RPM minimum yt-dlp dependency'
 assert_file_contains "${script_dir}/install-gui.sh" \
     'readonly ICON_FILE=' 'per-user dedicated icon installation'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
@@ -450,4 +452,58 @@ assert_text_contains "${ASSERT_OUTPUT}" 'user information' \
 assert_file_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
     '%dir %{_licensedir}/%{name}' \
     'RPM owns its private license directory'
+
+assert_file_contains "${script_dir}/download-video.sh" \
+    "--break-match-filters '!playlist_index'" \
+    'collection entries are rejected before download'
+assert_file_contains "${script_dir}/download-video.sh" \
+    '--concurrent-fragments 1' \
+    'native HLS/DASH fragment downloads are serialized for reliability'
+assert_file_contains "${script_dir}/download-video.sh" \
+    '--no-update' \
+    'yt-dlp cannot self-update in the middle of a download'
+# shellcheck disable=SC2016
+# This assertion deliberately searches for literal shell source.
+assert_file_contains "${script_dir}/download-video.sh" \
+    '--js-runtimes "deno:${DENO_BIN}"' \
+    'managed Deno path is passed explicitly to yt-dlp'
+assert_file_contains "${script_dir}/runtime-manager.sh" \
+    'yt-dlp/yt-dlp-nightly-builds/releases/latest' \
+    'managed yt-dlp checks the nightly release channel'
+# shellcheck disable=SC2016
+# This assertion deliberately searches for literal shell source.
+assert_file_contains "${script_dir}/runtime-manager.sh" \
+    'upgrade --dry-run "${DENO_CHANNEL}"' \
+    'managed Deno checks the stable channel on launch'
+# shellcheck disable=SC2016
+# This assertion deliberately searches for literal shell source.
+assert_file_contains "${script_dir}/runtime-manager.sh" \
+    'parse_deno_version "${candidate}" version' \
+    'managed Deno strips --version metadata before version-directory naming'
+# shellcheck disable=SC2016
+# This assertion deliberately searches for literal shell source.
+assert_file_contains "${script_dir}/runtime-manager.sh" \
+    '--verify "${work}/SHA2-256SUMS.sig"' \
+    'yt-dlp checksum signature is passed to GPG'
+# shellcheck disable=SC2016
+# This assertion deliberately searches for literal shell source.
+assert_file_contains "${script_dir}/runtime-manager.sh" \
+    '"${work}/SHA2-256SUMS" >/dev/null 2>&1' \
+    'yt-dlp signed SHA-256 manifest is verified'
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    'dnf swap --assumeyes --allowerasing ffmpeg-free ffmpeg' \
+    'Fedora bootstrap replaces ffmpeg-free'
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    "ffmpeg_vendor" \
+    'Fedora bootstrap validates the FFmpeg vendor'
+assert_file_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+    'Requires:       gnupg2' \
+    'RPM installs signature-verification tooling'
+assert_file_not_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+    'Requires:       yt-dlp' \
+    'RPM does not mix a system yt-dlp with the managed runtime'
+assert_file_not_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+    'Recommends:     deno' \
+    'Deno is managed explicitly instead of weakly recommended'
+
 printf '%s\n' 'Static tests passed.'

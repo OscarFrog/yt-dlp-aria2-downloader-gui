@@ -23,9 +23,9 @@ readonly applications_dir="${DESTDIR}/usr/share/applications"
 readonly icon_dir="${DESTDIR}/usr/share/icons/hicolor/scalable/apps"
 readonly doc_dir="${DESTDIR}/usr/share/doc/${PACKAGE_NAME}"
 
-for required_file in download-video.sh download-video-gui.sh progress-monitor.sh \
+for required_file in download-video.sh download-video-gui.sh progress-monitor.sh runtime-manager.sh \
     README.md README.fr.md CHANGELOG.md packaging/yt-dlp-aria2-downloader.desktop \
-    packaging/icons/yt-dlp-aria2-downloader.svg; do
+    packaging/icons/yt-dlp-aria2-downloader.svg packaging/keys/yt-dlp-public.key; do
     [[ -f ${project_dir}/${required_file} ]] || {
         printf 'Error: required packaging input is absent: %s\n' "${required_file}" >&2
         exit 66
@@ -34,7 +34,10 @@ done
 
 install -d -m 0755 -- "${private_target}" "${bin_dir}" "${applications_dir}" "${icon_dir}" "${doc_dir}"
 install -m 0755 -- "${project_dir}/download-video.sh" "${project_dir}/download-video-gui.sh" \
-    "${project_dir}/progress-monitor.sh" "${private_target}/"
+    "${project_dir}/progress-monitor.sh" "${project_dir}/runtime-manager.sh" "${private_target}/"
+install -d -m 0755 -- "${private_target}/keys"
+install -m 0644 -- "${project_dir}/packaging/keys/yt-dlp-public.key" \
+    "${private_target}/keys/yt-dlp-public.key"
 install -m 0644 -- "${project_dir}/README.md" "${project_dir}/README.fr.md" \
     "${project_dir}/CHANGELOG.md" "${doc_dir}/"
 install -m 0644 -- "${project_dir}/packaging/yt-dlp-aria2-downloader.desktop" \

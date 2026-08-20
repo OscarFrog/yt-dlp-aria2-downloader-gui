@@ -92,6 +92,9 @@ PORT=$(<"${TEST_ROOT}/port")
 readonly PORT
 
 export XDG_RUNTIME_DIR="${TEST_ROOT}/runtime"
+export YTDLP_ARIA2_SKIP_RUNTIME_UPDATE=1
+YTDLP_ARIA2_YTDLP_BIN=$(command -v yt-dlp)
+export YTDLP_ARIA2_YTDLP_BIN
 export YTDLP_DISABLE_REMOTE_EJS=1
 
 RESULT_FILE="${TEST_ROOT}/result.txt"

@@ -29,7 +29,7 @@ jobs:
         run: |
           sudo apt-get -o Acquire::Retries=3 update
           sudo apt-get -o Acquire::Retries=3 install --yes \
-            aria2 desktop-file-utils ffmpeg python3-venv shellcheck
+            aria2 curl desktop-file-utils ffmpeg gnupg python3-venv shellcheck unzip
           python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
           "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
             --disable-pip-version-check 'yt-dlp==2026.6.9'
@@ -132,9 +132,10 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm); shopt -u nullglob
-          ((${#payloads[@]} == 2))
-          (cd dist && sha256sum -- *.zip *.rpm > SHA256SUMS && sha256sum --check SHA256SUMS)
+          install -m 0755 -- install-fedora.sh dist/install-fedora.sh
+          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/install-fedora.sh); shopt -u nullglob
+          ((${#payloads[@]} == 3))
+          (cd dist && sha256sum -- *.zip *.rpm install-fedora.sh > SHA256SUMS && sha256sum --check SHA256SUMS)
       - name: Attest release artifacts
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
@@ -145,7 +146,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm); shopt -u nullglob
+          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/install-fedora.sh); shopt -u nullglob
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
             existing=$(mktemp -d); trap 'rm -rf -- "${existing}"' EXIT
             for payload in "${payloads[@]}" dist/SHA256SUMS; do

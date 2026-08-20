@@ -16,24 +16,37 @@ single URL using one of three profiles:
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
 streams deliberately remain on yt-dlp's native downloader. The current version
-is **2.1.22**.
+is **2.1.23**.
 
 ## Recommended installation
 
-Open the [latest GitHub release](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest)
-and download the file matching your system:
+Open the [latest GitHub release](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
 
-- **Fedora 44 or newer:** `2.1.22` RPM,
-  `yt-dlp-aria2-downloader-gui-2.1.22-1.fc44.noarch.rpm`;
-- **Debian, Ubuntu, other GNU/Linux distributions, or portable use:** the
-  versioned ZIP. Ensure that `yt-dlp` and `aria2c` satisfy the minimum versions
-  listed below.
+For **Fedora 44 or newer**, download these three assets:
 
-For an RPM installation, the graphical launcher and its application icon
-are installed automatically in the desktop application menu. **Do not run
-`install-gui.sh` after installing a package.** That helper is only for ZIP and
-Git installations.
+```text
+install-fedora.sh
+yt-dlp-aria2-downloader-gui-2.1.23-1.fc44.noarch.rpm
+SHA256SUMS
+```
 
+Verify the downloaded files, then run the supported Fedora bootstrap:
+
+```bash
+sha256sum --ignore-missing --check SHA256SUMS
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.23-1.fc44.noarch.rpm
+```
+
+The bootstrap enables RPM Fusion Free when needed, replaces `ffmpeg-free` with
+the full RPM Fusion `ffmpeg`, installs the required Fedora packages, installs
+the application RPM, validates the FFmpeg provider, and initializes the
+per-user yt-dlp and Deno runtimes.
+
+For **Debian, Ubuntu, other GNU/Linux distributions, or portable use**, use the
+versioned ZIP or a Git checkout. The managed yt-dlp and Deno runtimes currently
+support Linux `x86_64` and `aarch64`.
+
+For an RPM installation, the graphical launcher and application icon are installed automatically in the desktop application menu. **Do not run `install-gui.sh` after installing a package.** That helper is only for ZIP and Git installations.
 ## Main features
 
 - simple Zenity graphical interface;
@@ -60,20 +73,33 @@ Git installations.
 
 ## Requirements
 
-The following commands must be installed and available in `PATH`:
+System commands required by the application are:
 
 - Bash **4.4 or newer**;
-- `yt-dlp` **2026.06.09 or newer**;
 - `aria2c` **1.37.0 or newer**;
 - FFmpeg and `ffprobe`;
-- Deno **2.3.0 or newer for YouTube extraction**; other supported sites can run without Deno;
 - Zenity for the graphical interface;
+- `curl`, GnuPG, and `unzip` for managed runtime bootstrap/update;
+- GNU coreutils, GNU grep, `find`, and `setsid`/`flock`, normally provided by
+  Fedora's core system packages and `util-linux`;
 - Firefox with an authenticated YouTube session only when using the optional
-  authenticated YouTube HLS profile;
-- GNU coreutils, GNU grep, and `setsid`, which is usually provided by
-  `util-linux`.
+  authenticated YouTube HLS profile.
 
-The engine always checks the minimum versions of `yt-dlp` and `aria2c`. Deno is checked only when it is installed or when YouTube extraction requires it.
+`yt-dlp` and Deno are **not required as system packages**. The application
+maintains verified per-user runtimes under
+`~/.local/share/yt-dlp-aria2-downloader/runtime/`.
+
+At every engine launch, the runtime manager checks the official yt-dlp nightly
+channel and the Deno stable channel. A new runtime is staged separately,
+validated, and activated atomically. If an update check fails, the last
+verified runtime remains active. yt-dlp's official Linux executable carries
+its compatible bundled Python dependencies, including `curl_cffi` and the
+bundled EJS support used by current YouTube extraction.
+
+System packages such as FFmpeg, aria2, and Zenity remain managed by the
+distribution package manager; the Fedora bootstrap installs the newest
+versions available from the enabled Fedora/RPM Fusion repositories at
+installation time.
 
 ## Package installation
 
@@ -92,37 +118,56 @@ first so it cannot override the packaged desktop entry:
 
 ### Fedora 44 and newer
 
-The complete `ffmpeg` package comes from RPM Fusion Free. Enable that repository
-before installing the RPM when it is not already configured:
+Use `install-fedora.sh` from the same GitHub release as the RPM. Do not install
+the RPM directly on a fresh Fedora system, because RPM Fusion must be enabled
+before DNF resolves the `ffmpeg` dependency.
 
-```bash
-sudo dnf install \
-  "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
-```
-
-Download these release assets:
+Download:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.22-1.fc44.noarch.rpm
+install-fedora.sh
+yt-dlp-aria2-downloader-gui-2.1.23-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
-Verify the downloaded RPM and install it:
+Verify all downloaded release assets:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo dnf install --allowerasing ./yt-dlp-aria2-downloader-gui-2.1.22-1.fc44.noarch.rpm
 ```
 
-The RPM declares yt-dlp, aria2, FFmpeg/FFprobe, Zenity, and the required GNU command-line tools as hard dependencies. Deno remains a separately managed runtime and is required only for YouTube extraction.
+Then run:
+
+```bash
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.23-1.fc44.noarch.rpm
+```
+
+The bootstrap performs these checks and actions:
+
+- enables RPM Fusion Free if it is absent;
+- replaces Fedora `ffmpeg-free` with RPM Fusion `ffmpeg` when necessary;
+- installs the required system dependencies, including aria2, Zenity, curl,
+  GnuPG, and unzip;
+- installs the application RPM;
+- verifies that `ffmpeg` is supplied by RPM Fusion and that `ffmpeg-free` is
+  absent;
+- initializes and validates the managed yt-dlp nightly and Deno stable
+  runtimes for the current user.
+
+The RPM itself does not download third-party runtimes from a package-manager
+scriptlet. Runtime downloads happen in the unprivileged user context and are
+verified before activation.
 
 ### Debian and Ubuntu
 
-Release 2.1.22 does not publish a DEB. The currently available Debian 13
-`trixie-backports` binary for yt-dlp is older than the security minimum required
-by this project (`2026.06.09`). Ubuntu repositories are also below that minimum.
-Use the portable ZIP or Git installation and provide a compatible yt-dlp
-separately. Do not lower the minimum version or force-install an older yt-dlp.
+Release 2.1.23 does not publish a DEB. Use the portable ZIP or a Git checkout.
+The application no longer requires a distribution-provided yt-dlp or Deno:
+supported Linux `x86_64` and `aarch64` systems use the same verified per-user
+runtime manager as Fedora.
+
+You must still provide the normal system tools (`aria2c`, FFmpeg/FFprobe,
+Zenity for the GUI, curl, GnuPG, unzip, coreutils, grep, findutils, and
+util-linux) through your distribution package manager.
 
 ### Packaged commands
 
@@ -156,7 +201,7 @@ older ZIP or Git installation created in the current user's home directory.
 Download these release assets:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.22.zip
+yt-dlp-aria2-downloader-gui-2.1.23.zip
 SHA256SUMS
 ```
 
@@ -164,9 +209,9 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.22.zip
-cd yt-dlp-aria2-downloader-gui-2.1.22
-chmod +x download-video.sh download-video-gui.sh install-gui.sh
+unzip yt-dlp-aria2-downloader-gui-2.1.23.zip
+cd yt-dlp-aria2-downloader-gui-2.1.23
+chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
 ```
@@ -183,7 +228,7 @@ cd yt-dlp-aria2-downloader-gui
 Make the scripts executable and install the application-menu launcher:
 
 ```bash
-chmod +x download-video.sh download-video-gui.sh install-gui.sh
+chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
 ```
@@ -331,14 +376,18 @@ yt-dlp's native downloader for DASH and HLS manifests:
 This keeps segmented media handling inside yt-dlp while retaining aria2c's
 multi-connection acceleration where it is appropriate.
 
-For current YouTube extraction, the engine enables Deno. yt-dlp uses locally installed EJS components when available and may request the official EJS components from npm as a fallback:
+For current YouTube extraction, the engine uses the managed Deno runtime through
+an explicit path:
 
 ```text
---js-runtimes deno
---remote-components ejs:npm
+--js-runtimes deno:/absolute/path/to/managed/deno
 ```
 
-yt-dlp may download the yt-dlp-ejs challenge-solver components from npm when compatible local components are unavailable. Set `YTDLP_DISABLE_REMOTE_EJS=1` to prohibit that fallback. In strict mode, YouTube extraction fails rather than downloading remote components.
+The managed official yt-dlp Linux executable includes the compatible EJS
+components used by the release. The wrapper therefore does **not** request
+`--remote-components ejs:npm` during downloads. yt-dlp and its bundled
+dependencies are updated together as one verified runtime, avoiding an
+independently updated EJS/Python dependency set.
 
 ### Complete video
 
@@ -391,6 +440,12 @@ Graphical-interface configuration:
 
 ```text
 ~/.config/yt-dlp-aria2-downloader/gui.conf
+```
+
+Managed yt-dlp and Deno runtimes:
+
+```text
+~/.local/share/yt-dlp-aria2-downloader/runtime/
 ```
 
 Execution logs:

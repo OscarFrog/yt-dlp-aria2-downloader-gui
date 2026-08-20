@@ -17,11 +17,12 @@ Requires:       grep
 Requires:       sed
 Requires:       util-linux
 Requires:       aria2 >= 1.37.0
-Requires:       yt-dlp >= 2026.06.09
 Requires:       ffmpeg
+Requires:       curl
+Requires:       gnupg2
+Requires:       unzip
 Requires:       zenity
 Requires:       hicolor-icon-theme
-Recommends:     deno >= 2.3.0
 Suggests:       firefox
 
 %description
@@ -44,6 +45,9 @@ test "$("%{buildroot}%{_bindir}/yt-dlp-aria2-downloader" --version)" = "yt-dlp-a
 %{_libexecdir}/yt-dlp-aria2-downloader/download-video.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/download-video-gui.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/progress-monitor.sh
+%{_libexecdir}/yt-dlp-aria2-downloader/runtime-manager.sh
+%dir %{_libexecdir}/yt-dlp-aria2-downloader/keys
+%{_libexecdir}/yt-dlp-aria2-downloader/keys/yt-dlp-public.key
 %{_datadir}/applications/yt-dlp-aria2-downloader.desktop
 %{_datadir}/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg
 %dir %{_docdir}/%{name}
