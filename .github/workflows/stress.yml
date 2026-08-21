@@ -1,0 +1,29 @@
+name: Concurrency stress
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: stress-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  mock-stress:
+    name: Mock process/cancellation stress (10x)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Repeat race-sensitive integration scenarios
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for iteration in {1..10}; do
+            printf '=== mock integration stress iteration %d/10 ===\n' "${iteration}"
+            timeout --signal=TERM --kill-after=10s 4m bash ./tests/mock-integration.sh
+          done

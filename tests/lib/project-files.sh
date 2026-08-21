@@ -19,8 +19,10 @@ PACKAGING_SHELL_FILES=(
     packaging/install-tree.sh
     packaging/deb/build-deb.sh
     packaging/deb/test-package-lifecycle.sh
+    packaging/deb/test-package-upgrade.sh
     packaging/rpm/build-rpm.sh
     packaging/rpm/test-package-lifecycle.sh
+    packaging/rpm/test-package-upgrade.sh
 )
 
 # shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
@@ -31,6 +33,7 @@ TEST_SHELL_FILES=(
     tests/lib/project-files.sh
     tests/mock-integration.sh
     tests/runtime-manager-integration.sh
+    tests/runtime-manager-hardening-integration.sh
     tests/progress-monitor-integration.sh
     tests/installer-integration.sh
     tests/packaging-integration.sh

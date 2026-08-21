@@ -26,6 +26,7 @@ bash -n tests/lib/assert.sh
 bash -n tests/lib/project-files.sh
 bash -n tests/mock-integration.sh
 bash -n tests/runtime-manager-integration.sh
+bash -n tests/runtime-manager-hardening-integration.sh
 bash -n tests/progress-monitor-integration.sh
 bash -n tests/installer-integration.sh
 bash -n tests/packaging-integration.sh
@@ -34,8 +35,10 @@ bash -n tests/real-tools-integration.sh
 bash -n packaging/install-tree.sh
 bash -n packaging/deb/build-deb.sh
 bash -n packaging/deb/test-package-lifecycle.sh
+bash -n packaging/deb/test-package-upgrade.sh
 bash -n packaging/rpm/build-rpm.sh
 bash -n packaging/rpm/test-package-lifecycle.sh
+bash -n packaging/rpm/test-package-upgrade.sh
 ```
 
 ## ShellCheck
@@ -56,6 +59,7 @@ shellcheck -x -o all \
   install-fedora.sh \
   tests/mock-integration.sh \
   tests/runtime-manager-integration.sh \
+  tests/runtime-manager-hardening-integration.sh \
   tests/progress-monitor-integration.sh \
   tests/installer-integration.sh \
   tests/packaging-integration.sh \
@@ -64,8 +68,10 @@ shellcheck -x -o all \
   packaging/install-tree.sh \
   packaging/deb/build-deb.sh \
   packaging/deb/test-package-lifecycle.sh \
+  packaging/deb/test-package-upgrade.sh \
   packaging/rpm/build-rpm.sh \
-  packaging/rpm/test-package-lifecycle.sh
+  packaging/rpm/test-package-lifecycle.sh \
+  packaging/rpm/test-package-upgrade.sh
 ```
 
 ## Covered behavior
@@ -134,8 +140,16 @@ The automated suite checks, among other things:
 - measured wrapper-managed FFmpeg remux progress and bounded progress arithmetic;
 - hermetic real-tool transfers using generated media and a loopback HTTP server;
 - managed-runtime operation with Deno outside PATH, bounded lock/network waits,
-  offline fallback, lock-descriptor isolation, explicit/automatic rollback, and
+  strict zero-network `require` mode, exact-tag stable/nightly/stable switching,
+  lock-descriptor isolation, ten-cycle contention/double-rollback stress,
+  interrupted-activation journal recovery, explicit/automatic rollback, and
   x86_64/aarch64 asset mapping.
+- package reinstall plus real v2.1.24 -> current upgrade validation for RPM and
+  DEB;
+- exact same RPM artifact tested in Fedora `fresh` and `ffmpeg-free`;
+- current stable yt-dlp compatibility in addition to the minimum supported
+  version;
+- exact release asset inventory and immutable-release/asset verification.
 
 ## GitHub Actions
 
@@ -161,11 +175,12 @@ video-only result without contacting a public media service.
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the complete validation and the hermetic real-tool integration first, verifies
 tag ancestry and project versions, builds the ZIP, RPM, and DEB in separate
-read-only jobs, requalifies the exact release-tag RPM in Fedora `fresh` and
-`ffmpeg-free` scenarios, downloads the exact tested artifacts into one
-publication job, generates a shared SHA256SUMS file, and publishes the ZIP, RPM,
-DEB, Fedora bootstrap, and checksum file. Only the final job receives
-`contents: write`.
+read-only jobs, builds the release RPM exactly once and requalifies those identical bytes in
+Fedora `fresh` and `ffmpeg-free`, downloads the exact tested artifacts into one
+publication job, generates a shared SHA256SUMS file, verifies the exact release
+asset inventory, and requires GitHub Immutable Releases before accepting the
+published ZIP, RPM, DEB, Fedora bootstrap, and checksum file. Only the final
+job receives `contents: write`.
 
 ## Real-world checks on Fedora 44
 
@@ -190,3 +205,9 @@ left behind.
 
 Version, help, and progress output is generated under `LC_ALL=C` for stable
 parsing. Zenity windows remain in the graphical session's locale.
+
+## Stress validation
+
+`.github/workflows/stress.yml` repeats the full mock integration suite ten times
+on pull requests and pushes to `main`, specifically increasing the probability
+of exposing cancellation, PGID publication, process-reaping, and timing races.

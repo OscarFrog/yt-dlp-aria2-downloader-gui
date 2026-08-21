@@ -1,3 +1,28 @@
+## 2.1.25 - 2026-08-21
+
+### Release-grade hardening and audit closure
+
+- Add a strict zero-network managed-runtime mode: `YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE=0`
+  now validates already-installed runtimes only and never bootstraps them.
+- Resolve exact yt-dlp and Deno release tags before downloading assets, removing
+  the multi-request `latest` race while retaining signed yt-dlp manifests and
+  Deno release checksums.
+- Add bounded validation for downloaded/cached runtime executables, safer private
+  runtime directories, distinct lock-path versus contention statuses, and an
+  activation journal that repairs `current`/`previous` after interrupted updates.
+- Add stable -> nightly -> stable, double rollback, unsafe/missing previous,
+  journal recovery, ten-cycle lock contention, strict-offline, exact-tag, and
+  lock-FD isolation integration tests.
+- Build the release RPM once and test the exact same artifact in Fedora `fresh`
+  and `ffmpeg-free` scenarios; add true v2.1.24 -> v2.1.25 RPM and DEB upgrades
+  plus deterministic reinstall lifecycle checks.
+- Test both the minimum supported yt-dlp 2026.06.09 and current stable 2026.07.04
+  with real yt-dlp/aria2c/FFmpeg/FFprobe integration.
+- Add a ten-pass concurrency/cancellation stress workflow.
+- Require exact existing-release asset inventory, GitHub Immutable Releases,
+  release-attestation verification, and `gh release verify-asset` for every
+  published artifact; document consumer-side attestation verification.
+
 ## 2.1.24 - 2026-08-20
 
 ### Runtime reliability and DEB requalification
