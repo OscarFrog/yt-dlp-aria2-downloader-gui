@@ -2,9 +2,9 @@
 
 ### Release qualification closure
 
-- Qualify RPM and DEB upgrades from the exact package bytes published by the
-  previous immutable GitHub release instead of rebuilding the previous version
-  from source.
+- Qualify RPM and DEB upgrades in both pull-request package CI and the release
+  workflow from the exact package bytes published by the previous immutable
+  GitHub release instead of rebuilding the previous version from source.
 - Verify the previous release's immutable state, SHA-256 integrity,
   release-asset identity, SLSA provenance, signer workflow, source repository,
   and exact source commit before using its packages in upgrade tests.

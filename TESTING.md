@@ -163,12 +163,21 @@ for pushes to `main`, in two environments:
 - `ubuntu-24.04`;
 - a Fedora 44 container on a GitHub-hosted runner.
 
-`.github/workflows/packages.yml` validates both package formats. The noarch RPM
-is built and installed on Fedora 44 in `fresh` and `ffmpeg-free` scenarios
-through the supported RPM Fusion bootstrap. The architecture-independent DEB is
-built on Ubuntu 24.04, installed with APT, and removed again. Both lifecycle
-checks verify the managed-runtime manager and embedded yt-dlp signing key; the
-DEB no longer depends on distribution yt-dlp or Deno packages.
+`.github/workflows/packages.yml` validates both package formats. Before package
+upgrade testing, a dedicated `previous-release` job resolves the immediately
+preceding semantic-version release, requires it to be immutable, downloads its
+exact published RPM, DEB, and SHA256SUMS, and verifies release identity,
+checksums, release-asset identity, and SLSA provenance bound to the expected
+repository, release workflow, and exact source commit. The RPM and DEB upgrade
+jobs consume those verified bytes through a short-lived Actions artifact and
+recheck their transferred SHA-256 digests before installation.
+
+The current noarch RPM is built once and installed on Fedora 44 in `fresh` and
+`ffmpeg-free` scenarios through the supported RPM Fusion bootstrap. The
+architecture-independent DEB is built on Ubuntu 24.04, installed with APT, and
+removed again. Both lifecycle checks verify the managed-runtime manager and
+embedded yt-dlp signing key; the DEB no longer depends on distribution yt-dlp
+or Deno packages.
 
 
 `.github/workflows/real-tools.yml` installs actual yt-dlp, aria2c, FFmpeg, and

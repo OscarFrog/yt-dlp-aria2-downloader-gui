@@ -700,4 +700,75 @@ assert_file_contains "${script_dir}/TESTING.md" \
     'deterministic archive snapshot of the per-user' \
     'testing documentation describes runtime preservation precisely'
 
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'previous-release:' \
+    'package CI resolves the previous immutable release'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'attestations: read' \
+    'package CI can verify previous release attestations'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'sort -Vr -u' \
+    'package CI resolves the previous semantic version dynamically'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    '--json isImmutable' \
+    'package CI requires the previous release to be immutable'
+
+# shellcheck disable=SC2016
+# Literal workflow source: PREVIOUS_TAG must not expand in this test.
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'gh release verify "${PREVIOUS_TAG}"' \
+    'package CI verifies previous immutable release identity'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'gh release verify-asset' \
+    'package CI verifies previous release assets'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'gh attestation verify' \
+    'package CI verifies previous release provenance'
+
+# shellcheck disable=SC2016
+# Literal workflow source: PREVIOUS_COMMIT must not expand in this test.
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    '--source-digest "${PREVIOUS_COMMIT}"' \
+    'package CI binds provenance to the exact previous source commit'
+
+# shellcheck disable=SC2016
+# Literal GitHub Actions expression.
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'previous-release-packages-${{ github.sha }}' \
+    'package CI transfers exact verified previous packages between jobs'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    '      - previous-release' \
+    'RPM package CI depends on previous release verification'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    '    needs: previous-release' \
+    'DEB package CI depends on previous release verification'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'previous/*.rpm' \
+    'RPM upgrade consumes the published previous RPM'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'previous/*.deb' \
+    'DEB upgrade consumes the published previous DEB'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'sha256sum --check PREVIOUS_SHA256SUMS' \
+    'package upgrade jobs recheck transferred previous package digests'
+
+assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
+    'git worktree add' \
+    'package CI never rebuilds a previous release from source'
+
+assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
+    'v2.1.24' \
+    'package CI does not hard-code a historical upgrade source version'
+
 printf '%s\n' 'Static tests passed.'
