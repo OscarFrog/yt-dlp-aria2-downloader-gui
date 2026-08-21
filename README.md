@@ -16,17 +16,18 @@ single URL using one of three profiles:
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
 streams deliberately remain on yt-dlp's native downloader. The current version
-is **2.1.27**.
+is **2.1.28**.
 
 ## Recommended installation
 
 Open the [latest GitHub release](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
 
-For **Fedora 44 or newer**, download these three assets:
+For **Fedora 44 or newer**, download these four assets:
 
 ```text
 install-fedora.sh
-yt-dlp-aria2-downloader-gui-2.1.27-1.fc44.noarch.rpm
+RPM-GPG-KEY-OscarFrog
+yt-dlp-aria2-downloader-gui-2.1.28-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -34,7 +35,7 @@ Verify the downloaded files, then run the supported Fedora bootstrap:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.27-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.28-1.fc44.noarch.rpm
 ```
 
 The bootstrap enables RPM Fusion Free when needed, replaces `ffmpeg-free` with
@@ -43,7 +44,7 @@ the application RPM, validates the FFmpeg provider, and initializes the
 per-user yt-dlp and Deno runtimes.
 
 For **Debian or Ubuntu**, download the versioned DEB and `SHA256SUMS`, verify
-it, then install it with `sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.27-1_all.deb`.
+it, then install it with `sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.28-1_all.deb`.
 For **other GNU/Linux distributions or portable use**, use the versioned ZIP or
 a Git checkout. The managed yt-dlp and Deno runtimes currently support Linux
 `x86_64` and `aarch64`.
@@ -135,8 +136,8 @@ both build provenance and immutable-release identity:
 
 ```bash
 gh attestation verify ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.1.27 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.1.27 ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.1.28 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.1.28 ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 `SHA256SUMS` remains useful for offline/local integrity checks; the GitHub
@@ -145,7 +146,8 @@ attestation and immutable-release checks add provenance and release identity.
 ## Package installation
 
 GitHub releases publish a Fedora RPM, a Debian/Ubuntu DEB, the portable ZIP,
-the Fedora bootstrap, and a single `SHA256SUMS` file. RPM and DEB packages place
+the Fedora bootstrap, the RPM OpenPGP public signing key, and a single
+`SHA256SUMS` file. RPM and DEB packages place
 the commands, dedicated application icon, and desktop launcher system-wide; no
 separate `install-gui.sh` command is required for a package installation.
 
@@ -166,7 +168,8 @@ Download:
 
 ```text
 install-fedora.sh
-yt-dlp-aria2-downloader-gui-2.1.27-1.fc44.noarch.rpm
+RPM-GPG-KEY-OscarFrog
+yt-dlp-aria2-downloader-gui-2.1.28-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -179,8 +182,14 @@ sha256sum --ignore-missing --check SHA256SUMS
 Then run:
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.27-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.28-1.fc44.noarch.rpm
 ```
+
+The bootstrap refuses an unsigned release RPM. It pins and imports the
+`RPM-GPG-KEY-OscarFrog` fingerprint, verifies the RPM OpenPGP signature with
+`rpmkeys`, and installs the local package with DNF
+`localpkg_gpgcheck=True`. The `--allow-unsigned-dev` option exists only
+for explicit local/CI development builds and is not used for releases.
 
 The bootstrap performs these checks and actions:
 
@@ -188,6 +197,8 @@ The bootstrap performs these checks and actions:
 - replaces Fedora `ffmpeg-free` with RPM Fusion `ffmpeg` when necessary;
 - installs the required system dependencies, including aria2, Zenity, curl,
   GnuPG, and unzip;
+- verifies the pinned OscarFrog RPM OpenPGP signing key and signature;
+- enables DNF OpenPGP checking for the local release RPM;
 - installs the application RPM;
 - verifies that `ffmpeg` is supplied by RPM Fusion and that `ffmpeg-free` is
   absent;
@@ -200,11 +211,11 @@ verified before activation.
 
 ### Debian and Ubuntu
 
-Release 2.1.27 publishes an architecture-independent DEB aligned with the same
+Release 2.1.28 publishes an architecture-independent DEB aligned with the same
 managed-runtime model as Fedora. Download:
 
 ```text
-yt-dlp-aria2-downloader-gui_2.1.27-1_all.deb
+yt-dlp-aria2-downloader-gui_2.1.28-1_all.deb
 SHA256SUMS
 ```
 
@@ -212,7 +223,7 @@ Verify and install it:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.27-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.28-1_all.deb
 ```
 
 The DEB depends on the normal system tools (`aria2c`, FFmpeg/FFprobe, Zenity,
@@ -277,7 +288,7 @@ desktop installation from the current user's home directory.
 Download these release assets:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.27.zip
+yt-dlp-aria2-downloader-gui-2.1.28.zip
 SHA256SUMS
 ```
 
@@ -285,8 +296,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.27.zip
-cd yt-dlp-aria2-downloader-gui-2.1.27
+unzip yt-dlp-aria2-downloader-gui-2.1.28.zip
+cd yt-dlp-aria2-downloader-gui-2.1.28
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install

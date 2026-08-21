@@ -305,13 +305,104 @@ jobs:
           bash packaging/rpm/build-rpm.sh "${RELEASE_TAG#v}" dist
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          name: unsigned-rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+          retention-days: 1
+
+  rpm-sign:
+    needs: rpm-build
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    timeout-minutes: 10
+    environment: rpm-signing
+    env:
+      RPM_SIGNING_FINGERPRINT: 7B54065FE061E78ED2C96252E3BE996196ABEA7F
+    steps:
+      - name: Install isolated RPM signing tools
+        run: dnf install --assumeyes coreutils gawk gnupg2 rpm rpm-sign
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: unsigned-rpm
+          path: unsigned
+      - name: Sign exact release RPM with OpenPGP
+        shell: bash
+        env:
+          RPM_SIGNING_PRIVATE_KEY_B64: ${{ secrets.RPM_SIGNING_PRIVATE_KEY_B64 }}
+          RPM_SIGNING_PASSPHRASE: ${{ secrets.RPM_SIGNING_PASSPHRASE }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          [[ -n ${RPM_SIGNING_PRIVATE_KEY_B64} ]] || {
+            printf '%s\n' 'Error: RPM_SIGNING_PRIVATE_KEY_B64 is not configured.' >&2
+            exit 78
+          }
+          [[ -n ${RPM_SIGNING_PASSPHRASE} ]] || {
+            printf '%s\n' 'Error: RPM_SIGNING_PASSPHRASE is not configured.' >&2
+            exit 78
+          }
+
+          shopt -s nullglob
+          unsigned=(unsigned/*.rpm)
+          shopt -u nullglob
+          ((${#unsigned[@]} == 1))
+
+          initial_state=$(LC_ALL=C rpm -qp --qf '%|OPENPGP?{signed}:{unsigned}|\n' -- "${unsigned[0]}")
+          [[ ${initial_state} == unsigned ]] || {
+            printf '%s\n' 'Error: rpm-build unexpectedly produced an already-signed RPM.' >&2
+            exit 65
+          }
+
+          signing_home=$(mktemp -d)
+          key_file=$(mktemp)
+          passphrase_file=$(mktemp)
+          public_key=$(mktemp)
+          trap 'rm -rf -- "${signing_home}"; rm -f -- "${key_file}" "${passphrase_file}" "${public_key}"' EXIT
+          chmod 700 "${signing_home}"
+          chmod 600 "${key_file}" "${passphrase_file}"
+
+          printf '%s' "${RPM_SIGNING_PRIVATE_KEY_B64}" | base64 --decode >"${key_file}"
+          printf '%s' "${RPM_SIGNING_PASSPHRASE}" >"${passphrase_file}"
+
+          export GNUPGHOME="${signing_home}"
+          gpg --batch --import "${key_file}"
+
+          imported_fingerprint=$(
+            gpg --batch --with-colons --list-secret-keys --fingerprint               "${RPM_SIGNING_FINGERPRINT}" |
+              awk -F: '$1 == "fpr" && !found { value=toupper($10); found=1 } END { if (found) print value }'
+          )
+          [[ ${imported_fingerprint} == "${RPM_SIGNING_FINGERPRINT}" ]] || {
+            printf 'Error: imported signing key fingerprint mismatch: %s\n'               "${imported_fingerprint:-missing}" >&2
+            exit 65
+          }
+
+          gpg --batch --armor --export "${RPM_SIGNING_FINGERPRINT}" >"${public_key}"
+          rpmkeys --import "${public_key}"
+
+          mkdir -p dist
+          cp -- "${unsigned[0]}" "dist/${unsigned[0]##*/}"
+          signed="dist/${unsigned[0]##*/}"
+
+          rpmsign --addsign             --key-id "${RPM_SIGNING_FINGERPRINT}"             --define "_openpgp_sign gpg"             --define "_gpg_path ${signing_home}"             --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file ${passphrase_file}"             "${signed}"
+
+          final_state=$(LC_ALL=C rpm -qp --qf '%|OPENPGP?{signed}:{unsigned}|\n' -- "${signed}")
+          [[ ${final_state} == signed ]] || {
+            printf '%s\n' 'Error: rpmsign completed without an OpenPGP signature.' >&2
+            exit 65
+          }
+
+          rpmkeys --checksig "${signed}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
           name: release-rpm
           path: dist/*.rpm
           if-no-files-found: error
           retention-days: 7
 
   rpm-test:
-    needs: [rpm-build, previous-release]
+    needs: [rpm-sign, previous-release]
     runs-on: ubuntu-24.04
     container: fedora:44
     timeout-minutes: 35
@@ -348,6 +439,8 @@ jobs:
           set -Eeuo pipefail
           shopt -s nullglob; packages=(dist/*.rpm); shopt -u nullglob
           ((${#packages[@]} == 1))
+          state=$(LC_ALL=C rpm -qp --qf '%|OPENPGP?{signed}:{unsigned}|\n' -- "${packages[0]}")
+          [[ ${state} == signed ]]
           HOME="${PACKAGE_TEST_HOME}" bash ./install-fedora.sh "${packages[0]}"
       - name: Validate installed environment
         shell: bash
@@ -468,9 +561,10 @@ jobs:
         run: |
           set -Eeuo pipefail
           install -m 0755 -- install-fedora.sh dist/install-fedora.sh
-          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/*.deb dist/install-fedora.sh); shopt -u nullglob
-          ((${#payloads[@]} == 4))
-          (cd dist && sha256sum -- *.zip *.rpm *.deb install-fedora.sh > SHA256SUMS && sha256sum --check SHA256SUMS)
+          install -m 0644 -- packaging/keys/RPM-GPG-KEY-OscarFrog dist/RPM-GPG-KEY-OscarFrog
+          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/*.deb dist/install-fedora.sh dist/RPM-GPG-KEY-OscarFrog); shopt -u nullglob
+          ((${#payloads[@]} == 5))
+          (cd dist && sha256sum -- *.zip *.rpm *.deb install-fedora.sh RPM-GPG-KEY-OscarFrog > SHA256SUMS && sha256sum --check SHA256SUMS)
       - name: Attest release artifacts
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
@@ -481,7 +575,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/*.deb dist/install-fedora.sh); shopt -u nullglob
+          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/*.deb dist/install-fedora.sh dist/RPM-GPG-KEY-OscarFrog); shopt -u nullglob
           expected=$(mktemp); actual=$(mktemp); existing=$(mktemp -d)
           trap 'rm -f -- "${expected}" "${actual}"; rm -rf -- "${existing}"' EXIT
           for payload in "${payloads[@]}" dist/SHA256SUMS; do

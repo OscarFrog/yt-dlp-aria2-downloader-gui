@@ -257,13 +257,31 @@ jobs:
         with:
           name: previous-release-packages-${{ github.sha }}
           path: previous
-      - name: Install exact shared RPM through supported bootstrap
+      - name: Confirm unsigned PR RPM is rejected by release bootstrap
         shell: bash
         run: |
           set -Eeuo pipefail
           shopt -s nullglob; packages=(dist/*.rpm); shopt -u nullglob
           ((${#packages[@]} == 1))
-          HOME="${PACKAGE_TEST_HOME}" bash ./install-fedora.sh "${packages[0]}"
+          state=$(LC_ALL=C rpm -qp --qf '%|OPENPGP?{signed}:{unsigned}|\n' -- "${packages[0]}")
+          [[ ${state} == unsigned ]]
+
+          log=$(mktemp)
+          trap 'rm -f -- "${log}"' EXIT
+          set +e
+          HOME="${PACKAGE_TEST_HOME}" bash ./install-fedora.sh "${packages[0]}" >"${log}" 2>&1
+          status=$?
+          set -e
+          [[ ${status} -eq 65 ]]
+          grep -Fq 'RPM has no OpenPGP signature' "${log}"
+
+      - name: Install exact unsigned PR RPM through explicit development bootstrap
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob; packages=(dist/*.rpm); shopt -u nullglob
+          ((${#packages[@]} == 1))
+          HOME="${PACKAGE_TEST_HOME}" bash ./install-fedora.sh             --allow-unsigned-dev             "${packages[0]}"
       - name: Validate installed environment
         shell: bash
         run: |
