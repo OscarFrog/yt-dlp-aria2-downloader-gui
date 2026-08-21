@@ -91,6 +91,7 @@ cp -- "${project_dir}/packaging/rpm/${PACKAGE_NAME}.spec" \
 
 rpmbuild -bb \
     --define "_topdir ${topdir}" \
+    --define "_rpmformat 4" \
     --define "project_version ${VERSION}" \
     "${topdir}/SPECS/${PACKAGE_NAME}.spec"
 
@@ -105,6 +106,21 @@ mapfile -t rpm_files <"${rpm_list_file}"
 rpm_name=$(basename -- "${rpm_files[0]}")
 rpm_path="${output_dir}/${rpm_name}"
 cp -- "${rpm_files[0]}" "${rpm_path}"
+
+package_format=''
+if ! package_format=$(
+    LC_ALL=C rpm -qp --qf '%{rpmformat}\n' -- "${rpm_path}"
+); then
+    printf 'Error: unable to determine the generated RPM package format.\n' >&2
+    exit 65
+fi
+
+if [[ ${package_format} != 4 ]]; then
+    printf 'Error: generated RPM uses unexpected package format: %s\n' \
+        "${package_format}" >&2
+    printf 'Expected RPM package format: 4\n' >&2
+    exit 65
+fi
 
 rpm -qpi -- "${rpm_path}"
 rpm -qpl -- "${rpm_path}"
