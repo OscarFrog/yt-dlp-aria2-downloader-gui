@@ -240,7 +240,7 @@ jobs:
     steps:
       - name: Install test tools
         run: |
-          dnf install --assumeyes cpio desktop-file-utils findutils git gzip rpm-build tar
+          dnf install --assumeyes cpio desktop-file-utils findutils git gnupg2 gzip rpm-build rpm-sign tar
           if [[ '${{ matrix.scenario }}' == 'ffmpeg-free' ]]; then
             dnf install --assumeyes ffmpeg-free
           fi
@@ -257,6 +257,110 @@ jobs:
         with:
           name: previous-release-packages-${{ github.sha }}
           path: previous
+      - name: Reject a different globally trusted RPM signer in PR CI
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          shopt -s nullglob
+          packages=(dist/*.rpm)
+          shopt -u nullglob
+          ((${#packages[@]} == 1))
+
+          wrong_home=$(mktemp -d)
+          wrong_public=$(mktemp)
+          wrong_rpm=$(mktemp --suffix=.rpm)
+          wrong_passphrase=$(mktemp)
+          wrong_verify_keyring="${wrong_home}/rpm-keyring"
+          log=$(mktemp)
+
+          cleanup_wrong_signer() {
+            rm -rf -- "${wrong_home}" || true
+            rm -f --               "${wrong_public}"               "${wrong_rpm}"               "${wrong_passphrase}"               "${log}" || true
+          }
+          trap cleanup_wrong_signer EXIT
+          chmod 700 "${wrong_home}"
+          chmod 600 "${wrong_passphrase}"
+          mkdir -p -- "${wrong_verify_keyring}"
+          chmod 700 "${wrong_verify_keyring}"
+
+          gpg \
+            --homedir "${wrong_home}" \
+            --batch \
+            --pinentry-mode loopback \
+            --passphrase '' \
+            --quick-generate-key \
+            'yt-dlp-aria2 wrong-signer PR CI <wrong-signer@example.invalid>' \
+            rsa2048 sign 1d
+
+          wrong_fingerprint=$(
+            gpg \
+              --homedir "${wrong_home}" \
+              --batch \
+              --with-colons \
+              --list-secret-keys \
+              --fingerprint |
+              awk -F: \
+                '$1 == "fpr" && !found {
+                   value=toupper($10); found=1
+                 }
+                 END { if (found) print value }'
+          )
+
+          [[ ${wrong_fingerprint} =~ ^[0-9A-F]{40}$ ]]
+
+          gpg \
+            --homedir "${wrong_home}" \
+            --batch \
+            --armor \
+            --export "${wrong_fingerprint}" >"${wrong_public}"
+
+          # Deliberately trust the wrong key globally. The production bootstrap
+          # must still reject the RPM because authorization is bound to the pinned
+          # OscarFrog certificate and its unique signing subkey in an isolated fs keyring.
+          rpmkeys --import "${wrong_public}"
+
+          cp -- "${packages[0]}" "${wrong_rpm}"
+
+          GPG_TTY=/dev/null rpmsign \
+            --addsign \
+            --key-id "${wrong_fingerprint}" \
+            --define "_openpgp_sign gpg" \
+            --define "_gpg_path ${wrong_home}" \
+            --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file ${wrong_passphrase}" \
+            "${wrong_rpm}"
+
+          wrong_state=$(
+            LC_ALL=C rpm -qp --qf '%|OPENPGP?{signed}:{unsigned}|\n' \
+              -- "${wrong_rpm}"
+          )
+          [[ ${wrong_state} == signed ]]
+
+          # Prove the adversarial RPM is valid for the attacker before
+          # requiring the production bootstrap to reject it.
+          rpmkeys \
+            --define "_keyring fs" \
+            --define "_keyringpath ${wrong_verify_keyring}" \
+            --define "_keyring_lockpath ${wrong_verify_keyring}/.keyring.lock" \
+            --define "_rpmlock_path ${wrong_verify_keyring}/.rpm.lock" \
+            --import "${wrong_public}"
+          rpmkeys \
+            --define "_keyring fs" \
+            --define "_keyringpath ${wrong_verify_keyring}" \
+            --define "_keyring_lockpath ${wrong_verify_keyring}/.keyring.lock" \
+            --define "_rpmlock_path ${wrong_verify_keyring}/.rpm.lock" \
+            --checksig "${wrong_rpm}"
+
+          set +e
+          HOME="${PACKAGE_TEST_HOME}" \
+            bash ./install-fedora.sh "${wrong_rpm}" >"${log}" 2>&1
+          status=$?
+          set -e
+
+          [[ ${status} -eq 65 ]]
+          grep -Fq 'RPM OpenPGP signature verification failed against the isolated pinned certificate.' "${log}"
+
       - name: Confirm unsigned PR RPM is rejected by release bootstrap
         shell: bash
         run: |

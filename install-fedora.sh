@@ -3,10 +3,11 @@ set -Eeuo pipefail
 umask 022
 
 readonly PACKAGE_NAME='yt-dlp-aria2-downloader-gui'
-readonly APP_VERSION='2.1.28'
+readonly APP_VERSION='2.1.29'
 readonly PRIVATE_DIR='/usr/libexec/yt-dlp-aria2-downloader'
 readonly RPM_SIGNING_KEY_NAME='RPM-GPG-KEY-OscarFrog'
 readonly RPM_SIGNING_FINGERPRINT='7B54065FE061E78ED2C96252E3BE996196ABEA7F'
+readonly RPM_SIGNING_SUBKEY_FINGERPRINT='1F5B769CE48A08AAC0A7D9DDECC9894B41830245'
 
 error() {
     printf 'Error: %s\n' "$*" >&2
@@ -125,6 +126,158 @@ run_root() {
     fi
 }
 
+
+if [[ ${signature_state} == signed ]]; then
+    # GnuPG is a Fedora-repository prerequisite for authenticating the release
+    # before any third-party repository is enabled.
+    if ! command -v gpg >/dev/null 2>&1; then
+        printf 'Installing GnuPG prerequisite for RPM authentication...\n'
+        run_root dnf install --assumeyes gnupg2
+    fi
+    command -v gpg >/dev/null 2>&1 || {
+        error 'GnuPG is required to validate the pinned RPM signing certificate.'
+        exit 127
+    }
+
+    verify_root=$(mktemp -d) || {
+        error 'unable to create the isolated RPM verification directory.'
+        exit 70
+    }
+    chmod 700 "${verify_root}" || {
+        rm -rf -- "${verify_root}"
+        error 'unable to secure the isolated RPM verification directory.'
+        exit 70
+    }
+    gpg_home="${verify_root}/gnupg"
+    rpm_verify_keyring="${verify_root}/rpm-keyring"
+    gpg_output="${verify_root}/key.colons"
+    mkdir -p -- "${gpg_home}" "${rpm_verify_keyring}"
+    chmod 700 "${gpg_home}" "${rpm_verify_keyring}"
+    trap 'rm -rf -- "${verify_root:-}"' EXIT
+
+    if ! LC_ALL=C gpg \
+        --homedir "${gpg_home}" \
+        --batch \
+        --no-options \
+        --with-colons \
+        --show-keys \
+        --fingerprint \
+        "${key_path}" >"${gpg_output}"
+    then
+        error 'unable to inspect the RPM signing public certificate.'
+        exit 65
+    fi
+
+    primary_count=$(
+        awk -F: '$1 == "pub" { count++ } END { print count + 0 }' \
+            "${gpg_output}"
+    )
+    primary_fingerprint=$(
+        awk -F: \
+            '$1 == "pub" { want=1; next }
+             want && $1 == "fpr" && !found {
+                 value=toupper($10); found=1
+             }
+             END { if (found) print value }' \
+            "${gpg_output}"
+    )
+    primary_validity=$(
+        awk -F: '$1 == "pub" { print $2; exit }' "${gpg_output}"
+    )
+    primary_capabilities=$(
+        awk -F: '$1 == "pub" { print $12; exit }' "${gpg_output}"
+    )
+    signing_subkey_count=$(
+        awk -F: \
+            '$1 == "sub" &&
+             $2 != "r" &&
+             $2 != "e" &&
+             index($12, "s") > 0 {
+                 count++
+             }
+             END { print count + 0 }' \
+            "${gpg_output}"
+    )
+    signing_subkey_fingerprint=$(
+        awk -F: -v expected="${RPM_SIGNING_SUBKEY_FINGERPRINT}" \
+            '$1 == "sub" {
+                 want=($2 != "r" && $2 != "e" && index($12, "s") > 0)
+                 next
+             }
+             want && $1 == "fpr" {
+                 value=toupper($10)
+                 if (value == expected) {
+                     print value
+                     exit
+                 }
+                 want=0
+             }' \
+            "${gpg_output}"
+    )
+
+    if [[ ${primary_count} != 1 ]]; then
+        error "RPM signing key file must contain exactly one primary certificate; found ${primary_count}."
+        exit 65
+    fi
+    if [[ ${primary_fingerprint} != "${RPM_SIGNING_FINGERPRINT}" ]]; then
+        error "unexpected RPM signing primary fingerprint: ${primary_fingerprint:-missing}"
+        exit 65
+    fi
+    if [[ ${primary_validity} == r || ${primary_validity} == e ]]; then
+        error 'the pinned RPM signing primary certificate is revoked or expired.'
+        exit 65
+    fi
+    if [[ ${primary_capabilities} != *c* ]]; then
+        error 'the pinned RPM primary certificate lacks certification capability.'
+        exit 65
+    fi
+    if [[ ${primary_capabilities} == *s* ]]; then
+        error 'the pinned RPM primary certificate must remain certification-only.'
+        exit 65
+    fi
+    if [[ ${signing_subkey_count} != 1 ]]; then
+        error "the pinned RPM certificate must contain exactly one usable signing subkey; found ${signing_subkey_count}."
+        exit 65
+    fi
+    if [[ ${signing_subkey_fingerprint} != "${RPM_SIGNING_SUBKEY_FINGERPRINT}" ]]; then
+        error "required RPM signing subkey is missing, expired, revoked, or not signing-capable: ${RPM_SIGNING_SUBKEY_FINGERPRINT}"
+        exit 65
+    fi
+
+    # Verify with RPM 6's filesystem keyring backend. Both the key store and
+    # RPM transaction lock are private to this invocation, so pre-existing host
+    # RPM keys cannot authorize this package.
+    rpmkeys \
+        --define "_keyring fs" \
+        --define "_keyringpath ${rpm_verify_keyring}" \
+        --define "_keyring_lockpath ${rpm_verify_keyring}/.keyring.lock" \
+        --define "_rpmlock_path ${rpm_verify_keyring}/.rpm.lock" \
+        --import "${key_path}" || {
+        error 'unable to import the pinned certificate into the isolated RPM keyring.'
+        exit 65
+    }
+    if ! rpmkeys \
+        --define "_keyring fs" \
+        --define "_keyringpath ${rpm_verify_keyring}" \
+        --define "_keyring_lockpath ${rpm_verify_keyring}/.keyring.lock" \
+        --define "_rpmlock_path ${rpm_verify_keyring}/.rpm.lock" \
+        --checksig "${rpm_path}"
+    then
+        error 'RPM OpenPGP signature verification failed against the isolated pinned certificate.'
+        exit 65
+    fi
+
+    rm -rf -- "${verify_root}"
+    verify_root=''
+    trap - EXIT
+
+    # DNF performs a second verification during the privileged transaction.
+    # Import only after the isolated pinned-certificate verification succeeded.
+    printf 'Importing pinned OscarFrog RPM signing key: %s\n' \
+        "${RPM_SIGNING_FINGERPRINT}"
+    run_root rpmkeys --import "${key_path}"
+fi
+
 if ! rpm -q rpmfusion-free-release >/dev/null 2>&1; then
     printf 'Enabling RPM Fusion Free...\n'
     run_root dnf install --assumeyes         "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${fedora_version}.noarch.rpm"
@@ -136,66 +289,6 @@ if rpm -q ffmpeg-free >/dev/null 2>&1; then
 else
     printf 'Installing RPM Fusion ffmpeg and required system dependencies...\n'
     run_root dnf install --assumeyes --allowerasing         ffmpeg aria2 zenity curl gnupg2 unzip
-fi
-
-if [[ ${signature_state} == signed ]]; then
-    command -v gpg >/dev/null 2>&1 || {
-        error 'GnuPG is required to validate the pinned RPM signing key.'
-        exit 127
-    }
-
-    gpg_home=$(mktemp -d) || {
-        error 'unable to create a temporary GnuPG home.'
-        exit 70
-    }
-    chmod 700 "${gpg_home}"
-
-    gpg_output=$(mktemp) || {
-        rm -rf -- "${gpg_home}"
-        error 'unable to create a temporary GnuPG output file.'
-        exit 70
-    }
-
-    if ! LC_ALL=C gpg \
-        --homedir "${gpg_home}" \
-        --batch \
-        --no-options \
-        --with-colons \
-        --show-keys \
-        --fingerprint \
-        "${key_path}" >"${gpg_output}"
-    then
-        rm -rf -- "${gpg_home}"
-        rm -f -- "${gpg_output}"
-        error 'unable to inspect the RPM signing public key.'
-        exit 65
-    fi
-
-    key_fingerprint=$(
-        awk -F: \
-            '$1 == "fpr" && !found { value=toupper($10); found=1 } END { if (found) print value }' \
-            "${gpg_output}"
-    )
-
-    rm -rf -- "${gpg_home}"
-    rm -f -- "${gpg_output}"
-
-    if [[ ${key_fingerprint} != "${RPM_SIGNING_FINGERPRINT}" ]]; then
-        error "unexpected RPM signing key fingerprint: ${key_fingerprint:-missing}"
-        exit 65
-    fi
-
-    printf 'Importing pinned OscarFrog RPM signing key: %s\n'         "${RPM_SIGNING_FINGERPRINT}"
-    run_root rpmkeys --import "${key_path}"
-
-    # shellcheck disable=SC2310
-    # run_root is deliberately a status-propagating privilege wrapper. It does
-    # not rely on errexit internally, so using its status in this conditional is
-    # intentional and preserves the explicit verification diagnostic.
-    if ! run_root rpmkeys --checksig "${rpm_path}"; then
-        error 'RPM OpenPGP signature verification failed.'
-        exit 65
-    fi
 fi
 
 printf 'Installing %s...\n' "${PACKAGE_NAME}"

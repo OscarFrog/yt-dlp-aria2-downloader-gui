@@ -134,7 +134,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.28'
+readonly EXPECTED_VERSION='2.1.29'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -248,6 +248,65 @@ assert_file_contains "${script_dir}/install-fedora.sh" \
     "readonly RPM_SIGNING_FINGERPRINT='7B54065FE061E78ED2C96252E3BE996196ABEA7F'" \
     'Fedora bootstrap pins the RPM signing fingerprint'
 assert_file_contains "${script_dir}/install-fedora.sh" \
+    "readonly RPM_SIGNING_SUBKEY_FINGERPRINT='1F5B769CE48A08AAC0A7D9DDECC9894B41830245'" \
+    'Fedora bootstrap pins the dedicated RPM signing subkey'
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    '--define "_keyring fs"' \
+    'Fedora bootstrap uses RPM 6 filesystem keyring isolation'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    '--define "_keyringpath ${rpm_verify_keyring}"' \
+    'Fedora bootstrap places trusted keys in its private verification keyring'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    '--define "_rpmlock_path ${rpm_verify_keyring}/.rpm.lock"' \
+    'Fedora bootstrap redirects the RPM transaction lock into its private verification root'
+assert_file_not_contains "${script_dir}/install-fedora.sh" \
+    'OPENPGP:pgpsig' \
+    'Fedora bootstrap does not use the display-only RPM Key ID as a full fingerprint'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    'signing_subkey_count=$(' \
+    'Fedora bootstrap requires exactly one usable signing subkey in the pinned certificate'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    '--key-id "${RPM_SIGNING_SUBKEY_FINGERPRINT}"' \
+    'release signing requests the dedicated signing subkey'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'signing_subkey_count=$(' \
+    'release public certificate permits exactly one usable signing subkey'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'imported_signing_subkey_count=$(' \
+    'release secret bundle permits exactly one usable signing subkey'
+# shellcheck disable=SC2016
+assert_file_not_contains "${script_dir}/.github/workflows/release.yml" \
+    'signer_output=$(LC_ALL=C rpm -qp' \
+    'release signing does not treat RPM display Key ID as a full fingerprint'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    '--define "_rpmlock_path ${wrong_verify_keyring}/.rpm.lock"' \
+    'release wrong-signer proof uses an isolated writable RPM fs keyring'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'Reject a different globally trusted RPM signer' \
+    'release CI reproduces and rejects the 2.1.28 wrong-signer scenario'
+assert_file_contains "${script_dir}/runtime-manager.sh" \
+    "readonly RUNTIME_OWNER_SENTINEL='.package-runtime-owner-v1'" \
+    'runtime manager records a custom-XDG ownership sentinel'
+assert_file_contains "${script_dir}/packaging/package-user-cleanup.sh" \
+    'custom runtime marker lacks a matching ownership sentinel' \
+    'package cleanup refuses marker-only custom deletion'
+assert_file_contains "${script_dir}/README.md" \
+    '## Contents' \
+    'English README has a table of contents'
+assert_file_contains "${script_dir}/README.fr.md" \
+    '## Sommaire' \
+    'French README has a table of contents'
+assert_file_contains "${script_dir}/TESTING.md" \
+    '## Contents' \
+    'testing documentation has a table of contents'
+assert_file_contains "${script_dir}/install-fedora.sh" \
     '--setopt=localpkg_gpgcheck=True' \
     'Fedora bootstrap enables local-package OpenPGP verification'
 assert_file_contains "${script_dir}/install-fedora.sh" \
@@ -256,6 +315,25 @@ assert_file_contains "${script_dir}/install-fedora.sh" \
 assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
     'Confirm unsigned PR RPM is rejected by release bootstrap' \
     'PR package CI proves fail-closed unsigned behavior'
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'Reject a different globally trusted RPM signer in PR CI' \
+    'PR package CI proves a globally trusted wrong signer cannot authorize the RPM'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    '--define "_rpmlock_path ${wrong_verify_keyring}/.rpm.lock"' \
+    'PR wrong-signer proof uses a fully isolated writable RPM fs keyring'
+
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    '_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file ${wrong_passphrase}' \
+    'PR wrong-signer RPM signing is explicitly noninteractive'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    '_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file ${wrong_passphrase}' \
+    'release wrong-signer RPM signing is explicitly noninteractive'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    "printf 'Error: signing secret must contain exactly one primary certificate; found %s\\n'" \
+    'release signing diagnostic keeps its newline escaped inside YAML'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'environment: rpm-signing' \
     'release RPM signing is isolated behind a GitHub Environment'
@@ -269,12 +347,30 @@ assert_file_contains "${script_dir}/.github/workflows/release.yml" \
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'coreutils gawk gnupg2 rpm rpm-sign' \
     'isolated RPM signing job declares its awk dependency'
+# shellcheck disable=SC2016
+# The assertion deliberately checks that GPG output is materialized completely
+# before the release workflow parses primary/subkey records.
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
-    'found=1 } END { if (found) print value }' \
-    'release signing fingerprint parser consumes complete GPG output'
+    'secret_listing="${signing_home}/secret-keys.colons"' \
+    'release signing key inspection uses a complete materialized GPG listing'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    '"${RPM_SIGNING_FINGERPRINT}" >"${secret_listing}"' \
+    'release signing GPG listing is completed before fingerprint parsing'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'imported_signing_subkey=$(' \
+    'release signing parser separately validates the dedicated signing subkey'
+
+# shellcheck disable=SC2016
+# The Fedora bootstrap follows the same complete-output-before-parsing model.
 assert_file_contains "${script_dir}/install-fedora.sh" \
-    'found=1 } END { if (found) print value }' \
-    'Fedora installer fingerprint parser consumes complete GPG output'
+    '"${key_path}" >"${gpg_output}"' \
+    'Fedora installer materializes the complete public-key listing before parsing'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    'signing_subkey_fingerprint=$(' \
+    'Fedora installer separately validates the dedicated signing subkey'
 
 assert_file_contains "${script_dir}/install-fedora.sh" \
     "--homedir \"\${gpg_home}\"" \

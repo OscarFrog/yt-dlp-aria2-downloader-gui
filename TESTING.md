@@ -3,6 +3,18 @@
 This document describes the repeatable validation procedure for the current
 project. It is intentionally independent of a particular release date.
 
+## Contents
+
+- [Complete local test suite](#complete-local-test-suite)
+- [Bash syntax](#bash-syntax)
+- [ShellCheck](#shellcheck)
+- [Covered behavior](#covered-behavior)
+- [GitHub Actions](#github-actions)
+- [Release maintainer preflight](#release-maintainer-preflight)
+- [Real-world checks on Fedora 44](#real-world-checks-on-fedora-44)
+- [Locale-stabilized probes](#locale-stabilized-probes)
+- [Stress validation](#stress-validation)
+
 ## Complete local test suite
 
 Run from the repository root:
@@ -141,6 +153,15 @@ The automated suite checks, among other things:
 - fail-closed rejection of an unsigned PR RPM by the production Fedora bootstrap,
   with unsigned installation permitted only through the explicit
   `--allow-unsigned-dev` development path;
+- release-RPM verification against an isolated OscarFrog trust domain,
+  with the consumer bootstrap using a private RPM 6 filesystem keyring and
+  independently pinning the full primary and dedicated signing-subkey
+  fingerprints through GnuPG;
+- a package-CI negative test that imports a different ephemeral signer into
+  the host RPM database, signs the unsigned PR RPM with that key, and proves
+  the production bootstrap still rejects it before merge;
+- an independent release-CI negative test that repeats the wrong-signer attack
+  against a copy of the actual signed release RPM before publication;
 - real build, APT installation, removal, and ownership validation of the DEB on
   Ubuntu 24.04 without system yt-dlp or Deno package dependencies.
 
@@ -167,6 +188,8 @@ The automated suite checks, among other things:
 - package-cleanup integration coverage for a custom `XDG_DATA_HOME`, exact
   legacy `-gui` paths, preservation of unrelated similarly named files, and
   preservation of a portable ZIP/Git launcher;
+- adversarial cleanup coverage for forged and multi-line custom-XDG markers,
+  symlinked ownership sentinels, missing homes, and terminal runtime symlinks;
 - exact same RPM artifact tested in Fedora `fresh` and `ffmpeg-free`;
 - current stable yt-dlp compatibility in addition to the minimum supported
   version;
@@ -218,8 +241,12 @@ repository, release workflow, and exact source commit.
 
 The current ZIP, RPM, and DEB are built in separate jobs. The release RPM is
 built exactly once as an unsigned artifact, then a secret-bearing signing job
-with no repository checkout verifies the expected signing-key fingerprint and
-adds the OpenPGP signature. The resulting signed RPM bytes are the exact bytes
+with no repository checkout verifies the expected primary and dedicated
+signing-subkey fingerprints, requires exactly one usable signing subkey,
+requests that exact subkey, and cryptographically verifies the result before
+publication. RPM `OPENPGP:pgpsig` output is diagnostic metadata only and is not
+treated as a full-fingerprint authorization primitive.
+The resulting signed RPM bytes are the exact bytes
 requalified in Fedora `fresh` and `ffmpeg-free` and later published. RPM and DEB upgrade tests use the previously published
 immutable package bytes and verify that a deterministic archive snapshot of
 the per-user managed-runtime tree remains unchanged across installation and
@@ -252,6 +279,48 @@ The command requires repository administration read access. A successful
 preflight must return:
 
     true
+
+
+Before approving the `rpm-sign` environment deployment, also verify the
+`rpm-signing` GitHub Environment itself:
+
+1. `RPM_SIGNING_PRIVATE_KEY_B64` and `RPM_SIGNING_PASSPHRASE` are environment
+   secrets, not repository-level secrets;
+2. required reviewers are configured and self-review is prevented when those
+   controls are available for the repository;
+3. deployment branch/tag rules are restricted to the minimum release paths
+   required by the tag workflow and any intentionally retained
+   `workflow_dispatch` recovery path;
+4. the public certificate still has primary fingerprint
+   `7B54065FE061E78ED2C96252E3BE996196ABEA7F`;
+5. the dedicated signing subkey is
+   `1F5B769CE48A08AAC0A7D9DDECC9894B41830245` and has not expired or been revoked;
+6. a temporary import of the environment private bundle shows the primary as
+   an offline `sec#` stub and the dedicated signing subkey as usable secret
+   material; the primary private key itself must not be present in CI.
+
+After the final `publish` job succeeds, download the release RPM and independently
+confirm its signer and isolated trust binding on Fedora 44:
+
+```bash
+rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' ./yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm
+
+VERIFY_ROOT=$(mktemp -d)
+VERIFY_KEYRING="${VERIFY_ROOT}/keyring"
+
+mkdir -p "$VERIFY_KEYRING"
+chmod 700 "$VERIFY_ROOT" "$VERIFY_KEYRING"
+
+rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --import ./RPM-GPG-KEY-OscarFrog
+
+rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --checksig ./yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm
+
+rm -rf -- "$VERIFY_ROOT"
+
+gh release verify v2.1.29 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.1.29   ./yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh attestation verify   ./yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
+```
 
 A specific release is considered qualified only after its final `publish` job
 has completed successfully. The presence of immutable-release, attestation, or
