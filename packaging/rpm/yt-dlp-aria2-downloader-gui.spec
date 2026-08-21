@@ -57,6 +57,9 @@ test "$("%{buildroot}%{_bindir}/yt-dlp-aria2-downloader" --version)" = "yt-dlp-a
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Fri Aug 21 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - %{version}-1
+- Qualify exact previous immutable packages, preserve user runtimes, and harden release verification.
+
 * Thu Aug 20 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - %{version}-1
 - Close 2.1.24 audit findings: runtime transactions, exact artifacts, upgrades, and immutable releases.
 

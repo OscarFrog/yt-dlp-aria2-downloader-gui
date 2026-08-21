@@ -1,3 +1,27 @@
+## 2.1.26 - 2026-08-21
+
+### Release qualification closure
+
+- Qualify RPM and DEB upgrades from the exact package bytes published by the
+  previous immutable GitHub release instead of rebuilding the previous version
+  from source.
+- Verify the previous release's immutable state, SHA-256 integrity,
+  release-asset identity, SLSA provenance, signer workflow, source repository,
+  and exact source commit before using its packages in upgrade tests.
+- Verify that a deterministic archive snapshot of the per-user managed-runtime
+  tree remains unchanged across previous-package installation, package upgrade,
+  and final package removal.
+- Fail explicitly if cleanup of an unexpectedly mutable newly-created release
+  fails or cannot be confirmed.
+- Repeat the runtime-manager hardening integration suite ten times in stress CI
+  in addition to the existing ten-pass process/cancellation stress suite.
+- Correct the yt-dlp version used during 2.1.25 release qualification to
+  2026.08.19 and complete French documentation parity for the authenticated
+  YouTube HLS fallback.
+- Tighten release and testing documentation so that only successfully executed
+  immutable-release and attestation checks are described as qualification
+  evidence.
+
 ## 2.1.25 - 2026-08-21
 
 ### Release-grade hardening and audit closure
@@ -16,8 +40,8 @@
 - Build the release RPM once and test the exact same artifact in Fedora `fresh`
   and `ffmpeg-free` scenarios; add true v2.1.24 -> v2.1.25 RPM and DEB upgrades
   plus deterministic reinstall lifecycle checks.
-- Test both the minimum supported yt-dlp 2026.06.09 and current stable 2026.07.04
-  with real yt-dlp/aria2c/FFmpeg/FFprobe integration.
+- Test both the minimum supported yt-dlp 2026.06.09 and the then-current stable
+  yt-dlp 2026.08.19 with real yt-dlp/aria2c/FFmpeg/FFprobe integration.
 - Add a ten-pass concurrency/cancellation stress workflow.
 - Require exact existing-release asset inventory, GitHub Immutable Releases,
   release-attestation verification, and `gh release verify-asset` for every
