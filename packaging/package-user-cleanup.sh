@@ -18,6 +18,7 @@ umask 077
 readonly APP_ID='yt-dlp-aria2-downloader'
 readonly LEGACY_GUI_ID='yt-dlp-aria2-downloader-gui'
 readonly MARKER_NAME='.package-runtime-data-home-v1'
+readonly RUNTIME_OWNER_SENTINEL='.package-runtime-owner-v1'
 
 SELF=$(realpath -e -- "${BASH_SOURCE[0]}") || {
     printf 'Warning: unable to resolve package cleanup helper path.\n' >&2
@@ -83,6 +84,32 @@ remove_legacy_icons() {
     done
 }
 
+
+custom_runtime_root_is_owned() {
+    local base=$1
+    local home=$2
+    local sentinel="${base}/${APP_ID}/${RUNTIME_OWNER_SENTINEL}"
+    local owner=''
+    local mode=''
+    local -a lines=()
+
+    safe_xdg_base "${base}" || return 1
+    [[ -f ${sentinel} && ! -L ${sentinel} ]] || return 1
+
+    owner=$(stat -c '%u' -- "${sentinel}" 2>/dev/null) || return 1
+    mode=$(stat -c '%a' -- "${sentinel}" 2>/dev/null) || return 1
+    [[ ${owner} == "${EUID}" && ${mode} == 600 ]] || return 1
+
+    mapfile -t lines <"${sentinel}" || return 1
+    ((${#lines[@]} == 4)) || return 1
+    [[ ${lines[0]} == "app=${APP_ID}" ]] || return 1
+    [[ ${lines[1]} == "uid=${EUID}" ]] || return 1
+    [[ ${lines[2]} == "home=${home}" ]] || return 1
+    [[ ${lines[3]} == "data=${base}" ]] || return 1
+
+    return 0
+}
+
 cleanup_one_home() {
     local home=$1
     local default_data
@@ -93,6 +120,7 @@ cleanup_one_home() {
     local marker
     local candidate=''
     local -a data_homes=()
+    local -a marker_lines=()
 
     safe_home "${home}" || {
         warn "refusing invalid HOME: ${home}"
@@ -113,13 +141,21 @@ cleanup_one_home() {
     marker="${default_data}/${APP_ID}/${MARKER_NAME}"
 
     if [[ -f ${marker} && ! -L ${marker} ]]; then
-        IFS= read -r candidate <"${marker}" || true
-        if safe_xdg_base "${candidate}"; then
-            if [[ ${candidate} != "${default_data}" ]]; then
-                data_homes+=("${candidate}")
-            fi
+        if mapfile -t marker_lines <"${marker}" &&
+            ((${#marker_lines[@]} == 1)); then
+            candidate=${marker_lines[0]}
         else
-            warn "ignoring invalid runtime location marker: ${marker}"
+            candidate=''
+        fi
+
+        if ! safe_xdg_base "${candidate}"; then
+            warn "ignoring invalid or multi-line runtime location marker: ${marker}"
+        elif [[ ${candidate} != "${default_data}" ]]; then
+            if custom_runtime_root_is_owned "${candidate}" "${home}"; then
+                data_homes+=("${candidate}")
+            else
+                warn "custom runtime marker lacks a matching ownership sentinel; preserving: ${candidate}"
+            fi
         fi
     fi
 
@@ -134,6 +170,8 @@ cleanup_one_home() {
         remove_exact \
             "${data_home}/appdata/${LEGACY_GUI_ID}.appdata.xml" || true
         remove_legacy_icons "${data_home}"
+        remove_exact "${data_home}/${APP_ID}/${RUNTIME_OWNER_SENTINEL}" || true
+        rmdir -- "${data_home}/${APP_ID}" 2>/dev/null || true
     done
 
     remove_exact "${config_home}/${LEGACY_GUI_ID}" || true

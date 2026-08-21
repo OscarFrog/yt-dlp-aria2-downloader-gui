@@ -1,3 +1,42 @@
+## 2.1.29 - 2026-08-21
+
+### RPM signer authorization hardening
+
+- Bind Fedora release authentication to the exact OscarFrog certificate and
+  dedicated signing subkey `1F5B769CE48A08AAC0A7D9DDECC9894B41830245` instead of accepting any
+  key already trusted by the host RPM database.
+- Verify release RPMs in a private temporary RPM database containing only the
+  pinned certificate, then retain DNF `localpkg_gpgcheck=True` as a second,
+  transaction-time verification layer.
+- Make release signing select the dedicated signing subkey explicitly, assert
+  the RPM-reported signer fingerprint after signing, and verify the result
+  against an isolated RPM database before publishing the signed artifact.
+- Validate that the repository public key contains exactly one expected primary
+  certificate and the required usable signing subkey.
+- Add a Fedora release regression test that deliberately trusts a different
+  ephemeral key globally, resigns a copy of the release RPM with it, and proves
+  the production bootstrap rejects that wrong signer.
+
+### Package cleanup data safety
+
+- Add a private per-runtime ownership sentinel binding application ID, UID,
+  HOME, and the effective custom `XDG_DATA_HOME`.
+- Require a single-line custom-XDG marker plus its matching regular `0600`
+  sentinel before package final-removal may clean a custom data root.
+- Add adversarial cleanup tests for forged and multi-line markers, symlinked
+  sentinels, unavailable homes, and terminal runtime symlinks.
+- Preserve pre-2.1.29 custom roots conservatively when no 2.1.29 ownership
+  sentinel has ever been recorded.
+
+### Documentation and release operations
+
+- Add tables of contents to both English and French READMEs and to TESTING.md.
+- Document the exact RPM trust bootstrap, `rpm-signing` GitHub Environment
+  hardening, post-release signer verification, and signing-key
+  rotation/revocation procedure.
+- Bump all user-facing version declarations and installation examples to
+  2.1.29.
+
 ## 2.1.28 - 2026-08-21
 
 ### RPM OpenPGP release signing

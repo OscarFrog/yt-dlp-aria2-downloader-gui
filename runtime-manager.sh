@@ -7,6 +7,7 @@ set -uo pipefail
 umask 077
 
 readonly APP_ID='yt-dlp-aria2-downloader'
+readonly RUNTIME_OWNER_SENTINEL='.package-runtime-owner-v1'
 readonly DENO_RELEASE_REPOSITORY='denoland/deno'
 readonly DEFAULT_YTDLP_CHANNEL='stable'
 
@@ -32,13 +33,15 @@ validate_bounded_uint() {
     return 0
 }
 
-if [[ -z ${HOME:-} || ${HOME} != /* ]]; then
-    error 'HOME must be an absolute path.'
+if [[ -z ${HOME:-} || ${HOME} != /* || ${HOME} == / ||
+      ${HOME} == *$'\n'* || ${HOME} == *$'\r'* ]]; then
+    error 'HOME must be a safe absolute non-root path.'
     exit 64
 fi
 
 data_home=${XDG_DATA_HOME:-${HOME}/.local/share}
-if [[ ${data_home} != /* ]]; then
+if [[ ${data_home} != /* || ${data_home} == / ||
+      ${data_home} == *$'\n'* || ${data_home} == *$'\r'* ]]; then
     data_home="${HOME}/.local/share"
 fi
 readonly RUNTIME_ROOT="${data_home}/${APP_ID}/runtime"
@@ -158,35 +161,77 @@ ensure_private_directory() {
 
 record_runtime_data_home() {
     local registry_root="${HOME}/.local/share/${APP_ID}"
+    local managed_data_root="${data_home}/${APP_ID}"
     local marker="${registry_root}/.package-runtime-data-home-v1"
-    local temporary=''
+    local sentinel="${managed_data_root}/${RUNTIME_OWNER_SENTINEL}"
+    local marker_temporary=''
+    local sentinel_temporary=''
+
+    # The sentinel is a non-secret ownership proof used by package final-removal
+    # cleanup. It makes a custom marker alone insufficient to authorize deletion.
+    if ! ensure_private_directory "${managed_data_root}"; then
+        warning 'unable to secure managed data root; custom-XDG package cleanup will remain conservative.'
+        return 0
+    fi
+
+    sentinel_temporary=$(
+        mktemp \
+            --tmpdir="${managed_data_root}" \
+            '.runtime-owner.XXXXXXXX'
+    ) || {
+        warning 'unable to create runtime ownership sentinel.'
+        return 0
+    }
+
+    if ! printf 'app=%s
+uid=%s
+home=%s
+data=%s
+' \
+        "${APP_ID}" "${EUID}" "${HOME}" "${data_home}" \
+        >"${sentinel_temporary}"; then
+        rm -f -- "${sentinel_temporary}" || true
+        warning 'unable to write runtime ownership sentinel.'
+        return 0
+    fi
+    if ! chmod 600 -- "${sentinel_temporary}"; then
+        rm -f -- "${sentinel_temporary}" || true
+        warning 'unable to secure runtime ownership sentinel.'
+        return 0
+    fi
+    if ! mv -Tf -- "${sentinel_temporary}" "${sentinel}"; then
+        rm -f -- "${sentinel_temporary}" || true
+        warning 'unable to publish runtime ownership sentinel.'
+        return 0
+    fi
 
     if ! ensure_private_directory "${registry_root}"; then
         warning 'unable to create runtime-location registry; package uninstall may not discover a custom XDG_DATA_HOME.'
         return 0
     fi
 
-    temporary=$(
-        mktemp             --tmpdir="${registry_root}"             '.runtime-data-home.XXXXXXXX'
+    marker_temporary=$(
+        mktemp \
+            --tmpdir="${registry_root}" \
+            '.runtime-data-home.XXXXXXXX'
     ) || {
         warning 'unable to create runtime-location marker.'
         return 0
     }
 
-    if ! printf '%s\n' "${data_home}" >"${temporary}"; then
-        rm -f -- "${temporary}" || true
+    if ! printf '%s
+' "${data_home}" >"${marker_temporary}"; then
+        rm -f -- "${marker_temporary}" || true
         warning 'unable to write runtime-location marker.'
         return 0
     fi
-
-    if ! chmod 600 -- "${temporary}"; then
-        rm -f -- "${temporary}" || true
+    if ! chmod 600 -- "${marker_temporary}"; then
+        rm -f -- "${marker_temporary}" || true
         warning 'unable to secure runtime-location marker.'
         return 0
     fi
-
-    if ! mv -Tf -- "${temporary}" "${marker}"; then
-        rm -f -- "${temporary}" || true
+    if ! mv -Tf -- "${marker_temporary}" "${marker}"; then
+        rm -f -- "${marker_temporary}" || true
         warning 'unable to publish runtime-location marker.'
         return 0
     fi

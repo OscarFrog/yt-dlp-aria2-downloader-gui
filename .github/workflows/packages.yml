@@ -240,7 +240,7 @@ jobs:
     steps:
       - name: Install test tools
         run: |
-          dnf install --assumeyes cpio desktop-file-utils findutils git gzip rpm-build tar
+          dnf install --assumeyes cpio desktop-file-utils findutils git gnupg2 gzip rpm-build rpm-sign tar
           if [[ '${{ matrix.scenario }}' == 'ffmpeg-free' ]]; then
             dnf install --assumeyes ffmpeg-free
           fi
@@ -257,6 +257,88 @@ jobs:
         with:
           name: previous-release-packages-${{ github.sha }}
           path: previous
+      - name: Reject a different globally trusted RPM signer in PR CI
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          shopt -s nullglob
+          packages=(dist/*.rpm)
+          shopt -u nullglob
+          ((${#packages[@]} == 1))
+
+          wrong_home=$(mktemp -d)
+          wrong_public=$(mktemp)
+          wrong_rpm=$(mktemp --suffix=.rpm)
+          log=$(mktemp)
+
+          cleanup_wrong_signer() {
+            rm -rf -- "${wrong_home}" || true
+            rm -f -- "${wrong_public}" "${wrong_rpm}" "${log}" || true
+          }
+          trap cleanup_wrong_signer EXIT
+          chmod 700 "${wrong_home}"
+
+          gpg \
+            --homedir "${wrong_home}" \
+            --batch \
+            --pinentry-mode loopback \
+            --passphrase '' \
+            --quick-generate-key \
+            'yt-dlp-aria2 wrong-signer PR CI <wrong-signer@example.invalid>' \
+            rsa2048 sign 1d
+
+          wrong_fingerprint=$(
+            gpg \
+              --homedir "${wrong_home}" \
+              --batch \
+              --with-colons \
+              --list-secret-keys \
+              --fingerprint |
+              awk -F: \
+                '$1 == "fpr" && !found {
+                   value=toupper($10); found=1
+                 }
+                 END { if (found) print value }'
+          )
+
+          [[ ${wrong_fingerprint} =~ ^[0-9A-F]{40}$ ]]
+
+          gpg \
+            --homedir "${wrong_home}" \
+            --batch \
+            --armor \
+            --export "${wrong_fingerprint}" >"${wrong_public}"
+
+          # Deliberately trust the wrong key globally. The production bootstrap
+          # must still reject the RPM because project authorization is bound to
+          # the pinned OscarFrog signing-subkey fingerprint and isolated rpmdb.
+          rpmkeys --import "${wrong_public}"
+
+          cp -- "${packages[0]}" "${wrong_rpm}"
+
+          rpmsign \
+            --addsign \
+            --key-id "${wrong_fingerprint}" \
+            --define "_openpgp_sign gpg" \
+            --define "_gpg_path ${wrong_home}" \
+            "${wrong_rpm}"
+
+          wrong_signer=$(
+            LC_ALL=C rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' -- "${wrong_rpm}"
+          )
+          [[ ${wrong_signer^^} == *"${wrong_fingerprint}"* ]]
+
+          set +e
+          HOME="${PACKAGE_TEST_HOME}" \
+            bash ./install-fedora.sh "${wrong_rpm}" >"${log}" 2>&1
+          status=$?
+          set -e
+
+          [[ ${status} -eq 65 ]]
+          grep -Fq 'unexpected RPM signer fingerprint' "${log}"
+
       - name: Confirm unsigned PR RPM is rejected by release bootstrap
         shell: bash
         run: |

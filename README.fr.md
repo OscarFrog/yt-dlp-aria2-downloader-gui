@@ -4,6 +4,28 @@
 
 [English version](README.md)
 
+## Sommaire
+
+- [Installation recommandée](#installation-recommandée)
+- [Fonctionnalités principales](#fonctionnalités-principales)
+- [Prérequis](#prérequis)
+- [Provenance et immuabilité des releases](#provenance-et-immuabilité-des-releases)
+- [Installation par paquet](#installation-par-paquet)
+  - [Fedora 44 et versions suivantes](#fedora-44-et-versions-suivantes)
+  - [Debian et Ubuntu](#debian-et-ubuntu)
+  - [Commandes installées par les paquets](#commandes-installées-par-les-paquets)
+  - [Désinstaller une installation par paquet](#désinstaller-une-installation-par-paquet)
+- [Installation depuis une archive de release portable](#installation-depuis-une-archive-de-release-portable)
+- [Installation avec Git](#installation-avec-git)
+- [Utilisation graphique](#utilisation-graphique)
+- [Utilisation en ligne de commande](#utilisation-en-ligne-de-commande)
+- [Fonctionnement des téléchargeurs](#fonctionnement-des-téléchargeurs)
+- [Données locales](#données-locales)
+- [Tests](#tests)
+- [Désinstallation du lanceur](#désinstallation-du-lanceur)
+- [Limites et utilisation légale](#limites-et-utilisation-légale)
+- [Licence](#licence)
+
 Interface graphique Zenity et moteur Bash exclusivement pour GNU/Linux. Le programme télécharge
 une seule URL avec l'un des trois profils suivants :
 
@@ -17,7 +39,7 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.28**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.29**.
 
 ## Installation recommandée
 
@@ -28,7 +50,7 @@ Pour **Fedora 44 ou une version plus récente**, téléchargez ces quatre fichie
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.1.28-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -36,7 +58,7 @@ Vérifiez les fichiers téléchargés puis lancez le bootstrap Fedora officiel :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.28-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm
 ```
 
 Le bootstrap active RPM Fusion Free si nécessaire, remplace `ffmpeg-free` par
@@ -46,7 +68,7 @@ runtimes yt-dlp et Deno propres à l'utilisateur.
 
 Pour **Debian ou Ubuntu**, téléchargez le DEB versionné et `SHA256SUMS`,
 vérifiez-les puis installez le paquet avec `sudo apt install
-./yt-dlp-aria2-downloader-gui_2.1.28-1_all.deb`. Pour **les autres distributions
+./yt-dlp-aria2-downloader-gui_2.1.29-1_all.deb`. Pour **les autres distributions
 GNU/Linux ou une utilisation portable**, utilisez le ZIP versionné ou un clone
 Git. Les runtimes yt-dlp et Deno gérés automatiquement prennent actuellement en
 charge Linux `x86_64` et `aarch64`.
@@ -144,12 +166,48 @@ l'identité de la release :
 
 ```bash
 gh attestation verify ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.1.28 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.1.28 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.1.29 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.1.29 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 `SHA256SUMS` reste utile pour un contrôle local ou hors ligne ; les attestations
 et l'immuabilité ajoutent la preuve de provenance et d'identité de release.
+
+### Identité de signature RPM, environnement et rotation des clés
+
+L'autorisation d'un RPM Fedora est volontairement plus stricte que le trousseau
+RPM global de la machine. Le bootstrap côté utilisateur n'accepte que le
+certificat primaire `7B54065FE061E78ED2C96252E3BE996196ABEA7F` et exige que la signature du RPM annonce
+la sous-clé de signature dédiée `1F5B769CE48A08AAC0A7D9DDECC9894B41830245`. Le job de signature de
+release contrôle indépendamment les mêmes empreintes, demande explicitement
+cette sous-clé à `rpmsign --key-id`, puis vérifie le RPM obtenu dans une base RPM
+temporaire isolée.
+
+L'environnement GitHub `rpm-signing` constitue une frontière de sécurité
+opérationnelle et pas seulement un nom dans le workflow. Conservez
+`RPM_SIGNING_PRIVATE_KEY_B64` et `RPM_SIGNING_PASSPHRASE` comme **secrets
+d'environnement**. Le bundle privé doit être produit avec
+`--export-secret-subkeys` de GnuPG : la clé privée primaire reste hors ligne et
+n'est importée que comme stub `sec#`, tandis que la sous-clé de signature dédiée
+reste utilisable. Configurez des réviseurs obligatoires et l'interdiction de
+l'auto-approbation lorsque le plan et les paramètres du dépôt le permettent,
+et limitez les branches/tags de déploiement aux chemins réellement nécessaires
+à la release. Le `workflow_dispatch` manuel étant conservé, n'appliquez pas une
+règle exclusivement `v*` sauf si vous désactivez volontairement ce mode manuel ;
+sinon, n'autorisez que l'ensemble minimal branche par défaut/tags nécessaire à
+la reprise d'une release.
+
+La sous-clé de signature actuelle expire le **21 août 2027**. Sa rotation doit
+être préparée avant cette date. Pour une rotation normale sous le même
+certificat primaire, publiez le certificat public actualisé, remplacez
+l'empreinte de sous-clé épinglée dans le code, le workflow et les tests,
+actualisez le secret de signature de l'environnement, puis imposez toute la
+qualification Fedora positive et négative avant le tag suivant. En cas de
+compromission de la sous-clé, arrêtez les releases, révoquez-la, remplacez le
+secret d'environnement, publiez le certificat actualisé et ne reprenez les
+releases qu'après épinglage de la nouvelle empreinte. Si le certificat primaire
+est compromis, une nouvelle empreinte primaire est obligatoire : aucun
+remplacement silencieux du certificat primaire n'est accepté.
 
 ## Installation par paquet
 
@@ -178,7 +236,7 @@ Téléchargez :
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.1.28-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -191,15 +249,21 @@ sha256sum --ignore-missing --check SHA256SUMS
 Puis lancez :
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.28-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm
 ```
 
-Le bootstrap refuse par défaut un RPM de release non signé. Il épingle et
-importe l'empreinte de `RPM-GPG-KEY-OscarFrog`, vérifie la signature OpenPGP du
-RPM avec `rpmkeys`, puis impose `localpkg_gpgcheck=True` à DNF pour le
-paquet local. L'option `--allow-unsigned-dev` est réservée explicitement
-aux builds locaux/CI de développement et n'est jamais utilisée pour une
-release.
+Le bootstrap refuse par défaut un RPM de release non signé. Il vérifie que
+`RPM-GPG-KEY-OscarFrog` contient exactement un certificat primaire d'empreinte
+`7B54065FE061E78ED2C96252E3BE996196ABEA7F` ainsi que la sous-clé de signature dédiée
+`1F5B769CE48A08AAC0A7D9DDECC9894B41830245`. Il crée ensuite une base RPM temporaire privée
+contenant uniquement ce certificat, exige que l'empreinte du signataire OpenPGP
+annoncée par le RPM corresponde à cette sous-clé dédiée, puis vérifie le paquet
+dans ce trousseau isolé. Ce n'est qu'après ces contrôles que le certificat est
+importé dans la base RPM système afin que DNF répète indépendamment la
+vérification avec `localpkg_gpgcheck=True`. Une autre clé déjà approuvée dans la
+base RPM de la machine ne peut donc plus autoriser le RPM du projet. L'option
+`--allow-unsigned-dev` reste réservée explicitement aux builds locaux/CI de
+développement et n'est jamais utilisée pour une release.
 
 Le bootstrap :
 
@@ -219,11 +283,11 @@ de l'utilisateur et vérifiés avant activation.
 
 ### Debian et Ubuntu
 
-La release 2.1.28 publie un DEB indépendant de l'architecture, aligné sur le
+La release 2.1.29 publie un DEB indépendant de l'architecture, aligné sur le
 même modèle de runtimes gérés que Fedora. Téléchargez :
 
 ```text
-yt-dlp-aria2-downloader-gui_2.1.28-1_all.deb
+yt-dlp-aria2-downloader-gui_2.1.29-1_all.deb
 SHA256SUMS
 ```
 
@@ -231,7 +295,7 @@ Vérifiez puis installez :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.28-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.29-1_all.deb
 ```
 
 Le DEB dépend des outils système habituels (`aria2c`, FFmpeg/FFprobe, Zenity,
@@ -288,6 +352,18 @@ puisse aussi retrouver un emplacement de données personnalisé. Un emplacement
 XDG personnalisé utilisé uniquement par une ancienne version et jamais observé
 par la 2.1.27 ne peut pas être reconstitué automatiquement de manière sûre.
 
+À partir de la 2.1.29, la racine de données personnalisée reçoit également une
+preuve de propriété privée qui lie l'identifiant de l'application, l'UID, HOME
+et la racine de données réellement utilisée. La désinstallation finale ne suit
+un marker personnalisé que s'il contient exactement une seule ligne avec un
+chemin absolu et si la preuve régulière `0600` correspondante existe et
+appartient à l'utilisateur cible. La seule modification du marker ne peut donc
+plus autoriser une suppression dans une autre racine XDG. Après une mise à
+niveau depuis la 2.1.27/2.1.28, une exécution du gestionnaire de runtime 2.1.29
+crée automatiquement cette preuve. Si la 2.1.29 est supprimée avant cette
+migration, l'ancienne racine personnalisée est conservée par prudence au lieu
+d'être supprimée.
+
 Le lanceur portable ZIP/Git
 `~/.local/share/yt-dlp-aria2-downloader/launch` est volontairement conservé
 lorsqu'il existe, car il peut appartenir à une installation portable
@@ -302,7 +378,7 @@ courant.
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.28.zip
+yt-dlp-aria2-downloader-gui-2.1.29.zip
 SHA256SUMS
 ```
 
@@ -310,8 +386,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.28.zip
-cd yt-dlp-aria2-downloader-gui-2.1.28
+unzip yt-dlp-aria2-downloader-gui-2.1.29.zip
+cd yt-dlp-aria2-downloader-gui-2.1.29
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
