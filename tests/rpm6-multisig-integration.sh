@@ -231,6 +231,10 @@ printf '%s\n' fixture > %{buildroot}/usr/share/rpm6-multisig-fixture/payload
 
 %files
 /usr/share/rpm6-multisig-fixture/payload
+
+%changelog
+* Sat Aug 22 2026 yt-dlp aria2 CI <ci@example.invalid> - 1.0-1
+- Deterministic RPM v6 multi-signature fixture.
 SPEC
 
     rpmbuild -bb \

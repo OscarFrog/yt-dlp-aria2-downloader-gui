@@ -230,6 +230,17 @@ assert_file_contains "${script_dir}/.github/workflows/shell.yml" \
     'outdated validation runs are cancelled'
 
 assert_file_contains \
+    "${script_dir}/packaging/rpm/build-rpm.sh" \
+    '--define "_rpmformat 4"' \
+    'RPM package format is explicitly pinned to v4'
+# shellcheck disable=SC2016
+# This assertion deliberately searches for literal shell source code.
+assert_file_contains \
+    "${script_dir}/packaging/rpm/build-rpm.sh" \
+    'if [[ ${package_format} != 4 ]]; then' \
+    'generated RPM package format is independently verified'
+
+assert_file_contains \
     "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
     '%dir %{_docdir}/%{name}' \
     'RPM owns its application documentation directory'
