@@ -330,7 +330,7 @@ jobs:
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           name: previous-release-packages-${{ github.sha }}
-          path: previous
+          path: ${{ runner.temp }}/previous-release
 
       - name: Install DEB build tools
         run: |
@@ -339,6 +339,7 @@ jobs:
       - name: Build, lifecycle, reinstall, and upgrade DEB
         env:
           PREVIOUS_VERSION: ${{ needs.previous-release.outputs.version }}
+          PREVIOUS_DIR: ${{ runner.temp }}/previous-release
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -348,7 +349,7 @@ jobs:
           ((${#packages[@]} == 1))
           sudo bash packaging/deb/test-package-lifecycle.sh "${packages[0]}" "${version}"
           shopt -s nullglob
-          old=(previous/*.deb)
+          old=("${PREVIOUS_DIR}"/*.deb)
           shopt -u nullglob
 
           if ((${#old[@]} != 1)); then
@@ -358,7 +359,7 @@ jobs:
           fi
 
           (
-            cd previous
+            cd "${PREVIOUS_DIR}"
             sha256sum --check PREVIOUS_SHA256SUMS
           )
 

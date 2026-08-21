@@ -755,9 +755,11 @@ assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
     'previous/*.rpm' \
     'RPM upgrade consumes the published previous RPM'
 
+# shellcheck disable=SC2016
+# Literal GitHub Actions runner-temp expression.
 assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
-    'previous/*.deb' \
-    'DEB upgrade consumes the published previous DEB'
+    'PREVIOUS_DIR: ${{ runner.temp }}/previous-release' \
+    'DEB upgrade keeps the published previous DEB outside the source worktree'
 
 assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
     'sha256sum --check PREVIOUS_SHA256SUMS' \
