@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+set -e
+
+# Intentionally no runtime bootstrap here.
+case "${1:-}" in
+configure|triggered|abort-upgrade|abort-remove|abort-deconfigure)
+    :
+    ;;
+*)
+    :
+    ;;
+esac
+
+exit 0

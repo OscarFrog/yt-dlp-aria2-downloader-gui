@@ -134,7 +134,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.26'
+readonly EXPECTED_VERSION='2.1.27'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -233,6 +233,16 @@ assert_file_contains \
     "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
     '%dir %{_docdir}/%{name}' \
     'RPM owns its application documentation directory'
+assert_file_contains \
+    "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+    "if [ \"\$1\" -eq 0 ]; then" \
+    'RPM user cleanup runs only on final erase'
+assert_file_contains "${script_dir}/packaging/deb/prerm" \
+    "if [ \"\$#\" -eq 1 ] && [ -x \"\${HELPER}\" ]; then" \
+    'DEB user cleanup excludes remove-in-favour replacement'
+assert_file_contains "${script_dir}/packaging/install-tree.sh" \
+    'packaging/package-user-cleanup.sh' \
+    'package tree ships user cleanup helper'
 
 assert_file_contains "${script_dir}/README.md"     "is **${EXPECTED_VERSION}**." 'English README version'
 assert_file_contains "${script_dir}/README.fr.md"     "version actuelle est la **${EXPECTED_VERSION}**." 'French README version'
@@ -396,7 +406,7 @@ assert_file_not_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gu
 
 
 
-# Version 2.1.26 runtime, release, playlist, HLS, packaging, and supply-chain contracts.
+# Version 2.1.27 runtime, release, playlist, HLS, packaging, and supply-chain contracts.
 assert_file_contains "${script_dir}/download-video.sh" \
     '--url-file FILE' 'private URL-file input'
 assert_file_contains "${script_dir}/download-video.sh" \
@@ -652,8 +662,8 @@ assert_file_contains "${script_dir}/packaging/rpm/test-package-upgrade.sh" \
     'RPM package upgrade preserves user runtime data'
 
 assert_file_contains "${script_dir}/packaging/rpm/test-package-upgrade.sh" \
-    "assert_runtime_preserved 'package removal'" \
-    'RPM package removal preserves user runtime data'
+    "assert_runtime_removed 'final package removal'" \
+    'RPM final package removal cleans managed user runtime data'
 
 assert_file_contains "${script_dir}/packaging/deb/test-package-upgrade.sh" \
     "assert_runtime_preserved 'installation of previous package'" \
@@ -664,8 +674,8 @@ assert_file_contains "${script_dir}/packaging/deb/test-package-upgrade.sh" \
     'DEB package upgrade preserves user runtime data'
 
 assert_file_contains "${script_dir}/packaging/deb/test-package-upgrade.sh" \
-    "assert_runtime_preserved 'package removal'" \
-    'DEB package removal preserves user runtime data'
+    "assert_runtime_removed 'final package removal'" \
+    'DEB final package removal cleans managed user runtime data'
 
 assert_file_contains "${script_dir}/README.fr.md" \
     '### Vidéo YouTube HLS authentifiée' \

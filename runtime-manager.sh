@@ -156,9 +156,48 @@ ensure_private_directory() {
     return 0
 }
 
+record_runtime_data_home() {
+    local registry_root="${HOME}/.local/share/${APP_ID}"
+    local marker="${registry_root}/.package-runtime-data-home-v1"
+    local temporary=''
+
+    if ! ensure_private_directory "${registry_root}"; then
+        warning 'unable to create runtime-location registry; package uninstall may not discover a custom XDG_DATA_HOME.'
+        return 0
+    fi
+
+    temporary=$(
+        mktemp             --tmpdir="${registry_root}"             '.runtime-data-home.XXXXXXXX'
+    ) || {
+        warning 'unable to create runtime-location marker.'
+        return 0
+    }
+
+    if ! printf '%s\n' "${data_home}" >"${temporary}"; then
+        rm -f -- "${temporary}" || true
+        warning 'unable to write runtime-location marker.'
+        return 0
+    fi
+
+    if ! chmod 600 -- "${temporary}"; then
+        rm -f -- "${temporary}" || true
+        warning 'unable to secure runtime-location marker.'
+        return 0
+    fi
+
+    if ! mv -Tf -- "${temporary}" "${marker}"; then
+        rm -f -- "${temporary}" || true
+        warning 'unable to publish runtime-location marker.'
+        return 0
+    fi
+
+    return 0
+}
+
 ensure_private_directory "${RUNTIME_ROOT}" || exit $?
 ensure_private_directory "${YTDLP_ROOT}" || exit $?
 ensure_private_directory "${DENO_ROOT}" || exit $?
+record_runtime_data_home
 
 LOCK_FD=''
 release_runtime_lock() {

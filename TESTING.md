@@ -30,10 +30,15 @@ bash -n tests/runtime-manager-hardening-integration.sh
 bash -n tests/progress-monitor-integration.sh
 bash -n tests/installer-integration.sh
 bash -n tests/packaging-integration.sh
+bash -n tests/package-user-cleanup-integration.sh
 bash -n tests/ffmpeg-progress-integration.sh
 bash -n tests/real-tools-integration.sh
 bash -n packaging/install-tree.sh
+bash -n packaging/package-user-cleanup.sh
 bash -n packaging/deb/build-deb.sh
+bash -n packaging/deb/postinst
+bash -n packaging/deb/prerm
+bash -n packaging/deb/postrm
 bash -n packaging/deb/test-package-lifecycle.sh
 bash -n packaging/deb/test-package-upgrade.sh
 bash -n packaging/rpm/build-rpm.sh
@@ -63,10 +68,15 @@ shellcheck -x -o all \
   tests/progress-monitor-integration.sh \
   tests/installer-integration.sh \
   tests/packaging-integration.sh \
+  tests/package-user-cleanup-integration.sh \
   tests/ffmpeg-progress-integration.sh \
   tests/real-tools-integration.sh \
   packaging/install-tree.sh \
+  packaging/package-user-cleanup.sh \
   packaging/deb/build-deb.sh \
+  packaging/deb/postinst \
+  packaging/deb/prerm \
+  packaging/deb/postrm \
   packaging/deb/test-package-lifecycle.sh \
   packaging/deb/test-package-upgrade.sh \
   packaging/rpm/build-rpm.sh \
@@ -148,8 +158,12 @@ The automated suite checks, among other things:
   validation for RPM and DEB, using the exact previously published package
   bytes rather than rebuilding the previous version from source;
 - preservation of a deterministic archive snapshot of the per-user
-  managed-runtime tree across previous package installation, upgrade, and final
-  package removal;
+  managed-runtime tree across previous package installation and package
+  upgrade, followed by allowlisted managed-runtime cleanup on final package
+  removal;
+- package-cleanup integration coverage for a custom `XDG_DATA_HOME`, exact
+  legacy `-gui` paths, preservation of unrelated similarly named files, and
+  preservation of a portable ZIP/Git launcher;
 - exact same RPM artifact tested in Fedora `fresh` and `ffmpeg-free`;
 - current stable yt-dlp compatibility in addition to the minimum supported
   version;
@@ -199,8 +213,9 @@ The current ZIP, RPM, and DEB are built in separate jobs. The release RPM is
 built exactly once and the identical bytes are requalified in Fedora `fresh`
 and `ffmpeg-free`. RPM and DEB upgrade tests use the previously published
 immutable package bytes and verify that a deterministic archive snapshot of
-the per-user managed-runtime tree remains unchanged across installation,
-upgrade, and package removal.
+the per-user managed-runtime tree remains unchanged across installation and
+upgrade. Final package removal then verifies that the managed runtime has been
+removed by the package cleanup hook.
 
 The publication job downloads the exact tested current artifacts, generates one
 shared SHA256SUMS file, verifies the exact release asset inventory, requires the

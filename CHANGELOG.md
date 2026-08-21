@@ -1,3 +1,18 @@
+## 2.1.27 - 2026-08-21
+
+### Package uninstall cleanup
+
+- Clean the managed per-user yt-dlp/Deno runtime on final DEB or RPM package
+  removal while preserving it during package upgrades.
+- Run non-root home cleanup under the owning UID/GID and remove only an
+  explicit allowlist of managed runtime and exact legacy
+  `yt-dlp-aria2-downloader-gui` XDG paths.
+- Preserve the portable ZIP/Git launcher and unrelated similarly named files.
+- Record the effective `XDG_DATA_HOME` prospectively so later package removal
+  can find custom runtime locations without a filesystem-wide search.
+- Add DEB maintainer scripts, an RPM final-erase `%preun`, package payload
+  checks, and integration coverage for final-removal cleanup.
+
 ## 2.1.26 - 2026-08-21
 
 ### Release qualification closure

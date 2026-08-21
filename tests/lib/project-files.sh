@@ -17,7 +17,11 @@ PRODUCTION_SHELL_FILES=(
 PACKAGING_SHELL_FILES=(
     install-fedora.sh
     packaging/install-tree.sh
+    packaging/package-user-cleanup.sh
     packaging/deb/build-deb.sh
+    packaging/deb/postinst
+    packaging/deb/prerm
+    packaging/deb/postrm
     packaging/deb/test-package-lifecycle.sh
     packaging/deb/test-package-upgrade.sh
     packaging/rpm/build-rpm.sh
@@ -37,6 +41,7 @@ TEST_SHELL_FILES=(
     tests/progress-monitor-integration.sh
     tests/installer-integration.sh
     tests/packaging-integration.sh
+    tests/package-user-cleanup-integration.sh
     tests/ffmpeg-progress-integration.sh
     tests/real-tools-integration.sh
 )
