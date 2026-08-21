@@ -457,26 +457,22 @@ jobs:
           )
 
           [[ ${imported_primary_count} == 1 ]] || {
-            printf 'Error: signing secret must contain exactly one primary certificate; found %s
-' \
+            printf 'Error: signing secret must contain exactly one primary certificate; found %s\n' \
               "${imported_primary_count}" >&2
             exit 65
           }
           [[ ${imported_primary_secret_state} == '#' ]] || {
-            printf '%s
-' \
+            printf '%s\n' \
               'Error: primary private signing key material must remain offline; configure an export-secret-subkeys bundle.' >&2
             exit 65
           }
           [[ ${imported_fingerprint} == "${RPM_SIGNING_FINGERPRINT}" ]] || {
-            printf 'Error: imported signing primary fingerprint mismatch: %s
-' \
+            printf 'Error: imported signing primary fingerprint mismatch: %s\n' \
               "${imported_fingerprint:-missing}" >&2
             exit 65
           }
           [[ ${imported_signing_subkey} == "${RPM_SIGNING_SUBKEY_FINGERPRINT}" ]] || {
-            printf 'Error: required signing subkey is absent, expired, revoked, or not signing-capable: %s
-' \
+            printf 'Error: required signing subkey is absent, expired, revoked, or not signing-capable: %s\n' \
               "${RPM_SIGNING_SUBKEY_FINGERPRINT}" >&2
             exit 65
           }
@@ -560,6 +556,7 @@ jobs:
           wrong_home=$(mktemp -d)
           wrong_public=$(mktemp)
           wrong_rpm=$(mktemp --suffix=.rpm)
+          wrong_passphrase=$(mktemp)
           log=$(mktemp)
           wrong_fingerprint=''
 
@@ -568,10 +565,11 @@ jobs:
               rpmkeys --delete "${wrong_fingerprint}" >/dev/null 2>&1 || true
             fi
             rm -rf -- "${wrong_home}" || true
-            rm -f -- "${wrong_public}" "${wrong_rpm}" "${log}" || true
+            rm -f --               "${wrong_public}"               "${wrong_rpm}"               "${wrong_passphrase}"               "${log}" || true
           }
           trap cleanup_wrong_signer EXIT
           chmod 700 "${wrong_home}"
+          chmod 600 "${wrong_passphrase}"
 
           gpg \
             --homedir "${wrong_home}" \
@@ -614,6 +612,7 @@ jobs:
             --key-id "${wrong_fingerprint}" \
             --define "_openpgp_sign gpg" \
             --define "_gpg_path ${wrong_home}" \
+            --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file ${wrong_passphrase}" \
             "${wrong_rpm}"
 
           wrong_signer=$(

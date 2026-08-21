@@ -292,6 +292,18 @@ assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
 assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
     'Reject a different globally trusted RPM signer in PR CI' \
     'PR package CI proves a globally trusted wrong signer cannot authorize the RPM'
+
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    '_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file ${wrong_passphrase}' \
+    'PR wrong-signer RPM signing is explicitly noninteractive'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    '_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file ${wrong_passphrase}' \
+    'release wrong-signer RPM signing is explicitly noninteractive'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    "printf 'Error: signing secret must contain exactly one primary certificate; found %s\\n'" \
+    'release signing diagnostic keeps its newline escaped inside YAML'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'environment: rpm-signing' \
     'release RPM signing is isolated behind a GitHub Environment'
