@@ -127,6 +127,18 @@ assert_runtime_preserved() {
     return 0
 }
 
+assert_runtime_removed() {
+    local stage=$1
+
+    if [[ -e ${runtime_root} || -L ${runtime_root} ]]; then
+        printf 'Error: per-user runtime remains after %s: %s\n' \
+            "${stage}" "${runtime_root}" >&2
+        return 65
+    fi
+
+    return 0
+}
+
 set +e
 runtime_tree_baseline=$(runtime_tree_snapshot)
 runtime_tree_snapshot_status=$?
@@ -144,7 +156,8 @@ cleanup() {
     fi
 
     if [[ -n ${runtime_probe_dir} &&
-          ${runtime_probe_dir} == "${runtime_root}/.package-upgrade-preservation."* ]]; then
+          ${runtime_probe_dir} == "${runtime_root}/.package-upgrade-preservation."* &&
+          ( -e ${runtime_root} || -L ${runtime_root} ) ]]; then
         if [[ -d ${runtime_root} && ! -L ${runtime_root} ]]; then
             rm -rf -- "${runtime_probe_dir}"
         else
@@ -181,7 +194,7 @@ new_version_output=$(/usr/bin/yt-dlp-aria2-downloader --version)
 
 dnf remove --assumeyes "${PACKAGE_NAME}"
 installed=false
-assert_runtime_preserved 'package removal'
+assert_runtime_removed 'final package removal'
 if rpm -q "${PACKAGE_NAME}" >/dev/null 2>&1; then
     printf 'Error: RPM remains installed after upgrade/removal.\n' >&2
     exit 65

@@ -134,7 +134,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.26'
+readonly EXPECTED_VERSION='2.1.27'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -233,6 +233,16 @@ assert_file_contains \
     "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
     '%dir %{_docdir}/%{name}' \
     'RPM owns its application documentation directory'
+assert_file_contains \
+    "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+    "if [ \"\$1\" -eq 0 ]; then" \
+    'RPM user cleanup runs only on final erase'
+assert_file_contains "${script_dir}/packaging/deb/prerm" \
+    "if [ \"\$#\" -eq 1 ] && [ -x \"\${HELPER}\" ]; then" \
+    'DEB user cleanup excludes remove-in-favour replacement'
+assert_file_contains "${script_dir}/packaging/install-tree.sh" \
+    'packaging/package-user-cleanup.sh' \
+    'package tree ships user cleanup helper'
 
 assert_file_contains "${script_dir}/README.md"     "is **${EXPECTED_VERSION}**." 'English README version'
 assert_file_contains "${script_dir}/README.fr.md"     "version actuelle est la **${EXPECTED_VERSION}**." 'French README version'
@@ -396,7 +406,7 @@ assert_file_not_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gu
 
 
 
-# Version 2.1.26 runtime, release, playlist, HLS, packaging, and supply-chain contracts.
+# Version 2.1.27 runtime, release, playlist, HLS, packaging, and supply-chain contracts.
 assert_file_contains "${script_dir}/download-video.sh" \
     '--url-file FILE' 'private URL-file input'
 assert_file_contains "${script_dir}/download-video.sh" \
@@ -652,8 +662,8 @@ assert_file_contains "${script_dir}/packaging/rpm/test-package-upgrade.sh" \
     'RPM package upgrade preserves user runtime data'
 
 assert_file_contains "${script_dir}/packaging/rpm/test-package-upgrade.sh" \
-    "assert_runtime_preserved 'package removal'" \
-    'RPM package removal preserves user runtime data'
+    "assert_runtime_removed 'final package removal'" \
+    'RPM final package removal cleans managed user runtime data'
 
 assert_file_contains "${script_dir}/packaging/deb/test-package-upgrade.sh" \
     "assert_runtime_preserved 'installation of previous package'" \
@@ -664,8 +674,8 @@ assert_file_contains "${script_dir}/packaging/deb/test-package-upgrade.sh" \
     'DEB package upgrade preserves user runtime data'
 
 assert_file_contains "${script_dir}/packaging/deb/test-package-upgrade.sh" \
-    "assert_runtime_preserved 'package removal'" \
-    'DEB package removal preserves user runtime data'
+    "assert_runtime_removed 'final package removal'" \
+    'DEB final package removal cleans managed user runtime data'
 
 assert_file_contains "${script_dir}/README.fr.md" \
     '### Vidéo YouTube HLS authentifiée' \
@@ -772,5 +782,30 @@ assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
 assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
     'v2.1.24' \
     'package CI does not hard-code a historical upgrade source version'
+
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'PACKAGE_TEST_HOME: /root' \
+    'package CI uses an NSS-discoverable Fedora package-test HOME'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    "HOME=\"\${PACKAGE_TEST_HOME}\" bash ./install-fedora.sh" \
+    'package CI Fedora bootstrap uses the package-test HOME'
+
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'PACKAGE_TEST_HOME: /root' \
+    'release CI uses an NSS-discoverable Fedora package-test HOME'
+
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    "HOME=\"\${PACKAGE_TEST_HOME}\" bash ./install-fedora.sh" \
+    'release Fedora bootstrap uses the package-test HOME'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'supported Fedora bootstrap runtime survived final RPM removal' \
+    'package CI checks bootstrap runtime removal'
+
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'supported Fedora bootstrap runtime survived final RPM removal' \
+    'release CI checks bootstrap runtime removal'
 
 printf '%s\n' 'Static tests passed.'

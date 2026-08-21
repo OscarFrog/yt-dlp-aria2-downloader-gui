@@ -128,6 +128,18 @@ assert_runtime_preserved() {
     return 0
 }
 
+assert_runtime_removed() {
+    local stage=$1
+
+    if [[ -e ${runtime_root} || -L ${runtime_root} ]]; then
+        printf 'Error: per-user runtime remains after %s: %s\n' \
+            "${stage}" "${runtime_root}" >&2
+        return 65
+    fi
+
+    return 0
+}
+
 set +e
 runtime_tree_baseline=$(runtime_tree_snapshot)
 runtime_tree_snapshot_status=$?
@@ -146,7 +158,8 @@ cleanup() {
     fi
 
     if [[ -n ${runtime_probe_dir} &&
-          ${runtime_probe_dir} == "${runtime_root}/.package-upgrade-preservation."* ]]; then
+          ${runtime_probe_dir} == "${runtime_root}/.package-upgrade-preservation."* &&
+          ( -e ${runtime_root} || -L ${runtime_root} ) ]]; then
         if [[ -d ${runtime_root} && ! -L ${runtime_root} ]]; then
             rm -rf -- "${runtime_probe_dir}"
         else
@@ -179,7 +192,7 @@ new_version_output=$(/usr/bin/yt-dlp-aria2-downloader --version)
 [[ -x /usr/lib/yt-dlp-aria2-downloader/runtime-manager.sh ]]
 DEBIAN_FRONTEND=noninteractive apt-get remove --yes "${PACKAGE_NAME}"
 installed=false
-assert_runtime_preserved 'package removal'
+assert_runtime_removed 'final package removal'
 status=$(dpkg-query -W -f='${Status}' "${PACKAGE_NAME}" 2>/dev/null || true)
 [[ ${status} != 'install ok installed' ]]
 for path in "/usr/lib/yt-dlp-aria2-downloader" "/usr/share/doc/${PACKAGE_NAME}"; do

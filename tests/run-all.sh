@@ -84,4 +84,7 @@ bash -- ./tests/installer-integration.sh
 printf '\n=== Packaging integration ===\n'
 bash -- ./tests/packaging-integration.sh
 
+printf '\n=== Package user cleanup integration ===\n'
+bash -- ./tests/package-user-cleanup-integration.sh
+
 printf '\nAll validation suites passed.\n'

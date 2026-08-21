@@ -35,7 +35,12 @@ bash "${project_dir}/packaging/install-tree.sh" \
     "${root}" "${version}" '/usr/lib/yt-dlp-aria2-downloader'
 
 private_dir="${root}/usr/lib/yt-dlp-aria2-downloader"
-for executable in download-video.sh download-video-gui.sh progress-monitor.sh runtime-manager.sh; do
+for executable in \
+    download-video.sh \
+    download-video-gui.sh \
+    progress-monitor.sh \
+    runtime-manager.sh \
+    package-user-cleanup.sh; do
     [[ -x ${private_dir}/${executable} && ! -L ${private_dir}/${executable} ]] ||
         fail "Missing packaged executable: ${executable}"
     mode=$(stat -c '%a' -- "${private_dir}/${executable}")

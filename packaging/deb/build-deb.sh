@@ -102,6 +102,12 @@ Description: Zenity interface and Bash engine for yt-dlp and aria2
 EOF_CONTROL
 chmod 0644 -- "${root}/DEBIAN/control"
 
+for maintainer_script in postinst prerm postrm; do
+    install -m 0755 -- \
+        "${project_dir}/packaging/deb/${maintainer_script}" \
+        "${root}/DEBIAN/${maintainer_script}"
+done
+
 package_path="${output_dir}/${PACKAGE_NAME}_${VERSION}-${PACKAGE_REVISION}_all.deb"
 rm -f -- "${package_path}"
 
@@ -133,6 +139,7 @@ desktop-file-validate --no-hints \
     "${extracted}/usr/share/applications/yt-dlp-aria2-downloader.desktop"
 [[ -f ${extracted}/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg ]]
 [[ -x ${extracted}/usr/lib/yt-dlp-aria2-downloader/runtime-manager.sh ]]
+[[ -x ${extracted}/usr/lib/yt-dlp-aria2-downloader/package-user-cleanup.sh ]]
 [[ -f ${extracted}/usr/lib/yt-dlp-aria2-downloader/keys/yt-dlp-public.key ]]
 engine_mode=$(stat -c '%a' -- \
     "${extracted}/usr/lib/yt-dlp-aria2-downloader/download-video.sh")

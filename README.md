@@ -16,7 +16,7 @@ single URL using one of three profiles:
 The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP/FTP downloads, and FFmpeg to merge, remux, or extract streams. DASH and HLS
 streams deliberately remain on yt-dlp's native downloader. The current version
-is **2.1.26**.
+is **2.1.27**.
 
 ## Recommended installation
 
@@ -26,7 +26,7 @@ For **Fedora 44 or newer**, download these three assets:
 
 ```text
 install-fedora.sh
-yt-dlp-aria2-downloader-gui-2.1.26-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.27-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -34,7 +34,7 @@ Verify the downloaded files, then run the supported Fedora bootstrap:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.26-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.27-1.fc44.noarch.rpm
 ```
 
 The bootstrap enables RPM Fusion Free when needed, replaces `ffmpeg-free` with
@@ -43,7 +43,7 @@ the application RPM, validates the FFmpeg provider, and initializes the
 per-user yt-dlp and Deno runtimes.
 
 For **Debian or Ubuntu**, download the versioned DEB and `SHA256SUMS`, verify
-it, then install it with `sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.26-1_all.deb`.
+it, then install it with `sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.27-1_all.deb`.
 For **other GNU/Linux distributions or portable use**, use the versioned ZIP or
 a Git checkout. The managed yt-dlp and Deno runtimes currently support Linux
 `x86_64` and `aarch64`.
@@ -135,8 +135,8 @@ both build provenance and immutable-release identity:
 
 ```bash
 gh attestation verify ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.1.26 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.1.26 ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.1.27 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.1.27 ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 `SHA256SUMS` remains useful for offline/local integrity checks; the GitHub
@@ -166,7 +166,7 @@ Download:
 
 ```text
 install-fedora.sh
-yt-dlp-aria2-downloader-gui-2.1.26-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.27-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -179,7 +179,7 @@ sha256sum --ignore-missing --check SHA256SUMS
 Then run:
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.26-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.27-1.fc44.noarch.rpm
 ```
 
 The bootstrap performs these checks and actions:
@@ -200,11 +200,11 @@ verified before activation.
 
 ### Debian and Ubuntu
 
-Release 2.1.26 publishes an architecture-independent DEB aligned with the same
+Release 2.1.27 publishes an architecture-independent DEB aligned with the same
 managed-runtime model as Fedora. Download:
 
 ```text
-yt-dlp-aria2-downloader-gui_2.1.26-1_all.deb
+yt-dlp-aria2-downloader-gui_2.1.27-1_all.deb
 SHA256SUMS
 ```
 
@@ -212,7 +212,7 @@ Verify and install it:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.26-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.27-1_all.deb
 ```
 
 The DEB depends on the normal system tools (`aria2c`, FFmpeg/FFprobe, Zenity,
@@ -249,24 +249,35 @@ Debian/Ubuntu:
 sudo apt remove yt-dlp-aria2-downloader-gui
 ```
 
-The package manager removes the system commands, desktop launcher, and
-application icon. Per-user managed runtimes are deliberately not package-owned
-and remain under `~/.local/share/yt-dlp-aria2-downloader/runtime/`. After the
-application is removed, they can optionally be purged with:
+A **final package removal** now performs best-effort cleanup of the managed
+per-user runtime and exact legacy `yt-dlp-aria2-downloader-gui` XDG artifacts
+for users whose home directories are available. Package **upgrades do not
+perform this cleanup**.
 
-```bash
-rm -rf -- ~/.local/share/yt-dlp-aria2-downloader/runtime/
-```
+The cleanup is intentionally allowlisted. It removes the managed runtime under
+`${XDG_DATA_HOME:-$HOME/.local/share}/yt-dlp-aria2-downloader/runtime/` and
+known legacy `yt-dlp-aria2-downloader-gui` paths under the standard XDG data,
+config, state, and cache locations. It does **not** recursively search the home
+directory for similarly named files.
 
-`install-gui.sh uninstall` is only needed to clean up an older ZIP or Git
-installation created in the current user's home directory.
+From 2.1.27 onward, the runtime manager records the effective `XDG_DATA_HOME`
+so a later package uninstall can also find a custom data directory. A custom
+XDG location used only by an older release and never observed by 2.1.27 cannot
+be reconstructed safely after the fact.
+
+The portable ZIP/Git launcher
+`~/.local/share/yt-dlp-aria2-downloader/launch` is deliberately preserved when
+present, because it can belong to an independent portable installation.
+
+`install-gui.sh uninstall` remains the command for removing an older ZIP or Git
+desktop installation from the current user's home directory.
 
 ## Installation from a portable release archive
 
 Download these release assets:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.26.zip
+yt-dlp-aria2-downloader-gui-2.1.27.zip
 SHA256SUMS
 ```
 
@@ -274,8 +285,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.26.zip
-cd yt-dlp-aria2-downloader-gui-2.1.26
+unzip yt-dlp-aria2-downloader-gui-2.1.27.zip
+cd yt-dlp-aria2-downloader-gui-2.1.27
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install

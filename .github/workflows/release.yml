@@ -315,6 +315,8 @@ jobs:
     runs-on: ubuntu-24.04
     container: fedora:44
     timeout-minutes: 35
+    env:
+      PACKAGE_TEST_HOME: /root
     strategy:
       fail-fast: false
       matrix:
@@ -346,7 +348,7 @@ jobs:
           set -Eeuo pipefail
           shopt -s nullglob; packages=(dist/*.rpm); shopt -u nullglob
           ((${#packages[@]} == 1))
-          bash ./install-fedora.sh "${packages[0]}"
+          HOME="${PACKAGE_TEST_HOME}" bash ./install-fedora.sh "${packages[0]}"
       - name: Validate installed environment
         shell: bash
         run: |
@@ -357,13 +359,21 @@ jobs:
           [[ ${vendor} == *'RPM Fusion'* ]]
           ! command -v deno >/dev/null 2>&1
           runtime_manager=/usr/libexec/yt-dlp-aria2-downloader/runtime-manager.sh
-          "${runtime_manager}" versions
+          HOME="${PACKAGE_TEST_HOME}" "${runtime_manager}" versions
           /usr/bin/yt-dlp-aria2-downloader --version
       - name: Remove and re-run exact RPM lifecycle
         shell: bash
         run: |
           set -Eeuo pipefail
           dnf remove --assumeyes yt-dlp-aria2-downloader-gui
+
+          runtime_root="${PACKAGE_TEST_HOME}/.local/share/yt-dlp-aria2-downloader/runtime"
+          if [[ -e ${runtime_root} || -L ${runtime_root} ]]; then
+            printf 'Error: supported Fedora bootstrap runtime survived final RPM removal: %s\n' \
+              "${runtime_root}" >&2
+            exit 65
+          fi
+
           shopt -s nullglob; packages=(dist/*.rpm); shopt -u nullglob
           ((${#packages[@]} == 1))
           bash packaging/rpm/test-package-lifecycle.sh "${packages[0]}" "${RELEASE_TAG#v}"
@@ -385,7 +395,7 @@ jobs:
 
           ((${#old[@]} == 1 && ${#current[@]} == 1))
 
-          bash packaging/rpm/test-package-upgrade.sh             "${old[0]}"             "${current[0]}"             "${{ needs.previous-release.outputs.version }}"             "${RELEASE_TAG#v}"
+          HOME="${PACKAGE_TEST_HOME}" bash packaging/rpm/test-package-upgrade.sh             "${old[0]}"             "${current[0]}"             "${{ needs.previous-release.outputs.version }}"             "${RELEASE_TAG#v}"
 
   deb:
     needs: [validate, real-tools, previous-release]

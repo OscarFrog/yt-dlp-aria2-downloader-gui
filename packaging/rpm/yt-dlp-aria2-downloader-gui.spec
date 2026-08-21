@@ -23,6 +23,9 @@ Requires:       gnupg2
 Requires:       unzip
 Requires:       zenity
 Requires:       hicolor-icon-theme
+Requires(preun): bash
+Requires(preun): coreutils
+Requires(preun): util-linux
 Suggests:       firefox
 
 %description
@@ -38,6 +41,16 @@ install -D -m 0644 LICENSE "%{buildroot}%{_licensedir}/%{name}/LICENSE"
 %check
 desktop-file-validate --no-hints "%{buildroot}%{_datadir}/applications/yt-dlp-aria2-downloader.desktop"
 test "$("%{buildroot}%{_bindir}/yt-dlp-aria2-downloader" --version)" = "yt-dlp-aria2-downloader version %{version}"
+
+%preun
+if [ "$1" -eq 0 ]; then
+    helper="%{_libexecdir}/yt-dlp-aria2-downloader/package-user-cleanup.sh"
+    if [ -x "${helper}" ]; then
+        "${helper}" --all-users || :
+    fi
+fi
+:
+
 %files
 %{_bindir}/yt-dlp-aria2-downloader
 %{_bindir}/yt-dlp-aria2-downloader-gui
@@ -46,6 +59,7 @@ test "$("%{buildroot}%{_bindir}/yt-dlp-aria2-downloader" --version)" = "yt-dlp-a
 %{_libexecdir}/yt-dlp-aria2-downloader/download-video-gui.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/progress-monitor.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/runtime-manager.sh
+%{_libexecdir}/yt-dlp-aria2-downloader/package-user-cleanup.sh
 %dir %{_libexecdir}/yt-dlp-aria2-downloader/keys
 %{_libexecdir}/yt-dlp-aria2-downloader/keys/yt-dlp-public.key
 %{_datadir}/applications/yt-dlp-aria2-downloader.desktop
@@ -58,6 +72,9 @@ test "$("%{buildroot}%{_bindir}/yt-dlp-aria2-downloader" --version)" = "yt-dlp-a
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
 * Fri Aug 21 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - %{version}-1
+- Clean managed per-user runtime and exact legacy GUI XDG data on final package erase.
+
+* Fri Aug 21 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.1.26-1
 - Qualify exact previous immutable packages, preserve user runtimes, and harden release verification.
 
 * Thu Aug 20 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - %{version}-1
