@@ -783,4 +783,29 @@ assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
     'v2.1.24' \
     'package CI does not hard-code a historical upgrade source version'
 
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'PACKAGE_TEST_HOME: /root' \
+    'package CI uses an NSS-discoverable Fedora package-test HOME'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    "HOME=\"\${PACKAGE_TEST_HOME}\" bash ./install-fedora.sh" \
+    'package CI Fedora bootstrap uses the package-test HOME'
+
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'PACKAGE_TEST_HOME: /root' \
+    'release CI uses an NSS-discoverable Fedora package-test HOME'
+
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    "HOME=\"\${PACKAGE_TEST_HOME}\" bash ./install-fedora.sh" \
+    'release Fedora bootstrap uses the package-test HOME'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'supported Fedora bootstrap runtime survived final RPM removal' \
+    'package CI checks bootstrap runtime removal'
+
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'supported Fedora bootstrap runtime survived final RPM removal' \
+    'release CI checks bootstrap runtime removal'
+
 printf '%s\n' 'Static tests passed.'
