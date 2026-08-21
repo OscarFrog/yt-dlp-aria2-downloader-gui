@@ -10,6 +10,7 @@
 # - no recursive search of /home or the filesystem;
 # - only an explicit path allowlist is removed;
 # - marker contents are data, never sourced/eval'ed;
+# - symlinked parent components below an authorized XDG root are never crossed;
 # - cleanup failure must not break dpkg/rpm removal.
 
 set -u -o pipefail
@@ -30,29 +31,87 @@ warn() {
     printf 'Warning: %s\n' "$*" >&2
 }
 
+safe_absolute_path() {
+    local path=$1
+    local rest=''
+    local component=''
+
+    [[ ${path} == /* &&
+       ${path} != / &&
+       ${path} != *$'\n'* &&
+       ${path} != *$'\r'* ]] || return 1
+
+    rest=${path#/}
+    while [[ -n ${rest} ]]; do
+        if [[ ${rest} == */* ]]; then
+            component=${rest%%/*}
+            rest=${rest#*/}
+        else
+            component=${rest}
+            rest=''
+        fi
+
+        [[ -n ${component} &&
+           ${component} != . &&
+           ${component} != .. ]] || return 1
+    done
+
+    return 0
+}
+
 safe_home() {
     local home=$1
-    [[ ${home} == /* &&
-       ${home} != / &&
-       ${home} != /nonexistent &&
-       ${home} != /var/empty &&
-       ${home} != *$'\n'* &&
-       ${home} != *$'\r'* ]]
+    safe_absolute_path "${home}" &&
+        [[ ${home} != /nonexistent &&
+           ${home} != /var/empty ]]
 }
 
 safe_xdg_base() {
+    safe_absolute_path "$1"
+}
+
+path_has_symlink_parent_below_base() {
     local base=$1
-    [[ ${base} == /* &&
-       ${base} != / &&
-       ${base} != *$'\n'* &&
-       ${base} != *$'\r'* ]]
+    local path=$2
+    local relative=''
+    local component=''
+    local current=''
+
+    safe_xdg_base "${base}" || return 0
+    safe_absolute_path "${path}" || return 0
+    [[ ${path} == "${base}/"* ]] || return 0
+
+    relative=${path#"${base}/"}
+    current=${base}
+
+    # The leaf itself is intentionally excluded: rm(1) removes a terminal
+    # symlink rather than traversing it. Only directory components that must be
+    # traversed to reach the leaf are forbidden from being symlinks.
+    while [[ ${relative} == */* ]]; do
+        component=${relative%%/*}
+        relative=${relative#*/}
+        [[ -n ${component} ]] || return 0
+
+        current="${current}/${component}"
+        [[ ! -L ${current} ]] || return 0
+    done
+
+    return 1
 }
 
 remove_exact() {
-    local path=$1
+    local base=$1
+    local path=$2
 
-    if [[ -z ${path} || ${path} != /* || ${path} == / ]]; then
+    if ! safe_xdg_base "${base}" ||
+        ! safe_absolute_path "${path}" ||
+        [[ ${path} != "${base}/"* ]]; then
         warn "refusing unsafe cleanup path: ${path}"
+        return 64
+    fi
+
+    if path_has_symlink_parent_below_base "${base}" "${path}"; then
+        warn "refusing cleanup through a symlinked parent: ${path}"
         return 64
     fi
 
@@ -80,10 +139,9 @@ remove_legacy_icons() {
     shopt -u nullglob
 
     for path in "${icons[@]}"; do
-        remove_exact "${path}" || true
+        remove_exact "${data_home}" "${path}" || true
     done
 }
-
 
 custom_runtime_root_is_owned() {
     local base=$1
@@ -94,6 +152,9 @@ custom_runtime_root_is_owned() {
     local -a lines=()
 
     safe_xdg_base "${base}" || return 1
+    if path_has_symlink_parent_below_base "${base}" "${sentinel}"; then
+        return 1
+    fi
     [[ -f ${sentinel} && ! -L ${sentinel} ]] || return 1
 
     owner=$(stat -c '%u' -- "${sentinel}" 2>/dev/null) || return 1
@@ -119,6 +180,7 @@ cleanup_one_home() {
     local cache_home
     local marker
     local candidate=''
+    local marker_parent_safe=true
     local -a data_homes=()
     local -a marker_lines=()
 
@@ -140,7 +202,13 @@ cleanup_one_home() {
 
     marker="${default_data}/${APP_ID}/${MARKER_NAME}"
 
-    if [[ -f ${marker} && ! -L ${marker} ]]; then
+    if path_has_symlink_parent_below_base "${default_data}" "${marker}"; then
+        marker_parent_safe=false
+        warn "ignoring runtime location marker behind a symlinked parent: ${marker}"
+    fi
+
+    if [[ ${marker_parent_safe} == true &&
+          -f ${marker} && ! -L ${marker} ]]; then
         if mapfile -t marker_lines <"${marker}" &&
             ((${#marker_lines[@]} == 1)); then
             candidate=${marker_lines[0]}
@@ -161,25 +229,31 @@ cleanup_one_home() {
 
     for data_home in "${data_homes[@]}"; do
         safe_xdg_base "${data_home}" || continue
-        remove_exact "${data_home}/${APP_ID}/runtime" || true
-        remove_exact "${data_home}/${LEGACY_GUI_ID}" || true
+        remove_exact "${data_home}" "${data_home}/${APP_ID}/runtime" || true
+        remove_exact "${data_home}" "${data_home}/${LEGACY_GUI_ID}" || true
         remove_exact \
+            "${data_home}" \
             "${data_home}/applications/${LEGACY_GUI_ID}.desktop" || true
         remove_exact \
+            "${data_home}" \
             "${data_home}/metainfo/${LEGACY_GUI_ID}.metainfo.xml" || true
         remove_exact \
+            "${data_home}" \
             "${data_home}/appdata/${LEGACY_GUI_ID}.appdata.xml" || true
         remove_legacy_icons "${data_home}"
-        remove_exact "${data_home}/${APP_ID}/${RUNTIME_OWNER_SENTINEL}" || true
+        remove_exact \
+            "${data_home}" \
+            "${data_home}/${APP_ID}/${RUNTIME_OWNER_SENTINEL}" || true
         rmdir -- "${data_home}/${APP_ID}" 2>/dev/null || true
     done
 
-    remove_exact "${config_home}/${LEGACY_GUI_ID}" || true
+    remove_exact "${config_home}" "${config_home}/${LEGACY_GUI_ID}" || true
     remove_exact \
+        "${config_home}" \
         "${config_home}/autostart/${LEGACY_GUI_ID}.desktop" || true
-    remove_exact "${state_home}/${LEGACY_GUI_ID}" || true
-    remove_exact "${cache_home}/${LEGACY_GUI_ID}" || true
-    remove_exact "${marker}" || true
+    remove_exact "${state_home}" "${state_home}/${LEGACY_GUI_ID}" || true
+    remove_exact "${cache_home}" "${cache_home}/${LEGACY_GUI_ID}" || true
+    remove_exact "${default_data}" "${marker}" || true
 
     # Preserve a possible portable ZIP/Git launcher in the parent.
     rmdir -- "${default_data}/${APP_ID}" 2>/dev/null || true
