@@ -317,8 +317,8 @@ jobs:
             --export "${wrong_fingerprint}" >"${wrong_public}"
 
           # Deliberately trust the wrong key globally. The production bootstrap
-          # must still reject the RPM because project authorization is bound to
-          # the pinned OscarFrog signing-subkey fingerprint and isolated rpmdb.
+          # must still reject the RPM because authorization is bound to the pinned
+          # OscarFrog certificate and its unique signing subkey in an isolated fs keyring.
           rpmkeys --import "${wrong_public}"
 
           cp -- "${packages[0]}" "${wrong_rpm}"
