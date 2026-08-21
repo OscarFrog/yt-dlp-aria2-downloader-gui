@@ -134,7 +134,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.25'
+readonly EXPECTED_VERSION='2.1.26'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -396,7 +396,7 @@ assert_file_not_contains "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gu
 
 
 
-# Version 2.1.25 runtime, release, playlist, HLS, packaging, and supply-chain contracts.
+# Version 2.1.26 runtime, release, playlist, HLS, packaging, and supply-chain contracts.
 assert_file_contains "${script_dir}/download-video.sh" \
     '--url-file FILE' 'private URL-file input'
 assert_file_contains "${script_dir}/download-video.sh" \
@@ -589,5 +589,188 @@ assert_file_contains \
     "${script_dir}/packaging/deb/build-deb.sh" \
     'source version does not match requested package version' \
     'DEB build validates its requested source version'
+
+
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'previous-release:' \
+    'previous immutable release job'
+
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'attestations: read' \
+    'previous release attestation read permission'
+
+# shellcheck disable=SC2016
+# Literal workflow source: PREVIOUS_TAG must not expand in this test.
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'gh release verify "${PREVIOUS_TAG}"' \
+    'previous immutable release identity verification'
+
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'gh release verify-asset' \
+    'previous and current release assets use immutable release verification'
+
+# shellcheck disable=SC2016
+# Literal GitHub attestation policy source.
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    '--source-digest "${PREVIOUS_COMMIT}"' \
+    'previous package provenance is bound to its exact source commit'
+
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'previous-release-packages' \
+    'exact previous published packages are passed to upgrade jobs'
+
+assert_file_not_contains "${script_dir}/.github/workflows/release.yml" \
+    'git worktree add' \
+    'release qualification does not rebuild the previous release from source'
+
+assert_file_contains "${script_dir}/.github/workflows/stress.yml" \
+    'runtime-hardening-stress:' \
+    'runtime manager has a dedicated stress job'
+
+assert_file_contains "${script_dir}/.github/workflows/stress.yml" \
+    'Runtime-manager hardening stress (10x)' \
+    'runtime hardening stress count is documented in the job name'
+
+assert_file_contains "${script_dir}/.github/workflows/stress.yml" \
+    'tests/runtime-manager-hardening-integration.sh' \
+    'runtime hardening integration is executed by stress CI'
+
+assert_file_contains "${script_dir}/packaging/rpm/test-package-upgrade.sh" \
+    'runtime_tree_snapshot() {' \
+    'RPM upgrade snapshots the complete managed-runtime tree'
+
+assert_file_contains "${script_dir}/packaging/deb/test-package-upgrade.sh" \
+    'runtime_tree_snapshot() {' \
+    'DEB upgrade snapshots the complete managed-runtime tree'
+
+assert_file_contains "${script_dir}/packaging/rpm/test-package-upgrade.sh" \
+    "assert_runtime_preserved 'installation of previous package'" \
+    'RPM previous package installation preserves user runtime data'
+
+assert_file_contains "${script_dir}/packaging/rpm/test-package-upgrade.sh" \
+    "assert_runtime_preserved 'package upgrade'" \
+    'RPM package upgrade preserves user runtime data'
+
+assert_file_contains "${script_dir}/packaging/rpm/test-package-upgrade.sh" \
+    "assert_runtime_preserved 'package removal'" \
+    'RPM package removal preserves user runtime data'
+
+assert_file_contains "${script_dir}/packaging/deb/test-package-upgrade.sh" \
+    "assert_runtime_preserved 'installation of previous package'" \
+    'DEB previous package installation preserves user runtime data'
+
+assert_file_contains "${script_dir}/packaging/deb/test-package-upgrade.sh" \
+    "assert_runtime_preserved 'package upgrade'" \
+    'DEB package upgrade preserves user runtime data'
+
+assert_file_contains "${script_dir}/packaging/deb/test-package-upgrade.sh" \
+    "assert_runtime_preserved 'package removal'" \
+    'DEB package removal preserves user runtime data'
+
+assert_file_contains "${script_dir}/README.fr.md" \
+    '### Vidéo YouTube HLS authentifiée' \
+    'French README documents authenticated YouTube HLS in detail'
+
+assert_file_contains "${script_dir}/README.fr.md" \
+    'youtube:player_client=web_safari' \
+    'French authenticated HLS documentation names the selected player client'
+
+assert_file_contains "${script_dir}/TESTING.md" \
+    'previous-immutable-release -> current upgrade' \
+    'testing documentation requires exact previous immutable release upgrades'
+
+assert_file_contains "${script_dir}/TESTING.md" \
+    '## Release maintainer preflight' \
+    'testing documentation contains immutable-release maintainer preflight'
+
+
+assert_file_contains "${script_dir}/packaging/rpm/test-package-upgrade.sh" \
+    'refusing to clean runtime probe through unsafe runtime root' \
+    'RPM cleanup refuses an unsafe runtime root'
+
+assert_file_contains "${script_dir}/packaging/deb/test-package-upgrade.sh" \
+    'refusing to clean runtime probe through unsafe runtime root' \
+    'DEB cleanup refuses an unsafe runtime root'
+
+assert_file_contains "${script_dir}/CHANGELOG.md" \
+    'deterministic archive snapshot of the per-user managed-runtime' \
+    'changelog describes the measured runtime preservation guarantee precisely'
+
+assert_file_contains "${script_dir}/TESTING.md" \
+    'deterministic archive snapshot of the per-user' \
+    'testing documentation describes runtime preservation precisely'
+
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'previous-release:' \
+    'package CI resolves the previous immutable release'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'attestations: read' \
+    'package CI can verify previous release attestations'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'sort -Vr -u' \
+    'package CI resolves the previous semantic version dynamically'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    '--json isImmutable' \
+    'package CI requires the previous release to be immutable'
+
+# shellcheck disable=SC2016
+# Literal workflow source: PREVIOUS_TAG must not expand in this test.
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'gh release verify "${PREVIOUS_TAG}"' \
+    'package CI verifies previous immutable release identity'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'gh release verify-asset' \
+    'package CI verifies previous release assets'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'gh attestation verify' \
+    'package CI verifies previous release provenance'
+
+# shellcheck disable=SC2016
+# Literal workflow source: PREVIOUS_COMMIT must not expand in this test.
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    '--source-digest "${PREVIOUS_COMMIT}"' \
+    'package CI binds provenance to the exact previous source commit'
+
+# shellcheck disable=SC2016
+# Literal GitHub Actions expression.
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'previous-release-packages-${{ github.sha }}' \
+    'package CI transfers exact verified previous packages between jobs'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    '      - previous-release' \
+    'RPM package CI depends on previous release verification'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    '    needs: previous-release' \
+    'DEB package CI depends on previous release verification'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'previous/*.rpm' \
+    'RPM upgrade consumes the published previous RPM'
+
+# shellcheck disable=SC2016
+# Literal GitHub Actions runner-temp expression.
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'PREVIOUS_DIR: ${{ runner.temp }}/previous-release' \
+    'DEB upgrade keeps the published previous DEB outside the source worktree'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'sha256sum --check PREVIOUS_SHA256SUMS' \
+    'package upgrade jobs recheck transferred previous package digests'
+
+assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
+    'git worktree add' \
+    'package CI never rebuilds a previous release from source'
+
+assert_file_not_contains "${script_dir}/.github/workflows/packages.yml" \
+    'v2.1.24' \
+    'package CI does not hard-code a historical upgrade source version'
 
 printf '%s\n' 'Static tests passed.'

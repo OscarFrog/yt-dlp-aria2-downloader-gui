@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : progress-monitor.sh
-# Version     : 2.1.25
-# Date        : 2026-08-20
+# Version     : 2.1.26
+# Date        : 2026-08-21
 # Description : Convert downloader events into a unified Zenity progress stream.
 # ============================================================================
 

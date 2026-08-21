@@ -17,7 +17,7 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.25**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.26**.
 
 ## Installation recommandée
 
@@ -27,7 +27,7 @@ Pour **Fedora 44 ou une version plus récente**, téléchargez ces trois fichier
 
 ```text
 install-fedora.sh
-yt-dlp-aria2-downloader-gui-2.1.25-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.26-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -35,7 +35,7 @@ Vérifiez les fichiers téléchargés puis lancez le bootstrap Fedora officiel :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.25-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.26-1.fc44.noarch.rpm
 ```
 
 Le bootstrap active RPM Fusion Free si nécessaire, remplace `ffmpeg-free` par
@@ -45,7 +45,7 @@ runtimes yt-dlp et Deno propres à l'utilisateur.
 
 Pour **Debian ou Ubuntu**, téléchargez le DEB versionné et `SHA256SUMS`,
 vérifiez-les puis installez le paquet avec `sudo apt install
-./yt-dlp-aria2-downloader-gui_2.1.25-1_all.deb`. Pour **les autres distributions
+./yt-dlp-aria2-downloader-gui_2.1.26-1_all.deb`. Pour **les autres distributions
 GNU/Linux ou une utilisation portable**, utilisez le ZIP versionné ou un clone
 Git. Les runtimes yt-dlp et Deno gérés automatiquement prennent actuellement en
 charge Linux `x86_64` et `aarch64`.
@@ -134,16 +134,17 @@ Les **Immutable Releases** GitHub doivent être activées dans les paramètres d
 dépôt avant de pousser le tag de release. Le workflow contrôle l'inventaire
 exact des noms d'assets, compare octet par octet une release déjà existante lors
 d'un rerun, confirme que la release obtenue est immuable, puis vérifie
-l'attestation GitHub et chaque asset local. Une nouvelle release restée mutable
-est supprimée et le workflow échoue au lieu de l'accepter.
+l'attestation GitHub et chaque asset local. Si une nouvelle release reste anormalement mutable, le workflow tente
+de la supprimer, vérifie ensuite sa disparition et échoue explicitement si le
+nettoyage ne peut pas être confirmé.
 
 Avec GitHub CLI, il est possible de vérifier en plus la provenance du build et
 l'identité de la release :
 
 ```bash
 gh attestation verify ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.1.25 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.1.25 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.1.26 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.1.26 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 `SHA256SUMS` reste utile pour un contrôle local ou hors ligne ; les attestations
@@ -174,7 +175,7 @@ Téléchargez :
 
 ```text
 install-fedora.sh
-yt-dlp-aria2-downloader-gui-2.1.25-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.26-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -187,7 +188,7 @@ sha256sum --ignore-missing --check SHA256SUMS
 Puis lancez :
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.25-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.26-1.fc44.noarch.rpm
 ```
 
 Le bootstrap :
@@ -206,11 +207,11 @@ de l'utilisateur et vérifiés avant activation.
 
 ### Debian et Ubuntu
 
-La release 2.1.25 publie un DEB indépendant de l'architecture, aligné sur le
+La release 2.1.26 publie un DEB indépendant de l'architecture, aligné sur le
 même modèle de runtimes gérés que Fedora. Téléchargez :
 
 ```text
-yt-dlp-aria2-downloader-gui_2.1.25-1_all.deb
+yt-dlp-aria2-downloader-gui_2.1.26-1_all.deb
 SHA256SUMS
 ```
 
@@ -218,7 +219,7 @@ Vérifiez puis installez :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.25-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.26-1_all.deb
 ```
 
 Le DEB dépend des outils système habituels (`aria2c`, FFmpeg/FFprobe, Zenity,
@@ -273,7 +274,7 @@ ZIP ou Git créée dans le dossier personnel de l’utilisateur courant.
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.25.zip
+yt-dlp-aria2-downloader-gui-2.1.26.zip
 SHA256SUMS
 ```
 
@@ -281,8 +282,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.25.zip
-cd yt-dlp-aria2-downloader-gui-2.1.25
+unzip yt-dlp-aria2-downloader-gui-2.1.26.zip
+cd yt-dlp-aria2-downloader-gui-2.1.26
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -457,6 +458,30 @@ dépendances embarquées sont mis à jour ensemble comme un seul runtime vérifi
 Le moteur sélectionne les meilleures pistes vidéo et audio, puis les fusionne ou
 les remuxe dans un conteneur MKV sans réencodage lorsque les flux sont
 compatibles.
+
+### Vidéo YouTube HLS authentifiée
+
+Le profil graphique `YouTube video - Firefox cookies (HLS/MKV)` est un mode de
+repli explicite pour les sessions YouTube nécessitant une authentification,
+notamment lorsque les URL média HTTPS ordinaires retournent une erreur HTTP
+403. Il ajoute les options suivantes :
+
+    --cookies-from-browser firefox
+    --extractor-args youtube:player_client=web_safari
+    --format (bv*+ba/b)[protocol^=m3u8]
+
+Ce profil est limité au mode vidéo et aux URL YouTube. yt-dlp lit directement
+la base locale de cookies Firefox ; l'application ne copie, n'exporte et ne
+stocke aucune valeur de cookie dans `gui.conf`.
+
+Les téléchargements HLS réussis restent traités par le téléchargeur natif de
+médias fragmentés de yt-dlp. yt-dlp applique d'abord son correctif
+MPEG-TS-dans-MP4, puis le moteur effectue un second remux en copie de flux du
+MP4 réparé vers MKV. Aucune de ces deux étapes ne réencode la vidéo ou l'audio.
+
+Ce profil constitue une solution de compatibilité et ne remplace pas les
+plugins fournisseurs de PO Token. Les mécanismes de contrôle de YouTube peuvent
+évoluer indépendamment de ce projet.
 
 ### Piste audio native
 

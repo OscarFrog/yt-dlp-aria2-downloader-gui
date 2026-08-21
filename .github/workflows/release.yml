@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to publish, for example v2.1.25
+        description: Existing version tag to publish, for example v2.1.26
         required: true
         type: string
 permissions:
@@ -45,6 +45,189 @@ jobs:
           grep -Fq "version actuelle est la **${version}**" README.fr.md
           grep -Fq "## ${version} - " CHANGELOG.md
       - run: bash ./tests/run-all.sh
+
+
+  previous-release:
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      attestations: read
+    outputs:
+      tag: ${{ steps.previous.outputs.tag }}
+      version: ${{ steps.previous.outputs.version }}
+      commit: ${{ steps.previous.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve previous versioned release
+        id: previous
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          found_current=false
+          previous_tag=''
+
+          while IFS= read -r candidate; do
+            [[ ${candidate} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+
+            if [[ ${found_current} == false ]]; then
+              if [[ ${candidate} == "${RELEASE_TAG}" ]]; then
+                found_current=true
+              fi
+              continue
+            fi
+
+            previous_tag=${candidate}
+            break
+          done < <(
+            git tag \
+              --list 'v[0-9]*.[0-9]*.[0-9]*' \
+              --sort=-version:refname
+          )
+
+          if [[ ${found_current} != true ]]; then
+            printf 'Error: current release tag was not found in the versioned tag set: %s\n' \
+              "${RELEASE_TAG}" >&2
+            exit 65
+          fi
+
+          if [[ ! ${previous_tag} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Error: unable to resolve a previous versioned release before %s.\n' \
+              "${RELEASE_TAG}" >&2
+            exit 65
+          fi
+
+          previous_commit=$(git rev-parse "${previous_tag}^{commit}")
+          current_commit=$(git rev-parse "${RELEASE_TAG}^{commit}")
+
+          if [[ ! ${previous_commit} =~ ^[0-9a-f]{40}$ ]]; then
+            printf 'Error: invalid previous release commit: %s\n' \
+              "${previous_commit}" >&2
+            exit 65
+          fi
+
+          if ! git merge-base --is-ancestor \
+              "${previous_commit}" \
+              "${current_commit}"; then
+            printf 'Error: previous release %s is not an ancestor of %s.\n' \
+              "${previous_tag}" "${RELEASE_TAG}" >&2
+            exit 65
+          fi
+
+          printf 'Previous immutable release candidate: %s\n' "${previous_tag}"
+          printf 'Previous release commit: %s\n' "${previous_commit}"
+          printf 'tag=%s\n' "${previous_tag}" >>"${GITHUB_OUTPUT}"
+          printf 'version=%s\n' "${previous_tag#v}" >>"${GITHUB_OUTPUT}"
+          printf 'commit=%s\n' "${previous_commit}" >>"${GITHUB_OUTPUT}"
+
+      - name: Download and verify exact previous immutable packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+          PREVIOUS_COMMIT: ${{ steps.previous.outputs.commit }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          mkdir -p previous
+
+          immutable=$(
+            gh release view "${PREVIOUS_TAG}" \
+              -R "${GITHUB_REPOSITORY}" \
+              --json isImmutable \
+              --jq '.isImmutable'
+          )
+
+          if [[ ${immutable} != true ]]; then
+            printf 'Error: previous release is not immutable: %s\n' \
+              "${PREVIOUS_TAG}" >&2
+            exit 65
+          fi
+
+          gh release verify "${PREVIOUS_TAG}" \
+            -R "${GITHUB_REPOSITORY}"
+
+          gh release download "${PREVIOUS_TAG}" \
+            -R "${GITHUB_REPOSITORY}" \
+            --dir previous \
+            --pattern '*.rpm'
+
+          gh release download "${PREVIOUS_TAG}" \
+            -R "${GITHUB_REPOSITORY}" \
+            --dir previous \
+            --pattern '*.deb'
+
+          gh release download "${PREVIOUS_TAG}" \
+            -R "${GITHUB_REPOSITORY}" \
+            --dir previous \
+            --pattern 'SHA256SUMS'
+
+          shopt -s nullglob
+          rpms=(previous/*.rpm)
+          debs=(previous/*.deb)
+          shopt -u nullglob
+
+          if ((${#rpms[@]} != 1)); then
+            printf 'Error: expected exactly one RPM in previous release; found %d.\n' \
+              "${#rpms[@]}" >&2
+            exit 65
+          fi
+
+          if ((${#debs[@]} != 1)); then
+            printf 'Error: expected exactly one DEB in previous release; found %d.\n' \
+              "${#debs[@]}" >&2
+            exit 65
+          fi
+
+          grep -Fq "  ${rpms[0]##*/}" previous/SHA256SUMS
+          grep -Fq "  ${debs[0]##*/}" previous/SHA256SUMS
+
+          (
+            cd previous
+            sha256sum --ignore-missing --check SHA256SUMS
+          )
+
+          signer_workflow="${GITHUB_REPOSITORY}/.github/workflows/release.yml"
+
+          for asset in \
+            "${rpms[0]}" \
+            "${debs[0]}" \
+            previous/SHA256SUMS; do
+
+            gh release verify-asset \
+              "${PREVIOUS_TAG}" \
+              "${asset}" \
+              -R "${GITHUB_REPOSITORY}"
+
+            gh attestation verify \
+              "${asset}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${signer_workflow}" \
+              --source-digest "${PREVIOUS_COMMIT}"
+          done
+
+          (
+            cd previous
+            sha256sum -- *.rpm *.deb > PREVIOUS_SHA256SUMS
+            sha256sum --check PREVIOUS_SHA256SUMS
+          )
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: previous-release-packages
+          path: |
+            previous/*.rpm
+            previous/*.deb
+            previous/PREVIOUS_SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
 
   real-tools:
     needs: validate
@@ -128,7 +311,7 @@ jobs:
           retention-days: 7
 
   rpm-test:
-    needs: rpm-build
+    needs: [rpm-build, previous-release]
     runs-on: ubuntu-24.04
     container: fedora:44
     timeout-minutes: 35
@@ -152,6 +335,11 @@ jobs:
         with:
           name: release-rpm
           path: dist
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        if: matrix.scenario == 'fresh'
+        with:
+          name: previous-release-packages
+          path: previous
       - name: Install exact shared RPM through supported Fedora bootstrap
         shell: bash
         run: |
@@ -179,23 +367,28 @@ jobs:
           shopt -s nullglob; packages=(dist/*.rpm); shopt -u nullglob
           ((${#packages[@]} == 1))
           bash packaging/rpm/test-package-lifecycle.sh "${packages[0]}" "${RELEASE_TAG#v}"
-      - name: Test v2.1.24 -> release RPM upgrade
+      - name: Test exact previous immutable RPM -> release RPM upgrade
         if: matrix.scenario == 'fresh'
         shell: bash
         run: |
           set -Eeuo pipefail
-          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-          old_root=$(mktemp -d); old_tree="${old_root}/tree"; old_dist="${old_root}/dist"; mkdir -p -- "${old_dist}"
-          trap 'git worktree remove --force "${old_tree}" >/dev/null 2>&1 || true; rm -rf -- "${old_root}"' EXIT
-          git worktree add --detach "${old_tree}" v2.1.24
-          git config --global --add safe.directory "${old_tree}"
-          bash "${old_tree}/packaging/rpm/build-rpm.sh" 2.1.24 "${old_dist}"
-          shopt -s nullglob; old=("${old_dist}"/*.rpm); current=(dist/*.rpm); shopt -u nullglob
+
+          (
+            cd previous
+            sha256sum --check PREVIOUS_SHA256SUMS
+          )
+
+          shopt -s nullglob
+          old=(previous/*.rpm)
+          current=(dist/*.rpm)
+          shopt -u nullglob
+
           ((${#old[@]} == 1 && ${#current[@]} == 1))
-          bash packaging/rpm/test-package-upgrade.sh "${old[0]}" "${current[0]}" 2.1.24 "${RELEASE_TAG#v}"
+
+          bash packaging/rpm/test-package-upgrade.sh             "${old[0]}"             "${current[0]}"             "${{ needs.previous-release.outputs.version }}"             "${RELEASE_TAG#v}"
 
   deb:
-    needs: [validate, real-tools]
+    needs: [validate, real-tools, previous-release]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -208,6 +401,10 @@ jobs:
         run: |
           sudo apt-get -o Acquire::Retries=3 update
           sudo apt-get -o Acquire::Retries=3 install --yes desktop-file-utils
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: previous-release-packages
+          path: previous
       - name: Build, lifecycle, reinstall, and upgrade DEB
         shell: bash
         run: |
@@ -216,13 +413,19 @@ jobs:
           shopt -s nullglob; packages=(dist/*.deb); shopt -u nullglob
           ((${#packages[@]} == 1))
           sudo bash packaging/deb/test-package-lifecycle.sh "${packages[0]}" "${RELEASE_TAG#v}"
-          old_root=$(mktemp -d); old_tree="${old_root}/tree"; old_dist="${old_root}/dist"; mkdir -p -- "${old_dist}"
-          trap 'git worktree remove --force "${old_tree}" >/dev/null 2>&1 || true; rm -rf -- "${old_root}"' EXIT
-          git worktree add --detach "${old_tree}" v2.1.24
-          bash "${old_tree}/packaging/deb/build-deb.sh" 2.1.24 "${old_dist}"
-          shopt -s nullglob; old=("${old_dist}"/*.deb); shopt -u nullglob
+
+          (
+            cd previous
+            sha256sum --check PREVIOUS_SHA256SUMS
+          )
+
+          shopt -s nullglob
+          old=(previous/*.deb)
+          shopt -u nullglob
+
           ((${#old[@]} == 1))
-          sudo bash packaging/deb/test-package-upgrade.sh "${old[0]}" "${packages[0]}" 2.1.24 "${RELEASE_TAG#v}"
+
+          sudo bash packaging/deb/test-package-upgrade.sh             "${old[0]}"             "${packages[0]}"             "${{ needs.previous-release.outputs.version }}"             "${RELEASE_TAG#v}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-deb
@@ -299,10 +502,28 @@ jobs:
             sleep 2
           done
           if [[ ${immutable} != true ]]; then
-            printf '%s\n' 'Error: repository Immutable Releases must be enabled before tagging/publishing.' >&2
+            printf '%s\n' 'Error: the published release is not immutable.' >&2
+
             if [[ ${created_release} == true ]]; then
-              gh release delete "${RELEASE_TAG}" --yes >/dev/null 2>&1 || true
+              if ! gh release delete "${RELEASE_TAG}" --yes; then
+                printf '%s\n' \
+                  'Error: failed to delete the newly-created mutable release.' >&2
+                exit 79
+              fi
+
+              if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+                printf '%s\n' \
+                  'Error: mutable release cleanup could not be confirmed.' >&2
+                exit 79
+              fi
+
+              printf '%s\n' \
+                'Mutable release cleanup completed.' >&2
+            else
+              printf '%s\n' \
+                'Error: an existing mutable release must be removed before retrying.' >&2
             fi
+
             exit 78
           fi
 

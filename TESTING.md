@@ -144,8 +144,12 @@ The automated suite checks, among other things:
   lock-descriptor isolation, ten-cycle contention/double-rollback stress,
   interrupted-activation journal recovery, explicit/automatic rollback, and
   x86_64/aarch64 asset mapping.
-- package reinstall plus real v2.1.24 -> current upgrade validation for RPM and
-  DEB;
+- package reinstall plus real previous-immutable-release -> current upgrade
+  validation for RPM and DEB, using the exact previously published package
+  bytes rather than rebuilding the previous version from source;
+- preservation of a deterministic archive snapshot of the per-user
+  managed-runtime tree across previous package installation, upgrade, and final
+  package removal;
 - exact same RPM artifact tested in Fedora `fresh` and `ffmpeg-free`;
 - current stable yt-dlp compatibility in addition to the minimum supported
   version;
@@ -159,12 +163,21 @@ for pushes to `main`, in two environments:
 - `ubuntu-24.04`;
 - a Fedora 44 container on a GitHub-hosted runner.
 
-`.github/workflows/packages.yml` validates both package formats. The noarch RPM
-is built and installed on Fedora 44 in `fresh` and `ffmpeg-free` scenarios
-through the supported RPM Fusion bootstrap. The architecture-independent DEB is
-built on Ubuntu 24.04, installed with APT, and removed again. Both lifecycle
-checks verify the managed-runtime manager and embedded yt-dlp signing key; the
-DEB no longer depends on distribution yt-dlp or Deno packages.
+`.github/workflows/packages.yml` validates both package formats. Before package
+upgrade testing, a dedicated `previous-release` job resolves the immediately
+preceding semantic-version release, requires it to be immutable, downloads its
+exact published RPM, DEB, and SHA256SUMS, and verifies release identity,
+checksums, release-asset identity, and SLSA provenance bound to the expected
+repository, release workflow, and exact source commit. The RPM and DEB upgrade
+jobs consume those verified bytes through a short-lived Actions artifact and
+recheck their transferred SHA-256 digests before installation.
+
+The current noarch RPM is built once and installed on Fedora 44 in `fresh` and
+`ffmpeg-free` scenarios through the supported RPM Fusion bootstrap. The
+architecture-independent DEB is built on Ubuntu 24.04, installed with APT, and
+removed again. Both lifecycle checks verify the managed-runtime manager and
+embedded yt-dlp signing key; the DEB no longer depends on distribution yt-dlp
+or Deno packages.
 
 
 `.github/workflows/real-tools.yml` installs actual yt-dlp, aria2c, FFmpeg, and
@@ -174,13 +187,51 @@ video-only result without contacting a public media service.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the complete validation and the hermetic real-tool integration first, verifies
-tag ancestry and project versions, builds the ZIP, RPM, and DEB in separate
-read-only jobs, builds the release RPM exactly once and requalifies those identical bytes in
-Fedora `fresh` and `ffmpeg-free`, downloads the exact tested artifacts into one
-publication job, generates a shared SHA256SUMS file, verifies the exact release
-asset inventory, and requires GitHub Immutable Releases before accepting the
-published ZIP, RPM, DEB, Fedora bootstrap, and checksum file. Only the final
-job receives `contents: write`.
+tag ancestry and project versions, then resolves the previous semantic-version
+release.
+
+That previous release must be immutable. Its exact published RPM and DEB are
+downloaded and verified with the published SHA256SUMS, `gh release verify`,
+`gh release verify-asset`, and SLSA provenance constrained to the expected
+repository, release workflow, and exact source commit.
+
+The current ZIP, RPM, and DEB are built in separate jobs. The release RPM is
+built exactly once and the identical bytes are requalified in Fedora `fresh`
+and `ffmpeg-free`. RPM and DEB upgrade tests use the previously published
+immutable package bytes and verify that a deterministic archive snapshot of
+the per-user managed-runtime tree remains unchanged across installation,
+upgrade, and package removal.
+
+The publication job downloads the exact tested current artifacts, generates one
+shared SHA256SUMS file, verifies the exact release asset inventory, requires the
+resulting GitHub Release to be immutable, and verifies the release attestation
+and every local asset.
+
+If a newly created release unexpectedly remains mutable, the workflow attempts
+to delete it and verifies that cleanup succeeded. Failure or unconfirmed cleanup
+causes publication to fail explicitly. Only the final job receives
+`contents: write`.
+
+## Release maintainer preflight
+
+Before pushing a release tag, confirm that GitHub Immutable Releases are
+enabled for the repository:
+
+    gh api \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'X-GitHub-Api-Version: 2026-03-10' \
+      repos/OscarFrog/yt-dlp-aria2-downloader-gui/immutable-releases \
+      --jq '.enabled'
+
+The command requires repository administration read access. A successful
+preflight must return:
+
+    true
+
+A specific release is considered qualified only after its final `publish` job
+has completed successfully. The presence of immutable-release, attestation, or
+asset-verification commands in the workflow alone is not evidence that a
+particular release actually passed those checks.
 
 ## Real-world checks on Fedora 44
 
@@ -208,6 +259,13 @@ parsing. Zenity windows remain in the graphical session's locale.
 
 ## Stress validation
 
-`.github/workflows/stress.yml` repeats the full mock integration suite ten times
-on pull requests and pushes to `main`, specifically increasing the probability
-of exposing cancellation, PGID publication, process-reaping, and timing races.
+`.github/workflows/stress.yml` runs two independent ten-pass stress jobs on pull
+requests and pushes to `main`:
+
+- the complete mock process/cancellation integration suite ten times, increasing
+  the probability of exposing cancellation, PGID publication, process-reaping,
+  and timing races;
+- the runtime-manager hardening integration suite ten times, repeatedly
+  exercising fresh bootstrap, strict zero-network behavior, exact-tag
+  resolution, activation-journal recovery, lock contention, and rollback
+  transactions.
