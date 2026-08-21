@@ -176,12 +176,20 @@ et l'immuabilité ajoutent la preuve de provenance et d'identité de release.
 ### Identité de signature RPM, environnement et rotation des clés
 
 L'autorisation d'un RPM Fedora est volontairement plus stricte que le trousseau
-RPM global de la machine. Le bootstrap côté utilisateur n'accepte que le
-certificat primaire `7B54065FE061E78ED2C96252E3BE996196ABEA7F` et exige que la signature du RPM annonce
-la sous-clé de signature dédiée `1F5B769CE48A08AAC0A7D9DDECC9894B41830245`. Le job de signature de
-release contrôle indépendamment les mêmes empreintes, demande explicitement
-cette sous-clé à `rpmsign --key-id`, puis vérifie le RPM obtenu dans une base RPM
-temporaire isolée.
+RPM global de la machine. Le bootstrap valide l'empreinte exacte du certificat
+primaire `7B54065FE061E78ED2C96252E3BE996196ABEA7F`, exige exactement une sous-clé
+de signature utilisable et épingle celle-ci sur
+`1F5B769CE48A08AAC0A7D9DDECC9894B41830245`. Il importe ensuite uniquement ce
+certificat dans un trousseau RPM 6 privé de type `fs` et y vérifie le RPM, en
+redirigeant également le verrou de transaction RPM dans la même racine
+temporaire privée. Une clé déjà approuvée par la base RPM globale de la machine
+ne peut donc pas autoriser le RPM du projet. Le job de signature contrôle
+indépendamment les mêmes empreintes complètes, demande explicitement la
+sous-clé exacte avec `rpmsign --key-id`, puis vérifie cryptographiquement le RPM
+signé avant publication. La sortie RPM `OPENPGP:pgpsig` reste uniquement
+diagnostique : sous Fedora 44 avec RPM 6.0.2, elle affiche un Key ID long et non
+l'empreinte OpenPGP complète ; elle n'est donc pas utilisée pour prendre la
+décision d'autorisation.
 
 L'environnement GitHub `rpm-signing` constitue une frontière de sécurité
 opérationnelle et pas seulement un nom dans le workflow. Conservez

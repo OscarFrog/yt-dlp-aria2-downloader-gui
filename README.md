@@ -168,11 +168,19 @@ attestation and immutable-release checks add provenance and release identity.
 ### RPM signing identity, environment, and key rotation
 
 Fedora release authorization is deliberately narrower than the host RPM trust
-database. The consumer bootstrap accepts only the primary certificate
-`7B54065FE061E78ED2C96252E3BE996196ABEA7F` and requires the RPM signature to report the dedicated signing
-subkey `1F5B769CE48A08AAC0A7D9DDECC9894B41830245`. The release signing job independently checks the
-same two fingerprints, requests that exact signing subkey with `rpmsign
---key-id`, and verifies the resulting RPM in an isolated temporary RPM database.
+database. The consumer bootstrap validates the exact primary certificate
+fingerprint `7B54065FE061E78ED2C96252E3BE996196ABEA7F`, requires exactly one usable
+signing subkey, and pins that subkey to
+`1F5B769CE48A08AAC0A7D9DDECC9894B41830245`. It then imports only that certificate
+into a private RPM 6 filesystem (`fs`) keyring and verifies the RPM there, with
+the RPM transaction lock redirected into the same private temporary root.
+Consequently, a key already trusted by the host RPM database cannot authorize
+the project RPM. The release signing job independently checks the same full
+fingerprints, requests the exact signing subkey with `rpmsign --key-id`, and
+cryptographically verifies the signed RPM before publication. RPM
+`OPENPGP:pgpsig` output is diagnostic only: on Fedora 44 with RPM 6.0.2 it
+reports a long Key ID rather than the complete OpenPGP fingerprint and is not
+used as an authorization decision.
 
 The GitHub Environment named `rpm-signing` is an operational security boundary,
 not merely a workflow label. Store `RPM_SIGNING_PRIVATE_KEY_B64` and

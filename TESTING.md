@@ -153,9 +153,10 @@ The automated suite checks, among other things:
 - fail-closed rejection of an unsigned PR RPM by the production Fedora bootstrap,
   with unsigned installation permitted only through the explicit
   `--allow-unsigned-dev` development path;
-- release-RPM verification in an isolated temporary RPM database containing
-  only the pinned OscarFrog certificate, plus exact matching of the dedicated
-  signing-subkey fingerprint reported by RPM;
+- release-RPM verification against an isolated OscarFrog trust domain,
+  with the consumer bootstrap using a private RPM 6 filesystem keyring and
+  independently pinning the full primary and dedicated signing-subkey
+  fingerprints through GnuPG;
 - a package-CI negative test that imports a different ephemeral signer into
   the host RPM database, signs the unsigned PR RPM with that key, and proves
   the production bootstrap still rejects it before merge;
@@ -241,8 +242,10 @@ repository, release workflow, and exact source commit.
 The current ZIP, RPM, and DEB are built in separate jobs. The release RPM is
 built exactly once as an unsigned artifact, then a secret-bearing signing job
 with no repository checkout verifies the expected primary and dedicated
-signing-subkey fingerprints, requests that exact subkey, verifies the result
-in an isolated RPM database, and asserts the RPM-reported signer fingerprint.
+signing-subkey fingerprints, requires exactly one usable signing subkey,
+requests that exact subkey, and cryptographically verifies the result before
+publication. RPM `OPENPGP:pgpsig` output is diagnostic metadata only and is not
+treated as a full-fingerprint authorization primitive.
 The resulting signed RPM bytes are the exact bytes
 requalified in Fedora `fresh` and `ffmpeg-free` and later published. RPM and DEB upgrade tests use the previously published
 immutable package bytes and verify that a deterministic archive snapshot of
@@ -302,11 +305,17 @@ confirm its signer and isolated trust binding on Fedora 44:
 ```bash
 rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' ./yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm
 
-VERIFY_DB=$(mktemp -d)
-rpmdb --initdb --dbpath "$VERIFY_DB"
-rpmkeys --dbpath "$VERIFY_DB" --import ./RPM-GPG-KEY-OscarFrog
-rpmkeys --dbpath "$VERIFY_DB" --checksig ./yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm
-rm -rf -- "$VERIFY_DB"
+VERIFY_ROOT=$(mktemp -d)
+VERIFY_KEYRING="${VERIFY_ROOT}/keyring"
+
+mkdir -p "$VERIFY_KEYRING"
+chmod 700 "$VERIFY_ROOT" "$VERIFY_KEYRING"
+
+rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --import ./RPM-GPG-KEY-OscarFrog
+
+rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --checksig ./yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm
+
+rm -rf -- "$VERIFY_ROOT"
 
 gh release verify v2.1.29 -R OscarFrog/yt-dlp-aria2-downloader-gui
 gh release verify-asset v2.1.29   ./yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui

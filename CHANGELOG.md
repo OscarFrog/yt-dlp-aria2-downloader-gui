@@ -5,12 +5,14 @@
 - Bind Fedora release authentication to the exact OscarFrog certificate and
   dedicated signing subkey `1F5B769CE48A08AAC0A7D9DDECC9894B41830245` instead of accepting any
   key already trusted by the host RPM database.
-- Verify release RPMs in a private temporary RPM database containing only the
-  pinned certificate, then retain DNF `localpkg_gpgcheck=True` as a second,
-  transaction-time verification layer.
-- Make release signing select the dedicated signing subkey explicitly, assert
-  the RPM-reported signer fingerprint after signing, and verify the result
-  against an isolated RPM database before publishing the signed artifact.
+- Verify release RPMs against a private RPM 6 filesystem keyring containing
+  only the pinned certificate, with key storage and transaction locking
+  redirected away from the host RPM database; retain DNF
+  `localpkg_gpgcheck=True` as a second transaction-time verification layer.
+- Make release signing select the dedicated signing subkey explicitly,
+  require exactly one usable signing subkey with the pinned full fingerprint,
+  and cryptographically verify the signed result before publication; RPM's
+  display-only long Key ID is not used for authorization.
 - Validate that the repository public key contains exactly one expected primary
   certificate and the required usable signing subkey.
 - Add a Fedora release regression test that deliberately trusts a different

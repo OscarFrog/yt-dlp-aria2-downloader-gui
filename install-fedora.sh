@@ -34,7 +34,7 @@ if (($# != 1)); then
     exit 2
 fi
 
-for command_name in awk dnf mktemp rpm rpmdb rpmkeys realpath; do
+for command_name in awk dnf mktemp rpm rpmkeys realpath; do
     command -v "${command_name}" >/dev/null 2>&1 || {
         error "required installer command is absent: ${command_name}"
         exit 127
@@ -149,10 +149,10 @@ if [[ ${signature_state} == signed ]]; then
         exit 70
     }
     gpg_home="${verify_root}/gnupg"
-    rpm_verify_db="${verify_root}/rpmdb"
+    rpm_verify_keyring="${verify_root}/rpm-keyring"
     gpg_output="${verify_root}/key.colons"
-    mkdir -p -- "${gpg_home}" "${rpm_verify_db}"
-    chmod 700 "${gpg_home}" "${rpm_verify_db}"
+    mkdir -p -- "${gpg_home}" "${rpm_verify_keyring}"
+    chmod 700 "${gpg_home}" "${rpm_verify_keyring}"
     trap 'rm -rf -- "${verify_root:-}"' EXIT
 
     if ! LC_ALL=C gpg \
@@ -187,6 +187,17 @@ if [[ ${signature_state} == signed ]]; then
     primary_capabilities=$(
         awk -F: '$1 == "pub" { print $12; exit }' "${gpg_output}"
     )
+    signing_subkey_count=$(
+        awk -F: \
+            '$1 == "sub" &&
+             $2 != "r" &&
+             $2 != "e" &&
+             index($12, "s") > 0 {
+                 count++
+             }
+             END { print count + 0 }' \
+            "${gpg_output}"
+    )
     signing_subkey_fingerprint=$(
         awk -F: -v expected="${RPM_SIGNING_SUBKEY_FINGERPRINT}" \
             '$1 == "sub" {
@@ -220,38 +231,38 @@ if [[ ${signature_state} == signed ]]; then
         error 'the pinned RPM primary certificate lacks certification capability.'
         exit 65
     fi
+    if [[ ${primary_capabilities} == *s* ]]; then
+        error 'the pinned RPM primary certificate must remain certification-only.'
+        exit 65
+    fi
+    if [[ ${signing_subkey_count} != 1 ]]; then
+        error "the pinned RPM certificate must contain exactly one usable signing subkey; found ${signing_subkey_count}."
+        exit 65
+    fi
     if [[ ${signing_subkey_fingerprint} != "${RPM_SIGNING_SUBKEY_FINGERPRINT}" ]]; then
         error "required RPM signing subkey is missing, expired, revoked, or not signing-capable: ${RPM_SIGNING_SUBKEY_FINGERPRINT}"
         exit 65
     fi
 
-    # RPM 6 exposes the signature fingerprint through the :pgpsig formatter.
-    # Requiring the exact dedicated signing-subkey fingerprint prevents another
-    # globally trusted RPM key from satisfying this project's authorization
-    # policy.
-    signer_output=$(
-        LC_ALL=C rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' -- "${rpm_path}"
-    ) || {
-        error 'unable to inspect the RPM OpenPGP signer fingerprint.'
+    # Verify with RPM 6's filesystem keyring backend. Both the key store and
+    # RPM transaction lock are private to this invocation, so pre-existing host
+    # RPM keys cannot authorize this package.
+    rpmkeys \
+        --define "_keyring fs" \
+        --define "_keyringpath ${rpm_verify_keyring}" \
+        --define "_keyring_lockpath ${rpm_verify_keyring}/.keyring.lock" \
+        --define "_rpmlock_path ${rpm_verify_keyring}/.rpm.lock" \
+        --import "${key_path}" || {
+        error 'unable to import the pinned certificate into the isolated RPM keyring.'
         exit 65
     }
-    if [[ ${signer_output^^} != *"${RPM_SIGNING_SUBKEY_FINGERPRINT}"* ]]; then
-        error "unexpected RPM signer fingerprint; expected dedicated signing subkey ${RPM_SIGNING_SUBKEY_FINGERPRINT}."
-        exit 65
-    fi
-
-    # Verify in an isolated rpmdb containing only the pinned OscarFrog
-    # certificate. The host's pre-existing trusted RPM keys cannot authorize
-    # this package.
-    rpmdb --initdb --dbpath "${rpm_verify_db}" || {
-        error 'unable to initialize the isolated RPM verification database.'
-        exit 70
-    }
-    rpmkeys --dbpath "${rpm_verify_db}" --import "${key_path}" || {
-        error 'unable to import the pinned certificate into the isolated RPM database.'
-        exit 65
-    }
-    if ! rpmkeys --dbpath "${rpm_verify_db}" --checksig "${rpm_path}"; then
+    if ! rpmkeys \
+        --define "_keyring fs" \
+        --define "_keyringpath ${rpm_verify_keyring}" \
+        --define "_keyring_lockpath ${rpm_verify_keyring}/.keyring.lock" \
+        --define "_rpmlock_path ${rpm_verify_keyring}/.rpm.lock" \
+        --checksig "${rpm_path}"
+    then
         error 'RPM OpenPGP signature verification failed against the isolated pinned certificate.'
         exit 65
     fi
@@ -261,7 +272,7 @@ if [[ ${signature_state} == signed ]]; then
     trap - EXIT
 
     # DNF performs a second verification during the privileged transaction.
-    # Import only after the isolated exact-signer verification succeeded.
+    # Import only after the isolated pinned-certificate verification succeeded.
     printf 'Importing pinned OscarFrog RPM signing key: %s\n' \
         "${RPM_SIGNING_FINGERPRINT}"
     run_root rpmkeys --import "${key_path}"

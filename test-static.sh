@@ -250,21 +250,44 @@ assert_file_contains "${script_dir}/install-fedora.sh" \
 assert_file_contains "${script_dir}/install-fedora.sh" \
     "readonly RPM_SIGNING_SUBKEY_FINGERPRINT='1F5B769CE48A08AAC0A7D9DDECC9894B41830245'" \
     'Fedora bootstrap pins the dedicated RPM signing subkey'
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    '--define "_keyring fs"' \
+    'Fedora bootstrap uses RPM 6 filesystem keyring isolation'
 # shellcheck disable=SC2016
 assert_file_contains "${script_dir}/install-fedora.sh" \
-    'rpmdb --initdb --dbpath "${rpm_verify_db}"' \
-    'Fedora bootstrap creates an isolated RPM verification database'
+    '--define "_keyringpath ${rpm_verify_keyring}"' \
+    'Fedora bootstrap places trusted keys in its private verification keyring'
 # shellcheck disable=SC2016
 assert_file_contains "${script_dir}/install-fedora.sh" \
-    'rpmkeys --dbpath "${rpm_verify_db}" --checksig "${rpm_path}"' \
-    'Fedora bootstrap verifies against only the isolated pinned RPM keyring'
+    '--define "_rpmlock_path ${rpm_verify_keyring}/.rpm.lock"' \
+    'Fedora bootstrap redirects the RPM transaction lock into its private verification root'
+assert_file_not_contains "${script_dir}/install-fedora.sh" \
+    'OPENPGP:pgpsig' \
+    'Fedora bootstrap does not use the display-only RPM Key ID as a full fingerprint'
+# shellcheck disable=SC2016
 assert_file_contains "${script_dir}/install-fedora.sh" \
-    "rpm -qp --qf '[%{OPENPGP:pgpsig}\\n]'" \
-    'Fedora bootstrap reads the exact RPM signer fingerprint'
+    'signing_subkey_count=$(' \
+    'Fedora bootstrap requires exactly one usable signing subkey in the pinned certificate'
 # shellcheck disable=SC2016
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     '--key-id "${RPM_SIGNING_SUBKEY_FINGERPRINT}"' \
     'release signing requests the dedicated signing subkey'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'signing_subkey_count=$(' \
+    'release public certificate permits exactly one usable signing subkey'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'imported_signing_subkey_count=$(' \
+    'release secret bundle permits exactly one usable signing subkey'
+# shellcheck disable=SC2016
+assert_file_not_contains "${script_dir}/.github/workflows/release.yml" \
+    'signer_output=$(LC_ALL=C rpm -qp' \
+    'release signing does not treat RPM display Key ID as a full fingerprint'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    '--define "_rpmlock_path ${wrong_verify_keyring}/.rpm.lock"' \
+    'release wrong-signer proof uses an isolated writable RPM fs keyring'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'Reject a different globally trusted RPM signer' \
     'release CI reproduces and rejects the 2.1.28 wrong-signer scenario'
@@ -280,6 +303,9 @@ assert_file_contains "${script_dir}/README.md" \
 assert_file_contains "${script_dir}/README.fr.md" \
     '## Sommaire' \
     'French README has a table of contents'
+assert_file_contains "${script_dir}/TESTING.md" \
+    '## Contents' \
+    'testing documentation has a table of contents'
 assert_file_contains "${script_dir}/install-fedora.sh" \
     '--setopt=localpkg_gpgcheck=True' \
     'Fedora bootstrap enables local-package OpenPGP verification'
@@ -292,6 +318,10 @@ assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
 assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
     'Reject a different globally trusted RPM signer in PR CI' \
     'PR package CI proves a globally trusted wrong signer cannot authorize the RPM'
+# shellcheck disable=SC2016
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    '--define "_rpmlock_path ${wrong_verify_keyring}/.rpm.lock"' \
+    'PR wrong-signer proof uses a fully isolated writable RPM fs keyring'
 
 # shellcheck disable=SC2016
 assert_file_contains "${script_dir}/.github/workflows/packages.yml" \

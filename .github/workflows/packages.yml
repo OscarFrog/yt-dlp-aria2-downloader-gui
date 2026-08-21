@@ -272,6 +272,7 @@ jobs:
           wrong_public=$(mktemp)
           wrong_rpm=$(mktemp --suffix=.rpm)
           wrong_passphrase=$(mktemp)
+          wrong_verify_keyring="${wrong_home}/rpm-keyring"
           log=$(mktemp)
 
           cleanup_wrong_signer() {
@@ -281,6 +282,8 @@ jobs:
           trap cleanup_wrong_signer EXIT
           chmod 700 "${wrong_home}"
           chmod 600 "${wrong_passphrase}"
+          mkdir -p -- "${wrong_verify_keyring}"
+          chmod 700 "${wrong_verify_keyring}"
 
           gpg \
             --homedir "${wrong_home}" \
@@ -320,7 +323,7 @@ jobs:
 
           cp -- "${packages[0]}" "${wrong_rpm}"
 
-          rpmsign \
+          GPG_TTY=/dev/null rpmsign \
             --addsign \
             --key-id "${wrong_fingerprint}" \
             --define "_openpgp_sign gpg" \
@@ -328,10 +331,26 @@ jobs:
             --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file ${wrong_passphrase}" \
             "${wrong_rpm}"
 
-          wrong_signer=$(
-            LC_ALL=C rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' -- "${wrong_rpm}"
+          wrong_state=$(
+            LC_ALL=C rpm -qp --qf '%|OPENPGP?{signed}:{unsigned}|\n' \
+              -- "${wrong_rpm}"
           )
-          [[ ${wrong_signer^^} == *"${wrong_fingerprint}"* ]]
+          [[ ${wrong_state} == signed ]]
+
+          # Prove the adversarial RPM is valid for the attacker before
+          # requiring the production bootstrap to reject it.
+          rpmkeys \
+            --define "_keyring fs" \
+            --define "_keyringpath ${wrong_verify_keyring}" \
+            --define "_keyring_lockpath ${wrong_verify_keyring}/.keyring.lock" \
+            --define "_rpmlock_path ${wrong_verify_keyring}/.rpm.lock" \
+            --import "${wrong_public}"
+          rpmkeys \
+            --define "_keyring fs" \
+            --define "_keyringpath ${wrong_verify_keyring}" \
+            --define "_keyring_lockpath ${wrong_verify_keyring}/.keyring.lock" \
+            --define "_rpmlock_path ${wrong_verify_keyring}/.rpm.lock" \
+            --checksig "${wrong_rpm}"
 
           set +e
           HOME="${PACKAGE_TEST_HOME}" \
@@ -340,7 +359,7 @@ jobs:
           set -e
 
           [[ ${status} -eq 65 ]]
-          grep -Fq 'unexpected RPM signer fingerprint' "${log}"
+          grep -Fq 'RPM OpenPGP signature verification failed against the isolated pinned certificate.' "${log}"
 
       - name: Confirm unsigned PR RPM is rejected by release bootstrap
         shell: bash

@@ -63,6 +63,20 @@ jobs:
                }
                END { if (found) print value }' "${listing}"
           )
+          primary_capabilities=$(
+            awk -F: '$1 == "pub" { print $12; exit }' "${listing}"
+          )
+          signing_subkey_count=$(
+            awk -F: \
+              '$1 == "sub" &&
+               $2 != "r" &&
+               $2 != "e" &&
+               index($12, "s") > 0 {
+                   count++
+               }
+               END { print count + 0 }' \
+              "${listing}"
+          )
           signing_subkey=$(
             awk -F: -v expected="${RPM_SIGNING_SUBKEY_FINGERPRINT}" \
               '$1 == "sub" {
@@ -78,6 +92,9 @@ jobs:
 
           [[ ${primary_count} == 1 ]]
           [[ ${primary_fingerprint} == "${RPM_SIGNING_FINGERPRINT}" ]]
+          [[ ${primary_capabilities} == *c* ]]
+          [[ ${primary_capabilities} != *s* ]]
+          [[ ${signing_subkey_count} == 1 ]]
           [[ ${signing_subkey} == "${RPM_SIGNING_SUBKEY_FINGERPRINT}" ]]
 
       - name: Verify tag and versions
@@ -442,6 +459,20 @@ jobs:
                END { if (found) print value }' \
               "${secret_listing}"
           )
+          imported_primary_capabilities=$(
+            awk -F: '$1 == "sec" { print $12; exit }' "${secret_listing}"
+          )
+          imported_signing_subkey_count=$(
+            awk -F: \
+              '$1 == "ssb" &&
+               $2 != "r" &&
+               $2 != "e" &&
+               index($12, "s") > 0 {
+                   count++
+               }
+               END { print count + 0 }' \
+              "${secret_listing}"
+          )
           imported_signing_subkey=$(
             awk -F: -v expected="${RPM_SIGNING_SUBKEY_FINGERPRINT}" \
               '$1 == "ssb" {
@@ -471,6 +502,17 @@ jobs:
               "${imported_fingerprint:-missing}" >&2
             exit 65
           }
+          [[ ${imported_primary_capabilities} == *c* &&
+              ${imported_primary_capabilities} != *s* ]] || {
+            printf '%s\n' \
+              'Error: signing primary certificate must remain certification-only.' >&2
+            exit 65
+          }
+          [[ ${imported_signing_subkey_count} == 1 ]] || {
+            printf 'Error: signing secret must contain exactly one usable signing subkey; found %s\n' \
+              "${imported_signing_subkey_count}" >&2
+            exit 65
+          }
           [[ ${imported_signing_subkey} == "${RPM_SIGNING_SUBKEY_FINGERPRINT}" ]] || {
             printf 'Error: required signing subkey is absent, expired, revoked, or not signing-capable: %s\n' \
               "${RPM_SIGNING_SUBKEY_FINGERPRINT}" >&2
@@ -485,18 +527,16 @@ jobs:
           cp -- "${unsigned[0]}" "dist/${unsigned[0]##*/}"
           signed="dist/${unsigned[0]##*/}"
 
-          rpmsign --addsign             --key-id "${RPM_SIGNING_SUBKEY_FINGERPRINT}"             --define "_openpgp_sign gpg"             --define "_gpg_path ${signing_home}"             --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file ${passphrase_file}"             "${signed}"
+          GPG_TTY=/dev/null rpmsign --addsign \
+            --key-id "${RPM_SIGNING_SUBKEY_FINGERPRINT}" \
+            --define "_openpgp_sign gpg" \
+            --define "_gpg_path ${signing_home}" \
+            --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file ${passphrase_file}" \
+            "${signed}"
 
           final_state=$(LC_ALL=C rpm -qp --qf '%|OPENPGP?{signed}:{unsigned}|\n' -- "${signed}")
           [[ ${final_state} == signed ]] || {
             printf '%s\n' 'Error: rpmsign completed without an OpenPGP signature.' >&2
-            exit 65
-          }
-
-          signer_output=$(LC_ALL=C rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' -- "${signed}")
-          [[ ${signer_output^^} == *"${RPM_SIGNING_SUBKEY_FINGERPRINT}"* ]] || {
-            printf 'Error: signed RPM does not report the required signing subkey: %s\n' \
-              "${RPM_SIGNING_SUBKEY_FINGERPRINT}" >&2
             exit 65
           }
 
@@ -557,6 +597,7 @@ jobs:
           wrong_public=$(mktemp)
           wrong_rpm=$(mktemp --suffix=.rpm)
           wrong_passphrase=$(mktemp)
+          wrong_verify_keyring="${wrong_home}/rpm-keyring"
           log=$(mktemp)
           wrong_fingerprint=''
 
@@ -570,6 +611,8 @@ jobs:
           trap cleanup_wrong_signer EXIT
           chmod 700 "${wrong_home}"
           chmod 600 "${wrong_passphrase}"
+          mkdir -p -- "${wrong_verify_keyring}"
+          chmod 700 "${wrong_verify_keyring}"
 
           gpg \
             --homedir "${wrong_home}" \
@@ -607,7 +650,7 @@ jobs:
 
           cp -- "${packages[0]}" "${wrong_rpm}"
           rpmsign --delsign "${wrong_rpm}"
-          rpmsign \
+          GPG_TTY=/dev/null rpmsign \
             --addsign \
             --key-id "${wrong_fingerprint}" \
             --define "_openpgp_sign gpg" \
@@ -615,10 +658,27 @@ jobs:
             --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file ${wrong_passphrase}" \
             "${wrong_rpm}"
 
-          wrong_signer=$(
-            LC_ALL=C rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' -- "${wrong_rpm}"
+          wrong_state=$(
+            LC_ALL=C rpm -qp --qf '%|OPENPGP?{signed}:{unsigned}|\n' \
+              -- "${wrong_rpm}"
           )
-          [[ ${wrong_signer^^} == *"${wrong_fingerprint}"* ]]
+          [[ ${wrong_state} == signed ]]
+
+          # Prove independently that the adversarial RPM is genuinely
+          # valid for the attacker's certificate before requiring the
+          # production bootstrap to reject it.
+          rpmkeys \
+            --define "_keyring fs" \
+            --define "_keyringpath ${wrong_verify_keyring}" \
+            --define "_keyring_lockpath ${wrong_verify_keyring}/.keyring.lock" \
+            --define "_rpmlock_path ${wrong_verify_keyring}/.rpm.lock" \
+            --import "${wrong_public}"
+          rpmkeys \
+            --define "_keyring fs" \
+            --define "_keyringpath ${wrong_verify_keyring}" \
+            --define "_keyring_lockpath ${wrong_verify_keyring}/.keyring.lock" \
+            --define "_rpmlock_path ${wrong_verify_keyring}/.rpm.lock" \
+            --checksig "${wrong_rpm}"
 
           set +e
           HOME="${PACKAGE_TEST_HOME}" \
@@ -627,7 +687,7 @@ jobs:
           set -e
 
           [[ ${status} -eq 65 ]]
-          grep -Fq 'unexpected RPM signer fingerprint' "${log}"
+          grep -Fq 'RPM OpenPGP signature verification failed against the isolated pinned certificate.' "${log}"
 
       - name: Install exact shared RPM through supported Fedora bootstrap
         shell: bash
