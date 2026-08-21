@@ -134,7 +134,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.27'
+readonly EXPECTED_VERSION='2.1.28'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -243,6 +243,54 @@ assert_file_contains "${script_dir}/packaging/deb/prerm" \
 assert_file_contains "${script_dir}/packaging/install-tree.sh" \
     'packaging/package-user-cleanup.sh' \
     'package tree ships user cleanup helper'
+
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    "readonly RPM_SIGNING_FINGERPRINT='7B54065FE061E78ED2C96252E3BE996196ABEA7F'" \
+    'Fedora bootstrap pins the RPM signing fingerprint'
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    '--setopt=localpkg_gpgcheck=True' \
+    'Fedora bootstrap enables local-package OpenPGP verification'
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    '--allow-unsigned-dev' \
+    'unsigned RPM installation requires an explicit development opt-in'
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'Confirm unsigned PR RPM is rejected by release bootstrap' \
+    'PR package CI proves fail-closed unsigned behavior'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'environment: rpm-signing' \
+    'release RPM signing is isolated behind a GitHub Environment'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'name: unsigned-rpm' \
+    'unsigned RPM artifact is distinct from the signed release artifact'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'rpmsign --addsign' \
+    'release workflow applies an OpenPGP RPM signature'
+
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'coreutils gawk gnupg2 rpm rpm-sign' \
+    'isolated RPM signing job declares its awk dependency'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'found=1 } END { if (found) print value }' \
+    'release signing fingerprint parser consumes complete GPG output'
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    'found=1 } END { if (found) print value }' \
+    'Fedora installer fingerprint parser consumes complete GPG output'
+
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    "--homedir \"\${gpg_home}\"" \
+    'Fedora installer inspects the signing key in an ephemeral GnuPG home'
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    '--no-options' \
+    'Fedora installer ignores personal GnuPG configuration during key inspection'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'name: release-rpm' \
+    'signed RPM is the release artifact consumed by downstream tests'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'RPM-GPG-KEY-OscarFrog' \
+    'release publishes the RPM signing public key'
+assert_file_contains "${script_dir}/packaging/keys/RPM-GPG-KEY-OscarFrog" \
+    '-----BEGIN PGP PUBLIC KEY BLOCK-----' \
+    'repository contains only the public RPM signing certificate'
 
 assert_file_contains "${script_dir}/README.md"     "is **${EXPECTED_VERSION}**." 'English README version'
 assert_file_contains "${script_dir}/README.fr.md"     "version actuelle est la **${EXPECTED_VERSION}**." 'French README version'

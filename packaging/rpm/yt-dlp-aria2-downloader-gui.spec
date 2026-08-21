@@ -71,7 +71,10 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
-* Fri Aug 21 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - %{version}-1
+* Fri Aug 21 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.1.28-1
+- Add OpenPGP signing for the exact Fedora release RPM and fail-closed verification.
+
+* Fri Aug 21 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.1.27-1
 - Clean managed per-user runtime and exact legacy GUI XDG data on final package erase.
 
 * Fri Aug 21 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.1.26-1

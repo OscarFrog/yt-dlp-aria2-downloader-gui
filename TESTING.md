@@ -138,6 +138,9 @@ The automated suite checks, among other things:
 - real privileged installation and removal of the generated RPM in Fedora 44
   `fresh` and `ffmpeg-free` GitHub Actions environments, including launcher and
   icon cleanup;
+- fail-closed rejection of an unsigned PR RPM by the production Fedora bootstrap,
+  with unsigned installation permitted only through the explicit
+  `--allow-unsigned-dev` development path;
 - real build, APT installation, removal, and ownership validation of the DEB on
   Ubuntu 24.04 without system yt-dlp or Deno package dependencies.
 
@@ -186,8 +189,12 @@ repository, release workflow, and exact source commit. The RPM and DEB upgrade
 jobs consume those verified bytes through a short-lived Actions artifact and
 recheck their transferred SHA-256 digests before installation.
 
-The current noarch RPM is built once and installed on Fedora 44 in `fresh` and
-`ffmpeg-free` scenarios through the supported RPM Fusion bootstrap. The
+Pull-request CI builds one unsigned noarch RPM and proves that the production
+bootstrap rejects it unless `--allow-unsigned-dev` is explicitly selected.
+Release CI builds the RPM once, signs those exact bytes once in the isolated
+`rpm-signing` GitHub Environment, and then installs the identical signed RPM
+on Fedora 44 in `fresh` and `ffmpeg-free` scenarios through the supported
+RPM Fusion bootstrap. The
 architecture-independent DEB is built on Ubuntu 24.04, installed with APT, and
 removed again. Both lifecycle checks verify the managed-runtime manager and
 embedded yt-dlp signing key; the DEB no longer depends on distribution yt-dlp
@@ -210,15 +217,18 @@ downloaded and verified with the published SHA256SUMS, `gh release verify`,
 repository, release workflow, and exact source commit.
 
 The current ZIP, RPM, and DEB are built in separate jobs. The release RPM is
-built exactly once and the identical bytes are requalified in Fedora `fresh`
-and `ffmpeg-free`. RPM and DEB upgrade tests use the previously published
+built exactly once as an unsigned artifact, then a secret-bearing signing job
+with no repository checkout verifies the expected signing-key fingerprint and
+adds the OpenPGP signature. The resulting signed RPM bytes are the exact bytes
+requalified in Fedora `fresh` and `ffmpeg-free` and later published. RPM and DEB upgrade tests use the previously published
 immutable package bytes and verify that a deterministic archive snapshot of
 the per-user managed-runtime tree remains unchanged across installation and
 upgrade. Final package removal then verifies that the managed runtime has been
 removed by the package cleanup hook.
 
-The publication job downloads the exact tested current artifacts, generates one
-shared SHA256SUMS file, verifies the exact release asset inventory, requires the
+The publication job downloads the exact tested current artifacts, adds the
+public `RPM-GPG-KEY-OscarFrog` certificate, generates one shared SHA256SUMS file,
+verifies the exact release asset inventory, requires the
 resulting GitHub Release to be immutable, and verifies the release attestation
 and every local asset.
 

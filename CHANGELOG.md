@@ -1,3 +1,20 @@
+## 2.1.28 - 2026-08-21
+
+### RPM OpenPGP release signing
+
+- Sign the exact Fedora release RPM in an isolated `rpm-signing` GitHub
+  Environment after build and before any release-package qualification.
+- Keep the signing job free of repository checkout, verify the expected primary
+  OpenPGP fingerprint, use only the dedicated signing secret/subkey, and publish
+  only the signed RPM artifact.
+- Make `install-fedora.sh` reject unsigned release RPMs by default, pin and
+  import the OscarFrog RPM public signing key, verify the RPM with `rpmkeys`,
+  and enable DNF `localpkg_gpgcheck=True`.
+- Retain an explicit `--allow-unsigned-dev` path solely for local and pull-request
+  development builds; package CI proves the normal release path fails closed.
+- Publish and attest the public RPM signing key alongside the RPM, DEB, ZIP,
+  Fedora bootstrap, and `SHA256SUMS`.
+
 ## 2.1.27 - 2026-08-21
 
 ### Package uninstall cleanup
