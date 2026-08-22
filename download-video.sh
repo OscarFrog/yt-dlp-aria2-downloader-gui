@@ -3,15 +3,15 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.29
-# Date        : 2026-08-21
+# Version     : 2.1.30
+# Date        : 2026-08-22
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
 
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.1.29"
+readonly VERSION="2.1.30"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"

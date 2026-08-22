@@ -134,7 +134,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.29'
+readonly EXPECTED_VERSION='2.1.30'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -228,6 +228,49 @@ assert_file_contains "${script_dir}/.github/workflows/release.yml" \
 assert_file_contains "${script_dir}/.github/workflows/shell.yml" \
     'cancel-in-progress: true' \
     'outdated validation runs are cancelled'
+
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'Qualify RPM v4/v6 signature semantics (3x)' \
+    'PR CI qualifies RPM v4/v6 signature semantics'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'Qualify release RPM v4/v6 signature semantics (3x)' \
+    'release CI qualifies RPM v4/v6 signature semantics'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'unsigned release RPM uses unexpected package format' \
+    'release signer requires RPM format v4 before signing'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    '--define "_keyring fs"' \
+    'release signer verifies through an isolated RPM fs keyring'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'unset RPM_SIGNING_PRIVATE_KEY_B64 RPM_SIGNING_PASSPHRASE' \
+    'release signing secrets are removed from the shell environment after materialization'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    "gpgconf --homedir \"\${signing_home}\" --kill gpg-agent" \
+    'release signing agent is explicitly terminated'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'Fresh-download public release verification' \
+    'release performs independent fresh-download verification'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'public asset differs byte-for-byte from tested artifact' \
+    'public release assets are compared byte-for-byte with tested artifacts'
+
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'manual release recovery must run from a tag ref' \
+    'manual release recovery is bound to an exact tag ref'
+assert_file_contains "${script_dir}/.github/workflows/stress.yml" \
+    'Package cleanup hardening stress (10x)' \
+    'package cleanup safety is repeatedly stress-tested'
+
+assert_file_contains \
+    "${script_dir}/packaging/rpm/build-rpm.sh" \
+    '--define "_rpmformat 4"' \
+    'RPM package format is explicitly pinned to v4'
+# shellcheck disable=SC2016
+# This assertion deliberately searches for literal shell source code.
+assert_file_contains \
+    "${script_dir}/packaging/rpm/build-rpm.sh" \
+    'if [[ ${package_format} != 4 ]]; then' \
+    'generated RPM package format is independently verified'
 
 assert_file_contains \
     "${script_dir}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \

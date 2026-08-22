@@ -97,9 +97,11 @@ jobs:
           printf 'Previous release: %s\n' "${previous_tag}"
           printf 'Previous commit: %s\n' "${previous_commit}"
 
-          printf 'tag=%s\n' "${previous_tag}" >>"${GITHUB_OUTPUT}"
-          printf 'version=%s\n' "${previous_tag#v}" >>"${GITHUB_OUTPUT}"
-          printf 'commit=%s\n' "${previous_commit}" >>"${GITHUB_OUTPUT}"
+          {
+            printf 'tag=%s\n' "${previous_tag}"
+            printf 'version=%s\n' "${previous_tag#v}"
+            printf 'commit=%s\n' "${previous_commit}"
+          } >>"${GITHUB_OUTPUT}"
 
       - name: Verify exact published previous packages
         env:
@@ -204,7 +206,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Install RPM build tools
-        run: dnf install --assumeyes cpio desktop-file-utils findutils git gzip rpm-build tar
+        run: dnf install --assumeyes cpio desktop-file-utils findutils gawk git gnupg2 gzip python3 rpm-build rpm-sign tar
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -216,6 +218,20 @@ jobs:
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           version=$(./download-video.sh --version); version=${version##* }
           bash packaging/rpm/build-rpm.sh "${version}" dist
+      - name: Qualify RPM v4/v6 signature semantics (3x)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          packages=(dist/*.rpm)
+          shopt -u nullglob
+          ((${#packages[@]} == 1))
+
+          for iteration in {1..3}; do
+            printf '=== RPM v4/v6 qualification iteration %d/3 ===\n' "${iteration}"
+            timeout --signal=TERM --kill-after=10s 4m \
+              bash ./tests/rpm6-multisig-integration.sh "${packages[0]}"
+          done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rpm-under-test-${{ github.sha }}
@@ -391,10 +407,16 @@ jobs:
         run: |
           set -Eeuo pipefail
           rpm -q yt-dlp-aria2-downloader-gui ffmpeg aria2 zenity
-          ! rpm -q ffmpeg-free
+          if rpm -q ffmpeg-free >/dev/null 2>&1; then
+            printf '%s\n' 'Error: ffmpeg-free must not remain installed after bootstrap.' >&2
+            exit 65
+          fi
           vendor=$(rpm -q --qf '%{VENDOR}\n' ffmpeg)
           [[ ${vendor} == *'RPM Fusion'* ]]
-          ! command -v deno >/dev/null 2>&1
+          if command -v deno >/dev/null 2>&1; then
+            printf '%s\n' 'Error: Deno must not be provided by the system PATH.' >&2
+            exit 65
+          fi
           runtime_manager=/usr/libexec/yt-dlp-aria2-downloader/runtime-manager.sh
           HOME="${PACKAGE_TEST_HOME}" "${runtime_manager}" versions
           /usr/bin/yt-dlp-aria2-downloader --version

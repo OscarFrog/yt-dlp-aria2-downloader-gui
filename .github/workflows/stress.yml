@@ -52,3 +52,24 @@ jobs:
               2m \
               bash ./tests/runtime-manager-hardening-integration.sh
           done
+
+  package-cleanup-stress:
+    name: Package cleanup hardening stress (10x)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Repeat package cleanup safety scenarios
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          for iteration in {1..10}; do
+            printf '=== package cleanup stress iteration %d/10 ===\n' \
+              "${iteration}"
+            timeout --signal=TERM --kill-after=10s 1m \
+              bash ./tests/package-user-cleanup-integration.sh
+          done

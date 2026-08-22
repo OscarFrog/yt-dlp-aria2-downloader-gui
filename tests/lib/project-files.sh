@@ -16,6 +16,7 @@ PRODUCTION_SHELL_FILES=(
 # shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
 PACKAGING_SHELL_FILES=(
     install-fedora.sh
+    scripts/release-preflight.sh
     packaging/install-tree.sh
     packaging/package-user-cleanup.sh
     packaging/deb/build-deb.sh
@@ -42,6 +43,7 @@ TEST_SHELL_FILES=(
     tests/installer-integration.sh
     tests/packaging-integration.sh
     tests/package-user-cleanup-integration.sh
+    tests/rpm6-multisig-integration.sh
     tests/ffmpeg-progress-integration.sh
     tests/real-tools-integration.sh
 )
