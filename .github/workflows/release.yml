@@ -451,6 +451,13 @@ jobs:
           shopt -u nullglob
           ((${#unsigned[@]} == 1))
 
+          initial_format=$(LC_ALL=C rpm -qp --qf '%{rpmformat}\n' -- "${unsigned[0]}")
+          [[ ${initial_format} == 4 ]] || {
+            printf 'Error: unsigned release RPM uses unexpected package format: %s\n' \
+              "${initial_format:-missing}" >&2
+            exit 65
+          }
+
           initial_state=$(LC_ALL=C rpm -qp --qf '%|OPENPGP?{signed}:{unsigned}|\n' -- "${unsigned[0]}")
           [[ ${initial_state} == unsigned ]] || {
             printf '%s\n' 'Error: rpm-build unexpectedly produced an already-signed RPM.' >&2
@@ -461,18 +468,31 @@ jobs:
           key_file=$(mktemp)
           passphrase_file=$(mktemp)
           public_key=$(mktemp)
-          trap 'rm -rf -- "${signing_home}"; rm -f -- "${key_file}" "${passphrase_file}" "${public_key}"' EXIT
+          verify_keyring="${signing_home}/rpm-keyring"
+
+          cleanup_signing() {
+            gpgconf --homedir "${signing_home}" --kill gpg-agent \
+              >/dev/null 2>&1 || true
+            unset GNUPGHOME || true
+            rm -rf -- "${signing_home}" || true
+            rm -f -- "${key_file}" "${passphrase_file}" "${public_key}" || true
+          }
+          trap cleanup_signing EXIT
+
           chmod 700 "${signing_home}"
           chmod 600 "${key_file}" "${passphrase_file}"
+          mkdir -p -- "${verify_keyring}"
+          chmod 700 "${verify_keyring}"
 
           printf '%s' "${RPM_SIGNING_PRIVATE_KEY_B64}" | base64 --decode >"${key_file}"
           printf '%s' "${RPM_SIGNING_PASSPHRASE}" >"${passphrase_file}"
+          unset RPM_SIGNING_PRIVATE_KEY_B64 RPM_SIGNING_PASSPHRASE
 
           export GNUPGHOME="${signing_home}"
           gpg --batch --import "${key_file}"
+          rm -f -- "${key_file}"
 
           secret_listing="${signing_home}/secret-keys.colons"
-          verify_db="${signing_home}/rpmdb"
 
           gpg --batch --with-colons --list-secret-keys --fingerprint \
             "${RPM_SIGNING_FINGERPRINT}" >"${secret_listing}"
@@ -554,8 +574,13 @@ jobs:
           }
 
           gpg --batch --armor --export "${RPM_SIGNING_FINGERPRINT}" >"${public_key}"
-          rpmdb --initdb --dbpath "${verify_db}"
-          rpmkeys --dbpath "${verify_db}" --import "${public_key}"
+
+          rpmkeys \
+            --define "_keyring fs" \
+            --define "_keyringpath ${verify_keyring}" \
+            --define "_keyring_lockpath ${verify_keyring}/.keyring.lock" \
+            --define "_rpmlock_path ${verify_keyring}/.rpm.lock" \
+            --import "${public_key}"
 
           mkdir -p dist
           cp -- "${unsigned[0]}" "dist/${unsigned[0]##*/}"
@@ -567,6 +592,14 @@ jobs:
             --define "_gpg_path ${signing_home}" \
             --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file ${passphrase_file}" \
             "${signed}"
+          rm -f -- "${passphrase_file}"
+
+          final_format=$(LC_ALL=C rpm -qp --qf '%{rpmformat}\n' -- "${signed}")
+          [[ ${final_format} == 4 ]] || {
+            printf 'Error: signed release RPM changed package format unexpectedly: %s\n' \
+              "${final_format:-missing}" >&2
+            exit 65
+          }
 
           final_state=$(LC_ALL=C rpm -qp --qf '%|OPENPGP?{signed}:{unsigned}|\n' -- "${signed}")
           [[ ${final_state} == signed ]] || {
@@ -574,7 +607,12 @@ jobs:
             exit 65
           }
 
-          rpmkeys --dbpath "${verify_db}" --checksig "${signed}"
+          rpmkeys \
+            --define "_keyring fs" \
+            --define "_keyringpath ${verify_keyring}" \
+            --define "_keyring_lockpath ${verify_keyring}/.keyring.lock" \
+            --define "_rpmlock_path ${verify_keyring}/.rpm.lock" \
+            --checksig "${signed}"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -941,3 +979,143 @@ jobs:
           for payload in "${payloads[@]}" dist/SHA256SUMS; do
             verify_with_retry gh release verify-asset "${RELEASE_TAG}" "${payload}"
           done
+
+  verify-published:
+    name: Fresh-download public release verification
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          pattern: release-*
+          path: expected
+          merge-multiple: true
+
+      - name: Reconstruct expected public payload
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          install -m 0755 -- install-fedora.sh expected/install-fedora.sh
+          install -m 0644 -- \
+            packaging/keys/RPM-GPG-KEY-OscarFrog \
+            expected/RPM-GPG-KEY-OscarFrog
+
+          shopt -s nullglob
+          payloads=(
+            expected/*.zip
+            expected/*.rpm
+            expected/*.deb
+            expected/install-fedora.sh
+            expected/RPM-GPG-KEY-OscarFrog
+          )
+          shopt -u nullglob
+
+          ((${#payloads[@]} == 5))
+
+          (
+            cd expected
+            sha256sum -- \
+              *.zip *.rpm *.deb \
+              install-fedora.sh RPM-GPG-KEY-OscarFrog \
+              > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: Download and independently verify immutable public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          mkdir -p public
+
+          tag_commit=$(git rev-parse "${RELEASE_TAG}^{commit}")
+          [[ ${tag_commit} =~ ^[0-9a-f]{40}$ ]]
+
+          immutable=$(
+            gh release view "${RELEASE_TAG}" \
+              -R "${GITHUB_REPOSITORY}" \
+              --json isImmutable \
+              --jq '.isImmutable'
+          )
+          [[ ${immutable} == true ]] || {
+            printf 'Error: public release is not immutable: %s\n' \
+              "${RELEASE_TAG}" >&2
+            exit 65
+          }
+
+          gh release download "${RELEASE_TAG}" \
+            -R "${GITHUB_REPOSITORY}" \
+            --dir public
+
+          expected_inventory=$(mktemp)
+          public_inventory=$(mktemp)
+          trap 'rm -f -- "${expected_inventory}" "${public_inventory}"' EXIT
+
+          find expected -maxdepth 1 -type f -printf '%f\n' |
+            LC_ALL=C sort >"${expected_inventory}"
+          find public -maxdepth 1 -type f -printf '%f\n' |
+            LC_ALL=C sort >"${public_inventory}"
+
+          if ! cmp -s -- "${expected_inventory}" "${public_inventory}"; then
+            printf '%s\n' \
+              'Error: freshly-downloaded public release inventory differs from tested artifacts.' >&2
+            diff -u -- "${expected_inventory}" "${public_inventory}" >&2 || true
+            exit 65
+          fi
+
+          retry() {
+            local attempt
+            for ((attempt = 1; attempt <= 10; attempt++)); do
+              "$@" && return 0
+              sleep 3
+            done
+            return 1
+          }
+
+          retry gh release verify \
+            "${RELEASE_TAG}" \
+            -R "${GITHUB_REPOSITORY}"
+
+          signer_workflow="${GITHUB_REPOSITORY}/.github/workflows/release.yml"
+
+          while IFS= read -r name; do
+            [[ -n ${name} ]]
+
+            cmp -s -- "expected/${name}" "public/${name}" || {
+              printf 'Error: public asset differs byte-for-byte from tested artifact: %s\n' \
+                "${name}" >&2
+              exit 65
+            }
+
+            retry gh release verify-asset \
+              "${RELEASE_TAG}" \
+              "public/${name}" \
+              -R "${GITHUB_REPOSITORY}"
+
+            retry gh attestation verify \
+              "public/${name}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${signer_workflow}" \
+              --source-digest "${tag_commit}"
+          done <"${expected_inventory}"
+
+          (
+            cd public
+            sha256sum --check SHA256SUMS
+          )
+
+          printf '%s\n' \
+            'Fresh public release is immutable, attested, and byte-identical to tested artifacts.'

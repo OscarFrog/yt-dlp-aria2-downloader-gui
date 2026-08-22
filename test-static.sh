@@ -236,6 +236,25 @@ assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'Qualify release RPM v4/v6 signature semantics (3x)' \
     'release CI qualifies RPM v4/v6 signature semantics'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'unsigned release RPM uses unexpected package format' \
+    'release signer requires RPM format v4 before signing'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    '--define "_keyring fs"' \
+    'release signer verifies through an isolated RPM fs keyring'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'unset RPM_SIGNING_PRIVATE_KEY_B64 RPM_SIGNING_PASSPHRASE' \
+    'release signing secrets are removed from the shell environment after materialization'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    "gpgconf --homedir \"\${signing_home}\" --kill gpg-agent" \
+    'release signing agent is explicitly terminated'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'Fresh-download public release verification' \
+    'release performs independent fresh-download verification'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'public asset differs byte-for-byte from tested artifact' \
+    'public release assets are compared byte-for-byte with tested artifacts'
+
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'manual release recovery must run from a tag ref' \
     'manual release recovery is bound to an exact tag ref'
 assert_file_contains "${script_dir}/.github/workflows/stress.yml" \
