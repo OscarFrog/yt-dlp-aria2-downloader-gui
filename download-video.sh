@@ -3,15 +3,15 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.32
-# Date        : 2026-08-22
+# Version     : 2.1.33
+# Date        : 2026-08-23
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
 
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.1.32"
+readonly VERSION="2.1.33"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -26,6 +26,7 @@ JS_RUNTIME_AVAILABLE=false
 RESULT_FILE_TMP=''
 INTERNAL_PATH_FILE_TMP=''
 HLS_REMUX_TMP=''
+HLS_SOURCE_TO_CLEAN=''
 YTDLP_BATCH_FILE_TMP=''
 OUTPUT_LOCK_FD=''
 OUTPUT_LOCK_FILE=''
@@ -705,14 +706,20 @@ probe_stream() {
     local probe_output=''
     local detected_present=false
 
-    if probe_output=$(
+    # Initialize the caller-visible result before probing so an ffprobe
+    # failure cannot leave a stale result from a previous stream selector.
+    printf -v "${output_variable}" '%s' false
+    if ! probe_output=$(
         timeout --signal=TERM --kill-after=2s 15s \
             ffprobe -v error \
             -select_streams "${stream_selector}" \
             -show_entries stream=index \
             -of csv=p=0 \
             "${final_path}" 2>/dev/null
-    ) && grep -Eq '^[0-9]+$' <<<"${probe_output}"; then
+    ); then
+        return 1
+    fi
+    if grep -Eq '^[0-9]+$' <<<"${probe_output}"; then
         detected_present=true
     fi
 
@@ -759,19 +766,30 @@ validate_final_media_file() {
     local final_path=$1
     local mode=$2
     local stream_present=false
+    local probe_status=0
 
     [[ -f ${final_path} && -s ${final_path} ]] || return 1
 
     case ${mode} in
     video)
         probe_stream stream_present "${final_path}" 'v:0'
+        probe_status=$?
+        ((probe_status == 0)) || return 1
         [[ ${stream_present} == true ]] || return 1
         probe_stream stream_present "${final_path}" 'a:0'
+        probe_status=$?
+        ((probe_status == 0)) || return 1
         [[ ${stream_present} == true ]] || return 1
         ;;
     audio)
         probe_stream stream_present "${final_path}" 'a:0'
+        probe_status=$?
+        ((probe_status == 0)) || return 1
         [[ ${stream_present} == true ]] || return 1
+        probe_stream stream_present "${final_path}" 'V:0'
+        probe_status=$?
+        ((probe_status == 0)) || return 1
+        [[ ${stream_present} == false ]] || return 1
         ;;
     *)
         return 2
@@ -1375,10 +1393,8 @@ if ((DOWNLOAD_STATUS == 0)); then
             exit 13
         fi
         emit_machine_postprocess finished FFmpegVideoRemuxer
-        if [[ ${hls_source_path} != "${hls_final_path}" ]] &&
-            ! rm -f -- "${hls_source_path}"; then
-            printf 'Warning: unable to remove the repaired HLS intermediate: %s\n' \
-                "${hls_source_path}" >&2
+        if [[ ${hls_source_path} != "${hls_final_path}" ]]; then
+            HLS_SOURCE_TO_CLEAN=${hls_source_path}
         fi
     fi
 
@@ -1425,6 +1441,14 @@ if ((DOWNLOAD_STATUS == 0)); then
             exit 13
         fi
         INTERNAL_PATH_FILE_TMP=''
+    fi
+
+    if [[ -n ${HLS_SOURCE_TO_CLEAN} ]]; then
+        if ! rm -f -- "${HLS_SOURCE_TO_CLEAN}"; then
+            printf 'Warning: unable to remove the repaired HLS intermediate: %s\n' \
+                "${HLS_SOURCE_TO_CLEAN}" >&2
+        fi
+        HLS_SOURCE_TO_CLEAN=''
     fi
     printf '\nDownload completed successfully.\n'
 else

@@ -53,7 +53,7 @@ printf '\n=== Static validation ===\n'
 bash -- ./test-static.sh
 
 printf '\n=== Production ShellCheck ===\n'
-shellcheck -o all "${PRODUCTION_SHELL_FILES[@]}"
+shellcheck -x -o all "${PRODUCTION_SHELL_FILES[@]}"
 
 printf '\n=== Packaging ShellCheck ===\n'
 shellcheck -x -o all "${PACKAGING_SHELL_FILES[@]}"

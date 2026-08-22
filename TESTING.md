@@ -66,7 +66,7 @@ bash -n packaging/rpm/test-package-upgrade.sh
 ## ShellCheck
 
 ```bash
-shellcheck -o all \
+shellcheck -x -o all \
   download-video.sh \
   download-video-gui.sh \
   progress-monitor.sh \
@@ -179,7 +179,8 @@ The automated suite checks, among other things:
   the requested URL absent from GUI, engine, and yt-dlp process arguments;
 - retained-log URL redaction, an 8 MiB retained-size limit, and private live
   diagnostics kept under the runtime temporary directory;
-- complete-video rejection when either the video or audio stream is absent;
+- complete-video rejection when either the video or audio stream is absent,
+  plus audio-mode rejection when a content-video stream remains in the final file;
 - conditional Deno requirements and YouTube-only remote EJS fallback;
 - measured wrapper-managed FFmpeg remux progress and bounded progress arithmetic;
 - a complementary real-FFmpeg `-progress pipe:1` integration, repeated three
@@ -187,15 +188,17 @@ The automated suite checks, among other things:
   no global 100% before result-file publication;
 - HLS post-remux duration consistency with real FFmpeg/FFprobe, including a
   reproducible truncated-input case where FFmpeg exits 0 with both streams but
-  a materially shortened MKV; that result must not be published;
+  a materially shortened MKV; that result must not be published, and the
+  repaired HLS source remains available until global validation/publication succeeds;
 - hermetic real-tool direct HTTP, AAC/M4A, Opus/WebM and combined-source audio,
   HLS and DASH transfers using generated media and loopback HTTP servers, with
   transparent shims proving that real aria2c is used for direct transfers and
   not for HLS/DASH fragments;
 - controlled real aria2 Range/no-Range/redirect/error behavior plus interrupted
-  transfer resumption, with server-side Range observation, no premature
-  result-file/global 100%, FFprobe-valid finals, and proof that a resumed run
-  transfers a strict remainder instead of the complete object again;
+  transfer resumption, with explicit server active-request state around the
+  restart marker/accounting boundary, no premature result-file/global 100%,
+  FFprobe-valid finals, and proof that a resumed run transfers a strict
+  remainder instead of the complete object again;
 - managed-runtime operation with Deno outside PATH, bounded lock/network waits,
   strict zero-network `require` mode, exact-tag stable/nightly/stable switching,
   lock-descriptor isolation, ten-cycle contention/double-rollback stress,
@@ -268,8 +271,9 @@ them over loopback, proves the aria2c/native downloader boundary, exercises real
 FFmpeg progress, and checks HLS post-remux duration consistency without
 contacting a public media service. Audio/routing and HLS-duration scenarios are
 repeated three times. The controlled aria2 behavior suite repeats
-Range/no-Range/redirect/error three times and interrupted resume ten times. A
-separate weekly scheduled job resolves and logs the current stable yt-dlp
+Range/no-Range/redirect/error three times, the silent-active quiescence
+negative control ten times, and interrupted resume ten times. A separate weekly
+scheduled job resolves and logs the current stable yt-dlp
 version and runs the same qualification without changing PR pins.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
