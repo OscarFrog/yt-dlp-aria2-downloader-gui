@@ -49,6 +49,7 @@ bash -n tests/ffmpeg-progress-integration.sh
 bash -n tests/ffmpeg-real-progress-integration.sh
 bash -n tests/hls-remux-duration-integration.sh
 bash -n tests/real-tools-integration.sh
+bash -n tests/aria2-real-behavior-integration.sh
 bash -n packaging/install-tree.sh
 bash -n packaging/package-user-cleanup.sh
 bash -n packaging/deb/build-deb.sh
@@ -91,6 +92,7 @@ shellcheck -x -o all \
   tests/ffmpeg-real-progress-integration.sh \
   tests/hls-remux-duration-integration.sh \
   tests/real-tools-integration.sh \
+  tests/aria2-real-behavior-integration.sh \
   packaging/install-tree.sh \
   packaging/package-user-cleanup.sh \
   packaging/deb/build-deb.sh \
@@ -186,9 +188,14 @@ The automated suite checks, among other things:
 - HLS post-remux duration consistency with real FFmpeg/FFprobe, including a
   reproducible truncated-input case where FFmpeg exits 0 with both streams but
   a materially shortened MKV; that result must not be published;
-- hermetic real-tool direct HTTP, native-audio, HLS and DASH transfers using
-  generated media and a loopback HTTP server, with a transparent shim proving
-  that real aria2c is used for direct transfers and not for HLS/DASH fragments;
+- hermetic real-tool direct HTTP, AAC/M4A, Opus/WebM and combined-source audio,
+  HLS and DASH transfers using generated media and loopback HTTP servers, with
+  transparent shims proving that real aria2c is used for direct transfers and
+  not for HLS/DASH fragments;
+- controlled real aria2 Range/no-Range/redirect/error behavior plus interrupted
+  transfer resumption, with server-side Range observation, no premature
+  result-file/global 100%, FFprobe-valid finals, and proof that a resumed run
+  transfers a strict remainder instead of the complete object again;
 - managed-runtime operation with Deno outside PATH, bounded lock/network waits,
   strict zero-network `require` mode, exact-tag stable/nightly/stable switching,
   lock-descriptor isolation, ten-cycle contention/double-rollback stress,
@@ -256,12 +263,14 @@ or Deno packages.
 `.github/workflows/real-tools.yml` installs actual yt-dlp, aria2c, FFmpeg, and
 FFprobe on Ubuntu. Pull-request qualification retains the pinned yt-dlp
 `2026.6.9` and `2026.8.19` matrix for reproducibility. It generates tiny direct
-HTTP, audio, HLS and DASH fixtures locally, serves them over loopback, proves
-the aria2c/native downloader boundary, exercises real FFmpeg progress, and
-checks HLS post-remux duration consistency without contacting a public media
-service. Deterministic real-tool routing and HLS-duration scenarios are repeated
-three times. A separate weekly scheduled job resolves and logs the current
-stable yt-dlp version and runs the same qualification without changing PR pins.
+HTTP, AAC/M4A, Opus/WebM, combined-audio, HLS and DASH fixtures locally, serves
+them over loopback, proves the aria2c/native downloader boundary, exercises real
+FFmpeg progress, and checks HLS post-remux duration consistency without
+contacting a public media service. Audio/routing and HLS-duration scenarios are
+repeated three times. The controlled aria2 behavior suite repeats
+Range/no-Range/redirect/error three times and interrupted resume ten times. A
+separate weekly scheduled job resolves and logs the current stable yt-dlp
+version and runs the same qualification without changing PR pins.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the complete validation and the hermetic real-tool integration first, verifies

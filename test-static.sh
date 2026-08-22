@@ -134,7 +134,7 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.31'
+readonly EXPECTED_VERSION='2.1.32'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
@@ -278,6 +278,15 @@ assert_file_contains "${script_dir}/tests/real-tools-integration.sh" \
 assert_file_contains "${script_dir}/.github/workflows/real-tools.yml" \
     'schedule:' \
     'current stable yt-dlp is checked on a scheduled workflow'
+assert_file_contains "${script_dir}/tests/lib/project-files.sh" \
+    'tests/aria2-real-behavior-integration.sh' \
+    'real aria2 behavior test is part of canonical shell validation'
+assert_file_contains "${script_dir}/.github/workflows/real-tools.yml" \
+    'Run aria2 direct-transfer behavior qualification' \
+    'PR/current-stable CI gates real aria2 direct-transfer behavior'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'Run aria2 direct-transfer behavior qualification' \
+    'release CI gates real aria2 direct-transfer behavior'
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'Run HLS post-remux duration validation (3x)' \
     'release qualification gates HLS duration validation'

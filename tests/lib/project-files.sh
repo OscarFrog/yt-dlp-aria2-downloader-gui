@@ -48,6 +48,7 @@ TEST_SHELL_FILES=(
     tests/ffmpeg-real-progress-integration.sh
     tests/hls-remux-duration-integration.sh
     tests/real-tools-integration.sh
+    tests/aria2-real-behavior-integration.sh
 )
 
 # shellcheck disable=SC2034 # Arrays are read by scripts that source this file.

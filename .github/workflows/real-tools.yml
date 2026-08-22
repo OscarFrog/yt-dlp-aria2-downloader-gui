@@ -46,6 +46,13 @@ jobs:
             timeout --signal=TERM --kill-after=10s 8m \
               bash ./tests/real-tools-integration.sh
           done
+      - name: Run aria2 direct-transfer behavior qualification
+        env:
+          ARIA2_BEHAVIOR_BASIC_RUNS: 3
+          ARIA2_BEHAVIOR_RESUME_RUNS: 10
+        run: |
+          timeout --signal=TERM --kill-after=10s 12m \
+            bash ./tests/aria2-real-behavior-integration.sh
       - name: Run real FFmpeg progress qualification
         run: |
           timeout --signal=TERM --kill-after=10s 8m \
@@ -88,6 +95,13 @@ jobs:
             timeout --signal=TERM --kill-after=10s 8m \
               bash ./tests/real-tools-integration.sh
           done
+      - name: Run current-stable aria2 direct-transfer behavior qualification
+        env:
+          ARIA2_BEHAVIOR_BASIC_RUNS: 3
+          ARIA2_BEHAVIOR_RESUME_RUNS: 10
+        run: |
+          timeout --signal=TERM --kill-after=10s 12m \
+            bash ./tests/aria2-real-behavior-integration.sh
       - name: Run current-stable real FFmpeg progress qualification
         run: |
           timeout --signal=TERM --kill-after=10s 8m \

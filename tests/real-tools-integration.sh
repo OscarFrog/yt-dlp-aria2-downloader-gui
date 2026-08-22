@@ -65,6 +65,11 @@ ffmpeg -hide_banner -loglevel error -nostdin \
     "${TEST_ROOT}/web/audio.m4a"
 
 ffmpeg -hide_banner -loglevel error -nostdin \
+    -f lavfi -i 'sine=frequency=660:sample_rate=48000' \
+    -t 2 -c:a libopus -b:a 96k \
+    "${TEST_ROOT}/web/audio-opus.webm"
+
+ffmpeg -hide_banner -loglevel error -nostdin \
     -i "${TEST_ROOT}/web/av.mp4" \
     -map 0:v:0 -map 0:a:0 \
     -c:v copy -c:a copy \
@@ -156,18 +161,45 @@ assert_media_streams() {
         grep -Eq '^[0-9]+$'
 }
 
+
+assert_audio_only_codec() {
+    local media_path=$1
+    local expected_codec=$2
+    local actual_codec
+    local video_index=''
+
+    actual_codec=$(
+        ffprobe -v error -select_streams a:0 \
+            -show_entries stream=codec_name -of csv=p=0 "${media_path}"
+    ) || return 65
+    [[ ${actual_codec} == "${expected_codec}" ]] || {
+        printf 'FAIL: audio codec changed from %s to %s.\n' \
+            "${expected_codec}" "${actual_codec}" >&2
+        return 65
+    }
+    video_index=$(
+        ffprobe -v error -select_streams v:0 \
+            -show_entries stream=index -of csv=p=0 "${media_path}"
+    ) || return 65
+    [[ -z ${video_index} ]] || {
+        printf 'FAIL: audio result unexpectedly retained a video stream.\n' >&2
+        return 65
+    }
+}
+
 RUN_FINAL_FILE=''
 run_engine() {
     local mode=$1
     local scenario=$2
     local url=$3
+    local engine=${4:-"${PROJECT_DIR}/download-video.sh"}
     local scenario_dir="${TEST_ROOT}/output/${scenario}"
     local result_file="${TEST_ROOT}/${scenario}.result"
 
     RUN_FINAL_FILE=''
     mkdir -p -- "${scenario_dir}"
     rm -f -- "${result_file}"
-    bash "${PROJECT_DIR}/download-video.sh" \
+    bash "${engine}" \
         --mode "${mode}" \
         --output-dir "${scenario_dir}" \
         --result-file "${result_file}" \
@@ -218,17 +250,53 @@ audio_final=${RUN_FINAL_FILE}
     printf 'FAIL: audio result is absent.\n' >&2
     exit 65
 }
-final_audio_codec=$(
-    ffprobe -v error -select_streams a:0 \
-        -show_entries stream=codec_name -of csv=p=0 "${audio_final}"
-)
-[[ ${final_audio_codec} == "${source_audio_codec}" ]] || {
-    printf 'FAIL: audio codec changed from %s to %s.\n' \
-        "${source_audio_codec}" "${final_audio_codec}" >&2
-    exit 65
-}
+assert_audio_only_codec "${audio_final}" "${source_audio_codec}"
 [[ -s ${ARIA2_INVOCATION_LOG} ]] || {
     printf 'FAIL: direct audio transfer did not invoke real aria2c.\n' >&2
+    exit 65
+}
+
+# Opus/WebM audio-only must preserve the source codec without a forced MP3/AAC conversion.
+: >"${ARIA2_INVOCATION_LOG}"
+source_opus_codec=$(
+    ffprobe -v error -select_streams a:0 \
+        -show_entries stream=codec_name -of csv=p=0 \
+        "${TEST_ROOT}/web/audio-opus.webm"
+)
+[[ ${source_opus_codec} == opus ]] || {
+    printf 'FAIL: generated Opus fixture has unexpected codec: %s.\n' \
+        "${source_opus_codec}" >&2
+    exit 65
+}
+run_engine audio audio-opus "http://127.0.0.1:${PORT}/audio-opus.webm"
+opus_final=${RUN_FINAL_FILE}
+[[ -f ${opus_final} ]] || {
+    printf 'FAIL: Opus audio result is absent.\n' >&2
+    exit 65
+}
+assert_audio_only_codec "${opus_final}" "${source_opus_codec}"
+[[ -s ${ARIA2_INVOCATION_LOG} ]] || {
+    printf 'FAIL: direct Opus transfer did not invoke real aria2c.\n' >&2
+    exit 65
+}
+
+# The ba/b fallback must extract audio from a combined A/V source, remove video,
+# and preserve AAC when yt-dlp can do so without transcoding.
+: >"${ARIA2_INVOCATION_LOG}"
+combined_source_codec=$(
+    ffprobe -v error -select_streams a:0 \
+        -show_entries stream=codec_name -of csv=p=0 \
+        "${TEST_ROOT}/web/av.mp4"
+)
+run_engine audio audio-combined "http://127.0.0.1:${PORT}/av.mp4"
+combined_final=${RUN_FINAL_FILE}
+[[ -f ${combined_final} ]] || {
+    printf 'FAIL: combined-source audio result is absent.\n' >&2
+    exit 65
+}
+assert_audio_only_codec "${combined_final}" "${combined_source_codec}"
+[[ -s ${ARIA2_INVOCATION_LOG} ]] || {
+    printf 'FAIL: combined direct transfer did not invoke real aria2c.\n' >&2
     exit 65
 }
 
@@ -290,4 +358,44 @@ if assert_native_fragment_routing "${mutated_engine}"; then
     exit 65
 fi
 
-printf 'Real-tool direct/audio/HLS/DASH integration passed.\n'
+# Audio mutation proof: forcing MP3 in a temporary engine copy must be caught by
+# the Opus codec-preservation assertion. The repository source is never changed.
+mutated_audio_engine="${TEST_ROOT}/download-video-audio-mutated.sh"
+cp -- "${PROJECT_DIR}/download-video.sh" "${mutated_audio_engine}"
+sed -i 's/--audio-format best/--audio-format mp3/' "${mutated_audio_engine}"
+grep -Fq -- '--audio-format mp3' "${mutated_audio_engine}" || {
+    printf 'FAIL: unable to create the forced-MP3 audio mutation.\n' >&2
+    exit 65
+}
+: >"${ARIA2_INVOCATION_LOG}"
+run_engine audio audio-opus-mutated \
+    "http://127.0.0.1:${PORT}/audio-opus.webm" "${mutated_audio_engine}"
+mutated_audio_final=${RUN_FINAL_FILE}
+mutation_diagnostic="${TEST_ROOT}/audio-mutation.expected.stderr"
+set +e
+assert_audio_only_codec \
+    "${mutated_audio_final}" "${source_opus_codec}" \
+    2>"${mutation_diagnostic}"
+mutation_status=$?
+set -e
+if ((mutation_status == 0)); then
+    printf 'FAIL: forced-MP3 mutation escaped the Opus preservation test.\n' >&2
+    exit 65
+fi
+mutated_audio_codec=$(
+    ffprobe -v error -select_streams a:0 \
+        -show_entries stream=codec_name -of csv=p=0 \
+        "${mutated_audio_final}"
+)
+[[ ${mutated_audio_codec} == mp3 ]] || {
+    printf 'FAIL: forced-MP3 mutation did not produce MP3 as expected; got %s.\n' \
+        "${mutated_audio_codec}" >&2
+    exit 65
+}
+grep -Fq -- 'audio codec changed from opus to mp3' "${mutation_diagnostic}" || {
+    printf 'FAIL: forced-MP3 mutation failed for an unexpected reason.\n' >&2
+    exit 65
+}
+printf 'Expected mutation detected: forced MP3 was rejected by Opus preservation.\n'
+
+printf 'Real-tool direct/audio/Opus/fallback/HLS/DASH integration passed.\n'
