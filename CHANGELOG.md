@@ -1,3 +1,35 @@
+## 2.1.32 - 2026-08-22
+
+### Real-tool audio qualification
+
+- Add a generated WebM/Opus audio-only fixture and prove that audio mode keeps
+  the Opus codec, removes video, publishes a validated result, and crosses the
+  real aria2c boundary.
+- Exercise the `ba/b` fallback with a combined A/V source and prove that the
+  final result is audio-only while preserving its AAC codec when no transcode
+  is required.
+- Add a temporary forced-MP3 engine mutation and prove that the Opus
+  codec-preservation assertion rejects it without modifying production source.
+
+### aria2 direct-transfer qualification
+
+- Add a hermetic loopback server for Range, no-Range, redirect, deterministic
+  HTTP error, and interrupted-transfer resume behavior using the real engine,
+  yt-dlp, aria2c, FFmpeg, FFprobe, and progress monitor.
+- Prove resume from server observations rather than final success alone: the
+  interrupted run publishes no result/global 100%, a completed Range is retained,
+  and the restart transfers a strict remainder rather than the complete object.
+- Repeat Range/no-Range/redirect/error three times and resume ten times for each
+  pinned/current-stable qualification job and before release packaging.
+
+### Documentation and release metadata
+
+- Document the expanded real-tool audio and direct-transfer qualification in
+  English/French documentation and TESTING.md.
+- Bump current release declarations and examples to 2.1.32. Production
+  downloader routing, HLS duration guard, progress behavior, and aria2 tuning
+  remain unchanged.
+
 ## 2.1.31 - 2026-08-22
 
 ### HLS post-remux validation
