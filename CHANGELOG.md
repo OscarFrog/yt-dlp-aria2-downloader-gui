@@ -1,3 +1,50 @@
+## 2.1.30 - 2026-08-22
+
+### Package cleanup and filesystem safety
+
+- Refuse recursive cleanup through symbolic-link components beneath authorized
+  XDG roots while preserving ambiguous paths conservatively.
+- Extend adversarial cleanup coverage and repeat package-cleanup safety
+  qualification ten times in stress CI.
+
+### RPM format and signing qualification
+
+- Explicitly pin generated production RPMs to package format v4 and independently
+  verify that format after build and before/after release signing.
+- Add a dedicated RPM v6 fixture that qualifies multi-signature ordering,
+  multiple valid signers, and corrupted-signature behavior; repeat the
+  qualification three times in package PR CI and three times in release CI.
+- Make the secret-bearing `rpm-sign` job verify the signed result through an
+  isolated RPM 6 `fs` keyring matching the consumer trust model.
+- Shorten signing-secret lifetime by removing materialized key/passphrase files
+  as soon as possible, clearing secret environment variables, and explicitly
+  terminating the temporary `gpg-agent`.
+
+### Release provenance and CI hardening
+
+- Bind manual `workflow_dispatch` recovery to the exact requested tag ref and
+  source commit, and remove stale version-specific workflow help text.
+- Make workflow shell blocks pass `actionlint`/ShellCheck without suppressing
+  the new checks, including explicit absence checks under `set -e`.
+- Add a separate read-only post-publication job that freshly downloads the
+  immutable public release, compares all assets byte-for-byte with the exact
+  tested Actions artifacts, rechecks `SHA256SUMS`, and verifies release/asset
+  provenance against the exact tag commit.
+- Add a maintainer preflight for Immutable Releases, `rpm-signing` reviewers,
+  self-review prevention, tag deployment policy, signing-secret scope, pinned
+  certificate identity, and signing-subkey expiry.
+
+### Documentation and release metadata
+
+- Correct the Fedora bootstrap documentation to describe the private RPM 6
+  filesystem keyring rather than RPM display metadata as the authorization
+  primitive.
+- Document RPM-v4 production pinning, RPM-v6 qualification, exact-tag manual
+  recovery, fresh public-release verification, and parent-symlink cleanup
+  refusal in English and French.
+- Bump current package/install/verification examples and user-facing version
+  declarations to 2.1.30.
+
 ## 2.1.29 - 2026-08-21
 
 ### RPM signer authorization hardening

@@ -31,6 +31,7 @@ bash -n download-video-gui.sh
 bash -n progress-monitor.sh
 bash -n runtime-manager.sh
 bash -n install-fedora.sh
+bash -n scripts/release-preflight.sh
 bash -n install-gui.sh
 bash -n test-static.sh
 bash -n tests/run-all.sh
@@ -43,6 +44,7 @@ bash -n tests/progress-monitor-integration.sh
 bash -n tests/installer-integration.sh
 bash -n tests/packaging-integration.sh
 bash -n tests/package-user-cleanup-integration.sh
+bash -n tests/rpm6-multisig-integration.sh
 bash -n tests/ffmpeg-progress-integration.sh
 bash -n tests/real-tools-integration.sh
 bash -n packaging/install-tree.sh
@@ -74,6 +76,7 @@ shellcheck -x -o all \
   tests/lib/assert.sh \
   tests/lib/project-files.sh \
   install-fedora.sh \
+  scripts/release-preflight.sh \
   tests/mock-integration.sh \
   tests/runtime-manager-integration.sh \
   tests/runtime-manager-hardening-integration.sh \
@@ -81,6 +84,7 @@ shellcheck -x -o all \
   tests/installer-integration.sh \
   tests/packaging-integration.sh \
   tests/package-user-cleanup-integration.sh \
+  tests/rpm6-multisig-integration.sh \
   tests/ffmpeg-progress-integration.sh \
   tests/real-tools-integration.sh \
   packaging/install-tree.sh \
@@ -190,10 +194,19 @@ The automated suite checks, among other things:
   preservation of a portable ZIP/Git launcher;
 - adversarial cleanup coverage for forged and multi-line custom-XDG markers,
   symlinked ownership sentinels, missing homes, and terminal runtime symlinks;
+- refusal to traverse symlinked intermediate cleanup components beneath
+  authorized XDG roots, with that cleanup safety suite repeated ten times in
+  stress CI;
+- explicit production RPM-v4 pinning plus a dedicated RPM-v6 fixture that
+  qualifies multi-signature ordering/corruption semantics three times in
+  package PR CI and three times again before a release RPM is signed;
 - exact same RPM artifact tested in Fedora `fresh` and `ffmpeg-free`;
 - current stable yt-dlp compatibility in addition to the minimum supported
   version;
 - exact release asset inventory and immutable-release/asset verification.
+- a separate read-only post-publication job that freshly downloads the public
+  release and proves byte identity with the tested Actions artifacts, rechecks
+  `SHA256SUMS`, and verifies provenance against the exact tag commit.
 
 ## GitHub Actions
 
@@ -214,10 +227,14 @@ recheck their transferred SHA-256 digests before installation.
 
 Pull-request CI builds one unsigned noarch RPM and proves that the production
 bootstrap rejects it unless `--allow-unsigned-dev` is explicitly selected.
-Release CI builds the RPM once, signs those exact bytes once in the isolated
-`rpm-signing` GitHub Environment, and then installs the identical signed RPM
-on Fedora 44 in `fresh` and `ffmpeg-free` scenarios through the supported
-RPM Fusion bootstrap. The
+Release CI builds the RPM once, explicitly requires RPM package format v4,
+qualifies RPM-v4/v6 signature semantics three times, then signs those exact
+bytes once in the isolated `rpm-signing` GitHub Environment. The signer has no
+repository checkout, uses the same private RPM 6 `fs` keyring model as the
+consumer bootstrap, removes materialized signing secrets as soon as they are no
+longer needed, and explicitly terminates its temporary `gpg-agent`. The
+identical signed RPM is then installed on Fedora 44 in `fresh` and
+`ffmpeg-free` scenarios through the supported RPM Fusion bootstrap. The
 architecture-independent DEB is built on Ubuntu 24.04, installed with APT, and
 removed again. Both lifecycle checks verify the managed-runtime manager and
 embedded yt-dlp signing key; the DEB no longer depends on distribution yt-dlp
@@ -259,12 +276,37 @@ verifies the exact release asset inventory, requires the
 resulting GitHub Release to be immutable, and verifies the release attestation
 and every local asset.
 
+A separate `verify-published` job then starts with read-only permissions,
+downloads the immutable public release again, reconstructs the expected
+inventory from the tested Actions artifacts, compares every public asset
+byte-for-byte, verifies the shared checksum file, and constrains attestation
+verification to this repository, `release.yml`, and the exact tag commit.
+
 If a newly created release unexpectedly remains mutable, the workflow attempts
 to delete it and verifies that cleanup succeeded. Failure or unconfirmed cleanup
 causes publication to fail explicitly. Only the final job receives
 `contents: write`.
 
 ## Release maintainer preflight
+
+The preferred preflight is the repository helper:
+
+```bash
+bash ./scripts/release-preflight.sh   --confirm-admin-bypass-disabled   --confirm-tag-policy   v2.1.30
+```
+
+The two confirmation flags require the operator to have checked in the GitHub
+UI that administrator bypass is disabled and that the selected `v*` deployment
+policy is a **tag** policy. The script additionally verifies Immutable Releases,
+required reviewers, self-review prevention, secret scope, the pinned public
+certificate, the dedicated signing subkey, signed-tag/HEAD/version identity,
+and warns when the signing subkey is within 90 days of expiry.
+
+For manual workflow recovery, invoke the workflow from the exact same tag:
+
+```bash
+gh workflow run release.yml   --ref v2.1.30   -f tag=v2.1.30   -R OscarFrog/yt-dlp-aria2-downloader-gui
+```
 
 Before pushing a release tag, confirm that GitHub Immutable Releases are
 enabled for the repository:
@@ -303,7 +345,7 @@ After the final `publish` job succeeds, download the release RPM and independent
 confirm its signer and isolated trust binding on Fedora 44:
 
 ```bash
-rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' ./yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm
+rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' ./yt-dlp-aria2-downloader-gui-2.1.30-1.fc44.noarch.rpm
 
 VERIFY_ROOT=$(mktemp -d)
 VERIFY_KEYRING="${VERIFY_ROOT}/keyring"
@@ -313,13 +355,13 @@ chmod 700 "$VERIFY_ROOT" "$VERIFY_KEYRING"
 
 rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --import ./RPM-GPG-KEY-OscarFrog
 
-rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --checksig ./yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm
+rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --checksig ./yt-dlp-aria2-downloader-gui-2.1.30-1.fc44.noarch.rpm
 
 rm -rf -- "$VERIFY_ROOT"
 
-gh release verify v2.1.29 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.1.29   ./yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh attestation verify   ./yt-dlp-aria2-downloader-gui-2.1.29-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.1.30 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.1.30   ./yt-dlp-aria2-downloader-gui-2.1.30-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh attestation verify   ./yt-dlp-aria2-downloader-gui-2.1.30-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 A specific release is considered qualified only after its final `publish` job
