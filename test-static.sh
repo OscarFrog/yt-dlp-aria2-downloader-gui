@@ -138,6 +138,9 @@ readonly EXPECTED_VERSION='2.1.31'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    "readonly APP_VERSION='${EXPECTED_VERSION}'" \
+    'Fedora bootstrap application version'
 for versioned_script in \
     download-video.sh download-video-gui.sh progress-monitor.sh install-gui.sh; do
     assert_file_contains "${script_dir}/${versioned_script}" \
