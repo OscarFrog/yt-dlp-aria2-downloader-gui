@@ -45,6 +45,8 @@ TEST_SHELL_FILES=(
     tests/package-user-cleanup-integration.sh
     tests/rpm6-multisig-integration.sh
     tests/ffmpeg-progress-integration.sh
+    tests/ffmpeg-real-progress-integration.sh
+    tests/hls-remux-duration-integration.sh
     tests/real-tools-integration.sh
 )
 

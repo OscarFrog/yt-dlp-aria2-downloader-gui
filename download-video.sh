@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # ============================================================================
 # Name        : download-video.sh
-# Version     : 2.1.30
+# Version     : 2.1.31
 # Date        : 2026-08-22
 # Description : Download one complete MKV video or the best native audio track.
 # ============================================================================
@@ -11,7 +11,7 @@
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.1.30"
+readonly VERSION="2.1.31"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -1288,11 +1288,11 @@ if ((DOWNLOAD_STATUS == 0)); then
         fi
 
         emit_machine_postprocess started FFmpegVideoRemuxer
-        ffmpeg_duration_us=''
+        hls_source_duration_us=''
         probe_duration_microseconds \
-            ffmpeg_duration_us "${hls_source_path}" 2>/dev/null
-        if [[ ${MACHINE_PROGRESS} == true && ${ffmpeg_duration_us} =~ ^[1-9][0-9]*$ ]]; then
-            printf 'FFMPEG_PROGRESS_DURATION|%s\n' "${ffmpeg_duration_us}"
+            hls_source_duration_us "${hls_source_path}" 2>/dev/null
+        if [[ ${MACHINE_PROGRESS} == true && ${hls_source_duration_us} =~ ^[1-9][0-9]*$ ]]; then
+            printf 'FFMPEG_PROGRESS_DURATION|%s\n' "${hls_source_duration_us}"
         fi
         if ! HLS_REMUX_TMP=$(mktemp \
             --tmpdir="${hls_source_dir}" \
@@ -1325,6 +1325,36 @@ if ((DOWNLOAD_STATUS == 0)); then
             printf 'The repaired HLS intermediate was retained at: %s\n' \
                 "${hls_source_path}" >&2
             exit "${ffmpeg_status}"
+        fi
+
+        hls_final_duration_us=''
+        probe_duration_microseconds \
+            hls_final_duration_us "${HLS_REMUX_TMP}" 2>/dev/null
+        if [[ ${hls_source_duration_us} =~ ^[1-9][0-9]*$ &&
+            ${hls_final_duration_us} =~ ^[1-9][0-9]*$ ]] &&
+            ((hls_final_duration_us < hls_source_duration_us)); then
+            # Stream-copy remuxes may shift/drop a small amount of timestamp
+            # padding. Permit 2% loss, with a 0.5 s floor and 5 s ceiling, but
+            # fail closed on a materially shortened result. This is deliberately
+            # metadata-only validation; do not decode the complete media again.
+            hls_duration_tolerance_us=$((hls_source_duration_us / 50))
+            if ((hls_duration_tolerance_us < 500000)); then
+                hls_duration_tolerance_us=500000
+            elif ((hls_duration_tolerance_us > 5000000)); then
+                hls_duration_tolerance_us=5000000
+            fi
+            hls_duration_loss_us=$((hls_source_duration_us - hls_final_duration_us))
+            if ((hls_duration_loss_us > hls_duration_tolerance_us)); then
+                emit_machine_postprocess error FFmpegVideoRemuxer
+                error 'the remuxed MKV is substantially shorter than the repaired HLS source.'
+                printf 'Source duration: %s us; remuxed duration: %s us; allowed loss: %s us.\n' \
+                    "${hls_source_duration_us}" \
+                    "${hls_final_duration_us}" \
+                    "${hls_duration_tolerance_us}" >&2
+                printf 'The repaired HLS intermediate was retained at: %s\n' \
+                    "${hls_source_path}" >&2
+                exit 65
+            fi
         fi
 
         if ! mv -nT -- "${HLS_REMUX_TMP}" "${hls_final_path}"; then

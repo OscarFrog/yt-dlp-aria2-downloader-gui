@@ -5,16 +5,20 @@ on:
     branches:
       - main
   workflow_dispatch:
+  schedule:
+    - cron: '23 5 * * 1'
 permissions:
   contents: read
 concurrency:
   group: real-tools-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
 jobs:
-  local-media:
-    name: Local HTTP media (yt-dlp ${{ matrix.yt_dlp_version }})
+  pinned-local-media:
+    if: github.event_name != 'schedule'
+    name: Local media, pinned yt-dlp ${{ matrix.yt_dlp_version }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -31,5 +35,69 @@ jobs:
           "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
             --disable-pip-version-check "yt-dlp==${{ matrix.yt_dlp_version }}"
           echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >> "${GITHUB_PATH}"
-      - name: Run hermetic integration
-        run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/real-tools-integration.sh
+      - name: Record yt-dlp version
+        run: yt-dlp --version
+      - name: Run direct, audio, HLS and DASH boundary qualification (3x)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for iteration in 1 2 3; do
+            printf '=== real-tool routing iteration %d/3 ===\n' "${iteration}"
+            timeout --signal=TERM --kill-after=10s 8m \
+              bash ./tests/real-tools-integration.sh
+          done
+      - name: Run real FFmpeg progress qualification
+        run: |
+          timeout --signal=TERM --kill-after=10s 8m \
+            bash ./tests/ffmpeg-real-progress-integration.sh
+      - name: Run HLS post-remux duration validation (3x)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for iteration in 1 2 3; do
+            printf '=== HLS duration guard iteration %d/3 ===\n' "${iteration}"
+            timeout --signal=TERM --kill-after=10s 5m \
+              bash ./tests/hls-remux-duration-integration.sh
+          done
+
+  current-stable-local-media:
+    if: github.event_name == 'schedule'
+    name: Scheduled current stable yt-dlp
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install real engines and current yt-dlp stable
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install --yes aria2 ffmpeg python3-venv
+          python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
+            --disable-pip-version-check --upgrade yt-dlp
+          echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >> "${GITHUB_PATH}"
+      - name: Record resolved current stable yt-dlp version
+        run: yt-dlp --version
+      - name: Run current-stable routing qualification (3x)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for iteration in 1 2 3; do
+            printf '=== current stable routing iteration %d/3 ===\n' "${iteration}"
+            timeout --signal=TERM --kill-after=10s 8m \
+              bash ./tests/real-tools-integration.sh
+          done
+      - name: Run current-stable real FFmpeg progress qualification
+        run: |
+          timeout --signal=TERM --kill-after=10s 8m \
+            bash ./tests/ffmpeg-real-progress-integration.sh
+      - name: Run current-stable HLS duration validation (3x)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for iteration in 1 2 3; do
+            printf '=== current stable HLS guard iteration %d/3 ===\n' "${iteration}"
+            timeout --signal=TERM --kill-after=10s 5m \
+              bash ./tests/hls-remux-duration-integration.sh
+          done

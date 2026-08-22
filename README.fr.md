@@ -39,7 +39,7 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
 extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.30**.
+téléchargeur natif de yt-dlp. La version actuelle est la **2.1.31**.
 
 ## Installation recommandée
 
@@ -50,7 +50,7 @@ Pour **Fedora 44 ou une version plus récente**, téléchargez ces quatre fichie
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.1.30-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -58,7 +58,7 @@ Vérifiez les fichiers téléchargés puis lancez le bootstrap Fedora officiel :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.30-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm
 ```
 
 Le bootstrap active RPM Fusion Free si nécessaire, remplace `ffmpeg-free` par
@@ -68,7 +68,7 @@ runtimes yt-dlp et Deno propres à l'utilisateur.
 
 Pour **Debian ou Ubuntu**, téléchargez le DEB versionné et `SHA256SUMS`,
 vérifiez-les puis installez le paquet avec `sudo apt install
-./yt-dlp-aria2-downloader-gui_2.1.30-1_all.deb`. Pour **les autres distributions
+./yt-dlp-aria2-downloader-gui_2.1.31-1_all.deb`. Pour **les autres distributions
 GNU/Linux ou une utilisation portable**, utilisez le ZIP versionné ou un clone
 Git. Les runtimes yt-dlp et Deno gérés automatiquement prennent actuellement en
 charge Linux `x86_64` et `aarch64`.
@@ -97,7 +97,9 @@ Avec le RPM, le lanceur graphique et son icône sont installés automatiquement 
   post-traitement ;
 - journaux privés conservés uniquement pour les exécutions problématiques, avec expurgation des URL et limite de 8 Mio ;
 - lanceur dans le menu des applications ;
-- tests statiques, tests d'intégration et validation GitHub Actions sous Ubuntu
+- tests statiques, mocks et intégrations hermétiques avec outils réels,
+  notamment routage local direct/audio/HLS/DASH, progression FFmpeg réelle et
+  stress des courses de processus, avec validation GitHub Actions sous Ubuntu
   et Fedora 44.
 
 ## Prérequis
@@ -125,7 +127,9 @@ Par défaut, chaque lancement du moteur contrôle le canal **stable** signé de
 yt-dlp et le canal stable de Deno. Toute nouvelle version est préparée
 séparément, validée puis activée atomiquement. Les attentes de verrou et les
 opérations réseau sont bornées ; si le contrôle de mise à jour échoue, le
-dernier runtime vérifié reste actif.
+dernier runtime vérifié reste actif. L'exécutable Linux officiel de yt-dlp
+embarque ses dépendances Python compatibles, notamment `curl_cffi`, ainsi que
+le support EJS embarqué utilisé par l'extraction YouTube actuelle.
 
 Définissez `YTDLP_ARIA2_YTDLP_CHANNEL=nightly` pour utiliser volontairement les
 nightly yt-dlp. Définissez `YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE=0` pour un **mode
@@ -166,8 +170,8 @@ l'identité de la release :
 
 ```bash
 gh attestation verify ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.1.30 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.1.30 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.1.31 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.1.31 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 `SHA256SUMS` reste utile pour un contrôle local ou hors ligne ; les attestations
@@ -219,7 +223,7 @@ de déploiement **tag** sélectionnée `v*`. La reprise manuelle reste disponibl
 mais elle doit exécuter le workflow depuis le tag exact de la release :
 
 ```bash
-gh workflow run release.yml   --ref v2.1.30   -f tag=v2.1.30   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref v2.1.31   -f tag=v2.1.31   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Le workflow refuse indépendamment toute exécution manuelle dont le type de ref,
@@ -264,7 +268,7 @@ Téléchargez :
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.1.30-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -277,7 +281,7 @@ sha256sum --ignore-missing --check SHA256SUMS
 Puis lancez :
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.30-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm
 ```
 
 Le bootstrap refuse par défaut un RPM de release non signé. Il vérifie que
@@ -312,11 +316,11 @@ de l'utilisateur et vérifiés avant activation.
 
 ### Debian et Ubuntu
 
-La release 2.1.30 publie un DEB indépendant de l'architecture, aligné sur le
+La release 2.1.31 publie un DEB indépendant de l'architecture, aligné sur le
 même modèle de runtimes gérés que Fedora. Téléchargez :
 
 ```text
-yt-dlp-aria2-downloader-gui_2.1.30-1_all.deb
+yt-dlp-aria2-downloader-gui_2.1.31-1_all.deb
 SHA256SUMS
 ```
 
@@ -324,7 +328,7 @@ Vérifiez puis installez :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.30-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.31-1_all.deb
 ```
 
 Le DEB dépend des outils système habituels (`aria2c`, FFmpeg/FFprobe, Zenity,
@@ -410,7 +414,7 @@ courant.
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.30.zip
+yt-dlp-aria2-downloader-gui-2.1.31.zip
 SHA256SUMS
 ```
 
@@ -418,8 +422,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.30.zip
-cd yt-dlp-aria2-downloader-gui-2.1.30
+unzip yt-dlp-aria2-downloader-gui-2.1.31.zip
+cd yt-dlp-aria2-downloader-gui-2.1.31
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -614,6 +618,11 @@ Les téléchargements HLS réussis restent traités par le téléchargeur natif 
 médias fragmentés de yt-dlp. yt-dlp applique d'abord son correctif
 MPEG-TS-dans-MP4, puis le moteur effectue un second remux en copie de flux du
 MP4 réparé vers MKV. Aucune de ces deux étapes ne réencode la vidéo ou l'audio.
+
+Dans l'état actuel d'upstream yt-dlp, les formats HLS de `web_safari` n'exigent
+pas de GVS PO Token, mais depuis 2026.07 YouTube ne renvoie ces formats HLS que
+pour certaines sessions connectées ou « trusted ». Ce comportement upstream
+peut évoluer indépendamment du projet.
 
 Ce profil constitue une solution de compatibilité et ne remplace pas les
 plugins fournisseurs de PO Token. Les mécanismes de contrôle de YouTube peuvent

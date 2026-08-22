@@ -46,6 +46,8 @@ bash -n tests/packaging-integration.sh
 bash -n tests/package-user-cleanup-integration.sh
 bash -n tests/rpm6-multisig-integration.sh
 bash -n tests/ffmpeg-progress-integration.sh
+bash -n tests/ffmpeg-real-progress-integration.sh
+bash -n tests/hls-remux-duration-integration.sh
 bash -n tests/real-tools-integration.sh
 bash -n packaging/install-tree.sh
 bash -n packaging/package-user-cleanup.sh
@@ -86,6 +88,8 @@ shellcheck -x -o all \
   tests/package-user-cleanup-integration.sh \
   tests/rpm6-multisig-integration.sh \
   tests/ffmpeg-progress-integration.sh \
+  tests/ffmpeg-real-progress-integration.sh \
+  tests/hls-remux-duration-integration.sh \
   tests/real-tools-integration.sh \
   packaging/install-tree.sh \
   packaging/package-user-cleanup.sh \
@@ -176,7 +180,15 @@ The automated suite checks, among other things:
 - complete-video rejection when either the video or audio stream is absent;
 - conditional Deno requirements and YouTube-only remote EJS fallback;
 - measured wrapper-managed FFmpeg remux progress and bounded progress arithmetic;
-- hermetic real-tool transfers using generated media and a loopback HTTP server;
+- a complementary real-FFmpeg `-progress pipe:1` integration, repeated three
+  times, proving parseable `out_time_us`, monotone/bounded global progress and
+  no global 100% before result-file publication;
+- HLS post-remux duration consistency with real FFmpeg/FFprobe, including a
+  reproducible truncated-input case where FFmpeg exits 0 with both streams but
+  a materially shortened MKV; that result must not be published;
+- hermetic real-tool direct HTTP, native-audio, HLS and DASH transfers using
+  generated media and a loopback HTTP server, with a transparent shim proving
+  that real aria2c is used for direct transfers and not for HLS/DASH fragments;
 - managed-runtime operation with Deno outside PATH, bounded lock/network waits,
   strict zero-network `require` mode, exact-tag stable/nightly/stable switching,
   lock-descriptor isolation, ten-cycle contention/double-rollback stress,
@@ -242,9 +254,14 @@ or Deno packages.
 
 
 `.github/workflows/real-tools.yml` installs actual yt-dlp, aria2c, FFmpeg, and
-FFprobe on Ubuntu. It generates tiny media fixtures locally, serves them over a
-loopback HTTP server, validates a complete video with audio, and rejects a
-video-only result without contacting a public media service.
+FFprobe on Ubuntu. Pull-request qualification retains the pinned yt-dlp
+`2026.6.9` and `2026.8.19` matrix for reproducibility. It generates tiny direct
+HTTP, audio, HLS and DASH fixtures locally, serves them over loopback, proves
+the aria2c/native downloader boundary, exercises real FFmpeg progress, and
+checks HLS post-remux duration consistency without contacting a public media
+service. Deterministic real-tool routing and HLS-duration scenarios are repeated
+three times. A separate weekly scheduled job resolves and logs the current
+stable yt-dlp version and runs the same qualification without changing PR pins.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the complete validation and the hermetic real-tool integration first, verifies
@@ -296,7 +313,7 @@ bash ./scripts/release-preflight.sh \
   --confirm-admin-bypass-disabled \
   --confirm-tag-policy \
   --confirm-single-maintainer-self-review \
-  v2.1.30
+  v2.1.31
 ```
 
 The three confirmation flags require the operator to have checked that
@@ -311,7 +328,7 @@ and warns when the signing subkey is within 90 days of expiry.
 For manual workflow recovery, invoke the workflow from the exact same tag:
 
 ```bash
-gh workflow run release.yml   --ref v2.1.30   -f tag=v2.1.30   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref v2.1.31   -f tag=v2.1.31   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Before pushing a release tag, confirm that GitHub Immutable Releases are
@@ -352,7 +369,7 @@ After the final `publish` job succeeds, download the release RPM and independent
 confirm its signer and isolated trust binding on Fedora 44:
 
 ```bash
-rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' ./yt-dlp-aria2-downloader-gui-2.1.30-1.fc44.noarch.rpm
+rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' ./yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm
 
 VERIFY_ROOT=$(mktemp -d)
 VERIFY_KEYRING="${VERIFY_ROOT}/keyring"
@@ -362,13 +379,13 @@ chmod 700 "$VERIFY_ROOT" "$VERIFY_KEYRING"
 
 rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --import ./RPM-GPG-KEY-OscarFrog
 
-rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --checksig ./yt-dlp-aria2-downloader-gui-2.1.30-1.fc44.noarch.rpm
+rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --checksig ./yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm
 
 rm -rf -- "$VERIFY_ROOT"
 
-gh release verify v2.1.30 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.1.30   ./yt-dlp-aria2-downloader-gui-2.1.30-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh attestation verify   ./yt-dlp-aria2-downloader-gui-2.1.30-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.1.31 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.1.31   ./yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh attestation verify   ./yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 A specific release is considered qualified only after its final `publish` job
@@ -402,12 +419,13 @@ parsing. Zenity windows remain in the graphical session's locale.
 
 ## Stress validation
 
-`.github/workflows/stress.yml` runs two independent ten-pass stress jobs on pull
+`.github/workflows/stress.yml` runs three independent stress jobs on pull
 requests and pushes to `main`:
 
-- the complete mock process/cancellation integration suite ten times, increasing
-  the probability of exposing cancellation, PGID publication, process-reaping,
-  and timing races;
+- the complete mock process/cancellation integration suite twenty times with
+  bounded deterministic timing variations around cancellation, late
+  cancel/success arbitration, PGID publication, worker/FFmpeg startup, and
+  `setsid` startup;
 - the runtime-manager hardening integration suite ten times, repeatedly
   exercising fresh bootstrap, strict zero-network behavior, exact-tag
   resolution, activation-journal recovery, lock contention, and rollback

@@ -10,22 +10,49 @@ permissions:
 concurrency:
   group: stress-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
 jobs:
   mock-stress:
-    name: Mock process/cancellation stress (10x)
+    name: Mock process/cancellation stress (20x deterministic jitter)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Repeat race-sensitive integration scenarios
+      - name: Repeat race-sensitive integration scenarios with bounded jitter
         shell: bash
         run: |
           set -Eeuo pipefail
-          for iteration in {1..10}; do
-            printf '=== mock integration stress iteration %d/10 ===\n' "${iteration}"
-            timeout --signal=TERM --kill-after=10s 4m bash ./tests/mock-integration.sh
+
+          cancel_timings=(0 0.01 0.03 0.07 0.12)
+          late_cancel_timings=(0 0.01 0.04 0.08 0.15)
+          pgid_timings=(2 2.5 3 4 5)
+          worker_timings=(0 0.01 0.03 0.06)
+          ffmpeg_timings=(0 0.01 0.04 0.08)
+          supervisor_timings=(0 0.005 0.01 0.02)
+
+          for iteration in {1..20}; do
+            index=$((iteration - 1))
+            cancel=${cancel_timings[index % ${#cancel_timings[@]}]}
+            late_cancel=${late_cancel_timings[index % ${#late_cancel_timings[@]}]}
+            pgid=${pgid_timings[index % ${#pgid_timings[@]}]}
+            worker=${worker_timings[index % ${#worker_timings[@]}]}
+            ffmpeg_start=${ffmpeg_timings[index % ${#ffmpeg_timings[@]}]}
+            supervisor=${supervisor_timings[index % ${#supervisor_timings[@]}]}
+
+            printf '%s\n' \
+              "=== mock jitter iteration ${iteration}/20: cancel=${cancel}s late=${late_cancel}s pgid=${pgid}s worker=${worker}s ffmpeg=${ffmpeg_start}s supervisor=${supervisor}s ==="
+
+            timeout --signal=TERM --kill-after=10s 5m \
+              env \
+                MOCK_CANCEL_JITTER_SECONDS="${cancel}" \
+                MOCK_CANCEL_AFTER_EOF_JITTER_SECONDS="${late_cancel}" \
+                MOCK_PGID_PUBLISH_DELAY_SECONDS="${pgid}" \
+                MOCK_WORKER_START_JITTER_SECONDS="${worker}" \
+                MOCK_FFMPEG_START_JITTER_SECONDS="${ffmpeg_start}" \
+                MOCK_SETSID_START_JITTER_SECONDS="${supervisor}" \
+                bash ./tests/mock-integration.sh
           done
 
   runtime-hardening-stress:
