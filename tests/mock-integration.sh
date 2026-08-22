@@ -350,6 +350,9 @@ if [[ ${MOCK_FFPROBE_EXIT_STATUS:-0} != 0 ]]; then
     printf 'Simulated FFprobe validation failure.\n' >&2
     exit "${MOCK_FFPROBE_EXIT_STATUS}"
 fi
+if [[ ${selector} == 'V:0' && ${MOCK_FFPROBE_CONTENT_VIDEO:-0} != 1 ]]; then
+    exit 0
+fi
 if [[ ${MOCK_FFPROBE_EMPTY:-0} != 1 ]]; then
     printf '0\n'
 fi
@@ -856,8 +859,8 @@ assert_file_has_line "${result_file}" \
 # shellcheck disable=SC2034 # Read indirectly through nameref assertion helpers.
 ffprobe_arguments=()
 read_arguments "${ffprobe_argument_log}" ffprobe_arguments
-assert_option_value ffprobe_arguments '-select_streams' 'a:0' \
-    'audio result FFprobe stream validation'
+assert_option_value ffprobe_arguments '-select_streams' 'V:0' \
+    'audio result FFprobe content-video validation'
 [[ ! -e ${injection_marker} ]] || fail 'The URL was interpreted as shell code.'
 
 arguments=()
@@ -894,6 +897,24 @@ assert_option_value arguments '--output' "${expected_output_template}" \
     'absolute escaped output template'
 assert_array_not_contains arguments '--paths' 'legacy path option is absent'
 
+
+# Audio-mode final validation must reject a real content-video stream even
+# when the audio stream remains present.
+prepare_argument_log 'audio-content-video-validation'
+content_video_result="${TEST_ROOT}/audio-content-video-result.txt"
+rm -f -- "${content_video_result}"
+assert_status 65 'audio mode rejects a retained content-video stream' \
+    env MOCK_FFPROBE_CONTENT_VIDEO=1 \
+    "${PROJECT_DIR}/download-video.sh" \
+    --output-dir "${OUTPUT_DIR}" --mode audio \
+    --result-file "${content_video_result}" \
+    -- 'https://example.com/watch?v=audio-content-video'
+[[ ! -e ${content_video_result} ]] ||
+    fail 'Audio mode published a result-file while content video remained.'
+assert_text_contains "${ASSERT_OUTPUT}" \
+    'the final media file failed FFprobe validation:' \
+    'audio content-video rejection diagnostic'
+rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
 # A distro build may omit the optional netrc feature entirely. Such a build
 # must remain usable and must not receive an unsupported --no-netrc argument.

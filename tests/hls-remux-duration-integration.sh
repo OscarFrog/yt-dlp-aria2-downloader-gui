@@ -50,6 +50,11 @@ ffmpeg -hide_banner -loglevel error -nostdin \
     -output_ts_offset 5 \
     "${TEST_ROOT}/source/nonzero-ts.mp4"
 
+ffmpeg -hide_banner -loglevel error -nostdin \
+    -f lavfi -i 'testsrc2=size=160x90:rate=25' \
+    -t 8 -c:v mpeg4 -q:v 5 -an \
+    "${TEST_ROOT}/source/video-only.mp4"
+
 cp -- "${TEST_ROOT}/source/full.mp4" "${TEST_ROOT}/source/truncated.mp4"
 source_size=$(stat -c '%s' -- "${TEST_ROOT}/source/truncated.mp4")
 truncate -s "$((source_size * 60 / 100))" \
@@ -169,6 +174,7 @@ run_case() {
     local label=$1
     local media_source=$2
     local expected_status=$3
+    local expected_failure_mkv=${4:-false}
     local output_dir="${TEST_ROOT}/output-${label}"
     local result_file="${TEST_ROOT}/${label}.result"
     mkdir -p -- "${output_dir}"
@@ -208,14 +214,25 @@ run_case() {
         ffprobe -v error -select_streams a:0 \
             -show_entries stream=index -of csv=p=0 "${final_file}" |
             grep -Eq '^[0-9]+$'
+        if find "${output_dir}" -maxdepth 1 -type f -name '*.mp4' -print -quit |
+            grep -q .; then
+            printf 'FAIL: successful HLS remux retained its repaired intermediate.\n' >&2
+            exit 65
+        fi
     else
         [[ ! -e ${result_file} ]] || {
-            printf 'FAIL: truncated HLS media published a success result.\n' >&2
+            printf 'FAIL: invalid HLS media published a success result.\n' >&2
             exit 65
         }
-        if find "${output_dir}" -maxdepth 1 -type f -name '*.mkv' -print -quit |
+        if [[ ${expected_failure_mkv} == true ]]; then
+            find "${output_dir}" -maxdepth 1 -type f -name '*.mkv' -print -quit |
+                grep -q . || {
+                printf 'FAIL: late HLS validation failure did not retain its diagnostic MKV.\n' >&2
+                exit 65
+            }
+        elif find "${output_dir}" -maxdepth 1 -type f -name '*.mkv' -print -quit |
             grep -q .; then
-            printf 'FAIL: truncated HLS media published a final MKV.\n' >&2
+            printf 'FAIL: duration-rejected HLS media published a final MKV.\n' >&2
             exit 65
         fi
         find "${output_dir}" -maxdepth 1 -type f -name '*.mp4' -print -quit |
@@ -235,5 +252,11 @@ run_case nonzero-ts "${TEST_ROOT}/source/nonzero-ts.mp4" 0
 # Regression: FFmpeg can exit 0 and retain both streams while losing ~40% of
 # duration. The engine must return EX_DATAERR (65) and publish no final result.
 run_case truncated "${TEST_ROOT}/source/truncated.mp4" 65
+
+# PATCH-003: FFmpeg stream-copy succeeds and duration remains coherent, but
+# final video validation fails because audio is absent. The repaired source must
+# survive this late failure; only a globally successful run may remove it.
+run_case video-only-validation-failure \
+    "${TEST_ROOT}/source/video-only.mp4" 65 true
 
 printf 'HLS remux duration validation passed.\n'

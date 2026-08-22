@@ -1,3 +1,9 @@
+## 2.1.33 - 2026-08-23
+
+- Harden aria2 resume qualification by waiting for explicit server quiescence before strict-remainder accounting.
+- Enforce audio-only final validation in audio mode while allowing attached cover art.
+- Retain the repaired HLS intermediate until final media validation and result publication succeed.
+
 ## 2.1.32 - 2026-08-22
 
 ### Real-tool audio qualification

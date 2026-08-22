@@ -300,6 +300,39 @@ assert_audio_only_codec "${combined_final}" "${combined_source_codec}"
     exit 65
 }
 
+# PATCH-002 mutation proof: remove --extract-audio from a temporary engine copy.
+# The combined A/V source then remains A/V, and production final validation must
+# reject it with EX_DATAERR instead of publishing an audio success result.
+mutated_no_extract_engine="${TEST_ROOT}/download-video-no-extract-mutated.sh"
+cp -- "${PROJECT_DIR}/download-video.sh" "${mutated_no_extract_engine}"
+sed -i '/^[[:space:]]*--extract-audio[[:space:]]*$/d' "${mutated_no_extract_engine}"
+if grep -Eq '^[[:space:]]*--extract-audio[[:space:]]*$' "${mutated_no_extract_engine}"; then
+    printf 'FAIL: unable to create the no-extract audio mutation.\n' >&2
+    exit 65
+fi
+mutated_no_extract_dir="${TEST_ROOT}/output/audio-no-extract-mutated"
+mutated_no_extract_result="${TEST_ROOT}/audio-no-extract-mutated.result"
+mkdir -p -- "${mutated_no_extract_dir}"
+rm -f -- "${mutated_no_extract_result}"
+set +e
+bash "${mutated_no_extract_engine}" \
+    --mode audio \
+    --output-dir "${mutated_no_extract_dir}" \
+    --result-file "${mutated_no_extract_result}" \
+    "http://127.0.0.1:${PORT}/av.mp4" \
+    >"${TEST_ROOT}/audio-no-extract-mutated.stdout" 2>&1
+mutated_no_extract_status=$?
+set -e
+if ((mutated_no_extract_status != 65)); then
+    printf 'FAIL: unextracted A/V audio mutation returned %d instead of 65.\n' \
+        "${mutated_no_extract_status}" >&2
+    exit 65
+fi
+[[ ! -e ${mutated_no_extract_result} ]] || {
+    printf 'FAIL: unextracted A/V audio mutation published a result-file.\n' >&2
+    exit 65
+}
+
 # HLS fragments must stay on yt-dlp's native downloader.
 : >"${ARIA2_INVOCATION_LOG}"
 run_engine video hls "http://127.0.0.1:${PORT}/hls/stream.m3u8"

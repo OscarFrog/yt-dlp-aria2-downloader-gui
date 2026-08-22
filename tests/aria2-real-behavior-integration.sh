@@ -9,6 +9,7 @@ PROJECT_DIR=${PROJECT_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd
 readonly PROJECT_DIR
 readonly BASIC_RUNS=${ARIA2_BEHAVIOR_BASIC_RUNS:-3}
 readonly RESUME_RUNS=${ARIA2_BEHAVIOR_RESUME_RUNS:-10}
+readonly QUIESCENCE_RUNS=${ARIA2_BEHAVIOR_QUIESCENCE_RUNS:-10}
 readonly MIN_COMPLETED_RANGE_BYTES=262144
 
 for command_name in aria2c awk bash ffmpeg ffprobe find grep mktemp python3 realpath sed sleep stat tail wc; do
@@ -30,7 +31,11 @@ case ${RESUME_RUNS} in
 '' | *[!0-9]*) printf 'Error: ARIA2_BEHAVIOR_RESUME_RUNS must be a positive integer.\n' >&2; exit 64 ;;
 *) ;;
 esac
-((BASIC_RUNS > 0 && RESUME_RUNS > 0)) || {
+case ${QUIESCENCE_RUNS} in
+'' | *[!0-9]*) printf 'Error: ARIA2_BEHAVIOR_QUIESCENCE_RUNS must be a positive integer.\n' >&2; exit 64 ;;
+*) ;;
+esac
+((BASIC_RUNS > 0 && RESUME_RUNS > 0 && QUIESCENCE_RUNS > 0)) || {
     printf 'Error: aria2 behavior repetition counts must be greater than zero.\n' >&2
     exit 64
 }
@@ -80,10 +85,13 @@ readonly MEDIA_SIZE
 
 SERVER_LOG="${TEST_ROOT}/server.log"
 readonly SERVER_LOG
+SERVER_STATE="${TEST_ROOT}/server.state"
+readonly SERVER_STATE
 : >"${SERVER_LOG}"
 
 cat >"${TEST_ROOT}/server.py" <<'PY_SERVER'
 import http.server
+import os
 import pathlib
 import re
 import socketserver
@@ -95,9 +103,12 @@ import urllib.parse
 root = pathlib.Path(sys.argv[1])
 port_file = pathlib.Path(sys.argv[2])
 log_file = pathlib.Path(sys.argv[3])
+state_file = pathlib.Path(sys.argv[4])
 media_path = root / "media.mp4"
 media_size = media_path.stat().st_size
 log_lock = threading.Lock()
+activity_lock = threading.Lock()
+active_requests = 0
 range_re = re.compile(r"^bytes=(\d+)-(\d*)$")
 
 
@@ -107,6 +118,18 @@ def write_log(*fields):
         with log_file.open("a", encoding="utf-8") as handle:
             handle.write(line)
             handle.flush()
+
+
+def set_activity(delta):
+    global active_requests
+    with activity_lock:
+        next_value = active_requests + delta
+        if next_value < 0:
+            raise RuntimeError("active request counter became negative")
+        active_requests = next_value
+        temporary = pathlib.Path(f"{state_file}.tmp")
+        temporary.write_text(f"{active_requests}\n", encoding="ascii")
+        os.replace(temporary, state_file)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -230,6 +253,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             write_log("END", parsed.path, range_header, status, sent, complete)
 
     def _dispatch(self):
+        set_activity(+1)
+        try:
+            self._dispatch_inner()
+        finally:
+            set_activity(-1)
+
+    def _dispatch_inner(self):
         parsed = urllib.parse.urlsplit(self.path)
         if parsed.path.startswith("/source/") and parsed.path.endswith(".html"):
             name = pathlib.PurePosixPath(parsed.path).stem
@@ -258,6 +288,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/error/media.mp4":
             self._media_response("error", parsed)
             return
+        if parsed.path == "/control/silent-active":
+            body = b"ok\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            # Deliberately stay active without touching SERVER_LOG. The former
+            # log-size heuristic would falsely declare quiescence in this gap.
+            time.sleep(0.50)
+            if self.command != "HEAD":
+                try:
+                    self.wfile.write(body)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            return
         self.send_error(404)
 
     def do_GET(self):
@@ -273,19 +320,20 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 with Server(("127.0.0.1", 0), Handler) as server:
+    set_activity(0)
     port_file.write_text(str(server.server_address[1]), encoding="ascii")
     server.serve_forever()
 PY_SERVER
 
 python3 "${TEST_ROOT}/server.py" \
-    "${TEST_ROOT}/web" "${TEST_ROOT}/port" "${SERVER_LOG}" &
+    "${TEST_ROOT}/web" "${TEST_ROOT}/port" "${SERVER_LOG}" "${SERVER_STATE}" &
 SERVER_PID=$!
 for _ in {1..100}; do
-    [[ -s ${TEST_ROOT}/port ]] && break
+    [[ -s ${TEST_ROOT}/port && -s ${SERVER_STATE} ]] && break
     sleep 0.05
 done
-[[ -s ${TEST_ROOT}/port ]] || {
-    printf 'FAIL: local HTTP server did not publish its port.\n' >&2
+[[ -s ${TEST_ROOT}/port && -s ${SERVER_STATE} ]] || {
+    printf 'FAIL: local HTTP server did not publish its port/activity state.\n' >&2
     exit 65
 }
 PORT=$(<"${TEST_ROOT}/port")
@@ -389,21 +437,25 @@ wait_for_completed_partial_range() {
     return 1
 }
 
+server_is_active() {
+    local activity=''
+
+    if ! { IFS= read -r activity <"${SERVER_STATE}"; } 2>/dev/null; then
+        return 1
+    fi
+    [[ ${activity} =~ ^[1-9][0-9]*$ ]]
+}
+
 wait_for_server_quiescence() {
-    local previous_size=-1
-    local stable=0
-    local current_size
+    local activity=''
     local count=0
-    while ((count < 100)); do
-        current_size=$(stat -c '%s' -- "${SERVER_LOG}")
-        if [[ ${current_size} == "${previous_size}" ]]; then
-            ((stable += 1))
-            if ((stable >= 3)); then
-                return 0
-            fi
-        else
-            stable=0
-            previous_size=${current_size}
+
+    while ((count < 200)); do
+        activity=''
+        if { IFS= read -r activity <"${SERVER_STATE}"; } 2>/dev/null &&
+            [[ ${activity} =~ ^[0-9]+$ ]] &&
+            ((activity == 0)); then
+            return 0
         fi
         sleep 0.05
         ((count += 1))
@@ -486,6 +538,80 @@ run_engine_with_monitor() {
     fi
     return 0
 }
+
+# Negative control for quiescence: keep a response active while SERVER_LOG
+# remains byte-for-byte unchanged. The historical log-size stability heuristic
+# would return after roughly 150 ms; explicit activity state must wait for the
+# response to finish.
+for ((iteration = 1; iteration <= QUIESCENCE_RUNS; iteration += 1)); do
+    printf '=== server quiescence negative control %d/%d ===\n' \
+        "${iteration}" "${QUIESCENCE_RUNS}"
+    log_size_before=$(stat -c '%s' -- "${SERVER_LOG}")
+    python3 - "${PORT}" <<'PY_QUIESCENCE_CLIENT' >/dev/null 2>&1 &
+import sys
+import urllib.request
+
+with urllib.request.urlopen(
+    f"http://127.0.0.1:{sys.argv[1]}/control/silent-active",
+    timeout=5,
+) as response:
+    response.read()
+PY_QUIESCENCE_CLIENT
+    control_pid=$!
+
+    activity_seen=false
+    for _ in {1..200}; do
+        set +e
+        server_is_active
+        activity_status=$?
+        set -e
+        if ((activity_status == 0)); then
+            activity_seen=true
+            break
+        fi
+        sleep 0.01
+    done
+    if [[ ${activity_seen} != true ]]; then
+        printf 'FAIL: silent-active control never became observable.\n' >&2
+        kill -TERM -- "${control_pid}" 2>/dev/null || true
+        wait "${control_pid}" 2>/dev/null || true
+        exit 65
+    fi
+
+    set +e
+    wait_for_server_quiescence
+    quiescence_status=$?
+    set -e
+    if ((quiescence_status != 0)); then
+        printf 'FAIL: explicit quiescence control timed out.\n' >&2
+        kill -TERM -- "${control_pid}" 2>/dev/null || true
+        wait "${control_pid}" 2>/dev/null || true
+        exit 65
+    fi
+    set +e
+    server_is_active
+    activity_status=$?
+    set -e
+    if ((activity_status == 0)); then
+        printf 'FAIL: quiescence returned while the silent response was still active.\n' >&2
+        kill -TERM -- "${control_pid}" 2>/dev/null || true
+        wait "${control_pid}" 2>/dev/null || true
+        exit 65
+    fi
+
+    control_status=0
+    wait "${control_pid}" || control_status=$?
+    if ((control_status != 0)); then
+        printf 'FAIL: silent-active control client returned %d.\n' \
+            "${control_status}" >&2
+        exit 65
+    fi
+    log_size_after=$(stat -c '%s' -- "${SERVER_LOG}")
+    if [[ ${log_size_after} != "${log_size_before}" ]]; then
+        printf 'FAIL: silent-active control unexpectedly changed the server log.\n' >&2
+        exit 65
+    fi
+done
 
 # Range/no-Range/redirection/error behavior is repeated independently.
 for ((iteration = 1; iteration <= BASIC_RUNS; iteration += 1)); do
@@ -662,6 +788,15 @@ for ((iteration = 1; iteration <= RESUME_RUNS; iteration += 1)); do
     }
     assert_av_media "${RUN_FINAL_FILE}"
     assert_aria2_used
+
+    set +e
+    wait_for_server_quiescence
+    quiescence_status=$?
+    set -e
+    if ((quiescence_status != 0)); then
+        printf 'FAIL: local server did not quiesce before resume accounting.\n' >&2
+        exit 65
+    fi
 
     post_resume_bytes=$(
         awk -F'|' -v marker="${marker}" '
