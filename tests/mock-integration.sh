@@ -448,6 +448,35 @@ case " $* " in
     *' --progress '*)
         if [[ -n ${MOCK_ZENITY_PROGRESS_STATUS:-} ]]; then
             IFS= read -r _ || true
+
+            # For timeout/error signal tests, do not let the mock progress dialog
+            # fail before the long-running worker has installed its TERM trap.
+            # This turns the termination marker into a deterministic assertion
+            # instead of an assertion on process-scheduling order.
+            if [[ ${MOCK_ZENITY_WAIT_FOR_WORKER_START:-0} == 1 ]]; then
+                worker_start_marker=${MOCK_STARTED_MARKER:-}
+                if [[ -z ${worker_start_marker} ]]; then
+                    printf '%s\n' \
+                        'MOCK_ZENITY_WAIT_FOR_WORKER_START requires MOCK_STARTED_MARKER.' >&2
+                    exit 64
+                fi
+
+                worker_started=false
+                for ((attempt = 0; attempt < 100; attempt++)); do
+                    if [[ -f ${worker_start_marker} ]]; then
+                        worker_started=true
+                        break
+                    fi
+                    sleep 0.1
+                done
+
+                if [[ ${worker_started} != true ]]; then
+                    printf 'Timed out waiting for mock worker startup: %s\n' \
+                        "${worker_start_marker}" >&2
+                    exit 66
+                fi
+            fi
+
             exit "${MOCK_ZENITY_PROGRESS_STATUS}"
         fi
         if [[ ${MOCK_CANCEL_AFTER_EOF:-0} == 1 ]]; then
@@ -1681,27 +1710,39 @@ assert_status 1 'missing aria2c capability is rejected' \
     -- 'https://example.com/watch?v=missing-aria2-option'
 
 # Progress-dialog timeout and unexpected error terminate the worker group.
+# Synchronize the injected Zenity failure with a worker-start marker so the
+# termination assertion proves signal delivery, not scheduler ordering.
+progress_timeout_started="${TEST_ROOT}/progress-timeout-started"
 progress_timeout_marker="${TEST_ROOT}/progress-timeout-terminated"
 progress_timeout_errors="${TEST_ROOT}/progress-timeout-errors.txt"
 prepare_argument_log 'progress-timeout'
 assert_status 1 'progress dialog timeout is propagated' \
     env MOCK_LONG_DOWNLOAD=1 MOCK_ZENITY_PROGRESS_STATUS=5 \
+    MOCK_ZENITY_WAIT_FOR_WORKER_START=1 \
+    MOCK_STARTED_MARKER="${progress_timeout_started}" \
     MOCK_TERMINATION_MARKER="${progress_timeout_marker}" \
     MOCK_ERROR_CAPTURE="${progress_timeout_errors}" \
     "${PROJECT_DIR}/download-video-gui.sh"
+wait_for_file "${progress_timeout_started}" 10 \
+    'progress-timeout worker started before injected timeout'
 wait_for_file "${progress_timeout_marker}" 10 \
     'progress-timeout worker receives TERM'
 assert_file_contains "${progress_timeout_errors}" 'progress dialog timed out' \
     'progress-timeout diagnostic'
 
+progress_error_started="${TEST_ROOT}/progress-error-started"
 progress_error_marker="${TEST_ROOT}/progress-error-terminated"
 progress_error_capture="${TEST_ROOT}/progress-error-errors.txt"
 prepare_argument_log 'progress-error'
 assert_status 1 'unexpected progress dialog status is reported' \
     env MOCK_LONG_DOWNLOAD=1 MOCK_ZENITY_PROGRESS_STATUS=42 \
+    MOCK_ZENITY_WAIT_FOR_WORKER_START=1 \
+    MOCK_STARTED_MARKER="${progress_error_started}" \
     MOCK_TERMINATION_MARKER="${progress_error_marker}" \
     MOCK_ERROR_CAPTURE="${progress_error_capture}" \
     "${PROJECT_DIR}/download-video-gui.sh"
+wait_for_file "${progress_error_started}" 10 \
+    'progress-error worker started before injected error'
 wait_for_file "${progress_error_marker}" 10 \
     'progress-error worker receives TERM'
 assert_file_contains "${progress_error_capture}" 'status 42' \
