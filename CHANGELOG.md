@@ -1,3 +1,42 @@
+## 2.1.31 - 2026-08-22
+
+### HLS post-remux validation
+
+- Reject a wrapper-remuxed HLS MKV when FFmpeg exits successfully but FFprobe
+  shows a material duration loss versus the repaired HLS source. The guard uses
+  metadata only, permits a bounded 2% timestamp/remux tolerance with a 0.5 s
+  floor and 5 s ceiling, and retains the repaired source for diagnosis instead
+  of performing a costly full decode.
+- Add a real FFmpeg/FFprobe regression fixture reproducing the truncated-input
+  false-success boundary and a positive complete-input control.
+
+### Real-tool and progress qualification
+
+- Extend hermetic real-tool coverage to direct HTTP, native audio, HLS and DASH
+  fixtures generated locally, with a transparent aria2c shim proving the real
+  downloader boundary while preserving native DASH/HLS routing.
+- Add a real `ffmpeg -nostdin -progress pipe:1` integration that verifies
+  parseable progress, monotonic/bounded global progress, FFprobe-valid output,
+  and no global 100% before final result publication.
+- Repeat deterministic real-tool routing and HLS duration scenarios three times
+  in CI and retain a routing mutation check.
+
+### Race and upstream-compatibility CI
+
+- Add bounded deterministic jitter to cancellation/success arbitration, delayed
+  PGID publication, worker/FFmpeg startup, and supervisor startup; repeat the
+  complete race-sensitive mock suite twenty times.
+- Preserve pinned yt-dlp `2026.6.9` and `2026.8.19` PR qualification and add a
+  separate weekly job that resolves, logs, and tests the current stable yt-dlp.
+
+### Documentation and release metadata
+
+- Restore English/French prerequisite parity for yt-dlp's bundled `curl_cffi`
+  and EJS support.
+- Document the current `web_safari` HLS trusted-session limitation symmetrically
+  in English and French without adding an automatic PO Token provider.
+- Bump user-facing version declarations and release examples to 2.1.31.
+
 ## 2.1.30 - 2026-08-22
 
 ### Package cleanup and filesystem safety

@@ -134,10 +134,13 @@ assert_file_contains "${script_dir}/tests/mock-integration.sh" \
 assert_file_contains "${script_dir}/tests/mock-integration.sh" \
     '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
     'non-owner test cleanup protection'
-readonly EXPECTED_VERSION='2.1.30'
+readonly EXPECTED_VERSION='2.1.31'
 assert_file_contains "${script_dir}/download-video.sh" \
     "readonly VERSION=\"${EXPECTED_VERSION}\"" \
     'engine version constant'
+assert_file_contains "${script_dir}/install-fedora.sh" \
+    "readonly APP_VERSION='${EXPECTED_VERSION}'" \
+    'Fedora bootstrap application version'
 for versioned_script in \
     download-video.sh download-video-gui.sh progress-monitor.sh install-gui.sh; do
     assert_file_contains "${script_dir}/${versioned_script}" \
@@ -266,6 +269,24 @@ assert_file_contains "${script_dir}/scripts/release-preflight.sh" \
 assert_file_contains "${script_dir}/scripts/release-preflight.sh" \
     'sole rpm-signing reviewer must match the authenticated maintainer' \
     'release preflight binds the sole reviewer to the authenticated maintainer'
+assert_file_contains "${script_dir}/download-video.sh" \
+    'hls_duration_loss_us > hls_duration_tolerance_us' \
+    'HLS post-remux duration loss is bounded before publication'
+assert_file_contains "${script_dir}/tests/real-tools-integration.sh" \
+    "--downloader 'dash,m3u8:native'" \
+    'real-tool qualification defends native DASH/HLS routing'
+assert_file_contains "${script_dir}/.github/workflows/real-tools.yml" \
+    'schedule:' \
+    'current stable yt-dlp is checked on a scheduled workflow'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'Run HLS post-remux duration validation (3x)' \
+    'release qualification gates HLS duration validation'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'Run real FFmpeg progress integration' \
+    'release qualification gates real FFmpeg progress'
+assert_file_contains "${script_dir}/.github/workflows/stress.yml" \
+    'Mock process/cancellation stress (20x deterministic jitter)' \
+    'race-sensitive mock qualification uses twenty deterministic jitter passes'
 assert_file_contains "${script_dir}/.github/workflows/stress.yml" \
     'Package cleanup hardening stress (10x)' \
     'package cleanup safety is repeatedly stress-tested'

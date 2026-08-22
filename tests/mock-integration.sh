@@ -161,10 +161,11 @@ if [[ -n ${progress_ready_marker} ]]; then
 fi
 
 if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
+    trap 'printf terminated > "${MOCK_TERMINATION_MARKER:?}"; exit 143' TERM INT
+    sleep "${MOCK_WORKER_START_JITTER_SECONDS:-0}"
     if [[ -n ${MOCK_STARTED_MARKER:-} ]]; then
         printf started >"${MOCK_STARTED_MARKER}"
     fi
-    trap 'printf terminated > "${MOCK_TERMINATION_MARKER:?}"; exit 143' TERM INT
     while true; do
         sleep 0.1
     done
@@ -297,10 +298,11 @@ if [[ -n ${MOCK_FFMPEG_ARG_LOG:-} ]]; then
     printf '%s\0' "$@" >"${MOCK_FFMPEG_ARG_LOG}"
 fi
 if [[ ${MOCK_LONG_FFMPEG:-0} == 1 ]]; then
+    trap 'printf terminated >"${MOCK_FFMPEG_TERMINATION_MARKER:?}"; exit 143' TERM INT
+    sleep "${MOCK_FFMPEG_START_JITTER_SECONDS:-0}"
     if [[ -n ${MOCK_FFMPEG_STARTED_MARKER:-} ]]; then
         printf started >"${MOCK_FFMPEG_STARTED_MARKER}"
     fi
-    trap 'printf terminated >"${MOCK_FFMPEG_TERMINATION_MARKER:?}"; exit 143' TERM INT
     while true; do
         sleep 0.1
     done
@@ -364,7 +366,7 @@ set -euo pipefail
 destination=${!#}
 if [[ ${destination} == */pgid && ${MOCK_DELAY_PGID_PUBLISH:-0} == 1 ]]; then
     trap 'printf terminated >"${MOCK_PGID_DELAY_TERMINATION_MARKER:?}"; exit 143' TERM INT
-    sleep 6
+    sleep "${MOCK_PGID_PUBLISH_DELAY_SECONDS:-6}"
 fi
 exec "${REAL_MV:?}" "$@"
 EOF_MV
@@ -383,6 +385,7 @@ fi
 if [[ -n ${MOCK_SETSID_LOG:-} ]]; then
     printf 'call\n' >>"${MOCK_SETSID_LOG}"
 fi
+sleep "${MOCK_SETSID_START_JITTER_SECONDS:-0}"
 exec "${REAL_SETSID:?}" "$@"
 EOF_SETSID
 chmod +x "${MOCK_BIN}/setsid"
@@ -449,10 +452,12 @@ case " $* " in
         fi
         if [[ ${MOCK_CANCEL_AFTER_EOF:-0} == 1 ]]; then
             cat >/dev/null
+            sleep "${MOCK_CANCEL_AFTER_EOF_JITTER_SECONDS:-0}"
             exit 1
         fi
         if [[ ${MOCK_CANCEL:-0} == 1 ]]; then
             IFS= read -r _ || true
+            sleep "${MOCK_CANCEL_JITTER_SECONDS:-0}"
             exit 1
         fi
 

@@ -320,7 +320,7 @@ jobs:
   real-tools:
     needs: validate
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -338,8 +338,28 @@ jobs:
           "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
             --disable-pip-version-check "yt-dlp==${{ matrix.yt_dlp_version }}"
           echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >> "${GITHUB_PATH}"
-      - name: Run hermetic real-tool integration
-        run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/real-tools-integration.sh
+      - name: Run hermetic routing integration (3x)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for iteration in 1 2 3; do
+            printf '=== release routing iteration %d/3 ===\n' "${iteration}"
+            timeout --signal=TERM --kill-after=10s 8m \
+              bash ./tests/real-tools-integration.sh
+          done
+      - name: Run real FFmpeg progress integration
+        run: |
+          timeout --signal=TERM --kill-after=10s 8m \
+            bash ./tests/ffmpeg-real-progress-integration.sh
+      - name: Run HLS post-remux duration validation (3x)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for iteration in 1 2 3; do
+            printf '=== release HLS duration guard iteration %d/3 ===\n' "${iteration}"
+            timeout --signal=TERM --kill-after=10s 5m \
+              bash ./tests/hls-remux-duration-integration.sh
+          done
 
   zip:
     needs: [validate, real-tools]
