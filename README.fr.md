@@ -208,10 +208,14 @@ opérationnelle et pas seulement un nom dans le workflow. Conservez
 d'environnement**. Le bundle privé doit être produit avec
 `--export-secret-subkeys` de GnuPG : la clé privée primaire reste hors ligne et
 n'est importée que comme stub `sec#`, tandis que la sous-clé de signature dédiée
-reste utilisable. Configurez des réviseurs obligatoires, interdisez
-l'auto-approbation, désactivez le contournement administrateur lorsque cela est
-opérationnellement possible et limitez l'environnement à une politique de
-déploiement **tag** sélectionnée `v*`. La reprise manuelle reste disponible,
+reste utilisable. Configurez un réviseur obligatoire et désactivez le
+contournement administrateur. Pour un dépôt volontairement exploité par un
+**mainteneur unique**, le seul réviseur peut également être l'auteur du
+déclenchement : `prevent_self_review` reste donc désactivé par conception. Le
+preflight mainteneur exige alors la confirmation explicite
+`--confirm-single-maintainer-self-review` et vérifie que l'unique réviseur
+correspond au compte GitHub authentifié. Limitez l'environnement à une politique
+de déploiement **tag** sélectionnée `v*`. La reprise manuelle reste disponible,
 mais elle doit exécuter le workflow depuis le tag exact de la release :
 
 ```bash

@@ -292,13 +292,19 @@ causes publication to fail explicitly. Only the final job receives
 The preferred preflight is the repository helper:
 
 ```bash
-bash ./scripts/release-preflight.sh   --confirm-admin-bypass-disabled   --confirm-tag-policy   v2.1.30
+bash ./scripts/release-preflight.sh \
+  --confirm-admin-bypass-disabled \
+  --confirm-tag-policy \
+  --confirm-single-maintainer-self-review \
+  v2.1.30
 ```
 
-The two confirmation flags require the operator to have checked in the GitHub
-UI that administrator bypass is disabled and that the selected `v*` deployment
-policy is a **tag** policy. The script additionally verifies Immutable Releases,
-required reviewers, self-review prevention, secret scope, the pinned public
+The three confirmation flags require the operator to have checked that
+administrator bypass is disabled, that the selected `v*` deployment policy is a
+**tag** policy, and that single-maintainer self-approval is intentional. The
+script additionally verifies Immutable Releases, exactly one required reviewer,
+that the reviewer matches the authenticated GitHub account, that self-review is
+allowed for this single-maintainer mode, secret scope, the pinned public
 certificate, the dedicated signing subkey, signed-tag/HEAD/version identity,
 and warns when the signing subkey is within 90 days of expiry.
 
@@ -328,8 +334,9 @@ Before approving the `rpm-sign` environment deployment, also verify the
 
 1. `RPM_SIGNING_PRIVATE_KEY_B64` and `RPM_SIGNING_PASSPHRASE` are environment
    secrets, not repository-level secrets;
-2. required reviewers are configured and self-review is prevented when those
-   controls are available for the repository;
+2. exactly one required reviewer is configured for this single-maintainer
+   repository, that reviewer is the authenticated maintainer, and self-review
+   remains intentionally allowed;
 3. deployment branch/tag rules are restricted to the minimum release paths
    required by the tag workflow and any intentionally retained
    `workflow_dispatch` recovery path;

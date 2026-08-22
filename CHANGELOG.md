@@ -30,9 +30,10 @@
   immutable public release, compares all assets byte-for-byte with the exact
   tested Actions artifacts, rechecks `SHA256SUMS`, and verifies release/asset
   provenance against the exact tag commit.
-- Add a maintainer preflight for Immutable Releases, `rpm-signing` reviewers,
-  self-review prevention, tag deployment policy, signing-secret scope, pinned
-  certificate identity, and signing-subkey expiry.
+- Add a maintainer preflight for Immutable Releases, `rpm-signing` reviewer
+  identity, explicit single-maintainer self-approval policy, tag deployment
+  policy, signing-secret scope, pinned certificate identity, and signing-subkey
+  expiry.
 
 ### Documentation and release metadata
 

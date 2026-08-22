@@ -198,10 +198,14 @@ not merely a workflow label. Store `RPM_SIGNING_PRIVATE_KEY_B64` and
 `RPM_SIGNING_PASSPHRASE` as **environment secrets**. The private-key bundle
 must be produced with GnuPG `--export-secret-subkeys`: the primary private key
 stays offline and imports only as a `sec#` stub, while the dedicated signing
-subkey remains usable. Configure required reviewers, prevent self-review,
-disable administrator bypass when operationally possible, and restrict the
-Environment to a selected `v*` **tag** deployment policy. Manual recovery remains
-available, but it must execute the workflow from the exact release tag:
+subkey remains usable. Configure a required reviewer and disable administrator
+bypass. For a repository intentionally operated by a **single maintainer**, the
+sole reviewer may also be the workflow initiator, so `prevent_self_review`
+remains disabled by design; the maintainer-side preflight requires an explicit
+`--confirm-single-maintainer-self-review` acknowledgement and verifies that the
+sole reviewer matches the authenticated GitHub account. Restrict the Environment
+to a selected `v*` **tag** deployment policy. Manual recovery remains available,
+but it must execute the workflow from the exact release tag:
 
 ```bash
 gh workflow run release.yml \

@@ -25,17 +25,21 @@ Usage:
   scripts/release-preflight.sh \
     --confirm-admin-bypass-disabled \
     --confirm-tag-policy \
+    --confirm-single-maintainer-self-review \
     vX.Y.Z
 
-The two explicit confirmations cover GitHub Environment settings that the
-current REST responses do not expose unambiguously enough for this preflight:
+The explicit confirmations cover GitHub Environment settings and operating
+choices that must be acknowledged by the maintainer:
 - administrator deployment-protection bypass is disabled;
-- the selected deployment policy named v* is configured as a TAG policy.
+- the selected deployment policy named v* is configured as a TAG policy;
+- this repository is intentionally operated by one maintainer, so the sole
+  required reviewer may approve the deployment they initiated.
 USAGE
 }
 
 confirm_admin_bypass=false
 confirm_tag_policy=false
+confirm_single_maintainer_self_review=false
 while (($# > 1)); do
     case $1 in
     --confirm-admin-bypass-disabled)
@@ -43,6 +47,9 @@ while (($# > 1)); do
         ;;
     --confirm-tag-policy)
         confirm_tag_policy=true
+        ;;
+    --confirm-single-maintainer-self-review)
+        confirm_single_maintainer_self_review=true
         ;;
     *)
         usage
@@ -69,6 +76,12 @@ readonly release_tag=$1
 [[ ${confirm_tag_policy} == true ]] || {
     printf '%s\n' \
         'Error: confirm in GitHub Settings > Environments > rpm-signing that v* is configured as a TAG deployment policy.' >&2
+    usage
+    exit 77
+}
+[[ ${confirm_single_maintainer_self_review} == true ]] || {
+    printf '%s\n' \
+        'Error: explicitly confirm that this single-maintainer repository intentionally allows the sole reviewer to self-approve rpm-signing.' >&2
     usage
     exit 77
 }
@@ -148,8 +161,26 @@ reviewer_count=$(
         "${environment_endpoint}" \
         --jq '[.protection_rules[]? | select(.type == "required_reviewers")][0].reviewers | length'
 )
-((reviewer_count >= 1)) ||
-    fail 'rpm-signing required-reviewers rule has no reviewer.'
+[[ ${reviewer_count} == 1 ]] ||
+    fail "single-maintainer rpm-signing must have exactly one reviewer; found ${reviewer_count}."
+
+reviewer_login=$(
+    api_capture \
+        'unable to query rpm-signing reviewer identity.' \
+        "${environment_endpoint}" \
+        --jq '[.protection_rules[]? | select(.type == "required_reviewers")][0].reviewers[0].reviewer.login // ""'
+)
+[[ -n ${reviewer_login} ]] ||
+    fail 'unable to determine the sole rpm-signing reviewer login.'
+
+authenticated_login=$(
+    api_capture \
+        'unable to query the authenticated GitHub user.' \
+        user \
+        --jq '.login'
+)
+[[ ${reviewer_login} == "${authenticated_login}" ]] ||
+    fail "sole rpm-signing reviewer must match the authenticated maintainer: reviewer=${reviewer_login} authenticated=${authenticated_login}"
 
 prevent_self_review=$(
     api_capture \
@@ -157,8 +188,8 @@ prevent_self_review=$(
         "${environment_endpoint}" \
         --jq '[.protection_rules[]? | select(.type == "required_reviewers")][0].prevent_self_review // false'
 )
-[[ ${prevent_self_review} == true ]] ||
-    fail 'rpm-signing must prevent self-review.'
+[[ ${prevent_self_review} == false ]] ||
+    fail 'single-maintainer rpm-signing must allow self-review.'
 
 custom_policies=$(
     api_capture \
@@ -314,8 +345,10 @@ fi
 printf 'Release preflight passed for %s at %s.\n' \
     "${release_tag}" "${tag_commit}"
 printf '%s\n' \
-    'rpm-signing: reviewer(s), self-review prevention, v* deployment policy, and environment-secret scope verified.'
+    'rpm-signing: sole authenticated reviewer, intentional self-review allowance, v* deployment policy, and environment-secret scope verified.'
 printf '%s\n' \
     'Administrator bypass: operator explicitly confirmed disabled.'
 printf '%s\n' \
     'Deployment policy type: operator explicitly confirmed v* is a TAG policy.'
+printf '%s\n' \
+    'Single-maintainer self-review: operator explicitly confirmed intentional.'

@@ -257,6 +257,15 @@ assert_file_contains "${script_dir}/.github/workflows/release.yml" \
 assert_file_contains "${script_dir}/.github/workflows/release.yml" \
     'manual release recovery must run from a tag ref' \
     'manual release recovery is bound to an exact tag ref'
+assert_file_contains "${script_dir}/scripts/release-preflight.sh" \
+    '--confirm-single-maintainer-self-review' \
+    'release preflight requires explicit single-maintainer self-review acknowledgement'
+assert_file_contains "${script_dir}/scripts/release-preflight.sh" \
+    'single-maintainer rpm-signing must allow self-review.' \
+    'release preflight verifies self-review remains enabled for the sole maintainer'
+assert_file_contains "${script_dir}/scripts/release-preflight.sh" \
+    'sole rpm-signing reviewer must match the authenticated maintainer' \
+    'release preflight binds the sole reviewer to the authenticated maintainer'
 assert_file_contains "${script_dir}/.github/workflows/stress.yml" \
     'Package cleanup hardening stress (10x)' \
     'package cleanup safety is repeatedly stress-tested'
