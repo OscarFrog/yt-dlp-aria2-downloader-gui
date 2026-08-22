@@ -229,6 +229,19 @@ assert_file_contains "${script_dir}/.github/workflows/shell.yml" \
     'cancel-in-progress: true' \
     'outdated validation runs are cancelled'
 
+assert_file_contains "${script_dir}/.github/workflows/packages.yml" \
+    'Qualify RPM v4/v6 signature semantics (3x)' \
+    'PR CI qualifies RPM v4/v6 signature semantics'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'Qualify release RPM v4/v6 signature semantics (3x)' \
+    'release CI qualifies RPM v4/v6 signature semantics'
+assert_file_contains "${script_dir}/.github/workflows/release.yml" \
+    'manual release recovery must run from a tag ref' \
+    'manual release recovery is bound to an exact tag ref'
+assert_file_contains "${script_dir}/.github/workflows/stress.yml" \
+    'Package cleanup hardening stress (10x)' \
+    'package cleanup safety is repeatedly stress-tested'
+
 assert_file_contains \
     "${script_dir}/packaging/rpm/build-rpm.sh" \
     '--define "_rpmformat 4"' \

@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to publish, for example v2.1.26
+        description: Existing semantic-version tag to publish, for example vX.Y.Z
         required: true
         type: string
 permissions:
@@ -103,6 +103,24 @@ jobs:
           set -Eeuo pipefail
           [[ ${RELEASE_TAG} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           tag_commit=$(git rev-parse "${RELEASE_TAG}^{commit}")
+
+          if [[ ${GITHUB_EVENT_NAME} == workflow_dispatch ]]; then
+            [[ ${GITHUB_REF_TYPE} == tag ]] || {
+              printf 'Error: manual release recovery must run from a tag ref; got %s.\n' \
+                "${GITHUB_REF_TYPE}" >&2
+              exit 65
+            }
+            [[ ${GITHUB_REF_NAME} == "${RELEASE_TAG}" ]] || {
+              printf 'Error: workflow_dispatch ref/tag mismatch: ref=%s requested=%s\n' \
+                "${GITHUB_REF_NAME}" "${RELEASE_TAG}" >&2
+              exit 65
+            }
+            [[ ${GITHUB_SHA} == "${tag_commit}" ]] || {
+              printf 'Error: workflow_dispatch source SHA differs from release tag commit.\n' >&2
+              exit 65
+            }
+          fi
+
           [[ ${tag_commit} == "$(git rev-parse HEAD)" ]]
           git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
           git merge-base --is-ancestor "${tag_commit}" origin/main
@@ -191,9 +209,11 @@ jobs:
 
           printf 'Previous immutable release candidate: %s\n' "${previous_tag}"
           printf 'Previous release commit: %s\n' "${previous_commit}"
-          printf 'tag=%s\n' "${previous_tag}" >>"${GITHUB_OUTPUT}"
-          printf 'version=%s\n' "${previous_tag#v}" >>"${GITHUB_OUTPUT}"
-          printf 'commit=%s\n' "${previous_commit}" >>"${GITHUB_OUTPUT}"
+          {
+            printf 'tag=%s\n' "${previous_tag}"
+            printf 'version=%s\n' "${previous_tag#v}"
+            printf 'commit=%s\n' "${previous_commit}"
+          } >>"${GITHUB_OUTPUT}"
 
       - name: Download and verify exact previous immutable packages
         env:
@@ -359,7 +379,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Install RPM build tools
-        run: dnf install --assumeyes cpio desktop-file-utils findutils git gzip rpm-build tar
+        run: dnf install --assumeyes cpio desktop-file-utils findutils gawk git gnupg2 gzip python3 rpm-build rpm-sign tar
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_TAG }}
@@ -371,6 +391,20 @@ jobs:
           set -Eeuo pipefail
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           bash packaging/rpm/build-rpm.sh "${RELEASE_TAG#v}" dist
+      - name: Qualify release RPM v4/v6 signature semantics (3x)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          packages=(dist/*.rpm)
+          shopt -u nullglob
+          ((${#packages[@]} == 1))
+
+          for iteration in {1..3}; do
+            printf '=== release RPM v4/v6 qualification iteration %d/3 ===\n' "${iteration}"
+            timeout --signal=TERM --kill-after=10s 4m \
+              bash ./tests/rpm6-multisig-integration.sh "${packages[0]}"
+          done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: unsigned-rpm
@@ -703,10 +737,16 @@ jobs:
         run: |
           set -Eeuo pipefail
           rpm -q yt-dlp-aria2-downloader-gui ffmpeg aria2 zenity
-          ! rpm -q ffmpeg-free
+          if rpm -q ffmpeg-free >/dev/null 2>&1; then
+            printf '%s\n' 'Error: ffmpeg-free must not remain installed after bootstrap.' >&2
+            exit 65
+          fi
           vendor=$(rpm -q --qf '%{VENDOR}\n' ffmpeg)
           [[ ${vendor} == *'RPM Fusion'* ]]
-          ! command -v deno >/dev/null 2>&1
+          if command -v deno >/dev/null 2>&1; then
+            printf '%s\n' 'Error: Deno must not be provided by the system PATH.' >&2
+            exit 65
+          fi
           runtime_manager=/usr/libexec/yt-dlp-aria2-downloader/runtime-manager.sh
           HOME="${PACKAGE_TEST_HOME}" "${runtime_manager}" versions
           /usr/bin/yt-dlp-aria2-downloader --version
