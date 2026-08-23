@@ -2,6 +2,9 @@
 
 - Add real-tool regression coverage for audio files with attached cover art, and ensure
   the suite detects a `V:0` to `v:0` validation regression.
+- Normalize the headers of every canonical shell script and enforce the shared format in static validation.
+- Strengthen project-version coherence checks and remove release validation dependencies on versioned comment headers.
+- Normalize permanent shell comments around rationale-first production notes and durable test labels, removing patch-specific comment history and redundant version assertions.
 
 ## 2.1.33 - 2026-08-23
 

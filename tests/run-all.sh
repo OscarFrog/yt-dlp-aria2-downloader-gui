@@ -1,35 +1,40 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : tests/run-all.sh
+# Purpose     : Run the complete local validation suite.
+# ==============================================================================
 
 set -euo pipefail
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-readonly script_dir
-project_dir=$(cd -- "${script_dir}/.." && pwd -P)
-readonly project_dir
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+readonly SCRIPT_DIR
+PROJECT_DIR=$(cd -- "${SCRIPT_DIR}/.." && pwd -P)
+readonly PROJECT_DIR
 
-project_files="${project_dir}/tests/lib/project-files.sh"
-readonly project_files
-if [[ ! -r ${project_files} ]]; then
+PROJECT_FILES="${PROJECT_DIR}/tests/lib/project-files.sh"
+readonly PROJECT_FILES
+if [[ ! -r ${PROJECT_FILES} ]]; then
     printf 'Error: required project file list is not readable: %s\n' \
-        "${project_files}" >&2
+        "${PROJECT_FILES}" >&2
     exit 66
 fi
 # Resolve this source relative to tests/run-all.sh for ShellCheck.
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/project-files.sh
-source "${project_files}"
+source "${PROJECT_FILES}"
 
 for array_name in PRODUCTION_SHELL_FILES PACKAGING_SHELL_FILES TEST_SHELL_FILES; do
-    if ! array_declaration=$(declare -p "${array_name}" 2>/dev/null) ||
-        [[ ${array_declaration} != 'declare -a '* ]]; then
+    if ! array_declaration=$(declare -p "${array_name}" 2>/dev/null) \
+        || [[ ${array_declaration} != 'declare -a '* ]]; then
         printf 'Error: %s is not an indexed array in %s.\n' \
-            "${array_name}" "${project_files}" >&2
+            "${array_name}" "${PROJECT_FILES}" >&2
         exit 65
     fi
 done
-if ((${#PRODUCTION_SHELL_FILES[@]} == 0 ||
-    ${#PACKAGING_SHELL_FILES[@]} == 0 ||
+if ((${#PRODUCTION_SHELL_FILES[@]} == 0 || \
+    ${#PACKAGING_SHELL_FILES[@]} == 0 || \
     ${#TEST_SHELL_FILES[@]} == 0)); then
     printf 'Error: project-files.sh returned an empty shell-file list.\n' >&2
     exit 65
@@ -39,7 +44,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-cd -- "${project_dir}"
+cd -- "${PROJECT_DIR}"
 
 if ! command -v shellcheck >/dev/null 2>&1; then
     printf 'Error: shellcheck is required to run the complete validation suite.\n' >&2

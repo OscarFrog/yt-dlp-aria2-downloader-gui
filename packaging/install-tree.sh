@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : packaging/install-tree.sh
+# Purpose     : Assemble the packaged application tree under a staging DESTDIR.
+# ==============================================================================
 
 set -Eeuo pipefail
 umask 022
@@ -10,44 +15,53 @@ if (($# != 3)); then
 fi
 readonly DESTDIR=$1 VERSION=$2 PRIVATE_DIR=$3
 readonly PACKAGE_NAME='yt-dlp-aria2-downloader-gui'
-[[ ${DESTDIR} == /* ]] || { printf 'Error: DESTDIR must be absolute.\n' >&2; exit 2; }
-[[ ${PRIVATE_DIR} == /usr/* && ${PRIVATE_DIR} != */../* ]] || { printf 'Error: invalid PRIVATE_DIR.\n' >&2; exit 2; }
-[[ ${VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { printf 'Error: invalid version.\n' >&2; exit 2; }
+[[ ${DESTDIR} == /* ]] || {
+    printf 'Error: DESTDIR must be absolute.\n' >&2
+    exit 2
+}
+[[ ${PRIVATE_DIR} == /usr/* && ${PRIVATE_DIR} != */../* ]] || {
+    printf 'Error: invalid PRIVATE_DIR.\n' >&2
+    exit 2
+}
+[[ ${VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    printf 'Error: invalid version.\n' >&2
+    exit 2
+}
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-project_dir=$(cd -- "${script_dir}/.." && pwd -P)
-readonly script_dir project_dir
-readonly private_target="${DESTDIR}${PRIVATE_DIR}"
-readonly bin_dir="${DESTDIR}/usr/bin"
-readonly applications_dir="${DESTDIR}/usr/share/applications"
-readonly icon_dir="${DESTDIR}/usr/share/icons/hicolor/scalable/apps"
-readonly doc_dir="${DESTDIR}/usr/share/doc/${PACKAGE_NAME}"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+PROJECT_DIR=$(cd -- "${SCRIPT_DIR}/.." && pwd -P)
+readonly SCRIPT_DIR PROJECT_DIR
+readonly PRIVATE_TARGET="${DESTDIR}${PRIVATE_DIR}"
+readonly BIN_DIR="${DESTDIR}/usr/bin"
+readonly APPLICATIONS_DIR="${DESTDIR}/usr/share/applications"
+readonly ICON_DIR="${DESTDIR}/usr/share/icons/hicolor/scalable/apps"
+readonly DOC_DIR="${DESTDIR}/usr/share/doc/${PACKAGE_NAME}"
 
 for required_file in download-video.sh download-video-gui.sh progress-monitor.sh runtime-manager.sh \
     packaging/package-user-cleanup.sh \
     README.md README.fr.md CHANGELOG.md packaging/yt-dlp-aria2-downloader.desktop \
     packaging/icons/yt-dlp-aria2-downloader.svg packaging/keys/yt-dlp-public.key; do
-    [[ -f ${project_dir}/${required_file} ]] || {
+    [[ -f ${PROJECT_DIR}/${required_file} ]] || {
         printf 'Error: required packaging input is absent: %s\n' "${required_file}" >&2
         exit 66
     }
 done
 
-install -d -m 0755 -- "${private_target}" "${bin_dir}" "${applications_dir}" "${icon_dir}" "${doc_dir}"
-install -m 0755 -- "${project_dir}/download-video.sh" "${project_dir}/download-video-gui.sh" \
-    "${project_dir}/progress-monitor.sh" "${project_dir}/runtime-manager.sh" \
-    "${project_dir}/packaging/package-user-cleanup.sh" "${private_target}/"
-install -d -m 0755 -- "${private_target}/keys"
-install -m 0644 -- "${project_dir}/packaging/keys/yt-dlp-public.key" \
-    "${private_target}/keys/yt-dlp-public.key"
-install -m 0644 -- "${project_dir}/README.md" "${project_dir}/README.fr.md" \
-    "${project_dir}/CHANGELOG.md" "${doc_dir}/"
-install -m 0644 -- "${project_dir}/packaging/yt-dlp-aria2-downloader.desktop" \
-    "${applications_dir}/yt-dlp-aria2-downloader.desktop"
-install -m 0644 -- "${project_dir}/packaging/icons/yt-dlp-aria2-downloader.svg" \
-    "${icon_dir}/yt-dlp-aria2-downloader.svg"
+install -d -m 0755 -- "${PRIVATE_TARGET}" "${BIN_DIR}" "${APPLICATIONS_DIR}" "${ICON_DIR}" "${DOC_DIR}"
+install -m 0755 -- "${PROJECT_DIR}/download-video.sh" "${PROJECT_DIR}/download-video-gui.sh" \
+    "${PROJECT_DIR}/progress-monitor.sh" "${PROJECT_DIR}/runtime-manager.sh" \
+    "${PROJECT_DIR}/packaging/package-user-cleanup.sh" "${PRIVATE_TARGET}/"
+install -d -m 0755 -- "${PRIVATE_TARGET}/keys"
+install -m 0644 -- "${PROJECT_DIR}/packaging/keys/yt-dlp-public.key" \
+    "${PRIVATE_TARGET}/keys/yt-dlp-public.key"
+install -m 0644 -- "${PROJECT_DIR}/README.md" "${PROJECT_DIR}/README.fr.md" \
+    "${PROJECT_DIR}/CHANGELOG.md" "${DOC_DIR}/"
+install -m 0644 -- "${PROJECT_DIR}/packaging/yt-dlp-aria2-downloader.desktop" \
+    "${APPLICATIONS_DIR}/yt-dlp-aria2-downloader.desktop"
+install -m 0644 -- "${PROJECT_DIR}/packaging/icons/yt-dlp-aria2-downloader.svg" \
+    "${ICON_DIR}/yt-dlp-aria2-downloader.svg"
 
 relative_private="../${PRIVATE_DIR#/usr/}"
-ln -s -- "${relative_private}/download-video.sh" "${bin_dir}/yt-dlp-aria2-downloader"
-ln -s -- "${relative_private}/download-video-gui.sh" "${bin_dir}/yt-dlp-aria2-downloader-gui"
+ln -s -- "${relative_private}/download-video.sh" "${BIN_DIR}/yt-dlp-aria2-downloader"
+ln -s -- "${relative_private}/download-video-gui.sh" "${BIN_DIR}/yt-dlp-aria2-downloader-gui"
 printf 'Installed package tree for version %s under %s\n' "${VERSION}" "${DESTDIR}"

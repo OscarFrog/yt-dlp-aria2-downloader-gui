@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
-# Hermetic integration using real yt-dlp, aria2c, FFmpeg, and FFprobe.
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : tests/real-tools-integration.sh
+# Purpose     : Exercise real yt-dlp, aria2c, FFmpeg and FFprobe on local media.
+# ==============================================================================
 
 set -Eeuo pipefail
 umask 077
@@ -33,166 +37,16 @@ cleanup() {
     fi
     rm -rf -- "${TEST_ROOT}" || true
 }
-trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
-mkdir -p -- \
-    "${TEST_ROOT}/web/hls" \
-    "${TEST_ROOT}/web/dash" \
-    "${TEST_ROOT}/output" \
-    "${TEST_ROOT}/runtime" \
-    "${TEST_ROOT}/shim"
-chmod 700 -- "${TEST_ROOT}/runtime"
-
-ffmpeg -hide_banner -loglevel error -nostdin \
-    -f lavfi -i 'testsrc2=size=160x90:rate=10' \
-    -f lavfi -i 'sine=frequency=1000:sample_rate=44100' \
-    -t 3 -shortest -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
-    -g 10 -keyint_min 10 -sc_threshold 0 \
-    -c:a aac -movflags +faststart \
-    "${TEST_ROOT}/web/av.mp4"
-
-ffmpeg -hide_banner -loglevel error -nostdin \
-    -f lavfi -i 'testsrc2=size=160x90:rate=10' \
-    -t 1 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -an \
-    "${TEST_ROOT}/web/video-only.mp4"
-
-ffmpeg -hide_banner -loglevel error -nostdin \
-    -f lavfi -i 'sine=frequency=880:sample_rate=44100' \
-    -t 2 -c:a aac -b:a 128k \
-    "${TEST_ROOT}/web/audio.m4a"
-
-ffmpeg -hide_banner -loglevel error -nostdin \
-    -f lavfi -i 'sine=frequency=660:sample_rate=48000' \
-    -t 2 -c:a libopus -b:a 96k \
-    "${TEST_ROOT}/web/audio-opus.webm"
-
-ffmpeg -hide_banner -loglevel error -nostdin \
-    -f lavfi -i 'color=c=blue:s=32x32' \
-    -frames:v 1 -c:v mjpeg -update 1 \
-    "${TEST_ROOT}/web/cover.jpg"
-
-# Use MP3/ID3 APIC deliberately for this validator regression fixture.
-# yt-dlp's metadata postprocessor treats M4A as audio-only and invokes FFmpeg
-# with -vn, which removes an attached picture before final validation. MP3 is a
-# common audio format, so --audio-format best does not reconvert it, while the
-# metadata postprocessor maps/copies all streams and preserves the cover.
-ffmpeg -hide_banner -loglevel error -nostdin \
-    -f lavfi -i 'sine=frequency=550:sample_rate=44100' \
-    -t 2 -c:a libmp3lame -b:a 96k \
-    "${TEST_ROOT}/web/audio-cover-base.mp3"
-
-ffmpeg -hide_banner -loglevel error -nostdin \
-    -i "${TEST_ROOT}/web/audio-cover-base.mp3" \
-    -i "${TEST_ROOT}/web/cover.jpg" \
-    -map 0:a:0 -map 1:v:0 -c copy \
-    -id3v2_version 3 \
-    -metadata:s:v title='Album cover' \
-    -metadata:s:v comment='Cover (front)' \
-    -disposition:v:0 attached_pic \
-    "${TEST_ROOT}/web/audio-cover.mp3"
-
-ffmpeg -hide_banner -loglevel error -nostdin \
-    -i "${TEST_ROOT}/web/av.mp4" \
-    -i "${TEST_ROOT}/web/cover.jpg" \
-    -map 0:v:0 -map 0:a:0 -map 1:v:0 -c copy \
-    -disposition:v:0 0 -disposition:v:1 attached_pic -movflags +faststart \
-    "${TEST_ROOT}/web/av-cover.mp4"
-
-ffmpeg -hide_banner -loglevel error -nostdin \
-    -i "${TEST_ROOT}/web/av.mp4" \
-    -map 0:v:0 -map 0:a:0 \
-    -c:v copy -c:a copy \
-    -f hls -hls_time 1 -hls_list_size 0 \
-    -hls_segment_filename "${TEST_ROOT}/web/hls/segment-%03d.ts" \
-    "${TEST_ROOT}/web/hls/stream.m3u8"
-
-ffmpeg -hide_banner -loglevel error -nostdin \
-    -i "${TEST_ROOT}/web/av.mp4" \
-    -map 0:v:0 -map 0:a:0 \
-    -c:v copy -c:a copy \
-    -seg_duration 1 -use_template 1 -use_timeline 1 \
-    -adaptation_sets 'id=0,streams=v id=1,streams=a' \
-    -f dash "${TEST_ROOT}/web/dash/stream.mpd"
-
-cat >"${TEST_ROOT}/server.py" <<'PY_SERVER'
-import http.server
-import pathlib
-import socketserver
-import sys
-
-root = pathlib.Path(sys.argv[1])
-port_file = pathlib.Path(sys.argv[2])
-
-class Handler(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, _format, *args):
-        return
-
-    def end_headers(self):
-        self.send_header("Cache-Control", "no-store")
-        super().end_headers()
-
-class Server(socketserver.TCPServer):
-    allow_reuse_address = True
-
-with Server(
-    ("127.0.0.1", 0),
-    lambda *args, **kwargs: Handler(*args, directory=str(root), **kwargs),
-) as server:
-    port_file.write_text(str(server.server_address[1]), encoding="ascii")
-    server.serve_forever()
-PY_SERVER
-
-python3 "${TEST_ROOT}/server.py" \
-    "${TEST_ROOT}/web" "${TEST_ROOT}/port" &
-SERVER_PID=$!
-for _ in {1..100}; do
-    [[ -s ${TEST_ROOT}/port ]] && break
-    sleep 0.05
-done
-[[ -s ${TEST_ROOT}/port ]] || {
-    printf 'FAIL: local HTTP server did not publish its port.\n' >&2
-    exit 65
-}
-PORT=$(<"${TEST_ROOT}/port")
-readonly PORT
-
-ARIA2_INVOCATION_LOG="${TEST_ROOT}/aria2-invocations.bin"
-export ARIA2_INVOCATION_LOG REAL_ARIA2
-: >"${ARIA2_INVOCATION_LOG}"
-
-cat >"${TEST_ROOT}/shim/aria2c" <<'EOF_ARIA2_SHIM'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-case ${1:-} in
---version | --help=#all)
-    exec "${REAL_ARIA2:?}" "$@"
-    ;;
-esac
-printf '%s\0' "$@" >>"${ARIA2_INVOCATION_LOG:?}"
-exec "${REAL_ARIA2:?}" "$@"
-EOF_ARIA2_SHIM
-chmod 700 -- "${TEST_ROOT}/shim/aria2c"
-export PATH="${TEST_ROOT}/shim:${PATH}"
-
-export XDG_RUNTIME_DIR="${TEST_ROOT}/runtime"
-export YTDLP_ARIA2_SKIP_RUNTIME_UPDATE=1
-YTDLP_ARIA2_YTDLP_BIN=$(command -v yt-dlp)
-export YTDLP_ARIA2_YTDLP_BIN
-export YTDLP_DISABLE_REMOTE_EJS=1
 
 assert_media_streams() {
     local media_path=$1
     ffprobe -v error -select_streams v:0 \
-        -show_entries stream=index -of csv=p=0 "${media_path}" |
-        grep -Eq '^[0-9]+$'
+        -show_entries stream=index -of csv=p=0 "${media_path}" \
+        | grep -Eq '^[0-9]+$'
     ffprobe -v error -select_streams a:0 \
-        -show_entries stream=index -of csv=p=0 "${media_path}" |
-        grep -Eq '^[0-9]+$'
+        -show_entries stream=index -of csv=p=0 "${media_path}" \
+        | grep -Eq '^[0-9]+$'
 }
-
 
 assert_audio_only_codec() {
     local media_path=$1
@@ -266,7 +120,6 @@ assert_audio_cover_codec() {
     }
 }
 
-RUN_FINAL_FILE=''
 run_engine() {
     local mode=$1
     local scenario=$2
@@ -296,116 +149,269 @@ assert_native_fragment_routing() {
     grep -Fq -- "--downloader 'dash,m3u8:native'" "${engine}"
 }
 
-# shellcheck disable=SC2310 # Predicate failure is the assertion result.
-assert_native_fragment_routing "${PROJECT_DIR}/download-video.sh" || {
-    printf 'FAIL: native DASH/HLS routing invariant is absent.\n' >&2
-    exit 65
-}
+main() {
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
-# Direct HTTP must cross the real aria2c boundary.
-: >"${ARIA2_INVOCATION_LOG}"
-run_engine video direct "http://127.0.0.1:${PORT}/av.mp4"
-direct_final=${RUN_FINAL_FILE}
-[[ -f ${direct_final} ]] || {
-    printf 'FAIL: direct HTTP result is absent.\n' >&2
-    exit 65
-}
-assert_media_streams "${direct_final}"
-[[ -s ${ARIA2_INVOCATION_LOG} ]] || {
-    printf 'FAIL: direct HTTP transfer did not invoke real aria2c.\n' >&2
-    exit 65
-}
+    mkdir -p -- \
+        "${TEST_ROOT}/web/hls" \
+        "${TEST_ROOT}/web/dash" \
+        "${TEST_ROOT}/output" \
+        "${TEST_ROOT}/runtime" \
+        "${TEST_ROOT}/shim"
+    chmod 700 -- "${TEST_ROOT}/runtime"
 
-# Audio mode must remain valid and preserve AAC when no conversion is needed.
-: >"${ARIA2_INVOCATION_LOG}"
-source_audio_codec=$(
-    ffprobe -v error -select_streams a:0 \
-        -show_entries stream=codec_name -of csv=p=0 \
-        "${TEST_ROOT}/web/audio.m4a"
-)
-run_engine audio audio "http://127.0.0.1:${PORT}/audio.m4a"
-audio_final=${RUN_FINAL_FILE}
-[[ -f ${audio_final} ]] || {
-    printf 'FAIL: audio result is absent.\n' >&2
-    exit 65
-}
-assert_audio_only_codec "${audio_final}" "${source_audio_codec}"
-[[ -s ${ARIA2_INVOCATION_LOG} ]] || {
-    printf 'FAIL: direct audio transfer did not invoke real aria2c.\n' >&2
-    exit 65
-}
-
-# Opus/WebM audio-only must preserve the source codec without a forced MP3/AAC conversion.
-: >"${ARIA2_INVOCATION_LOG}"
-source_opus_codec=$(
-    ffprobe -v error -select_streams a:0 \
-        -show_entries stream=codec_name -of csv=p=0 \
-        "${TEST_ROOT}/web/audio-opus.webm"
-)
-[[ ${source_opus_codec} == opus ]] || {
-    printf 'FAIL: generated Opus fixture has unexpected codec: %s.\n' \
-        "${source_opus_codec}" >&2
-    exit 65
-}
-run_engine audio audio-opus "http://127.0.0.1:${PORT}/audio-opus.webm"
-opus_final=${RUN_FINAL_FILE}
-[[ -f ${opus_final} ]] || {
-    printf 'FAIL: Opus audio result is absent.\n' >&2
-    exit 65
-}
-assert_audio_only_codec "${opus_final}" "${source_opus_codec}"
-[[ -s ${ARIA2_INVOCATION_LOG} ]] || {
-    printf 'FAIL: direct Opus transfer did not invoke real aria2c.\n' >&2
-    exit 65
-}
-
-# The ba/b fallback must extract audio from a combined A/V source, remove video,
-# and preserve AAC when yt-dlp can do so without transcoding.
-: >"${ARIA2_INVOCATION_LOG}"
-combined_source_codec=$(
-    ffprobe -v error -select_streams a:0 \
-        -show_entries stream=codec_name -of csv=p=0 \
+    ffmpeg -hide_banner -loglevel error -nostdin \
+        -f lavfi -i 'testsrc2=size=160x90:rate=10' \
+        -f lavfi -i 'sine=frequency=1000:sample_rate=44100' \
+        -t 3 -shortest -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+        -g 10 -keyint_min 10 -sc_threshold 0 \
+        -c:a aac -movflags +faststart \
         "${TEST_ROOT}/web/av.mp4"
-)
-run_engine audio audio-combined "http://127.0.0.1:${PORT}/av.mp4"
-combined_final=${RUN_FINAL_FILE}
-[[ -f ${combined_final} ]] || {
-    printf 'FAIL: combined-source audio result is absent.\n' >&2
-    exit 65
-}
-assert_audio_only_codec "${combined_final}" "${combined_source_codec}"
-[[ -s ${ARIA2_INVOCATION_LOG} ]] || {
-    printf 'FAIL: combined direct transfer did not invoke real aria2c.\n' >&2
-    exit 65
-}
 
-# Audio with an attached cover is valid: v:0 must see the cover while V:0 must
-# see no content-video stream. The final must retain that distinction.
-source_cover_codec=$(
-    ffprobe -v error -select_streams a:0 \
-        -show_entries stream=codec_name -of csv=p=0 \
+    ffmpeg -hide_banner -loglevel error -nostdin \
+        -f lavfi -i 'testsrc2=size=160x90:rate=10' \
+        -t 1 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -an \
+        "${TEST_ROOT}/web/video-only.mp4"
+
+    ffmpeg -hide_banner -loglevel error -nostdin \
+        -f lavfi -i 'sine=frequency=880:sample_rate=44100' \
+        -t 2 -c:a aac -b:a 128k \
+        "${TEST_ROOT}/web/audio.m4a"
+
+    ffmpeg -hide_banner -loglevel error -nostdin \
+        -f lavfi -i 'sine=frequency=660:sample_rate=48000' \
+        -t 2 -c:a libopus -b:a 96k \
+        "${TEST_ROOT}/web/audio-opus.webm"
+
+    ffmpeg -hide_banner -loglevel error -nostdin \
+        -f lavfi -i 'color=c=blue:s=32x32' \
+        -frames:v 1 -c:v mjpeg -update 1 \
+        "${TEST_ROOT}/web/cover.jpg"
+
+    # Use MP3/ID3 APIC deliberately for this validator regression fixture.
+    # yt-dlp's metadata postprocessor treats M4A as audio-only and invokes FFmpeg
+    # with -vn, which removes an attached picture before final validation. MP3 is a
+    # common audio format, so --audio-format best does not reconvert it, while the
+    # metadata postprocessor maps/copies all streams and preserves the cover.
+    ffmpeg -hide_banner -loglevel error -nostdin \
+        -f lavfi -i 'sine=frequency=550:sample_rate=44100' \
+        -t 2 -c:a libmp3lame -b:a 96k \
+        "${TEST_ROOT}/web/audio-cover-base.mp3"
+
+    ffmpeg -hide_banner -loglevel error -nostdin \
+        -i "${TEST_ROOT}/web/audio-cover-base.mp3" \
+        -i "${TEST_ROOT}/web/cover.jpg" \
+        -map 0:a:0 -map 1:v:0 -c copy \
+        -id3v2_version 3 \
+        -metadata:s:v title='Album cover' \
+        -metadata:s:v comment='Cover (front)' \
+        -disposition:v:0 attached_pic \
         "${TEST_ROOT}/web/audio-cover.mp3"
-)
-assert_audio_cover_codec "${TEST_ROOT}/web/audio-cover.mp3" "${source_cover_codec}"
-: >"${ARIA2_INVOCATION_LOG}"
-run_engine audio audio-cover "http://127.0.0.1:${PORT}/audio-cover.mp3"
-cover_final=${RUN_FINAL_FILE}
-[[ -f ${cover_final} ]] || {
-    printf 'FAIL: attached-cover audio result is absent.\n' >&2
-    exit 65
-}
-assert_audio_cover_codec "${cover_final}" "${source_cover_codec}"
-[[ -s ${ARIA2_INVOCATION_LOG} ]] || {
-    printf 'FAIL: attached-cover direct audio did not invoke real aria2c.\n' >&2
-    exit 65
-}
 
-# PATCH-001 mutation proof: change only the final audio validator's V:0 stream
-# specifier to v:0 in a temporary engine copy. The same valid attached-cover
-# fixture must then be rejected, proving the test kills this regression.
-mutated_cover_engine="${TEST_ROOT}/download-video-cover-mutated.sh"
-cp -- "${PROJECT_DIR}/download-video.sh" "${mutated_cover_engine}"
-python3 - "${mutated_cover_engine}" <<'PY_COVER_MUTATION'
+    ffmpeg -hide_banner -loglevel error -nostdin \
+        -i "${TEST_ROOT}/web/av.mp4" \
+        -i "${TEST_ROOT}/web/cover.jpg" \
+        -map 0:v:0 -map 0:a:0 -map 1:v:0 -c copy \
+        -disposition:v:0 0 -disposition:v:1 attached_pic -movflags +faststart \
+        "${TEST_ROOT}/web/av-cover.mp4"
+
+    ffmpeg -hide_banner -loglevel error -nostdin \
+        -i "${TEST_ROOT}/web/av.mp4" \
+        -map 0:v:0 -map 0:a:0 \
+        -c:v copy -c:a copy \
+        -f hls -hls_time 1 -hls_list_size 0 \
+        -hls_segment_filename "${TEST_ROOT}/web/hls/segment-%03d.ts" \
+        "${TEST_ROOT}/web/hls/stream.m3u8"
+
+    ffmpeg -hide_banner -loglevel error -nostdin \
+        -i "${TEST_ROOT}/web/av.mp4" \
+        -map 0:v:0 -map 0:a:0 \
+        -c:v copy -c:a copy \
+        -seg_duration 1 -use_template 1 -use_timeline 1 \
+        -adaptation_sets 'id=0,streams=v id=1,streams=a' \
+        -f dash "${TEST_ROOT}/web/dash/stream.mpd"
+
+    cat >"${TEST_ROOT}/server.py" <<'PY_SERVER'
+import http.server
+import pathlib
+import socketserver
+import sys
+
+root = pathlib.Path(sys.argv[1])
+port_file = pathlib.Path(sys.argv[2])
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, _format, *args):
+        return
+
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+class Server(socketserver.TCPServer):
+    allow_reuse_address = True
+
+with Server(
+    ("127.0.0.1", 0),
+    lambda *args, **kwargs: Handler(*args, directory=str(root), **kwargs),
+) as server:
+    port_file.write_text(str(server.server_address[1]), encoding="ascii")
+    server.serve_forever()
+PY_SERVER
+
+    python3 "${TEST_ROOT}/server.py" \
+        "${TEST_ROOT}/web" "${TEST_ROOT}/port" &
+    SERVER_PID=$!
+    for _ in {1..100}; do
+        [[ -s ${TEST_ROOT}/port ]] && break
+        sleep 0.05
+    done
+    [[ -s ${TEST_ROOT}/port ]] || {
+        printf 'FAIL: local HTTP server did not publish its port.\n' >&2
+        exit 65
+    }
+    PORT=$(<"${TEST_ROOT}/port")
+    readonly PORT
+
+    ARIA2_INVOCATION_LOG="${TEST_ROOT}/aria2-invocations.bin"
+    export ARIA2_INVOCATION_LOG REAL_ARIA2
+    : >"${ARIA2_INVOCATION_LOG}"
+
+    cat >"${TEST_ROOT}/shim/aria2c" <<'EOF_ARIA2_SHIM'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+case ${1:-} in
+--version | --help=#all)
+    exec "${REAL_ARIA2:?}" "$@"
+    ;;
+esac
+printf '%s\0' "$@" >>"${ARIA2_INVOCATION_LOG:?}"
+exec "${REAL_ARIA2:?}" "$@"
+EOF_ARIA2_SHIM
+    chmod 700 -- "${TEST_ROOT}/shim/aria2c"
+    export PATH="${TEST_ROOT}/shim:${PATH}"
+
+    export XDG_RUNTIME_DIR="${TEST_ROOT}/runtime"
+    export YTDLP_ARIA2_SKIP_RUNTIME_UPDATE=1
+    YTDLP_ARIA2_YTDLP_BIN=$(command -v yt-dlp)
+    export YTDLP_ARIA2_YTDLP_BIN
+    export YTDLP_DISABLE_REMOTE_EJS=1
+
+    RUN_FINAL_FILE=''
+
+    # shellcheck disable=SC2310 # Predicate failure is the assertion result.
+    assert_native_fragment_routing "${PROJECT_DIR}/download-video.sh" || {
+        printf 'FAIL: native DASH/HLS routing invariant is absent.\n' >&2
+        exit 65
+    }
+
+    # Scenario: direct HTTP must cross the real aria2c boundary.
+    : >"${ARIA2_INVOCATION_LOG}"
+    run_engine video direct "http://127.0.0.1:${PORT}/av.mp4"
+    direct_final=${RUN_FINAL_FILE}
+    [[ -f ${direct_final} ]] || {
+        printf 'FAIL: direct HTTP result is absent.\n' >&2
+        exit 65
+    }
+    assert_media_streams "${direct_final}"
+    [[ -s ${ARIA2_INVOCATION_LOG} ]] || {
+        printf 'FAIL: direct HTTP transfer did not invoke real aria2c.\n' >&2
+        exit 65
+    }
+
+    # Scenario: audio mode remains valid and preserves AAC when no conversion is needed.
+    : >"${ARIA2_INVOCATION_LOG}"
+    source_audio_codec=$(
+        ffprobe -v error -select_streams a:0 \
+            -show_entries stream=codec_name -of csv=p=0 \
+            "${TEST_ROOT}/web/audio.m4a"
+    )
+    run_engine audio audio "http://127.0.0.1:${PORT}/audio.m4a"
+    audio_final=${RUN_FINAL_FILE}
+    [[ -f ${audio_final} ]] || {
+        printf 'FAIL: audio result is absent.\n' >&2
+        exit 65
+    }
+    assert_audio_only_codec "${audio_final}" "${source_audio_codec}"
+    [[ -s ${ARIA2_INVOCATION_LOG} ]] || {
+        printf 'FAIL: direct audio transfer did not invoke real aria2c.\n' >&2
+        exit 65
+    }
+
+    # Scenario: Opus/WebM audio-only preserves the source codec without forced conversion.
+    : >"${ARIA2_INVOCATION_LOG}"
+    source_opus_codec=$(
+        ffprobe -v error -select_streams a:0 \
+            -show_entries stream=codec_name -of csv=p=0 \
+            "${TEST_ROOT}/web/audio-opus.webm"
+    )
+    [[ ${source_opus_codec} == opus ]] || {
+        printf 'FAIL: generated Opus fixture has unexpected codec: %s.\n' \
+            "${source_opus_codec}" >&2
+        exit 65
+    }
+    run_engine audio audio-opus "http://127.0.0.1:${PORT}/audio-opus.webm"
+    opus_final=${RUN_FINAL_FILE}
+    [[ -f ${opus_final} ]] || {
+        printf 'FAIL: Opus audio result is absent.\n' >&2
+        exit 65
+    }
+    assert_audio_only_codec "${opus_final}" "${source_opus_codec}"
+    [[ -s ${ARIA2_INVOCATION_LOG} ]] || {
+        printf 'FAIL: direct Opus transfer did not invoke real aria2c.\n' >&2
+        exit 65
+    }
+
+    # Scenario: the ba/b fallback extracts audio from combined A/V, removes video,
+    # and preserves AAC when yt-dlp can do so without transcoding.
+    : >"${ARIA2_INVOCATION_LOG}"
+    combined_source_codec=$(
+        ffprobe -v error -select_streams a:0 \
+            -show_entries stream=codec_name -of csv=p=0 \
+            "${TEST_ROOT}/web/av.mp4"
+    )
+    run_engine audio audio-combined "http://127.0.0.1:${PORT}/av.mp4"
+    combined_final=${RUN_FINAL_FILE}
+    [[ -f ${combined_final} ]] || {
+        printf 'FAIL: combined-source audio result is absent.\n' >&2
+        exit 65
+    }
+    assert_audio_only_codec "${combined_final}" "${combined_source_codec}"
+    [[ -s ${ARIA2_INVOCATION_LOG} ]] || {
+        printf 'FAIL: combined direct transfer did not invoke real aria2c.\n' >&2
+        exit 65
+    }
+
+    # Scenario: attached-cover audio is valid; v:0 sees the cover while V:0 sees no
+    # content-video stream, and the final result retains that distinction.
+    source_cover_codec=$(
+        ffprobe -v error -select_streams a:0 \
+            -show_entries stream=codec_name -of csv=p=0 \
+            "${TEST_ROOT}/web/audio-cover.mp3"
+    )
+    assert_audio_cover_codec "${TEST_ROOT}/web/audio-cover.mp3" "${source_cover_codec}"
+    : >"${ARIA2_INVOCATION_LOG}"
+    run_engine audio audio-cover "http://127.0.0.1:${PORT}/audio-cover.mp3"
+    cover_final=${RUN_FINAL_FILE}
+    [[ -f ${cover_final} ]] || {
+        printf 'FAIL: attached-cover audio result is absent.\n' >&2
+        exit 65
+    }
+    assert_audio_cover_codec "${cover_final}" "${source_cover_codec}"
+    [[ -s ${ARIA2_INVOCATION_LOG} ]] || {
+        printf 'FAIL: attached-cover direct audio did not invoke real aria2c.\n' >&2
+        exit 65
+    }
+
+    # Mutation test: change only the final audio validator's V:0 selector to v:0
+    # in a temporary engine copy. The valid attached-cover fixture must then be
+    # rejected, proving this test kills that regression.
+    mutated_cover_engine="${TEST_ROOT}/download-video-cover-mutated.sh"
+    cp -- "${PROJECT_DIR}/download-video.sh" "${mutated_cover_engine}"
+    python3 - "${mutated_cover_engine}" <<'PY_COVER_MUTATION'
 from pathlib import Path
 import sys
 
@@ -417,184 +423,188 @@ if text.count(old) != 1:
     raise SystemExit("expected exactly one audio-mode V:0 validator anchor")
 path.write_text(text.replace(old, new, 1), encoding="utf-8")
 PY_COVER_MUTATION
-mutated_cover_dir="${TEST_ROOT}/output/audio-cover-mutated"
-mutated_cover_result="${TEST_ROOT}/audio-cover-mutated.result"
-mkdir -p -- "${mutated_cover_dir}"
-rm -f -- "${mutated_cover_result}"
-set +e
-bash "${mutated_cover_engine}" \
-    --mode audio \
-    --output-dir "${mutated_cover_dir}" \
-    --result-file "${mutated_cover_result}" \
-    "http://127.0.0.1:${PORT}/audio-cover.mp3" \
-    >"${TEST_ROOT}/audio-cover-mutated.stdout" 2>&1
-mutated_cover_status=$?
-set -e
-if ((mutated_cover_status != 65)); then
-    printf 'FAIL: V:0 -> v:0 cover mutation returned %d instead of 65.\n' \
-        "${mutated_cover_status}" >&2
-    exit 65
-fi
-[[ ! -e ${mutated_cover_result} ]] || {
-    printf 'FAIL: V:0 -> v:0 cover mutation published a result-file.\n' >&2
-    exit 65
-}
-printf 'Expected mutation detected: v:0 rejected attached cover art.\n'
+    mutated_cover_dir="${TEST_ROOT}/output/audio-cover-mutated"
+    mutated_cover_result="${TEST_ROOT}/audio-cover-mutated.result"
+    mkdir -p -- "${mutated_cover_dir}"
+    rm -f -- "${mutated_cover_result}"
+    set +e
+    bash "${mutated_cover_engine}" \
+        --mode audio \
+        --output-dir "${mutated_cover_dir}" \
+        --result-file "${mutated_cover_result}" \
+        "http://127.0.0.1:${PORT}/audio-cover.mp3" \
+        >"${TEST_ROOT}/audio-cover-mutated.stdout" 2>&1
+    mutated_cover_status=$?
+    set -e
+    if ((mutated_cover_status != 65)); then
+        printf 'FAIL: V:0 -> v:0 cover mutation returned %d instead of 65.\n' \
+            "${mutated_cover_status}" >&2
+        exit 65
+    fi
+    [[ ! -e ${mutated_cover_result} ]] || {
+        printf 'FAIL: V:0 -> v:0 cover mutation published a result-file.\n' >&2
+        exit 65
+    }
+    printf 'Expected mutation detected: v:0 rejected attached cover art.\n'
 
-# PATCH-002 mutation proof: remove --extract-audio from a temporary engine copy.
-# The combined A/V source then remains A/V, and production final validation must
-# reject it with EX_DATAERR instead of publishing an audio success result.
-mutated_no_extract_engine="${TEST_ROOT}/download-video-no-extract-mutated.sh"
-cp -- "${PROJECT_DIR}/download-video.sh" "${mutated_no_extract_engine}"
-sed -i '/^[[:space:]]*--extract-audio[[:space:]]*$/d' "${mutated_no_extract_engine}"
-if grep -Eq '^[[:space:]]*--extract-audio[[:space:]]*$' "${mutated_no_extract_engine}"; then
-    printf 'FAIL: unable to create the no-extract audio mutation.\n' >&2
-    exit 65
-fi
-mutated_no_extract_dir="${TEST_ROOT}/output/audio-no-extract-mutated"
-mutated_no_extract_result="${TEST_ROOT}/audio-no-extract-mutated.result"
-mkdir -p -- "${mutated_no_extract_dir}"
-rm -f -- "${mutated_no_extract_result}"
-set +e
-bash "${mutated_no_extract_engine}" \
-    --mode audio \
-    --output-dir "${mutated_no_extract_dir}" \
-    --result-file "${mutated_no_extract_result}" \
-    "http://127.0.0.1:${PORT}/av.mp4" \
-    >"${TEST_ROOT}/audio-no-extract-mutated.stdout" 2>&1
-mutated_no_extract_status=$?
-set -e
-if ((mutated_no_extract_status != 65)); then
-    printf 'FAIL: unextracted A/V audio mutation returned %d instead of 65.\n' \
-        "${mutated_no_extract_status}" >&2
-    exit 65
-fi
-[[ ! -e ${mutated_no_extract_result} ]] || {
-    printf 'FAIL: unextracted A/V audio mutation published a result-file.\n' >&2
-    exit 65
+    # Mutation test: remove --extract-audio from a temporary engine copy. The
+    # combined A/V source then remains A/V, and final validation must reject it
+    # with EX_DATAERR instead of publishing an audio success result.
+    mutated_no_extract_engine="${TEST_ROOT}/download-video-no-extract-mutated.sh"
+    cp -- "${PROJECT_DIR}/download-video.sh" "${mutated_no_extract_engine}"
+    sed -i '/^[[:space:]]*--extract-audio[[:space:]]*$/d' "${mutated_no_extract_engine}"
+    if grep -Eq '^[[:space:]]*--extract-audio[[:space:]]*$' "${mutated_no_extract_engine}"; then
+        printf 'FAIL: unable to create the no-extract audio mutation.\n' >&2
+        exit 65
+    fi
+    mutated_no_extract_dir="${TEST_ROOT}/output/audio-no-extract-mutated"
+    mutated_no_extract_result="${TEST_ROOT}/audio-no-extract-mutated.result"
+    mkdir -p -- "${mutated_no_extract_dir}"
+    rm -f -- "${mutated_no_extract_result}"
+    set +e
+    bash "${mutated_no_extract_engine}" \
+        --mode audio \
+        --output-dir "${mutated_no_extract_dir}" \
+        --result-file "${mutated_no_extract_result}" \
+        "http://127.0.0.1:${PORT}/av.mp4" \
+        >"${TEST_ROOT}/audio-no-extract-mutated.stdout" 2>&1
+    mutated_no_extract_status=$?
+    set -e
+    if ((mutated_no_extract_status != 65)); then
+        printf 'FAIL: unextracted A/V audio mutation returned %d instead of 65.\n' \
+            "${mutated_no_extract_status}" >&2
+        exit 65
+    fi
+    [[ ! -e ${mutated_no_extract_result} ]] || {
+        printf 'FAIL: unextracted A/V audio mutation published a result-file.\n' >&2
+        exit 65
+    }
+
+    # Negative control: an attached cover must not hide a real content-video
+    # stream. Reuse the no-extract mutant so A/V+cover reaches final validation.
+    mutated_no_extract_cover_dir="${TEST_ROOT}/output/audio-no-extract-cover-mutated"
+    mutated_no_extract_cover_result="${TEST_ROOT}/audio-no-extract-cover-mutated.result"
+    mkdir -p -- "${mutated_no_extract_cover_dir}"
+    rm -f -- "${mutated_no_extract_cover_result}"
+    set +e
+    bash "${mutated_no_extract_engine}" \
+        --mode audio \
+        --output-dir "${mutated_no_extract_cover_dir}" \
+        --result-file "${mutated_no_extract_cover_result}" \
+        "http://127.0.0.1:${PORT}/av-cover.mp4" \
+        >"${TEST_ROOT}/audio-no-extract-cover-mutated.stdout" 2>&1
+    mutated_no_extract_cover_status=$?
+    set -e
+    if ((mutated_no_extract_cover_status != 65)); then
+        printf 'FAIL: unextracted A/V+cover mutation returned %d instead of 65.\n' \
+            "${mutated_no_extract_cover_status}" >&2
+        exit 65
+    fi
+    [[ ! -e ${mutated_no_extract_cover_result} ]] || {
+        printf 'FAIL: unextracted A/V+cover mutation published a result-file.\n' >&2
+        exit 65
+    }
+
+    # Scenario: HLS fragments stay on yt-dlp's native downloader.
+    : >"${ARIA2_INVOCATION_LOG}"
+    run_engine video hls "http://127.0.0.1:${PORT}/hls/stream.m3u8"
+    hls_final=${RUN_FINAL_FILE}
+    [[ -f ${hls_final} ]] || {
+        printf 'FAIL: HLS result is absent.\n' >&2
+        exit 65
+    }
+    assert_media_streams "${hls_final}"
+    [[ ! -s ${ARIA2_INVOCATION_LOG} ]] || {
+        printf 'FAIL: aria2c was invoked for native HLS fragments.\n' >&2
+        exit 65
+    }
+
+    # Scenario: DASH fragments stay on yt-dlp's native downloader.
+    : >"${ARIA2_INVOCATION_LOG}"
+    run_engine video dash "http://127.0.0.1:${PORT}/dash/stream.mpd"
+    dash_final=${RUN_FINAL_FILE}
+    [[ -f ${dash_final} ]] || {
+        printf 'FAIL: DASH result is absent.\n' >&2
+        exit 65
+    }
+    assert_media_streams "${dash_final}"
+    [[ ! -s ${ARIA2_INVOCATION_LOG} ]] || {
+        printf 'FAIL: aria2c was invoked for native DASH fragments.\n' >&2
+        exit 65
+    }
+
+    # Contract check: structural validation remains part of real-tool qualification.
+    rm -f -- "${TEST_ROOT}/video-only.result"
+    set +e
+    bash "${PROJECT_DIR}/download-video.sh" \
+        --mode video \
+        --output-dir "${TEST_ROOT}/output" \
+        --result-file "${TEST_ROOT}/video-only.result" \
+        "http://127.0.0.1:${PORT}/video-only.mp4"
+    video_only_status=$?
+    set -e
+    if ((video_only_status != 65)); then
+        printf 'FAIL: missing-audio validation returned %d instead of 65.\n' \
+            "${video_only_status}" >&2
+        exit 65
+    fi
+    [[ ! -e ${TEST_ROOT}/video-only.result ]] || {
+        printf 'FAIL: invalid video-only media published a result file.\n' >&2
+        exit 65
+    }
+
+    # Mutation test: deleting the protocol-specific override must be detected.
+    mutated_engine="${TEST_ROOT}/download-video-mutated.sh"
+    cp -- "${PROJECT_DIR}/download-video.sh" "${mutated_engine}"
+    sed -i "/--downloader 'dash,m3u8:native'/d" "${mutated_engine}"
+    # shellcheck disable=SC2310 # Predicate success means the mutation escaped detection.
+    if assert_native_fragment_routing "${mutated_engine}"; then
+        printf 'FAIL: routing mutation was not detected.\n' >&2
+        exit 65
+    fi
+
+    # Mutation test: forcing MP3 in a temporary engine copy must be caught by the
+    # Opus codec-preservation assertion. The repository source is never changed.
+    mutated_audio_engine="${TEST_ROOT}/download-video-audio-mutated.sh"
+    cp -- "${PROJECT_DIR}/download-video.sh" "${mutated_audio_engine}"
+    sed -i 's/--audio-format best/--audio-format mp3/' "${mutated_audio_engine}"
+    grep -Fq -- '--audio-format mp3' "${mutated_audio_engine}" || {
+        printf 'FAIL: unable to create the forced-MP3 audio mutation.\n' >&2
+        exit 65
+    }
+    : >"${ARIA2_INVOCATION_LOG}"
+    run_engine audio audio-opus-mutated \
+        "http://127.0.0.1:${PORT}/audio-opus.webm" "${mutated_audio_engine}"
+    mutated_audio_final=${RUN_FINAL_FILE}
+    mutation_diagnostic="${TEST_ROOT}/audio-mutation.expected.stderr"
+    set +e
+    assert_audio_only_codec \
+        "${mutated_audio_final}" "${source_opus_codec}" \
+        2>"${mutation_diagnostic}"
+    mutation_status=$?
+    set -e
+    if ((mutation_status == 0)); then
+        printf 'FAIL: forced-MP3 mutation escaped the Opus preservation test.\n' >&2
+        exit 65
+    fi
+    mutated_audio_codec=$(
+        ffprobe -v error -select_streams a:0 \
+            -show_entries stream=codec_name -of csv=p=0 \
+            "${mutated_audio_final}"
+    )
+    [[ ${mutated_audio_codec} == mp3 ]] || {
+        printf 'FAIL: forced-MP3 mutation did not produce MP3 as expected; got %s.\n' \
+            "${mutated_audio_codec}" >&2
+        exit 65
+    }
+    grep -Fq -- 'audio codec changed from opus to mp3' "${mutation_diagnostic}" || {
+        printf 'FAIL: forced-MP3 mutation failed for an unexpected reason.\n' >&2
+        exit 65
+    }
+    printf 'Expected mutation detected: forced MP3 was rejected by Opus preservation.\n'
+
+    printf 'Real-tool direct/audio/Opus/fallback/cover/HLS/DASH integration passed.\n'
+
 }
 
-# An attached cover must not hide a real content-video stream. Reuse the
-# no-extract mutant so the generated A/V+cover source reaches final validation.
-mutated_no_extract_cover_dir="${TEST_ROOT}/output/audio-no-extract-cover-mutated"
-mutated_no_extract_cover_result="${TEST_ROOT}/audio-no-extract-cover-mutated.result"
-mkdir -p -- "${mutated_no_extract_cover_dir}"
-rm -f -- "${mutated_no_extract_cover_result}"
-set +e
-bash "${mutated_no_extract_engine}" \
-    --mode audio \
-    --output-dir "${mutated_no_extract_cover_dir}" \
-    --result-file "${mutated_no_extract_cover_result}" \
-    "http://127.0.0.1:${PORT}/av-cover.mp4" \
-    >"${TEST_ROOT}/audio-no-extract-cover-mutated.stdout" 2>&1
-mutated_no_extract_cover_status=$?
-set -e
-if ((mutated_no_extract_cover_status != 65)); then
-    printf 'FAIL: unextracted A/V+cover mutation returned %d instead of 65.\n' \
-        "${mutated_no_extract_cover_status}" >&2
-    exit 65
-fi
-[[ ! -e ${mutated_no_extract_cover_result} ]] || {
-    printf 'FAIL: unextracted A/V+cover mutation published a result-file.\n' >&2
-    exit 65
-}
-
-# HLS fragments must stay on yt-dlp's native downloader.
-: >"${ARIA2_INVOCATION_LOG}"
-run_engine video hls "http://127.0.0.1:${PORT}/hls/stream.m3u8"
-hls_final=${RUN_FINAL_FILE}
-[[ -f ${hls_final} ]] || {
-    printf 'FAIL: HLS result is absent.\n' >&2
-    exit 65
-}
-assert_media_streams "${hls_final}"
-[[ ! -s ${ARIA2_INVOCATION_LOG} ]] || {
-    printf 'FAIL: aria2c was invoked for native HLS fragments.\n' >&2
-    exit 65
-}
-
-# DASH fragments must stay on yt-dlp's native downloader.
-: >"${ARIA2_INVOCATION_LOG}"
-run_engine video dash "http://127.0.0.1:${PORT}/dash/stream.mpd"
-dash_final=${RUN_FINAL_FILE}
-[[ -f ${dash_final} ]] || {
-    printf 'FAIL: DASH result is absent.\n' >&2
-    exit 65
-}
-assert_media_streams "${dash_final}"
-[[ ! -s ${ARIA2_INVOCATION_LOG} ]] || {
-    printf 'FAIL: aria2c was invoked for native DASH fragments.\n' >&2
-    exit 65
-}
-
-# Existing structural validation remains part of real-tool qualification.
-rm -f -- "${TEST_ROOT}/video-only.result"
-set +e
-bash "${PROJECT_DIR}/download-video.sh" \
-    --mode video \
-    --output-dir "${TEST_ROOT}/output" \
-    --result-file "${TEST_ROOT}/video-only.result" \
-    "http://127.0.0.1:${PORT}/video-only.mp4"
-video_only_status=$?
-set -e
-if ((video_only_status != 65)); then
-    printf 'FAIL: missing-audio validation returned %d instead of 65.\n' \
-        "${video_only_status}" >&2
-    exit 65
-fi
-[[ ! -e ${TEST_ROOT}/video-only.result ]] || {
-    printf 'FAIL: invalid video-only media published a result file.\n' >&2
-    exit 65
-}
-
-# Mutation proof: deleting the protocol-specific override must be detected.
-mutated_engine="${TEST_ROOT}/download-video-mutated.sh"
-cp -- "${PROJECT_DIR}/download-video.sh" "${mutated_engine}"
-sed -i "/--downloader 'dash,m3u8:native'/d" "${mutated_engine}"
-# shellcheck disable=SC2310 # Predicate success means the mutation escaped detection.
-if assert_native_fragment_routing "${mutated_engine}"; then
-    printf 'FAIL: routing mutation was not detected.\n' >&2
-    exit 65
-fi
-
-# Audio mutation proof: forcing MP3 in a temporary engine copy must be caught by
-# the Opus codec-preservation assertion. The repository source is never changed.
-mutated_audio_engine="${TEST_ROOT}/download-video-audio-mutated.sh"
-cp -- "${PROJECT_DIR}/download-video.sh" "${mutated_audio_engine}"
-sed -i 's/--audio-format best/--audio-format mp3/' "${mutated_audio_engine}"
-grep -Fq -- '--audio-format mp3' "${mutated_audio_engine}" || {
-    printf 'FAIL: unable to create the forced-MP3 audio mutation.\n' >&2
-    exit 65
-}
-: >"${ARIA2_INVOCATION_LOG}"
-run_engine audio audio-opus-mutated \
-    "http://127.0.0.1:${PORT}/audio-opus.webm" "${mutated_audio_engine}"
-mutated_audio_final=${RUN_FINAL_FILE}
-mutation_diagnostic="${TEST_ROOT}/audio-mutation.expected.stderr"
-set +e
-assert_audio_only_codec \
-    "${mutated_audio_final}" "${source_opus_codec}" \
-    2>"${mutation_diagnostic}"
-mutation_status=$?
-set -e
-if ((mutation_status == 0)); then
-    printf 'FAIL: forced-MP3 mutation escaped the Opus preservation test.\n' >&2
-    exit 65
-fi
-mutated_audio_codec=$(
-    ffprobe -v error -select_streams a:0 \
-        -show_entries stream=codec_name -of csv=p=0 \
-        "${mutated_audio_final}"
-)
-[[ ${mutated_audio_codec} == mp3 ]] || {
-    printf 'FAIL: forced-MP3 mutation did not produce MP3 as expected; got %s.\n' \
-        "${mutated_audio_codec}" >&2
-    exit 65
-}
-grep -Fq -- 'audio codec changed from opus to mp3' "${mutation_diagnostic}" || {
-    printf 'FAIL: forced-MP3 mutation failed for an unexpected reason.\n' >&2
-    exit 65
-}
-printf 'Expected mutation detected: forced MP3 was rejected by Opus preservation.\n'
-
-printf 'Real-tool direct/audio/Opus/fallback/cover/HLS/DASH integration passed.\n'
+main "$@"

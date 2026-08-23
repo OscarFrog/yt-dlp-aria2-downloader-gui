@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-
 # SPDX-License-Identifier: MIT
-# ============================================================================
-# Name        : download-video.sh
-# Version     : 2.1.34
-# Date        : 2026-08-23
-# Description : Download one complete MKV video or the best native audio track.
-# ============================================================================
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : download-video.sh
+# Purpose     : Download one complete MKV video or the best native audio track.
+# ==============================================================================
 
 set -euo pipefail
 umask 077
@@ -39,8 +37,8 @@ REQUESTED_EXIT_STATUS=''
 SHUTDOWN_REQUESTED=false
 REUSE_CURRENT_SESSION=${YTDLP_ARIA2_SUPERVISED_SESSION:-false}
 case ${REUSE_CURRENT_SESSION} in
-true | false) ;;
-*) REUSE_CURRENT_SESSION=false ;;
+    true | false) ;;
+    *) REUSE_CURRENT_SESSION=false ;;
 esac
 
 cleanup() {
@@ -82,8 +80,8 @@ request_shutdown() {
     local exit_status=$2
 
     if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
-        if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]] &&
-            declare -F signal_download_worker >/dev/null 2>&1; then
+        if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]] \
+            && declare -F signal_download_worker >/dev/null 2>&1; then
             signal_download_worker KILL
         fi
         return 0
@@ -91,19 +89,14 @@ request_shutdown() {
 
     SHUTDOWN_REQUESTED=true
     REQUESTED_EXIT_STATUS=${exit_status}
-    if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]] &&
-        declare -F signal_download_worker >/dev/null 2>&1; then
+    if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]] \
+        && declare -F signal_download_worker >/dev/null 2>&1; then
         signal_download_worker "${signal_name}"
         return 0
     fi
 
     exit "${exit_status}"
 }
-
-trap cleanup EXIT
-trap 'request_shutdown HUP 129' HUP
-trap 'request_shutdown INT 130' INT
-trap 'request_shutdown TERM 143' TERM
 
 usage() {
     cat <<EOF_USAGE
@@ -181,10 +174,10 @@ compare_versions() {
     minimum_patch=$((10#${BASH_REMATCH[3]}))
     VERSION_PARSE_VALID=true
 
-    if [[ ${current_is_prerelease} == true ]] &&
-        ((current_major == minimum_major &&
-            current_minor == minimum_minor &&
-            current_patch == minimum_patch)); then
+    if [[ ${current_is_prerelease} == true ]] \
+        && ((current_major == minimum_major && \
+        current_minor == minimum_minor && \
+        current_patch == minimum_patch)); then
         return 0
     fi
 
@@ -225,8 +218,8 @@ check_runtime_compatibility() {
     fi
 
     JS_RUNTIME_AVAILABLE=false
-    if [[ -n ${DENO_BIN:-} && -x ${DENO_BIN} ]] &&
-        deno_output=$(LC_ALL=C "${DENO_BIN}" --version 2>/dev/null); then
+    if [[ -n ${DENO_BIN:-} && -x ${DENO_BIN} ]] \
+        && deno_output=$(LC_ALL=C "${DENO_BIN}" --version 2>/dev/null); then
         IFS=' ' read -r deno_name deno_version _ <<<"${deno_output%%$'\n'*}"
         if [[ ${deno_name} == deno && -n ${deno_version} ]]; then
             compare_versions "${deno_version}" "${MIN_DENO_VERSION}"
@@ -403,7 +396,7 @@ acquire_output_lock() {
 
     OUTPUT_LOCK_FILE="${OUTPUT_LOCK_ROOT}/${lock_key}.lock"
     if [[ -L ${OUTPUT_LOCK_FILE} ||
-        ( -e ${OUTPUT_LOCK_FILE} && ! -f ${OUTPUT_LOCK_FILE} ) ]]; then
+        (-e ${OUTPUT_LOCK_FILE} && ! -f ${OUTPUT_LOCK_FILE}) ]]; then
         error 'the destination lock exists but is not a regular file.'
         return 73
     fi
@@ -451,9 +444,9 @@ recover_download_pgid() {
     local -a child_pids=()
 
     if [[ -n ${DOWNLOAD_PGID_FILE} && -f ${DOWNLOAD_PGID_FILE} ]]; then
-        if { IFS= read -r candidate <"${DOWNLOAD_PGID_FILE}"; } 2>/dev/null &&
-            [[ ${candidate} =~ ^[1-9][0-9]*$ ]] &&
-            kill -0 -- "-${candidate}" 2>/dev/null; then
+        if { IFS= read -r candidate <"${DOWNLOAD_PGID_FILE}"; } 2>/dev/null \
+            && [[ ${candidate} =~ ^[1-9][0-9]*$ ]] \
+            && kill -0 -- "-${candidate}" 2>/dev/null; then
             DOWNLOAD_WORKER_PGID=${candidate}
             return 0
         fi
@@ -461,8 +454,8 @@ recover_download_pgid() {
 
     if [[ -n ${DOWNLOAD_WORKER_PID} ]]; then
         children_file="/proc/${DOWNLOAD_WORKER_PID}/task/${DOWNLOAD_WORKER_PID}/children"
-        if [[ -r ${children_file} ]] &&
-            { IFS= read -r children <"${children_file}" || [[ -n ${children} ]]; } 2>/dev/null; then
+        if [[ -r ${children_file} ]] \
+            && { IFS= read -r children <"${children_file}" || [[ -n ${children} ]]; } 2>/dev/null; then
             read -r -a child_pids <<<"${children}"
             for candidate in "${child_pids[@]}"; do
                 [[ ${candidate} =~ ^[1-9][0-9]*$ ]] || continue
@@ -504,8 +497,8 @@ signal_download_worker() {
         fi
     fi
 
-    if [[ ${signal_name} == KILL || ${group_signaled} == false ]] &&
-        [[ -n ${DOWNLOAD_WORKER_PID} ]]; then
+    if [[ ${signal_name} == KILL || ${group_signaled} == false ]] \
+        && [[ -n ${DOWNLOAD_WORKER_PID} ]]; then
         kill "-${signal_name}" -- "${DOWNLOAD_WORKER_PID}" 2>/dev/null || true
     fi
 
@@ -521,8 +514,8 @@ wait_for_download_pgid() {
             return 0
         fi
         # shellcheck disable=SC2310 # Predicate failure means the supervisor exited.
-        if [[ -n ${DOWNLOAD_WORKER_PID} ]] &&
-            ! process_is_running "${DOWNLOAD_WORKER_PID}"; then
+        if [[ -n ${DOWNLOAD_WORKER_PID} ]] \
+            && ! process_is_running "${DOWNLOAD_WORKER_PID}"; then
             return 1
         fi
         sleep 0.1
@@ -751,9 +744,8 @@ probe_duration_microseconds() {
             fraction="${fraction}000000"
             fraction=${fraction:0:6}
             if ((10#${seconds} <= 9000000000000)); then
-                duration_microseconds=$((
-                    10#${seconds} * 1000000 + 10#${fraction}
-                ))
+                duration_microseconds=$((\
+                    10#${seconds} * 1000000 + 10#${fraction}))
             fi
         fi
     fi
@@ -771,29 +763,29 @@ validate_final_media_file() {
     [[ -f ${final_path} && -s ${final_path} ]] || return 1
 
     case ${mode} in
-    video)
-        probe_stream stream_present "${final_path}" 'v:0'
-        probe_status=$?
-        ((probe_status == 0)) || return 1
-        [[ ${stream_present} == true ]] || return 1
-        probe_stream stream_present "${final_path}" 'a:0'
-        probe_status=$?
-        ((probe_status == 0)) || return 1
-        [[ ${stream_present} == true ]] || return 1
-        ;;
-    audio)
-        probe_stream stream_present "${final_path}" 'a:0'
-        probe_status=$?
-        ((probe_status == 0)) || return 1
-        [[ ${stream_present} == true ]] || return 1
-        probe_stream stream_present "${final_path}" 'V:0'
-        probe_status=$?
-        ((probe_status == 0)) || return 1
-        [[ ${stream_present} == false ]] || return 1
-        ;;
-    *)
-        return 2
-        ;;
+        video)
+            probe_stream stream_present "${final_path}" 'v:0'
+            probe_status=$?
+            ((probe_status == 0)) || return 1
+            [[ ${stream_present} == true ]] || return 1
+            probe_stream stream_present "${final_path}" 'a:0'
+            probe_status=$?
+            ((probe_status == 0)) || return 1
+            [[ ${stream_present} == true ]] || return 1
+            ;;
+        audio)
+            probe_stream stream_present "${final_path}" 'a:0'
+            probe_status=$?
+            ((probe_status == 0)) || return 1
+            [[ ${stream_present} == true ]] || return 1
+            probe_stream stream_present "${final_path}" 'V:0'
+            probe_status=$?
+            ((probe_status == 0)) || return 1
+            [[ ${stream_present} == false ]] || return 1
+            ;;
+        *)
+            return 2
+            ;;
     esac
     return 0
 }
@@ -824,635 +816,644 @@ normalize_path_record() {
     return 0
 }
 
-OUTPUT_DIR=''
-MODE='video'
-MACHINE_PROGRESS=false
-YOUTUBE_HLS_FIREFOX=false
-RESULT_FILE=''
-URL_FILE=''
-URL=''
-IS_YOUTUBE_URL=false
-POSITIONAL_ARGUMENTS=()
+main() {
+    trap cleanup EXIT
+    trap 'request_shutdown HUP 129' HUP
+    trap 'request_shutdown INT 130' INT
+    trap 'request_shutdown TERM 143' TERM
 
-while (($# > 0)); do
-    case $1 in
-    -h | --help)
-        usage
-        exit 0
-        ;;
-    -V | --version)
-        printf '%s version %s\n' "${SCRIPT_NAME}" "${VERSION}"
-        exit 0
-        ;;
-    -o | --output-dir)
-        require_value "$1" "${2-}"
-        OUTPUT_DIR=$2
-        shift 2
-        ;;
-    --output-dir=*)
-        OUTPUT_DIR=${1#*=}
-        require_value '--output-dir' "${OUTPUT_DIR}"
-        shift
-        ;;
-    -m | --mode)
-        require_value "$1" "${2-}"
-        MODE=$2
-        shift 2
-        ;;
-    --mode=*)
-        MODE=${1#*=}
-        require_value '--mode' "${MODE}"
-        shift
-        ;;
-    --machine-progress)
-        MACHINE_PROGRESS=true
-        shift
-        ;;
-    --youtube-hls-firefox)
-        YOUTUBE_HLS_FIREFOX=true
-        shift
-        ;;
-    --result-file)
-        require_value "$1" "${2-}"
-        RESULT_FILE=$2
-        shift 2
-        ;;
-    --result-file=*)
-        RESULT_FILE=${1#*=}
-        require_value '--result-file' "${RESULT_FILE}"
-        shift
-        ;;
-    --url-file)
-        require_value "$1" "${2-}"
-        URL_FILE=$2
-        shift 2
-        ;;
-    --url-file=*)
-        URL_FILE=${1#*=}
-        require_value '--url-file' "${URL_FILE}"
-        shift
-        ;;
-    --)
-        shift
-        POSITIONAL_ARGUMENTS+=("$@")
-        break
-        ;;
-    -*)
-        error "unknown option: $1"
-        usage >&2
-        exit 2
-        ;;
-    *)
-        POSITIONAL_ARGUMENTS+=("$1")
-        shift
-        ;;
-    esac
-done
-
-if [[ -n ${URL_FILE} ]]; then
-    if ((${#POSITIONAL_ARGUMENTS[@]} != 0)); then
-        error 'do not combine --url-file with a positional URL.'
-        exit 2
-    fi
-    if [[ -L ${URL_FILE} || ! -f ${URL_FILE} || ! -r ${URL_FILE} ]]; then
-        error 'the URL file must be a readable regular file and not a symbolic link.'
-        exit 2
-    fi
-    url_file_owner=$(stat -c '%u' -- "${URL_FILE}" 2>/dev/null || true)
-    if [[ ${url_file_owner} != "${EUID}" ]]; then
-        error 'the URL file must be owned by the current user.'
-        exit 2
-    fi
+    OUTPUT_DIR=''
+    MODE='video'
+    MACHINE_PROGRESS=false
+    YOUTUBE_HLS_FIREFOX=false
+    RESULT_FILE=''
+    URL_FILE=''
     URL=''
-    url_line_count=0
-    while IFS= read -r url_line || [[ -n ${url_line} ]]; do
-        ((url_line_count += 1))
-        if ((url_line_count == 1)); then
-            URL=${url_line}
+    IS_YOUTUBE_URL=false
+    POSITIONAL_ARGUMENTS=()
+
+    while (($# > 0)); do
+        case $1 in
+            -h | --help)
+                usage
+                exit 0
+                ;;
+            -V | --version)
+                printf '%s version %s\n' "${SCRIPT_NAME}" "${VERSION}"
+                exit 0
+                ;;
+            -o | --output-dir)
+                require_value "$1" "${2-}"
+                OUTPUT_DIR=$2
+                shift 2
+                ;;
+            --output-dir=*)
+                OUTPUT_DIR=${1#*=}
+                require_value '--output-dir' "${OUTPUT_DIR}"
+                shift
+                ;;
+            -m | --mode)
+                require_value "$1" "${2-}"
+                MODE=$2
+                shift 2
+                ;;
+            --mode=*)
+                MODE=${1#*=}
+                require_value '--mode' "${MODE}"
+                shift
+                ;;
+            --machine-progress)
+                MACHINE_PROGRESS=true
+                shift
+                ;;
+            --youtube-hls-firefox)
+                YOUTUBE_HLS_FIREFOX=true
+                shift
+                ;;
+            --result-file)
+                require_value "$1" "${2-}"
+                RESULT_FILE=$2
+                shift 2
+                ;;
+            --result-file=*)
+                RESULT_FILE=${1#*=}
+                require_value '--result-file' "${RESULT_FILE}"
+                shift
+                ;;
+            --url-file)
+                require_value "$1" "${2-}"
+                URL_FILE=$2
+                shift 2
+                ;;
+            --url-file=*)
+                URL_FILE=${1#*=}
+                require_value '--url-file' "${URL_FILE}"
+                shift
+                ;;
+            --)
+                shift
+                POSITIONAL_ARGUMENTS+=("$@")
+                break
+                ;;
+            -*)
+                error "unknown option: $1"
+                usage >&2
+                exit 2
+                ;;
+            *)
+                POSITIONAL_ARGUMENTS+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -n ${URL_FILE} ]]; then
+        if ((${#POSITIONAL_ARGUMENTS[@]} != 0)); then
+            error 'do not combine --url-file with a positional URL.'
+            exit 2
         fi
-    done <"${URL_FILE}"
-    if ((url_line_count != 1)); then
-        error 'the URL file must contain exactly one line.'
-        exit 2
-    fi
-else
-    if ((${#POSITIONAL_ARGUMENTS[@]} == 0)); then
-        error 'a video URL is required.'
-        usage >&2
-        exit 2
-    fi
-    if ((${#POSITIONAL_ARGUMENTS[@]} != 1)); then
-        error 'exactly one video URL is required.'
-        usage >&2
-        exit 2
-    fi
-    URL=${POSITIONAL_ARGUMENTS[0]}
-fi
-
-if [[ ${URL} == *$'\n'* || ${URL} == *$'\r'* ]]; then
-    error 'the URL must not contain line breaks.'
-    exit 2
-fi
-if [[ ! ${URL} =~ ^https?://[^[:space:]]+$ ]]; then
-    error 'provide a URL beginning with http:// or https://.'
-    exit 2
-fi
-
-url_authority=${URL#*://}
-url_authority=${url_authority%%/*}
-url_authority=${url_authority%%\?*}
-url_authority=${url_authority%%\#*}
-if [[ ${url_authority} == *@* ]]; then
-    error 'URLs containing user information are not accepted.'
-    exit 2
-fi
-URL_HOST=${url_authority%%:*}
-URL_HOST=${URL_HOST,,}
-URL_HOST=${URL_HOST%.}
-case ${URL_HOST} in
-    youtube.com | *.youtube.com | youtu.be | *.youtu.be | \
-        youtube-nocookie.com | *.youtube-nocookie.com)
-        IS_YOUTUBE_URL=true
-        ;;
-    *)
-        IS_YOUTUBE_URL=false
-        ;;
-esac
-readonly URL_HOST IS_YOUTUBE_URL
-
-case ${MODE} in
-video | audio) ;;
-*)
-    error '--mode must be video or audio.'
-    exit 2
-    ;;
-esac
-
-if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
-    if [[ ${MODE} != video ]]; then
-        error '--youtube-hls-firefox is available only with --mode video.'
-        exit 2
-    fi
-
-    if [[ ${IS_YOUTUBE_URL} != true ]]; then
-        error '--youtube-hls-firefox requires a YouTube URL.'
-        exit 2
-    fi
-fi
-
-for command_name in aria2c ffmpeg ffprobe realpath grep mktemp mv rm chmod flock mkdir sha256sum stat setsid sleep timeout find; do
-    if ! command -v "${command_name}" >/dev/null 2>&1; then
-        error "required command \"${command_name}\" was not found."
-        exit 127
-    fi
-done
-
-script_path=$(realpath -e -- "${BASH_SOURCE[0]}") || {
-    error 'unable to resolve the engine path.'
-    exit 66
-}
-script_dir=${script_path%/*}
-runtime_manager="${script_dir}/runtime-manager.sh"
-
-if [[ ${YTDLP_ARIA2_SKIP_RUNTIME_UPDATE:-0} == 1 ]]; then
-    YTDLP_BIN=${YTDLP_ARIA2_YTDLP_BIN:-$(command -v yt-dlp 2>/dev/null || true)}
-    DENO_BIN=${YTDLP_ARIA2_DENO_BIN:-$(command -v deno 2>/dev/null || true)}
-else
-    if [[ ! -x ${runtime_manager} ]]; then
-        error "runtime manager is missing: ${runtime_manager}"
-        exit 66
-    fi
-    runtime_action='update'
-    case ${YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE:-1} in
-    1 | '') ;;
-    0) runtime_action='require' ;;
-    *)
-        error 'YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE must be 0 or 1.'
-        exit 64
-        ;;
-    esac
-    if ! "${runtime_manager}" "${runtime_action}"; then
-        error 'unable to initialize the managed yt-dlp and Deno runtimes.'
-        exit 69
-    fi
-    YTDLP_BIN=$("${runtime_manager}" path yt-dlp) || {
-        error 'unable to resolve the managed yt-dlp runtime.'
-        exit 69
-    }
-    DENO_BIN=$("${runtime_manager}" path deno) || {
-        error 'unable to resolve the managed Deno runtime.'
-        exit 69
-    }
-fi
-readonly YTDLP_BIN DENO_BIN
-
-if [[ ! -x ${YTDLP_BIN} ]]; then
-    error 'the selected yt-dlp runtime is not executable.'
-    exit 127
-fi
-
-# Keep this as a simple command: placing it in an if/|| context would disable
-# errexit inside the function body under Bash's documented rules.
-check_runtime_compatibility
-readonly ARIA2_SUPPORTS_NO_NETRC
-
-if [[ -z ${OUTPUT_DIR} ]]; then
-    OUTPUT_DIR=${PWD}
-fi
-
-if [[ ${OUTPUT_DIR} == *$'\n'* || ${OUTPUT_DIR} == *$'\r'* ]]; then
-    error 'the destination path must not contain line breaks.'
-    exit 2
-fi
-
-if [[ ! -d ${OUTPUT_DIR} ]]; then
-    error "destination directory does not exist: ${OUTPUT_DIR}"
-    exit 1
-fi
-
-if ! OUTPUT_DIR=$(realpath -e -- "${OUTPUT_DIR}"); then
-    error 'unable to resolve the destination directory.'
-    exit 1
-fi
-readonly OUTPUT_DIR
-
-# --output is an yt-dlp output template. Escape literal percent signs from the
-# real destination path so directories containing '%' are handled correctly.
-OUTPUT_DIR_TEMPLATE=${OUTPUT_DIR//%/%%}
-readonly OUTPUT_DIR_TEMPLATE
-
-if [[ ! -w ${OUTPUT_DIR} || ! -x ${OUTPUT_DIR} ]]; then
-    error "destination directory is not writable: ${OUTPUT_DIR}"
-    exit 13
-fi
-
-# Keep one same-user writer per canonical destination directory. The lock is
-# stored in a private local runtime directory, so no marker is written into the
-# user's media directory and an interrupted process releases it automatically.
-acquire_output_lock "${OUTPUT_DIR}"
-cleanup_stale_temporary_files
-
-if [[ -n ${RESULT_FILE} ]]; then
-    if [[ ${RESULT_FILE} == *$'\n'* || ${RESULT_FILE} == *$'\r'* ]]; then
-        error 'the result-file path must not contain line breaks.'
-        exit 2
-    fi
-
-    result_parent=${RESULT_FILE%/*}
-    if [[ ${result_parent} == "${RESULT_FILE}" ]]; then
-        result_parent='.'
-    elif [[ -z ${result_parent} ]]; then
-        result_parent='/'
-    fi
-
-    if [[ ! -d ${result_parent} || ! -w ${result_parent} || ! -x ${result_parent} ]]; then
-        error 'the result-file directory is not writable.'
-        exit 13
-    fi
-
-    if [[ -e ${RESULT_FILE} || -L ${RESULT_FILE} ]]; then
-        error 'the result-file already exists; refusing to overwrite it.'
-        exit 13
-    fi
-
-    if ! RESULT_FILE_TMP=$(mktemp \
-        --tmpdir="${result_parent}" \
-        '.yt-dlp-result.XXXXXXXX'); then
-        error 'unable to create the temporary result file.'
-        exit 13
-    fi
-fi
-
-if [[ -z ${RESULT_FILE_TMP} ]]; then
-    # Always retain the final yt-dlp path internally. This permits uniform
-    # FFprobe validation for ordinary CLI runs as well as GUI and HLS runs.
-    if ! INTERNAL_PATH_FILE_TMP=$(mktemp \
-        --tmpdir="${OUTPUT_DIR}" \
-        '.yt-dlp-path.XXXXXXXX'); then
-        error 'unable to create the internal result-path file.'
-        exit 13
-    fi
-fi
-
-
-if ! YTDLP_BATCH_FILE_TMP=$(mktemp \
-    --tmpdir="${OUTPUT_LOCK_ROOT}" \
-    '.url-batch.XXXXXXXX'); then
-    error 'unable to create the private yt-dlp URL batch file.'
-    exit 13
-fi
-if ! printf '%s\n' "${URL}" >"${YTDLP_BATCH_FILE_TMP}" ||
-    ! chmod 600 -- "${YTDLP_BATCH_FILE_TMP}"; then
-    error 'unable to secure the private yt-dlp URL batch file.'
-    exit 13
-fi
-unset URL
-
-printf '%s version %s\n' "${SCRIPT_NAME}" "${VERSION}"
-printf 'Download directory: %s\n' "${OUTPUT_DIR}"
-printf 'Mode: %s\n' "${MODE}"
-if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
-    printf '%s\n' 'YouTube access: Firefox cookies with web_safari HLS'
-fi
-
-ARIA2_ARGUMENTS='-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true'
-if [[ ${ARIA2_SUPPORTS_NO_NETRC} == true ]]; then
-    ARIA2_ARGUMENTS+=' --no-netrc=true'
-fi
-ARIA2_ARGUMENTS+=' --console-log-level=warn --enable-color=false --truncate-console-readout=false'
-if [[ ${MACHINE_PROGRESS} == true ]]; then
-    # yt-dlp does not currently expose aria2c transfer progress through its
-    # own progress hooks. yt-dlp captures stderr from external downloaders and
-    # normally replays it only on failure, so aria2c's periodic readout must
-    # remain on stdout to reach the GUI log during a successful transfer.
-    ARIA2_ARGUMENTS+=' --summary-interval=1 --show-console-readout=true --stderr=false'
-else
-    ARIA2_ARGUMENTS+=' --summary-interval=0'
-fi
-readonly ARIA2_ARGUMENTS
-
-YT_DLP_OPTIONS=(
-    --ignore-config
-    --no-update
-    --no-playlist
-    --break-match-filters '!playlist_index'
-    --no-overwrites
-    --no-post-overwrites
-    --embed-metadata
-    --socket-timeout 30
-    --retries 10
-    --fragment-retries 10
-    --extractor-retries 3
-    --retry-sleep 2
-    --output "${OUTPUT_DIR_TEMPLATE}/%(title).160B [%(id).64B].%(ext)s"
-    --continue
-    --progress-delta 1
-    # Use aria2c for direct transfers, but retain yt-dlp's native downloader for
-    # fragmented DASH and HLS streams. Multiple --downloader rules are additive.
-    --downloader aria2c
-    --downloader 'dash,m3u8:native'
-    --downloader-args "aria2c:${ARIA2_ARGUMENTS}"
-    --concurrent-fragments 1
-)
-
-if [[ ${JS_RUNTIME_AVAILABLE} == true ]]; then
-    YT_DLP_OPTIONS+=(--js-runtimes "deno:${DENO_BIN}")
-fi
-
-if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
-    # This explicit profile reads the authenticated Firefox session and asks
-    # YouTube's web_safari client for HLS formats. Current yt-dlp guidance notes
-    # that these HLS URLs do not require a GVS PO Token at this time.
-    YT_DLP_OPTIONS+=(
-        --cookies-from-browser firefox
-        --extractor-args 'youtube:player_client=web_safari'
-        --fixup force
-    )
-fi
-
-if [[ ${MODE} == 'video' ]]; then
-    # Keep both container options. --merge-output-format covers separate
-    # video/audio streams, while --remux-video covers the combined-format fallback.
-    if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
-        VIDEO_FORMAT='(bv*+ba/b)[protocol^=m3u8]'
+        if [[ -L ${URL_FILE} || ! -f ${URL_FILE} || ! -r ${URL_FILE} ]]; then
+            error 'the URL file must be a readable regular file and not a symbolic link.'
+            exit 2
+        fi
+        url_file_owner=$(stat -c '%u' -- "${URL_FILE}" 2>/dev/null || true)
+        if [[ ${url_file_owner} != "${EUID}" ]]; then
+            error 'the URL file must be owned by the current user.'
+            exit 2
+        fi
+        URL=''
+        url_line_count=0
+        while IFS= read -r url_line || [[ -n ${url_line} ]]; do
+            ((url_line_count += 1))
+            if ((url_line_count == 1)); then
+                URL=${url_line}
+            fi
+        done <"${URL_FILE}"
+        if ((url_line_count != 1)); then
+            error 'the URL file must contain exactly one line.'
+            exit 2
+        fi
     else
-        VIDEO_FORMAT='bv*+ba/b'
+        if ((${#POSITIONAL_ARGUMENTS[@]} == 0)); then
+            error 'a video URL is required.'
+            usage >&2
+            exit 2
+        fi
+        if ((${#POSITIONAL_ARGUMENTS[@]} != 1)); then
+            error 'exactly one video URL is required.'
+            usage >&2
+            exit 2
+        fi
+        URL=${POSITIONAL_ARGUMENTS[0]}
     fi
-    YT_DLP_OPTIONS+=(--format "${VIDEO_FORMAT}")
-    # The authenticated HLS profile must let yt-dlp run FixupM3u8 before this
-    # wrapper performs its final MKV remux. Scheduling VideoRemuxer here would
-    # make yt-dlp treat the fixup as redundant and skip it.
-    if [[ ${YOUTUBE_HLS_FIREFOX} != true ]]; then
-        YT_DLP_OPTIONS+=(
-            --merge-output-format mkv
-            --remux-video mkv
-        )
+
+    if [[ ${URL} == *$'\n'* || ${URL} == *$'\r'* ]]; then
+        error 'the URL must not contain line breaks.'
+        exit 2
     fi
-else
-    # Match the dedicated download-audio.sh behavior: select the best
-    # audio-only stream, fall back to the best combined stream when necessary,
-    # extract audio, and preserve the source codec/container whenever possible.
-    YT_DLP_OPTIONS+=(
-        --format 'ba/b'
-        --extract-audio
-        --audio-format best
-        --audio-quality 0
-    )
-fi
+    if [[ ! ${URL} =~ ^https?://[^[:space:]]+$ ]]; then
+        error 'provide a URL beginning with http:// or https://.'
+        exit 2
+    fi
 
-if [[ ${MACHINE_PROGRESS} == true ]]; then
-    YT_DLP_OPTIONS+=(
-        --newline
-        --progress
-        --color never
-        --print 'before_dl:YTDLP_PLAN|%(id|unknown)s|%(format_id|unknown)s|%(requested_formats.0.format_id|)s|%(requested_formats.1.format_id|)s'
-        --progress-template 'download:YTDLP_PROGRESS_V2|%(info.id|unknown)s|%(info.format_id|unknown)s|%(progress.status|unknown)s|%(progress.downloaded_bytes|0)s|%(progress.total_bytes|0)s|%(progress.total_bytes_estimate|0)s|%(progress.fragment_index|0)s|%(progress.fragment_count|0)s|%(progress._percent_str|)s|%(progress._speed_str|)s|%(progress._eta_str|)s'
-        --progress-template 'postprocess:YTDLP_POSTPROCESS|%(progress.status|unknown)s|%(progress.postprocessor|unknown)s'
-    )
-fi
-
-PATH_RECORD_TMP=${RESULT_FILE_TMP:-${INTERNAL_PATH_FILE_TMP}}
-if [[ -n ${PATH_RECORD_TMP} ]]; then
-    # The FILE argument is itself an output template, so literal % characters
-    # in the temporary path must be doubled.
-    path_record_template=${PATH_RECORD_TMP//%/%%}
-    YT_DLP_OPTIONS+=(
-        --print-to-file 'after_move:%(filepath)s' "${path_record_template}"
-    )
-fi
-
-run_supervised_command "${YTDLP_BIN}" "${YT_DLP_OPTIONS[@]}" --batch-file "${YTDLP_BATCH_FILE_TMP}"
-if ! rm -f -- "${YTDLP_BATCH_FILE_TMP}"; then
-    error 'unable to remove the private yt-dlp URL batch file.'
-    exit 13
-fi
-YTDLP_BATCH_FILE_TMP=''
-if ((DOWNLOAD_STATUS == 0)); then
-    if [[ -n ${PATH_RECORD_TMP} ]]; then
-        set +e
-        normalize_path_record "${PATH_RECORD_TMP}" "${OUTPUT_DIR}"
-        path_record_status=$?
-        set -e
-        case ${path_record_status} in
-        0) ;;
-        1)
-            error 'yt-dlp did not report a valid final media path inside the destination directory.'
-            exit 1
+    url_authority=${URL#*://}
+    url_authority=${url_authority%%/*}
+    url_authority=${url_authority%%\?*}
+    url_authority=${url_authority%%\#*}
+    if [[ ${url_authority} == *@* ]]; then
+        error 'URLs containing user information are not accepted.'
+        exit 2
+    fi
+    URL_HOST=${url_authority%%:*}
+    URL_HOST=${URL_HOST,,}
+    URL_HOST=${URL_HOST%.}
+    case ${URL_HOST} in
+        youtube.com | *.youtube.com | youtu.be | *.youtu.be | \
+            youtube-nocookie.com | *.youtube-nocookie.com)
+            IS_YOUTUBE_URL=true
             ;;
         *)
-            error 'unable to normalize the final media path record.'
-            exit 13
+            IS_YOUTUBE_URL=false
             ;;
-        esac
-    fi
+    esac
+    readonly URL_HOST IS_YOUTUBE_URL
+
+    case ${MODE} in
+        video | audio) ;;
+        *)
+            error '--mode must be video or audio.'
+            exit 2
+            ;;
+    esac
 
     if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
-        hls_source_path=$(<"${PATH_RECORD_TMP}") || {
-            error 'unable to read the repaired HLS file path.'
-            exit 13
-        }
-
-        hls_source_dir=${hls_source_path%/*}
-        if [[ ${hls_source_dir} == "${hls_source_path}" ]]; then
-            hls_source_dir='.'
-        fi
-        hls_source_name=${hls_source_path##*/}
-        hls_source_stem=${hls_source_name%.*}
-        hls_final_path="${hls_source_dir}/${hls_source_stem}.mkv"
-
-        if [[ -e ${hls_final_path} || -L ${hls_final_path} ]]; then
-            error "the final MKV already exists; refusing to overwrite it: ${hls_final_path}"
-            exit 13
+        if [[ ${MODE} != video ]]; then
+            error '--youtube-hls-firefox is available only with --mode video.'
+            exit 2
         fi
 
-        emit_machine_postprocess started FFmpegVideoRemuxer
-        hls_source_duration_us=''
-        probe_duration_microseconds \
-            hls_source_duration_us "${hls_source_path}" 2>/dev/null
-        if [[ ${MACHINE_PROGRESS} == true && ${hls_source_duration_us} =~ ^[1-9][0-9]*$ ]]; then
-            printf 'FFMPEG_PROGRESS_DURATION|%s\n' "${hls_source_duration_us}"
-        fi
-        if ! HLS_REMUX_TMP=$(mktemp \
-            --tmpdir="${hls_source_dir}" \
-            --suffix='.mkv' \
-            '.yt-dlp-remux.XXXXXXXX'); then
-            emit_machine_postprocess error FFmpegVideoRemuxer
-            error 'unable to create the temporary MKV file.'
-            exit 13
-        fi
-
-        run_supervised_command \
-            ffmpeg \
-            -hide_banner \
-            -loglevel warning \
-            -nostdin \
-            -nostats \
-            -stats_period 0.5 \
-            -progress pipe:1 \
-            -i "${hls_source_path}" \
-            -map 0 \
-            -dn \
-            -ignore_unknown \
-            -c copy \
-            -y \
-            "${HLS_REMUX_TMP}"
-        ffmpeg_status=${DOWNLOAD_STATUS}
-        if ((ffmpeg_status != 0)); then
-            emit_machine_postprocess error FFmpegVideoRemuxer
-            error "unable to remux the repaired HLS file into MKV (FFmpeg status ${ffmpeg_status})."
-            printf 'The repaired HLS intermediate was retained at: %s\n' \
-                "${hls_source_path}" >&2
-            exit "${ffmpeg_status}"
-        fi
-
-        hls_final_duration_us=''
-        probe_duration_microseconds \
-            hls_final_duration_us "${HLS_REMUX_TMP}" 2>/dev/null
-        if [[ ${hls_source_duration_us} =~ ^[1-9][0-9]*$ &&
-            ${hls_final_duration_us} =~ ^[1-9][0-9]*$ ]] &&
-            ((hls_final_duration_us < hls_source_duration_us)); then
-            # Stream-copy remuxes may shift/drop a small amount of timestamp
-            # padding. Permit 2% loss, with a 0.5 s floor and 5 s ceiling, but
-            # fail closed on a materially shortened result. This is deliberately
-            # metadata-only validation; do not decode the complete media again.
-            hls_duration_tolerance_us=$((hls_source_duration_us / 50))
-            if ((hls_duration_tolerance_us < 500000)); then
-                hls_duration_tolerance_us=500000
-            elif ((hls_duration_tolerance_us > 5000000)); then
-                hls_duration_tolerance_us=5000000
-            fi
-            hls_duration_loss_us=$((hls_source_duration_us - hls_final_duration_us))
-            if ((hls_duration_loss_us > hls_duration_tolerance_us)); then
-                emit_machine_postprocess error FFmpegVideoRemuxer
-                error 'the remuxed MKV is substantially shorter than the repaired HLS source.'
-                printf 'Source duration: %s us; remuxed duration: %s us; allowed loss: %s us.\n' \
-                    "${hls_source_duration_us}" \
-                    "${hls_final_duration_us}" \
-                    "${hls_duration_tolerance_us}" >&2
-                printf 'The repaired HLS intermediate was retained at: %s\n' \
-                    "${hls_source_path}" >&2
-                exit 65
-            fi
-        fi
-
-        if ! mv -nT -- "${HLS_REMUX_TMP}" "${hls_final_path}"; then
-            emit_machine_postprocess error FFmpegVideoRemuxer
-            error 'unable to publish the final MKV file.'
-            exit 13
-        fi
-        if [[ -e ${HLS_REMUX_TMP} || -L ${HLS_REMUX_TMP} ]]; then
-            emit_machine_postprocess error FFmpegVideoRemuxer
-            error "the final MKV appeared during publication; refusing to overwrite it: ${hls_final_path}"
-            exit 13
-        fi
-        HLS_REMUX_TMP=''
-        if ! printf '%s\n' "${hls_final_path}" >"${PATH_RECORD_TMP}"; then
-            error 'unable to record the final MKV path.'
-            printf 'The repaired HLS intermediate was retained at: %s\n' \
-                "${hls_source_path}" >&2
-            exit 13
-        fi
-        emit_machine_postprocess finished FFmpegVideoRemuxer
-        if [[ ${hls_source_path} != "${hls_final_path}" ]]; then
-            HLS_SOURCE_TO_CLEAN=${hls_source_path}
+        if [[ ${IS_YOUTUBE_URL} != true ]]; then
+            error '--youtube-hls-firefox requires a YouTube URL.'
+            exit 2
         fi
     fi
 
-    final_media_path=''
-    if ! { IFS= read -r final_media_path <"${PATH_RECORD_TMP}"; } 2>/dev/null ||
-        [[ -z ${final_media_path} ]]; then
-        error 'unable to read the final media path for validation.'
+    for command_name in aria2c ffmpeg ffprobe realpath grep mktemp mv rm chmod flock mkdir sha256sum stat setsid sleep timeout find; do
+        if ! command -v "${command_name}" >/dev/null 2>&1; then
+            error "required command \"${command_name}\" was not found."
+            exit 127
+        fi
+    done
+
+    script_path=$(realpath -e -- "${BASH_SOURCE[0]}") || {
+        error 'unable to resolve the engine path.'
+        exit 66
+    }
+    script_dir=${script_path%/*}
+    runtime_manager="${script_dir}/runtime-manager.sh"
+
+    if [[ ${YTDLP_ARIA2_SKIP_RUNTIME_UPDATE:-0} == 1 ]]; then
+        YTDLP_BIN=${YTDLP_ARIA2_YTDLP_BIN:-$(command -v yt-dlp 2>/dev/null || true)}
+        DENO_BIN=${YTDLP_ARIA2_DENO_BIN:-$(command -v deno 2>/dev/null || true)}
+    else
+        if [[ ! -x ${runtime_manager} ]]; then
+            error "runtime manager is missing: ${runtime_manager}"
+            exit 66
+        fi
+        runtime_action='update'
+        case ${YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE:-1} in
+            1 | '') ;;
+            0) runtime_action='require' ;;
+            *)
+                error 'YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE must be 0 or 1.'
+                exit 64
+                ;;
+        esac
+        if ! "${runtime_manager}" "${runtime_action}"; then
+            error 'unable to initialize the managed yt-dlp and Deno runtimes.'
+            exit 69
+        fi
+        YTDLP_BIN=$("${runtime_manager}" path yt-dlp) || {
+            error 'unable to resolve the managed yt-dlp runtime.'
+            exit 69
+        }
+        DENO_BIN=$("${runtime_manager}" path deno) || {
+            error 'unable to resolve the managed Deno runtime.'
+            exit 69
+        }
+    fi
+    readonly YTDLP_BIN DENO_BIN
+
+    if [[ ! -x ${YTDLP_BIN} ]]; then
+        error 'the selected yt-dlp runtime is not executable.'
+        exit 127
+    fi
+
+    # Keep this as a simple command: placing it in an if/|| context would disable
+    # errexit inside the function body under Bash's documented rules.
+    check_runtime_compatibility
+    readonly ARIA2_SUPPORTS_NO_NETRC
+
+    if [[ -z ${OUTPUT_DIR} ]]; then
+        OUTPUT_DIR=${PWD}
+    fi
+
+    if [[ ${OUTPUT_DIR} == *$'\n'* || ${OUTPUT_DIR} == *$'\r'* ]]; then
+        error 'the destination path must not contain line breaks.'
+        exit 2
+    fi
+
+    if [[ ! -d ${OUTPUT_DIR} ]]; then
+        error "destination directory does not exist: ${OUTPUT_DIR}"
+        exit 1
+    fi
+
+    if ! OUTPUT_DIR=$(realpath -e -- "${OUTPUT_DIR}"); then
+        error 'unable to resolve the destination directory.'
+        exit 1
+    fi
+    readonly OUTPUT_DIR
+
+    # --output is an yt-dlp output template. Escape literal percent signs from the
+    # real destination path so directories containing '%' are handled correctly.
+    OUTPUT_DIR_TEMPLATE=${OUTPUT_DIR//%/%%}
+    readonly OUTPUT_DIR_TEMPLATE
+
+    if [[ ! -w ${OUTPUT_DIR} || ! -x ${OUTPUT_DIR} ]]; then
+        error "destination directory is not writable: ${OUTPUT_DIR}"
         exit 13
     fi
 
-    emit_machine_postprocess started MediaValidation
-
-    # Call the validation function outside a conditional context. Bash disables
-    # errexit throughout a function invoked by if, !, &&, or ||, which could
-    # otherwise hide an unexpected failure inside the validation routine.
-    set +e
-    validate_final_media_file \
-        "${final_media_path}" "${MODE}"
-    validation_status=$?
-    set -e
-
-    if ((validation_status != 0)); then
-        emit_machine_postprocess error MediaValidation
-        error "the final media file failed FFprobe validation: ${final_media_path}"
-        printf '%s\n' \
-            'The media file was retained for diagnosis and was not published as a successful result.' >&2
-        exit 65
-    fi
-    emit_machine_postprocess finished MediaValidation
+    # Keep one same-user writer per canonical destination directory. The lock is
+    # stored in a private local runtime directory, so no marker is written into the
+    # user's media directory and an interrupted process releases it automatically.
+    acquire_output_lock "${OUTPUT_DIR}"
+    cleanup_stale_temporary_files
 
     if [[ -n ${RESULT_FILE} ]]; then
-        if ! mv -nT -- "${RESULT_FILE_TMP}" "${RESULT_FILE}"; then
-            error 'unable to publish the result file.'
+        if [[ ${RESULT_FILE} == *$'\n'* || ${RESULT_FILE} == *$'\r'* ]]; then
+            error 'the result-file path must not contain line breaks.'
+            exit 2
+        fi
+
+        result_parent=${RESULT_FILE%/*}
+        if [[ ${result_parent} == "${RESULT_FILE}" ]]; then
+            result_parent='.'
+        elif [[ -z ${result_parent} ]]; then
+            result_parent='/'
+        fi
+
+        if [[ ! -d ${result_parent} || ! -w ${result_parent} || ! -x ${result_parent} ]]; then
+            error 'the result-file directory is not writable.'
             exit 13
         fi
-        if [[ -e ${RESULT_FILE_TMP} || -L ${RESULT_FILE_TMP} ]]; then
-            error 'the result file appeared during publication; refusing to overwrite it.'
+
+        if [[ -e ${RESULT_FILE} || -L ${RESULT_FILE} ]]; then
+            error 'the result-file already exists; refusing to overwrite it.'
             exit 13
         fi
-        RESULT_FILE_TMP=''
-    elif [[ -n ${INTERNAL_PATH_FILE_TMP} ]]; then
-        if ! rm -f -- "${INTERNAL_PATH_FILE_TMP}"; then
-            error 'unable to remove the internal result-path file.'
+
+        if ! RESULT_FILE_TMP=$(mktemp \
+            --tmpdir="${result_parent}" \
+            '.yt-dlp-result.XXXXXXXX'); then
+            error 'unable to create the temporary result file.'
             exit 13
         fi
-        INTERNAL_PATH_FILE_TMP=''
     fi
 
-    if [[ -n ${HLS_SOURCE_TO_CLEAN} ]]; then
-        if ! rm -f -- "${HLS_SOURCE_TO_CLEAN}"; then
-            printf 'Warning: unable to remove the repaired HLS intermediate: %s\n' \
-                "${HLS_SOURCE_TO_CLEAN}" >&2
+    if [[ -z ${RESULT_FILE_TMP} ]]; then
+        # Always retain the final yt-dlp path internally. This permits uniform
+        # FFprobe validation for ordinary CLI runs as well as GUI and HLS runs.
+        if ! INTERNAL_PATH_FILE_TMP=$(mktemp \
+            --tmpdir="${OUTPUT_DIR}" \
+            '.yt-dlp-path.XXXXXXXX'); then
+            error 'unable to create the internal result-path file.'
+            exit 13
         fi
-        HLS_SOURCE_TO_CLEAN=''
     fi
-    printf '\nDownload completed successfully.\n'
-else
-    status=${DOWNLOAD_STATUS}
-    printf '\nDownload failed with exit code %d.\n' "${status}" >&2
-    exit "${status}"
-fi
+
+    if ! YTDLP_BATCH_FILE_TMP=$(mktemp \
+        --tmpdir="${OUTPUT_LOCK_ROOT}" \
+        '.url-batch.XXXXXXXX'); then
+        error 'unable to create the private yt-dlp URL batch file.'
+        exit 13
+    fi
+    if ! printf '%s\n' "${URL}" >"${YTDLP_BATCH_FILE_TMP}" \
+        || ! chmod 600 -- "${YTDLP_BATCH_FILE_TMP}"; then
+        error 'unable to secure the private yt-dlp URL batch file.'
+        exit 13
+    fi
+    unset URL
+
+    printf '%s version %s\n' "${SCRIPT_NAME}" "${VERSION}"
+    printf 'Download directory: %s\n' "${OUTPUT_DIR}"
+    printf 'Mode: %s\n' "${MODE}"
+    if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
+        printf '%s\n' 'YouTube access: Firefox cookies with web_safari HLS'
+    fi
+
+    ARIA2_ARGUMENTS='-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true'
+    if [[ ${ARIA2_SUPPORTS_NO_NETRC} == true ]]; then
+        ARIA2_ARGUMENTS+=' --no-netrc=true'
+    fi
+    ARIA2_ARGUMENTS+=' --console-log-level=warn --enable-color=false --truncate-console-readout=false'
+    if [[ ${MACHINE_PROGRESS} == true ]]; then
+        # yt-dlp does not currently expose aria2c transfer progress through its
+        # own progress hooks. yt-dlp captures stderr from external downloaders and
+        # normally replays it only on failure, so aria2c's periodic readout must
+        # remain on stdout to reach the GUI log during a successful transfer.
+        ARIA2_ARGUMENTS+=' --summary-interval=1 --show-console-readout=true --stderr=false'
+    else
+        ARIA2_ARGUMENTS+=' --summary-interval=0'
+    fi
+    readonly ARIA2_ARGUMENTS
+
+    YT_DLP_OPTIONS=(
+        --ignore-config
+        --no-update
+        --no-playlist
+        --break-match-filters '!playlist_index'
+        --no-overwrites
+        --no-post-overwrites
+        --embed-metadata
+        --socket-timeout 30
+        --retries 10
+        --fragment-retries 10
+        --extractor-retries 3
+        --retry-sleep 2
+        --output "${OUTPUT_DIR_TEMPLATE}/%(title).160B [%(id).64B].%(ext)s"
+        --continue
+        --progress-delta 1
+        # Use aria2c for direct transfers, but retain yt-dlp's native downloader for
+        # fragmented DASH and HLS streams. Multiple --downloader rules are additive.
+        --downloader aria2c
+        --downloader 'dash,m3u8:native'
+        --downloader-args "aria2c:${ARIA2_ARGUMENTS}"
+        --concurrent-fragments 1
+    )
+
+    if [[ ${JS_RUNTIME_AVAILABLE} == true ]]; then
+        YT_DLP_OPTIONS+=(--js-runtimes "deno:${DENO_BIN}")
+    fi
+
+    if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
+        # This explicit profile reads the authenticated Firefox session and asks
+        # YouTube's web_safari client for HLS formats. Current yt-dlp guidance notes
+        # that these HLS URLs do not require a GVS PO Token at this time.
+        YT_DLP_OPTIONS+=(
+            --cookies-from-browser firefox
+            --extractor-args 'youtube:player_client=web_safari'
+            --fixup force
+        )
+    fi
+
+    if [[ ${MODE} == 'video' ]]; then
+        # Keep both container options. --merge-output-format covers separate
+        # video/audio streams, while --remux-video covers the combined-format fallback.
+        if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
+            VIDEO_FORMAT='(bv*+ba/b)[protocol^=m3u8]'
+        else
+            VIDEO_FORMAT='bv*+ba/b'
+        fi
+        YT_DLP_OPTIONS+=(--format "${VIDEO_FORMAT}")
+        # The authenticated HLS profile must let yt-dlp run FixupM3u8 before this
+        # wrapper performs its final MKV remux. Scheduling VideoRemuxer here would
+        # make yt-dlp treat the fixup as redundant and skip it.
+        if [[ ${YOUTUBE_HLS_FIREFOX} != true ]]; then
+            YT_DLP_OPTIONS+=(
+                --merge-output-format mkv
+                --remux-video mkv
+            )
+        fi
+    else
+        # Match the dedicated download-audio.sh behavior: select the best
+        # audio-only stream, fall back to the best combined stream when necessary,
+        # extract audio, and preserve the source codec/container whenever possible.
+        YT_DLP_OPTIONS+=(
+            --format 'ba/b'
+            --extract-audio
+            --audio-format best
+            --audio-quality 0
+        )
+    fi
+
+    if [[ ${MACHINE_PROGRESS} == true ]]; then
+        YT_DLP_OPTIONS+=(
+            --newline
+            --progress
+            --color never
+            --print 'before_dl:YTDLP_PLAN|%(id|unknown)s|%(format_id|unknown)s|%(requested_formats.0.format_id|)s|%(requested_formats.1.format_id|)s'
+            --progress-template 'download:YTDLP_PROGRESS_V2|%(info.id|unknown)s|%(info.format_id|unknown)s|%(progress.status|unknown)s|%(progress.downloaded_bytes|0)s|%(progress.total_bytes|0)s|%(progress.total_bytes_estimate|0)s|%(progress.fragment_index|0)s|%(progress.fragment_count|0)s|%(progress._percent_str|)s|%(progress._speed_str|)s|%(progress._eta_str|)s'
+            --progress-template 'postprocess:YTDLP_POSTPROCESS|%(progress.status|unknown)s|%(progress.postprocessor|unknown)s'
+        )
+    fi
+
+    PATH_RECORD_TMP=${RESULT_FILE_TMP:-${INTERNAL_PATH_FILE_TMP}}
+    if [[ -n ${PATH_RECORD_TMP} ]]; then
+        # The FILE argument is itself an output template, so literal % characters
+        # in the temporary path must be doubled.
+        path_record_template=${PATH_RECORD_TMP//%/%%}
+        YT_DLP_OPTIONS+=(
+            --print-to-file 'after_move:%(filepath)s' "${path_record_template}"
+        )
+    fi
+
+    run_supervised_command "${YTDLP_BIN}" "${YT_DLP_OPTIONS[@]}" --batch-file "${YTDLP_BATCH_FILE_TMP}"
+    if ! rm -f -- "${YTDLP_BATCH_FILE_TMP}"; then
+        error 'unable to remove the private yt-dlp URL batch file.'
+        exit 13
+    fi
+    YTDLP_BATCH_FILE_TMP=''
+    if ((DOWNLOAD_STATUS == 0)); then
+        if [[ -n ${PATH_RECORD_TMP} ]]; then
+            set +e
+            normalize_path_record "${PATH_RECORD_TMP}" "${OUTPUT_DIR}"
+            path_record_status=$?
+            set -e
+            case ${path_record_status} in
+                0) ;;
+                1)
+                    error 'yt-dlp did not report a valid final media path inside the destination directory.'
+                    exit 1
+                    ;;
+                *)
+                    error 'unable to normalize the final media path record.'
+                    exit 13
+                    ;;
+            esac
+        fi
+
+        if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
+            hls_source_path=$(<"${PATH_RECORD_TMP}") || {
+                error 'unable to read the repaired HLS file path.'
+                exit 13
+            }
+
+            hls_source_dir=${hls_source_path%/*}
+            if [[ ${hls_source_dir} == "${hls_source_path}" ]]; then
+                hls_source_dir='.'
+            fi
+            hls_source_name=${hls_source_path##*/}
+            hls_source_stem=${hls_source_name%.*}
+            hls_final_path="${hls_source_dir}/${hls_source_stem}.mkv"
+
+            if [[ -e ${hls_final_path} || -L ${hls_final_path} ]]; then
+                error "the final MKV already exists; refusing to overwrite it: ${hls_final_path}"
+                exit 13
+            fi
+
+            emit_machine_postprocess started FFmpegVideoRemuxer
+            hls_source_duration_us=''
+            probe_duration_microseconds \
+                hls_source_duration_us "${hls_source_path}" 2>/dev/null
+            if [[ ${MACHINE_PROGRESS} == true && ${hls_source_duration_us} =~ ^[1-9][0-9]*$ ]]; then
+                printf 'FFMPEG_PROGRESS_DURATION|%s\n' "${hls_source_duration_us}"
+            fi
+            if ! HLS_REMUX_TMP=$(mktemp \
+                --tmpdir="${hls_source_dir}" \
+                --suffix='.mkv' \
+                '.yt-dlp-remux.XXXXXXXX'); then
+                emit_machine_postprocess error FFmpegVideoRemuxer
+                error 'unable to create the temporary MKV file.'
+                exit 13
+            fi
+
+            run_supervised_command \
+                ffmpeg \
+                -hide_banner \
+                -loglevel warning \
+                -nostdin \
+                -nostats \
+                -stats_period 0.5 \
+                -progress pipe:1 \
+                -i "${hls_source_path}" \
+                -map 0 \
+                -dn \
+                -ignore_unknown \
+                -c copy \
+                -y \
+                "${HLS_REMUX_TMP}"
+            ffmpeg_status=${DOWNLOAD_STATUS}
+            if ((ffmpeg_status != 0)); then
+                emit_machine_postprocess error FFmpegVideoRemuxer
+                error "unable to remux the repaired HLS file into MKV (FFmpeg status ${ffmpeg_status})."
+                printf 'The repaired HLS intermediate was retained at: %s\n' \
+                    "${hls_source_path}" >&2
+                exit "${ffmpeg_status}"
+            fi
+
+            hls_final_duration_us=''
+            probe_duration_microseconds \
+                hls_final_duration_us "${HLS_REMUX_TMP}" 2>/dev/null
+            if [[ ${hls_source_duration_us} =~ ^[1-9][0-9]*$ &&
+                ${hls_final_duration_us} =~ ^[1-9][0-9]*$ ]] \
+                && ((hls_final_duration_us < hls_source_duration_us)); then
+                # Stream-copy remuxes may shift/drop a small amount of timestamp
+                # padding. Permit 2% loss, with a 0.5 s floor and 5 s ceiling, but
+                # fail closed on a materially shortened result. This is deliberately
+                # metadata-only validation; do not decode the complete media again.
+                hls_duration_tolerance_us=$((hls_source_duration_us / 50))
+                if ((hls_duration_tolerance_us < 500000)); then
+                    hls_duration_tolerance_us=500000
+                elif ((hls_duration_tolerance_us > 5000000)); then
+                    hls_duration_tolerance_us=5000000
+                fi
+                hls_duration_loss_us=$((hls_source_duration_us - hls_final_duration_us))
+                if ((hls_duration_loss_us > hls_duration_tolerance_us)); then
+                    emit_machine_postprocess error FFmpegVideoRemuxer
+                    error 'the remuxed MKV is substantially shorter than the repaired HLS source.'
+                    printf 'Source duration: %s us; remuxed duration: %s us; allowed loss: %s us.\n' \
+                        "${hls_source_duration_us}" \
+                        "${hls_final_duration_us}" \
+                        "${hls_duration_tolerance_us}" >&2
+                    printf 'The repaired HLS intermediate was retained at: %s\n' \
+                        "${hls_source_path}" >&2
+                    exit 65
+                fi
+            fi
+
+            if ! mv -nT -- "${HLS_REMUX_TMP}" "${hls_final_path}"; then
+                emit_machine_postprocess error FFmpegVideoRemuxer
+                error 'unable to publish the final MKV file.'
+                exit 13
+            fi
+            if [[ -e ${HLS_REMUX_TMP} || -L ${HLS_REMUX_TMP} ]]; then
+                emit_machine_postprocess error FFmpegVideoRemuxer
+                error "the final MKV appeared during publication; refusing to overwrite it: ${hls_final_path}"
+                exit 13
+            fi
+            HLS_REMUX_TMP=''
+            if ! printf '%s\n' "${hls_final_path}" >"${PATH_RECORD_TMP}"; then
+                error 'unable to record the final MKV path.'
+                printf 'The repaired HLS intermediate was retained at: %s\n' \
+                    "${hls_source_path}" >&2
+                exit 13
+            fi
+            emit_machine_postprocess finished FFmpegVideoRemuxer
+            if [[ ${hls_source_path} != "${hls_final_path}" ]]; then
+                HLS_SOURCE_TO_CLEAN=${hls_source_path}
+            fi
+        fi
+
+        final_media_path=''
+        if ! { IFS= read -r final_media_path <"${PATH_RECORD_TMP}"; } 2>/dev/null \
+            || [[ -z ${final_media_path} ]]; then
+            error 'unable to read the final media path for validation.'
+            exit 13
+        fi
+
+        emit_machine_postprocess started MediaValidation
+
+        # Call the validation function outside a conditional context. Bash disables
+        # errexit throughout a function invoked by if, !, &&, or ||, which could
+        # otherwise hide an unexpected failure inside the validation routine.
+        set +e
+        validate_final_media_file \
+            "${final_media_path}" "${MODE}"
+        validation_status=$?
+        set -e
+
+        if ((validation_status != 0)); then
+            emit_machine_postprocess error MediaValidation
+            error "the final media file failed FFprobe validation: ${final_media_path}"
+            printf '%s\n' \
+                'The media file was retained for diagnosis and was not published as a successful result.' >&2
+            exit 65
+        fi
+        emit_machine_postprocess finished MediaValidation
+
+        if [[ -n ${RESULT_FILE} ]]; then
+            if ! mv -nT -- "${RESULT_FILE_TMP}" "${RESULT_FILE}"; then
+                error 'unable to publish the result file.'
+                exit 13
+            fi
+            if [[ -e ${RESULT_FILE_TMP} || -L ${RESULT_FILE_TMP} ]]; then
+                error 'the result file appeared during publication; refusing to overwrite it.'
+                exit 13
+            fi
+            RESULT_FILE_TMP=''
+        elif [[ -n ${INTERNAL_PATH_FILE_TMP} ]]; then
+            if ! rm -f -- "${INTERNAL_PATH_FILE_TMP}"; then
+                error 'unable to remove the internal result-path file.'
+                exit 13
+            fi
+            INTERNAL_PATH_FILE_TMP=''
+        fi
+
+        if [[ -n ${HLS_SOURCE_TO_CLEAN} ]]; then
+            if ! rm -f -- "${HLS_SOURCE_TO_CLEAN}"; then
+                printf 'Warning: unable to remove the repaired HLS intermediate: %s\n' \
+                    "${HLS_SOURCE_TO_CLEAN}" >&2
+            fi
+            HLS_SOURCE_TO_CLEAN=''
+        fi
+        printf '\nDownload completed successfully.\n'
+    else
+        status=${DOWNLOAD_STATUS}
+        printf '\nDownload failed with exit code %d.\n' "${status}" >&2
+        exit "${status}"
+    fi
+
+}
+
+main "$@"

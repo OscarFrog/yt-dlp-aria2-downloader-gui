@@ -110,6 +110,9 @@ shellcheck -x -o all \
 
 The automated suite checks, among other things:
 
+- shell-comment policy: preserve ShellCheck directives and non-obvious rationale, use durable `Scenario`, `Mutation test`, `Regression guard`, `Negative control`, and `Positive controls` labels in tests, and reject permanent `PATCH`/`AUD`/version-history labels;
+- project-version coherence across active scripts, documentation and release workflow surfaces, while keeping historical CHANGELOG entries exempt;
+- standardized headers on every canonical shell script, including an SPDX MIT tag, project name, repository-relative file name and purpose;
 - argument validation, terminal `--`, and exactly one URL per run;
 - preservation of URLs containing shell metacharacters;
 - trimming of leading and trailing whitespace entered in the GUI;
@@ -328,7 +331,7 @@ bash ./scripts/release-preflight.sh \
   --confirm-admin-bypass-disabled \
   --confirm-tag-policy \
   --confirm-single-maintainer-self-review \
-  v2.1.31
+  vX.Y.Z
 ```
 
 The three confirmation flags require the operator to have checked that
@@ -343,7 +346,7 @@ and warns when the signing subkey is within 90 days of expiry.
 For manual workflow recovery, invoke the workflow from the exact same tag:
 
 ```bash
-gh workflow run release.yml   --ref v2.1.31   -f tag=v2.1.31   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref vX.Y.Z   -f tag=vX.Y.Z   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Before pushing a release tag, confirm that GitHub Immutable Releases are
@@ -384,7 +387,7 @@ After the final `publish` job succeeds, download the release RPM and independent
 confirm its signer and isolated trust binding on Fedora 44:
 
 ```bash
-rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' ./yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm
+rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc44.noarch.rpm
 
 VERIFY_ROOT=$(mktemp -d)
 VERIFY_KEYRING="${VERIFY_ROOT}/keyring"
@@ -394,13 +397,13 @@ chmod 700 "$VERIFY_ROOT" "$VERIFY_KEYRING"
 
 rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --import ./RPM-GPG-KEY-OscarFrog
 
-rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --checksig ./yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm
+rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --checksig ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc44.noarch.rpm
 
 rm -rf -- "$VERIFY_ROOT"
 
-gh release verify v2.1.31 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.1.31   ./yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh attestation verify   ./yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify vX.Y.Z -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset vX.Y.Z   ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh attestation verify   ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 A specific release is considered qualified only after its final `publish` job

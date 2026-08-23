@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : tests/runtime-manager-integration.sh
+# Purpose     : Exercise normal runtime-manager installation and rollback behavior.
+# ==============================================================================
 
 set -Eeuo pipefail
 umask 077
@@ -23,46 +28,13 @@ assert_link_target() {
     if ! actual_target=$(readlink -- "${link_path}"); then
         fail "${message}: unable to read ${link_path}"
     fi
-    [[ ${actual_target} == "${expected_target}" ]] ||
-        fail "${message}: expected ${expected_target}, found ${actual_target}"
+    [[ ${actual_target} == "${expected_target}" ]] \
+        || fail "${message}: expected ${expected_target}, found ${actual_target}"
 }
 
-for command_name in bash chmod env flock grep ln mkdir mktemp readlink rm timeout; do
-    command -v "${command_name}" >/dev/null 2>&1 || {
-        printf 'Error: required test command is absent: %s\n' "${command_name}" >&2
-        exit 127
-    }
-done
-[[ -x ${RUNTIME_MANAGER} ]] || fail "runtime manager is not executable: ${RUNTIME_MANAGER}"
-
-TEST_ROOT=$(mktemp -d)
-readonly TEST_ROOT
 cleanup() {
     rm -rf -- "${TEST_ROOT}" || true
 }
-trap cleanup EXIT HUP INT TERM
-
-readonly HOME_DIR="${TEST_ROOT}/home"
-readonly DATA_HOME="${TEST_ROOT}/data"
-readonly MOCK_BIN="${TEST_ROOT}/bin"
-readonly CURL_LOG="${TEST_ROOT}/curl.args"
-readonly LOCK_LEAK_MARKER="${TEST_ROOT}/lock-leaked"
-mkdir -p -- "${HOME_DIR}" "${DATA_HOME}" "${MOCK_BIN}"
-
-cat >"${MOCK_BIN}/curl" <<'EOF_CURL'
-#!/usr/bin/env bash
-set -euo pipefail
-: "${MOCK_CURL_LOG:?}"
-printf '%s\n' "$@" >>"${MOCK_CURL_LOG}"
-for fd_path in /proc/$$/fd/*; do
-    target=$(readlink -- "${fd_path}" 2>/dev/null || true)
-    if [[ ${target} == */yt-dlp-aria2-downloader/runtime/update.lock ]]; then
-        : >"${MOCK_LOCK_LEAK_MARKER:?}"
-    fi
-done
-exit 7
-EOF_CURL
-chmod 0755 -- "${MOCK_BIN}/curl"
 
 make_ytdlp() {
     local path=$1
@@ -112,143 +84,182 @@ EOF_DENO
     chmod 0755 -- "${path}"
 }
 
-runtime_root="${DATA_HOME}/yt-dlp-aria2-downloader/runtime"
-ytdlp_root="${runtime_root}/yt-dlp"
-deno_root="${runtime_root}/deno"
-mkdir -p -- "${ytdlp_root}" "${deno_root}"
-make_ytdlp "${ytdlp_root}/2026.07.04/yt-dlp_linux" '2026.07.04'
-make_ytdlp "${ytdlp_root}/2026.06.09/yt-dlp_linux" '2026.06.09'
-make_deno "${deno_root}/2.9.5/deno" '2.9.5'
-make_deno "${deno_root}/2.8.0/deno" '2.8.0'
-ln -s -- '2026.07.04' "${ytdlp_root}/current"
-ln -s -- '2026.06.09' "${ytdlp_root}/previous"
-ln -s -- '2.9.5' "${deno_root}/current"
-ln -s -- '2.8.0' "${deno_root}/previous"
+main() {
+    for command_name in bash chmod env flock grep ln mkdir mktemp readlink rm timeout; do
+        command -v "${command_name}" >/dev/null 2>&1 || {
+            printf 'Error: required test command is absent: %s\n' "${command_name}" >&2
+            exit 127
+        }
+    done
+    [[ -x ${RUNTIME_MANAGER} ]] || fail "runtime manager is not executable: ${RUNTIME_MANAGER}"
 
-runtime_env=(
-    env
-    HOME="${HOME_DIR}"
-    XDG_DATA_HOME="${DATA_HOME}"
-    PATH="${MOCK_BIN}:${PATH}"
-    MOCK_CURL_LOG="${CURL_LOG}"
-    MOCK_LOCK_LEAK_MARKER="${LOCK_LEAK_MARKER}"
-    YTDLP_ARIA2_RUNTIME_LOCK_WAIT_SECONDS=1
-    YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS=2
-    YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS=10
-    YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS=10
-    YTDLP_ARIA2_DENO_CHECK_TIMEOUT_SECONDS=5
-    YTDLP_ARIA2_DENO_UPDATE_TIMEOUT_SECONDS=10
-)
+    TEST_ROOT=$(mktemp -d)
+    readonly TEST_ROOT
+    trap cleanup EXIT HUP INT TERM
 
-expected_ytdlp="${ytdlp_root}/current/yt-dlp_linux"
-actual_ytdlp=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" path yt-dlp)
-[[ ${actual_ytdlp} == "${expected_ytdlp}" ]] || fail 'managed yt-dlp path is incorrect'
-actual_deno=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" path deno)
-[[ ${actual_deno} == "${deno_root}/current/deno" ]] || fail 'managed Deno path is incorrect'
+    readonly HOME_DIR="${TEST_ROOT}/home"
+    readonly DATA_HOME="${TEST_ROOT}/data"
+    readonly MOCK_BIN="${TEST_ROOT}/bin"
+    readonly CURL_LOG="${TEST_ROOT}/curl.args"
+    readonly LOCK_LEAK_MARKER="${TEST_ROOT}/lock-leaked"
+    mkdir -p -- "${HOME_DIR}" "${DATA_HOME}" "${MOCK_BIN}"
 
-# Read-only lookups must not wait behind an updater because current is an
-# atomically published symlink.
-lock_holder_ready="${TEST_ROOT}/lock-holder-ready"
-(
-    exec 9>>"${runtime_root}/update.lock"
-    flock --exclusive 9
-    : >"${lock_holder_ready}"
-    sleep 6
-) &
-lock_holder_pid=$!
-for _ in {1..50}; do
-    [[ -e ${lock_holder_ready} ]] && break
-    sleep 0.02
+    cat >"${MOCK_BIN}/curl" <<'EOF_CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${MOCK_CURL_LOG:?}"
+printf '%s\n' "$@" >>"${MOCK_CURL_LOG}"
+for fd_path in /proc/$$/fd/*; do
+    target=$(readlink -- "${fd_path}" 2>/dev/null || true)
+    if [[ ${target} == */yt-dlp-aria2-downloader/runtime/update.lock ]]; then
+        : >"${MOCK_LOCK_LEAK_MARKER:?}"
+    fi
 done
-[[ -e ${lock_holder_ready} ]] || fail 'lock holder did not start'
-timeout 2s "${runtime_env[@]}" "${RUNTIME_MANAGER}" path yt-dlp >/dev/null ||
-    fail 'path lookup blocked behind the runtime update lock'
+exit 7
+EOF_CURL
+    chmod 0755 -- "${MOCK_BIN}/curl"
 
-# update has a bounded lock wait. With valid active runtimes it must fall back
-# to those verified runtimes instead of failing the application launch.
-"${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null 2>"${TEST_ROOT}/lock-fallback.err" ||
-    fail 'update did not fall back to active runtimes during lock contention'
-grep -Fq -- 'another runtime update is in progress' "${TEST_ROOT}/lock-fallback.err" ||
-    fail 'lock-contention fallback diagnostic is missing'
-kill -TERM -- "${lock_holder_pid}" 2>/dev/null || true
-wait "${lock_holder_pid}" 2>/dev/null || true
+    runtime_root="${DATA_HOME}/yt-dlp-aria2-downloader/runtime"
+    ytdlp_root="${runtime_root}/yt-dlp"
+    deno_root="${runtime_root}/deno"
+    mkdir -p -- "${ytdlp_root}" "${deno_root}"
+    make_ytdlp "${ytdlp_root}/2026.07.04/yt-dlp_linux" '2026.07.04'
+    make_ytdlp "${ytdlp_root}/2026.06.09/yt-dlp_linux" '2026.06.09'
+    make_deno "${deno_root}/2.9.5/deno" '2.9.5'
+    make_deno "${deno_root}/2.8.0/deno" '2.8.0'
+    ln -s -- '2026.07.04' "${ytdlp_root}/current"
+    ln -s -- '2026.06.09' "${ytdlp_root}/previous"
+    ln -s -- '2.9.5' "${deno_root}/current"
+    ln -s -- '2.8.0' "${deno_root}/previous"
 
-# Network failure after bootstrap must preserve the verified active runtimes.
-: >"${CURL_LOG}"
-rm -f -- "${LOCK_LEAK_MARKER}"
-"${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null 2>"${TEST_ROOT}/offline.err" ||
-    fail 'offline update did not preserve verified active runtimes'
-assert_link_target "${ytdlp_root}/current" '2026.07.04' \
-    'offline update changed the active yt-dlp runtime'
-assert_link_target "${deno_root}/current" '2.9.5' \
-    'offline update changed the active Deno runtime'
-[[ ! -e ${LOCK_LEAK_MARKER} ]] ||
-    fail 'runtime update lock leaked into the curl child process'
-for required_curl_option in --connect-timeout --max-time --retry-max-time; do
-    grep -Fqx -- "${required_curl_option}" "${CURL_LOG}" ||
-        fail "curl runtime bound is missing: ${required_curl_option}"
-done
+    runtime_env=(
+        env
+        HOME="${HOME_DIR}"
+        XDG_DATA_HOME="${DATA_HOME}"
+        PATH="${MOCK_BIN}:${PATH}"
+        MOCK_CURL_LOG="${CURL_LOG}"
+        MOCK_LOCK_LEAK_MARKER="${LOCK_LEAK_MARKER}"
+        YTDLP_ARIA2_RUNTIME_LOCK_WAIT_SECONDS=1
+        YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS=2
+        YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS=10
+        YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS=10
+        YTDLP_ARIA2_DENO_CHECK_TIMEOUT_SECONDS=5
+        YTDLP_ARIA2_DENO_UPDATE_TIMEOUT_SECONDS=10
+    )
 
-# previous is a real rollback target. Rollback swaps current/previous only after
-# validating the target runtime.
-"${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null
-assert_link_target "${ytdlp_root}/current" '2026.06.09' \
-    'yt-dlp rollback did not activate the previous runtime'
-assert_link_target "${ytdlp_root}/previous" '2026.07.04' \
-    'yt-dlp rollback did not preserve the replaced runtime'
-"${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback deno >/dev/null
-assert_link_target "${deno_root}/current" '2.8.0' \
-    'Deno rollback did not activate the previous runtime'
+    expected_ytdlp="${ytdlp_root}/current/yt-dlp_linux"
+    actual_ytdlp=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" path yt-dlp)
+    [[ ${actual_ytdlp} == "${expected_ytdlp}" ]] || fail 'managed yt-dlp path is incorrect'
+    actual_deno=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" path deno)
+    [[ ${actual_deno} == "${deno_root}/current/deno" ]] || fail 'managed Deno path is incorrect'
 
-# A corrupted current runtime is recovered from a verified previous runtime.
-rm -f -- "${ytdlp_root}/current"
-ln -s -- '2026.07.04' "${ytdlp_root}/current"
-rm -f -- "${ytdlp_root}/previous"
-ln -s -- '2026.06.09' "${ytdlp_root}/previous"
-printf '#!/usr/bin/env bash\nexit 1\n' >"${ytdlp_root}/2026.07.04/yt-dlp_linux"
-chmod 0755 -- "${ytdlp_root}/2026.07.04/yt-dlp_linux"
-"${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null 2>"${TEST_ROOT}/rollback.err" ||
-    fail 'invalid active yt-dlp runtime was not recovered from previous'
-assert_link_target "${ytdlp_root}/current" '2026.06.09' \
-    'automatic yt-dlp rollback selected the wrong runtime'
+    # Read-only lookups must not wait behind an updater because current is an
+    # atomically published symlink.
+    lock_holder_ready="${TEST_ROOT}/lock-holder-ready"
+    (
+        exec 9>>"${runtime_root}/update.lock"
+        flock --exclusive 9
+        : >"${lock_holder_ready}"
+        sleep 6
+    ) &
+    lock_holder_pid=$!
+    for _ in {1..50}; do
+        [[ -e ${lock_holder_ready} ]] && break
+        sleep 0.02
+    done
+    [[ -e ${lock_holder_ready} ]] || fail 'lock holder did not start'
+    timeout 2s "${runtime_env[@]}" "${RUNTIME_MANAGER}" path yt-dlp >/dev/null \
+        || fail 'path lookup blocked behind the runtime update lock'
 
-# First bootstrap without a network and without existing runtimes must fail
-# rather than creating or activating an unverified placeholder.
-empty_data="${TEST_ROOT}/empty-data"
-mkdir -p -- "${empty_data}"
-if env HOME="${HOME_DIR}" XDG_DATA_HOME="${empty_data}" \
-    PATH="${MOCK_BIN}:${PATH}" MOCK_CURL_LOG="${CURL_LOG}" \
-    MOCK_LOCK_LEAK_MARKER="${LOCK_LEAK_MARKER}" \
-    YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS=2 \
-    YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS=10 \
-    YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS=10 \
-    "${RUNTIME_MANAGER}" update >/dev/null 2>&1; then
-    fail 'initial offline bootstrap unexpectedly succeeded'
-fi
-[[ ! -L ${empty_data}/yt-dlp-aria2-downloader/runtime/yt-dlp/current ]] ||
-    fail 'initial offline bootstrap published an unverified yt-dlp runtime'
+    # update has a bounded lock wait. With valid active runtimes it must fall back
+    # to those verified runtimes instead of failing the application launch.
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null 2>"${TEST_ROOT}/lock-fallback.err" \
+        || fail 'update did not fall back to active runtimes during lock contention'
+    grep -Fq -- 'another runtime update is in progress' "${TEST_ROOT}/lock-fallback.err" \
+        || fail 'lock-contention fallback diagnostic is missing'
+    kill -TERM -- "${lock_holder_pid}" 2>/dev/null || true
+    wait "${lock_holder_pid}" 2>/dev/null || true
 
-# Architecture mapping is tested hermetically for aarch64 without requiring an
-# ARM runner.
-aarch_data="${TEST_ROOT}/aarch-data"
-aarch_bin="${TEST_ROOT}/aarch-bin"
-mkdir -p -- "${aarch_data}/yt-dlp-aria2-downloader/runtime/yt-dlp/2026.07.04" \
-    "${aarch_data}/yt-dlp-aria2-downloader/runtime/deno/2.9.5" "${aarch_bin}"
-make_ytdlp "${aarch_data}/yt-dlp-aria2-downloader/runtime/yt-dlp/2026.07.04/yt-dlp_linux_aarch64" '2026.07.04'
-make_deno "${aarch_data}/yt-dlp-aria2-downloader/runtime/deno/2.9.5/deno" '2.9.5'
-ln -s -- '2026.07.04' "${aarch_data}/yt-dlp-aria2-downloader/runtime/yt-dlp/current"
-ln -s -- '2.9.5' "${aarch_data}/yt-dlp-aria2-downloader/runtime/deno/current"
-cat >"${aarch_bin}/uname" <<'EOF_UNAME'
+    # Network failure after bootstrap must preserve the verified active runtimes.
+    : >"${CURL_LOG}"
+    rm -f -- "${LOCK_LEAK_MARKER}"
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null 2>"${TEST_ROOT}/offline.err" \
+        || fail 'offline update did not preserve verified active runtimes'
+    assert_link_target "${ytdlp_root}/current" '2026.07.04' \
+        'offline update changed the active yt-dlp runtime'
+    assert_link_target "${deno_root}/current" '2.9.5' \
+        'offline update changed the active Deno runtime'
+    [[ ! -e ${LOCK_LEAK_MARKER} ]] \
+        || fail 'runtime update lock leaked into the curl child process'
+    for required_curl_option in --connect-timeout --max-time --retry-max-time; do
+        grep -Fqx -- "${required_curl_option}" "${CURL_LOG}" \
+            || fail "curl runtime bound is missing: ${required_curl_option}"
+    done
+
+    # previous is a real rollback target. Rollback swaps current/previous only after
+    # validating the target runtime.
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null
+    assert_link_target "${ytdlp_root}/current" '2026.06.09' \
+        'yt-dlp rollback did not activate the previous runtime'
+    assert_link_target "${ytdlp_root}/previous" '2026.07.04' \
+        'yt-dlp rollback did not preserve the replaced runtime'
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback deno >/dev/null
+    assert_link_target "${deno_root}/current" '2.8.0' \
+        'Deno rollback did not activate the previous runtime'
+
+    # A corrupted current runtime is recovered from a verified previous runtime.
+    rm -f -- "${ytdlp_root}/current"
+    ln -s -- '2026.07.04' "${ytdlp_root}/current"
+    rm -f -- "${ytdlp_root}/previous"
+    ln -s -- '2026.06.09' "${ytdlp_root}/previous"
+    printf '#!/usr/bin/env bash\nexit 1\n' >"${ytdlp_root}/2026.07.04/yt-dlp_linux"
+    chmod 0755 -- "${ytdlp_root}/2026.07.04/yt-dlp_linux"
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null 2>"${TEST_ROOT}/rollback.err" \
+        || fail 'invalid active yt-dlp runtime was not recovered from previous'
+    assert_link_target "${ytdlp_root}/current" '2026.06.09' \
+        'automatic yt-dlp rollback selected the wrong runtime'
+
+    # First bootstrap without a network and without existing runtimes must fail
+    # rather than creating or activating an unverified placeholder.
+    empty_data="${TEST_ROOT}/empty-data"
+    mkdir -p -- "${empty_data}"
+    if env HOME="${HOME_DIR}" XDG_DATA_HOME="${empty_data}" \
+        PATH="${MOCK_BIN}:${PATH}" MOCK_CURL_LOG="${CURL_LOG}" \
+        MOCK_LOCK_LEAK_MARKER="${LOCK_LEAK_MARKER}" \
+        YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS=2 \
+        YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS=10 \
+        YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS=10 \
+        "${RUNTIME_MANAGER}" update >/dev/null 2>&1; then
+        fail 'initial offline bootstrap unexpectedly succeeded'
+    fi
+    [[ ! -L ${empty_data}/yt-dlp-aria2-downloader/runtime/yt-dlp/current ]] \
+        || fail 'initial offline bootstrap published an unverified yt-dlp runtime'
+
+    # Architecture mapping is tested hermetically for aarch64 without requiring an
+    # ARM runner.
+    aarch_data="${TEST_ROOT}/aarch-data"
+    aarch_bin="${TEST_ROOT}/aarch-bin"
+    mkdir -p -- "${aarch_data}/yt-dlp-aria2-downloader/runtime/yt-dlp/2026.07.04" \
+        "${aarch_data}/yt-dlp-aria2-downloader/runtime/deno/2.9.5" "${aarch_bin}"
+    make_ytdlp "${aarch_data}/yt-dlp-aria2-downloader/runtime/yt-dlp/2026.07.04/yt-dlp_linux_aarch64" '2026.07.04'
+    make_deno "${aarch_data}/yt-dlp-aria2-downloader/runtime/deno/2.9.5/deno" '2.9.5'
+    ln -s -- '2026.07.04' "${aarch_data}/yt-dlp-aria2-downloader/runtime/yt-dlp/current"
+    ln -s -- '2.9.5' "${aarch_data}/yt-dlp-aria2-downloader/runtime/deno/current"
+    cat >"${aarch_bin}/uname" <<'EOF_UNAME'
 #!/usr/bin/env bash
 [[ ${1:-} == '-m' ]] || exit 64
 printf '%s\n' aarch64
 EOF_UNAME
-chmod 0755 -- "${aarch_bin}/uname"
-aarch_path=$(env HOME="${HOME_DIR}" XDG_DATA_HOME="${aarch_data}" \
-    PATH="${aarch_bin}:${MOCK_BIN}:${PATH}" MOCK_CURL_LOG="${CURL_LOG}" \
-    MOCK_LOCK_LEAK_MARKER="${LOCK_LEAK_MARKER}" \
-    "${RUNTIME_MANAGER}" path yt-dlp)
-[[ ${aarch_path} == */current/yt-dlp_linux_aarch64 ]] ||
-    fail 'aarch64 yt-dlp asset mapping is incorrect'
+    chmod 0755 -- "${aarch_bin}/uname"
+    aarch_path=$(env HOME="${HOME_DIR}" XDG_DATA_HOME="${aarch_data}" \
+        PATH="${aarch_bin}:${MOCK_BIN}:${PATH}" MOCK_CURL_LOG="${CURL_LOG}" \
+        MOCK_LOCK_LEAK_MARKER="${LOCK_LEAK_MARKER}" \
+        "${RUNTIME_MANAGER}" path yt-dlp)
+    [[ ${aarch_path} == */current/yt-dlp_linux_aarch64 ]] \
+        || fail 'aarch64 yt-dlp asset mapping is incorrect'
 
-printf 'Runtime-manager integration passed.\n'
+    printf 'Runtime-manager integration passed.\n'
+
+}
+
+main "$@"

@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : packaging/deb/build-deb.sh
+# Purpose     : Build the architecture-independent Debian package.
+# ==============================================================================
 
 set -Eeuo pipefail
 umask 022
@@ -30,15 +35,14 @@ for command_name in \
 done
 
 script_parent=$(dirname -- "${BASH_SOURCE[0]}")
-script_dir=$(cd -- "${script_parent}" && pwd -P)
-readonly script_dir
-project_dir=$(cd -- "${script_dir}/../.." && pwd -P)
-readonly project_dir
-
+SCRIPT_DIR=$(cd -- "${script_parent}" && pwd -P)
+readonly SCRIPT_DIR
+PROJECT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)
+readonly PROJECT_DIR
 
 source_status=''
 if ! source_status=$(
-    git -C "${project_dir}" status --porcelain=v1 --untracked-files=normal
+    git -C "${PROJECT_DIR}" status --porcelain=v1 --untracked-files=normal
 ); then
     printf 'Error: unable to inspect the package source worktree.\n' >&2
     exit 65
@@ -52,7 +56,7 @@ if [[ -n ${source_status} ]]; then
 fi
 
 source_version_output=''
-if ! source_version_output=$("${project_dir}/download-video.sh" --version); then
+if ! source_version_output=$("${PROJECT_DIR}/download-video.sh" --version); then
     printf 'Error: unable to read the source-tree version.\n' >&2
     exit 65
 fi
@@ -65,27 +69,30 @@ if [[ ${source_version} != "${VERSION}" ]]; then
 fi
 
 mkdir -p -- "${OUTPUT_DIR}"
-output_dir=$(realpath -m -- "${OUTPUT_DIR}")
-readonly output_dir
+RESOLVED_OUTPUT_DIR=$(realpath -m -- "${OUTPUT_DIR}")
+readonly RESOLVED_OUTPUT_DIR
 
 work_dir=$(mktemp -d)
+
 cleanup() {
     rm -rf -- "${work_dir}"
 }
-trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
-root="${work_dir}/root"
-mkdir -p -- "${root}/DEBIAN"
-bash "${project_dir}/packaging/install-tree.sh" \
-    "${root}" "${VERSION}" '/usr/lib/yt-dlp-aria2-downloader'
-install -m 0644 -- "${project_dir}/LICENSE" \
-    "${root}/usr/share/doc/${PACKAGE_NAME}/copyright"
+main() {
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
-installed_size=$(du -sk -- "${root}/usr" | awk '{print $1}')
-cat >"${root}/DEBIAN/control" <<EOF_CONTROL
+    root="${work_dir}/root"
+    mkdir -p -- "${root}/DEBIAN"
+    bash "${PROJECT_DIR}/packaging/install-tree.sh" \
+        "${root}" "${VERSION}" '/usr/lib/yt-dlp-aria2-downloader'
+    install -m 0644 -- "${PROJECT_DIR}/LICENSE" \
+        "${root}/usr/share/doc/${PACKAGE_NAME}/copyright"
+
+    installed_size=$(du -sk -- "${root}/usr" | awk '{print $1}')
+    cat >"${root}/DEBIAN/control" <<EOF_CONTROL
 Package: ${PACKAGE_NAME}
 Version: ${VERSION}-${PACKAGE_REVISION}
 Section: utils
@@ -100,49 +107,52 @@ Description: Zenity interface and Bash engine for yt-dlp and aria2
  Download one complete MKV video or the best native audio track with managed
  verified yt-dlp and Deno runtimes, aria2c, FFmpeg, and Zenity on GNU/Linux.
 EOF_CONTROL
-chmod 0644 -- "${root}/DEBIAN/control"
+    chmod 0644 -- "${root}/DEBIAN/control"
 
-for maintainer_script in postinst prerm postrm; do
-    install -m 0755 -- \
-        "${project_dir}/packaging/deb/${maintainer_script}" \
-        "${root}/DEBIAN/${maintainer_script}"
-done
+    for maintainer_script in postinst prerm postrm; do
+        install -m 0755 -- \
+            "${PROJECT_DIR}/packaging/deb/${maintainer_script}" \
+            "${root}/DEBIAN/${maintainer_script}"
+    done
 
-package_path="${output_dir}/${PACKAGE_NAME}_${VERSION}-${PACKAGE_REVISION}_all.deb"
-rm -f -- "${package_path}"
+    package_path="${RESOLVED_OUTPUT_DIR}/${PACKAGE_NAME}_${VERSION}-${PACKAGE_REVISION}_all.deb"
+    rm -f -- "${package_path}"
 
-source_date_epoch=${SOURCE_DATE_EPOCH:-}
-if [[ -z ${source_date_epoch} ]]; then
-    source_date_epoch=$(git -C "${project_dir}" show -s --format=%ct HEAD)
-fi
-[[ ${source_date_epoch} =~ ^[0-9]+$ ]] || {
-    printf 'Error: invalid SOURCE_DATE_EPOCH: %s\n' \
-        "${source_date_epoch}" >&2
-    exit 65
+    source_date_epoch=${SOURCE_DATE_EPOCH:-}
+    if [[ -z ${source_date_epoch} ]]; then
+        source_date_epoch=$(git -C "${PROJECT_DIR}" show -s --format=%ct HEAD)
+    fi
+    [[ ${source_date_epoch} =~ ^[0-9]+$ ]] || {
+        printf 'Error: invalid SOURCE_DATE_EPOCH: %s\n' \
+            "${source_date_epoch}" >&2
+        exit 65
+    }
+    readonly source_date_epoch
+
+    SOURCE_DATE_EPOCH=${source_date_epoch} \
+        dpkg-deb --root-owner-group --build "${root}" "${package_path}"
+
+    dpkg-deb --info "${package_path}"
+    dpkg-deb --contents "${package_path}"
+
+    extracted="${work_dir}/extracted"
+    dpkg-deb --extract "${package_path}" "${extracted}"
+    packaged_version=$(
+        "${extracted}/usr/bin/yt-dlp-aria2-downloader" --version
+    )
+    [[ ${packaged_version} == "yt-dlp-aria2-downloader version ${VERSION}" ]]
+    desktop-file-validate --no-hints \
+        "${extracted}/usr/share/applications/yt-dlp-aria2-downloader.desktop"
+    [[ -f ${extracted}/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg ]]
+    [[ -x ${extracted}/usr/lib/yt-dlp-aria2-downloader/runtime-manager.sh ]]
+    [[ -x ${extracted}/usr/lib/yt-dlp-aria2-downloader/package-user-cleanup.sh ]]
+    [[ -f ${extracted}/usr/lib/yt-dlp-aria2-downloader/keys/yt-dlp-public.key ]]
+    engine_mode=$(stat -c '%a' -- \
+        "${extracted}/usr/lib/yt-dlp-aria2-downloader/download-video.sh")
+    [[ ${engine_mode} == 755 ]]
+
+    printf 'DEB package created: %s\n' "${package_path}"
+
 }
-readonly source_date_epoch
 
-SOURCE_DATE_EPOCH=${source_date_epoch} \
-    dpkg-deb --root-owner-group --build "${root}" "${package_path}"
-
-dpkg-deb --info "${package_path}"
-dpkg-deb --contents "${package_path}"
-
-extracted="${work_dir}/extracted"
-dpkg-deb --extract "${package_path}" "${extracted}"
-packaged_version=$(
-    "${extracted}/usr/bin/yt-dlp-aria2-downloader" --version
-)
-[[ ${packaged_version} == \
-    "yt-dlp-aria2-downloader version ${VERSION}" ]]
-desktop-file-validate --no-hints \
-    "${extracted}/usr/share/applications/yt-dlp-aria2-downloader.desktop"
-[[ -f ${extracted}/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg ]]
-[[ -x ${extracted}/usr/lib/yt-dlp-aria2-downloader/runtime-manager.sh ]]
-[[ -x ${extracted}/usr/lib/yt-dlp-aria2-downloader/package-user-cleanup.sh ]]
-[[ -f ${extracted}/usr/lib/yt-dlp-aria2-downloader/keys/yt-dlp-public.key ]]
-engine_mode=$(stat -c '%a' -- \
-    "${extracted}/usr/lib/yt-dlp-aria2-downloader/download-video.sh")
-[[ ${engine_mode} == 755 ]]
-
-printf 'DEB package created: %s\n' "${package_path}"
+main "$@"

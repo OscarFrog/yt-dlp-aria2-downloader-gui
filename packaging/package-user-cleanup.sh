@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
-#
-# Best-effort package final-removal cleanup for managed per-user runtime data
-# and exact legacy yt-dlp-aria2-downloader-gui XDG artifacts.
-#
-# Security model:
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : packaging/package-user-cleanup.sh
+# Purpose     : Safely remove package-owned per-user data during package removal.
+# ==============================================================================
+
+# Security invariants:
 # - root only enumerates users;
 # - non-root home cleanup is executed under the target UID/GID;
 # - no recursive search of /home or the filesystem;
@@ -37,9 +39,9 @@ safe_absolute_path() {
     local component=''
 
     [[ ${path} == /* &&
-       ${path} != / &&
-       ${path} != *$'\n'* &&
-       ${path} != *$'\r'* ]] || return 1
+        ${path} != / &&
+        ${path} != *$'\n'* &&
+        ${path} != *$'\r'* ]] || return 1
 
     rest=${path#/}
     while [[ -n ${rest} ]]; do
@@ -52,8 +54,8 @@ safe_absolute_path() {
         fi
 
         [[ -n ${component} &&
-           ${component} != . &&
-           ${component} != .. ]] || return 1
+            ${component} != . &&
+            ${component} != .. ]] || return 1
     done
 
     return 0
@@ -61,9 +63,9 @@ safe_absolute_path() {
 
 safe_home() {
     local home=$1
-    safe_absolute_path "${home}" &&
-        [[ ${home} != /nonexistent &&
-           ${home} != /var/empty ]]
+    safe_absolute_path "${home}" \
+        && [[ ${home} != /nonexistent &&
+            ${home} != /var/empty ]]
 }
 
 safe_xdg_base() {
@@ -103,9 +105,9 @@ remove_exact() {
     local base=$1
     local path=$2
 
-    if ! safe_xdg_base "${base}" ||
-        ! safe_absolute_path "${path}" ||
-        [[ ${path} != "${base}/"* ]]; then
+    if ! safe_xdg_base "${base}" \
+        || ! safe_absolute_path "${path}" \
+        || [[ ${path} != "${base}/"* ]]; then
         warn "refusing unsafe cleanup path: ${path}"
         return 64
     fi
@@ -208,9 +210,9 @@ cleanup_one_home() {
     fi
 
     if [[ ${marker_parent_safe} == true &&
-          -f ${marker} && ! -L ${marker} ]]; then
-        if mapfile -t marker_lines <"${marker}" &&
-            ((${#marker_lines[@]} == 1)); then
+        -f ${marker} && ! -L ${marker} ]]; then
+        if mapfile -t marker_lines <"${marker}" \
+            && ((${#marker_lines[@]} == 1)); then
             candidate=${marker_lines[0]}
         else
             candidate=''
@@ -296,10 +298,10 @@ run_as_user() {
         LOGNAME="${uid}" \
         PATH='/usr/sbin:/usr/bin:/sbin:/bin' \
         "${SELF}" --user-home "${home}" || {
-            warn \
-                "cleanup failed or timed out for uid=${uid} home=${home}; continuing"
-            return 0
-        }
+        warn \
+            "cleanup failed or timed out for uid=${uid} home=${home}; continuing"
+        return 0
+    }
 
     return 0
 }
@@ -359,45 +361,50 @@ Usage:
 EOF
 }
 
-case ${1:-} in
---all-users)
-    ((EUID == 0)) || {
-        warn '--all-users must run as root'
-        exit 77
-    }
-    (($# == 1)) || {
-        usage
-        exit 2
-    }
-    enumerate_users
-    ;;
+main() {
+    case ${1:-} in
+        --all-users)
+            ((EUID == 0)) || {
+                warn '--all-users must run as root'
+                exit 77
+            }
+            (($# == 1)) || {
+                usage
+                exit 2
+            }
+            enumerate_users
+            ;;
 
---user-home)
-    (($# == 2)) || {
-        usage
-        exit 2
-    }
-    cleanup_one_home "$2"
-    ;;
+        --user-home)
+            (($# == 2)) || {
+                usage
+                exit 2
+            }
+            cleanup_one_home "$2"
+            ;;
 
---numeric-home)
-    (($# == 4)) || {
-        usage
-        exit 2
-    }
-    ((EUID == 0)) || {
-        warn '--numeric-home must run as root'
-        exit 77
-    }
-    [[ $2 =~ ^[0-9]+$ && $3 =~ ^[0-9]+$ ]] || {
-        usage
-        exit 2
-    }
-    run_as_user "$2" "$3" "$4"
-    ;;
+        --numeric-home)
+            (($# == 4)) || {
+                usage
+                exit 2
+            }
+            ((EUID == 0)) || {
+                warn '--numeric-home must run as root'
+                exit 77
+            }
+            [[ $2 =~ ^[0-9]+$ && $3 =~ ^[0-9]+$ ]] || {
+                usage
+                exit 2
+            }
+            run_as_user "$2" "$3" "$4"
+            ;;
 
-*)
-    usage
-    exit 2
-    ;;
-esac
+        *)
+            usage
+            exit 2
+            ;;
+    esac
+
+}
+
+main "$@"

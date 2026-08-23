@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-
 # SPDX-License-Identifier: MIT
-# ============================================================================
-# Name        : install-gui.sh
-# Version     : 2.1.34
-# Date        : 2026-08-23
-# Description : Install or remove the per-user desktop launcher and icon.
-# ============================================================================
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : install-gui.sh
+# Purpose     : Install or remove the per-user desktop launcher and icon.
+# ==============================================================================
 
 set -euo pipefail
 umask 077
@@ -38,11 +36,6 @@ cleanup() {
         rm -f -- "${TEMP_ICON_FILE}" || true
     fi
 }
-
-trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
 usage() {
     cat <<EOF_USAGE
@@ -103,45 +96,6 @@ write_embedded_icon() {
 EOF_ICON
 }
 
-for command_name in cat chmod dirname ln mkdir mktemp mv readlink realpath rm rmdir; do
-    if ! command -v "${command_name}" >/dev/null 2>&1; then
-        printf 'Error: required command "%s" was not found.\n' \
-            "${command_name}" >&2
-        exit 127
-    fi
-done
-
-if (($# != 1)); then
-    usage >&2
-    exit 2
-fi
-
-set +e
-resolve_script_dir SCRIPT_DIR
-resolve_status=$?
-set -e
-if ((resolve_status != 0)); then
-    printf 'Error: unable to resolve the script directory.\n' >&2
-    exit 1
-fi
-readonly SCRIPT_DIR
-readonly GUI_SCRIPT="${SCRIPT_DIR}/download-video-gui.sh"
-readonly ICON_SOURCE="${SCRIPT_DIR}/packaging/icons/${APP_ID}.svg"
-
-data_home=${XDG_DATA_HOME:-${HOME}/.local/share}
-if [[ ${data_home} != /* ]]; then
-    printf 'Error: XDG_DATA_HOME must resolve to an absolute path: %s\n' \
-        "${data_home}" >&2
-    exit 1
-fi
-readonly DATA_HOME=${data_home}
-readonly APPLICATION_DIR="${DATA_HOME}/applications"
-readonly LAUNCHER_DIR="${DATA_HOME}/${APP_ID}"
-readonly LAUNCHER_LINK="${LAUNCHER_DIR}/launch"
-readonly DESKTOP_FILE="${APPLICATION_DIR}/${APP_ID}.desktop"
-readonly ICON_DIR="${DATA_HOME}/icons/hicolor/scalable/apps"
-readonly ICON_FILE="${ICON_DIR}/${APP_ID}.svg"
-
 remove_stale_install_artifacts() {
     local -a artifacts=()
 
@@ -170,38 +124,83 @@ reject_symlink_directory() {
     return 0
 }
 
-case $1 in
-install)
-    if [[ ! -x ${GUI_SCRIPT} ]]; then
-        printf 'Error: %s is absent or not executable.\n' "${GUI_SCRIPT}" >&2
-        exit 1
+main() {
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    for command_name in cat chmod dirname ln mkdir mktemp mv readlink realpath rm rmdir; do
+        if ! command -v "${command_name}" >/dev/null 2>&1; then
+            printf 'Error: required command "%s" was not found.\n' \
+                "${command_name}" >&2
+            exit 127
+        fi
+    done
+
+    if (($# != 1)); then
+        usage >&2
+        exit 2
     fi
 
-    if [[ ${LAUNCHER_LINK} == *'%'* || ${LAUNCHER_LINK} == *'='* ||
-        ${LAUNCHER_LINK} == *$'\n'* || ${LAUNCHER_LINK} == *$'\r'* ]]; then
-        printf 'Error: the XDG data path cannot be represented safely in a desktop Exec key: %s\n' \
-            "${LAUNCHER_LINK}" >&2
+    set +e
+    resolve_script_dir SCRIPT_DIR
+    resolve_status=$?
+    set -e
+    if ((resolve_status != 0)); then
+        printf 'Error: unable to resolve the script directory.\n' >&2
         exit 1
     fi
+    readonly SCRIPT_DIR
+    readonly GUI_SCRIPT="${SCRIPT_DIR}/download-video-gui.sh"
+    readonly ICON_SOURCE="${SCRIPT_DIR}/packaging/icons/${APP_ID}.svg"
 
-    if [[ -e ${LAUNCHER_LINK} && ! -L ${LAUNCHER_LINK} ]]; then
-        printf 'Error: the launcher path already exists and is not a symbolic link: %s\n' \
-            "${LAUNCHER_LINK}" >&2
+    data_home=${XDG_DATA_HOME:-${HOME}/.local/share}
+    if [[ ${data_home} != /* ]]; then
+        printf 'Error: XDG_DATA_HOME must resolve to an absolute path: %s\n' \
+            "${data_home}" >&2
         exit 1
     fi
+    readonly DATA_HOME=${data_home}
+    readonly APPLICATION_DIR="${DATA_HOME}/applications"
+    readonly LAUNCHER_DIR="${DATA_HOME}/${APP_ID}"
+    readonly LAUNCHER_LINK="${LAUNCHER_DIR}/launch"
+    readonly DESKTOP_FILE="${APPLICATION_DIR}/${APP_ID}.desktop"
+    readonly ICON_DIR="${DATA_HOME}/icons/hicolor/scalable/apps"
+    readonly ICON_FILE="${ICON_DIR}/${APP_ID}.svg"
 
-    reject_symlink_directory "${APPLICATION_DIR}"
-    reject_symlink_directory "${LAUNCHER_DIR}"
-    reject_symlink_directory "${ICON_DIR}"
-    mkdir -p -- "${APPLICATION_DIR}" "${LAUNCHER_DIR}" "${ICON_DIR}"
-    chmod 700 -- "${LAUNCHER_DIR}"
-    remove_stale_install_artifacts
+    case $1 in
+        install)
+            if [[ ! -x ${GUI_SCRIPT} ]]; then
+                printf 'Error: %s is absent or not executable.\n' "${GUI_SCRIPT}" >&2
+                exit 1
+            fi
 
-    desktop_exec=$(quote_desktop_exec_path "${LAUNCHER_LINK}")
-    TEMP_DESKTOP_FILE=$(mktemp \
-        --tmpdir="${APPLICATION_DIR}" \
-        ".${APP_ID}.XXXXXXXX.tmp")
-    cat >"${TEMP_DESKTOP_FILE}" <<EOF_DESKTOP
+            if [[ ${LAUNCHER_LINK} == *'%'* || ${LAUNCHER_LINK} == *'='* ||
+                ${LAUNCHER_LINK} == *$'\n'* || ${LAUNCHER_LINK} == *$'\r'* ]]; then
+                printf 'Error: the XDG data path cannot be represented safely in a desktop Exec key: %s\n' \
+                    "${LAUNCHER_LINK}" >&2
+                exit 1
+            fi
+
+            if [[ -e ${LAUNCHER_LINK} && ! -L ${LAUNCHER_LINK} ]]; then
+                printf 'Error: the launcher path already exists and is not a symbolic link: %s\n' \
+                    "${LAUNCHER_LINK}" >&2
+                exit 1
+            fi
+
+            reject_symlink_directory "${APPLICATION_DIR}"
+            reject_symlink_directory "${LAUNCHER_DIR}"
+            reject_symlink_directory "${ICON_DIR}"
+            mkdir -p -- "${APPLICATION_DIR}" "${LAUNCHER_DIR}" "${ICON_DIR}"
+            chmod 700 -- "${LAUNCHER_DIR}"
+            remove_stale_install_artifacts
+
+            desktop_exec=$(quote_desktop_exec_path "${LAUNCHER_LINK}")
+            TEMP_DESKTOP_FILE=$(mktemp \
+                --tmpdir="${APPLICATION_DIR}" \
+                ".${APP_ID}.XXXXXXXX.tmp")
+            cat >"${TEMP_DESKTOP_FILE}" <<EOF_DESKTOP
 [Desktop Entry]
 Type=Application
 Version=1.0
@@ -214,102 +213,106 @@ Terminal=false
 Categories=AudioVideo;
 StartupNotify=true
 EOF_DESKTOP
-    chmod 644 -- "${TEMP_DESKTOP_FILE}"
+            chmod 644 -- "${TEMP_DESKTOP_FILE}"
 
-    if command -v desktop-file-validate >/dev/null 2>&1; then
-        TEMP_VALIDATION_FILE=$(mktemp \
-            --tmpdir="${LAUNCHER_DIR}" \
-            '.validate.XXXXXXXX.desktop')
-        cat -- "${TEMP_DESKTOP_FILE}" >"${TEMP_VALIDATION_FILE}"
+            if command -v desktop-file-validate >/dev/null 2>&1; then
+                TEMP_VALIDATION_FILE=$(mktemp \
+                    --tmpdir="${LAUNCHER_DIR}" \
+                    '.validate.XXXXXXXX.desktop')
+                cat -- "${TEMP_DESKTOP_FILE}" >"${TEMP_VALIDATION_FILE}"
 
-        validation_status=0
-        validation_output=$(desktop-file-validate \
-            --no-hints \
-            "${TEMP_VALIDATION_FILE}" 2>&1) || validation_status=$?
-        if ((validation_status != 0)); then
-            printf 'Error: the generated desktop launcher failed validation (status %d).\n' \
-                "${validation_status}" >&2
-            if [[ -n ${validation_output} ]]; then
-                printf '%s\n' "${validation_output}" >&2
+                validation_status=0
+                validation_output=$(desktop-file-validate \
+                    --no-hints \
+                    "${TEMP_VALIDATION_FILE}" 2>&1) || validation_status=$?
+                if ((validation_status != 0)); then
+                    printf 'Error: the generated desktop launcher failed validation (status %d).\n' \
+                        "${validation_status}" >&2
+                    if [[ -n ${validation_output} ]]; then
+                        printf '%s\n' "${validation_output}" >&2
+                    fi
+                    printf 'The previously installed launcher, if any, was left unchanged.\n' >&2
+                    exit 1
+                fi
+
+                rm -f -- "${TEMP_VALIDATION_FILE}"
+                TEMP_VALIDATION_FILE=''
+            else
+                printf 'Note: desktop-file-validate is unavailable; launcher validation was skipped.\n' >&2
             fi
-            printf 'The previously installed launcher, if any, was left unchanged.\n' >&2
-            exit 1
-        fi
 
-        rm -f -- "${TEMP_VALIDATION_FILE}"
-        TEMP_VALIDATION_FILE=''
-    else
-        printf 'Note: desktop-file-validate is unavailable; launcher validation was skipped.\n' >&2
-    fi
+            TEMP_LAUNCHER_DIR=$(mktemp -d \
+                --tmpdir="${LAUNCHER_DIR}" \
+                '.install.XXXXXXXX')
+            ln -s -- "${GUI_SCRIPT}" "${TEMP_LAUNCHER_DIR}/launch"
 
-    TEMP_LAUNCHER_DIR=$(mktemp -d \
-        --tmpdir="${LAUNCHER_DIR}" \
-        '.install.XXXXXXXX')
-    ln -s -- "${GUI_SCRIPT}" "${TEMP_LAUNCHER_DIR}/launch"
+            TEMP_ICON_FILE=$(mktemp \
+                --tmpdir="${ICON_DIR}" \
+                ".${APP_ID}.XXXXXXXX.tmp")
+            if [[ -f ${ICON_SOURCE} && ! -L ${ICON_SOURCE} ]]; then
+                cat -- "${ICON_SOURCE}" >"${TEMP_ICON_FILE}"
+            else
+                # Keep source-tree installer tests and minimal portable copies usable.
+                write_embedded_icon "${TEMP_ICON_FILE}"
+            fi
+            chmod 644 -- "${TEMP_ICON_FILE}"
 
-    TEMP_ICON_FILE=$(mktemp \
-        --tmpdir="${ICON_DIR}" \
-        ".${APP_ID}.XXXXXXXX.tmp")
-    if [[ -f ${ICON_SOURCE} && ! -L ${ICON_SOURCE} ]]; then
-        cat -- "${ICON_SOURCE}" >"${TEMP_ICON_FILE}"
-    else
-        # Keep source-tree installer tests and minimal portable copies usable.
-        write_embedded_icon "${TEMP_ICON_FILE}"
-    fi
-    chmod 644 -- "${TEMP_ICON_FILE}"
+            mv -Tf -- "${TEMP_LAUNCHER_DIR}/launch" "${LAUNCHER_LINK}"
+            rmdir -- "${TEMP_LAUNCHER_DIR}"
+            TEMP_LAUNCHER_DIR=''
 
-    mv -Tf -- "${TEMP_LAUNCHER_DIR}/launch" "${LAUNCHER_LINK}"
-    rmdir -- "${TEMP_LAUNCHER_DIR}"
-    TEMP_LAUNCHER_DIR=''
+            if [[ ! -L ${LAUNCHER_LINK} || ! -x ${LAUNCHER_LINK} ]]; then
+                printf 'Error: the published launcher link is missing or not executable.\n' >&2
+                exit 1
+            fi
+            if ! published_target=$(readlink -- "${LAUNCHER_LINK}"); then
+                printf 'Error: unable to read the published launcher link: %s\n' \
+                    "${LAUNCHER_LINK}" >&2
+                exit 1
+            fi
+            if [[ ${published_target} != "${GUI_SCRIPT}" ]]; then
+                printf 'Error: the published launcher target is incorrect: %s\n' \
+                    "${published_target}" >&2
+                exit 1
+            fi
 
-    if [[ ! -L ${LAUNCHER_LINK} || ! -x ${LAUNCHER_LINK} ]]; then
-        printf 'Error: the published launcher link is missing or not executable.\n' >&2
-        exit 1
-    fi
-    if ! published_target=$(readlink -- "${LAUNCHER_LINK}"); then
-        printf 'Error: unable to read the published launcher link: %s\n' \
-            "${LAUNCHER_LINK}" >&2
-        exit 1
-    fi
-    if [[ ${published_target} != "${GUI_SCRIPT}" ]]; then
-        printf 'Error: the published launcher target is incorrect: %s\n' \
-            "${published_target}" >&2
-        exit 1
-    fi
+            mv -Tf -- "${TEMP_ICON_FILE}" "${ICON_FILE}"
+            TEMP_ICON_FILE=''
+            mv -Tf -- "${TEMP_DESKTOP_FILE}" "${DESKTOP_FILE}"
+            TEMP_DESKTOP_FILE=''
+            printf 'Launcher installed: %s\n' "${DESKTOP_FILE}"
+            printf 'Launcher target:    %s\n' "${GUI_SCRIPT}"
+            printf 'Application icon:   %s\n' "${ICON_FILE}"
+            printf 'Reinstall the launcher if the project directory is moved.\n'
+            ;;
+        uninstall)
+            launcher_removed=false
+            if [[ -e ${DESKTOP_FILE} || -L ${DESKTOP_FILE} ]]; then
+                rm -f -- "${DESKTOP_FILE}"
+                printf 'Launcher removed: %s\n' "${DESKTOP_FILE}"
+                launcher_removed=true
+            fi
+            if [[ -e ${LAUNCHER_LINK} || -L ${LAUNCHER_LINK} ]]; then
+                rm -f -- "${LAUNCHER_LINK}"
+                launcher_removed=true
+            fi
+            if [[ -e ${ICON_FILE} || -L ${ICON_FILE} ]]; then
+                rm -f -- "${ICON_FILE}"
+                launcher_removed=true
+            fi
+            remove_stale_install_artifacts
+            rmdir -- "${LAUNCHER_DIR}" 2>/dev/null || true
 
-    mv -Tf -- "${TEMP_ICON_FILE}" "${ICON_FILE}"
-    TEMP_ICON_FILE=''
-    mv -Tf -- "${TEMP_DESKTOP_FILE}" "${DESKTOP_FILE}"
-    TEMP_DESKTOP_FILE=''
-    printf 'Launcher installed: %s\n' "${DESKTOP_FILE}"
-    printf 'Launcher target:    %s\n' "${GUI_SCRIPT}"
-    printf 'Application icon:   %s\n' "${ICON_FILE}"
-    printf 'Reinstall the launcher if the project directory is moved.\n'
-    ;;
-uninstall)
-    launcher_removed=false
-    if [[ -e ${DESKTOP_FILE} || -L ${DESKTOP_FILE} ]]; then
-        rm -f -- "${DESKTOP_FILE}"
-        printf 'Launcher removed: %s\n' "${DESKTOP_FILE}"
-        launcher_removed=true
-    fi
-    if [[ -e ${LAUNCHER_LINK} || -L ${LAUNCHER_LINK} ]]; then
-        rm -f -- "${LAUNCHER_LINK}"
-        launcher_removed=true
-    fi
-    if [[ -e ${ICON_FILE} || -L ${ICON_FILE} ]]; then
-        rm -f -- "${ICON_FILE}"
-        launcher_removed=true
-    fi
-    remove_stale_install_artifacts
-    rmdir -- "${LAUNCHER_DIR}" 2>/dev/null || true
+            if [[ ${launcher_removed} == false ]]; then
+                printf 'No launcher is installed at: %s\n' "${DESKTOP_FILE}"
+            fi
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
 
-    if [[ ${launcher_removed} == false ]]; then
-        printf 'No launcher is installed at: %s\n' "${DESKTOP_FILE}"
-    fi
-    ;;
-*)
-    usage >&2
-    exit 2
-    ;;
-esac
+}
+
+main "$@"
