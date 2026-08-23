@@ -1,5 +1,6 @@
 ## 2.1.34 - 2026-08-23
 
+- Support canonical shell-inventory validation from Git-free source archives and qualify the extracted release archive during package CI.
 - Pin and verify the upstream shfmt toolchain, enforce the canonical four-space shell format in `run-all.sh`, and add automated stable-release update pull requests.
 - Add real-tool regression coverage for audio files with attached cover art, and ensure
   the suite detects a `V:0` to `v:0` validation regression.
