@@ -6,23 +6,38 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: update-shfmt-pin
   cancel-in-progress: false
 
 jobs:
-  update:
+  prepare-shfmt-update:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      update: ${{ steps.detect.outputs.update }}
+      latest: ${{ steps.detect.outputs.latest }}
+      base_sha: ${{ steps.base.outputs.sha }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Record base revision
+        id: base
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          base_sha=$(git rev-parse HEAD)
+          [[ ${base_sha} =~ ^[0-9a-f]{40}$ ]]
+          printf 'sha=%s\n' "${base_sha}" >>"${GITHUB_OUTPUT}"
 
       - name: Install validation dependencies
         run: |
@@ -161,11 +176,249 @@ jobs:
         shell: bash
         run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/run-all.sh
 
-      - name: Create or update shfmt pull request
+      - name: Build data-only shfmt handoff
         if: steps.detect.outputs.update == 'true'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          # This job is deliberately read-only. Even if the candidate formatter
+          # is hostile, the privileged job receives only a textual Git patch.
+          # shellcheck disable=SC1091
+          source tests/lib/project-files.sh
+
+          handoff_dir="${RUNNER_TEMP}/shfmt-update-handoff"
+          patch="${handoff_dir}/shfmt-update.patch"
+          mkdir -p -- "${handoff_dir}"
+
+          git diff --binary -- \
+            scripts/dev-tools/shfmt-pin.env \
+            "${ALL_SHELL_FILES[@]}" >"${patch}"
+
+          if [[ ! -s ${patch} ]]; then
+            printf 'Error: shfmt update produced an empty handoff patch.\n' >&2
+            exit 65
+          fi
+
+          (
+            cd "${handoff_dir}"
+            sha256sum shfmt-update.patch >shfmt-update.patch.sha256
+          )
+
+      - name: Upload data-only shfmt handoff
+        if: steps.detect.outputs.update == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: shfmt-update-${{ steps.base.outputs.sha }}
+          path: |
+            ${{ runner.temp }}/shfmt-update-handoff/shfmt-update.patch
+            ${{ runner.temp }}/shfmt-update-handoff/shfmt-update.patch.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-shfmt-pr:
+    needs: prepare-shfmt-update
+    if: needs.prepare-shfmt-update.outputs.update == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      EXPECTED_BASE_SHA: ${{ needs.prepare-shfmt-update.outputs.base_sha }}
+      SHFMT_VERSION: ${{ needs.prepare-shfmt-update.outputs.latest }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare-shfmt-update.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download data-only shfmt handoff
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: shfmt-update-${{ needs.prepare-shfmt-update.outputs.base_sha }}
+          path: ${{ runner.temp }}/shfmt-update-handoff
+
+      - name: Verify base and apply allowlisted patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          [[ ${EXPECTED_BASE_SHA} =~ ^[0-9a-f]{40}$ ]]
+          [[ ${SHFMT_VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+          actual_base=$(git rev-parse HEAD)
+          if [[ ${actual_base} != "${EXPECTED_BASE_SHA}" ]]; then
+            printf 'Error: checkout SHA %s does not match candidate base %s.\n' \
+              "${actual_base}" "${EXPECTED_BASE_SHA}" >&2
+            exit 65
+          fi
+
+          git fetch --no-tags origin \
+            '+refs/heads/main:refs/remotes/origin/main'
+          current_main=$(git rev-parse refs/remotes/origin/main)
+          if [[ ${current_main} != "${EXPECTED_BASE_SHA}" ]]; then
+            printf 'Error: main advanced from %s to %s; refusing stale shfmt handoff.\n' \
+              "${EXPECTED_BASE_SHA}" "${current_main}" >&2
+            exit 75
+          fi
+
+          if [[ -n $(git status --short) ]]; then
+            printf 'Error: privileged checkout is not clean before patch application.\n' >&2
+            git status --short >&2
+            exit 65
+          fi
+
+          handoff_dir="${RUNNER_TEMP}/shfmt-update-handoff"
+          patch="${handoff_dir}/shfmt-update.patch"
+          digest="${handoff_dir}/shfmt-update.patch.sha256"
+
+          [[ -f ${patch} && ! -L ${patch} ]]
+          [[ -f ${digest} && ! -L ${digest} ]]
+
+          mapfile -t handoff_entries < <(
+            find "${handoff_dir}" \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -printf '%f\n' |
+              LC_ALL=C sort
+          )
+          expected_entries=(
+            shfmt-update.patch
+            shfmt-update.patch.sha256
+          )
+          if [[ ${handoff_entries[*]} != "${expected_entries[*]}" ]]; then
+            printf 'Error: unexpected shfmt handoff entries: %s\n' \
+              "${handoff_entries[*]}" >&2
+            exit 65
+          fi
+
+          (
+            cd "${handoff_dir}"
+            sha256sum --check shfmt-update.patch.sha256
+          )
+
+          allowed_file=$(mktemp)
+          patch_paths=$(mktemp)
+          changed_paths=$(mktemp)
+          unexpected_paths=$(mktemp)
+          trap 'rm -f -- "${allowed_file}" "${patch_paths}" "${changed_paths}" "${unexpected_paths}"' EXIT
+
+          {
+            printf '%s\n' scripts/dev-tools/shfmt-pin.env
+            python3 - tests/lib/project-files.sh <<'PY'
+          from pathlib import Path
+          import shlex
+          import sys
+
+          inventory = Path(sys.argv[1])
+          arrays = {
+              "PRODUCTION_SHELL_FILES",
+              "PACKAGING_SHELL_FILES",
+              "TEST_SHELL_FILES",
+              "DEVELOPMENT_SHELL_FILES",
+          }
+          active = None
+          seen = set()
+          entries = []
+
+          for raw_line in inventory.read_text(encoding="utf-8").splitlines():
+              stripped = raw_line.strip()
+              if active is None:
+                  matched = next(
+                      (name for name in arrays if stripped == f"{name}=("),
+                      None,
+                  )
+                  if matched is not None:
+                      if matched in seen:
+                          raise SystemExit(f"duplicate canonical array: {matched}")
+                      seen.add(matched)
+                      active = matched
+                  continue
+
+              if stripped == ")":
+                  active = None
+                  continue
+              if not stripped or stripped.startswith("#"):
+                  continue
+
+              fields = shlex.split(stripped, comments=True, posix=True)
+              if len(fields) != 1 or "$" in fields[0]:
+                  raise SystemExit(
+                      f"unsupported canonical inventory entry: {raw_line}"
+                  )
+              entries.append(fields[0])
+
+          if active is not None:
+              raise SystemExit(f"unterminated canonical array: {active}")
+          if seen != arrays:
+              missing = ", ".join(sorted(arrays - seen))
+              raise SystemExit(f"missing canonical arrays: {missing}")
+          if not entries:
+              raise SystemExit("canonical shell inventory is empty")
+
+          for entry in entries:
+              print(entry)
+          PY
+          } | LC_ALL=C sort -u >"${allowed_file}"
+
+          git apply --check -- "${patch}"
+          git apply --numstat -- "${patch}" |
+            while IFS=$'\t' read -r added removed path; do
+              if [[ ${added} == '-' || ${removed} == '-' ]]; then
+                printf 'Error: binary content is forbidden in shfmt handoff: %s\n' \
+                  "${path}" >&2
+                exit 65
+              fi
+              printf '%s\n' "${path}"
+            done |
+            LC_ALL=C sort -u >"${patch_paths}"
+
+          [[ -s ${patch_paths} ]]
+          grep -Fxq 'scripts/dev-tools/shfmt-pin.env' "${patch_paths}"
+          comm -23 -- "${patch_paths}" "${allowed_file}" >"${unexpected_paths}"
+          if [[ -s ${unexpected_paths} ]]; then
+            printf 'Error: shfmt handoff contains paths outside the allowlist:\n' >&2
+            cat -- "${unexpected_paths}" >&2
+            exit 65
+          fi
+
+          git apply -- "${patch}"
+          git diff --check
+
+          diff_summary=$(git diff --summary)
+          if [[ -n ${diff_summary} ]]; then
+            printf 'Error: shfmt handoff changes file type/mode or creates, deletes, or renames files:\n%s\n' \
+              "${diff_summary}" >&2
+            exit 65
+          fi
+
+          git diff --numstat |
+            while IFS=$'\t' read -r added removed path; do
+              if [[ ${added} == '-' || ${removed} == '-' ]]; then
+                printf 'Error: binary working-tree change is forbidden: %s\n' \
+                  "${path}" >&2
+                exit 65
+              fi
+            done
+
+          git diff --name-only --no-renames | LC_ALL=C sort -u >"${changed_paths}"
+          [[ -s ${changed_paths} ]]
+          grep -Fxq 'scripts/dev-tools/shfmt-pin.env' "${changed_paths}"
+          comm -23 -- "${changed_paths}" "${allowed_file}" >"${unexpected_paths}"
+          if [[ -s ${unexpected_paths} ]]; then
+            printf 'Error: applied shfmt handoff changed unexpected paths:\n' >&2
+            cat -- "${unexpected_paths}" >&2
+            exit 65
+          fi
+
+      - name: Create or update shfmt pull request
         env:
           GH_TOKEN: ${{ github.token }}
-          SHFMT_VERSION: ${{ steps.detect.outputs.latest }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -173,23 +426,24 @@ jobs:
           [[ ${SHFMT_VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           branch="automation/shfmt-v${SHFMT_VERSION}"
 
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-
-          git switch -C "${branch}"
-          git add \
-            scripts/dev-tools/shfmt-pin.env \
-            '*.sh' \
-            scripts \
-            packaging \
-            tests
-
-          if git diff --cached --quiet; then
-            printf 'No formatter update changes remain after validation.\n'
-            exit 0
+          mapfile -t changed_paths < <(git diff --name-only --no-renames)
+          if ((${#changed_paths[@]} == 0)); then
+            printf 'Error: no validated formatter changes remain for publication.\n' >&2
+            exit 65
           fi
 
-          git commit -m "Update shfmt to v${SHFMT_VERSION}"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -C "${branch}"
+          git add -- "${changed_paths[@]}"
+
+          if git diff --cached --quiet; then
+            printf 'Error: validated shfmt changes were not staged.\n' >&2
+            exit 65
+          fi
+
+          git -c core.hooksPath=/dev/null commit \
+            -m "Update shfmt to v${SHFMT_VERSION}"
 
           gh auth setup-git
           git fetch origin \
@@ -227,9 +481,6 @@ jobs:
             --title "Update shfmt to v${SHFMT_VERSION}" \
             --body "Automated shfmt update to v${SHFMT_VERSION}.
 
-          This PR:
-          - pins the new upstream Linux amd64/arm64 release assets by SHA-256;
-          - reformats the complete canonical shell inventory;
-          - passes the complete tests/run-all.sh validation before PR creation.
-
-          Merge this PR to make v${SHFMT_VERSION} the project formatter reference."
+          The candidate formatter was qualified in a read-only job. This publication job
+          started from the exact clean base revision and applied only a data-only,
+          allowlisted patch before creating this PR. Review remains required before merge."

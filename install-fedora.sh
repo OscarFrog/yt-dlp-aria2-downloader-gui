@@ -10,7 +10,7 @@ set -Eeuo pipefail
 umask 022
 
 readonly PACKAGE_NAME='yt-dlp-aria2-downloader-gui'
-readonly APP_VERSION='2.1.34'
+readonly APP_VERSION='2.1.35'
 readonly PRIVATE_DIR='/usr/libexec/yt-dlp-aria2-downloader'
 readonly RPM_SIGNING_KEY_NAME='RPM-GPG-KEY-OscarFrog'
 readonly RPM_SIGNING_FINGERPRINT='7B54065FE061E78ED2C96252E3BE996196ABEA7F'
