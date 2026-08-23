@@ -25,7 +25,7 @@ fi
 # shellcheck source=lib/project-files.sh
 source "${PROJECT_FILES}"
 
-for array_name in PRODUCTION_SHELL_FILES PACKAGING_SHELL_FILES TEST_SHELL_FILES; do
+for array_name in PRODUCTION_SHELL_FILES PACKAGING_SHELL_FILES TEST_SHELL_FILES DEVELOPMENT_SHELL_FILES; do
     if ! array_declaration=$(declare -p "${array_name}" 2>/dev/null) \
         || [[ ${array_declaration} != 'declare -a '* ]]; then
         printf 'Error: %s is not an indexed array in %s.\n' \
@@ -35,7 +35,8 @@ for array_name in PRODUCTION_SHELL_FILES PACKAGING_SHELL_FILES TEST_SHELL_FILES;
 done
 if ((${#PRODUCTION_SHELL_FILES[@]} == 0 || \
     ${#PACKAGING_SHELL_FILES[@]} == 0 || \
-    ${#TEST_SHELL_FILES[@]} == 0)); then
+    ${#TEST_SHELL_FILES[@]} == 0 || \
+    ${#DEVELOPMENT_SHELL_FILES[@]} == 0)); then
     printf 'Error: project-files.sh returned an empty shell-file list.\n' >&2
     exit 65
 fi
@@ -54,6 +55,9 @@ fi
 printf '=== ShellCheck version ===\n'
 shellcheck --version
 
+printf '\n=== shfmt validation ===\n'
+bash -- ./scripts/check-shell-format.sh
+
 printf '\n=== Static validation ===\n'
 bash -- ./test-static.sh
 
@@ -67,6 +71,9 @@ printf '\n=== Test-suite ShellCheck ===\n'
 # -x follows sourced project helpers; -o all keeps the same strict optional
 # checks for production and test scripts.
 shellcheck -x -o all "${TEST_SHELL_FILES[@]}"
+
+printf '\n=== Development tooling ShellCheck ===\n'
+shellcheck -x -o all "${DEVELOPMENT_SHELL_FILES[@]}"
 
 printf '\n=== Runtime-manager integration ===\n'
 bash -- ./tests/runtime-manager-integration.sh

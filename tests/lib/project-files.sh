@@ -56,6 +56,14 @@ TEST_SHELL_FILES=(
     tests/aria2-real-behavior-integration.sh
 )
 
+# Development shell tools are part of the canonical validation surface.
+# shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
+DEVELOPMENT_SHELL_FILES=(
+    scripts/dev-tools/ensure-shfmt.sh
+    scripts/check-shell-format.sh
+    scripts/format-shell.sh
+)
+
 # Shell files intentionally exempt from the explicit main() entry-point rule:
 # POSIX maintainer hooks, sourced libraries, and tiny linear Bash executables.
 # shellcheck disable=SC2034 # Array is read by test-static.sh.
@@ -74,4 +82,5 @@ ALL_SHELL_FILES=(
     "${PRODUCTION_SHELL_FILES[@]}"
     "${PACKAGING_SHELL_FILES[@]}"
     "${TEST_SHELL_FILES[@]}"
+    "${DEVELOPMENT_SHELL_FILES[@]}"
 )

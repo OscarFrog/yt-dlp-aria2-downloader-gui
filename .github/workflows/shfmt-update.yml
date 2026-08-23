@@ -1,0 +1,235 @@
+name: Update shfmt pin
+
+on:
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-shfmt-pin
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install validation dependencies
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install --yes \
+            curl desktop-file-utils gnupg procps shellcheck unzip
+
+      - name: Detect latest stable shfmt release
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          latest_tag=$(gh api repos/mvdan/sh/releases/latest --jq '.tag_name')
+          [[ ${latest_tag} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            printf 'Error: unexpected upstream shfmt release tag: %s\n' \
+              "${latest_tag}" >&2
+            exit 65
+          }
+
+          latest_version=${latest_tag#v}
+          current_version=$(
+            awk -F= \
+              '$1 == "SHFMT_VERSION" { print $2; found=1 }
+               END { if (!found) exit 1 }' \
+              scripts/dev-tools/shfmt-pin.env
+          )
+
+          [[ ${current_version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            printf 'Error: invalid current shfmt pin: %s\n' \
+              "${current_version}" >&2
+            exit 65
+          }
+
+          printf 'Current shfmt: v%s\n' "${current_version}"
+          printf 'Latest shfmt:  v%s\n' "${latest_version}"
+
+          if [[ ${latest_version} == "${current_version}" ]]; then
+            printf 'update=false\n' >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          newest_version=$(
+            printf '%s\n%s\n' "${current_version}" "${latest_version}" |
+              sort -V |
+              tail -n 1
+          )
+          if [[ ${newest_version} != "${latest_version}" ]]; then
+            printf 'Upstream latest v%s is older than the project pin v%s; refusing downgrade.\n' \
+              "${latest_version}" "${current_version}"
+            printf 'update=false\n' >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          printf 'update=true\n' >>"${GITHUB_OUTPUT}"
+          printf 'latest=%s\n' "${latest_version}" >>"${GITHUB_OUTPUT}"
+
+      - name: Update pin and checksums
+        if: steps.detect.outputs.update == 'true'
+        env:
+          SHFMT_VERSION: ${{ steps.detect.outputs.latest }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          [[ ${SHFMT_VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          work_dir=$(mktemp -d)
+          trap 'rm -rf -- "${work_dir}"' EXIT
+
+          for arch in amd64 arm64; do
+            asset="shfmt_v${SHFMT_VERSION}_linux_${arch}"
+            url="https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/${asset}"
+
+            curl \
+              --fail \
+              --location \
+              --proto '=https' \
+              --tlsv1.2 \
+              --retry 3 \
+              --retry-delay 1 \
+              --silent \
+              --show-error \
+              --output "${work_dir}/${asset}" \
+              "${url}"
+          done
+
+          amd64_sha=$(sha256sum \
+            "${work_dir}/shfmt_v${SHFMT_VERSION}_linux_amd64")
+          amd64_sha=${amd64_sha%% *}
+          arm64_sha=$(sha256sum \
+            "${work_dir}/shfmt_v${SHFMT_VERSION}_linux_arm64")
+          arm64_sha=${arm64_sha%% *}
+
+          [[ ${amd64_sha} =~ ^[0-9a-f]{64}$ ]]
+          [[ ${arm64_sha} =~ ^[0-9a-f]{64}$ ]]
+
+          python3 - \
+            "${SHFMT_VERSION}" \
+            "${amd64_sha}" \
+            "${arm64_sha}" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          path = Path("scripts/dev-tools/shfmt-pin.env")
+          version, amd64_sha, arm64_sha = sys.argv[1:]
+          text = path.read_text(encoding="utf-8")
+
+          replacements = {
+              "SHFMT_VERSION": version,
+              "SHFMT_LINUX_AMD64_SHA256": amd64_sha,
+              "SHFMT_LINUX_ARM64_SHA256": arm64_sha,
+          }
+
+          for key, value in replacements.items():
+              pattern = rf"(?m)^{re.escape(key)}=.*$"
+              text, count = re.subn(pattern, f"{key}={value}", text)
+              if count != 1:
+                  raise SystemExit(
+                      f"expected exactly one {key} entry; found {count}"
+                  )
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Reformat with new shfmt
+        if: steps.detect.outputs.update == 'true'
+        shell: bash
+        run: bash ./scripts/format-shell.sh
+
+      - name: Validate updated formatter and project
+        if: steps.detect.outputs.update == 'true'
+        shell: bash
+        run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/run-all.sh
+
+      - name: Create or update shfmt pull request
+        if: steps.detect.outputs.update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHFMT_VERSION: ${{ steps.detect.outputs.latest }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          [[ ${SHFMT_VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          branch="automation/shfmt-v${SHFMT_VERSION}"
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git switch -C "${branch}"
+          git add \
+            scripts/dev-tools/shfmt-pin.env \
+            '*.sh' \
+            scripts \
+            packaging \
+            tests
+
+          if git diff --cached --quiet; then
+            printf 'No formatter update changes remain after validation.\n'
+            exit 0
+          fi
+
+          git commit -m "Update shfmt to v${SHFMT_VERSION}"
+
+          gh auth setup-git
+          git fetch origin \
+            "refs/heads/${branch}:refs/remotes/origin/${branch}" \
+            2>/dev/null || true
+
+          if git show-ref --verify --quiet \
+              "refs/remotes/origin/${branch}"; then
+            remote_sha=$(git rev-parse "refs/remotes/origin/${branch}")
+            git push \
+              --force-with-lease="refs/heads/${branch}:${remote_sha}" \
+              origin \
+              "HEAD:refs/heads/${branch}"
+          else
+            git push --set-upstream origin \
+              "HEAD:refs/heads/${branch}"
+          fi
+
+          existing_pr=$(
+            gh pr list \
+              --state open \
+              --head "${branch}" \
+              --json number \
+              --jq '.[0].number // empty'
+          )
+
+          if [[ -n ${existing_pr} ]]; then
+            printf 'Updated existing shfmt PR #%s.\n' "${existing_pr}"
+            exit 0
+          fi
+
+          gh pr create \
+            --base main \
+            --head "${branch}" \
+            --title "Update shfmt to v${SHFMT_VERSION}" \
+            --body "Automated shfmt update to v${SHFMT_VERSION}.
+
+          This PR:
+          - pins the new upstream Linux amd64/arm64 release assets by SHA-256;
+          - reformats the complete canonical shell inventory;
+          - passes the complete tests/run-all.sh validation before PR creation.
+
+          Merge this PR to make v${SHFMT_VERSION} the project formatter reference."

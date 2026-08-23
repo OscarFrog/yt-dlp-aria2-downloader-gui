@@ -22,6 +22,7 @@ fi
 # Contract: every canonical shell file uses the standard header.
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
+SHELL_INVENTORY_FILE=''
 
 assert_standard_shell_header() {
     local relative_path=$1
@@ -134,7 +135,112 @@ assert_no_historical_comment_labels() {
     return 0
 }
 
+cleanup_static_test() {
+    if [[ -n ${SHELL_INVENTORY_FILE} ]]; then
+        rm -f -- "${SHELL_INVENTORY_FILE}" || true
+        SHELL_INVENTORY_FILE=''
+    fi
+}
+
+assert_shell_inventory_is_canonical() {
+    local candidate=''
+    local first_line=''
+    local canonical=''
+    local matched=false
+    local is_shell_candidate=false
+    local inventory_status=0
+
+    if ! git -C "${SCRIPT_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        printf 'FAIL: static validation requires a Git worktree.\n' >&2
+        return 65
+    fi
+
+    if ! SHELL_INVENTORY_FILE=$(mktemp); then
+        printf 'FAIL: unable to create the shell-inventory scratch file.\n' >&2
+        return 70
+    fi
+
+    if ! git -C "${SCRIPT_DIR}" ls-files -co --exclude-standard -z \
+        >"${SHELL_INVENTORY_FILE}"; then
+        cleanup_static_test
+        printf 'FAIL: unable to enumerate tracked/non-ignored project files.\n' >&2
+        return 65
+    fi
+
+    while IFS= read -r -d '' candidate; do
+        [[ -f ${SCRIPT_DIR}/${candidate} ]] || continue
+
+        first_line=''
+        IFS= read -r first_line <"${SCRIPT_DIR}/${candidate}" || true
+        is_shell_candidate=false
+
+        if [[ ${candidate} == *.sh ]]; then
+            is_shell_candidate=true
+        fi
+
+        case ${first_line} in
+            '#!/usr/bin/env bash' | '#!/bin/bash' | '#!/bin/sh' | '#!/usr/bin/env sh')
+                is_shell_candidate=true
+                ;;
+            *)
+                ;;
+        esac
+
+        [[ ${is_shell_candidate} == true ]] || continue
+
+        matched=false
+        for canonical in "${ALL_SHELL_FILES[@]}"; do
+            if [[ ${candidate} == "${canonical}" ]]; then
+                matched=true
+                break
+            fi
+        done
+
+        if [[ ${matched} != true ]]; then
+            printf 'FAIL: shell file is not in the canonical inventory: %s\n' \
+                "${candidate}" >&2
+            inventory_status=65
+            break
+        fi
+    done <"${SHELL_INVENTORY_FILE}"
+
+    cleanup_static_test
+    return "${inventory_status}"
+}
+
 main() {
+    trap cleanup_static_test EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    assert_shell_inventory_is_canonical
+
+    assert_file_contains "${SCRIPT_DIR}/.editorconfig" \
+        'indent_size = 4' \
+        'EditorConfig keeps the four-space project indentation'
+    assert_file_contains "${SCRIPT_DIR}/.editorconfig" \
+        'binary_next_line = true' \
+        'EditorConfig keeps binary operators on continuation lines'
+    assert_file_contains "${SCRIPT_DIR}/.editorconfig" \
+        'switch_case_indent = true' \
+        'EditorConfig indents case bodies'
+    assert_file_contains "${SCRIPT_DIR}/.editorconfig" \
+        'simplify = false' \
+        'EditorConfig disables shfmt simplification'
+    assert_file_contains "${SCRIPT_DIR}/tests/run-all.sh" \
+        'bash -- ./scripts/check-shell-format.sh' \
+        'run-all enforces shfmt before behavioral validation'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'repos/mvdan/sh/releases/latest' \
+        'automation discovers the latest stable upstream shfmt release'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'bash ./scripts/format-shell.sh' \
+        'automation reformats with the candidate shfmt release'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'bash ./tests/run-all.sh' \
+        'automation validates the formatter update before PR creation'
+
     for file in "${ALL_SHELL_FILES[@]}"; do
         assert_standard_shell_header "${file}"
         assert_main_entry_structure "${file}"

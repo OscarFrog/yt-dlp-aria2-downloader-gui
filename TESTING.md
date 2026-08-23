@@ -6,6 +6,7 @@ project. It is intentionally independent of a particular release date.
 ## Contents
 
 - [Complete local test suite](#complete-local-test-suite)
+- [Shell formatting](#shell-formatting)
 - [Bash syntax](#bash-syntax)
 - [ShellCheck](#shellcheck)
 - [Covered behavior](#covered-behavior)
@@ -23,87 +24,51 @@ Run from the repository root:
 ./tests/run-all.sh
 ```
 
-## Bash syntax
+## Shell formatting
+
+The project pins the upstream `mvdan/sh` `shfmt` release and its Linux
+amd64/arm64 SHA-256 digests in `scripts/dev-tools/shfmt-pin.env`.
+
+Check formatting without modifying files:
 
 ```bash
-bash -n download-video.sh
-bash -n download-video-gui.sh
-bash -n progress-monitor.sh
-bash -n runtime-manager.sh
-bash -n install-fedora.sh
-bash -n scripts/release-preflight.sh
-bash -n install-gui.sh
-bash -n test-static.sh
-bash -n tests/run-all.sh
-bash -n tests/lib/assert.sh
-bash -n tests/lib/project-files.sh
-bash -n tests/mock-integration.sh
-bash -n tests/runtime-manager-integration.sh
-bash -n tests/runtime-manager-hardening-integration.sh
-bash -n tests/progress-monitor-integration.sh
-bash -n tests/installer-integration.sh
-bash -n tests/packaging-integration.sh
-bash -n tests/package-user-cleanup-integration.sh
-bash -n tests/rpm6-multisig-integration.sh
-bash -n tests/ffmpeg-progress-integration.sh
-bash -n tests/ffmpeg-real-progress-integration.sh
-bash -n tests/hls-remux-duration-integration.sh
-bash -n tests/real-tools-integration.sh
-bash -n tests/aria2-real-behavior-integration.sh
-bash -n packaging/install-tree.sh
-bash -n packaging/package-user-cleanup.sh
-bash -n packaging/deb/build-deb.sh
-bash -n packaging/deb/postinst
-bash -n packaging/deb/prerm
-bash -n packaging/deb/postrm
-bash -n packaging/deb/test-package-lifecycle.sh
-bash -n packaging/deb/test-package-upgrade.sh
-bash -n packaging/rpm/build-rpm.sh
-bash -n packaging/rpm/test-package-lifecycle.sh
-bash -n packaging/rpm/test-package-upgrade.sh
+./scripts/check-shell-format.sh
+```
+
+Apply the canonical format:
+
+```bash
+./scripts/format-shell.sh
+```
+
+The project contract is `shfmt -i 4 -ci -bn`, with simplification disabled.
+`tests/run-all.sh` performs the non-mutating check automatically. If the pinned
+upstream binary is absent from the local managed tool directory, the bootstrap downloads the
+exact GitHub release asset and verifies its SHA-256 before execution.
+
+The scheduled `.github/workflows/shfmt-update.yml` workflow detects a newer
+stable upstream release, updates the pin/checksums, reformats all canonical
+shell files, runs the complete validation suite, and opens or refreshes a
+dedicated update pull request.
+
+See `SHELL_STYLE.md` for the complete permanent shell-style contract.
+
+## Bash syntax
+
+The canonical inventory is centralized in `tests/lib/project-files.sh`:
+
+```bash
+source ./tests/lib/project-files.sh
+for file in "${ALL_SHELL_FILES[@]}"; do
+    bash -n -- "${file}"
+done
 ```
 
 ## ShellCheck
 
 ```bash
-shellcheck -x -o all \
-  download-video.sh \
-  download-video-gui.sh \
-  progress-monitor.sh \
-  runtime-manager.sh \
-  install-gui.sh
-
-shellcheck -x -o all \
-  test-static.sh \
-  tests/run-all.sh \
-  tests/lib/assert.sh \
-  tests/lib/project-files.sh \
-  install-fedora.sh \
-  scripts/release-preflight.sh \
-  tests/mock-integration.sh \
-  tests/runtime-manager-integration.sh \
-  tests/runtime-manager-hardening-integration.sh \
-  tests/progress-monitor-integration.sh \
-  tests/installer-integration.sh \
-  tests/packaging-integration.sh \
-  tests/package-user-cleanup-integration.sh \
-  tests/rpm6-multisig-integration.sh \
-  tests/ffmpeg-progress-integration.sh \
-  tests/ffmpeg-real-progress-integration.sh \
-  tests/hls-remux-duration-integration.sh \
-  tests/real-tools-integration.sh \
-  tests/aria2-real-behavior-integration.sh \
-  packaging/install-tree.sh \
-  packaging/package-user-cleanup.sh \
-  packaging/deb/build-deb.sh \
-  packaging/deb/postinst \
-  packaging/deb/prerm \
-  packaging/deb/postrm \
-  packaging/deb/test-package-lifecycle.sh \
-  packaging/deb/test-package-upgrade.sh \
-  packaging/rpm/build-rpm.sh \
-  packaging/rpm/test-package-lifecycle.sh \
-  packaging/rpm/test-package-upgrade.sh
+source ./tests/lib/project-files.sh
+shellcheck -x -o all "${ALL_SHELL_FILES[@]}"
 ```
 
 ## Covered behavior
