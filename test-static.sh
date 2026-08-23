@@ -149,24 +149,38 @@ assert_shell_inventory_is_canonical() {
     local matched=false
     local is_shell_candidate=false
     local inventory_status=0
-
-    if ! git -c "safe.directory=${SCRIPT_DIR}" -C "${SCRIPT_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        printf 'FAIL: static validation requires a Git worktree.\n' >&2
-        return 65
-    fi
+    local inventory_is_absolute=false
 
     if ! SHELL_INVENTORY_FILE=$(mktemp); then
         printf 'FAIL: unable to create the shell-inventory scratch file.\n' >&2
         return 70
     fi
 
-    if ! git -c "safe.directory=${SCRIPT_DIR}" -C "${SCRIPT_DIR}" ls-files -co --exclude-standard -z >"${SHELL_INVENTORY_FILE}"; then
-        cleanup_static_test
-        printf 'FAIL: unable to enumerate tracked/non-ignored project files.\n' >&2
-        return 65
+    if [[ -e ${SCRIPT_DIR}/.git || -L ${SCRIPT_DIR}/.git ]]; then
+        if ! git -c "safe.directory=${SCRIPT_DIR}" -C "${SCRIPT_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            cleanup_static_test
+            printf 'FAIL: unable to validate the project Git worktree.\n' >&2
+            return 65
+        fi
+
+        if ! git -c "safe.directory=${SCRIPT_DIR}" -C "${SCRIPT_DIR}" ls-files -co --exclude-standard -z >"${SHELL_INVENTORY_FILE}"; then
+            cleanup_static_test
+            printf 'FAIL: unable to enumerate tracked/non-ignored project files.\n' >&2
+            return 65
+        fi
+    else
+        inventory_is_absolute=true
+        if ! find "${SCRIPT_DIR}" -type f -print0 >"${SHELL_INVENTORY_FILE}"; then
+            cleanup_static_test
+            printf 'FAIL: unable to enumerate Git-free source-archive files.\n' >&2
+            return 65
+        fi
     fi
 
     while IFS= read -r -d '' candidate; do
+        if [[ ${inventory_is_absolute} == true ]]; then
+            candidate=${candidate#"${SCRIPT_DIR}/"}
+        fi
         [[ -f ${SCRIPT_DIR}/${candidate} ]] || continue
 
         first_line=''

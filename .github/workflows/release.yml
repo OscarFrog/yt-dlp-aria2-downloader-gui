@@ -383,7 +383,7 @@ jobs:
           persist-credentials: false
       - run: |
           sudo apt-get update
-          sudo apt-get install --yes curl desktop-file-utils gnupg shellcheck unzip
+          sudo apt-get install --yes curl desktop-file-utils findutils gnupg shellcheck unzip
       - name: Build and retest ZIP
         shell: bash
         run: |
