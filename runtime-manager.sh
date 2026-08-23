@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : runtime-manager.sh
+# Purpose     : Manage verified per-user yt-dlp and Deno runtimes.
+# ==============================================================================
+
 # Predicates in this script are intentionally called from if/!/&&/|| contexts.
 # Do not use errexit here: Bash suppresses -e inside functions used as predicates,
 # which makes behavior depend on the caller. Every fallible operation below is
@@ -25,114 +32,19 @@ validate_bounded_uint() {
     local minimum=$3
     local maximum=$4
 
-    if [[ ! ${value} =~ ^[0-9]+$ ]] ||
-        ((10#${value} < minimum || 10#${value} > maximum)); then
+    if [[ ! ${value} =~ ^[0-9]+$ ]] \
+        || ((10#${value} < minimum || 10#${value} > maximum)); then
         error "${name} must be an integer between ${minimum} and ${maximum}; found ${value}."
         return 1
     fi
     return 0
 }
 
-if [[ -z ${HOME:-} || ${HOME} != /* || ${HOME} == / ||
-      ${HOME} == *$'\n'* || ${HOME} == *$'\r'* ]]; then
-    error 'HOME must be a safe absolute non-root path.'
-    exit 64
-fi
-
-data_home=${XDG_DATA_HOME:-${HOME}/.local/share}
-if [[ ${data_home} != /* || ${data_home} == / ||
-      ${data_home} == *$'\n'* || ${data_home} == *$'\r'* ]]; then
-    data_home="${HOME}/.local/share"
-fi
-readonly RUNTIME_ROOT="${data_home}/${APP_ID}/runtime"
-readonly YTDLP_ROOT="${RUNTIME_ROOT}/yt-dlp"
-readonly DENO_ROOT="${RUNTIME_ROOT}/deno"
-readonly LOCK_FILE="${RUNTIME_ROOT}/update.lock"
-
-YTDLP_CHANNEL=${YTDLP_ARIA2_YTDLP_CHANNEL:-${DEFAULT_YTDLP_CHANNEL}}
-case ${YTDLP_CHANNEL} in
-stable)
-    YTDLP_RELEASE_REPOSITORY='yt-dlp/yt-dlp'
-    YTDLP_CHANNEL_VERSION_PATTERN='^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$'
-    ;;
-nightly)
-    YTDLP_RELEASE_REPOSITORY='yt-dlp/yt-dlp-nightly-builds'
-    YTDLP_CHANNEL_VERSION_PATTERN='^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{6}$'
-    ;;
-*)
-    error "unsupported yt-dlp channel: ${YTDLP_CHANNEL}; expected stable or nightly."
-    exit 64
-    ;;
-esac
-readonly YTDLP_CHANNEL YTDLP_RELEASE_REPOSITORY YTDLP_CHANNEL_VERSION_PATTERN
-
-RUNTIME_LOCK_WAIT_SECONDS=${YTDLP_ARIA2_RUNTIME_LOCK_WAIT_SECONDS:-15}
-CURL_CONNECT_TIMEOUT_SECONDS=${YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS:-15}
-CURL_MAX_TIME_SECONDS=${YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS:-180}
-CURL_RETRY_MAX_TIME_SECONDS=${YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS:-300}
-RUNTIME_VALIDATE_TIMEOUT_SECONDS=${YTDLP_ARIA2_RUNTIME_VALIDATE_TIMEOUT_SECONDS:-30}
-for setting in \
-    "RUNTIME_LOCK_WAIT_SECONDS:${RUNTIME_LOCK_WAIT_SECONDS}:1:300" \
-    "CURL_CONNECT_TIMEOUT_SECONDS:${CURL_CONNECT_TIMEOUT_SECONDS}:1:300" \
-    "CURL_MAX_TIME_SECONDS:${CURL_MAX_TIME_SECONDS}:10:1800" \
-    "CURL_RETRY_MAX_TIME_SECONDS:${CURL_RETRY_MAX_TIME_SECONDS}:10:3600" \
-    "RUNTIME_VALIDATE_TIMEOUT_SECONDS:${RUNTIME_VALIDATE_TIMEOUT_SECONDS}:5:120"; do
-    IFS=: read -r setting_name setting_value setting_min setting_max <<<"${setting}"
-    validate_bounded_uint "${setting_name}" "${setting_value}" \
-        "${setting_min}" "${setting_max}" || exit 64
-done
-readonly RUNTIME_LOCK_WAIT_SECONDS CURL_CONNECT_TIMEOUT_SECONDS
-readonly CURL_MAX_TIME_SECONDS CURL_RETRY_MAX_TIME_SECONDS
-readonly RUNTIME_VALIDATE_TIMEOUT_SECONDS
-
-script_path=$(realpath -e -- "${BASH_SOURCE[0]}") || {
-    error 'unable to resolve runtime manager path.'
-    exit 66
-}
-readonly SCRIPT_DIR=${script_path%/*}
-
-if [[ -f ${SCRIPT_DIR}/keys/yt-dlp-public.key ]]; then
-    YTDLP_PUBLIC_KEY=${SCRIPT_DIR}/keys/yt-dlp-public.key
-elif [[ -f ${SCRIPT_DIR}/packaging/keys/yt-dlp-public.key ]]; then
-    YTDLP_PUBLIC_KEY=${SCRIPT_DIR}/packaging/keys/yt-dlp-public.key
-else
-    error 'yt-dlp signing key is missing.'
-    exit 66
-fi
-readonly YTDLP_PUBLIC_KEY
-
-machine_arch=$(uname -m)
-readonly machine_arch
-case ${machine_arch} in
-x86_64)
-    readonly YTDLP_ASSET='yt-dlp_linux'
-    readonly DENO_TARGET='x86_64-unknown-linux-gnu'
-    ;;
-aarch64)
-    readonly YTDLP_ASSET='yt-dlp_linux_aarch64'
-    readonly DENO_TARGET='aarch64-unknown-linux-gnu'
-    ;;
-*)
-    error "unsupported architecture: ${machine_arch}"
-    exit 69
-    ;;
-esac
-readonly DENO_ASSET="deno-${DENO_TARGET}.zip"
-
-for command_name in \
-    bash curl flock gpg grep install ln mkdir mktemp mv readlink realpath rm \
-    sha256sum stat timeout uname unzip; do
-    command -v "${command_name}" >/dev/null 2>&1 || {
-        error "required runtime-manager command is absent: ${command_name}"
-        exit 127
-    }
-done
-
 ensure_private_directory() {
     local path=$1
     local owner=''
 
-    if [[ -L ${path} || ( -e ${path} && ! -d ${path} ) ]]; then
+    if [[ -L ${path} || (-e ${path} && ! -d ${path}) ]]; then
         error "managed-runtime path exists but is not a safe directory: ${path}"
         return 73
     fi
@@ -239,12 +151,6 @@ data=%s
     return 0
 }
 
-ensure_private_directory "${RUNTIME_ROOT}" || exit $?
-ensure_private_directory "${YTDLP_ROOT}" || exit $?
-ensure_private_directory "${DENO_ROOT}" || exit $?
-record_runtime_data_home
-
-LOCK_FD=''
 release_runtime_lock() {
     if [[ -n ${LOCK_FD} ]]; then
         flock --unlock "${LOCK_FD}" 2>/dev/null || true
@@ -252,13 +158,12 @@ release_runtime_lock() {
         LOCK_FD=''
     fi
 }
-trap release_runtime_lock EXIT
 
 acquire_runtime_lock() {
     if [[ -n ${LOCK_FD} ]]; then
         return 0
     fi
-    if [[ -L ${LOCK_FILE} || ( -e ${LOCK_FILE} && ! -f ${LOCK_FILE} ) ]]; then
+    if [[ -L ${LOCK_FILE} || (-e ${LOCK_FILE} && ! -f ${LOCK_FILE}) ]]; then
         error 'the runtime update lock exists but is not a safe regular file.'
         return 73
     fi
@@ -279,13 +184,6 @@ acquire_runtime_lock() {
     return 0
 }
 
-run_child() (
-    if [[ -n ${LOCK_FD:-} ]]; then
-        exec {LOCK_FD}>&-
-    fi
-    exec "$@"
-)
-
 run_curl() {
     run_child curl \
         --fail --location --proto '=https' --tlsv1.2 \
@@ -302,37 +200,14 @@ run_timed() {
     run_child timeout --signal=TERM --kill-after=5s "${seconds}s" "$@"
 }
 
-run_in_dir() (
-    local directory=$1
-    shift
-
-    if [[ -n ${LOCK_FD:-} ]]; then
-        exec {LOCK_FD}>&- || return 1
-    fi
-    cd -- "${directory}" || return 1
-    exec "$@"
-)
-
-run_timed_in_dir() (
-    local seconds=$1
-    local directory=$2
-    shift 2
-
-    if [[ -n ${LOCK_FD:-} ]]; then
-        exec {LOCK_FD}>&- || return 1
-    fi
-    cd -- "${directory}" || return 1
-    exec timeout --signal=TERM --kill-after=5s "${seconds}s" "$@"
-)
-
 component_path() {
     local component=$1
     local path=''
 
     case ${component} in
-    yt-dlp) path="${YTDLP_ROOT}/current/${YTDLP_ASSET}" ;;
-    deno) path="${DENO_ROOT}/current/deno" ;;
-    *) return 2 ;;
+        yt-dlp) path="${YTDLP_ROOT}/current/${YTDLP_ASSET}" ;;
+        deno) path="${DENO_ROOT}/current/deno" ;;
+        *) return 2 ;;
     esac
 
     [[ -x ${path} ]] || return 1
@@ -435,19 +310,22 @@ recover_activation_transaction() {
 
     while IFS='=' read -r key value || [[ -n ${key}${value} ]]; do
         case ${key} in
-        old)
-            [[ ${seen_old} == false ]] || return 1
-            old_target=${value}; seen_old=true
-            ;;
-        previous)
-            [[ ${seen_previous} == false ]] || return 1
-            previous_before=${value}; seen_previous=true
-            ;;
-        new)
-            [[ ${seen_new} == false ]] || return 1
-            new_target=${value}; seen_new=true
-            ;;
-        *) return 1 ;;
+            old)
+                [[ ${seen_old} == false ]] || return 1
+                old_target=${value}
+                seen_old=true
+                ;;
+            previous)
+                [[ ${seen_previous} == false ]] || return 1
+                previous_before=${value}
+                seen_previous=true
+                ;;
+            new)
+                [[ ${seen_new} == false ]] || return 1
+                new_target=${value}
+                seen_new=true
+                ;;
+            *) return 1 ;;
         esac
     done <"${journal}"
 
@@ -570,8 +448,8 @@ validate_ytdlp() {
 
     if ! grep -E \
         '^[[:space:]]*[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+curl_cffi[^[:space:]]*([[:space:]]|$)' \
-        <<<"${impersonation}" |
-        grep -Eiv '\((unavailable|not available)\)' >/dev/null; then
+        <<<"${impersonation}" \
+        | grep -Eiv '\((unavailable|not available)\)' >/dev/null; then
         error 'yt-dlp runtime validation failed: no usable curl_cffi impersonation target.'
         printf '%s\n' "${impersonation}" >&2
         return 1
@@ -618,9 +496,9 @@ validate_deno() {
     minor=${BASH_REMATCH[2]}
     patch=${BASH_REMATCH[3]}
 
-    if ((10#${major} > 2 ||
-        (10#${major} == 2 && 10#${minor} > 3) ||
-        (10#${major} == 2 && 10#${minor} == 3 && 10#${patch} >= 0))); then
+    if ((10#${major} > 2 || (\
+        10#${major} == 2 && 10#${minor} > 3) || (\
+        10#${major} == 2 && 10#${minor} == 3 && 10#${patch} >= 0))); then
         return 0
     fi
 
@@ -640,7 +518,7 @@ install_ytdlp_candidate() {
     is_valid_ytdlp_version "${version}" || return 1
 
     version_dir="${YTDLP_ROOT}/${version}"
-    if [[ -L ${version_dir} || ( -e ${version_dir} && ! -d ${version_dir} ) ]]; then
+    if [[ -L ${version_dir} || (-e ${version_dir} && ! -d ${version_dir}) ]]; then
         error "unsafe yt-dlp version directory: ${version_dir}"
         return 1
     fi
@@ -670,7 +548,7 @@ install_deno_candidate() {
     parse_deno_version "${candidate}" version || return 1
 
     version_dir="${DENO_ROOT}/${version}"
-    if [[ -L ${version_dir} || ( -e ${version_dir} && ! -d ${version_dir} ) ]]; then
+    if [[ -L ${version_dir} || (-e ${version_dir} && ! -d ${version_dir}) ]]; then
         error "unsafe Deno version directory: ${version_dir}"
         return 1
     fi
@@ -741,9 +619,9 @@ bootstrap_ytdlp_version() {
         return 1
     fi
 
-    if ! run_curl -o "${work}/${YTDLP_ASSET}" "${base_url}/${YTDLP_ASSET}" ||
-       ! run_curl -o "${work}/SHA2-256SUMS" "${base_url}/SHA2-256SUMS" ||
-       ! run_curl -o "${work}/SHA2-256SUMS.sig" "${base_url}/SHA2-256SUMS.sig"; then
+    if ! run_curl -o "${work}/${YTDLP_ASSET}" "${base_url}/${YTDLP_ASSET}" \
+        || ! run_curl -o "${work}/SHA2-256SUMS" "${base_url}/SHA2-256SUMS" \
+        || ! run_curl -o "${work}/SHA2-256SUMS.sig" "${base_url}/SHA2-256SUMS.sig"; then
         rm -rf -- "${work}" || true
         return 1
     fi
@@ -814,8 +692,8 @@ bootstrap_deno_version() {
     work=$(mktemp -d --tmpdir="${RUNTIME_ROOT}" '.deno-bootstrap.XXXXXXXX') || return 1
     checksum_file="${DENO_ASSET}.sha256sum"
 
-    if ! run_curl -o "${work}/${DENO_ASSET}" "${base_url}/${DENO_ASSET}" ||
-       ! run_curl -o "${work}/${checksum_file}" "${base_url}/${checksum_file}"; then
+    if ! run_curl -o "${work}/${DENO_ASSET}" "${base_url}/${DENO_ASSET}" \
+        || ! run_curl -o "${work}/${checksum_file}" "${base_url}/${checksum_file}"; then
         rm -rf -- "${work}" || true
         return 1
     fi
@@ -832,9 +710,9 @@ bootstrap_deno_version() {
         return 1
     }
     if ! run_timed_in_dir "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" "${work}" \
-        sha256sum --check CHECKSUM >/dev/null ||
-       ! run_timed_in_dir "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" "${work}" \
-        unzip -q -- "${DENO_ASSET}"; then
+        sha256sum --check CHECKSUM >/dev/null \
+        || ! run_timed_in_dir "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" "${work}" \
+            unzip -q -- "${DENO_ASSET}"; then
         error 'Deno bootstrap failed: checksum verification or extraction failed.'
         rm -rf -- "${work}" || true
         return 1
@@ -929,18 +807,18 @@ rollback_component() {
     local previous_path=''
 
     case ${component} in
-    yt-dlp)
-        root=${YTDLP_ROOT}
-        asset=${YTDLP_ASSET}
-        ;;
-    deno)
-        root=${DENO_ROOT}
-        asset='deno'
-        ;;
-    *)
-        error "unknown runtime component for rollback: ${component}"
-        return 2
-        ;;
+        yt-dlp)
+            root=${YTDLP_ROOT}
+            asset=${YTDLP_ASSET}
+            ;;
+        deno)
+            root=${DENO_ROOT}
+            asset='deno'
+            ;;
+        *)
+            error "unknown runtime component for rollback: ${component}"
+            return 2
+            ;;
     esac
 
     [[ -L ${root}/previous ]] || {
@@ -959,9 +837,9 @@ rollback_component() {
     }
 
     case ${component} in
-    yt-dlp) validate_ytdlp "${previous_path}" || return 1 ;;
-    deno) validate_deno "${previous_path}" || return 1 ;;
-    *) return 2 ;;
+        yt-dlp) validate_ytdlp "${previous_path}" || return 1 ;;
+        deno) validate_deno "${previous_path}" || return 1 ;;
+        *) return 2 ;;
     esac
 
     activate_version "${root}" "${previous_target}" || return 1
@@ -975,9 +853,9 @@ recover_invalid_active_runtime() {
 
     if active=$(component_path "${component}"); then
         case ${component} in
-        yt-dlp) validate_ytdlp "${active}" && return 0 ;;
-        deno) validate_deno "${active}" && return 0 ;;
-        *) return 2 ;;
+            yt-dlp) validate_ytdlp "${active}" && return 0 ;;
+            deno) validate_deno "${active}" && return 0 ;;
+            *) return 2 ;;
         esac
     fi
 
@@ -1056,45 +934,183 @@ rollback_runtime_locked() {
     rollback_component "${component}"
 }
 
-case ${1:-} in
-require)
-    require_runtime
-    ;;
-ensure)
-    ensure_runtime_locked
-    ;;
-update)
-    update_runtime
-    ;;
-path)
-    component_path "${2:-}"
-    ;;
-rollback)
-    rollback_runtime_locked "${2:-}"
-    ;;
-versions)
-    require_runtime || exit $?
-    ytdlp=''
-    deno=''
-    ytdlp_version=''
-    deno_version=''
-    ytdlp=$(component_path yt-dlp) || exit 69
-    deno=$(component_path deno) || exit 69
-    ytdlp_version=$(LC_ALL=C run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" \
-        "${ytdlp}" --version) || {
-        error 'unable to read the managed yt-dlp version.'
-        exit 69
+main() {
+    if [[ -z ${HOME:-} || ${HOME} != /* || ${HOME} == / ||
+        ${HOME} == *$'\n'* || ${HOME} == *$'\r'* ]]; then
+        error 'HOME must be a safe absolute non-root path.'
+        exit 64
+    fi
+
+    data_home=${XDG_DATA_HOME:-${HOME}/.local/share}
+    if [[ ${data_home} != /* || ${data_home} == / ||
+        ${data_home} == *$'\n'* || ${data_home} == *$'\r'* ]]; then
+        data_home="${HOME}/.local/share"
+    fi
+    readonly RUNTIME_ROOT="${data_home}/${APP_ID}/runtime"
+    readonly YTDLP_ROOT="${RUNTIME_ROOT}/yt-dlp"
+    readonly DENO_ROOT="${RUNTIME_ROOT}/deno"
+    readonly LOCK_FILE="${RUNTIME_ROOT}/update.lock"
+
+    YTDLP_CHANNEL=${YTDLP_ARIA2_YTDLP_CHANNEL:-${DEFAULT_YTDLP_CHANNEL}}
+    case ${YTDLP_CHANNEL} in
+        stable)
+            YTDLP_RELEASE_REPOSITORY='yt-dlp/yt-dlp'
+            YTDLP_CHANNEL_VERSION_PATTERN='^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$'
+            ;;
+        nightly)
+            YTDLP_RELEASE_REPOSITORY='yt-dlp/yt-dlp-nightly-builds'
+            YTDLP_CHANNEL_VERSION_PATTERN='^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{6}$'
+            ;;
+        *)
+            error "unsupported yt-dlp channel: ${YTDLP_CHANNEL}; expected stable or nightly."
+            exit 64
+            ;;
+    esac
+    readonly YTDLP_CHANNEL YTDLP_RELEASE_REPOSITORY YTDLP_CHANNEL_VERSION_PATTERN
+
+    RUNTIME_LOCK_WAIT_SECONDS=${YTDLP_ARIA2_RUNTIME_LOCK_WAIT_SECONDS:-15}
+    CURL_CONNECT_TIMEOUT_SECONDS=${YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS:-15}
+    CURL_MAX_TIME_SECONDS=${YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS:-180}
+    CURL_RETRY_MAX_TIME_SECONDS=${YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS:-300}
+    RUNTIME_VALIDATE_TIMEOUT_SECONDS=${YTDLP_ARIA2_RUNTIME_VALIDATE_TIMEOUT_SECONDS:-30}
+    for setting in \
+        "RUNTIME_LOCK_WAIT_SECONDS:${RUNTIME_LOCK_WAIT_SECONDS}:1:300" \
+        "CURL_CONNECT_TIMEOUT_SECONDS:${CURL_CONNECT_TIMEOUT_SECONDS}:1:300" \
+        "CURL_MAX_TIME_SECONDS:${CURL_MAX_TIME_SECONDS}:10:1800" \
+        "CURL_RETRY_MAX_TIME_SECONDS:${CURL_RETRY_MAX_TIME_SECONDS}:10:3600" \
+        "RUNTIME_VALIDATE_TIMEOUT_SECONDS:${RUNTIME_VALIDATE_TIMEOUT_SECONDS}:5:120"; do
+        IFS=: read -r setting_name setting_value setting_min setting_max <<<"${setting}"
+        validate_bounded_uint "${setting_name}" "${setting_value}" \
+            "${setting_min}" "${setting_max}" || exit 64
+    done
+    readonly RUNTIME_LOCK_WAIT_SECONDS CURL_CONNECT_TIMEOUT_SECONDS
+    readonly CURL_MAX_TIME_SECONDS CURL_RETRY_MAX_TIME_SECONDS
+    readonly RUNTIME_VALIDATE_TIMEOUT_SECONDS
+
+    script_path=$(realpath -e -- "${BASH_SOURCE[0]}") || {
+        error 'unable to resolve runtime manager path.'
+        exit 66
     }
-    parse_deno_version "${deno}" deno_version || {
-        error 'unable to read the managed Deno version.'
-        exit 69
-    }
-    printf 'yt-dlp %s (%s)\n' "${ytdlp_version%%$'\n'*}" "${YTDLP_CHANNEL}"
-    printf 'Deno %s\n' "${deno_version}"
-    ;;
-*)
-    printf 'Usage: %s {require|ensure|update|path yt-dlp|path deno|rollback yt-dlp|rollback deno|versions}\n' \
-        "${0##*/}" >&2
-    exit 2
-    ;;
-esac
+    readonly SCRIPT_DIR=${script_path%/*}
+
+    if [[ -f ${SCRIPT_DIR}/keys/yt-dlp-public.key ]]; then
+        YTDLP_PUBLIC_KEY=${SCRIPT_DIR}/keys/yt-dlp-public.key
+    elif [[ -f ${SCRIPT_DIR}/packaging/keys/yt-dlp-public.key ]]; then
+        YTDLP_PUBLIC_KEY=${SCRIPT_DIR}/packaging/keys/yt-dlp-public.key
+    else
+        error 'yt-dlp signing key is missing.'
+        exit 66
+    fi
+    readonly YTDLP_PUBLIC_KEY
+
+    machine_arch=$(uname -m)
+    readonly machine_arch
+    case ${machine_arch} in
+        x86_64)
+            readonly YTDLP_ASSET='yt-dlp_linux'
+            readonly DENO_TARGET='x86_64-unknown-linux-gnu'
+            ;;
+        aarch64)
+            readonly YTDLP_ASSET='yt-dlp_linux_aarch64'
+            readonly DENO_TARGET='aarch64-unknown-linux-gnu'
+            ;;
+        *)
+            error "unsupported architecture: ${machine_arch}"
+            exit 69
+            ;;
+    esac
+    readonly DENO_ASSET="deno-${DENO_TARGET}.zip"
+
+    for command_name in \
+        bash curl flock gpg grep install ln mkdir mktemp mv readlink realpath rm \
+        sha256sum stat timeout uname unzip; do
+        command -v "${command_name}" >/dev/null 2>&1 || {
+            error "required runtime-manager command is absent: ${command_name}"
+            exit 127
+        }
+    done
+
+    ensure_private_directory "${RUNTIME_ROOT}" || exit $?
+    ensure_private_directory "${YTDLP_ROOT}" || exit $?
+    ensure_private_directory "${DENO_ROOT}" || exit $?
+    record_runtime_data_home
+
+    LOCK_FD=''
+    trap release_runtime_lock EXIT
+
+    run_child() (
+        if [[ -n ${LOCK_FD:-} ]]; then
+            exec {LOCK_FD}>&-
+        fi
+        exec "$@"
+    )
+
+    run_in_dir() (
+        local directory=$1
+        shift
+
+        if [[ -n ${LOCK_FD:-} ]]; then
+            exec {LOCK_FD}>&- || return 1
+        fi
+        cd -- "${directory}" || return 1
+        exec "$@"
+    )
+
+    run_timed_in_dir() (
+        local seconds=$1
+        local directory=$2
+        shift 2
+
+        if [[ -n ${LOCK_FD:-} ]]; then
+            exec {LOCK_FD}>&- || return 1
+        fi
+        cd -- "${directory}" || return 1
+        exec timeout --signal=TERM --kill-after=5s "${seconds}s" "$@"
+    )
+
+    case ${1:-} in
+        require)
+            require_runtime
+            ;;
+        ensure)
+            ensure_runtime_locked
+            ;;
+        update)
+            update_runtime
+            ;;
+        path)
+            component_path "${2:-}"
+            ;;
+        rollback)
+            rollback_runtime_locked "${2:-}"
+            ;;
+        versions)
+            require_runtime || exit $?
+            ytdlp=''
+            deno=''
+            ytdlp_version=''
+            deno_version=''
+            ytdlp=$(component_path yt-dlp) || exit 69
+            deno=$(component_path deno) || exit 69
+            ytdlp_version=$(LC_ALL=C run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" \
+                "${ytdlp}" --version) || {
+                error 'unable to read the managed yt-dlp version.'
+                exit 69
+            }
+            parse_deno_version "${deno}" deno_version || {
+                error 'unable to read the managed Deno version.'
+                exit 69
+            }
+            printf 'yt-dlp %s (%s)\n' "${ytdlp_version%%$'\n'*}" "${YTDLP_CHANNEL}"
+            printf 'Deno %s\n' "${deno_version}"
+            ;;
+        *)
+            printf 'Usage: %s {require|ensure|update|path yt-dlp|path deno|rollback yt-dlp|rollback deno|versions}\n' \
+                "${0##*/}" >&2
+            exit 2
+            ;;
+    esac
+
+}
+
+main "$@"

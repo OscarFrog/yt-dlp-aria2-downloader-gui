@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : packaging/rpm/build-rpm.sh
+# Purpose     : Build the Fedora RPM package.
+# ==============================================================================
 
 set -Eeuo pipefail
 umask 022
@@ -29,15 +34,14 @@ for command_name in \
 done
 
 script_parent=$(dirname -- "${BASH_SOURCE[0]}")
-script_dir=$(cd -- "${script_parent}" && pwd -P)
-readonly script_dir
-project_dir=$(cd -- "${script_dir}/../.." && pwd -P)
-readonly project_dir
-
+SCRIPT_DIR=$(cd -- "${script_parent}" && pwd -P)
+readonly SCRIPT_DIR
+PROJECT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)
+readonly PROJECT_DIR
 
 source_status=''
 if ! source_status=$(
-    git -C "${project_dir}" status --porcelain=v1 --untracked-files=normal
+    git -C "${PROJECT_DIR}" status --porcelain=v1 --untracked-files=normal
 ); then
     printf 'Error: unable to inspect the package source worktree.\n' >&2
     exit 65
@@ -51,7 +55,7 @@ if [[ -n ${source_status} ]]; then
 fi
 
 source_version_output=''
-if ! source_version_output=$("${project_dir}/download-video.sh" --version); then
+if ! source_version_output=$("${PROJECT_DIR}/download-video.sh" --version); then
     printf 'Error: unable to read the source-tree version.\n' >&2
     exit 65
 fi
@@ -64,81 +68,87 @@ if [[ ${source_version} != "${VERSION}" ]]; then
 fi
 
 mkdir -p -- "${OUTPUT_DIR}"
-output_dir=$(realpath -m -- "${OUTPUT_DIR}")
-readonly output_dir
+RESOLVED_OUTPUT_DIR=$(realpath -m -- "${OUTPUT_DIR}")
+readonly RESOLVED_OUTPUT_DIR
 
 work_dir=$(mktemp -d)
+
 cleanup() {
     rm -rf -- "${work_dir}"
 }
-trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
-topdir="${work_dir}/rpmbuild"
-mkdir -p -- \
-    "${topdir}/BUILD" "${topdir}/BUILDROOT" "${topdir}/RPMS" \
-    "${topdir}/SOURCES" "${topdir}/SPECS" "${topdir}/SRPMS"
+main() {
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
-git -C "${project_dir}" archive \
-    --format=tar.gz \
-    --prefix="${PACKAGE_NAME}-${VERSION}/" \
-    --output="${topdir}/SOURCES/${PACKAGE_NAME}-${VERSION}.tar.gz" \
-    HEAD
-cp -- "${project_dir}/packaging/rpm/${PACKAGE_NAME}.spec" \
-    "${topdir}/SPECS/"
+    topdir="${work_dir}/rpmbuild"
+    mkdir -p -- \
+        "${topdir}/BUILD" "${topdir}/BUILDROOT" "${topdir}/RPMS" \
+        "${topdir}/SOURCES" "${topdir}/SPECS" "${topdir}/SRPMS"
 
-rpmbuild -bb \
-    --define "_topdir ${topdir}" \
-    --define "_rpmformat 4" \
-    --define "project_version ${VERSION}" \
-    "${topdir}/SPECS/${PACKAGE_NAME}.spec"
+    git -C "${PROJECT_DIR}" archive \
+        --format=tar.gz \
+        --prefix="${PACKAGE_NAME}-${VERSION}/" \
+        --output="${topdir}/SOURCES/${PACKAGE_NAME}-${VERSION}.tar.gz" \
+        HEAD
+    cp -- "${PROJECT_DIR}/packaging/rpm/${PACKAGE_NAME}.spec" \
+        "${topdir}/SPECS/"
 
-rpm_list_file="${work_dir}/rpm-files"
-find "${topdir}/RPMS" -type f -name '*.rpm' -print >"${rpm_list_file}"
-mapfile -t rpm_files <"${rpm_list_file}"
-((${#rpm_files[@]} == 1)) || {
-    printf 'Error: expected one RPM, found %d.\n' \
-        "${#rpm_files[@]}" >&2
-    exit 65
+    rpmbuild -bb \
+        --define "_topdir ${topdir}" \
+        --define "_rpmformat 4" \
+        --define "project_version ${VERSION}" \
+        "${topdir}/SPECS/${PACKAGE_NAME}.spec"
+
+    rpm_list_file="${work_dir}/rpm-files"
+    find "${topdir}/RPMS" -type f -name '*.rpm' -print >"${rpm_list_file}"
+    mapfile -t rpm_files <"${rpm_list_file}"
+    ((${#rpm_files[@]} == 1)) || {
+        printf 'Error: expected one RPM, found %d.\n' \
+            "${#rpm_files[@]}" >&2
+        exit 65
+    }
+    rpm_name=$(basename -- "${rpm_files[0]}")
+    rpm_path="${RESOLVED_OUTPUT_DIR}/${rpm_name}"
+    cp -- "${rpm_files[0]}" "${rpm_path}"
+
+    package_format=''
+    if ! package_format=$(
+        LC_ALL=C rpm -qp --qf '%{rpmformat}\n' -- "${rpm_path}"
+    ); then
+        printf 'Error: unable to determine the generated RPM package format.\n' >&2
+        exit 65
+    fi
+
+    if [[ ${package_format} != 4 ]]; then
+        printf 'Error: generated RPM uses unexpected package format: %s\n' \
+            "${package_format}" >&2
+        printf 'Expected RPM package format: 4\n' >&2
+        exit 65
+    fi
+
+    rpm -qpi -- "${rpm_path}"
+    rpm -qpl -- "${rpm_path}"
+    rpm -qpR -- "${rpm_path}"
+
+    extracted="${work_dir}/extracted"
+    mkdir -p -- "${extracted}"
+    (
+        cd -- "${extracted}"
+        rpm2cpio "${rpm_path}" | cpio -idm --quiet
+    )
+    packaged_version=$(
+        "${extracted}/usr/bin/yt-dlp-aria2-downloader" --version
+    )
+    [[ ${packaged_version} == "yt-dlp-aria2-downloader version ${VERSION}" ]]
+    desktop-file-validate --no-hints \
+        "${extracted}/usr/share/applications/yt-dlp-aria2-downloader.desktop"
+    [[ -f ${extracted}/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg ]]
+
+    printf 'RPM package created: %s\n' "${rpm_path}"
+
 }
-rpm_name=$(basename -- "${rpm_files[0]}")
-rpm_path="${output_dir}/${rpm_name}"
-cp -- "${rpm_files[0]}" "${rpm_path}"
 
-package_format=''
-if ! package_format=$(
-    LC_ALL=C rpm -qp --qf '%{rpmformat}\n' -- "${rpm_path}"
-); then
-    printf 'Error: unable to determine the generated RPM package format.\n' >&2
-    exit 65
-fi
-
-if [[ ${package_format} != 4 ]]; then
-    printf 'Error: generated RPM uses unexpected package format: %s\n' \
-        "${package_format}" >&2
-    printf 'Expected RPM package format: 4\n' >&2
-    exit 65
-fi
-
-rpm -qpi -- "${rpm_path}"
-rpm -qpl -- "${rpm_path}"
-rpm -qpR -- "${rpm_path}"
-
-extracted="${work_dir}/extracted"
-mkdir -p -- "${extracted}"
-(
-    cd -- "${extracted}"
-    rpm2cpio "${rpm_path}" | cpio -idm --quiet
-)
-packaged_version=$(
-    "${extracted}/usr/bin/yt-dlp-aria2-downloader" --version
-)
-[[ ${packaged_version} == \
-    "yt-dlp-aria2-downloader version ${VERSION}" ]]
-desktop-file-validate --no-hints \
-    "${extracted}/usr/share/applications/yt-dlp-aria2-downloader.desktop"
-[[ -f ${extracted}/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg ]]
-
-printf 'RPM package created: %s\n' "${rpm_path}"
+main "$@"

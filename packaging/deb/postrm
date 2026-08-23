@@ -1,16 +1,22 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : packaging/deb/postrm
+# Purpose     : Handle Debian package post-removal cleanup.
+# ==============================================================================
+
 set -e
 
 # Final HOME cleanup is deliberately performed from prerm while the helper
 # still exists in the package payload.
 case "${1:-}" in
-remove|purge|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
-    :
-    ;;
-*)
-    :
-    ;;
+    remove | purge | upgrade | failed-upgrade | abort-install | abort-upgrade | disappear)
+        :
+        ;;
+    *)
+        :
+        ;;
 esac
 
 exit 0

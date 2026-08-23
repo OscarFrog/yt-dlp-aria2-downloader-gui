@@ -6,6 +6,7 @@ project. It is intentionally independent of a particular release date.
 ## Contents
 
 - [Complete local test suite](#complete-local-test-suite)
+- [Shell formatting](#shell-formatting)
 - [Bash syntax](#bash-syntax)
 - [ShellCheck](#shellcheck)
 - [Covered behavior](#covered-behavior)
@@ -23,93 +24,60 @@ Run from the repository root:
 ./tests/run-all.sh
 ```
 
-## Bash syntax
+## Shell formatting
+
+The project pins the upstream `mvdan/sh` `shfmt` release and its Linux
+amd64/arm64 SHA-256 digests in `scripts/dev-tools/shfmt-pin.env`.
+
+Check formatting without modifying files:
 
 ```bash
-bash -n download-video.sh
-bash -n download-video-gui.sh
-bash -n progress-monitor.sh
-bash -n runtime-manager.sh
-bash -n install-fedora.sh
-bash -n scripts/release-preflight.sh
-bash -n install-gui.sh
-bash -n test-static.sh
-bash -n tests/run-all.sh
-bash -n tests/lib/assert.sh
-bash -n tests/lib/project-files.sh
-bash -n tests/mock-integration.sh
-bash -n tests/runtime-manager-integration.sh
-bash -n tests/runtime-manager-hardening-integration.sh
-bash -n tests/progress-monitor-integration.sh
-bash -n tests/installer-integration.sh
-bash -n tests/packaging-integration.sh
-bash -n tests/package-user-cleanup-integration.sh
-bash -n tests/rpm6-multisig-integration.sh
-bash -n tests/ffmpeg-progress-integration.sh
-bash -n tests/ffmpeg-real-progress-integration.sh
-bash -n tests/hls-remux-duration-integration.sh
-bash -n tests/real-tools-integration.sh
-bash -n tests/aria2-real-behavior-integration.sh
-bash -n packaging/install-tree.sh
-bash -n packaging/package-user-cleanup.sh
-bash -n packaging/deb/build-deb.sh
-bash -n packaging/deb/postinst
-bash -n packaging/deb/prerm
-bash -n packaging/deb/postrm
-bash -n packaging/deb/test-package-lifecycle.sh
-bash -n packaging/deb/test-package-upgrade.sh
-bash -n packaging/rpm/build-rpm.sh
-bash -n packaging/rpm/test-package-lifecycle.sh
-bash -n packaging/rpm/test-package-upgrade.sh
+./scripts/check-shell-format.sh
+```
+
+Apply the canonical format:
+
+```bash
+./scripts/format-shell.sh
+```
+
+The project contract is `shfmt -i 4 -ci -bn`, with simplification disabled.
+`tests/run-all.sh` performs the non-mutating check automatically. If the pinned
+upstream binary is absent from the local managed tool directory, the bootstrap downloads the
+exact GitHub release asset and verifies its SHA-256 before execution.
+
+The scheduled `.github/workflows/shfmt-update.yml` workflow detects a newer
+stable upstream release, updates the pin/checksums, reformats all canonical
+shell files, runs the complete validation suite, and opens or refreshes a
+dedicated update pull request.
+
+See `SHELL_STYLE.md` for the complete permanent shell-style contract.
+
+## Bash syntax
+
+The canonical inventory is centralized in `tests/lib/project-files.sh`:
+
+```bash
+source ./tests/lib/project-files.sh
+for file in "${ALL_SHELL_FILES[@]}"; do
+    bash -n -- "${file}"
+done
 ```
 
 ## ShellCheck
 
 ```bash
-shellcheck -x -o all \
-  download-video.sh \
-  download-video-gui.sh \
-  progress-monitor.sh \
-  runtime-manager.sh \
-  install-gui.sh
-
-shellcheck -x -o all \
-  test-static.sh \
-  tests/run-all.sh \
-  tests/lib/assert.sh \
-  tests/lib/project-files.sh \
-  install-fedora.sh \
-  scripts/release-preflight.sh \
-  tests/mock-integration.sh \
-  tests/runtime-manager-integration.sh \
-  tests/runtime-manager-hardening-integration.sh \
-  tests/progress-monitor-integration.sh \
-  tests/installer-integration.sh \
-  tests/packaging-integration.sh \
-  tests/package-user-cleanup-integration.sh \
-  tests/rpm6-multisig-integration.sh \
-  tests/ffmpeg-progress-integration.sh \
-  tests/ffmpeg-real-progress-integration.sh \
-  tests/hls-remux-duration-integration.sh \
-  tests/real-tools-integration.sh \
-  tests/aria2-real-behavior-integration.sh \
-  packaging/install-tree.sh \
-  packaging/package-user-cleanup.sh \
-  packaging/deb/build-deb.sh \
-  packaging/deb/postinst \
-  packaging/deb/prerm \
-  packaging/deb/postrm \
-  packaging/deb/test-package-lifecycle.sh \
-  packaging/deb/test-package-upgrade.sh \
-  packaging/rpm/build-rpm.sh \
-  packaging/rpm/test-package-lifecycle.sh \
-  packaging/rpm/test-package-upgrade.sh
+source ./tests/lib/project-files.sh
+shellcheck -x -o all "${ALL_SHELL_FILES[@]}"
 ```
 
 ## Covered behavior
 
 The automated suite checks, among other things:
 
+- shell-comment policy: preserve ShellCheck directives and non-obvious rationale, use durable `Scenario`, `Mutation test`, `Regression guard`, `Negative control`, and `Positive controls` labels in tests, and reject permanent `PATCH`/`AUD`/version-history labels;
+- project-version coherence across active scripts, documentation and release workflow surfaces, while keeping historical CHANGELOG entries exempt;
+- standardized headers on every canonical shell script, including an SPDX MIT tag, project name, repository-relative file name and purpose;
 - argument validation, terminal `--`, and exactly one URL per run;
 - preservation of URLs containing shell metacharacters;
 - trimming of leading and trailing whitespace entered in the GUI;
@@ -181,6 +149,8 @@ The automated suite checks, among other things:
   diagnostics kept under the runtime temporary directory;
 - complete-video rejection when either the video or audio stream is absent,
   plus audio-mode rejection when a content-video stream remains in the final file;
+- real MP3/ID3 attached-cover qualification proving `v:0` sees cover art while
+  `V:0` does not, with a temporary `V:0` -> `v:0` validator mutant that must be killed;
 - conditional Deno requirements and YouTube-only remote EJS fallback;
 - measured wrapper-managed FFmpeg remux progress and bounded progress arithmetic;
 - a complementary real-FFmpeg `-progress pipe:1` integration, repeated three
@@ -190,8 +160,8 @@ The automated suite checks, among other things:
   reproducible truncated-input case where FFmpeg exits 0 with both streams but
   a materially shortened MKV; that result must not be published, and the
   repaired HLS source remains available until global validation/publication succeeds;
-- hermetic real-tool direct HTTP, AAC/M4A, Opus/WebM and combined-source audio,
-  HLS and DASH transfers using generated media and loopback HTTP servers, with
+- hermetic real-tool direct HTTP, AAC/M4A, Opus/WebM, combined-source audio,
+  attached-cover audio, HLS and DASH transfers using generated media and loopback HTTP servers, with
   transparent shims proving that real aria2c is used for direct transfers and
   not for HLS/DASH fragments;
 - controlled real aria2 Range/no-Range/redirect/error behavior plus interrupted
@@ -326,7 +296,7 @@ bash ./scripts/release-preflight.sh \
   --confirm-admin-bypass-disabled \
   --confirm-tag-policy \
   --confirm-single-maintainer-self-review \
-  v2.1.31
+  vX.Y.Z
 ```
 
 The three confirmation flags require the operator to have checked that
@@ -341,7 +311,7 @@ and warns when the signing subkey is within 90 days of expiry.
 For manual workflow recovery, invoke the workflow from the exact same tag:
 
 ```bash
-gh workflow run release.yml   --ref v2.1.31   -f tag=v2.1.31   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref vX.Y.Z   -f tag=vX.Y.Z   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Before pushing a release tag, confirm that GitHub Immutable Releases are
@@ -382,7 +352,7 @@ After the final `publish` job succeeds, download the release RPM and independent
 confirm its signer and isolated trust binding on Fedora 44:
 
 ```bash
-rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' ./yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm
+rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc44.noarch.rpm
 
 VERIFY_ROOT=$(mktemp -d)
 VERIFY_KEYRING="${VERIFY_ROOT}/keyring"
@@ -392,13 +362,13 @@ chmod 700 "$VERIFY_ROOT" "$VERIFY_KEYRING"
 
 rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --import ./RPM-GPG-KEY-OscarFrog
 
-rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --checksig ./yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm
+rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --checksig ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc44.noarch.rpm
 
 rm -rf -- "$VERIFY_ROOT"
 
-gh release verify v2.1.31 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.1.31   ./yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh attestation verify   ./yt-dlp-aria2-downloader-gui-2.1.31-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify vX.Y.Z -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset vX.Y.Z   ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh attestation verify   ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 A specific release is considered qualified only after its final `publish` job

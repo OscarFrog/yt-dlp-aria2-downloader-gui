@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : tests/progress-monitor-integration.sh
+# Purpose     : Validate progress parsing, weighting and completion semantics.
+# ==============================================================================
 
 set -euo pipefail
 
@@ -96,7 +101,10 @@ stop_process_bounded() {
     kill -TERM -- "${pid}" 2>/dev/null || true
     for ((attempt = 0; attempt < 20; attempt++)); do
         # shellcheck disable=SC2310
-        process_is_running "${pid}" || { wait "${pid}" 2>/dev/null || true; return 0; }
+        process_is_running "${pid}" || {
+            wait "${pid}" 2>/dev/null || true
+            return 0
+        }
         sleep 0.05
     done
     kill -KILL -- "${pid}" 2>/dev/null || true
@@ -121,7 +129,6 @@ stop_active_processes() {
         ACTIVE_WORKER=''
     fi
 }
-trap 'stop_active_processes; rm -rf -- "${TEST_ROOT}" || true' EXIT
 
 wait_for_text() {
     local file=$1
@@ -241,333 +248,340 @@ assert_percentages_never_decrease() {
     fi
 }
 
-# Closing the Zenity side of the pipe must end the monitor normally instead of
-# leaking a SIGPIPE status to the GUI pipeline.
-pipe_scenario_dir="${TEST_ROOT}/closed-progress-pipe"
-pipe_log="${pipe_scenario_dir}/download.log"
-pipe_result="${pipe_scenario_dir}/result.txt"
-mkdir -p -- "${pipe_scenario_dir}"
-: >"${pipe_log}"
-sleep 300 &
-ACTIVE_WORKER=$!
-pipe_worker=${ACTIVE_WORKER}
-pipe_status=0
-set +e
-# The positional parameters are intentionally expanded by the inner Bash.
-# shellcheck disable=SC2016
-timeout --signal=TERM --kill-after=1s 5s \
-    bash -o pipefail -c '
-        bash "$1" "$2" "$3" "$4" video "$5" | head -n 2 >/dev/null
-    ' bash "${MONITOR}" "${pipe_log}" "${pipe_worker}" "${pipe_result}" \
+main() {
+    trap 'stop_active_processes; rm -rf -- "${TEST_ROOT}" || true' EXIT
+
+    # Closing the Zenity side of the pipe must end the monitor normally instead of
+    # leaking a SIGPIPE status to the GUI pipeline.
+    pipe_scenario_dir="${TEST_ROOT}/closed-progress-pipe"
+    pipe_log="${pipe_scenario_dir}/download.log"
+    pipe_result="${pipe_scenario_dir}/result.txt"
+    mkdir -p -- "${pipe_scenario_dir}"
+    : >"${pipe_log}"
+    sleep 300 &
+    ACTIVE_WORKER=$!
+    pipe_worker=${ACTIVE_WORKER}
+    pipe_status=0
+    set +e
+    # The positional parameters are intentionally expanded by the inner Bash.
+    # shellcheck disable=SC2016
+    timeout --signal=TERM --kill-after=1s 5s \
+        bash -o pipefail -c '
+            bash "$1" "$2" "$3" "$4" video "$5" | head -n 2 >/dev/null
+        ' bash "${MONITOR}" "${pipe_log}" "${pipe_worker}" "${pipe_result}" \
         "${pipe_scenario_dir}"
-pipe_status=$?
-set -e
-stop_process_bounded "${pipe_worker}"
-ACTIVE_WORKER=''
-assert_equals '0' "${pipe_status}" \
-    "closed progress pipe exits normally (status ${pipe_status})"
+    pipe_status=$?
+    set -e
+    stop_process_bounded "${pipe_worker}"
+    ACTIVE_WORKER=''
+    assert_equals '0' "${pipe_status}" \
+        "closed progress pipe exits normally (status ${pipe_status})"
 
-# A partial record must be retained until its terminating newline arrives.
-start_scenario partial-progress-record audio
-printf '%s' 'YTDLP_PROGRESS_V2|media|251|downloa' >>"${LOG_FILE}"
-sleep 0.6
-printf '%s\n' 'ding|250|1000|0|0|0|25.0%|500KiB/s|00:06' >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading the audio track - 25%' \
-    'partial progress record is reconstructed'
-finish_success '/tmp/partial-record.webm'
+    # A partial record must be retained until its terminating newline arrives.
+    start_scenario partial-progress-record audio
+    printf '%s' 'YTDLP_PROGRESS_V2|media|251|downloa' >>"${LOG_FILE}"
+    sleep 0.6
+    printf '%s\n' 'ding|250|1000|0|0|0|25.0%|500KiB/s|00:06' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the audio track - 25%' \
+        'partial progress record is reconstructed'
+    finish_success '/tmp/partial-record.webm'
 
-# Removing the log path while the worker is alive must not create a busy loop.
-# The already-open descriptor remains safe, but no new records can arrive.
-start_scenario reader-unavailable video
-wait_for_text "${CAPTURE_FILE}" 'Analyzing the webpage...' \
-    'reader opens the progress log before its path is removed'
-rm -f -- "${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" \
-    'Progress information is unavailable; the download continues...' \
-    'missing progress log diagnostic'
-sleep 1
-reader_value_count=$(grep -Ec '^[0-9]+$' "${CAPTURE_FILE}" || true)
-[[ ${reader_value_count} =~ ^[0-9]+$ ]] || reader_value_count=0
-((reader_value_count <= 8)) || \
-    fail "missing progress log produced an unbounded loop: ${reader_value_count} values"
-finish_failure
+    # Removing the log path while the worker is alive must not create a busy loop.
+    # The already-open descriptor remains safe, but no new records can arrive.
+    start_scenario reader-unavailable video
+    wait_for_text "${CAPTURE_FILE}" 'Analyzing the webpage...' \
+        'reader opens the progress log before its path is removed'
+    rm -f -- "${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" \
+        'Progress information is unavailable; the download continues...' \
+        'missing progress log diagnostic'
+    sleep 1
+    reader_value_count=$(grep -Ec '^[0-9]+$' "${CAPTURE_FILE}" || true)
+    [[ ${reader_value_count} =~ ^[0-9]+$ ]] || reader_value_count=0
+    ((reader_value_count <= 8)) \
+        || fail "missing progress log produced an unbounded loop: ${reader_value_count} values"
+    finish_failure
 
-# Records appended immediately before worker exit must be drained from the
-# regular log file before the monitor performs final result verification.
-start_scenario final-log-drain video
-printf '%s\n' \
-    'YTDLP_PLAN|media|22|22|' \
-    'YTDLP_PROGRESS_V2|media|22|downloading|750|1000|0|0|0|75.0%|2MiB/s|00:01' \
-    >>"${LOG_FILE}"
-finish_success '/tmp/final-log-drain.mkv'
-assert_file_contains "${CAPTURE_FILE}" 'Downloading the media - 75%' \
-    'final log bytes are drained after worker exit'
+    # Records appended immediately before worker exit must be drained from the
+    # regular log file before the monitor performs final result verification.
+    start_scenario final-log-drain video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|22|22|' \
+        'YTDLP_PROGRESS_V2|media|22|downloading|750|1000|0|0|0|75.0%|2MiB/s|00:01' \
+        >>"${LOG_FILE}"
+    finish_success '/tmp/final-log-drain.mkv'
+    assert_file_contains "${CAPTURE_FILE}" 'Downloading the media - 75%' \
+        'final log bytes are drained after worker exit'
 
-# Direct video transfer handled by aria2c.
-start_scenario direct-aria-video video
-printf '%s\n' 'YTDLP_PLAN|media|18|18|' >>"${LOG_FILE}"
-printf '\r[#a1b2c3 4MiB/10MiB(40%%) CN:8 DL:1MiB ETA:6s]\r' >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" '40% (aria2c)' 'direct aria percentage'
-assert_file_has_no_line "${CAPTURE_FILE}" '100' 'aria local percentage is not global completion'
-finish_success '/tmp/direct-video.mkv'
+    # Scenario: direct video transfer handled by aria2c.
+    start_scenario direct-aria-video video
+    printf '%s\n' 'YTDLP_PLAN|media|18|18|' >>"${LOG_FILE}"
+    printf '\r[#a1b2c3 4MiB/10MiB(40%%) CN:8 DL:1MiB ETA:6s]\r' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" '40% (aria2c)' 'direct aria percentage'
+    assert_file_has_no_line "${CAPTURE_FILE}" '100' 'aria local percentage is not global completion'
+    finish_success '/tmp/direct-video.mkv'
 
-# Two direct aria2 streams with very different sizes must be aggregated by
-# transferred bytes instead of averaging their local percentages equally.
-start_scenario aria-weighted-video video
-{
-    printf '%s\n' 'YTDLP_PLAN|media||137|140'
-    printf '\r[#a1b2c3 900.0MiB/1000.0MiB(90%%) CN:8 DL:8MiB ETA:12s]\r'
-    printf '\r[#d4e5f6 1.0MiB/10.0MiB(10%%) CN:2 DL:1MiB ETA:9s]\r'
-} >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 10% (aria2c)' \
-    'second aria stream is rendered'
-weighted_max=$(max_percentage "${CAPTURE_FILE}")
-assert_equals '80' "${weighted_max}" 'aria progress is weighted by transferred bytes'
-finish_success '/tmp/aria-weighted-video.mkv'
+    # Two direct aria2 streams with very different sizes must be aggregated by
+    # transferred bytes instead of averaging their local percentages equally.
+    start_scenario aria-weighted-video video
+    {
+        printf '%s\n' 'YTDLP_PLAN|media||137|140'
+        printf '\r[#a1b2c3 900.0MiB/1000.0MiB(90%%) CN:8 DL:8MiB ETA:12s]\r'
+        printf '\r[#d4e5f6 1.0MiB/10.0MiB(10%%) CN:2 DL:1MiB ETA:9s]\r'
+    } >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 10% (aria2c)' \
+        'second aria stream is rendered'
+    weighted_max=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals '80' "${weighted_max}" 'aria progress is weighted by transferred bytes'
+    finish_success '/tmp/aria-weighted-video.mkv'
 
-# aria2c fallback without a YTDLP_PLAN record. This is the compatibility path
-# used by legacy or incomplete event streams and must still update Zenity.
-start_scenario aria-without-plan-audio audio
-printf '\r[#a1b2c3 4MiB/10MiB(40%%) CN:8 DL:1MiB ETA:6s]\r' >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" '40% (aria2c)' 'aria fallback percentage'
-assert_file_has_line "${CAPTURE_FILE}" '39' \
-    'aria fallback percentage maps into the global phase'
-finish_success '/tmp/aria-fallback-audio.webm'
+    # aria2c fallback without a YTDLP_PLAN record. This is the compatibility path
+    # used by legacy or incomplete event streams and must still update Zenity.
+    start_scenario aria-without-plan-audio audio
+    printf '\r[#a1b2c3 4MiB/10MiB(40%%) CN:8 DL:1MiB ETA:6s]\r' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" '40% (aria2c)' 'aria fallback percentage'
+    assert_file_has_line "${CAPTURE_FILE}" '39' \
+        'aria fallback percentage maps into the global phase'
+    finish_success '/tmp/aria-fallback-audio.webm'
 
-# Direct native audio transfer.
-start_scenario direct-audio audio
-printf '%s\n' \
-    'YTDLP_PLAN|media|251|251|' \
-    'YTDLP_PROGRESS_V2|media|251|downloading|250|1000|0|0|0|25.0%|500KiB/s|00:06' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading the audio track - 25%' \
-    'native audio percentage'
-printf '%s\n' \
-    'YTDLP_PROGRESS_V2|media|251|finished|1000|1000|0|0|0|100.0%|1MiB/s|00:00' \
-    >>"${LOG_FILE}"
-finish_success '/tmp/audio.webm'
+    # Scenario: direct native audio transfer.
+    start_scenario direct-audio audio
+    printf '%s\n' \
+        'YTDLP_PLAN|media|251|251|' \
+        'YTDLP_PROGRESS_V2|media|251|downloading|250|1000|0|0|0|25.0%|500KiB/s|00:06' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the audio track - 25%' \
+        'native audio percentage'
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|media|251|finished|1000|1000|0|0|0|100.0%|1MiB/s|00:00' \
+        >>"${LOG_FILE}"
+    finish_success '/tmp/audio.webm'
 
-# One file downloaded directly by yt-dlp.
-start_scenario native-single video
-printf '%s\n' \
-    'YTDLP_PLAN|media|22|22|' \
-    'YTDLP_PROGRESS_V2|media|22|downloading|600|1000|0|0|0|60.0%|2MiB/s|00:03' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 60%' \
-    'native direct percentage'
-finish_success '/tmp/native.mp4'
+    # Scenario: one file downloaded directly by yt-dlp.
+    start_scenario native-single video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|22|22|' \
+        'YTDLP_PROGRESS_V2|media|22|downloading|600|1000|0|0|0|60.0%|2MiB/s|00:03' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 60%' \
+        'native direct percentage'
+    finish_success '/tmp/native.mp4'
 
-# Fragmented HLS without a reliable byte total.
-start_scenario hls-fragments video
-printf '%s\n' \
-    'YTDLP_PLAN|media|hls-720|hls-720|' \
-    'YTDLP_PROGRESS_V2|media|hls-720|downloading|0|0|0|3|10||1MiB/s|00:07' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 30%' \
-    'HLS fragment percentage'
-finish_success '/tmp/hls.mkv'
+    # Scenario: fragmented HLS without a reliable byte total.
+    start_scenario hls-fragments video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|hls-720|hls-720|' \
+        'YTDLP_PROGRESS_V2|media|hls-720|downloading|0|0|0|3|10||1MiB/s|00:07' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 30%' \
+        'HLS fragment percentage'
+    finish_success '/tmp/hls.mkv'
 
-# yt-dlp may report a tiny HLS manifest/bootstrap record as 100% at fragment
-# 0/N. It must remain at the beginning of the global transfer phase.
-start_scenario hls-bootstrap-record video
-printf '%s\n' \
-    'YTDLP_PLAN|media|96-21|96-21|' \
-    'YTDLP_PROGRESS_V2|media|96-21|downloading|1024|0|1024|0|473|100.0%|2KiB/s|Unknown' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 0%' \
-    'HLS bootstrap record is ignored'
-bootstrap_max=$(max_percentage "${CAPTURE_FILE}")
-[[ ${bootstrap_max} =~ ^[0-9]+$ ]] || fail 'HLS bootstrap capture has no numeric progress'
-((bootstrap_max <= 5)) || fail 'HLS fragment 0/N must not advance the transfer phase'
-printf '%s\n' \
-    'YTDLP_PROGRESS_V2|media|96-21|downloading|23528240|0|1000442128|10|473|2.4%|24MiB/s|00:30' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 2%' \
-    'HLS media fragments advance normally after bootstrap'
-finish_success '/tmp/hls-bootstrap.mkv'
+    # yt-dlp may report a tiny HLS manifest/bootstrap record as 100% at fragment
+    # 0/N. It must remain at the beginning of the global transfer phase.
+    start_scenario hls-bootstrap-record video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|96-21|96-21|' \
+        'YTDLP_PROGRESS_V2|media|96-21|downloading|1024|0|1024|0|473|100.0%|2KiB/s|Unknown' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 0%' \
+        'HLS bootstrap record is ignored'
+    bootstrap_max=$(max_percentage "${CAPTURE_FILE}")
+    [[ ${bootstrap_max} =~ ^[0-9]+$ ]] || fail 'HLS bootstrap capture has no numeric progress'
+    ((bootstrap_max <= 5)) || fail 'HLS fragment 0/N must not advance the transfer phase'
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|media|96-21|downloading|23528240|0|1000442128|10|473|2.4%|24MiB/s|00:30' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 2%' \
+        'HLS media fragments advance normally after bootstrap'
+    finish_success '/tmp/hls-bootstrap.mkv'
 
-# An unknown-size transfer may animate within a narrow range, but every
-# percentage sent to Zenity must remain greater than or equal to the previous
-# one. The former triangular pulse regressed within a few ticks.
-start_scenario unknown-size-monotonic video
-printf '%s\n' \
-    'YTDLP_PLAN|media|unknown-size|unknown-size|' \
-    'YTDLP_PROGRESS_V2|media|unknown-size|downloading|0|0|0|0|0|||Unknown' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading the media - size unknown' \
-    'unknown-size monotonic phase'
-wait_for_numeric_occurrences "${CAPTURE_FILE}" 7 1 \
-    'unknown-size progress reaches its bounded plateau'
-finish_success '/tmp/unknown-size.mkv'
+    # An unknown-size transfer may animate within a narrow range, but every
+    # percentage sent to Zenity must remain greater than or equal to the previous
+    # one. The former triangular pulse regressed within a few ticks.
+    start_scenario unknown-size-monotonic video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|unknown-size|unknown-size|' \
+        'YTDLP_PROGRESS_V2|media|unknown-size|downloading|0|0|0|0|0|||Unknown' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the media - size unknown' \
+        'unknown-size monotonic phase'
+    wait_for_numeric_occurrences "${CAPTURE_FILE}" 7 1 \
+        'unknown-size progress reaches its bounded plateau'
+    finish_success '/tmp/unknown-size.mkv'
 
-# A long remux must move only forward through the post-processing envelope.
-# Waiting here makes the regression deterministic: the former bounded pulse
-# reached its upper bound and then emitted smaller percentages.
-start_scenario postprocess-monotonic video
-printf '%s\n' \
-    'YTDLP_PLAN|media|22|22|' \
-    'YTDLP_PROGRESS_V2|media|22|finished|1000|1000|0|0|0|100.0%|2MiB/s|00:00' \
-    'YTDLP_POSTPROCESS|started|FFmpegVideoRemuxer' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" \
-    'Remuxing the media into an MKV container...' \
-    'long remux monotonic phase'
-wait_for_numeric_occurrences "${CAPTURE_FILE}" 98 3 \
-    'post-processing progress remains at its upper plateau'
-finish_success '/tmp/postprocess-monotonic.mkv'
+    # A long remux must move only forward through the post-processing envelope.
+    # Waiting here makes the regression deterministic: the former bounded pulse
+    # reached its upper bound and then emitted smaller percentages.
+    start_scenario postprocess-monotonic video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|22|22|' \
+        'YTDLP_PROGRESS_V2|media|22|finished|1000|1000|0|0|0|100.0%|2MiB/s|00:00' \
+        'YTDLP_POSTPROCESS|started|FFmpegVideoRemuxer' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" \
+        'Remuxing the media into an MKV container...' \
+        'long remux monotonic phase'
+    wait_for_numeric_occurrences "${CAPTURE_FILE}" 98 3 \
+        'post-processing progress remains at its upper plateau'
+    finish_success '/tmp/postprocess-monotonic.mkv'
 
-# Fragmented DASH with an estimated size.
-start_scenario dash-fragments video
-printf '%s\n' \
-    'YTDLP_PLAN|media|dash-1080|dash-1080|' \
-    'YTDLP_PROGRESS_V2|media|dash-1080|downloading|400|0|1000|4|10||2MiB/s|00:05' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 40%' \
-    'DASH estimated-byte percentage'
-finish_success '/tmp/dash.mkv'
+    # Scenario: fragmented DASH with an estimated size.
+    start_scenario dash-fragments video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|dash-1080|dash-1080|' \
+        'YTDLP_PROGRESS_V2|media|dash-1080|downloading|400|0|1000|4|10||2MiB/s|00:05' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 40%' \
+        'DASH estimated-byte percentage'
+    finish_success '/tmp/dash.mkv'
 
-# Separate video and audio streams: the first local 100% must stay below global completion.
-start_scenario composite-video-audio video
-printf '%s\n' 'YTDLP_PLAN|media|137+140|137|140' >>"${LOG_FILE}"
-printf '\r[#aaa111 10MiB/10MiB(100%%) CN:8 DL:2MiB ETA:0s]\r' >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading item 1/2 - 100%' \
-    'first composite item completion'
-first_max=$(max_percentage "${CAPTURE_FILE}")
-[[ ${first_max} =~ ^[0-9]+$ ]] || fail 'composite capture has no numeric progress'
-((first_max < 90)) || fail 'first stream must not fill the global download range'
-printf '\r[#bbb222 1MiB/10MiB(10%%) CN:8 DL:1MiB ETA:9s]\r' >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 10%' \
-    'second composite item progress'
-printf '\r[#bbb222 10MiB/10MiB(100%%) CN:8 DL:2MiB ETA:0s]\r' >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 100%' \
-    'second composite item completion'
-assert_file_has_no_line "${CAPTURE_FILE}" '100' 'composite downloads do not complete before merge'
-printf '%s\n' 'YTDLP_POSTPROCESS|started|FFmpegMerger' >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Merging the video and audio streams...' \
-    'MKV merge phase'
-finish_success '/tmp/composite.mkv'
+    # Separate video and audio streams: the first local 100% must stay below global completion.
+    start_scenario composite-video-audio video
+    printf '%s\n' 'YTDLP_PLAN|media|137+140|137|140' >>"${LOG_FILE}"
+    printf '\r[#aaa111 10MiB/10MiB(100%%) CN:8 DL:2MiB ETA:0s]\r' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 1/2 - 100%' \
+        'first composite item completion'
+    first_max=$(max_percentage "${CAPTURE_FILE}")
+    [[ ${first_max} =~ ^[0-9]+$ ]] || fail 'composite capture has no numeric progress'
+    ((first_max < 90)) || fail 'first stream must not fill the global download range'
+    printf '\r[#bbb222 1MiB/10MiB(10%%) CN:8 DL:1MiB ETA:9s]\r' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 10%' \
+        'second composite item progress'
+    printf '\r[#bbb222 10MiB/10MiB(100%%) CN:8 DL:2MiB ETA:0s]\r' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 100%' \
+        'second composite item completion'
+    assert_file_has_no_line "${CAPTURE_FILE}" '100' 'composite downloads do not complete before merge'
+    printf '%s\n' 'YTDLP_POSTPROCESS|started|FFmpegMerger' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Merging the video and audio streams...' \
+        'MKV merge phase'
+    finish_success '/tmp/composite.mkv'
 
-# Mixed composite path: one stream is native and the next is handled by aria2c.
-start_scenario mixed-native-aria video
-printf '%s\n' \
-    'YTDLP_PLAN|media|hls-720+140|hls-720|140' \
-    'YTDLP_PROGRESS_V2|media|hls-720|finished|1000|1000|0|10|10|100.0%|2MiB/s|00:00' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading item 1/2 - 100%' \
-    'mixed native item completion'
-printf '\r[#d00d42 5MiB/10MiB(50%%) CN:8 DL:1MiB ETA:5s]\r' >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 50% (aria2c)' \
-    'mixed aria item association'
-finish_success '/tmp/mixed.mkv'
+    # Scenario: mixed composite path with native and aria2c-managed streams.
+    start_scenario mixed-native-aria video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|hls-720+140|hls-720|140' \
+        'YTDLP_PROGRESS_V2|media|hls-720|finished|1000|1000|0|10|10|100.0%|2MiB/s|00:00' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 1/2 - 100%' \
+        'mixed native item completion'
+    printf '\r[#d00d42 5MiB/10MiB(50%%) CN:8 DL:1MiB ETA:5s]\r' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 50% (aria2c)' \
+        'mixed aria item association'
+    finish_success '/tmp/mixed.mkv'
 
-# The authenticated HLS path first repairs MPEG-TS-in-MP4 and then performs
-# the final stream-copy remux into MKV.
-start_scenario hls-fixup-remux video
-printf '%s\n' \
-    'YTDLP_PLAN|media|96-21|96-21|' \
-    'YTDLP_PROGRESS_V2|media|96-21|finished|1000|1000|0|0|0|100.0%|2MiB/s|00:00' \
-    'YTDLP_POSTPROCESS|started|FixupM3u8' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Repairing the downloaded media...' \
-    'HLS MPEG-TS-in-MP4 fixup phase'
-printf '%s\n' 'YTDLP_POSTPROCESS|started|FFmpegVideoRemuxer' >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Remuxing the media into an MKV container...' \
-    'HLS final MKV remux phase'
-finish_success '/tmp/hls-fixed.mkv'
+    # Scenario: authenticated HLS first repairs MPEG-TS-in-MP4, then performs
+    # the final stream-copy remux into MKV.
+    start_scenario hls-fixup-remux video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|96-21|96-21|' \
+        'YTDLP_PROGRESS_V2|media|96-21|finished|1000|1000|0|0|0|100.0%|2MiB/s|00:00' \
+        'YTDLP_POSTPROCESS|started|FixupM3u8' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Repairing the downloaded media...' \
+        'HLS MPEG-TS-in-MP4 fixup phase'
+    printf '%s\n' 'YTDLP_POSTPROCESS|started|FFmpegVideoRemuxer' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Remuxing the media into an MKV container...' \
+        'HLS final MKV remux phase'
+    finish_success '/tmp/hls-fixed.mkv'
 
-# Remuxing and audio extraction are represented as indeterminate finalization phases.
-start_scenario remux-mkv video
-printf '%s\n' \
-    'YTDLP_PLAN|media|18|18|' \
-    'YTDLP_PROGRESS_V2|media|18|finished|1000|1000|0|0|0|100.0%|2MiB/s|00:00' \
-    'YTDLP_POSTPROCESS|started|FFmpegVideoRemuxer' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Remuxing the media into an MKV container...' \
-    'MKV remux phase'
-assert_file_has_no_line "${CAPTURE_FILE}" '100' 'remux phase stays below 100%'
-finish_success '/tmp/remux.mkv'
+    # Scenario: remuxing and audio extraction remain indeterminate finalization phases.
+    start_scenario remux-mkv video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|18|18|' \
+        'YTDLP_PROGRESS_V2|media|18|finished|1000|1000|0|0|0|100.0%|2MiB/s|00:00' \
+        'YTDLP_POSTPROCESS|started|FFmpegVideoRemuxer' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Remuxing the media into an MKV container...' \
+        'MKV remux phase'
+    assert_file_has_no_line "${CAPTURE_FILE}" '100' 'remux phase stays below 100%'
+    finish_success '/tmp/remux.mkv'
 
-start_scenario extract-audio audio
-printf '%s\n' \
-    'YTDLP_PLAN|media|18|18|' \
-    'YTDLP_POSTPROCESS|started|FFmpegExtractAudio' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Extracting the native audio track...' \
-    'audio extraction phase'
-finish_success '/tmp/extracted.opus'
+    start_scenario extract-audio audio
+    printf '%s\n' \
+        'YTDLP_PLAN|media|18|18|' \
+        'YTDLP_POSTPROCESS|started|FFmpegExtractAudio' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Extracting the native audio track...' \
+        'audio extraction phase'
+    finish_success '/tmp/extracted.opus'
 
-# Unknown total: the progress bar must move while remaining bounded.
-start_scenario unknown-size video
-printf '%s\n' 'YTDLP_PLAN|media|18|18|' >>"${LOG_FILE}"
-printf '\r[#c0ffee 4MiB/0B CN:8 DL:1MiB]\r' >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'size unknown (aria2c)' 'unknown-size fallback'
-sleep 0.8
-unknown_values=$(grep -E '^[0-9]+$' "${CAPTURE_FILE}" | sort -u | wc -l) || \
-    unknown_values=0
-[[ ${unknown_values} =~ ^[0-9]+$ ]] || unknown_values=0
-((unknown_values >= 2)) || fail 'unknown-size progress must remain animated'
-finish_success '/tmp/unknown.mkv'
+    # Unknown total: the progress bar must move while remaining bounded.
+    start_scenario unknown-size video
+    printf '%s\n' 'YTDLP_PLAN|media|18|18|' >>"${LOG_FILE}"
+    printf '\r[#c0ffee 4MiB/0B CN:8 DL:1MiB]\r' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'size unknown (aria2c)' 'unknown-size fallback'
+    sleep 0.8
+    unknown_values=$(grep -E '^[0-9]+$' "${CAPTURE_FILE}" | sort -u | wc -l) \
+        || unknown_values=0
+    [[ ${unknown_values} =~ ^[0-9]+$ ]] || unknown_values=0
+    ((unknown_values >= 2)) || fail 'unknown-size progress must remain animated'
+    finish_success '/tmp/unknown.mkv'
 
-# A late download line must not replace an active post-processing phase.
-start_scenario late-progress video
-printf '%s\n' \
-    'YTDLP_PLAN|media|18|18|' \
-    'YTDLP_POSTPROCESS|started|FFmpegMetadata' \
-    'YTDLP_PROGRESS_V2|media|18|downloading|100|1000|0|0|0|10.0%|1MiB/s|00:09' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Writing media metadata...' 'late-progress phase'
-assert_file_not_contains "${CAPTURE_FILE}" 'Downloading the media - 10%' \
-    'late download output is ignored after post-processing starts'
-finish_success '/tmp/late.mkv'
+    # A late download line must not replace an active post-processing phase.
+    start_scenario late-progress video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|18|18|' \
+        'YTDLP_POSTPROCESS|started|FFmpegMetadata' \
+        'YTDLP_PROGRESS_V2|media|18|downloading|100|1000|0|0|0|10.0%|1MiB/s|00:09' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Writing media metadata...' 'late-progress phase'
+    assert_file_not_contains "${CAPTURE_FILE}" 'Downloading the media - 10%' \
+        'late download output is ignored after post-processing starts'
+    finish_success '/tmp/late.mkv'
 
-# Download and post-processing failures never emit a completed percentage.
-start_scenario download-error video
-printf '%s\n' \
-    'YTDLP_PLAN|media|18|18|' \
-    'YTDLP_PROGRESS_V2|media|18|downloading|500|1000|0|0|0|50.0%|1MiB/s|00:05' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 50%' 'download error setup'
-finish_failure
+    # Negative control: download and post-processing failures never emit completion.
+    start_scenario download-error video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|18|18|' \
+        'YTDLP_PROGRESS_V2|media|18|downloading|500|1000|0|0|0|50.0%|1MiB/s|00:05' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 50%' 'download error setup'
+    finish_failure
 
-start_scenario postprocess-error video
-printf '%s\n' \
-    'YTDLP_PLAN|media|18|18|' \
-    'YTDLP_POSTPROCESS|started|FFmpegVideoRemuxer' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Remuxing the media into an MKV container...' \
-    'post-process error setup'
-finish_failure
+    start_scenario postprocess-error video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|18|18|' \
+        'YTDLP_POSTPROCESS|started|FFmpegVideoRemuxer' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Remuxing the media into an MKV container...' \
+        'post-process error setup'
+    finish_failure
 
-# Untrusted yt-dlp identifiers must never become Bash syntax or array
-# subscripts. Invalid identifiers fall back to an internal opaque item key.
-start_scenario hostile-format-identifier audio
-hostile_marker="${TEST_ROOT}/hostile-format-id-executed"
-# shellcheck disable=SC2016
-# This command substitution is deliberately kept literal as an attack payload.
-hostile_id='$(touch$IFS'"${hostile_marker}"')'
-printf '%s\n' \
-    "YTDLP_PLAN|media|${hostile_id}|${hostile_id}|" \
-    "YTDLP_PROGRESS_V2|media|${hostile_id}|downloading|250|1000|0|0|0|25.0%|500KiB/s|00:06" \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading the audio track - 25%' \
-    'hostile format identifier uses an internal progress key'
-[[ ! -e ${hostile_marker} ]] ||
-    fail 'A hostile format identifier was evaluated as shell syntax.'
-finish_success '/tmp/hostile-format-id.webm'
+    # Untrusted yt-dlp identifiers must never become Bash syntax or array
+    # subscripts. Invalid identifiers fall back to an internal opaque item key.
+    start_scenario hostile-format-identifier audio
+    hostile_marker="${TEST_ROOT}/hostile-format-id-executed"
+    # shellcheck disable=SC2016
+    # This command substitution is deliberately kept literal as an attack payload.
+    hostile_id='$(touch$IFS'"${hostile_marker}"')'
+    printf '%s\n' \
+        "YTDLP_PLAN|media|${hostile_id}|${hostile_id}|" \
+        "YTDLP_PROGRESS_V2|media|${hostile_id}|downloading|250|1000|0|0|0|25.0%|500KiB/s|00:06" \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the audio track - 25%' \
+        'hostile format identifier uses an internal progress key'
+    [[ ! -e ${hostile_marker} ]] \
+        || fail 'A hostile format identifier was evaluated as shell syntax.'
+    finish_success '/tmp/hostile-format-id.webm'
 
-# Extra protocol delimiters are rejected instead of shifting structured fields.
-start_scenario malformed-delimited-record audio
-printf '%s\n' \
-    'YTDLP_PROGRESS_V2|media|bad|identifier|downloading|250|1000|0|0|0|25.0%|500KiB/s|00:06' \
-    'YTDLP_PROGRESS_V2|media|251|downloading|500|1000|0|0|0|50.0%|1MiB/s|00:03' \
-    >>"${LOG_FILE}"
-wait_for_text "${CAPTURE_FILE}" 'Downloading the audio track - 50%' \
-    'malformed delimited progress record is ignored'
-finish_success '/tmp/malformed-delimiter.webm'
+    # Negative control: extra protocol delimiters are rejected instead of shifting fields.
+    start_scenario malformed-delimited-record audio
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|media|bad|identifier|downloading|250|1000|0|0|0|25.0%|500KiB/s|00:06' \
+        'YTDLP_PROGRESS_V2|media|251|downloading|500|1000|0|0|0|50.0%|1MiB/s|00:03' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the audio track - 50%' \
+        'malformed delimited progress record is ignored'
+    finish_success '/tmp/malformed-delimiter.webm'
 
-# A published path whose target file is absent is not successful completion.
-start_scenario missing-final-file video
-printf '%s\n' "${SCENARIO_DIR}/missing-output.mkv" >"${RESULT_FILE}"
-finish_failure
+    # Negative control: a published path without a target file is not completion.
+    start_scenario missing-final-file video
+    printf '%s\n' "${SCENARIO_DIR}/missing-output.mkv" >"${RESULT_FILE}"
+    finish_failure
 
-printf '%s\n' 'Progress-monitor integration tests passed.'
+    printf '%s\n' 'Progress-monitor integration tests passed.'
+
+}
+
+main "$@"

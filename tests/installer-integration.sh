@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : tests/installer-integration.sh
+# Purpose     : Validate desktop installer and launcher lifecycle behavior.
+# ==============================================================================
 
 set -euo pipefail
 
@@ -62,227 +68,232 @@ write_fake_gui() {
     chmod +x -- "${path}"
 }
 
-[[ -x ${PROJECT_DIR}/install-gui.sh ]] ||
-    fail 'install-gui.sh is not executable in the source tree.'
+main() {
+    [[ -x ${PROJECT_DIR}/install-gui.sh ]] \
+        || fail 'install-gui.sh is not executable in the source tree.'
 
-mkdir -p -- "${COPIED_PROJECT}"
-cp -- "${PROJECT_DIR}/install-gui.sh" "${COPIED_PROJECT}/"
-write_fake_gui "${COPIED_PROJECT}/download-video-gui.sh"
-chmod +x -- "${COPIED_PROJECT}/install-gui.sh"
+    mkdir -p -- "${COPIED_PROJECT}"
+    cp -- "${PROJECT_DIR}/install-gui.sh" "${COPIED_PROJECT}/"
+    write_fake_gui "${COPIED_PROJECT}/download-video-gui.sh"
+    chmod +x -- "${COPIED_PROJECT}/install-gui.sh"
 
-# shellcheck disable=SC2016 # $1 and $2 are expanded by the child bash.
-assert_status 0 'install desktop launcher from hostile project path' \
-    bash -c '
-        set -euo pipefail
-        umask 077
-        export XDG_DATA_HOME="$1"
-        exec bash "$2" install
-    ' bash "${DATA_HOME}" "${COPIED_PROJECT}/install-gui.sh"
+    # shellcheck disable=SC2016 # $1 and $2 are expanded by the child bash.
+    assert_status 0 'install desktop launcher from hostile project path' \
+        bash -c '
+            set -euo pipefail
+            umask 077
+            export XDG_DATA_HOME="$1"
+            exec bash "$2" install
+        ' bash "${DATA_HOME}" "${COPIED_PROJECT}/install-gui.sh"
 
-[[ -f ${DESKTOP_FILE} ]] || fail 'The desktop launcher was not created.'
-[[ -L ${LAUNCHER_LINK} ]] || fail 'The stable launcher link was not created.'
-launcher_target=$(readlink -- "${LAUNCHER_LINK}")
-assert_equals \
-    "${COPIED_PROJECT}/download-video-gui.sh" \
-    "${launcher_target}" \
-    'stable launcher link target'
-
-expected_exec='Exec="'
-expected_exec+="${TEST_ROOT}/Data space "
-expected_exec+='\\$'
-expected_exec+=' '
-expected_exec+='\\`'
-expected_exec+=' quote'
-expected_exec+='\\"'
-expected_exec+=' backslash'
-expected_exec+="\\\\\\\\"
-expected_exec+=" apostrophe' test/yt-dlp-aria2-downloader/launch\""
-actual_exec=$(grep -m1 '^Exec=' -- "${DESKTOP_FILE}") ||
-    fail 'The installed desktop file has no Exec line.'
-assert_equals "${expected_exec}" "${actual_exec}" \
-    'desktop Exec line uses specification-compliant escaping'
-
-assert_file_has_line "${DESKTOP_FILE}" 'Terminal=false' \
-    'desktop terminal setting'
-assert_file_has_no_line "${DESKTOP_FILE}" 'Terminal=true' \
-    'desktop terminal is never enabled'
-assert_file_has_line "${DESKTOP_FILE}" 'Categories=AudioVideo;' \
-    'desktop category'
-assert_file_has_line "${DESKTOP_FILE}" \
-    'Comment=Download a video or extract an audio track' \
-    'English desktop comment'
-assert_file_has_line "${DESKTOP_FILE}" \
-    'Comment[fr]=Télécharger une vidéo ou extraire une piste audio' \
-    'French desktop comment'
-assert_file_has_line "${DESKTOP_FILE}" 'Icon=yt-dlp-aria2-downloader' \
-    'dedicated per-user desktop icon name'
-[[ -f ${ICON_FILE} && ! -L ${ICON_FILE} ]] || \
-    fail 'The dedicated per-user application icon was not installed.'
-icon_mode=$(stat -c '%a' -- "${ICON_FILE}")
-assert_equals '644' "${icon_mode}" 'per-user application icon permissions'
-
-assert_status 0 'installed launcher passes desktop-file-validate' \
-    desktop-file-validate --no-hints "${DESKTOP_FILE}"
-
-launcher_mode=$(stat -c '%a' -- "${DESKTOP_FILE}")
-assert_equals '644' "${launcher_mode}" 'installed launcher permissions'
-launcher_dir_mode=$(stat -c '%a' -- "${LAUNCHER_DIR}")
-assert_equals '700' "${launcher_dir_mode}" 'private launcher-directory permissions'
-assert_no_install_temporary_files 'temporary cleanup after installation'
-
-if command -v gio >/dev/null 2>&1; then
-    rm -f -- "${EXEC_MARKER}"
-    assert_status 0 'GLib launches the installed desktop entry' \
-        gio launch "${DESKTOP_FILE}"
-    gio_timeout=${GIO_LAUNCH_TIMEOUT:-20}
-    [[ ${gio_timeout} =~ ^[1-9][0-9]*$ ]] ||
-        fail "GIO_LAUNCH_TIMEOUT must be a positive integer: ${gio_timeout}"
-    gio_deadline=$((SECONDS + gio_timeout))
-    while ((SECONDS < gio_deadline)); do
-        [[ -s ${EXEC_MARKER} ]] && break
-        sleep 0.1
-    done
-    [[ -s ${EXEC_MARKER} ]] ||
-        fail "gio did not launch the stable launcher link within ${gio_timeout}s."
+    [[ -f ${DESKTOP_FILE} ]] || fail 'The desktop launcher was not created.'
+    [[ -L ${LAUNCHER_LINK} ]] || fail 'The stable launcher link was not created.'
+    launcher_target=$(readlink -- "${LAUNCHER_LINK}")
     assert_equals \
-        "${LAUNCHER_LINK}" \
-        "$(<"${EXEC_MARKER}")" \
-        'GLib launches the exact stable path'
-fi
+        "${COPIED_PROJECT}/download-video-gui.sh" \
+        "${launcher_target}" \
+        'stable launcher link target'
 
-# A normal reinstall must remain deterministic and leave no temporary files.
-launcher_snapshot="${TEST_ROOT}/launcher-before-reinstall.desktop"
-cp -- "${DESKTOP_FILE}" "${launcher_snapshot}"
-assert_status 0 'reinstall existing desktop launcher' \
-    env XDG_DATA_HOME="${DATA_HOME}" \
-    bash "${COPIED_PROJECT}/install-gui.sh" install
-cmp -s -- "${launcher_snapshot}" "${DESKTOP_FILE}" || {
-    diff -u -- "${launcher_snapshot}" "${DESKTOP_FILE}" >&2 || true
-    fail 'A normal reinstall changed the deterministic desktop entry.'
-}
-assert_no_install_temporary_files 'temporary cleanup after reinstall'
+    expected_exec='Exec="'
+    expected_exec+="${TEST_ROOT}/Data space "
+    expected_exec+='\\$'
+    expected_exec+=' '
+    expected_exec+='\\`'
+    expected_exec+=' quote'
+    expected_exec+='\\"'
+    expected_exec+=' backslash'
+    expected_exec+="\\\\\\\\"
+    expected_exec+=" apostrophe' test/yt-dlp-aria2-downloader/launch\""
+    actual_exec=$(grep -m1 '^Exec=' -- "${DESKTOP_FILE}") \
+        || fail 'The installed desktop file has no Exec line.'
+    assert_equals "${expected_exec}" "${actual_exec}" \
+        'desktop Exec line uses specification-compliant escaping'
 
-# A failed validation must not replace the existing launcher or stable link.
-readonly VALIDATION_MOCK_BIN="${TEST_ROOT}/validation-mock-bin"
-mkdir -p -- "${VALIDATION_MOCK_BIN}"
-cat >"${VALIDATION_MOCK_BIN}/desktop-file-validate" <<'EOF_VALIDATE'
+    assert_file_has_line "${DESKTOP_FILE}" 'Terminal=false' \
+        'desktop terminal setting'
+    assert_file_has_no_line "${DESKTOP_FILE}" 'Terminal=true' \
+        'desktop terminal is never enabled'
+    assert_file_has_line "${DESKTOP_FILE}" 'Categories=AudioVideo;' \
+        'desktop category'
+    assert_file_has_line "${DESKTOP_FILE}" \
+        'Comment=Download a video or extract an audio track' \
+        'English desktop comment'
+    assert_file_has_line "${DESKTOP_FILE}" \
+        'Comment[fr]=Télécharger une vidéo ou extraire une piste audio' \
+        'French desktop comment'
+    assert_file_has_line "${DESKTOP_FILE}" 'Icon=yt-dlp-aria2-downloader' \
+        'dedicated per-user desktop icon name'
+    [[ -f ${ICON_FILE} && ! -L ${ICON_FILE} ]] \
+        || fail 'The dedicated per-user application icon was not installed.'
+    icon_mode=$(stat -c '%a' -- "${ICON_FILE}")
+    assert_equals '644' "${icon_mode}" 'per-user application icon permissions'
+
+    assert_status 0 'installed launcher passes desktop-file-validate' \
+        desktop-file-validate --no-hints "${DESKTOP_FILE}"
+
+    launcher_mode=$(stat -c '%a' -- "${DESKTOP_FILE}")
+    assert_equals '644' "${launcher_mode}" 'installed launcher permissions'
+    launcher_dir_mode=$(stat -c '%a' -- "${LAUNCHER_DIR}")
+    assert_equals '700' "${launcher_dir_mode}" 'private launcher-directory permissions'
+    assert_no_install_temporary_files 'temporary cleanup after installation'
+
+    if command -v gio >/dev/null 2>&1; then
+        rm -f -- "${EXEC_MARKER}"
+        assert_status 0 'GLib launches the installed desktop entry' \
+            gio launch "${DESKTOP_FILE}"
+        gio_timeout=${GIO_LAUNCH_TIMEOUT:-20}
+        [[ ${gio_timeout} =~ ^[1-9][0-9]*$ ]] \
+            || fail "GIO_LAUNCH_TIMEOUT must be a positive integer: ${gio_timeout}"
+        gio_deadline=$((SECONDS + gio_timeout))
+        while ((SECONDS < gio_deadline)); do
+            [[ -s ${EXEC_MARKER} ]] && break
+            sleep 0.1
+        done
+        [[ -s ${EXEC_MARKER} ]] \
+            || fail "gio did not launch the stable launcher link within ${gio_timeout}s."
+        assert_equals \
+            "${LAUNCHER_LINK}" \
+            "$(<"${EXEC_MARKER}")" \
+            'GLib launches the exact stable path'
+    fi
+
+    # A normal reinstall must remain deterministic and leave no temporary files.
+    launcher_snapshot="${TEST_ROOT}/launcher-before-reinstall.desktop"
+    cp -- "${DESKTOP_FILE}" "${launcher_snapshot}"
+    assert_status 0 'reinstall existing desktop launcher' \
+        env XDG_DATA_HOME="${DATA_HOME}" \
+        bash "${COPIED_PROJECT}/install-gui.sh" install
+    cmp -s -- "${launcher_snapshot}" "${DESKTOP_FILE}" || {
+        diff -u -- "${launcher_snapshot}" "${DESKTOP_FILE}" >&2 || true
+        fail 'A normal reinstall changed the deterministic desktop entry.'
+    }
+    assert_no_install_temporary_files 'temporary cleanup after reinstall'
+
+    # A failed validation must not replace the existing launcher or stable link.
+    readonly VALIDATION_MOCK_BIN="${TEST_ROOT}/validation-mock-bin"
+    mkdir -p -- "${VALIDATION_MOCK_BIN}"
+    cat >"${VALIDATION_MOCK_BIN}/desktop-file-validate" <<'EOF_VALIDATE'
 #!/usr/bin/env bash
 printf 'MOCK_VALIDATE_INVOKED:%s\n' "${*: -1}" >&2
 exit 9
 EOF_VALIDATE
-chmod +x -- "${VALIDATION_MOCK_BIN}/desktop-file-validate"
-launcher_target_before=$(readlink -- "${LAUNCHER_LINK}")
-assert_status 1 'failed validation is normalized' \
-    env PATH="${VALIDATION_MOCK_BIN}:${PATH}" XDG_DATA_HOME="${DATA_HOME}" \
-    bash "${COPIED_PROJECT}/install-gui.sh" install
-assert_text_contains "${ASSERT_OUTPUT}" 'MOCK_VALIDATE_INVOKED:' \
-    'validation mock invocation marker'
-assert_text_contains "${ASSERT_OUTPUT}" 'status 9' \
-    'validation status diagnostic'
-assert_text_contains "${ASSERT_OUTPUT}" 'previously installed launcher' \
-    'failed validation preservation diagnostic'
-cmp -s -- "${launcher_snapshot}" "${DESKTOP_FILE}" ||
-    fail 'Failed validation replaced the existing desktop entry.'
-launcher_target_after_failed_validation=$(
-    readlink -- "${LAUNCHER_LINK}"
-)
-assert_equals \
-    "${launcher_target_before}" \
-    "${launcher_target_after_failed_validation}" \
-    'failed validation preserves the stable launcher link'
-assert_no_install_temporary_files 'temporary cleanup after failed validation'
+    chmod +x -- "${VALIDATION_MOCK_BIN}/desktop-file-validate"
+    launcher_target_before=$(readlink -- "${LAUNCHER_LINK}")
+    assert_status 1 'failed validation is normalized' \
+        env PATH="${VALIDATION_MOCK_BIN}:${PATH}" XDG_DATA_HOME="${DATA_HOME}" \
+        bash "${COPIED_PROJECT}/install-gui.sh" install
+    assert_text_contains "${ASSERT_OUTPUT}" 'MOCK_VALIDATE_INVOKED:' \
+        'validation mock invocation marker'
+    assert_text_contains "${ASSERT_OUTPUT}" 'status 9' \
+        'validation status diagnostic'
+    assert_text_contains "${ASSERT_OUTPUT}" 'previously installed launcher' \
+        'failed validation preservation diagnostic'
+    cmp -s -- "${launcher_snapshot}" "${DESKTOP_FILE}" \
+        || fail 'Failed validation replaced the existing desktop entry.'
+    launcher_target_after_failed_validation=$(
+        readlink -- "${LAUNCHER_LINK}"
+    )
+    assert_equals \
+        "${launcher_target_before}" \
+        "${launcher_target_after_failed_validation}" \
+        'failed validation preserves the stable launcher link'
+    assert_no_install_temporary_files 'temporary cleanup after failed validation'
 
-# Explicit installation errors.
-readonly MISSING_PROJECT="${TEST_ROOT}/missing-gui-project"
-mkdir -p -- "${MISSING_PROJECT}"
-cp -- "${PROJECT_DIR}/install-gui.sh" "${MISSING_PROJECT}/"
-chmod +x -- "${MISSING_PROJECT}/install-gui.sh"
-assert_status 1 'installation rejects a missing GUI script' \
-    env XDG_DATA_HOME="${TEST_ROOT}/missing-data" \
-    bash "${MISSING_PROJECT}/install-gui.sh" install
-assert_text_contains "${ASSERT_OUTPUT}" 'absent or not executable' \
-    'missing GUI diagnostic'
+    # Scenario group: explicit installation failures.
+    readonly MISSING_PROJECT="${TEST_ROOT}/missing-gui-project"
+    mkdir -p -- "${MISSING_PROJECT}"
+    cp -- "${PROJECT_DIR}/install-gui.sh" "${MISSING_PROJECT}/"
+    chmod +x -- "${MISSING_PROJECT}/install-gui.sh"
+    assert_status 1 'installation rejects a missing GUI script' \
+        env XDG_DATA_HOME="${TEST_ROOT}/missing-data" \
+        bash "${MISSING_PROJECT}/install-gui.sh" install
+    assert_text_contains "${ASSERT_OUTPUT}" 'absent or not executable' \
+        'missing GUI diagnostic'
 
-write_fake_gui "${MISSING_PROJECT}/download-video-gui.sh"
-chmod -x -- "${MISSING_PROJECT}/download-video-gui.sh"
-assert_status 1 'installation rejects a non-executable GUI script' \
-    env XDG_DATA_HOME="${TEST_ROOT}/nonexec-data" \
-    bash "${MISSING_PROJECT}/install-gui.sh" install
-assert_text_contains "${ASSERT_OUTPUT}" 'absent or not executable' \
-    'non-executable GUI diagnostic'
+    write_fake_gui "${MISSING_PROJECT}/download-video-gui.sh"
+    chmod -x -- "${MISSING_PROJECT}/download-video-gui.sh"
+    assert_status 1 'installation rejects a non-executable GUI script' \
+        env XDG_DATA_HOME="${TEST_ROOT}/nonexec-data" \
+        bash "${MISSING_PROJECT}/install-gui.sh" install
+    assert_text_contains "${ASSERT_OUTPUT}" 'absent or not executable' \
+        'non-executable GUI diagnostic'
 
-assert_status 1 'relative XDG_DATA_HOME is rejected' \
-    env XDG_DATA_HOME='relative-data-home' \
-    bash "${COPIED_PROJECT}/install-gui.sh" install
-assert_text_contains "${ASSERT_OUTPUT}" 'must resolve to an absolute path' \
-    'relative XDG data diagnostic'
+    assert_status 1 'relative XDG_DATA_HOME is rejected' \
+        env XDG_DATA_HOME='relative-data-home' \
+        bash "${COPIED_PROJECT}/install-gui.sh" install
+    assert_text_contains "${ASSERT_OUTPUT}" 'must resolve to an absolute path' \
+        'relative XDG data diagnostic'
 
-assert_status 1 'unrepresentable XDG percent path is rejected' \
-    env XDG_DATA_HOME="${TEST_ROOT}/data%home" \
-    bash "${COPIED_PROJECT}/install-gui.sh" install
-assert_text_contains "${ASSERT_OUTPUT}" 'cannot be represented safely' \
-    'unrepresentable XDG path diagnostic'
+    assert_status 1 'unrepresentable XDG percent path is rejected' \
+        env XDG_DATA_HOME="${TEST_ROOT}/data%home" \
+        bash "${COPIED_PROJECT}/install-gui.sh" install
+    assert_text_contains "${ASSERT_OUTPUT}" 'cannot be represented safely' \
+        'unrepresentable XDG path diagnostic'
 
-conflict_data_home="${TEST_ROOT}/conflict-data"
-conflict_launcher_link="${conflict_data_home}/yt-dlp-aria2-downloader/launch"
-mkdir -p -- "${conflict_launcher_link}"
-assert_status 1 'launcher path directory conflict is rejected' \
-    env XDG_DATA_HOME="${conflict_data_home}" \
-    bash "${COPIED_PROJECT}/install-gui.sh" install
-assert_text_contains "${ASSERT_OUTPUT}" \
-    'already exists and is not a symbolic link' \
-    'launcher path conflict diagnostic'
-[[ -d ${conflict_launcher_link} ]] ||
-    fail 'The conflicting launcher directory was modified.'
+    conflict_data_home="${TEST_ROOT}/conflict-data"
+    conflict_launcher_link="${conflict_data_home}/yt-dlp-aria2-downloader/launch"
+    mkdir -p -- "${conflict_launcher_link}"
+    assert_status 1 'launcher path directory conflict is rejected' \
+        env XDG_DATA_HOME="${conflict_data_home}" \
+        bash "${COPIED_PROJECT}/install-gui.sh" install
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'already exists and is not a symbolic link' \
+        'launcher path conflict diagnostic'
+    [[ -d ${conflict_launcher_link} ]] \
+        || fail 'The conflicting launcher directory was modified.'
 
-assert_status 1 'XDG data path line breaks are rejected' \
-    env XDG_DATA_HOME="${TEST_ROOT}"$'/broken\npath' \
-    bash "${COPIED_PROJECT}/install-gui.sh" install
-assert_text_contains "${ASSERT_OUTPUT}" 'cannot be represented safely' \
-    'XDG line-break diagnostic'
+    assert_status 1 'XDG data path line breaks are rejected' \
+        env XDG_DATA_HOME="${TEST_ROOT}"$'/broken\npath' \
+        bash "${COPIED_PROJECT}/install-gui.sh" install
+    assert_text_contains "${ASSERT_OUTPUT}" 'cannot be represented safely' \
+        'XDG line-break diagnostic'
 
-# The validator is optional at runtime, but skipping it must be explicit.
-no_validator_bin="${TEST_ROOT}/no-validator-bin"
-mkdir -p -- "${no_validator_bin}"
-for required_command in bash cat chmod dirname ln mkdir mktemp mv readlink realpath rm rmdir; do
-    required_command_path=$(command -v "${required_command}") ||
-        fail "Required host command was not found: ${required_command}"
-    ln -s -- "${required_command_path}" \
-        "${no_validator_bin}/${required_command}"
-done
-no_validator_data="${TEST_ROOT}/no-validator-data"
-assert_status 0 'installation reports skipped optional validation' \
-    env PATH="${no_validator_bin}" XDG_DATA_HOME="${no_validator_data}" \
-    bash "${COPIED_PROJECT}/install-gui.sh" install
-assert_text_contains "${ASSERT_OUTPUT}" 'validation was skipped' \
-    'missing validator note'
+    # The validator is optional at runtime, but skipping it must be explicit.
+    no_validator_bin="${TEST_ROOT}/no-validator-bin"
+    mkdir -p -- "${no_validator_bin}"
+    for required_command in bash cat chmod dirname ln mkdir mktemp mv readlink realpath rm rmdir; do
+        required_command_path=$(command -v "${required_command}") \
+            || fail "Required host command was not found: ${required_command}"
+        ln -s -- "${required_command_path}" \
+            "${no_validator_bin}/${required_command}"
+    done
+    no_validator_data="${TEST_ROOT}/no-validator-data"
+    assert_status 0 'installation reports skipped optional validation' \
+        env PATH="${no_validator_bin}" XDG_DATA_HOME="${no_validator_data}" \
+        bash "${COPIED_PROJECT}/install-gui.sh" install
+    assert_text_contains "${ASSERT_OUTPUT}" 'validation was skipped' \
+        'missing validator note'
 
-assert_status 0 'uninstall existing launcher' \
-    env XDG_DATA_HOME="${DATA_HOME}" \
-    bash "${COPIED_PROJECT}/install-gui.sh" uninstall
-assert_text_contains "${ASSERT_OUTPUT}" 'Launcher removed:' \
-    'existing launcher removal message'
-[[ ! -e ${DESKTOP_FILE} ]] || fail 'The desktop launcher was not removed.'
-[[ ! -e ${LAUNCHER_LINK} && ! -L ${LAUNCHER_LINK} ]] ||
-    fail 'The stable launcher link was not removed.'
-[[ ! -e ${ICON_FILE} && ! -L ${ICON_FILE} ]] ||
-    fail 'The dedicated per-user application icon was not removed.'
+    assert_status 0 'uninstall existing launcher' \
+        env XDG_DATA_HOME="${DATA_HOME}" \
+        bash "${COPIED_PROJECT}/install-gui.sh" uninstall
+    assert_text_contains "${ASSERT_OUTPUT}" 'Launcher removed:' \
+        'existing launcher removal message'
+    [[ ! -e ${DESKTOP_FILE} ]] || fail 'The desktop launcher was not removed.'
+    [[ ! -e ${LAUNCHER_LINK} && ! -L ${LAUNCHER_LINK} ]] \
+        || fail 'The stable launcher link was not removed.'
+    [[ ! -e ${ICON_FILE} && ! -L ${ICON_FILE} ]] \
+        || fail 'The dedicated per-user application icon was not removed.'
 
-# Uninstall also removes known temporary artifacts left by an unclean stop.
-mkdir -p -- "${LAUNCHER_DIR}/.install.stale"
-: >"${LAUNCHER_DIR}/.validate.stale.desktop"
-: >"${APPLICATION_DIR}/.yt-dlp-aria2-downloader.stale.tmp"
-assert_status 0 'uninstall cleans stale installer artifacts' \
-    env XDG_DATA_HOME="${DATA_HOME}" \
-    bash "${COPIED_PROJECT}/install-gui.sh" uninstall
-[[ ! -d ${LAUNCHER_DIR} ]] || fail 'The private launcher directory remained.'
-[[ ! -e ${APPLICATION_DIR}/.yt-dlp-aria2-downloader.stale.tmp ]] ||
-    fail 'A stale desktop-entry temporary file remained.'
+    # Scenario: uninstall removes known temporary artifacts left by an unclean stop.
+    mkdir -p -- "${LAUNCHER_DIR}/.install.stale"
+    : >"${LAUNCHER_DIR}/.validate.stale.desktop"
+    : >"${APPLICATION_DIR}/.yt-dlp-aria2-downloader.stale.tmp"
+    assert_status 0 'uninstall cleans stale installer artifacts' \
+        env XDG_DATA_HOME="${DATA_HOME}" \
+        bash "${COPIED_PROJECT}/install-gui.sh" uninstall
+    [[ ! -d ${LAUNCHER_DIR} ]] || fail 'The private launcher directory remained.'
+    [[ ! -e ${APPLICATION_DIR}/.yt-dlp-aria2-downloader.stale.tmp ]] \
+        || fail 'A stale desktop-entry temporary file remained.'
 
-assert_status 0 'repeat uninstall without launcher' \
-    env XDG_DATA_HOME="${DATA_HOME}" \
-    bash "${COPIED_PROJECT}/install-gui.sh" uninstall
-assert_text_contains "${ASSERT_OUTPUT}" 'No launcher is installed at:' \
-    'idempotent uninstall message'
+    assert_status 0 'repeat uninstall without launcher' \
+        env XDG_DATA_HOME="${DATA_HOME}" \
+        bash "${COPIED_PROJECT}/install-gui.sh" uninstall
+    assert_text_contains "${ASSERT_OUTPUT}" 'No launcher is installed at:' \
+        'idempotent uninstall message'
 
-printf 'Installer integration tests passed.\n'
+    printf 'Installer integration tests passed.\n'
+
+}
+
+main "$@"

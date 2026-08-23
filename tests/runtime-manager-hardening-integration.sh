@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : tests/runtime-manager-hardening-integration.sh
+# Purpose     : Stress runtime-manager locking, recovery and hardening behavior.
+# ==============================================================================
+
 set -Eeuo pipefail
 umask 077
 
@@ -7,7 +13,10 @@ PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly PROJECT_DIR
 readonly RUNTIME_MANAGER="${PROJECT_DIR}/runtime-manager.sh"
 
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
 
 assert_link_target() {
     local link_path=$1
@@ -18,20 +27,10 @@ assert_link_target() {
     if ! actual=$(readlink -- "${link_path}"); then
         fail "${label}: unable to read link ${link_path}"
     fi
-    [[ ${actual} == "${expected}" ]] ||
-        fail "${label}: expected ${expected}, found ${actual}"
+    [[ ${actual} == "${expected}" ]] \
+        || fail "${label}: expected ${expected}, found ${actual}"
 }
 
-for command_name in bash chmod env flock grep ln mkdir mktemp readlink rm rmdir sed sha256sum sleep stat uname; do
-    command -v "${command_name}" >/dev/null 2>&1 || {
-        printf 'Error: required test command is absent: %s\n' "${command_name}" >&2
-        exit 127
-    }
-done
-
-TEST_ROOT=$(mktemp -d)
-readonly TEST_ROOT
-HOLDER_PID=''
 cleanup() {
     trap - EXIT HUP INT TERM
     if [[ -n ${HOLDER_PID} ]]; then
@@ -40,26 +39,76 @@ cleanup() {
     fi
     rm -rf -- "${TEST_ROOT}" || true
 }
-trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
-readonly HOME_DIR="${TEST_ROOT}/home"
-readonly DATA_HOME="${TEST_ROOT}/data"
-readonly MOCK_BIN="${TEST_ROOT}/bin"
-readonly URL_LOG="${TEST_ROOT}/urls.log"
-readonly FD_LEAK_MARKER="${TEST_ROOT}/fd-leak"
-readonly NETWORK_MARKER="${TEST_ROOT}/network-called"
-mkdir -p -- "${HOME_DIR}" "${DATA_HOME}" "${MOCK_BIN}"
 
-case $(uname -m) in
-x86_64) YTDLP_ASSET='yt-dlp_linux' ;;
-aarch64) YTDLP_ASSET='yt-dlp_linux_aarch64' ;;
-*) printf 'SKIP: unsupported test architecture.\n'; exit 0 ;;
+make_ytdlp() {
+    local path=$1 version=$2
+    mkdir -p -- "${path%/*}"
+    cat >"${path}" <<EOF_YTDLP
+#!/usr/bin/env bash
+set -euo pipefail
+for fd_path in /proc/\$\$/fd/*; do
+    target=\$(readlink -- "\${fd_path}" 2>/dev/null || true)
+    [[ \${target} != */yt-dlp-aria2-downloader/runtime/update.lock ]] || : >"\${MOCK_FD_LEAK_MARKER:?}"
+done
+case \${1:-} in
+--version) printf '%s\\n' '${version}' ;;
+--help) printf '%s\\n' --break-match-filters --js-runtimes --list-impersonate-targets --no-update ;;
+--list-impersonate-targets) printf '%s\\n' 'Chrome-140 Linux curl_cffi' ;;
+*) exit 64 ;;
 esac
-readonly YTDLP_ASSET
+EOF_YTDLP
+    chmod 0755 -- "${path}"
+}
 
-cat >"${MOCK_BIN}/gpg" <<'EOF_GPG'
+make_deno() {
+    local path=$1 version=$2
+    mkdir -p -- "${path%/*}"
+    cat >"${path}" <<EOF_DENO
+#!/usr/bin/env bash
+set -euo pipefail
+for fd_path in /proc/\$\$/fd/*; do
+    target=\$(readlink -- "\${fd_path}" 2>/dev/null || true)
+    [[ \${target} != */yt-dlp-aria2-downloader/runtime/update.lock ]] || : >"\${MOCK_FD_LEAK_MARKER:?}"
+done
+printf '%s\\n' 'deno ${version} (stable, release, test-target)' 'v8 0.0.0' 'typescript 0.0.0'
+EOF_DENO
+    chmod 0755 -- "${path}"
+}
+
+main() {
+    for command_name in bash chmod env flock grep ln mkdir mktemp readlink rm rmdir sed sha256sum sleep stat uname; do
+        command -v "${command_name}" >/dev/null 2>&1 || {
+            printf 'Error: required test command is absent: %s\n' "${command_name}" >&2
+            exit 127
+        }
+    done
+
+    TEST_ROOT=$(mktemp -d)
+    readonly TEST_ROOT
+    HOLDER_PID=''
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    readonly HOME_DIR="${TEST_ROOT}/home"
+    readonly DATA_HOME="${TEST_ROOT}/data"
+    readonly MOCK_BIN="${TEST_ROOT}/bin"
+    readonly URL_LOG="${TEST_ROOT}/urls.log"
+    readonly FD_LEAK_MARKER="${TEST_ROOT}/fd-leak"
+    readonly NETWORK_MARKER="${TEST_ROOT}/network-called"
+    mkdir -p -- "${HOME_DIR}" "${DATA_HOME}" "${MOCK_BIN}"
+
+    case $(uname -m) in
+        x86_64) YTDLP_ASSET='yt-dlp_linux' ;;
+        aarch64) YTDLP_ASSET='yt-dlp_linux_aarch64' ;;
+        *)
+            printf 'SKIP: unsupported test architecture.\n'
+            exit 0
+            ;;
+    esac
+    readonly YTDLP_ASSET
+
+    cat >"${MOCK_BIN}/gpg" <<'EOF_GPG'
 #!/usr/bin/env bash
 set -euo pipefail
 for fd_path in /proc/$$/fd/*; do
@@ -68,9 +117,9 @@ for fd_path in /proc/$$/fd/*; do
 done
 exit 0
 EOF_GPG
-chmod 0755 -- "${MOCK_BIN}/gpg"
+    chmod 0755 -- "${MOCK_BIN}/gpg"
 
-cat >"${MOCK_BIN}/unzip" <<'EOF_UNZIP'
+    cat >"${MOCK_BIN}/unzip" <<'EOF_UNZIP'
 #!/usr/bin/env bash
 set -euo pipefail
 for fd_path in /proc/$$/fd/*; do
@@ -91,9 +140,9 @@ printf '%s\\n' 'deno ${version} (stable, release, test-target)' 'v8 0.0.0' 'type
 EOF_DENO
 chmod 0755 deno
 EOF_UNZIP
-chmod 0755 -- "${MOCK_BIN}/unzip"
+    chmod 0755 -- "${MOCK_BIN}/unzip"
 
-cat >"${MOCK_BIN}/curl" <<'EOF_CURL'
+    cat >"${MOCK_BIN}/curl" <<'EOF_CURL'
 #!/usr/bin/env bash
 set -euo pipefail
 for fd_path in /proc/$$/fd/*; do
@@ -176,188 +225,168 @@ EOF_YTDLP
 *) exit 64 ;;
 esac
 EOF_CURL
-chmod 0755 -- "${MOCK_BIN}/curl"
+    chmod 0755 -- "${MOCK_BIN}/curl"
 
-make_ytdlp() {
-    local path=$1 version=$2
-    mkdir -p -- "${path%/*}"
-    cat >"${path}" <<EOF_YTDLP
-#!/usr/bin/env bash
-set -euo pipefail
-for fd_path in /proc/\$\$/fd/*; do
-    target=\$(readlink -- "\${fd_path}" 2>/dev/null || true)
-    [[ \${target} != */yt-dlp-aria2-downloader/runtime/update.lock ]] || : >"\${MOCK_FD_LEAK_MARKER:?}"
-done
-case \${1:-} in
---version) printf '%s\\n' '${version}' ;;
---help) printf '%s\\n' --break-match-filters --js-runtimes --list-impersonate-targets --no-update ;;
---list-impersonate-targets) printf '%s\\n' 'Chrome-140 Linux curl_cffi' ;;
-*) exit 64 ;;
-esac
-EOF_YTDLP
-    chmod 0755 -- "${path}"
+    runtime_root="${DATA_HOME}/yt-dlp-aria2-downloader/runtime"
+    ytdlp_root="${runtime_root}/yt-dlp"
+    deno_root="${runtime_root}/deno"
+    mkdir -p -- "${ytdlp_root}" "${deno_root}"
+    make_ytdlp "${ytdlp_root}/2026.06.09/${YTDLP_ASSET}" 2026.06.09
+    make_ytdlp "${ytdlp_root}/2026.03.17/${YTDLP_ASSET}" 2026.03.17
+    make_deno "${deno_root}/2.8.0/deno" 2.8.0
+    make_deno "${deno_root}/2.7.0/deno" 2.7.0
+    ln -s 2026.06.09 "${ytdlp_root}/current"
+    ln -s 2026.03.17 "${ytdlp_root}/previous"
+    ln -s 2.8.0 "${deno_root}/current"
+    ln -s 2.7.0 "${deno_root}/previous"
+
+    runtime_env=(env HOME="${HOME_DIR}" XDG_DATA_HOME="${DATA_HOME}" PATH="${MOCK_BIN}:${PATH}"
+        MOCK_URL_LOG="${URL_LOG}" MOCK_FD_LEAK_MARKER="${FD_LEAK_MARKER}"
+        MOCK_NETWORK_MARKER="${NETWORK_MARKER}" MOCK_YTDLP_ASSET="${YTDLP_ASSET}"
+        MOCK_YTDLP_STABLE_VERSION=2026.07.04 MOCK_YTDLP_NIGHTLY_VERSION=2026.08.20.123456
+        MOCK_DENO_LATEST_VERSION=2.9.5 YTDLP_ARIA2_RUNTIME_LOCK_WAIT_SECONDS=1
+        YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS=2 YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS=10
+        YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS=10 YTDLP_ARIA2_RUNTIME_VALIDATE_TIMEOUT_SECONDS=5)
+
+    # A completely empty managed-runtime tree must bootstrap both components.
+    # This specifically exercises ensure_runtime -> bootstrap_ytdlp/bootstrap_deno,
+    # rather than only the already-installed update paths.
+    FRESH_DATA_HOME="${TEST_ROOT}/fresh-data"
+    fresh_runtime_root="${FRESH_DATA_HOME}/yt-dlp-aria2-downloader/runtime"
+    fresh_ytdlp_root="${fresh_runtime_root}/yt-dlp"
+    fresh_deno_root="${fresh_runtime_root}/deno"
+
+    rm -rf -- "${FRESH_DATA_HOME}"
+    : >"${URL_LOG}"
+    rm -f -- "${FD_LEAK_MARKER}" "${NETWORK_MARKER}"
+
+    "${runtime_env[@]}" \
+        XDG_DATA_HOME="${FRESH_DATA_HOME}" \
+        "${RUNTIME_MANAGER}" ensure >/dev/null
+
+    assert_link_target \
+        "${fresh_ytdlp_root}/current" \
+        2026.07.04 \
+        'fresh yt-dlp bootstrap failed'
+
+    assert_link_target \
+        "${fresh_deno_root}/current" \
+        2.9.5 \
+        'fresh Deno bootstrap failed'
+
+    grep -Fq \
+        '/yt-dlp/yt-dlp/releases/download/2026.07.04/' \
+        "${URL_LOG}" \
+        || fail 'fresh yt-dlp bootstrap did not use its exact release tag'
+
+    grep -Fq \
+        '/denoland/deno/releases/download/v2.9.5/' \
+        "${URL_LOG}" \
+        || fail 'fresh Deno bootstrap did not use its exact release tag'
+
+    [[ ! -e ${FD_LEAK_MARKER} ]] \
+        || fail 'fresh bootstrap leaked the runtime lock to a child process'
+
+    # Strict no-network require mode: both success and missing-runtime failure must
+    # happen without invoking curl.
+    rm -f -- "${NETWORK_MARKER}" "${URL_LOG}"
+    MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" require
+    [[ ! -e ${NETWORK_MARKER} ]] || fail 'require mode invoked the network'
+    rm -f -- "${deno_root}/current"
+    status=0
+    MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" require >/dev/null 2>&1 || status=$?
+    [[ ${status} == 69 ]] || fail "missing-runtime require returned ${status}, expected 69"
+    [[ ! -e ${NETWORK_MARKER} ]] || fail 'failed require mode invoked the network'
+    ln -s 2.8.0 "${deno_root}/current"
+
+    # Scenario group: exact-tag stable update, Deno update, nightly opt-in, then stable.
+    : >"${URL_LOG}"
+    rm -f -- "${FD_LEAK_MARKER}"
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null
+    assert_link_target "${ytdlp_root}/current" 2026.07.04 'stable update failed'
+    assert_link_target "${deno_root}/current" 2.9.5 'Deno update failed'
+    grep -Fq '/releases/download/2026.07.04/' "${URL_LOG}" || fail 'yt-dlp exact tag URL missing'
+    grep -Fq '/releases/download/v2.9.5/' "${URL_LOG}" || fail 'Deno exact tag URL missing'
+    ! grep -Fq '/releases/latest/download/' "${URL_LOG}" || fail 'latest/download TOCTOU path remains'
+    [[ ! -e ${FD_LEAK_MARKER} ]] || fail 'runtime update lock leaked into a child process'
+
+    YTDLP_ARIA2_YTDLP_CHANNEL=nightly "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null
+    assert_link_target "${ytdlp_root}/current" 2026.08.20.123456 'stable -> nightly failed'
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null
+    assert_link_target "${ytdlp_root}/current" 2026.07.04 'nightly -> stable failed'
+    assert_link_target "${ytdlp_root}/previous" 2026.08.20.123456 'nightly rollback target missing'
+
+    # Ten double-rollbacks must always return to the exact initial state.
+    for ((iteration = 1; iteration <= 10; iteration++)); do
+        "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null
+        assert_link_target "${ytdlp_root}/current" 2026.08.20.123456 "rollback A failed at ${iteration}"
+        "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null
+        assert_link_target "${ytdlp_root}/current" 2026.07.04 "rollback B failed at ${iteration}"
+    done
+
+    # Missing, unsafe, and invalid previous targets must fail cleanly.
+    rm -f -- "${ytdlp_root}/previous"
+    status=0
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null 2>&1 || status=$?
+    [[ ${status} != 0 ]] || fail 'rollback unexpectedly accepted missing previous'
+    ln -s ../escape "${ytdlp_root}/previous"
+    status=0
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null 2>&1 || status=$?
+    [[ ${status} != 0 ]] || fail 'rollback accepted unsafe previous target'
+    rm -f -- "${ytdlp_root}/previous"
+    ln -s 2026.08.20.123456 "${ytdlp_root}/previous"
+
+    # Scenario: journal recovery repairs previous after commit and restores the
+    # pre-activation previous pointer after an interrupted activation.
+    printf 'old=2026.08.20.123456\nprevious=2026.03.17\nnew=2026.07.04\n' >"${ytdlp_root}/.activation-journal"
+    rm -f -- "${ytdlp_root}/previous"
+    ln -s 2026.03.17 "${ytdlp_root}/previous"
+    MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" ensure >/dev/null
+    assert_link_target "${ytdlp_root}/previous" 2026.08.20.123456 'committed journal recovery failed'
+    [[ ! -e ${ytdlp_root}/.activation-journal ]] || fail 'committed journal was not cleared'
+
+    rm -f -- "${ytdlp_root}/current" "${ytdlp_root}/previous"
+    ln -s 2026.08.20.123456 "${ytdlp_root}/current"
+    ln -s 2026.08.20.123456 "${ytdlp_root}/previous"
+    printf 'old=2026.08.20.123456\nprevious=2026.03.17\nnew=2026.07.04\n' >"${ytdlp_root}/.activation-journal"
+    MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" ensure >/dev/null
+    assert_link_target "${ytdlp_root}/previous" 2026.03.17 'aborted journal recovery failed'
+
+    # Distinguish lock path errors (73) from contention (75), then stress the
+    # contention fallback ten times with verified active runtimes and no network.
+    rm -f -- "${runtime_root}/update.lock"
+    mkdir "${runtime_root}/update.lock"
+    status=0
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" ensure >/dev/null 2>&1 || status=$?
+    [[ ${status} == 73 ]] || fail "unsafe lock path returned ${status}, expected 73"
+    rmdir "${runtime_root}/update.lock"
+
+    for ((iteration = 1; iteration <= 10; iteration++)); do
+        ready="${TEST_ROOT}/lock-ready-${iteration}"
+        (
+            exec 9>>"${runtime_root}/update.lock"
+            flock --exclusive 9
+            : >"${ready}"
+            sleep 5
+        ) &
+        holder=$!
+        HOLDER_PID=${holder}
+        for _ in {1..100}; do
+            [[ -e ${ready} ]] && break
+            sleep 0.01
+        done
+        [[ -e ${ready} ]] || fail "lock holder ${iteration} did not start"
+        MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null 2>"${TEST_ROOT}/lock-${iteration}.err" \
+            || fail "contention fallback ${iteration} failed"
+        grep -Fq 'another runtime update is in progress' "${TEST_ROOT}/lock-${iteration}.err" \
+            || fail "contention diagnostic ${iteration} missing"
+        kill -TERM -- "${holder}" 2>/dev/null || true
+        wait "${holder}" 2>/dev/null || true
+        HOLDER_PID=''
+    done
+
+    printf 'Runtime-manager hardening integration passed.\n'
+
 }
 
-make_deno() {
-    local path=$1 version=$2
-    mkdir -p -- "${path%/*}"
-    cat >"${path}" <<EOF_DENO
-#!/usr/bin/env bash
-set -euo pipefail
-for fd_path in /proc/\$\$/fd/*; do
-    target=\$(readlink -- "\${fd_path}" 2>/dev/null || true)
-    [[ \${target} != */yt-dlp-aria2-downloader/runtime/update.lock ]] || : >"\${MOCK_FD_LEAK_MARKER:?}"
-done
-printf '%s\\n' 'deno ${version} (stable, release, test-target)' 'v8 0.0.0' 'typescript 0.0.0'
-EOF_DENO
-    chmod 0755 -- "${path}"
-}
-
-runtime_root="${DATA_HOME}/yt-dlp-aria2-downloader/runtime"
-ytdlp_root="${runtime_root}/yt-dlp"
-deno_root="${runtime_root}/deno"
-mkdir -p -- "${ytdlp_root}" "${deno_root}"
-make_ytdlp "${ytdlp_root}/2026.06.09/${YTDLP_ASSET}" 2026.06.09
-make_ytdlp "${ytdlp_root}/2026.03.17/${YTDLP_ASSET}" 2026.03.17
-make_deno "${deno_root}/2.8.0/deno" 2.8.0
-make_deno "${deno_root}/2.7.0/deno" 2.7.0
-ln -s 2026.06.09 "${ytdlp_root}/current"
-ln -s 2026.03.17 "${ytdlp_root}/previous"
-ln -s 2.8.0 "${deno_root}/current"
-ln -s 2.7.0 "${deno_root}/previous"
-
-runtime_env=(env HOME="${HOME_DIR}" XDG_DATA_HOME="${DATA_HOME}" PATH="${MOCK_BIN}:${PATH}"
-    MOCK_URL_LOG="${URL_LOG}" MOCK_FD_LEAK_MARKER="${FD_LEAK_MARKER}"
-    MOCK_NETWORK_MARKER="${NETWORK_MARKER}" MOCK_YTDLP_ASSET="${YTDLP_ASSET}"
-    MOCK_YTDLP_STABLE_VERSION=2026.07.04 MOCK_YTDLP_NIGHTLY_VERSION=2026.08.20.123456
-    MOCK_DENO_LATEST_VERSION=2.9.5 YTDLP_ARIA2_RUNTIME_LOCK_WAIT_SECONDS=1
-    YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS=2 YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS=10
-    YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS=10 YTDLP_ARIA2_RUNTIME_VALIDATE_TIMEOUT_SECONDS=5)
-
-# A completely empty managed-runtime tree must bootstrap both components.
-# This specifically exercises ensure_runtime -> bootstrap_ytdlp/bootstrap_deno,
-# rather than only the already-installed update paths.
-FRESH_DATA_HOME="${TEST_ROOT}/fresh-data"
-fresh_runtime_root="${FRESH_DATA_HOME}/yt-dlp-aria2-downloader/runtime"
-fresh_ytdlp_root="${fresh_runtime_root}/yt-dlp"
-fresh_deno_root="${fresh_runtime_root}/deno"
-
-rm -rf -- "${FRESH_DATA_HOME}"
-: >"${URL_LOG}"
-rm -f -- "${FD_LEAK_MARKER}" "${NETWORK_MARKER}"
-
-"${runtime_env[@]}" \
-    XDG_DATA_HOME="${FRESH_DATA_HOME}" \
-    "${RUNTIME_MANAGER}" ensure >/dev/null
-
-assert_link_target \
-    "${fresh_ytdlp_root}/current" \
-    2026.07.04 \
-    'fresh yt-dlp bootstrap failed'
-
-assert_link_target \
-    "${fresh_deno_root}/current" \
-    2.9.5 \
-    'fresh Deno bootstrap failed'
-
-grep -Fq \
-    '/yt-dlp/yt-dlp/releases/download/2026.07.04/' \
-    "${URL_LOG}" ||
-    fail 'fresh yt-dlp bootstrap did not use its exact release tag'
-
-grep -Fq \
-    '/denoland/deno/releases/download/v2.9.5/' \
-    "${URL_LOG}" ||
-    fail 'fresh Deno bootstrap did not use its exact release tag'
-
-[[ ! -e ${FD_LEAK_MARKER} ]] ||
-    fail 'fresh bootstrap leaked the runtime lock to a child process'
-
-# Strict no-network require mode: both success and missing-runtime failure must
-# happen without invoking curl.
-rm -f -- "${NETWORK_MARKER}" "${URL_LOG}"
-MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" require
-[[ ! -e ${NETWORK_MARKER} ]] || fail 'require mode invoked the network'
-rm -f -- "${deno_root}/current"
-status=0
-MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" require >/dev/null 2>&1 || status=$?
-[[ ${status} == 69 ]] || fail "missing-runtime require returned ${status}, expected 69"
-[[ ! -e ${NETWORK_MARKER} ]] || fail 'failed require mode invoked the network'
-ln -s 2.8.0 "${deno_root}/current"
-
-# Exact-tag stable update, Deno update, nightly opt-in, then return to stable.
-: >"${URL_LOG}"; rm -f -- "${FD_LEAK_MARKER}"
-"${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null
-assert_link_target "${ytdlp_root}/current" 2026.07.04 'stable update failed'
-assert_link_target "${deno_root}/current" 2.9.5 'Deno update failed'
-grep -Fq '/releases/download/2026.07.04/' "${URL_LOG}" || fail 'yt-dlp exact tag URL missing'
-grep -Fq '/releases/download/v2.9.5/' "${URL_LOG}" || fail 'Deno exact tag URL missing'
-! grep -Fq '/releases/latest/download/' "${URL_LOG}" || fail 'latest/download TOCTOU path remains'
-[[ ! -e ${FD_LEAK_MARKER} ]] || fail 'runtime update lock leaked into a child process'
-
-YTDLP_ARIA2_YTDLP_CHANNEL=nightly "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null
-assert_link_target "${ytdlp_root}/current" 2026.08.20.123456 'stable -> nightly failed'
-"${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null
-assert_link_target "${ytdlp_root}/current" 2026.07.04 'nightly -> stable failed'
-assert_link_target "${ytdlp_root}/previous" 2026.08.20.123456 'nightly rollback target missing'
-
-# Ten double-rollbacks must always return to the exact initial state.
-for ((iteration = 1; iteration <= 10; iteration++)); do
-    "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null
-    assert_link_target "${ytdlp_root}/current" 2026.08.20.123456 "rollback A failed at ${iteration}"
-    "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null
-    assert_link_target "${ytdlp_root}/current" 2026.07.04 "rollback B failed at ${iteration}"
-done
-
-# Missing, unsafe, and invalid previous targets must fail cleanly.
-rm -f -- "${ytdlp_root}/previous"
-status=0; "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null 2>&1 || status=$?
-[[ ${status} != 0 ]] || fail 'rollback unexpectedly accepted missing previous'
-ln -s ../escape "${ytdlp_root}/previous"
-status=0; "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null 2>&1 || status=$?
-[[ ${status} != 0 ]] || fail 'rollback accepted unsafe previous target'
-rm -f -- "${ytdlp_root}/previous"; ln -s 2026.08.20.123456 "${ytdlp_root}/previous"
-
-# Journal recovery: committed current repairs previous to old; aborted current
-# restores the previous pointer that existed before the interrupted activation.
-printf 'old=2026.08.20.123456\nprevious=2026.03.17\nnew=2026.07.04\n' >"${ytdlp_root}/.activation-journal"
-rm -f -- "${ytdlp_root}/previous"; ln -s 2026.03.17 "${ytdlp_root}/previous"
-MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" ensure >/dev/null
-assert_link_target "${ytdlp_root}/previous" 2026.08.20.123456 'committed journal recovery failed'
-[[ ! -e ${ytdlp_root}/.activation-journal ]] || fail 'committed journal was not cleared'
-
-rm -f -- "${ytdlp_root}/current" "${ytdlp_root}/previous"
-ln -s 2026.08.20.123456 "${ytdlp_root}/current"
-ln -s 2026.08.20.123456 "${ytdlp_root}/previous"
-printf 'old=2026.08.20.123456\nprevious=2026.03.17\nnew=2026.07.04\n' >"${ytdlp_root}/.activation-journal"
-MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" ensure >/dev/null
-assert_link_target "${ytdlp_root}/previous" 2026.03.17 'aborted journal recovery failed'
-
-# Distinguish lock path errors (73) from contention (75), then stress the
-# contention fallback ten times with verified active runtimes and no network.
-rm -f -- "${runtime_root}/update.lock"; mkdir "${runtime_root}/update.lock"
-status=0; "${runtime_env[@]}" "${RUNTIME_MANAGER}" ensure >/dev/null 2>&1 || status=$?
-[[ ${status} == 73 ]] || fail "unsafe lock path returned ${status}, expected 73"
-rmdir "${runtime_root}/update.lock"
-
-for ((iteration = 1; iteration <= 10; iteration++)); do
-    ready="${TEST_ROOT}/lock-ready-${iteration}"
-    (
-        exec 9>>"${runtime_root}/update.lock"
-        flock --exclusive 9
-        : >"${ready}"
-        sleep 5
-    ) & holder=$!
-    HOLDER_PID=${holder}
-    for _ in {1..100}; do [[ -e ${ready} ]] && break; sleep 0.01; done
-    [[ -e ${ready} ]] || fail "lock holder ${iteration} did not start"
-    MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null 2>"${TEST_ROOT}/lock-${iteration}.err" ||
-        fail "contention fallback ${iteration} failed"
-    grep -Fq 'another runtime update is in progress' "${TEST_ROOT}/lock-${iteration}.err" ||
-        fail "contention diagnostic ${iteration} missing"
-    kill -TERM -- "${holder}" 2>/dev/null || true
-    wait "${holder}" 2>/dev/null || true
-    HOLDER_PID=''
-done
-
-printf 'Runtime-manager hardening integration passed.\n'
+main "$@"

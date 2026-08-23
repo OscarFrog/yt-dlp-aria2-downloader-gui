@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : tests/lib/project-files.sh
+# Purpose     : Define the canonical shell-file lists used by validation.
+# ==============================================================================
 
 # Canonical project shell-file lists shared by syntax and ShellCheck validation.
 # Paths are relative to the repository root. Callers must resolve them against
@@ -51,9 +56,31 @@ TEST_SHELL_FILES=(
     tests/aria2-real-behavior-integration.sh
 )
 
+# Development shell tools are part of the canonical validation surface.
+# shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
+DEVELOPMENT_SHELL_FILES=(
+    scripts/dev-tools/ensure-shfmt.sh
+    scripts/check-shell-format.sh
+    scripts/format-shell.sh
+)
+
+# Shell files intentionally exempt from the explicit main() entry-point rule:
+# POSIX maintainer hooks, sourced libraries, and tiny linear Bash executables.
+# shellcheck disable=SC2034 # Array is read by test-static.sh.
+MAIN_EXEMPT_SHELL_FILES=(
+    packaging/install-tree.sh
+    packaging/deb/postinst
+    packaging/deb/prerm
+    packaging/deb/postrm
+    tests/run-all.sh
+    tests/lib/assert.sh
+    tests/lib/project-files.sh
+)
+
 # shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
 ALL_SHELL_FILES=(
     "${PRODUCTION_SHELL_FILES[@]}"
     "${PACKAGING_SHELL_FILES[@]}"
     "${TEST_SHELL_FILES[@]}"
+    "${DEVELOPMENT_SHELL_FILES[@]}"
 )

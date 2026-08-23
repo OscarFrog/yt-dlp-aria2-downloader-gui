@@ -125,8 +125,11 @@ jobs:
           git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
           git merge-base --is-ancestor "${tag_commit}" origin/main
           version=${RELEASE_TAG#v}
+          reported_version=$(./download-video.sh --version)
+          reported_version=${reported_version##* }
+          [[ ${reported_version} == "${version}" ]]
           grep -Fqx "readonly VERSION=\"${version}\"" download-video.sh
-          grep -Fq "# Version     : ${version}" download-video-gui.sh progress-monitor.sh install-gui.sh
+          grep -Fqx "readonly APP_VERSION='${version}'" install-fedora.sh
           grep -Fq "is **${version}**." README.md
           grep -Fq "version actuelle est la **${version}**" README.fr.md
           grep -Fq "## ${version} - " CHANGELOG.md

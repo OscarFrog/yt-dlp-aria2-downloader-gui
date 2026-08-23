@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
-# Reproduce and guard the HLS post-remux truncated-media false-success boundary.
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : tests/hls-remux-duration-integration.sh
+# Purpose     : Validate HLS remux duration consistency and failure handling.
+# ==============================================================================
 
 set -Eeuo pipefail
 umask 077
@@ -26,51 +30,126 @@ cleanup() {
     trap - EXIT HUP INT TERM
     rm -rf -- "${TEST_ROOT}" || true
 }
-trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
-ffmpeg -hide_banner -loglevel error -nostdin \
-    -f lavfi -i 'testsrc2=size=160x90:rate=25' \
-    -f lavfi -i 'sine=frequency=1000:sample_rate=48000' \
-    -t 8 -shortest -c:v mpeg4 -q:v 5 -c:a aac -movflags +faststart \
-    "${TEST_ROOT}/source/full.mp4"
+run_case() {
+    local label=$1
+    local media_source=$2
+    local expected_status=$3
+    local expected_failure_mkv=${4:-false}
+    local output_dir="${TEST_ROOT}/output-${label}"
+    local result_file="${TEST_ROOT}/${label}.result"
+    mkdir -p -- "${output_dir}"
+    rm -f -- "${result_file}"
+    export MOCK_OUTPUT_DIR="${output_dir}"
+    export MOCK_MEDIA_SOURCE="${media_source}"
 
-ffmpeg -hide_banner -loglevel error -nostdin \
-    -f lavfi -i 'testsrc2=size=160x90:rate=25' \
-    -f lavfi -i 'sine=frequency=1200:sample_rate=48000' \
-    -t 1.2 -shortest -c:v mpeg4 -q:v 5 -c:a aac -movflags +faststart \
-    "${TEST_ROOT}/source/short.mp4"
+    set +e
+    bash "${PROJECT_DIR}/download-video.sh" \
+        --mode video \
+        --youtube-hls-firefox \
+        --output-dir "${output_dir}" \
+        --result-file "${result_file}" \
+        'https://www.youtube.com/watch?v=abc123'
+    status=$?
+    set -e
 
-ffmpeg -hide_banner -loglevel error -nostdin \
-    -f lavfi -i 'testsrc2=size=160x90:rate=25' \
-    -f lavfi -i 'sine=frequency=1400:sample_rate=48000' \
-    -t 2 -shortest -c:v mpeg4 -q:v 5 -c:a aac -movflags +faststart \
-    -output_ts_offset 5 \
-    "${TEST_ROOT}/source/nonzero-ts.mp4"
+    if ((status != expected_status)); then
+        printf 'FAIL: %s returned %d instead of %d.\n' \
+            "${label}" "${status}" "${expected_status}" >&2
+        exit 65
+    fi
 
-ffmpeg -hide_banner -loglevel error -nostdin \
-    -f lavfi -i 'testsrc2=size=160x90:rate=25' \
-    -t 8 -c:v mpeg4 -q:v 5 -an \
-    "${TEST_ROOT}/source/video-only.mp4"
-
-cp -- "${TEST_ROOT}/source/full.mp4" "${TEST_ROOT}/source/truncated.mp4"
-source_size=$(stat -c '%s' -- "${TEST_ROOT}/source/truncated.mp4")
-truncate -s "$((source_size * 60 / 100))" \
-    "${TEST_ROOT}/source/truncated.mp4"
-
-source_duration=$(
-    ffprobe -v error -show_entries format=duration \
-        -of default=noprint_wrappers=1:nokey=1 \
-        "${TEST_ROOT}/source/truncated.mp4"
-)
-[[ ${source_duration} == 8.* ]] || {
-    printf 'FAIL: truncated fixture no longer reproduces FFprobe duration retention.\n' >&2
-    exit 65
+    if ((expected_status == 0)); then
+        [[ -s ${result_file} ]] || {
+            printf 'FAIL: valid HLS remux did not publish a result.\n' >&2
+            exit 65
+        }
+        final_file=$(<"${result_file}")
+        [[ -f ${final_file} ]] || {
+            printf 'FAIL: valid HLS final MKV is absent.\n' >&2
+            exit 65
+        }
+        ffprobe -v error -select_streams v:0 \
+            -show_entries stream=index -of csv=p=0 "${final_file}" \
+            | grep -Eq '^[0-9]+$'
+        ffprobe -v error -select_streams a:0 \
+            -show_entries stream=index -of csv=p=0 "${final_file}" \
+            | grep -Eq '^[0-9]+$'
+        if find "${output_dir}" -maxdepth 1 -type f -name '*.mp4' -print -quit \
+            | grep -q .; then
+            printf 'FAIL: successful HLS remux retained its repaired intermediate.\n' >&2
+            exit 65
+        fi
+    else
+        [[ ! -e ${result_file} ]] || {
+            printf 'FAIL: invalid HLS media published a success result.\n' >&2
+            exit 65
+        }
+        if [[ ${expected_failure_mkv} == true ]]; then
+            find "${output_dir}" -maxdepth 1 -type f -name '*.mkv' -print -quit \
+                | grep -q . || {
+                printf 'FAIL: late HLS validation failure did not retain its diagnostic MKV.\n' >&2
+                exit 65
+            }
+        elif find "${output_dir}" -maxdepth 1 -type f -name '*.mkv' -print -quit \
+            | grep -q .; then
+            printf 'FAIL: duration-rejected HLS media published a final MKV.\n' >&2
+            exit 65
+        fi
+        find "${output_dir}" -maxdepth 1 -type f -name '*.mp4' -print -quit \
+            | grep -q . || {
+            printf 'FAIL: repaired HLS intermediate was not retained for diagnosis.\n' >&2
+            exit 65
+        }
+    fi
 }
 
-cat >"${MOCK_BIN}/yt-dlp" <<'EOF_YTDLP'
+main() {
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    ffmpeg -hide_banner -loglevel error -nostdin \
+        -f lavfi -i 'testsrc2=size=160x90:rate=25' \
+        -f lavfi -i 'sine=frequency=1000:sample_rate=48000' \
+        -t 8 -shortest -c:v mpeg4 -q:v 5 -c:a aac -movflags +faststart \
+        "${TEST_ROOT}/source/full.mp4"
+
+    ffmpeg -hide_banner -loglevel error -nostdin \
+        -f lavfi -i 'testsrc2=size=160x90:rate=25' \
+        -f lavfi -i 'sine=frequency=1200:sample_rate=48000' \
+        -t 1.2 -shortest -c:v mpeg4 -q:v 5 -c:a aac -movflags +faststart \
+        "${TEST_ROOT}/source/short.mp4"
+
+    ffmpeg -hide_banner -loglevel error -nostdin \
+        -f lavfi -i 'testsrc2=size=160x90:rate=25' \
+        -f lavfi -i 'sine=frequency=1400:sample_rate=48000' \
+        -t 2 -shortest -c:v mpeg4 -q:v 5 -c:a aac -movflags +faststart \
+        -output_ts_offset 5 \
+        "${TEST_ROOT}/source/nonzero-ts.mp4"
+
+    ffmpeg -hide_banner -loglevel error -nostdin \
+        -f lavfi -i 'testsrc2=size=160x90:rate=25' \
+        -t 8 -c:v mpeg4 -q:v 5 -an \
+        "${TEST_ROOT}/source/video-only.mp4"
+
+    cp -- "${TEST_ROOT}/source/full.mp4" "${TEST_ROOT}/source/truncated.mp4"
+    source_size=$(stat -c '%s' -- "${TEST_ROOT}/source/truncated.mp4")
+    truncate -s "$((source_size * 60 / 100))" \
+        "${TEST_ROOT}/source/truncated.mp4"
+
+    source_duration=$(
+        ffprobe -v error -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            "${TEST_ROOT}/source/truncated.mp4"
+    )
+    [[ ${source_duration} == 8.* ]] || {
+        printf 'FAIL: truncated fixture no longer reproduces FFprobe duration retention.\n' >&2
+        exit 65
+    }
+
+    cat >"${MOCK_BIN}/yt-dlp" <<'EOF_YTDLP'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 if (($# == 1)) && [[ $1 == '--version' ]]; then
@@ -126,18 +205,18 @@ cp -- "${MOCK_MEDIA_SOURCE:?}" "${output_path}"
 printf '%s\n' "${output_path}" >"${result_file}"
 printf 'YTDLP_POSTPROCESS|finished|FixupM3u8\n'
 EOF_YTDLP
-chmod 700 -- "${MOCK_BIN}/yt-dlp"
+    chmod 700 -- "${MOCK_BIN}/yt-dlp"
 
-cat >"${MOCK_BIN}/deno" <<'EOF_DENO'
+    cat >"${MOCK_BIN}/deno" <<'EOF_DENO'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 printf 'deno 2.3.0 (stable, release, x86_64-unknown-linux-gnu)\n'
 printf 'v8 0.0.0\n'
 printf 'typescript 0.0.0\n'
 EOF_DENO
-chmod 700 -- "${MOCK_BIN}/deno"
+    chmod 700 -- "${MOCK_BIN}/deno"
 
-cat >"${MOCK_BIN}/aria2c" <<'EOF_ARIA2'
+    cat >"${MOCK_BIN}/aria2c" <<'EOF_ARIA2'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 case ${1:-} in
@@ -161,102 +240,33 @@ case ${1:-} in
     ;;
 esac
 EOF_ARIA2
-chmod 700 -- "${MOCK_BIN}/aria2c"
+    chmod 700 -- "${MOCK_BIN}/aria2c"
 
-export PATH="${MOCK_BIN}:${PATH}"
-export XDG_RUNTIME_DIR="${RUNTIME_DIR}"
-export YTDLP_ARIA2_SKIP_RUNTIME_UPDATE=1
-export YTDLP_ARIA2_YTDLP_BIN="${MOCK_BIN}/yt-dlp"
-export YTDLP_ARIA2_DENO_BIN="${MOCK_BIN}/deno"
-export YTDLP_DISABLE_REMOTE_EJS=1
+    export PATH="${MOCK_BIN}:${PATH}"
+    export XDG_RUNTIME_DIR="${RUNTIME_DIR}"
+    export YTDLP_ARIA2_SKIP_RUNTIME_UPDATE=1
+    export YTDLP_ARIA2_YTDLP_BIN="${MOCK_BIN}/yt-dlp"
+    export YTDLP_ARIA2_DENO_BIN="${MOCK_BIN}/deno"
+    export YTDLP_DISABLE_REMOTE_EJS=1
 
-run_case() {
-    local label=$1
-    local media_source=$2
-    local expected_status=$3
-    local expected_failure_mkv=${4:-false}
-    local output_dir="${TEST_ROOT}/output-${label}"
-    local result_file="${TEST_ROOT}/${label}.result"
-    mkdir -p -- "${output_dir}"
-    rm -f -- "${result_file}"
-    export MOCK_OUTPUT_DIR="${output_dir}"
-    export MOCK_MEDIA_SOURCE="${media_source}"
+    # Positive controls: normal, very short, and non-zero-timestamp inputs ensure
+    # the duration guard does not reject benign remux differences.
+    run_case valid "${TEST_ROOT}/source/full.mp4" 0
+    run_case short "${TEST_ROOT}/source/short.mp4" 0
+    run_case nonzero-ts "${TEST_ROOT}/source/nonzero-ts.mp4" 0
 
-    set +e
-    bash "${PROJECT_DIR}/download-video.sh" \
-        --mode video \
-        --youtube-hls-firefox \
-        --output-dir "${output_dir}" \
-        --result-file "${result_file}" \
-        'https://www.youtube.com/watch?v=abc123'
-    status=$?
-    set -e
+    # Regression guard: FFmpeg can exit 0 and retain both streams while losing
+    # ~40% of duration. The engine must return EX_DATAERR (65) and publish no result.
+    run_case truncated "${TEST_ROOT}/source/truncated.mp4" 65
 
-    if ((status != expected_status)); then
-        printf 'FAIL: %s returned %d instead of %d.\n' \
-            "${label}" "${status}" "${expected_status}" >&2
-        exit 65
-    fi
+    # Regression guard: FFmpeg stream-copy succeeds and duration remains coherent,
+    # but final video validation fails because audio is absent. The repaired source
+    # must survive this late failure; only a globally successful run may remove it.
+    run_case video-only-validation-failure \
+        "${TEST_ROOT}/source/video-only.mp4" 65 true
 
-    if ((expected_status == 0)); then
-        [[ -s ${result_file} ]] || {
-            printf 'FAIL: valid HLS remux did not publish a result.\n' >&2
-            exit 65
-        }
-        final_file=$(<"${result_file}")
-        [[ -f ${final_file} ]] || {
-            printf 'FAIL: valid HLS final MKV is absent.\n' >&2
-            exit 65
-        }
-        ffprobe -v error -select_streams v:0 \
-            -show_entries stream=index -of csv=p=0 "${final_file}" |
-            grep -Eq '^[0-9]+$'
-        ffprobe -v error -select_streams a:0 \
-            -show_entries stream=index -of csv=p=0 "${final_file}" |
-            grep -Eq '^[0-9]+$'
-        if find "${output_dir}" -maxdepth 1 -type f -name '*.mp4' -print -quit |
-            grep -q .; then
-            printf 'FAIL: successful HLS remux retained its repaired intermediate.\n' >&2
-            exit 65
-        fi
-    else
-        [[ ! -e ${result_file} ]] || {
-            printf 'FAIL: invalid HLS media published a success result.\n' >&2
-            exit 65
-        }
-        if [[ ${expected_failure_mkv} == true ]]; then
-            find "${output_dir}" -maxdepth 1 -type f -name '*.mkv' -print -quit |
-                grep -q . || {
-                printf 'FAIL: late HLS validation failure did not retain its diagnostic MKV.\n' >&2
-                exit 65
-            }
-        elif find "${output_dir}" -maxdepth 1 -type f -name '*.mkv' -print -quit |
-            grep -q .; then
-            printf 'FAIL: duration-rejected HLS media published a final MKV.\n' >&2
-            exit 65
-        fi
-        find "${output_dir}" -maxdepth 1 -type f -name '*.mp4' -print -quit |
-            grep -q . || {
-            printf 'FAIL: repaired HLS intermediate was not retained for diagnosis.\n' >&2
-            exit 65
-        }
-    fi
+    printf 'HLS remux duration validation passed.\n'
+
 }
 
-# Positive controls cover a normal file, a very short file, and non-zero input
-# timestamps so the duration guard does not reject benign remux differences.
-run_case valid "${TEST_ROOT}/source/full.mp4" 0
-run_case short "${TEST_ROOT}/source/short.mp4" 0
-run_case nonzero-ts "${TEST_ROOT}/source/nonzero-ts.mp4" 0
-
-# Regression: FFmpeg can exit 0 and retain both streams while losing ~40% of
-# duration. The engine must return EX_DATAERR (65) and publish no final result.
-run_case truncated "${TEST_ROOT}/source/truncated.mp4" 65
-
-# PATCH-003: FFmpeg stream-copy succeeds and duration remains coherent, but
-# final video validation fails because audio is absent. The repaired source must
-# survive this late failure; only a globally successful run may remove it.
-run_case video-only-validation-failure \
-    "${TEST_ROOT}/source/video-only.mp4" 65 true
-
-printf 'HLS remux duration validation passed.\n'
+main "$@"

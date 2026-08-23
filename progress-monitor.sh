@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-
 # SPDX-License-Identifier: MIT
-# ============================================================================
-# Name        : progress-monitor.sh
-# Version     : 2.1.33
-# Date        : 2026-08-23
-# Description : Convert downloader events into a unified Zenity progress stream.
-# ============================================================================
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : progress-monitor.sh
+# Purpose     : Convert downloader events into a unified Zenity progress stream.
+# ==============================================================================
 
 set -euo pipefail
 export LC_ALL=C
@@ -15,54 +13,9 @@ cleanup() {
     exec 3<&- 2>/dev/null || true
 }
 
-trap cleanup EXIT
-trap 'exit 0' PIPE
-
-readonly DOWNLOAD_START=5
-readonly DOWNLOAD_END=90
-readonly POSTPROCESS_START=92
-readonly POSTPROCESS_END=98
-readonly VERIFY_PERCENT=99
-readonly MAX_PENDING_CHARS=1048576
-readonly MAX_SAFE_COUNTER=9000000000000000
-
 usage() {
     printf 'Usage: %s LOG_FILE WORKER_PID RESULT_FILE PROFILE OUTPUT_DIR\n' "${0##*/}" >&2
 }
-
-if (($# != 5)); then
-    usage
-    exit 2
-fi
-
-readonly LOG_FILE=$1
-readonly WORKER_PID=$2
-readonly RESULT_FILE=$3
-readonly PROFILE=$4
-OUTPUT_DIR=$5
-
-if ! OUTPUT_DIR=$(realpath -e -- "${OUTPUT_DIR}" 2>/dev/null) ||
-    [[ ! -d ${OUTPUT_DIR} ]]; then
-    printf 'Error: invalid output directory: %s\n' "$5" >&2
-    exit 2
-fi
-readonly OUTPUT_DIR
-
-if [[ ! ${WORKER_PID} =~ ^[1-9][0-9]*$ ]]; then
-    printf 'Error: invalid worker PID: %s\n' "${WORKER_PID}" >&2
-    exit 2
-fi
-case ${PROFILE} in
-video | audio) ;;
-*)
-    printf 'Error: invalid profile: %s\n' "${PROFILE}" >&2
-    exit 2
-    ;;
-esac
-if [[ ! -f ${LOG_FILE} || ! -r ${LOG_FILE} ]]; then
-    printf 'Error: progress log is missing or unreadable: %s\n' "${LOG_FILE}" >&2
-    exit 66
-fi
 
 process_is_running() {
     local pid=$1
@@ -91,15 +44,15 @@ trim_field() {
 
 is_unknown_field() {
     case ${1:-} in
-    '' | NA | N/A | Unknown | unknown | None | null) return 0 ;;
-    *) return 1 ;;
+        '' | NA | N/A | Unknown | unknown | None | null) return 0 ;;
+        *) return 1 ;;
     esac
 }
 
 sanitize_integer() {
     local value=${1:-0}
-    if [[ ${value} =~ ^[0-9]{1,16}$ ]] &&
-        ((10#${value} <= MAX_SAFE_COUNTER)); then
+    if [[ ${value} =~ ^[0-9]{1,16}$ ]] \
+        && ((10#${value} <= MAX_SAFE_COUNTER)); then
         printf '%d' "$((10#${value}))"
     else
         printf '0'
@@ -124,12 +77,15 @@ parse_aria_size() {
     fraction=${BASH_REMATCH[3]:-0}
     unit=${BASH_REMATCH[4]:-}
     case ${unit} in
-    '' | B) multiplier=1 ;;
-    Ki | KiB) multiplier=1024 ;;
-    Mi | MiB) multiplier=1048576 ;;
-    Gi | GiB) multiplier=1073741824 ;;
-    Ti | TiB) multiplier=1099511627776 ;;
-    *) printf '0'; return 0 ;;
+        '' | B) multiplier=1 ;;
+        Ki | KiB) multiplier=1024 ;;
+        Mi | MiB) multiplier=1048576 ;;
+        Gi | GiB) multiplier=1073741824 ;;
+        Ti | TiB) multiplier=1099511627776 ;;
+        *)
+            printf '0'
+            return 0
+            ;;
     esac
 
     if ((whole > MAX_SAFE_COUNTER / multiplier)); then
@@ -188,13 +144,13 @@ emit_progress() {
 
 postprocess_message() {
     case ${1:-} in
-    *Merger*) printf '%s' 'Merging the video and audio streams...' ;;
-    *Remux*) printf '%s' 'Remuxing the media into an MKV container...' ;;
-    *ExtractAudio*) printf '%s' 'Extracting the native audio track...' ;;
-    *Metadata*) printf '%s' 'Writing media metadata...' ;;
-    *EmbedSubtitle*) printf '%s' 'Embedding subtitles...' ;;
-    *Fixup*) printf '%s' 'Repairing the downloaded media...' ;;
-    *) printf '%s' 'Finalizing the media file...' ;;
+        *Merger*) printf '%s' 'Merging the video and audio streams...' ;;
+        *Remux*) printf '%s' 'Remuxing the media into an MKV container...' ;;
+        *ExtractAudio*) printf '%s' 'Extracting the native audio track...' ;;
+        *Metadata*) printf '%s' 'Writing media metadata...' ;;
+        *EmbedSubtitle*) printf '%s' 'Embedding subtitles...' ;;
+        *Fixup*) printf '%s' 'Repairing the downloaded media...' ;;
+        *) printf '%s' 'Finalizing the media file...' ;;
     esac
 }
 
@@ -211,32 +167,6 @@ bounded_advance() {
 
     printf '%d' "${current}"
 }
-
-declare -A ITEM_PERCENT=()
-declare -A ITEM_DOWNLOADED=()
-declare -A ITEM_TOTAL=()
-declare -A ITEM_INDEX=()
-declare -A ARIA_GID_ITEM=()
-declare -A ARIA_KEY_ASSIGNED=()
-
-declare -a PLANNED_KEYS=()
-declare -a PLANNED_FORMAT_IDS=()
-declare -a NATIVE_FORMAT_IDS=()
-declare -a NATIVE_FORMAT_KEYS=()
-
-planned_items=0
-seen_items=0
-aria_items=0
-stable_percent=0
-display_percent=0
-message='Analyzing the webpage...'
-phase='analyzing'
-postprocessor=''
-ffmpeg_duration_us=0
-ffmpeg_out_time_us=0
-last_line=''
-RESOLVED_KEY=''
-SANITIZED_IDENTIFIER=''
 
 register_item() {
     local key=$1
@@ -258,8 +188,8 @@ sanitize_identifier() {
     local value=${1:-}
 
     SANITIZED_IDENTIFIER=''
-    if ((${#value} <= 128)) &&
-        [[ ${value} =~ ^[A-Za-z0-9_.:+-]+$ ]]; then
+    if ((${#value} <= 128)) \
+        && [[ ${value} =~ ^[A-Za-z0-9_.:+-]+$ ]]; then
         SANITIZED_IDENTIFIER=${value}
     fi
 }
@@ -298,7 +228,7 @@ set_plan() {
 
     planned_items=${#PLANNED_KEYS[@]}
     for key in "${PLANNED_KEYS[@]}"; do
-        register_item "${key}" "$(( ${#ITEM_INDEX[@]} + 1 ))"
+        register_item "${key}" "$((${#ITEM_INDEX[@]} + 1))"
     done
     phase='downloading'
     if ((stable_percent < DOWNLOAD_START)); then
@@ -318,8 +248,8 @@ resolve_native_key() {
     if [[ -n ${format_id} ]]; then
         for index in "${!PLANNED_KEYS[@]}"; do
             key=${PLANNED_KEYS[index]}
-            if [[ ${PLANNED_FORMAT_IDS[index]} == "${format_id}" ]] &&
-                (( ${ITEM_PERCENT[${key}]:-0} < 100 )); then
+            if [[ ${PLANNED_FORMAT_IDS[index]} == "${format_id}" ]] \
+                && ((${ITEM_PERCENT[${key}]:-0} < 100)); then
                 RESOLVED_KEY=${key}
                 return 0
             fi
@@ -339,7 +269,7 @@ resolve_native_key() {
     fi
 
     for key in "${PLANNED_KEYS[@]}"; do
-        if (( ${ITEM_PERCENT[${key}]:-0} < 100 )); then
+        if ((${ITEM_PERCENT[${key}]:-0} < 100)); then
             RESOLVED_KEY=${key}
             return 0
         fi
@@ -374,8 +304,8 @@ resolve_aria_key() {
     # with the first planned stream that has not already been assigned to aria2c
     # and is not known to be complete through the native downloader.
     for candidate in "${PLANNED_KEYS[@]}"; do
-        if [[ -z ${ARIA_KEY_ASSIGNED[${candidate}]+x} ]] &&
-            (( ${ITEM_PERCENT[${candidate}]:-0} < 100 )); then
+        if [[ -z ${ARIA_KEY_ASSIGNED[${candidate}]+x} ]] \
+            && ((${ITEM_PERCENT[${candidate}]:-0} < 100)); then
             key=${candidate}
             break
         fi
@@ -559,8 +489,8 @@ handle_v2_progress() {
     fragment_count=$(sanitize_integer "${fragment_count_text}")
     percent=$(sanitize_percent "${percent_text}")
 
-    if ((fragment_count > 1 && fragment_index == 0)) &&
-        [[ ${status} != finished ]]; then
+    if ((fragment_count > 1 && fragment_index == 0)) \
+        && [[ ${status} != finished ]]; then
         # yt-dlp's native HLS downloader can emit a tiny manifest/bootstrap
         # record as 100% before fragment 1/N starts. It is not media progress.
         downloaded=0
@@ -760,43 +690,43 @@ process_line() {
     last_line=${line}
 
     case ${line} in
-    YTDLP_PLAN\|*)
-        IFS='|' read -r -a fields <<<"${line}"
-        ((${#fields[@]} <= 5)) || return 0
-        while ((${#fields[@]} < 5)); do fields+=(''); done
-        handle_plan "${fields[@]:0:5}"
-        ;;
-    YTDLP_PROGRESS_V2\|*)
-        IFS='|' read -r -a fields <<<"${line}"
-        ((${#fields[@]} <= 12)) || return 0
-        while ((${#fields[@]} < 12)); do fields+=(''); done
-        handle_v2_progress "${fields[@]:0:12}"
-        ;;
-    YTDLP_PROGRESS\|*)
-        IFS='|' read -r -a fields <<<"${line}"
-        ((${#fields[@]} <= 5)) || return 0
-        while ((${#fields[@]} < 5)); do fields+=(''); done
-        handle_legacy_progress "${fields[@]:0:5}"
-        ;;
-    YTDLP_POSTPROCESS\|*)
-        IFS='|' read -r -a fields <<<"${line}"
-        ((${#fields[@]} <= 3)) || return 0
-        while ((${#fields[@]} < 3)); do fields+=(''); done
-        handle_postprocess "${fields[@]:0:3}"
-        ;;
-    FFMPEG_PROGRESS_DURATION\|*)
-        IFS='|' read -r -a fields <<<"${line}"
-        ((${#fields[@]} == 2)) || return 0
-        handle_ffmpeg_duration "${fields[@]:0:2}"
-        ;;
-    out_time_us=*)
-        handle_ffmpeg_progress "${line#out_time_us=}"
-        ;;
-    \[#*)
-        handle_aria_progress "${line}"
-        ;;
-    *)
-        ;;
+        YTDLP_PLAN\|*)
+            IFS='|' read -r -a fields <<<"${line}"
+            ((${#fields[@]} <= 5)) || return 0
+            while ((${#fields[@]} < 5)); do fields+=(''); done
+            handle_plan "${fields[@]:0:5}"
+            ;;
+        YTDLP_PROGRESS_V2\|*)
+            IFS='|' read -r -a fields <<<"${line}"
+            ((${#fields[@]} <= 12)) || return 0
+            while ((${#fields[@]} < 12)); do fields+=(''); done
+            handle_v2_progress "${fields[@]:0:12}"
+            ;;
+        YTDLP_PROGRESS\|*)
+            IFS='|' read -r -a fields <<<"${line}"
+            ((${#fields[@]} <= 5)) || return 0
+            while ((${#fields[@]} < 5)); do fields+=(''); done
+            handle_legacy_progress "${fields[@]:0:5}"
+            ;;
+        YTDLP_POSTPROCESS\|*)
+            IFS='|' read -r -a fields <<<"${line}"
+            ((${#fields[@]} <= 3)) || return 0
+            while ((${#fields[@]} < 3)); do fields+=(''); done
+            handle_postprocess "${fields[@]:0:3}"
+            ;;
+        FFMPEG_PROGRESS_DURATION\|*)
+            IFS='|' read -r -a fields <<<"${line}"
+            ((${#fields[@]} == 2)) || return 0
+            handle_ffmpeg_duration "${fields[@]:0:2}"
+            ;;
+        out_time_us=*)
+            handle_ffmpeg_progress "${line#out_time_us=}"
+            ;;
+        \[#*)
+            handle_aria_progress "${line}"
+            ;;
+        *)
+            ;;
     esac
 }
 
@@ -822,30 +752,30 @@ render_tick() {
     local rendered=${stable_percent}
 
     case ${phase} in
-    analyzing)
-        rendered=$(bounded_advance 0 3 "${display_percent}")
-        ;;
-    downloading)
-        if [[ ${message} == *'size unknown'* ]]; then
-            rendered=$(bounded_advance \
-                "${stable_percent}" \
-                "$((stable_percent + 2 > DOWNLOAD_END ? DOWNLOAD_END : stable_percent + 2))" \
-                "${display_percent}")
-        fi
-        ;;
-    postprocessing)
-        if ((ffmpeg_duration_us > 0)); then
-            rendered=${stable_percent}
-        else
-            rendered=$(bounded_advance \
-                "${POSTPROCESS_START}" "${POSTPROCESS_END}" "${display_percent}")
-        fi
-        ;;
-    verifying)
-        rendered=${VERIFY_PERCENT}
-        ;;
-    *)
-        ;;
+        analyzing)
+            rendered=$(bounded_advance 0 3 "${display_percent}")
+            ;;
+        downloading)
+            if [[ ${message} == *'size unknown'* ]]; then
+                rendered=$(bounded_advance \
+                    "${stable_percent}" \
+                    "$((stable_percent + 2 > DOWNLOAD_END ? DOWNLOAD_END : stable_percent + 2))" \
+                    "${display_percent}")
+            fi
+            ;;
+        postprocessing)
+            if ((ffmpeg_duration_us > 0)); then
+                rendered=${stable_percent}
+            else
+                rendered=$(bounded_advance \
+                    "${POSTPROCESS_START}" "${POSTPROCESS_END}" "${display_percent}")
+            fi
+            ;;
+        verifying)
+            rendered=${VERIFY_PERCENT}
+            ;;
+        *)
+            ;;
     esac
     if ((rendered < display_percent)); then
         rendered=${display_percent}
@@ -857,16 +787,6 @@ render_tick() {
     emit_progress "${display_percent}" "${message}"
 }
 
-# Read the regular log file directly through a persistent descriptor. Bash's
-# read -N returns all bytes currently available at EOF, including a partial
-# record, so no asynchronous tail/tr pipeline or timed-read fragment can be
-# lost. Carriage-return console updates are normalized in memory.
-if ! exec 3<"${LOG_FILE}"; then
-    printf 'Error: unable to open progress log: %s\n' "${LOG_FILE}" >&2
-    exit 66
-fi
-
-pending_data=''
 consume_log_data() {
     local chunk=$1
     local line
@@ -885,62 +805,149 @@ consume_log_data() {
     done
 }
 
-while true; do
-    chunk=''
-    read_status=0
-    IFS= read -r -N 65536 chunk <&3 || read_status=$?
-    if [[ -n ${chunk} ]]; then
-        consume_log_data "${chunk}"
+main() {
+    trap cleanup EXIT
+    trap 'exit 0' PIPE
+
+    readonly DOWNLOAD_START=5
+    readonly DOWNLOAD_END=90
+    readonly POSTPROCESS_START=92
+    readonly POSTPROCESS_END=98
+    readonly VERIFY_PERCENT=99
+    readonly MAX_PENDING_CHARS=1048576
+    readonly MAX_SAFE_COUNTER=9000000000000000
+
+    if (($# != 5)); then
+        usage
+        exit 2
     fi
 
-    # A regular file reports status 1 at its current EOF. That is expected
-    # while the worker is still appending; poll at a bounded rate rather than
-    # spinning. Any other read failure is surfaced but does not abort the
-    # download worker.
-    if ((read_status != 0 && read_status != 1)); then
-        message='Progress information is unavailable; the download continues...'
-    elif [[ ! -r ${LOG_FILE} ]]; then
-        message='Progress information is unavailable; the download continues...'
+    readonly LOG_FILE=$1
+    readonly WORKER_PID=$2
+    readonly RESULT_FILE=$3
+    readonly PROFILE=$4
+    OUTPUT_DIR=$5
+
+    if ! OUTPUT_DIR=$(realpath -e -- "${OUTPUT_DIR}" 2>/dev/null) \
+        || [[ ! -d ${OUTPUT_DIR} ]]; then
+        printf 'Error: invalid output directory: %s\n' "$5" >&2
+        exit 2
+    fi
+    readonly OUTPUT_DIR
+
+    if [[ ! ${WORKER_PID} =~ ^[1-9][0-9]*$ ]]; then
+        printf 'Error: invalid worker PID: %s\n' "${WORKER_PID}" >&2
+        exit 2
+    fi
+    case ${PROFILE} in
+        video | audio) ;;
+        *)
+            printf 'Error: invalid profile: %s\n' "${PROFILE}" >&2
+            exit 2
+            ;;
+    esac
+    if [[ ! -f ${LOG_FILE} || ! -r ${LOG_FILE} ]]; then
+        printf 'Error: progress log is missing or unreadable: %s\n' "${LOG_FILE}" >&2
+        exit 66
     fi
 
-    # process_is_running is deliberately used as a liveness predicate.
-    # shellcheck disable=SC2310
-    if ! process_is_running "${WORKER_PID}"; then
-        # The worker has stopped, but it may have appended bytes after the read
-        # at the top of this iteration. Drain the regular file to its final EOF
-        # before processing a last unterminated record.
-        while true; do
-            chunk=''
-            IFS= read -r -N 65536 chunk <&3 || true
-            [[ -n ${chunk} ]] || break
+    declare -gA ITEM_PERCENT=()
+    declare -gA ITEM_DOWNLOADED=()
+    declare -gA ITEM_TOTAL=()
+    declare -gA ITEM_INDEX=()
+    declare -gA ARIA_GID_ITEM=()
+    declare -gA ARIA_KEY_ASSIGNED=()
+
+    declare -ga PLANNED_KEYS=()
+    declare -ga PLANNED_FORMAT_IDS=()
+    declare -ga NATIVE_FORMAT_IDS=()
+    declare -ga NATIVE_FORMAT_KEYS=()
+
+    planned_items=0
+    seen_items=0
+    aria_items=0
+    stable_percent=0
+    display_percent=0
+    message='Analyzing the webpage...'
+    phase='analyzing'
+    postprocessor=''
+    ffmpeg_duration_us=0
+    ffmpeg_out_time_us=0
+    last_line=''
+    RESOLVED_KEY=''
+    SANITIZED_IDENTIFIER=''
+
+    # Read the regular log file directly through a persistent descriptor. Bash's
+    # read -N returns all bytes currently available at EOF, including a partial
+    # record, so no asynchronous tail/tr pipeline or timed-read fragment can be
+    # lost. Carriage-return console updates are normalized in memory.
+    if ! exec 3<"${LOG_FILE}"; then
+        printf 'Error: unable to open progress log: %s\n' "${LOG_FILE}" >&2
+        exit 66
+    fi
+
+    pending_data=''
+
+    while true; do
+        chunk=''
+        read_status=0
+        IFS= read -r -N 65536 chunk <&3 || read_status=$?
+        if [[ -n ${chunk} ]]; then
             consume_log_data "${chunk}"
-        done
-        if [[ -n ${pending_data} ]]; then
-            process_line "${pending_data}"
-            pending_data=''
         fi
+
+        # A regular file reports status 1 at its current EOF. That is expected
+        # while the worker is still appending; poll at a bounded rate rather than
+        # spinning. Any other read failure is surfaced but does not abort the
+        # download worker.
+        if ((read_status != 0 && read_status != 1)); then
+            message='Progress information is unavailable; the download continues...'
+        elif [[ ! -r ${LOG_FILE} ]]; then
+            message='Progress information is unavailable; the download continues...'
+        fi
+
+        # process_is_running is deliberately used as a liveness predicate.
+        # shellcheck disable=SC2310
+        if ! process_is_running "${WORKER_PID}"; then
+            # The worker has stopped, but it may have appended bytes after the read
+            # at the top of this iteration. Drain the regular file to its final EOF
+            # before processing a last unterminated record.
+            while true; do
+                chunk=''
+                IFS= read -r -N 65536 chunk <&3 || true
+                [[ -n ${chunk} ]] || break
+                consume_log_data "${chunk}"
+            done
+            if [[ -n ${pending_data} ]]; then
+                process_line "${pending_data}"
+                pending_data=''
+            fi
+            # A closed Zenity pipe ends the monitor normally.
+            # shellcheck disable=SC2310
+            render_tick || exit 0
+            break
+        fi
+
         # A closed Zenity pipe ends the monitor normally.
         # shellcheck disable=SC2310
         render_tick || exit 0
-        break
+        if [[ -z ${chunk} ]]; then
+            sleep 0.4
+        fi
+    done
+
+    # The atomic result file is necessary but not sufficient: confirm that its
+    # final path names an actual regular file before presenting 100 percent.
+    # shellcheck disable=SC2310 # Predicate failure is the expected incomplete case.
+    if result_file_confirms_output; then
+        phase='verifying'
+        message='Verifying the final media file...'
+        emit_progress "${VERIFY_PERCENT}" "${message}" || exit 0
+        emit_progress 100 'Download complete.' || exit 0
+    else
+        emit_progress "${display_percent}" 'Download ended before the final file was confirmed.' || exit 0
     fi
 
-    # A closed Zenity pipe ends the monitor normally.
-    # shellcheck disable=SC2310
-    render_tick || exit 0
-    if [[ -z ${chunk} ]]; then
-        sleep 0.4
-    fi
-done
+}
 
-# The atomic result file is necessary but not sufficient: confirm that its
-# final path names an actual regular file before presenting 100 percent.
-# shellcheck disable=SC2310 # Predicate failure is the expected incomplete case.
-if result_file_confirms_output; then
-    phase='verifying'
-    message='Verifying the final media file...'
-    emit_progress "${VERIFY_PERCENT}" "${message}" || exit 0
-    emit_progress 100 'Download complete.' || exit 0
-else
-    emit_progress "${display_percent}" 'Download ended before the final file was confirmed.' || exit 0
-fi
+main "$@"
