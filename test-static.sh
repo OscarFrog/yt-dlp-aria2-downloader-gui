@@ -150,7 +150,7 @@ assert_shell_inventory_is_canonical() {
     local is_shell_candidate=false
     local inventory_status=0
 
-    if ! git -C "${SCRIPT_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if ! git -c "safe.directory=${SCRIPT_DIR}" -C "${SCRIPT_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         printf 'FAIL: static validation requires a Git worktree.\n' >&2
         return 65
     fi
@@ -160,8 +160,7 @@ assert_shell_inventory_is_canonical() {
         return 70
     fi
 
-    if ! git -C "${SCRIPT_DIR}" ls-files -co --exclude-standard -z \
-        >"${SHELL_INVENTORY_FILE}"; then
+    if ! git -c "safe.directory=${SCRIPT_DIR}" -C "${SCRIPT_DIR}" ls-files -co --exclude-standard -z >"${SHELL_INVENTORY_FILE}"; then
         cleanup_static_test
         printf 'FAIL: unable to enumerate tracked/non-ignored project files.\n' >&2
         return 65
