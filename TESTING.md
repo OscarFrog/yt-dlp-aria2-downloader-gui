@@ -181,6 +181,8 @@ The automated suite checks, among other things:
   diagnostics kept under the runtime temporary directory;
 - complete-video rejection when either the video or audio stream is absent,
   plus audio-mode rejection when a content-video stream remains in the final file;
+- real MP3/ID3 attached-cover qualification proving `v:0` sees cover art while
+  `V:0` does not, with a temporary `V:0` -> `v:0` validator mutant that must be killed;
 - conditional Deno requirements and YouTube-only remote EJS fallback;
 - measured wrapper-managed FFmpeg remux progress and bounded progress arithmetic;
 - a complementary real-FFmpeg `-progress pipe:1` integration, repeated three
@@ -190,8 +192,8 @@ The automated suite checks, among other things:
   reproducible truncated-input case where FFmpeg exits 0 with both streams but
   a materially shortened MKV; that result must not be published, and the
   repaired HLS source remains available until global validation/publication succeeds;
-- hermetic real-tool direct HTTP, AAC/M4A, Opus/WebM and combined-source audio,
-  HLS and DASH transfers using generated media and loopback HTTP servers, with
+- hermetic real-tool direct HTTP, AAC/M4A, Opus/WebM, combined-source audio,
+  attached-cover audio, HLS and DASH transfers using generated media and loopback HTTP servers, with
   transparent shims proving that real aria2c is used for direct transfers and
   not for HLS/DASH fragments;
 - controlled real aria2 Range/no-Range/redirect/error behavior plus interrupted

@@ -1,3 +1,8 @@
+## 2.1.34 - 2026-08-23
+
+- Add real-tool regression coverage for audio files with attached cover art, and ensure
+  the suite detects a `V:0` to `v:0` validation regression.
+
 ## 2.1.33 - 2026-08-23
 
 - Harden aria2 resume qualification by waiting for explicit server quiescence before strict-remainder accounting.

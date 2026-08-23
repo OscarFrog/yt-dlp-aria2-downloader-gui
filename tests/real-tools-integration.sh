@@ -70,6 +70,38 @@ ffmpeg -hide_banner -loglevel error -nostdin \
     "${TEST_ROOT}/web/audio-opus.webm"
 
 ffmpeg -hide_banner -loglevel error -nostdin \
+    -f lavfi -i 'color=c=blue:s=32x32' \
+    -frames:v 1 -c:v mjpeg -update 1 \
+    "${TEST_ROOT}/web/cover.jpg"
+
+# Use MP3/ID3 APIC deliberately for this validator regression fixture.
+# yt-dlp's metadata postprocessor treats M4A as audio-only and invokes FFmpeg
+# with -vn, which removes an attached picture before final validation. MP3 is a
+# common audio format, so --audio-format best does not reconvert it, while the
+# metadata postprocessor maps/copies all streams and preserves the cover.
+ffmpeg -hide_banner -loglevel error -nostdin \
+    -f lavfi -i 'sine=frequency=550:sample_rate=44100' \
+    -t 2 -c:a libmp3lame -b:a 96k \
+    "${TEST_ROOT}/web/audio-cover-base.mp3"
+
+ffmpeg -hide_banner -loglevel error -nostdin \
+    -i "${TEST_ROOT}/web/audio-cover-base.mp3" \
+    -i "${TEST_ROOT}/web/cover.jpg" \
+    -map 0:a:0 -map 1:v:0 -c copy \
+    -id3v2_version 3 \
+    -metadata:s:v title='Album cover' \
+    -metadata:s:v comment='Cover (front)' \
+    -disposition:v:0 attached_pic \
+    "${TEST_ROOT}/web/audio-cover.mp3"
+
+ffmpeg -hide_banner -loglevel error -nostdin \
+    -i "${TEST_ROOT}/web/av.mp4" \
+    -i "${TEST_ROOT}/web/cover.jpg" \
+    -map 0:v:0 -map 0:a:0 -map 1:v:0 -c copy \
+    -disposition:v:0 0 -disposition:v:1 attached_pic -movflags +faststart \
+    "${TEST_ROOT}/web/av-cover.mp4"
+
+ffmpeg -hide_banner -loglevel error -nostdin \
     -i "${TEST_ROOT}/web/av.mp4" \
     -map 0:v:0 -map 0:a:0 \
     -c:v copy -c:a copy \
@@ -187,6 +219,53 @@ assert_audio_only_codec() {
     }
 }
 
+assert_audio_cover_codec() {
+    local media_path=$1
+    local expected_codec=$2
+    local actual_codec
+    local cover_index=''
+    local content_video_index=''
+    local attached_pic=''
+
+    actual_codec=$(
+        ffprobe -v error -select_streams a:0 \
+            -show_entries stream=codec_name -of csv=p=0 "${media_path}"
+    ) || return 65
+    [[ ${actual_codec} == "${expected_codec}" ]] || {
+        printf 'FAIL: cover-art audio codec changed from %s to %s.\n' \
+            "${expected_codec}" "${actual_codec}" >&2
+        return 65
+    }
+
+    cover_index=$(
+        ffprobe -v error -select_streams v:0 \
+            -show_entries stream=index -of csv=p=0 "${media_path}"
+    ) || return 65
+    [[ ${cover_index} =~ ^[0-9]+$ ]] || {
+        printf 'FAIL: cover-art audio result has no video attachment.\n' >&2
+        return 65
+    }
+
+    content_video_index=$(
+        ffprobe -v error -select_streams V:0 \
+            -show_entries stream=index -of csv=p=0 "${media_path}"
+    ) || return 65
+    [[ -z ${content_video_index} ]] || {
+        printf 'FAIL: cover-art audio result unexpectedly contains content video.\n' >&2
+        return 65
+    }
+
+    attached_pic=$(
+        ffprobe -v error -select_streams v:0 \
+            -show_entries stream_disposition=attached_pic \
+            -of default=noprint_wrappers=1:nokey=1 "${media_path}"
+    ) || return 65
+    [[ ${attached_pic} == 1 ]] || {
+        printf 'FAIL: video attachment is not marked attached_pic.\n' >&2
+        return 65
+    }
+}
+
 RUN_FINAL_FILE=''
 run_engine() {
     local mode=$1
@@ -300,6 +379,68 @@ assert_audio_only_codec "${combined_final}" "${combined_source_codec}"
     exit 65
 }
 
+# Audio with an attached cover is valid: v:0 must see the cover while V:0 must
+# see no content-video stream. The final must retain that distinction.
+source_cover_codec=$(
+    ffprobe -v error -select_streams a:0 \
+        -show_entries stream=codec_name -of csv=p=0 \
+        "${TEST_ROOT}/web/audio-cover.mp3"
+)
+assert_audio_cover_codec "${TEST_ROOT}/web/audio-cover.mp3" "${source_cover_codec}"
+: >"${ARIA2_INVOCATION_LOG}"
+run_engine audio audio-cover "http://127.0.0.1:${PORT}/audio-cover.mp3"
+cover_final=${RUN_FINAL_FILE}
+[[ -f ${cover_final} ]] || {
+    printf 'FAIL: attached-cover audio result is absent.\n' >&2
+    exit 65
+}
+assert_audio_cover_codec "${cover_final}" "${source_cover_codec}"
+[[ -s ${ARIA2_INVOCATION_LOG} ]] || {
+    printf 'FAIL: attached-cover direct audio did not invoke real aria2c.\n' >&2
+    exit 65
+}
+
+# PATCH-001 mutation proof: change only the final audio validator's V:0 stream
+# specifier to v:0 in a temporary engine copy. The same valid attached-cover
+# fixture must then be rejected, proving the test kills this regression.
+mutated_cover_engine="${TEST_ROOT}/download-video-cover-mutated.sh"
+cp -- "${PROJECT_DIR}/download-video.sh" "${mutated_cover_engine}"
+python3 - "${mutated_cover_engine}" <<'PY_COVER_MUTATION'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+old = "probe_stream stream_present \"${final_path}\" 'V:0'"
+new = "probe_stream stream_present \"${final_path}\" 'v:0'"
+if text.count(old) != 1:
+    raise SystemExit("expected exactly one audio-mode V:0 validator anchor")
+path.write_text(text.replace(old, new, 1), encoding="utf-8")
+PY_COVER_MUTATION
+mutated_cover_dir="${TEST_ROOT}/output/audio-cover-mutated"
+mutated_cover_result="${TEST_ROOT}/audio-cover-mutated.result"
+mkdir -p -- "${mutated_cover_dir}"
+rm -f -- "${mutated_cover_result}"
+set +e
+bash "${mutated_cover_engine}" \
+    --mode audio \
+    --output-dir "${mutated_cover_dir}" \
+    --result-file "${mutated_cover_result}" \
+    "http://127.0.0.1:${PORT}/audio-cover.mp3" \
+    >"${TEST_ROOT}/audio-cover-mutated.stdout" 2>&1
+mutated_cover_status=$?
+set -e
+if ((mutated_cover_status != 65)); then
+    printf 'FAIL: V:0 -> v:0 cover mutation returned %d instead of 65.\n' \
+        "${mutated_cover_status}" >&2
+    exit 65
+fi
+[[ ! -e ${mutated_cover_result} ]] || {
+    printf 'FAIL: V:0 -> v:0 cover mutation published a result-file.\n' >&2
+    exit 65
+}
+printf 'Expected mutation detected: v:0 rejected attached cover art.\n'
+
 # PATCH-002 mutation proof: remove --extract-audio from a temporary engine copy.
 # The combined A/V source then remains A/V, and production final validation must
 # reject it with EX_DATAERR instead of publishing an audio success result.
@@ -330,6 +471,31 @@ if ((mutated_no_extract_status != 65)); then
 fi
 [[ ! -e ${mutated_no_extract_result} ]] || {
     printf 'FAIL: unextracted A/V audio mutation published a result-file.\n' >&2
+    exit 65
+}
+
+# An attached cover must not hide a real content-video stream. Reuse the
+# no-extract mutant so the generated A/V+cover source reaches final validation.
+mutated_no_extract_cover_dir="${TEST_ROOT}/output/audio-no-extract-cover-mutated"
+mutated_no_extract_cover_result="${TEST_ROOT}/audio-no-extract-cover-mutated.result"
+mkdir -p -- "${mutated_no_extract_cover_dir}"
+rm -f -- "${mutated_no_extract_cover_result}"
+set +e
+bash "${mutated_no_extract_engine}" \
+    --mode audio \
+    --output-dir "${mutated_no_extract_cover_dir}" \
+    --result-file "${mutated_no_extract_cover_result}" \
+    "http://127.0.0.1:${PORT}/av-cover.mp4" \
+    >"${TEST_ROOT}/audio-no-extract-cover-mutated.stdout" 2>&1
+mutated_no_extract_cover_status=$?
+set -e
+if ((mutated_no_extract_cover_status != 65)); then
+    printf 'FAIL: unextracted A/V+cover mutation returned %d instead of 65.\n' \
+        "${mutated_no_extract_cover_status}" >&2
+    exit 65
+fi
+[[ ! -e ${mutated_no_extract_cover_result} ]] || {
+    printf 'FAIL: unextracted A/V+cover mutation published a result-file.\n' >&2
     exit 65
 }
 
@@ -431,4 +597,4 @@ grep -Fq -- 'audio codec changed from opus to mp3' "${mutation_diagnostic}" || {
 }
 printf 'Expected mutation detected: forced MP3 was rejected by Opus preservation.\n'
 
-printf 'Real-tool direct/audio/Opus/fallback/HLS/DASH integration passed.\n'
+printf 'Real-tool direct/audio/Opus/fallback/cover/HLS/DASH integration passed.\n'
