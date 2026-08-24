@@ -1,3 +1,8 @@
+## 2.1.35 - 2026-08-23
+
+- Isolate untrusted shfmt update candidates in a read-only qualification job and keep repository write permissions in a clean publication-only job.
+- Add regression coverage for the shfmt updater privilege boundary and document the formatter-update trust model.
+
 ## 2.1.34 - 2026-08-23
 
 - Support canonical shell-inventory validation from Git-free source archives and qualify the extracted release archive during package CI.

@@ -77,8 +77,10 @@ the validation suite.
 
 The formatter bootstrap downloads the exact pinned upstream GitHub release
 asset when the verified binary is absent from the local managed tool directory. The downloaded
-asset must match the SHA-256 recorded in `shfmt-pin.env`; an unverified binary
-is never executed.
+asset must match the SHA-256 recorded in `shfmt-pin.env` before execution. This
+integrity check applies to an already approved project pin; a digest computed
+from a newly discovered candidate is not, by itself, an independent upstream
+authentication root.
 
 ## Canonical shell inventory
 
@@ -95,18 +97,24 @@ future shell additions automatically.
 `.github/workflows/shfmt-update.yml` checks the latest stable upstream GitHub
 release every Monday and can also be run manually.
 
-When a newer stable release exists, the workflow:
+When a newer stable release exists, the workflow uses two separate trust
+zones:
 
-1. downloads the Linux amd64 and arm64 assets from `mvdan/sh`;
-2. computes their SHA-256 digests;
-3. updates `scripts/dev-tools/shfmt-pin.env`;
-4. reformats the complete canonical shell inventory with the new version;
-5. runs `tests/run-all.sh`;
-6. creates or updates an automation-owned pull request.
+1. `prepare-shfmt-update` has `contents: read` only, downloads the Linux amd64
+   and arm64 candidates, computes their SHA-256 digests, updates the pin,
+   reformats the canonical shell inventory, runs `tests/run-all.sh`, and emits
+   only a textual Git patch plus its digest;
+2. `publish-shfmt-pr` has the repository write permissions, starts from a fresh
+   checkout of the exact candidate base revision, refuses a stale base, checks
+   the handoff digest and a strict path allowlist, runs `git apply --check`,
+   applies the patch, and publishes the branch without executing candidate code
+   or project scripts from the modified workspace. Git hooks are disabled for
+   the privileged commit.
 
-The project never switches formatter versions silently in the middle of an
-ordinary validation run. The new release becomes the project reference when
-that update pull request is merged.
+A newly discovered formatter candidate is therefore treated as untrusted until
+human review and merge. The project never switches formatter versions silently
+in the middle of an ordinary validation run. The new release becomes the
+project reference only when that update pull request is reviewed and merged.
 
 This preserves reproducibility: one commit always identifies one exact shfmt
 version and exact asset digests.

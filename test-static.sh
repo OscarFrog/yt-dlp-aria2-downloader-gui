@@ -221,6 +221,134 @@ assert_shell_inventory_is_canonical() {
     return "${inventory_status}"
 }
 
+workflow_job_block() {
+    local workflow=$1
+    local job_id=$2
+
+    awk -v job_id="${job_id}" '
+        /^jobs:[[:space:]]*$/ {
+            in_jobs = 1
+            next
+        }
+        in_jobs && $0 ~ "^  " job_id ":[[:space:]]*$" {
+            in_job = 1
+            print
+            next
+        }
+        in_job && $0 ~ /^  [[:alnum:]_-]+:[[:space:]]*$/ {
+            exit
+        }
+        in_job {
+            print
+        }
+    ' "${workflow}"
+}
+
+shfmt_candidate_job_policy() {
+    local job_block=$1
+
+    [[ ${job_block} == *'permissions:'* ]] || return 65
+    [[ ${job_block} == *'contents: read'* ]] || return 65
+    if grep -Eq '^[[:space:]]+[[:alnum:]_-]+:[[:space:]]+write[[:space:]]*$' \
+        <<<"${job_block}"; then
+        return 65
+    fi
+    # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
+    [[ ${job_block} != *'${{ secrets.'* ]] || return 65
+    [[ ${job_block} == *'bash ./scripts/format-shell.sh'* ]] || return 65
+    [[ ${job_block} == *'bash ./tests/run-all.sh'* ]] || return 65
+    [[ ${job_block} == *'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'* ]] || return 65
+    [[ ${job_block} == *"if: steps.detect.outputs.update == 'true'"* ]] || return 65
+    return 0
+}
+
+shfmt_publish_job_policy() {
+    local job_block=$1
+
+    [[ ${job_block} == *'permissions:'* ]] || return 65
+    [[ ${job_block} == *'contents: write'* ]] || return 65
+    [[ ${job_block} == *'pull-requests: write'* ]] || return 65
+    [[ ${job_block} == *"if: needs.prepare-shfmt-update.outputs.update == 'true'"* ]] || return 65
+    [[ ${job_block} == *'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
+    [[ ${job_block} == *'ref: ${{ needs.prepare-shfmt-update.outputs.base_sha }}'* ]] || return 65
+    [[ ${job_block} == *'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3'* ]] || return 65
+    [[ ${job_block} == *'git fetch --no-tags origin'* ]] || return 65
+    [[ ${job_block} == *'python3 - tests/lib/project-files.sh'* ]] || return 65
+    [[ ${job_block} != *'git ls-files -z'* ]] || return 65
+    [[ ${job_block} == *'git apply --check'* ]] || return 65
+    [[ ${job_block} == *'comm -23'* ]] || return 65
+    [[ ${job_block} == *'git diff --summary'* ]] || return 65
+    [[ ${job_block} == *'core.hooksPath=/dev/null'* ]] || return 65
+    [[ ${job_block} != *'scripts/format-shell.sh'* ]] || return 65
+    [[ ${job_block} != *'scripts/dev-tools/ensure-shfmt.sh'* ]] || return 65
+    [[ ${job_block} != *'bash ./tests/run-all.sh'* ]] || return 65
+    if grep -Eq '^[[:space:]]+(bash[[:space:]]+\./|source[[:space:]]+\./|\./(tests|scripts)/)' \
+        <<<"${job_block}"; then
+        return 65
+    fi
+    return 0
+}
+
+assert_shfmt_update_workflow_policy() {
+    local workflow="${SCRIPT_DIR}/.github/workflows/shfmt-update.yml"
+    local candidate_block=''
+    local publish_block=''
+    local mutated=''
+
+    candidate_block=$(workflow_job_block "${workflow}" prepare-shfmt-update)
+    publish_block=$(workflow_job_block "${workflow}" publish-shfmt-pr)
+
+    [[ -n ${candidate_block} ]] \
+        || fail 'shfmt updater read-only candidate job is missing.'
+    [[ -n ${publish_block} ]] \
+        || fail 'shfmt updater privileged publication job is missing.'
+
+    # Policy helpers are explicit-status predicates and intentionally do not rely
+    # on errexit inside their bodies.
+    # shellcheck disable=SC2310
+    shfmt_candidate_job_policy "${candidate_block}" \
+        || fail 'shfmt updater candidate job violates the read-only trust boundary.'
+    # shellcheck disable=SC2310
+    shfmt_publish_job_policy "${publish_block}" \
+        || fail 'shfmt updater publication job violates the privileged trust boundary.'
+
+    mutated=${candidate_block//contents: read/contents: write}
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if shfmt_candidate_job_policy "${mutated}"; then
+        fail 'shfmt updater policy did not reject candidate repository write permission.'
+    fi
+
+    mutated="${publish_block}"$'\n''      bash ./scripts/format-shell.sh'
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if shfmt_publish_job_policy "${mutated}"; then
+        fail 'shfmt updater policy did not reject candidate-code execution in publication.'
+    fi
+
+    mutated=${publish_block//git apply --check/git apply}
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if shfmt_publish_job_policy "${mutated}"; then
+        fail 'shfmt updater policy did not reject removal of git apply --check.'
+    fi
+
+    mutated=${publish_block//comm -23/comm -13}
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if shfmt_publish_job_policy "${mutated}"; then
+        fail 'shfmt updater policy did not reject removal of the patch path allowlist.'
+    fi
+
+    mutated=${publish_block//core.hooksPath=\/dev\/null/core.hooksPath=.git\/hooks}
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if shfmt_publish_job_policy "${mutated}"; then
+        fail 'shfmt updater policy did not reject privileged Git hooks.'
+    fi
+}
+
 main() {
     trap cleanup_static_test EXIT
     trap 'exit 129' HUP
@@ -228,6 +356,7 @@ main() {
     trap 'exit 143' TERM
 
     assert_shell_inventory_is_canonical
+    assert_shfmt_update_workflow_policy
 
     assert_file_contains "${SCRIPT_DIR}/.editorconfig" \
         'indent_size = 4' \
@@ -383,7 +512,7 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
         '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
         'non-owner test cleanup protection'
-    readonly EXPECTED_VERSION='2.1.34'
+    readonly EXPECTED_VERSION='2.1.35'
 
     # Current-version coherence is intentionally checked only on authoritative
     # carriers. Historical versions used by regression/upgrade fixtures are valid
