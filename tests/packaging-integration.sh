@@ -55,6 +55,15 @@ main() {
         assert_equals '755' "${mode}" "${executable} permissions"
     done
 
+    private_aria2_helper="${private_dir}/private-aria2-plan.py"
+    [[ -f ${private_aria2_helper} &&
+        ! -L ${private_aria2_helper} &&
+        ! -x ${private_aria2_helper} ]] \
+        || fail 'Missing or unsafe packaged private aria2 helper.'
+    helper_mode=$(stat -c '%a' -- "${private_aria2_helper}")
+    assert_equals '644' "${helper_mode}" \
+        'private-aria2-plan.py permissions'
+
     cli_link_target=$(readlink -- \
         "${root}/usr/bin/yt-dlp-aria2-downloader")
     gui_link_target=$(readlink -- \

@@ -1,0 +1,166 @@
+name: Extended qualification
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualification-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ffmpeg-ubuntu-6:
+    name: FFmpeg 6.1.1 / Ubuntu 24.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install real tools
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install --yes aria2 ffmpeg python3-venv
+          python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
+            --disable-pip-version-check 'yt-dlp==2026.8.19'
+          echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
+      - name: Qualify FFmpeg 6.1.1 generation
+        env:
+          EXPECTED_FFMPEG_VERSION: 6.1.1
+        run: |
+          timeout --signal=TERM --kill-after=10s 25m \
+            bash ./tests/ffmpeg-generation-qualification.sh
+
+  ffmpeg-fedora-8:
+    name: FFmpeg 8.1.2 / Fedora 44
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    timeout-minutes: 35
+    steps:
+      - name: Install Fedora bootstrap tools and RPM Fusion
+        run: |
+          dnf install --assumeyes ca-certificates curl findutils gawk git grep gzip procps-ng python3 python3-pip sed tar util-linux xz
+          dnf install --assumeyes \
+            https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm
+          dnf install --assumeyes aria2 ffmpeg
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned yt-dlp
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
+            --disable-pip-version-check 'yt-dlp==2026.8.19'
+          echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
+      - name: Qualify FFmpeg 8.1.2 generation
+        env:
+          EXPECTED_FFMPEG_VERSION: 8.1.2
+        run: |
+          timeout --signal=TERM --kill-after=10s 25m \
+            bash ./tests/ffmpeg-generation-qualification.sh
+
+  ffmpeg-upstream-9:
+    name: FFmpeg 9.0.1 / verified upstream source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install --yes \
+            aria2 build-essential curl gnupg libmp3lame-dev libopus-dev \
+            libx264-dev nasm pkg-config python3-venv xz-utils
+      - name: Download, verify and build FFmpeg 9.0.1
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          readonly version=9.0.1
+          readonly fingerprint=FCF986EA15E6E293A5644F10B4322F04D67658D8
+          source_dir="${RUNNER_TEMP}/ffmpeg-source"
+          prefix="${RUNNER_TEMP}/ffmpeg-${version}"
+          gpg_home=$(mktemp -d)
+          key_file=$(mktemp)
+          trap 'rm -rf -- "${gpg_home}"; rm -f -- "${key_file}"' EXIT
+          chmod 700 -- "${gpg_home}"
+
+          mkdir -p -- "${source_dir}"
+          cd -- "${source_dir}"
+
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "ffmpeg-${version}.tar.xz" \
+            "https://ffmpeg.org/releases/ffmpeg-${version}.tar.xz"
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "ffmpeg-${version}.tar.xz.asc" \
+            "https://ffmpeg.org/releases/ffmpeg-${version}.tar.xz.asc"
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "${key_file}" \
+            'https://ffmpeg.org/ffmpeg-devel.asc'
+
+          gpg --homedir "${gpg_home}" --batch --no-options --import "${key_file}"
+          imported_primary_fingerprints=$(
+            gpg --homedir "${gpg_home}" --batch --no-options \
+              --with-colons --list-keys |
+              awk -F: '
+                $1 == "pub" { want_fpr=1; next }
+                want_fpr && $1 == "fpr" {
+                  print toupper($10)
+                  want_fpr=0
+                }
+              '
+          )
+          [[ ${imported_primary_fingerprints} == "${fingerprint}" ]]
+
+          verify_status=$(
+            gpg --homedir "${gpg_home}" --batch --no-options \
+              --status-fd=1 \
+              --verify "ffmpeg-${version}.tar.xz.asc" "ffmpeg-${version}.tar.xz"
+          )
+          signature_primary_fingerprint=$(
+            awk '
+              $1 == "[GNUPG:]" && $2 == "VALIDSIG" {
+                print toupper(NF >= 12 ? $12 : $3)
+                exit
+              }
+            ' <<<"${verify_status}"
+          )
+          [[ ${signature_primary_fingerprint} == "${fingerprint}" ]]
+
+          tar -xf "ffmpeg-${version}.tar.xz"
+          cd -- "ffmpeg-${version}"
+          ./configure \
+            --prefix="${prefix}" \
+            --disable-debug \
+            --disable-doc \
+            --disable-ffplay \
+            --enable-gpl \
+            --enable-libmp3lame \
+            --enable-libopus \
+            --enable-libx264
+          make -j2
+          make install
+
+          echo "${prefix}/bin" >>"${GITHUB_PATH}"
+      - name: Install pinned yt-dlp
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
+            --disable-pip-version-check 'yt-dlp==2026.8.19'
+          echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
+      - name: Qualify FFmpeg 9.0.1 generation
+        env:
+          EXPECTED_FFMPEG_VERSION: 9.0.1
+        run: |
+          timeout --signal=TERM --kill-after=10s 25m \
+            bash ./tests/ffmpeg-generation-qualification.sh

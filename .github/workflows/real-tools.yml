@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        yt_dlp_version: ['2026.6.9', '2026.8.19']
+        yt_dlp_version: ['2026.6.9', '2026.7.4', '2026.8.19']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,7 +49,7 @@ jobs:
       - name: Run aria2 direct-transfer behavior qualification
         env:
           ARIA2_BEHAVIOR_BASIC_RUNS: 3
-          ARIA2_BEHAVIOR_RESUME_RUNS: 10
+          ARIA2_BEHAVIOR_CANCEL_RESTART_RUNS: 10
         run: |
           timeout --signal=TERM --kill-after=10s 12m \
             bash ./tests/aria2-real-behavior-integration.sh
@@ -98,7 +98,7 @@ jobs:
       - name: Run current-stable aria2 direct-transfer behavior qualification
         env:
           ARIA2_BEHAVIOR_BASIC_RUNS: 3
-          ARIA2_BEHAVIOR_RESUME_RUNS: 10
+          ARIA2_BEHAVIOR_CANCEL_RESTART_RUNS: 10
         run: |
           timeout --signal=TERM --kill-after=10s 12m \
             bash ./tests/aria2-real-behavior-integration.sh

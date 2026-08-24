@@ -406,6 +406,12 @@ EOF_ARIA2_SHIM
         exit 65
     }
 
+    # Mutation tests execute temporary copies of the engine. Keep the private
+    # aria2 planning helper beside those copies so direct HTTP reaches the
+    # intended mutated validation logic instead of failing dependency discovery.
+    cp -- "${PROJECT_DIR}/private-aria2-plan.py" "${TEST_ROOT}/private-aria2-plan.py"
+    chmod 644 -- "${TEST_ROOT}/private-aria2-plan.py"
+
     # Mutation test: change only the final audio validator's V:0 selector to v:0
     # in a temporary engine copy. The valid attached-cover fixture must then be
     # rejected, proving this test kills that regression.

@@ -159,11 +159,13 @@ fi
 if (($# == 1)) && [[ $1 == '--help' ]]; then
     printf '%s\n' \
         '--js-runtimes' \
+        '--cookies FILE' \
         '--cookies-from-browser BROWSER[:PROFILE]' \
         '--extractor-args KEY:ARGS' \
         '-O, --print [WHEN:]TEMPLATE' \
         '--progress-template TEMPLATE' \
         '--print-to-file TEMPLATE FILE' \
+        '--parse-metadata [WHEN:]FROM:TO' \
         '--fixup POLICY' \
         '--downloader-args NAME:ARGS' \
         '--batch-file FILE' \
@@ -175,13 +177,21 @@ if (($# == 1)) && [[ $1 == '--help' ]]; then
         '--no-overwrites' \
         '--no-post-overwrites' \
         '--break-match-filters FILTER' \
-        '--no-update'
+        '--no-update' \
+        '--skip-download' \
+        '--no-clean-info-json' \
+        '--dump-single-json' \
+        '--load-info-json FILE'
     exit 0
 fi
 
+dump_single_json=false
 result_file=''
 previous=''
 for argument in "$@"; do
+    if [[ ${argument} == '--dump-single-json' ]]; then
+        dump_single_json=true
+    fi
     if [[ ${previous} == '--print-to-file' ]]; then
         previous='print-template'
         continue
@@ -195,6 +205,14 @@ for argument in "$@"; do
         previous='--print-to-file'
     fi
 done
+
+if [[ ${dump_single_json} == true ]]; then
+    printf \
+        '{"requested_downloads":[{"filename":"%s","format_id":"mock-hls","ext":"mp4","protocol":"m3u8_native","url":"https://example.invalid/mock-manifest.m3u8","http_headers":{"User-Agent":"mock-agent"}}]}\n' \
+        "${MOCK_OUTPUT_DIR:?}/Mock HLS [abc123].mp4"
+    exit 0
+fi
+
 [[ -n ${result_file} ]] || {
     printf 'Mock yt-dlp did not receive --print-to-file.\n' >&2
     exit 64
@@ -227,6 +245,11 @@ case ${1:-} in
     printf '%s\n' \
         '--file-allocation=<METHOD>' \
         '--no-conf[=true|false]' \
+        '--input-file=FILE' \
+        '--dir=DIR' \
+        '--load-cookies=FILE' \
+        '--allow-overwrite[=true|false]' \
+        '--auto-file-renaming[=true|false]' \
         '--enable-color[=true|false]' \
         '--truncate-console-readout[=true|false]' \
         '--summary-interval=<SEC>' \

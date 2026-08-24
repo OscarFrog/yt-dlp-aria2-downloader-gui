@@ -353,7 +353,7 @@ jobs:
       - name: Run aria2 direct-transfer behavior qualification
         env:
           ARIA2_BEHAVIOR_BASIC_RUNS: 3
-          ARIA2_BEHAVIOR_RESUME_RUNS: 10
+          ARIA2_BEHAVIOR_CANCEL_RESTART_RUNS: 10
         run: |
           timeout --signal=TERM --kill-after=10s 12m \
             bash ./tests/aria2-real-behavior-integration.sh

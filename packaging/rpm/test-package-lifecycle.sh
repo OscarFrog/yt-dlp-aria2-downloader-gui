@@ -48,6 +48,7 @@ readonly PACKAGE_PATH
 package_requires=$(rpm -qpR -- "${PACKAGE_PATH}")
 for required_dependency in \
     'aria2 >= 1.37.0' \
+    'python3 >= 3.10' \
     'ffmpeg' \
     'curl' \
     'gnupg2' \
@@ -111,7 +112,7 @@ main() {
     [[ -f ${ICON_FILE} && ! -L ${ICON_FILE} ]]
     desktop-file-validate --no-hints "${DESKTOP_FILE}"
     grep -Fqx -- 'Icon=yt-dlp-aria2-downloader' "${DESKTOP_FILE}"
-    for runtime_command in aria2c ffmpeg ffprobe curl gpg unzip flock timeout; do
+    for runtime_command in aria2c ffmpeg ffprobe python3 curl gpg unzip flock timeout; do
         command -v "${runtime_command}" >/dev/null 2>&1 || {
             printf 'Error: package dependency command is absent: %s\n' \
                 "${runtime_command}" >&2

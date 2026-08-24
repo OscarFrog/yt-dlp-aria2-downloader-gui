@@ -37,9 +37,9 @@ une seule URL avec l'un des trois profils suivants :
   conteneur source lorsque yt-dlp peut le faire sans réencodage.
 
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
-les téléchargements directs HTTP/FTP et FFmpeg pour fusionner, remuxer ou
-extraire les flux. Les flux DASH et HLS restent volontairement traités par le
-téléchargeur natif de yt-dlp. La version actuelle est la **2.1.35**.
+les téléchargements directs HTTP(S) via un fichier d'entrée aria2 privé et
+FFmpeg pour fusionner, remuxer ou extraire les flux. Les flux DASH et HLS restent
+volontairement traités par le téléchargeur natif de yt-dlp. La version actuelle est la **2.2.0**.
 
 ## Installation recommandée
 
@@ -50,7 +50,7 @@ Pour **Fedora 44 ou une version plus récente**, téléchargez ces quatre fichie
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.1.35-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.2.0-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -58,7 +58,7 @@ Vérifiez les fichiers téléchargés puis lancez le bootstrap Fedora officiel :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.35-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.2.0-1.fc44.noarch.rpm
 ```
 
 Le bootstrap active RPM Fusion Free si nécessaire, remplace `ffmpeg-free` par
@@ -68,7 +68,7 @@ runtimes yt-dlp et Deno propres à l'utilisateur.
 
 Pour **Debian ou Ubuntu**, téléchargez le DEB versionné et `SHA256SUMS`,
 vérifiez-les puis installez le paquet avec `sudo apt install
-./yt-dlp-aria2-downloader-gui_2.1.35-1_all.deb`. Pour **les autres distributions
+./yt-dlp-aria2-downloader-gui_2.2.0-1_all.deb`. Pour **les autres distributions
 GNU/Linux ou une utilisation portable**, utilisez le ZIP versionné ou un clone
 Git. Les runtimes yt-dlp et Deno gérés automatiquement prennent actuellement en
 charge Linux `x86_64` et `aarch64`.
@@ -86,7 +86,10 @@ Avec le RPM, le lanceur graphique et son icône sont installés automatiquement 
 - vidéo MKV sans réencodage lorsque les flux sont compatibles ;
 - solution de repli YouTube HLS authentifiée facultative avec les cookies Firefox ;
 - extraction de la meilleure piste audio avec conservation du format source lorsque possible ;
-- reprise des téléchargements interrompus lorsque le site le permet ;
+- reprise des téléchargements interrompus gérés nativement par yt-dlp lorsque le site le permet ;
+- annulation orientée confidentialité pour les transferts HTTP(S) directs gérés
+  par aria2 : l'état partiel privé est supprimé et une exécution ultérieure
+  redémarre proprement ;
 - progression graphique unifiée pour les fichiers directs, les fragments
   HLS/DASH, les pistes vidéo/audio séparées et le post-traitement FFmpeg ;
 - annulation de tout le groupe de processus au sein d’une session GUI unique ;
@@ -99,7 +102,7 @@ Avec le RPM, le lanceur graphique et son icône sont installés automatiquement 
 - lanceur dans le menu des applications ;
 - tests statiques, mocks et intégrations hermétiques avec outils réels,
   notamment qualification audio directe AAC/Opus/source combinée, routage
-  HLS/DASH, comportement aria2 contrôlé Range/no-Range/redirection/erreur/reprise,
+  HLS/DASH, comportement aria2 contrôlé Range/no-Range/redirection/erreur/annulation-redémarrage-propre,
   progression FFmpeg réelle et stress des courses de processus, avec validation
   GitHub Actions sous Ubuntu et Fedora 44.
 
@@ -109,6 +112,7 @@ Les commandes système requises par l'application sont :
 
 - Bash **4.4 ou plus récent** ;
 - `aria2c` **1.37.0 ou plus récent** ;
+- Python **3.10 ou plus récent** ;
 - FFmpeg et `ffprobe` ;
 - Zenity pour l'interface graphique ;
 - `curl`, GnuPG et `unzip` pour l'initialisation et la mise à jour des runtimes ;
@@ -151,7 +155,7 @@ temps. Les appels réseau individuels sont bornés ; un bootstrap complet en
 chaîne plusieurs, il ne faut donc pas interpréter ces limites comme un délai
 global unique.
 
-Les paquets système comme FFmpeg, aria2 et Zenity restent gérés par le
+Les paquets système comme Python, FFmpeg, aria2 et Zenity restent gérés par le
 gestionnaire de paquets de la distribution. Sous Fedora, le bootstrap officiel
 installe les versions les plus récentes disponibles dans les dépôts
 Fedora/RPM Fusion activés au moment de l'installation.
@@ -171,8 +175,8 @@ l'identité de la release :
 
 ```bash
 gh attestation verify ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.1.35 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.1.35 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.2.0 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.2.0 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 `SHA256SUMS` reste utile pour un contrôle local ou hors ligne ; les attestations
@@ -224,7 +228,7 @@ de déploiement **tag** sélectionnée `v*`. La reprise manuelle reste disponibl
 mais elle doit exécuter le workflow depuis le tag exact de la release :
 
 ```bash
-gh workflow run release.yml   --ref v2.1.35   -f tag=v2.1.35   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref v2.2.0   -f tag=v2.2.0   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Le workflow refuse indépendamment toute exécution manuelle dont le type de ref,
@@ -269,7 +273,7 @@ Téléchargez :
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.1.35-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.2.0-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -282,7 +286,7 @@ sha256sum --ignore-missing --check SHA256SUMS
 Puis lancez :
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.1.35-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.2.0-1.fc44.noarch.rpm
 ```
 
 Le bootstrap refuse par défaut un RPM de release non signé. Il vérifie que
@@ -317,11 +321,11 @@ de l'utilisateur et vérifiés avant activation.
 
 ### Debian et Ubuntu
 
-La release 2.1.35 publie un DEB indépendant de l'architecture, aligné sur le
+La release 2.2.0 publie un DEB indépendant de l'architecture, aligné sur le
 même modèle de runtimes gérés que Fedora. Téléchargez :
 
 ```text
-yt-dlp-aria2-downloader-gui_2.1.35-1_all.deb
+yt-dlp-aria2-downloader-gui_2.2.0-1_all.deb
 SHA256SUMS
 ```
 
@@ -329,11 +333,11 @@ Vérifiez puis installez :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.1.35-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.2.0-1_all.deb
 ```
 
-Le DEB dépend des outils système habituels (`aria2c`, FFmpeg/FFprobe, Zenity,
-curl, GnuPG, unzip, coreutils, grep, findutils et util-linux), mais **ne dépend
+Le DEB dépend des outils système habituels (`aria2c`, Python 3.10+,
+FFmpeg/FFprobe, Zenity, curl, GnuPG, unzip, coreutils, grep, findutils et util-linux), mais **ne dépend
 pas de paquets yt-dlp ou Deno fournis par la distribution**. yt-dlp et Deno sont
 installés et vérifiés dans le runtime de l'utilisateur au premier lancement.
 
@@ -415,7 +419,7 @@ courant.
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.1.35.zip
+yt-dlp-aria2-downloader-gui-2.2.0.zip
 SHA256SUMS
 ```
 
@@ -423,8 +427,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.1.35.zip
-cd yt-dlp-aria2-downloader-gui-2.1.35
+unzip yt-dlp-aria2-downloader-gui-2.2.0.zip
+cd yt-dlp-aria2-downloader-gui-2.2.0
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -516,7 +520,14 @@ Le journal conservé peut être ouvert depuis la fenêtre d’erreur. Avant sa c
 
 ### Confidentialité des URL dans l’interface graphique
 
-La GUI écrit l’URL demandée dans un fichier temporaire privé et ne transmet au moteur que le chemin de ce fichier. Le moteur fournit ensuite l’URL à yt-dlp via son interface de fichier batch privé : l’URL n’apparaît donc pas dans les arguments de ligne de commande de la GUI, du moteur ou de yt-dlp. Les URL contenant `utilisateur:motdepasse@hôte` sont refusées. L’utilisation CLI directe avec une URL positionnelle reste possible ; comme pour toute commande, cette URL peut alors être visible dans les arguments du processus appelant.
+La GUI écrit l’URL demandée dans un fichier temporaire privé et ne transmet au
+moteur que le chemin de ce fichier. Le moteur fournit ensuite l’URL à yt-dlp via
+son fichier batch privé. Pour un média HTTP(S) direct, les URL et en-têtes
+validés sont écrits dans un fichier d'entrée aria2 privé `0600` : l'URL média
+n'apparaît donc pas dans les arguments d'`aria2c`. Les URL contenant
+`utilisateur:motdepasse@hôte` sont refusées. L’utilisation CLI directe avec une
+URL positionnelle reste possible ; comme pour toute commande, cette URL peut
+alors être visible dans les arguments du processus appelant.
 
 ## Utilisation en ligne de commande
 
@@ -564,9 +575,12 @@ non-écrasement. Lorsque le build aria2c installé annonce `--no-netrc`, le
 moteur active cette option afin d’éviter la lecture des identifiants d’un
 fichier `.netrc` personnel. Les builds qui n’exposent pas cette capacité
 facultative restent acceptés et ne reçoivent pas une option non prise en charge.
-Les fichiers `.part` interrompus peuvent toujours être repris, mais un média
-terminé ou post-traité déjà présent est conservé et l'exécution échoue au lieu
-de le remplacer.
+Les fichiers `.part` gérés nativement par yt-dlp peuvent toujours être repris
+lorsque l'amont le permet. Le staging aria2 des transferts HTTP(S) directs gérés
+par le moteur est volontairement éphémère : une annulation utilisateur supprime
+son état partiel/contrôle privé et une exécution ultérieure redémarre le
+transfert direct proprement. Un média terminé ou post-traité déjà présent est
+conservé et l'exécution échoue au lieu de le remplacer.
 
 Le modèle de sortie limite le titre et l'identifiant du média selon leur taille
 encodée en octets, ce qui réduit les échecs avec de longs titres Unicode sur les
@@ -574,13 +588,20 @@ systèmes de fichiers limitant un composant de chemin à 255 octets.
 
 ## Fonctionnement des téléchargeurs
 
-Le moteur utilise aria2c pour les transferts directs HTTP/FTP et le téléchargeur
-natif de yt-dlp pour les manifestes DASH et HLS :
+Le moteur demande d'abord à yt-dlp de planifier les formats sélectionnés sans
+télécharger le média. Les médias HTTP(S) directs sont ensuite transférés par
+aria2c via des fichiers privés d'entrée, manifeste, cookies et staging. FTP et
+les autres protocoles non HTTP(S) restent traités nativement par yt-dlp. DASH et
+HLS sont explicitement conservés sur le téléchargeur natif :
 
 ```text
---downloader aria2c
 --downloader dash,m3u8:native
+aria2c --input-file=/privé/aria2.input --dir=/privé/staging ...
 ```
+
+Cette architecture conserve l'accélération multi-connexion d'aria2c pour les
+médias HTTP(S) directs validés sans placer l'URL média dans les arguments du
+processus aria2c.
 
 Pour l'extraction YouTube actuelle, le moteur utilise le runtime Deno géré
 automatiquement via un chemin explicite :

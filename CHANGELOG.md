@@ -1,3 +1,27 @@
+## 2.2.0 - 2026-08-24
+
+### Direct-transfer privacy and publication hardening
+
+- Replace yt-dlp's external aria2 direct-transfer handoff with a private
+  PLAN/build/commit/POST pipeline for direct HTTP(S), keeping media URLs and
+  request headers out of `aria2c` process arguments.
+- Keep DASH/HLS on yt-dlp's native downloader and make wrapper-managed aria2
+  cancellation privacy-first: private staging and partial state are removed,
+  so a later direct HTTP(S) run starts cleanly instead of resuming the cancelled
+  aria2 transfer.
+- Preserve the final destination path component without resolving a final
+  symlink, reject malformed URLs and non-string HTTP header values, and make
+  multi-component publication rollback inode-aware and conservative.
+- Require Python 3.10 or newer for the private aria2 planning helper and package
+  it as a non-executable private implementation file.
+
+### Qualification hardening
+
+- Pin FFmpeg source-release verification to the expected primary signing
+  fingerprint and reject near-prefix FFmpeg/FFprobe version mismatches.
+- Update real aria2 qualification to cover private argv, cancellation cleanup,
+  and clean restart semantics rather than persistent aria2 resume state.
+
 ## 2.1.35 - 2026-08-23
 
 - Isolate untrusted shfmt update candidates in a read-only qualification job and keep repository write permissions in a clean publication-only job.

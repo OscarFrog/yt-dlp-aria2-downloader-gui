@@ -9,7 +9,7 @@
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.1.35"
+readonly VERSION="2.2.0"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -26,6 +26,11 @@ INTERNAL_PATH_FILE_TMP=''
 HLS_REMUX_TMP=''
 HLS_SOURCE_TO_CLEAN=''
 YTDLP_BATCH_FILE_TMP=''
+PRIVATE_ARIA2_STAGING=''
+PRIVATE_ARIA2_PLAN=''
+PRIVATE_ARIA2_COOKIE_JAR=''
+PRIVATE_ARIA2_INPUT=''
+PRIVATE_ARIA2_MANIFEST=''
 OUTPUT_LOCK_FD=''
 OUTPUT_LOCK_FILE=''
 OUTPUT_LOCK_ROOT=''
@@ -67,6 +72,11 @@ cleanup() {
     fi
     if [[ -n ${YTDLP_BATCH_FILE_TMP} ]]; then
         rm -f -- "${YTDLP_BATCH_FILE_TMP}" || true
+    fi
+    if [[ -n ${PRIVATE_ARIA2_STAGING} &&
+        -d ${PRIVATE_ARIA2_STAGING} &&
+        ! -L ${PRIVATE_ARIA2_STAGING} ]]; then
+        rm -rf -- "${PRIVATE_ARIA2_STAGING}" || true
     fi
     if [[ -n ${OUTPUT_LOCK_FD} ]]; then
         flock --unlock "${OUTPUT_LOCK_FD}" 2>/dev/null || true
@@ -243,8 +253,13 @@ check_runtime_compatibility() {
         --print \
         --progress-template \
         --print-to-file \
+        --parse-metadata \
+        --cookies \
+        --dump-single-json \
+        --load-info-json \
+        --no-clean-info-json \
+        --skip-download \
         --fixup \
-        --downloader-args \
         --batch-file \
         --socket-timeout \
         --retries \
@@ -297,12 +312,19 @@ check_runtime_compatibility() {
     for required_option in \
         --file-allocation \
         --no-conf \
+        --input-file \
+        --dir \
+        --load-cookies \
+        --allow-overwrite \
+        --auto-file-renaming \
         --enable-color \
         --truncate-console-readout \
         --summary-interval \
         --show-console-readout \
         --stderr; do
-        if ! grep -Eq -- "^[[:space:]]*${required_option}([=[:space:]]|\[|$)" <<<"${aria2_help}"; then
+        if ! grep -Eq -- \
+            "^[[:space:]]*(-[^,[:space:]]+,[[:space:]]+)?${required_option}([=[:space:]]|\[|$)" \
+            <<<"${aria2_help}"; then
             error "this aria2c build does not support ${required_option}."
             return 1
         fi
@@ -998,7 +1020,7 @@ main() {
         fi
     fi
 
-    for command_name in aria2c ffmpeg ffprobe realpath grep mktemp mv rm chmod flock mkdir sha256sum stat setsid sleep timeout find; do
+    for command_name in aria2c ffmpeg ffprobe python3 sed stdbuf tr realpath grep mktemp mv rm chmod flock mkdir sha256sum stat setsid sleep timeout find; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             error "required command \"${command_name}\" was not found."
             exit 127
@@ -1011,6 +1033,15 @@ main() {
     }
     script_dir=${script_path%/*}
     runtime_manager="${script_dir}/runtime-manager.sh"
+    private_aria2_helper="${script_dir}/private-aria2-plan.py"
+
+    if [[ -L ${private_aria2_helper} ||
+        ! -f ${private_aria2_helper} ||
+        ! -r ${private_aria2_helper} ]]; then
+        error "private aria2 helper is missing or unsafe: ${private_aria2_helper}"
+        exit 66
+    fi
+    readonly private_aria2_helper
 
     if [[ ${YTDLP_ARIA2_SKIP_RUNTIME_UPDATE:-0} == 1 ]]; then
         YTDLP_BIN=${YTDLP_ARIA2_YTDLP_BIN:-$(command -v yt-dlp 2>/dev/null || true)}
@@ -1145,6 +1176,32 @@ main() {
     fi
     unset URL
 
+    if ! PRIVATE_ARIA2_STAGING=$(mktemp -d \
+        --tmpdir="${OUTPUT_DIR}" \
+        '.yt-dlp-aria2.XXXXXXXX'); then
+        error 'unable to create the private aria2 staging directory.'
+        exit 13
+    fi
+    if ! chmod 700 -- "${PRIVATE_ARIA2_STAGING}"; then
+        error 'unable to secure the private aria2 staging directory.'
+        exit 13
+    fi
+
+    PRIVATE_ARIA2_PLAN="${PRIVATE_ARIA2_STAGING}/plan.json"
+    PRIVATE_ARIA2_COOKIE_JAR="${PRIVATE_ARIA2_STAGING}/cookies.txt"
+    PRIVATE_ARIA2_INPUT="${PRIVATE_ARIA2_STAGING}/aria2.input"
+    PRIVATE_ARIA2_MANIFEST="${PRIVATE_ARIA2_STAGING}/manifest.json"
+
+    if ! : >"${PRIVATE_ARIA2_PLAN}" \
+        || ! printf '%s\n' '# Netscape HTTP Cookie File' \
+            >"${PRIVATE_ARIA2_COOKIE_JAR}" \
+        || ! chmod 600 -- \
+            "${PRIVATE_ARIA2_PLAN}" \
+            "${PRIVATE_ARIA2_COOKIE_JAR}"; then
+        error 'unable to initialize private transfer metadata.'
+        exit 13
+    fi
+
     printf '%s version %s\n' "${SCRIPT_NAME}" "${VERSION}"
     printf 'Download directory: %s\n' "${OUTPUT_DIR}"
     printf 'Mode: %s\n' "${MODE}"
@@ -1156,6 +1213,7 @@ main() {
     if [[ ${ARIA2_SUPPORTS_NO_NETRC} == true ]]; then
         ARIA2_ARGUMENTS+=' --no-netrc=true'
     fi
+    ARIA2_ARGUMENTS+=' --allow-overwrite=false --auto-file-renaming=false'
     ARIA2_ARGUMENTS+=' --console-log-level=warn --enable-color=false --truncate-console-readout=false'
     if [[ ${MACHINE_PROGRESS} == true ]]; then
         # yt-dlp does not currently expose aria2c transfer progress through its
@@ -1167,6 +1225,8 @@ main() {
         ARIA2_ARGUMENTS+=' --summary-interval=0'
     fi
     readonly ARIA2_ARGUMENTS
+    read -r -a ARIA2_DIRECT_OPTIONS <<<"${ARIA2_ARGUMENTS}"
+    readonly -a ARIA2_DIRECT_OPTIONS
 
     YT_DLP_OPTIONS=(
         --ignore-config
@@ -1175,7 +1235,10 @@ main() {
         --break-match-filters '!playlist_index'
         --no-overwrites
         --no-post-overwrites
+        --cookies "${PRIVATE_ARIA2_COOKIE_JAR}"
         --embed-metadata
+        --parse-metadata ':(?P<meta_purl>)'
+        --parse-metadata ':(?P<meta_comment>)'
         --socket-timeout 30
         --retries 10
         --fragment-retries 10
@@ -1184,11 +1247,10 @@ main() {
         --output "${OUTPUT_DIR_TEMPLATE}/%(title).160B [%(id).64B].%(ext)s"
         --continue
         --progress-delta 1
-        # Use aria2c for direct transfers, but retain yt-dlp's native downloader for
-        # fragmented DASH and HLS streams. Multiple --downloader rules are additive.
-        --downloader aria2c
+        # Fragmented DASH/HLS transfers remain on yt-dlp's native downloader.
+        # Direct HTTP(S) transfers are classified and delegated to aria2 below
+        # through a private input file, never through aria2 argv.
         --downloader 'dash,m3u8:native'
-        --downloader-args "aria2c:${ARIA2_ARGUMENTS}"
         --concurrent-fragments 1
     )
 
@@ -1237,6 +1299,57 @@ main() {
         )
     fi
 
+    PLAN_OPTIONS=(
+        "${YT_DLP_OPTIONS[@]}"
+        --skip-download
+        --no-clean-info-json
+        --dump-single-json
+    )
+
+    run_supervised_command \
+        "${YTDLP_BIN}" \
+        "${PLAN_OPTIONS[@]}" \
+        --batch-file "${YTDLP_BATCH_FILE_TMP}" \
+        >"${PRIVATE_ARIA2_PLAN}"
+
+    plan_status=${DOWNLOAD_STATUS}
+    if ((plan_status != 0)); then
+        printf '\nDownload failed during format planning with exit code %d.\n' \
+            "${plan_status}" >&2
+        exit "${plan_status}"
+    fi
+
+    classification_output=''
+    if ! classification_output=$(python3 \
+        "${private_aria2_helper}" classify \
+        --plan "${PRIVATE_ARIA2_PLAN}"); then
+        error 'unable to classify the selected download transport.'
+        exit 65
+    fi
+
+    PRIVATE_TRANSPORT=''
+    while IFS= read -r classification_line; do
+        case ${classification_line} in
+            transport=*)
+                PRIVATE_TRANSPORT=${classification_line#transport=}
+                ;;
+            transfer_count=*)
+                ;;
+            *)
+                error 'the private transfer classifier returned unexpected output.'
+                exit 65
+                ;;
+        esac
+    done <<<"${classification_output}"
+
+    case ${PRIVATE_TRANSPORT} in
+        direct | native) ;;
+        *)
+            error 'the private transfer classifier returned an invalid transport.'
+            exit 65
+            ;;
+    esac
+
     if [[ ${MACHINE_PROGRESS} == true ]]; then
         YT_DLP_OPTIONS+=(
             --newline
@@ -1258,7 +1371,68 @@ main() {
         )
     fi
 
-    run_supervised_command "${YTDLP_BIN}" "${YT_DLP_OPTIONS[@]}" --batch-file "${YTDLP_BATCH_FILE_TMP}"
+    if [[ ${PRIVATE_TRANSPORT} == direct ]]; then
+        if ! python3 "${private_aria2_helper}" build \
+            --plan "${PRIVATE_ARIA2_PLAN}" \
+            --output-dir "${OUTPUT_DIR}" \
+            --staging-dir "${PRIVATE_ARIA2_STAGING}" \
+            --aria2-input "${PRIVATE_ARIA2_INPUT}" \
+            --manifest "${PRIVATE_ARIA2_MANIFEST}" \
+            >/dev/null; then
+            error 'unable to build the private aria2 transfer plan.'
+            exit 65
+        fi
+
+        # aria2 diagnostics can contain the URI on failures. Keep progress
+        # output, but redact every HTTP(S) token before it reaches CLI/GUI logs.
+        run_supervised_command bash -c '
+            set -o pipefail
+            "$@" 2>&1 |
+                stdbuf -o0 tr "\r" "\n" | sed -u -E "s#https?://[^[:space:]]+#[REDACTED_URL]#g"
+        ' bash \
+            aria2c \
+            --input-file="${PRIVATE_ARIA2_INPUT}" \
+            --dir="${PRIVATE_ARIA2_STAGING}" \
+            --load-cookies="${PRIVATE_ARIA2_COOKIE_JAR}" \
+            "${ARIA2_DIRECT_OPTIONS[@]}"
+
+        aria2_status=${DOWNLOAD_STATUS}
+
+        if ! rm -f -- "${PRIVATE_ARIA2_INPUT}"; then
+            error 'unable to remove the private aria2 input file.'
+            exit 13
+        fi
+        PRIVATE_ARIA2_INPUT=''
+
+        if ((aria2_status == 0)); then
+            commit_status=0
+            python3 "${private_aria2_helper}" commit \
+                --manifest "${PRIVATE_ARIA2_MANIFEST}" \
+                >/dev/null || commit_status=$?
+
+            if ((commit_status != 0)); then
+                if ((commit_status == 1)); then
+                    error 'final media destination already exists; refusing to overwrite it.'
+                    exit "${commit_status}"
+                fi
+
+                error 'unable to publish the completed aria2 transfer.'
+                exit 65
+            fi
+
+            run_supervised_command "${YTDLP_BIN}" \
+                "${YT_DLP_OPTIONS[@]}" \
+                --load-info-json "${PRIVATE_ARIA2_PLAN}"
+        else
+            DOWNLOAD_STATUS=${aria2_status}
+        fi
+    else
+        run_supervised_command \
+            "${YTDLP_BIN}" \
+            "${YT_DLP_OPTIONS[@]}" \
+            --batch-file "${YTDLP_BATCH_FILE_TMP}"
+    fi
+
     if ! rm -f -- "${YTDLP_BATCH_FILE_TMP}"; then
         error 'unable to remove the private yt-dlp URL batch file.'
         exit 13
