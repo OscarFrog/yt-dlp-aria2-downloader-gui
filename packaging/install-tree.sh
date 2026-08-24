@@ -38,7 +38,7 @@ readonly ICON_DIR="${DESTDIR}/usr/share/icons/hicolor/scalable/apps"
 readonly DOC_DIR="${DESTDIR}/usr/share/doc/${PACKAGE_NAME}"
 
 for required_file in download-video.sh download-video-gui.sh progress-monitor.sh runtime-manager.sh \
-    packaging/package-user-cleanup.sh \
+    private-aria2-plan.py packaging/package-user-cleanup.sh \
     README.md README.fr.md CHANGELOG.md packaging/yt-dlp-aria2-downloader.desktop \
     packaging/icons/yt-dlp-aria2-downloader.svg packaging/keys/yt-dlp-public.key; do
     [[ -f ${PROJECT_DIR}/${required_file} ]] || {
@@ -51,6 +51,8 @@ install -d -m 0755 -- "${PRIVATE_TARGET}" "${BIN_DIR}" "${APPLICATIONS_DIR}" "${
 install -m 0755 -- "${PROJECT_DIR}/download-video.sh" "${PROJECT_DIR}/download-video-gui.sh" \
     "${PROJECT_DIR}/progress-monitor.sh" "${PROJECT_DIR}/runtime-manager.sh" \
     "${PROJECT_DIR}/packaging/package-user-cleanup.sh" "${PRIVATE_TARGET}/"
+install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
+    "${PRIVATE_TARGET}/private-aria2-plan.py"
 install -d -m 0755 -- "${PRIVATE_TARGET}/keys"
 install -m 0644 -- "${PROJECT_DIR}/packaging/keys/yt-dlp-public.key" \
     "${PRIVATE_TARGET}/keys/yt-dlp-public.key"

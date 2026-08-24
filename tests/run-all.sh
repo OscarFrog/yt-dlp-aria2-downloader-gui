@@ -84,6 +84,9 @@ bash -- ./tests/runtime-manager-hardening-integration.sh
 printf '\n=== Mock integration ===\n'
 bash -- ./tests/mock-integration.sh
 
+printf '\n=== Private aria2 plan integration ===\n'
+bash -- ./tests/private-aria2-plan-integration.sh
+
 printf '\n=== Progress monitor integration ===\n'
 bash -- ./tests/progress-monitor-integration.sh
 

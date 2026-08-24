@@ -100,7 +100,7 @@ Priority: optional
 Architecture: all
 Maintainer: OscarFrog <151366285+OscarFrog@users.noreply.github.com>
 Installed-Size: ${installed_size}
-Depends: bash (>= 4.4), coreutils, curl, findutils, grep, sed, util-linux, aria2 (>= 1.37.0), ffmpeg, gnupg, unzip, zenity, hicolor-icon-theme
+Depends: bash (>= 4.4), coreutils, curl, findutils, grep, sed, util-linux, aria2 (>= 1.37.0), python3 (>= 3.10), ffmpeg, gnupg, unzip, zenity, hicolor-icon-theme
 Suggests: firefox | firefox-esr
 Homepage: https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui
 Description: Zenity interface and Bash engine for yt-dlp and aria2

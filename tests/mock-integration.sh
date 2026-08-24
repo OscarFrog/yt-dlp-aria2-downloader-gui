@@ -14,7 +14,7 @@ readonly PROJECT_DIR
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 for required_command in \
     awk bash cat chmod date dirname env grep ln mkdir mktemp mv readlink \
-    realpath rm setsid sleep stat timeout touch tr flock sha256sum wc; do
+    realpath rm setsid sleep stat timeout touch tr flock sha256sum wc python3; do
     require_test_command "${required_command}"
 done
 [[ -r /proc/self/cmdline ]] \
@@ -67,6 +67,12 @@ if (($# == 1)) && [[ $1 == '--help' ]]; then
         '-O, --print [WHEN:]TEMPLATE' \
         '--progress-template' \
         '--print-to-file' \
+        '--cookies FILE' \
+        '--dump-single-json' \
+        '--load-info-json FILE' \
+        '--no-clean-info-json' \
+        '--skip-download' \
+        '--parse-metadata [WHEN:]FROM:TO' \
         '--fixup POLICY' \
         '--downloader-args' \
         '--no-overwrites' \
@@ -81,8 +87,21 @@ if (($# == 1)) && [[ $1 == '--help' ]]; then
 fi
 
 : "${MOCK_ARG_LOG:?}"
-printf '%s\0' "$@" > "${MOCK_ARG_LOG}"
+: "${MOCK_PLAN_ARG_LOG:?}"
 
+dump_single_json=false
+for argument in "$@"; do
+    if [[ ${argument} == '--dump-single-json' ]]; then
+        dump_single_json=true
+        break
+    fi
+done
+
+if [[ ${dump_single_json} == true ]]; then
+    printf '%s\0' "$@" >"${MOCK_PLAN_ARG_LOG}"
+else
+    printf '%s\0' "$@" >"${MOCK_ARG_LOG}"
+fi
 
 batch_file=''
 batch_previous=''
@@ -100,6 +119,53 @@ if [[ -n ${batch_file} && -n ${MOCK_URL_SEEN_LOG:-} ]]; then
     batch_url=''
     IFS= read -r batch_url <"${batch_file}"
     printf '%s\n' "${batch_url}" >"${MOCK_URL_SEEN_LOG}"
+fi
+
+plan_youtube_hls=false
+
+for argument in "$@"; do
+    case ${argument} in
+        --dump-single-json)
+            dump_single_json=true
+            ;;
+        --cookies-from-browser)
+            plan_youtube_hls=true
+            ;;
+        *)
+            ;;
+    esac
+done
+
+if [[ ${dump_single_json} == true ]]; then
+    if [[ ${MOCK_PLAN_EXIT_STATUS:-0} != 0 ]]; then
+        printf 'Simulated yt-dlp planning failure.\n' >&2
+        exit "${MOCK_PLAN_EXIT_STATUS}"
+    fi
+
+    if [[ ${plan_youtube_hls} == true ]]; then
+        plan_filename="${MOCK_OUTPUT_DIR}/Mock media [abc123].mp4"
+        plan_protocol='m3u8_native'
+        plan_url='https://example.invalid/mock-manifest.m3u8'
+        plan_ext='mp4'
+    else
+        plan_filename="${MOCK_OUTPUT_DIR}/Mock media [abc123].webm"
+        plan_protocol='http'
+        plan_url='https://example.invalid/mock-media.webm'
+        plan_ext='webm'
+    fi
+
+    if [[ -n ${MOCK_PLAN_PROTOCOL:-} ]]; then
+        plan_protocol=${MOCK_PLAN_PROTOCOL}
+    fi
+
+    printf \
+        '{"requested_downloads":[{"filename":"%s","format_id":"mock","ext":"%s","protocol":"%s","url":"%s","http_headers":{"User-Agent":"mock-agent"}}]}\n' \
+        "${plan_filename}" \
+        "${plan_ext}" \
+        "${plan_protocol}" \
+        "${plan_url}"
+
+    exit 0
 fi
 
 wait_for_marker() {
@@ -131,11 +197,13 @@ result_file=''
 youtube_hls_mode=false
 no_overwrites=false
 no_post_overwrites=false
+load_info_json=false
 previous=''
 for argument in "$@"; do
     case ${argument} in
     --no-overwrites) no_overwrites=true ;;
     --no-post-overwrites) no_post_overwrites=true ;;
+    --load-info-json) load_info_json=true ;;
     *) ;;
     esac
     if [[ ${argument} == '--cookies-from-browser' ]]; then
@@ -155,15 +223,18 @@ for argument in "$@"; do
     fi
 done
 
-if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
-    printf '\r[#a1b2c3 4.0MiB/0B CN:8 DL:1.00MiB]\r'
-elif [[ ${MOCK_ARIA_ONLY:-0} == 1 ]]; then
-    printf '\r[#a1b2c3 4.0MiB/10.0MiB(40%%) CN:8 DL:1.00MiB ETA:6s]\r'
-else
-    printf 'YTDLP_PROGRESS|downloading| 12.5%%|1.00MiB/s|00:07\n'
-fi
-if [[ -n ${progress_ready_marker} ]]; then
-    wait_for_marker "${progress_ready_marker}" 'initial progress'
+if [[ ${load_info_json} != true ]]; then
+    if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
+        printf '\r[#a1b2c3 4.0MiB/0B CN:8 DL:1.00MiB]\r'
+    elif [[ ${MOCK_ARIA_ONLY:-0} == 1 ]]; then
+        printf '\r[#a1b2c3 4.0MiB/10.0MiB(40%%) CN:8 DL:1.00MiB ETA:6s]\r'
+    else
+        printf 'YTDLP_PROGRESS|downloading| 12.5%%|1.00MiB/s|00:07\n'
+    fi
+
+    if [[ -n ${progress_ready_marker} ]]; then
+        wait_for_marker "${progress_ready_marker}" 'initial progress'
+    fi
 fi
 
 if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
@@ -177,16 +248,20 @@ if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
     done
 fi
 
-if [[ -z ${progress_ready_marker} ]]; then
-    sleep 0.8
+if [[ ${load_info_json} != true ]]; then
+    if [[ -z ${progress_ready_marker} ]]; then
+        sleep 0.8
+    fi
+
+    if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
+        printf '\r[#a1b2c3 10.0MiB/0B CN:1 DL:2.00MiB]\r'
+    elif [[ ${MOCK_ARIA_ONLY:-0} == 1 ]]; then
+        printf '\r[#a1b2c3 10.0MiB/10.0MiB(100%%) CN:1 DL:2.00MiB ETA:0s]\r'
+    else
+        printf 'YTDLP_PROGRESS|downloading|100.0%%|2.00MiB/s|00:00\n'
+    fi
 fi
-if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
-    printf '\r[#a1b2c3 10.0MiB/0B CN:1 DL:2.00MiB]\r'
-elif [[ ${MOCK_ARIA_ONLY:-0} == 1 ]]; then
-    printf '\r[#a1b2c3 10.0MiB/10.0MiB(100%%) CN:1 DL:2.00MiB ETA:0s]\r'
-else
-    printf 'YTDLP_PROGRESS|downloading|100.0%%|2.00MiB/s|00:00\n'
-fi
+
 printf 'YTDLP_POSTPROCESS|processing|FFmpegExtractAudio\n'
 if [[ -n ${postprocess_ready_marker} ]]; then
     wait_for_marker "${postprocess_ready_marker}" 'post-processing progress'
@@ -227,7 +302,13 @@ if [[ ${MOCK_ENFORCE_NO_OVERWRITE:-0} == 1 && -e ${output_path} ]]; then
     printf 'Simulated refusal to overwrite an existing final media file.\n' >&2
     exit 1
 fi
-if [[ ${MOCK_RESULT_TARGET_MISSING:-0} != 1 ]]; then
+if [[ ${MOCK_RESULT_TARGET_MISSING:-0} == 1 ]]; then
+    # With the private aria2 pipeline, the direct-transfer component has
+    # already been committed before yt-dlp POST starts. Remove it explicitly
+    # to simulate a result path whose target disappeared before final
+    # validation.
+    rm -f -- "${output_path}"
+else
     printf '%s\n' 'mock media payload' >"${output_path}"
 fi
 if [[ -n ${result_file} && ${MOCK_SKIP_RESULT_FILE:-0} != 1 ]]; then
@@ -252,7 +333,12 @@ case ${1:-} in
     [[ ${LC_ALL:-} == C ]] || { printf 'ayuda aria2 localizada\n'; exit 65; }
     printf '%s\n' \
         '--file-allocation=<METHOD>' \
-        '--no-conf[=true|false]'
+        '--no-conf[=true|false]' \
+        '-i, --input-file=FILE' \
+        '-d, --dir=DIR' \
+        '--load-cookies=FILE' \
+        '--allow-overwrite[=true|false]' \
+        '--auto-file-renaming[=true|false]'
     if [[ ${MOCK_ARIA2_NO_NETRC_UNAVAILABLE:-0} != 1 ]]; then
         printf '%s\n' '-n, --no-netrc[=true|false]'
     fi
@@ -268,8 +354,93 @@ case ${1:-} in
     fi
     ;;
 *)
-    printf 'Unexpected aria2c mock invocation: %q\n' "$*" >&2
-    exit 64
+    : "${MOCK_ARIA2_ARG_LOG:?}"
+    printf '%s\0' "$@" >"${MOCK_ARIA2_ARG_LOG}"
+
+    input_file=''
+    download_dir=''
+
+    for argument in "$@"; do
+        case ${argument} in
+            --input-file=*)
+                input_file=${argument#*=}
+                ;;
+            --dir=*)
+                download_dir=${argument#*=}
+                ;;
+            *)
+                ;;
+        esac
+    done
+
+    if [[ -z ${input_file} || -z ${download_dir} ]]; then
+        printf 'Unexpected aria2c mock invocation: %q\n' "$*" >&2
+        exit 64
+    fi
+
+    if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
+        printf '\r[#a1b2c3 4.0MiB/0B CN:8 DL:1.00MiB]\r'
+    else
+        printf '\r[#a1b2c3 4.0MiB/10.0MiB(40%%) CN:8 DL:1.00MiB ETA:6s]\r'
+    fi
+
+    # Keep the intermediate aria2 state observable until the GUI progress
+    # monitor has consumed it. Restrict this synchronization to scenarios
+    # explicitly exercising aria2 progress so native/yt-dlp progress tests
+    # cannot deadlock here.
+    if [[ -n ${MOCK_PROGRESS_CAPTURE:-} &&
+        (${MOCK_ARIA_ONLY:-0} == 1 || ${MOCK_ARIA_NO_PERCENT:-0} == 1) ]]; then
+        progress_ready_marker="${MOCK_PROGRESS_CAPTURE}.progress-ready"
+        progress_seen=false
+
+        for ((attempt = 0; attempt < 100; attempt++)); do
+            if [[ -f ${progress_ready_marker} ]]; then
+                progress_seen=true
+                break
+            fi
+            sleep 0.1
+        done
+
+        if [[ ${progress_seen} != true ]]; then
+            printf 'Timed out waiting for aria2 progress marker: %s\n' \
+                "${progress_ready_marker}" >&2
+            exit 66
+        fi
+    fi
+
+    if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
+        trap \
+            'printf terminated >"${MOCK_TERMINATION_MARKER:?}"; exit 143' \
+            TERM INT
+
+        sleep "${MOCK_WORKER_START_JITTER_SECONDS:-0}"
+
+        if [[ -n ${MOCK_STARTED_MARKER:-} ]]; then
+            printf started >"${MOCK_STARTED_MARKER}"
+        fi
+
+        while true; do
+            sleep 0.1
+        done
+    fi
+
+    while IFS= read -r input_line || [[ -n ${input_line} ]]; do
+        case ${input_line} in
+            '  out='*)
+                output_name=${input_line#'  out='}
+                printf '%s\n' 'mock aria2 media payload' \
+                    >"${download_dir}/${output_name}"
+                ;;
+            *)
+                ;;
+        esac
+    done <"${input_file}"
+
+    if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
+        printf '\r[#a1b2c3 10.0MiB/0B CN:1 DL:2.00MiB]\r'
+    else
+        printf '\r[#a1b2c3 10.0MiB/10.0MiB(100%%) CN:1 DL:2.00MiB ETA:0s]\r'
+    fi
     ;;
 esac
 EOF_ARIA2
@@ -562,9 +733,13 @@ prepare_argument_log() {
     # exactly which test was running.
     printf 'Mock scenario: %s\n' "${scenario}"
 
-    MOCK_ARG_LOG="${TEST_ROOT}/yt-dlp-args-${scenario}.bin"
-    export MOCK_ARG_LOG
+    MOCK_ARG_LOG="${TEST_ROOT}/yt-dlp-post-args-${scenario}.bin"
+    MOCK_PLAN_ARG_LOG="${TEST_ROOT}/yt-dlp-plan-args-${scenario}.bin"
+    MOCK_ARIA2_ARG_LOG="${TEST_ROOT}/aria2-args-${scenario}.bin"
+    export MOCK_ARG_LOG MOCK_PLAN_ARG_LOG MOCK_ARIA2_ARG_LOG
     : >"${MOCK_ARG_LOG}"
+    : >"${MOCK_PLAN_ARG_LOG}"
+    : >"${MOCK_ARIA2_ARG_LOG}"
 }
 
 read_arguments() {
@@ -588,6 +763,20 @@ assert_array_contains() {
         [[ ${value} == "${expected}" ]] && return 0
     done
     fail "${label}: missing array element: ${expected}"
+}
+
+assert_array_contains_prefix() {
+    local array_name=$1
+    local expected_prefix=$2
+    local label=$3
+    local -n array_ref=${array_name}
+    local value
+
+    for value in "${array_ref[@]}"; do
+        [[ ${value} == "${expected_prefix}"* ]] && return 0
+    done
+
+    fail "${label}: missing array element with prefix: ${expected_prefix}"
 }
 
 assert_array_not_contains() {
@@ -843,6 +1032,12 @@ main() {
     [[ -f ${symlink_target} ]] \
         || fail 'Log cleanup removed the target of a symbolic link.'
 
+    # The log-retention scenario exercises GUI/log lifecycle only. Remove its
+    # successful media artifact before subsequent engine scenarios reuse the
+    # shared output directory. The private aria2 commit path intentionally
+    # refuses to overwrite an existing destination.
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
     # Scenario: audio mode covers quoting, locale stabilization, option/value pairing,
     # and result-path reporting.
     prepare_argument_log 'audio-engine'
@@ -876,18 +1071,42 @@ main() {
     assert_array_contains arguments '--no-playlist' 'yt-dlp disables playlists'
     assert_array_contains arguments '--no-overwrites' 'yt-dlp final-file overwrite protection'
     assert_array_contains arguments '--no-post-overwrites' 'yt-dlp post-processing overwrite protection'
+    assert_option_value arguments '--parse-metadata' ':(?P<meta_purl>)' \
+        'embedded purl URL metadata is cleared' 1
+    assert_option_value arguments '--parse-metadata' ':(?P<meta_comment>)' \
+        'embedded comment URL metadata is cleared' 2
     assert_array_not_contains arguments '--supervised-session' 'internal session option isolation'
     assert_array_not_contains arguments '--remote-components' 'generic extraction avoids remote EJS'
     assert_option_value arguments '--format' 'ba/b' 'audio format selector'
     assert_array_contains arguments '--extract-audio' 'audio extraction postprocessor'
     assert_option_value arguments '--audio-format' 'best' 'audio output format'
     assert_option_value arguments '--audio-quality' '0' 'fallback conversion quality'
-    assert_option_value arguments '--downloader' 'aria2c' 'default external downloader' 1
     assert_option_value arguments '--downloader' 'dash,m3u8:native' \
-        'fragmented-stream native downloader' 2
-    assert_option_value arguments '--downloader-args' \
-        'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --no-netrc=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=1 --show-console-readout=true --stderr=false' \
-        'aria2 machine-progress arguments'
+        'fragmented DASH/HLS streams remain on the native yt-dlp downloader'
+    assert_array_not_contains arguments 'aria2c' \
+        'yt-dlp no longer receives aria2c as an external downloader'
+    # shellcheck disable=SC2034 # Read through nameref assertion helpers.
+    aria2_arguments=()
+    read_arguments "${MOCK_ARIA2_ARG_LOG}" aria2_arguments
+
+    assert_array_contains_prefix aria2_arguments '--input-file=' \
+        'private aria2 input-file argument'
+    assert_array_contains_prefix aria2_arguments '--dir=' \
+        'private aria2 staging directory argument'
+    assert_array_contains_prefix aria2_arguments '--load-cookies=' \
+        'private aria2 cookie-file argument'
+    assert_array_contains aria2_arguments '--summary-interval=1' \
+        'machine-progress aria2 summary interval'
+    assert_array_contains aria2_arguments '--show-console-readout=true' \
+        'machine-progress aria2 console readout'
+    assert_array_contains aria2_arguments '--stderr=false' \
+        'machine-progress aria2 progress remains on stdout'
+
+    aria2_arguments_text=$(printf '%s\n' "${aria2_arguments[@]}")
+    assert_text_not_contains "${aria2_arguments_text}" 'http://' \
+        'aria2 argv contains no HTTP URL'
+    assert_text_not_contains "${aria2_arguments_text}" 'https://' \
+        'aria2 argv contains no HTTPS URL'
     assert_array_not_contains arguments '--machine-progress' \
         'internal wrapper option isolation'
     for forbidden_audio_format in mp3 m4a opus; do
@@ -896,7 +1115,21 @@ main() {
     done
     assert_array_not_contains arguments "${malicious_url}" \
         'private URL is absent from yt-dlp arguments'
-    assert_array_contains arguments '--batch-file' 'yt-dlp receives a private URL batch file'
+    # shellcheck disable=SC2034 # Read through nameref assertion helpers.
+    plan_arguments=()
+    read_arguments "${MOCK_PLAN_ARG_LOG}" plan_arguments
+
+    assert_array_contains plan_arguments '--batch-file' \
+        'yt-dlp PLAN receives a private URL batch file'
+    assert_array_contains plan_arguments '--dump-single-json' \
+        'yt-dlp PLAN emits the private transfer plan'
+    assert_array_contains plan_arguments '--skip-download' \
+        'yt-dlp PLAN performs extraction without downloading'
+
+    assert_array_not_contains arguments '--batch-file' \
+        'yt-dlp POST no longer receives the source URL batch file'
+    assert_array_contains arguments '--load-info-json' \
+        'yt-dlp POST resumes from the private info JSON'
     assert_file_has_line "${url_seen_log}" "${malicious_url}" \
         'private URL batch file preserves the exact URL'
     expected_output_template="${OUTPUT_DIR//%/%%}/%(title).160B [%(id).64B].%(ext)s"
@@ -906,6 +1139,11 @@ main() {
 
     # Audio-mode final validation must reject a real content-video stream even
     # when the audio stream remains present.
+    # The preceding successful audio-engine scenario leaves its media
+    # artifact in the shared mock output directory. The next scenario must
+    # start from a clean destination so it can reach FFprobe validation.
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
     prepare_argument_log 'audio-content-video-validation'
     content_video_result="${TEST_ROOT}/audio-content-video-result.txt"
     rm -f -- "${content_video_result}"
@@ -933,8 +1171,15 @@ main() {
     # shellcheck disable=SC2034 # Read indirectly through nameref assertion helpers.
     aria_without_netrc_arguments=()
     read_arguments "${MOCK_ARG_LOG}" aria_without_netrc_arguments
-    assert_option_value aria_without_netrc_arguments '--downloader-args' \
-        'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=1 --show-console-readout=true --stderr=false' \
+    # shellcheck disable=SC2034 # Read through nameref assertion helpers.
+    aria_without_netrc_direct_arguments=()
+    read_arguments \
+        "${MOCK_ARIA2_ARG_LOG}" \
+        aria_without_netrc_direct_arguments
+
+    assert_array_not_contains \
+        aria_without_netrc_direct_arguments \
+        '--no-netrc=true' \
         'aria2 arguments omit unsupported optional netrc capability'
 
     runtime_lock_dir="${XDG_RUNTIME_DIR}/yt-dlp-aria2-downloader"
@@ -953,6 +1198,12 @@ main() {
         runtime_lock_mode=$(stat -c '%a' -- "${runtime_lock_file}")
         assert_equals '600' "${runtime_lock_mode}" 'destination lock-file permissions'
     done
+
+    # The preceding successful direct-transfer scenario leaves its
+    # media artifact in the shared mock output directory. Remove only that
+    # completed artifact so result-path-normalization can exercise its own
+    # result-file semantics without weakening the no-overwrite policy.
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     prepare_argument_log 'result-path-normalization'
     normalized_result_file="${TEST_ROOT}/normalized-result.txt"
@@ -994,6 +1245,12 @@ main() {
         'duplicate URL after -- diagnostic'
 
     # Scenario: video mode.
+    # The preceding successful direct-transfer scenario leaves the
+    # shared mock media artifact behind. Remove only that completed artifact
+    # so video-engine starts with a clean destination and can exercise the
+    # video-specific pipeline.
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
     prepare_argument_log 'video-engine'
     assert_status 0 'video engine invocation' \
         "${PROJECT_DIR}/download-video.sh" \
@@ -1004,11 +1261,23 @@ main() {
     assert_option_value arguments '--format' 'bv*+ba/b' 'video format selector'
     assert_option_value arguments '--merge-output-format' 'mkv' 'video merge container'
     assert_option_value arguments '--remux-video' 'mkv' 'video remux container'
-    assert_option_value arguments '--downloader-args' \
-        'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --no-netrc=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=0' \
-        'ordinary CLI aria2 arguments'
+    # shellcheck disable=SC2034 # Read through nameref assertion helpers.
+    video_aria2_arguments=()
+    read_arguments "${MOCK_ARIA2_ARG_LOG}" video_aria2_arguments
+
+    assert_array_contains video_aria2_arguments '--summary-interval=0' \
+        'ordinary CLI aria2 summary interval'
+    assert_array_not_contains video_aria2_arguments \
+        '--show-console-readout=true' \
+        'ordinary CLI aria2 console progress remains disabled'
     assert_text_not_contains "$(printf '%s\n' "${arguments[@]}")" \
         '--show-console-readout=true' 'machine progress disabled in ordinary CLI mode'
+
+    # video-engine succeeds immediately before this validation scenario
+    # and leaves its committed direct-transfer artifact in the shared mock
+    # output directory. Remove only that completed artifact so the next run
+    # can reach its intended FFprobe missing-audio validation.
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     prepare_argument_log 'video-missing-audio-validation'
     assert_status 65 'complete-video mode rejects a result without audio' \
@@ -1031,8 +1300,11 @@ main() {
     assert_file_has_line "${existing_audio_path}" 'preserve existing audio result' \
         'existing final media is preserved'
     assert_text_contains "${ASSERT_OUTPUT}" \
-        'Simulated refusal to overwrite an existing final media file.' \
-        'existing media collision diagnostic'
+        'destination already exists: Mock media [abc123].webm' \
+        'existing media collision helper diagnostic'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'final media destination already exists; refusing to overwrite it.' \
+        'existing media collision engine diagnostic'
     rm -f -- "${existing_audio_path}"
 
     # Scenario: authenticated YouTube HLS profile.
@@ -1060,7 +1332,7 @@ main() {
     assert_option_value youtube_hls_arguments '--fixup' 'force' \
         'YouTube HLS MPEG-TS fixup policy'
     assert_option_value youtube_hls_arguments '--downloader' 'dash,m3u8:native' \
-        'YouTube HLS native downloader' 2
+        'YouTube HLS native downloader'
     assert_array_not_contains youtube_hls_arguments '--remux-video' \
         'yt-dlp remux is deferred until after HLS fixup'
     assert_array_not_contains youtube_hls_arguments '--merge-output-format' \
@@ -1195,7 +1467,9 @@ main() {
     atomic_result_file="${TEST_ROOT}/atomic-result.txt"
     prepare_argument_log 'atomic-result-failure'
     assert_status 7 'failed engine run does not publish a result path' \
-        env MOCK_YTDLP_EXIT_STATUS=7 MOCK_WRITE_RESULT_BEFORE_FAILURE=1 \
+        env MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_YTDLP_EXIT_STATUS=7 \
+        MOCK_WRITE_RESULT_BEFORE_FAILURE=1 \
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${OUTPUT_DIR}" \
         --result-file "${atomic_result_file}" \
@@ -1250,15 +1524,31 @@ main() {
     # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
     gui_arguments=()
     read_arguments "${MOCK_ARG_LOG}" gui_arguments
-    assert_option_value gui_arguments '--downloader-args' \
-        'aria2c:-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true --no-netrc=true --console-log-level=warn --enable-color=false --truncate-console-readout=false --summary-interval=1 --show-console-readout=true --stderr=false' \
+    # shellcheck disable=SC2034 # Read through nameref assertion helpers.
+    gui_aria2_arguments=()
+    read_arguments "${MOCK_ARIA2_ARG_LOG}" gui_aria2_arguments
+
+    assert_array_contains_prefix gui_aria2_arguments '--input-file=' \
+        'GUI private aria2 input-file argument'
+    assert_array_contains gui_aria2_arguments '--summary-interval=1' \
+        'GUI aria2 summary interval'
+    assert_array_contains gui_aria2_arguments '--show-console-readout=true' \
         'machine-progress aria2 readout remains visible on stdout'
+    assert_array_contains gui_aria2_arguments '--stderr=false' \
+        'GUI aria2 progress remains on stdout'
+
+    gui_aria2_arguments_text=$(printf '%s\n' "${gui_aria2_arguments[@]}")
+    assert_text_not_contains "${gui_aria2_arguments_text}" 'http://' \
+        'GUI aria2 argv contains no HTTP URL'
+    assert_text_not_contains "${gui_aria2_arguments_text}" 'https://' \
+        'GUI aria2 argv contains no HTTPS URL'
     assert_array_not_contains gui_arguments "${trimmed_gui_url}" \
         'trimmed GUI URL is absent from process arguments'
     assert_file_has_line "${gui_url_seen_log}" "${trimmed_gui_url}" \
         'trimmed GUI URL is transferred through the private batch file'
     assert_array_not_contains gui_arguments "  ${trimmed_gui_url}  " \
         'untrimmed GUI URL is absent'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     prepare_argument_log 'gui-aria-unknown-size'
     aria_unknown_capture="${TEST_ROOT}/gui-progress-aria-unknown.txt"
@@ -1268,6 +1558,7 @@ main() {
     assert_file_contains "${aria_unknown_capture}" \
         '# Downloading the audio track - size unknown (aria2c) - 1.00MiB' \
         'aria2 progress without a known total size'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
     list_arguments=()
@@ -1285,13 +1576,15 @@ main() {
     done
 
     prepare_argument_log 'gui-ytdlp-progress'
-    MOCK_PROGRESS_CAPTURE="${YTDLP_PROGRESS_CAPTURE}" \
+    MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_PROGRESS_CAPTURE="${YTDLP_PROGRESS_CAPTURE}" \
         "${PROJECT_DIR}/download-video-gui.sh"
     assert_file_has_line "${YTDLP_PROGRESS_CAPTURE}" '15' \
         'yt-dlp progress maps into the global download phase'
     assert_file_contains "${YTDLP_PROGRESS_CAPTURE}" \
         '# Downloading the audio track - 12% - 1.00MiB/s - 00:07 remaining' \
         'yt-dlp progress message'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     prepare_argument_log 'gui-video'
     MOCK_PROFILE='Complete video (MKV)' \
@@ -1303,6 +1596,7 @@ main() {
         'GUI video format selection'
     assert_array_not_contains video_gui_arguments 'ba/b' \
         'GUI video run does not use audio-only selector'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     prepare_argument_log 'gui-youtube-hls'
     MOCK_PROFILE='YouTube video - Firefox cookies (HLS/MKV)' \
@@ -1371,6 +1665,7 @@ main() {
 output_dir=${OUTPUT_DIR}
 profile=audio-mp3
 EOF_OLD_CONFIG
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     prepare_argument_log 'legacy-profile'
     MOCK_USE_DEFAULT_PROFILE=1 "${PROJECT_DIR}/download-video-gui.sh"
     assert_file_has_line "${config_file}" 'profile=audio' 'legacy profile migration'
@@ -1380,12 +1675,14 @@ malformed line
 unknown=value
 profile=invalid
 EOF_BAD_CONFIG
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     prepare_argument_log 'malformed-config'
     MOCK_USE_DEFAULT_PROFILE=1 "${PROJECT_DIR}/download-video-gui.sh"
     assert_file_has_line "${config_file}" 'profile=video' \
         'malformed configuration falls back to video'
 
     printf 'output_dir=%s\nprofile=audio' "${OUTPUT_DIR}" >"${config_file}"
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     prepare_argument_log 'config-without-final-newline'
     MOCK_USE_DEFAULT_PROFILE=1 "${PROJECT_DIR}/download-video-gui.sh"
     assert_file_has_line "${config_file}" 'profile=audio' \
@@ -1393,6 +1690,7 @@ EOF_BAD_CONFIG
 
     printf 'output_dir=%s\r\nprofile=audio\r\n' \
         "${OUTPUT_DIR}" >"${config_file}"
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     prepare_argument_log 'config-crlf'
     MOCK_USE_DEFAULT_PROFILE=1 "${PROJECT_DIR}/download-video-gui.sh"
     assert_file_has_line "${config_file}" 'profile=audio' \
@@ -1402,6 +1700,7 @@ EOF_BAD_CONFIG
     relative_config_dir="${PROJECT_DIR}/relative-config-home"
     relative_state_dir="${PROJECT_DIR}/relative-state-home"
     rm -rf -- "${relative_config_dir}" "${relative_state_dir}"
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     prepare_argument_log 'relative-xdg-home-fallback'
     env XDG_CONFIG_HOME='relative-config-home' \
         XDG_STATE_HOME='relative-state-home' \
@@ -1417,6 +1716,7 @@ EOF_BAD_CONFIG
     # Scenario: file chooser fallback after a GTK/Zenity initial-directory failure.
     file_selection_args_log="${TEST_ROOT}/file-selection-args.bin"
     : >"${file_selection_args_log}"
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     prepare_argument_log 'file-selection-fallback'
     MOCK_ZENITY_FILE_STATUS_WITH_FILENAME=255 \
         MOCK_ZENITY_FILE_ERROR='simulated initial-folder failure' \
@@ -1443,6 +1743,7 @@ EOF_BAD_CONFIG
     assert_equals '1' "${filename_attempts}" 'preselected file chooser attempt count'
 
     # Scenario group: diagnostic log retention and cleanup.
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     logs_before=$(count_logs)
     prepare_argument_log 'inconsistent-result'
     assert_status 1 'missing final path is reported as a failed GUI run' \
@@ -1463,6 +1764,7 @@ EOF_BAD_CONFIG
     done
     [[ ${log_record_found} == true ]] \
         || fail 'No retained inconsistent-run log contains the post-processing record.'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     outside_result_path="${TEST_ROOT}/outside-result.webm"
     logs_before=$(count_logs)
@@ -1477,11 +1779,14 @@ EOF_BAD_CONFIG
     [[ -f ${outside_result_path} ]] \
         || fail 'The outside-directory mock result was not created.'
     rm -f -- "${outside_result_path}"
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     logs_before=$(count_logs)
     prepare_argument_log 'failed-download'
     assert_status 7 'failed GUI download status is propagated' \
-        env MOCK_YTDLP_EXIT_STATUS=7 "${PROJECT_DIR}/download-video-gui.sh"
+        env MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_YTDLP_EXIT_STATUS=7 \
+        "${PROJECT_DIR}/download-video-gui.sh"
     logs_after=$(count_logs)
     assert_equals "$((logs_before + 1))" "${logs_after}" \
         'a failed download retains one new log'
@@ -1518,7 +1823,8 @@ EOF_BAD_CONFIG
     cli_termination_marker="${TEST_ROOT}/cli-worker-terminated"
     cli_signal_log="${TEST_ROOT}/cli-signal.log"
     prepare_argument_log 'cli-signal-forwarding'
-    env MOCK_LONG_DOWNLOAD=1 \
+    env MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_LONG_DOWNLOAD=1 \
         MOCK_STARTED_MARKER="${cli_started_marker}" \
         MOCK_TERMINATION_MARKER="${cli_termination_marker}" \
         "${PROJECT_DIR}/download-video.sh" \
@@ -1566,13 +1872,15 @@ EOF_BAD_CONFIG
     single_session_calls=$(wc -l <"${single_session_log}")
     assert_equals '1' "${single_session_calls}" \
         'one setsid invocation per GUI download'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     # Scenario: user cancellation terminates the complete process group.
     termination_marker="${TEST_ROOT}/terminated"
     prepare_argument_log 'cancel-process-group'
     assert_status_split 130 'cancellation terminates the process group' \
         timeout --signal=TERM --kill-after=2s 15s \
-        env MOCK_LONG_DOWNLOAD=1 MOCK_CANCEL=1 \
+        env MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_LONG_DOWNLOAD=1 MOCK_CANCEL=1 \
         MOCK_TERMINATION_MARKER="${termination_marker}" \
         "${PROJECT_DIR}/download-video-gui.sh"
     wait_for_file "${termination_marker}" 10 'worker group receives TERM'
@@ -1638,6 +1946,7 @@ EOF_BAD_CONFIG
         '2026.06.09.20260727' \
         '2026.06.09-1.fc44' \
         '2026.06.09+custom'; do
+        rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
         prepare_argument_log "version-${compatible_ytdlp_version//[^[:alnum:]]/_}"
         assert_status 0 "compatible yt-dlp version ${compatible_ytdlp_version}" \
             env MOCK_YTDLP_VERSION="${compatible_ytdlp_version}" \
@@ -1645,6 +1954,7 @@ EOF_BAD_CONFIG
             --output-dir "${OUTPUT_DIR}" \
             -- 'https://example.com/watch?v=version-suffix'
     done
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     assert_status 1 'unparseable yt-dlp version is rejected clearly' \
         env MOCK_YTDLP_VERSION=not-a-version \
@@ -1655,7 +1965,8 @@ EOF_BAD_CONFIG
 
     prepare_argument_log 'immediate-worker-failure'
     assert_status 23 'an immediate yt-dlp failure preserves its real status' \
-        env MOCK_YTDLP_EXIT_STATUS=23 \
+        env MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_YTDLP_EXIT_STATUS=23 \
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${OUTPUT_DIR}" --mode audio \
         -- 'https://example.com/watch?v=immediate-worker-failure'
@@ -1676,6 +1987,7 @@ EOF_BAD_CONFIG
     assert_text_contains "${ASSERT_OUTPUT}" \
         'final media file failed FFprobe validation' \
         'FFprobe failure diagnostic'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     assert_status 1 'old yt-dlp version is rejected' \
         env MOCK_YTDLP_VERSION=2026.06.08 \
@@ -1703,6 +2015,7 @@ EOF_BAD_CONFIG
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${OUTPUT_DIR}" \
         -- 'https://example.com/watch?v=no-deno-generic'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     assert_status 1 'YouTube extraction requires Deno' \
         env MOCK_DENO_UNAVAILABLE=1 \
         "${PROJECT_DIR}/download-video.sh" \
@@ -1737,7 +2050,8 @@ EOF_BAD_CONFIG
     progress_timeout_errors="${TEST_ROOT}/progress-timeout-errors.txt"
     prepare_argument_log 'progress-timeout'
     assert_status 1 'progress dialog timeout is propagated' \
-        env MOCK_LONG_DOWNLOAD=1 MOCK_ZENITY_PROGRESS_STATUS=5 \
+        env MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_LONG_DOWNLOAD=1 MOCK_ZENITY_PROGRESS_STATUS=5 \
         MOCK_ZENITY_WAIT_FOR_WORKER_START=1 \
         MOCK_STARTED_MARKER="${progress_timeout_started}" \
         MOCK_TERMINATION_MARKER="${progress_timeout_marker}" \
@@ -1755,7 +2069,8 @@ EOF_BAD_CONFIG
     progress_error_capture="${TEST_ROOT}/progress-error-errors.txt"
     prepare_argument_log 'progress-error'
     assert_status 1 'unexpected progress dialog status is reported' \
-        env MOCK_LONG_DOWNLOAD=1 MOCK_ZENITY_PROGRESS_STATUS=42 \
+        env MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_LONG_DOWNLOAD=1 MOCK_ZENITY_PROGRESS_STATUS=42 \
         MOCK_ZENITY_WAIT_FOR_WORKER_START=1 \
         MOCK_STARTED_MARKER="${progress_error_started}" \
         MOCK_TERMINATION_MARKER="${progress_error_marker}" \

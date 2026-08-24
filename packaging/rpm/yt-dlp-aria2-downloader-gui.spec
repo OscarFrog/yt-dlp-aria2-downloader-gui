@@ -17,6 +17,7 @@ Requires:       grep
 Requires:       sed
 Requires:       util-linux
 Requires:       aria2 >= 1.37.0
+Requires:       python3 >= 3.10
 Requires:       ffmpeg
 Requires:       curl
 Requires:       gnupg2
@@ -58,6 +59,7 @@ fi
 %{_libexecdir}/yt-dlp-aria2-downloader/download-video.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/download-video-gui.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/progress-monitor.sh
+%{_libexecdir}/yt-dlp-aria2-downloader/private-aria2-plan.py
 %{_libexecdir}/yt-dlp-aria2-downloader/runtime-manager.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/package-user-cleanup.sh
 %dir %{_libexecdir}/yt-dlp-aria2-downloader/keys

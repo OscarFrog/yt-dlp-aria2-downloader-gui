@@ -12,7 +12,7 @@ umask 077
 PROJECT_DIR=${PROJECT_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)}
 readonly PROJECT_DIR
 readonly BASIC_RUNS=${ARIA2_BEHAVIOR_BASIC_RUNS:-3}
-readonly RESUME_RUNS=${ARIA2_BEHAVIOR_RESUME_RUNS:-10}
+readonly CANCEL_RESTART_RUNS=${ARIA2_BEHAVIOR_CANCEL_RESTART_RUNS:-10}
 readonly QUIESCENCE_RUNS=${ARIA2_BEHAVIOR_QUIESCENCE_RUNS:-10}
 readonly MIN_COMPLETED_RANGE_BYTES=262144
 
@@ -34,9 +34,9 @@ case ${BASIC_RUNS} in
         ;;
     *) ;;
 esac
-case ${RESUME_RUNS} in
+case ${CANCEL_RESTART_RUNS} in
     '' | *[!0-9]*)
-        printf 'Error: ARIA2_BEHAVIOR_RESUME_RUNS must be a positive integer.\n' >&2
+        printf 'Error: ARIA2_BEHAVIOR_CANCEL_RESTART_RUNS must be a positive integer.\n' >&2
         exit 64
         ;;
     *) ;;
@@ -48,7 +48,7 @@ case ${QUIESCENCE_RUNS} in
         ;;
     *) ;;
 esac
-((BASIC_RUNS > 0 && RESUME_RUNS > 0 && QUIESCENCE_RUNS > 0)) || {
+((BASIC_RUNS > 0 && CANCEL_RESTART_RUNS > 0 && QUIESCENCE_RUNS > 0)) || {
     printf 'Error: aria2 behavior repetition counts must be greater than zero.\n' >&2
     exit 64
 }
@@ -113,6 +113,26 @@ assert_aria2_used() {
         printf 'FAIL: scenario did not cross the real aria2c boundary.\n' >&2
         return 65
     }
+}
+
+assert_private_aria2_invocation() {
+    grep -Fq -- '--input-file=' "${ARIA2_INVOCATION_LOG}" || {
+        printf 'FAIL: real aria2c invocation did not use --input-file.\n' >&2
+        return 65
+    }
+    grep -Fq -- '--dir=' "${ARIA2_INVOCATION_LOG}" || {
+        printf 'FAIL: real aria2c invocation did not use a private --dir.\n' >&2
+        return 65
+    }
+    grep -Fq -- '--load-cookies=' "${ARIA2_INVOCATION_LOG}" || {
+        printf 'FAIL: real aria2c invocation did not use a private cookie jar.\n' >&2
+        return 65
+    }
+
+    if grep -Eq -- 'https?://' "${ARIA2_INVOCATION_LOG}"; then
+        printf 'FAIL: an HTTP(S) URL leaked into the real aria2c argv.\n' >&2
+        return 65
+    fi
 }
 
 wait_for_completed_partial_range() {
@@ -643,10 +663,7 @@ PY_QUIESCENCE_CLIENT
         }
         assert_av_media "${RUN_FINAL_FILE}"
         assert_aria2_used
-        grep -Fq '/range/media.mp4' "${ARIA2_INVOCATION_LOG}" || {
-            printf 'FAIL: Range URL did not reach real aria2c.\n' >&2
-            exit 65
-        }
+        assert_private_aria2_invocation
         tail -n +"${start_line}" "${SERVER_LOG}" \
             | awk -F'|' '$1 == "REQ" && $2 == "/range/media.mp4" && $3 ~ /^bytes=/ { found=1 } END { exit !found }' || {
             printf 'FAIL: Range endpoint did not observe a Range request.\n' >&2
@@ -667,10 +684,7 @@ PY_QUIESCENCE_CLIENT
         }
         assert_av_media "${RUN_FINAL_FILE}"
         assert_aria2_used
-        grep -Fq '/no-range/media.mp4' "${ARIA2_INVOCATION_LOG}" || {
-            printf 'FAIL: no-Range URL did not reach real aria2c.\n' >&2
-            exit 65
-        }
+        assert_private_aria2_invocation
         tail -n +"${start_line}" "${SERVER_LOG}" \
             | awk -F'|' '$1 == "REQ" && $2 == "/no-range/media.mp4" && $4 == 200 { found=1 } END { exit !found }' || {
             printf 'FAIL: no-Range endpoint was not transferred successfully with HTTP 200.\n' >&2
@@ -691,10 +705,7 @@ PY_QUIESCENCE_CLIENT
         }
         assert_av_media "${RUN_FINAL_FILE}"
         assert_aria2_used
-        grep -Fq '/redirect/media.mp4' "${ARIA2_INVOCATION_LOG}" || {
-            printf 'FAIL: redirect URL did not reach real aria2c.\n' >&2
-            exit 65
-        }
+        assert_private_aria2_invocation
         tail -n +"${start_line}" "${SERVER_LOG}" \
             | awk -F'|' '
                 $1 == "REQ" && $2 == "/redirect/media.mp4" && $4 == 302 { redirect=1 }
@@ -718,10 +729,7 @@ PY_QUIESCENCE_CLIENT
             exit 65
         }
         assert_aria2_used
-        grep -Fq '/error/media.mp4' "${ARIA2_INVOCATION_LOG}" || {
-            printf 'FAIL: HTTP error URL did not reach real aria2c.\n' >&2
-            exit 65
-        }
+        assert_private_aria2_invocation
         tail -n +"${start_line}" "${SERVER_LOG}" \
             | grep -Fq 'REQ|/error/media.mp4|' || {
             printf 'FAIL: deterministic HTTP error endpoint was never reached.\n' >&2
@@ -729,14 +737,13 @@ PY_QUIESCENCE_CLIENT
         }
     done
 
-    # Scenario: resume only after a substantial partial 206 response, retain aria2's
-    # partial state, then prove the second run fetches fewer media bytes than a full
-    # redownload while still producing a valid file. Do not assume a split starts at
-    # byte zero; aria2 is free to schedule ranges.
-    for ((iteration = 1; iteration <= RESUME_RUNS; iteration += 1)); do
-        printf '=== aria2 resume iteration %d/%d ===\n' \
-            "${iteration}" "${RESUME_RUNS}"
-        scenario="resume-${iteration}"
+    # Scenario: cancel after a substantial partial 206 response, prove that the
+    # private aria2 state is removed, then prove a clean restart downloads the
+    # complete object without reusing stale partial state.
+    for ((iteration = 1; iteration <= CANCEL_RESTART_RUNS; iteration += 1)); do
+        printf '=== aria2 cancel-clean-restart iteration %d/%d ===\n' \
+            "${iteration}" "${CANCEL_RESTART_RUNS}"
+        scenario="cancel-restart-${iteration}"
         scenario_dir="${TEST_ROOT}/output/${scenario}"
         result_file="${TEST_ROOT}/${scenario}.result"
         quiescence_status=0
@@ -753,12 +760,18 @@ PY_QUIESCENCE_CLIENT
             exit 65
         }
         assert_aria2_used
-        find "${scenario_dir}" -maxdepth 1 -type f \
-            \( -name '*.part' -o -name '*.aria2' \) -print -quit \
-            | grep -q . || {
-            printf 'FAIL: cancellation did not retain an aria2/yt-dlp partial.\n' >&2
+        assert_private_aria2_invocation
+
+        # Privacy-first cancellation contract: the private aria2 staging area,
+        # partial payload, control file, input file, manifest, and cookie jar
+        # must not survive an ordinary cancellation.
+        if find "${scenario_dir}" -mindepth 1 -maxdepth 1 -print -quit \
+            | grep -q .; then
+            printf 'FAIL: cancellation left private aria2 staging or partial data in the output directory.\n' >&2
+            find "${scenario_dir}" -mindepth 1 -maxdepth 2 \
+                -printf '%y %m %p\n' >&2 || true
             exit 65
-        }
+        fi
 
         set +e
         wait_for_server_quiescence
@@ -768,7 +781,8 @@ PY_QUIESCENCE_CLIENT
             printf 'FAIL: local server did not quiesce after cancellation.\n' >&2
             exit 65
         fi
-        marker="MARK|resume|${iteration}"
+
+        marker="MARK|restart|${iteration}"
         printf '%s\n' "${marker}" >>"${SERVER_LOG}"
 
         : >"${ARIA2_INVOCATION_LOG}"
@@ -780,35 +794,40 @@ PY_QUIESCENCE_CLIENT
             --output-dir "${scenario_dir}" \
             --result-file "${result_file}" \
             "http://127.0.0.1:${PORT}/source/resume.html" \
-            >"${TEST_ROOT}/${scenario}.resume.stdout" 2>&1
+            >"${TEST_ROOT}/${scenario}.restart.stdout" 2>&1
         RUN_STATUS=$?
         set -e
+
         ((RUN_STATUS == 0)) || {
-            printf 'FAIL: resumed transfer returned %d.\n' "${RUN_STATUS}" >&2
+            printf 'FAIL: clean restart after cancellation returned %d.\n' \
+                "${RUN_STATUS}" >&2
             exit 65
         }
         [[ -s ${result_file} ]] || {
-            printf 'FAIL: resumed transfer did not publish a result-file.\n' >&2
+            printf 'FAIL: clean restart did not publish a result-file.\n' >&2
             exit 65
         }
+
         IFS= read -r RUN_FINAL_FILE <"${result_file}"
         [[ -f ${RUN_FINAL_FILE} ]] || {
-            printf 'FAIL: resumed final media is absent.\n' >&2
+            printf 'FAIL: clean-restart final media is absent.\n' >&2
             exit 65
         }
+
         assert_av_media "${RUN_FINAL_FILE}"
         assert_aria2_used
+        assert_private_aria2_invocation
 
         set +e
         wait_for_server_quiescence
         quiescence_status=$?
         set -e
         if ((quiescence_status != 0)); then
-            printf 'FAIL: local server did not quiesce before resume accounting.\n' >&2
+            printf 'FAIL: local server did not quiesce before restart accounting.\n' >&2
             exit 65
         fi
 
-        post_resume_bytes=$(
+        post_restart_bytes=$(
             awk -F'|' -v marker="${marker}" '
                 $0 == marker { seen=1; next }
                 seen && $1 == "END" && $2 == "/range/media.mp4" &&
@@ -818,11 +837,13 @@ PY_QUIESCENCE_CLIENT
                 END { print total + 0 }
             ' "${SERVER_LOG}"
         )
-        if ((post_resume_bytes <= 0 || post_resume_bytes >= MEDIA_SIZE)); then
-            printf 'FAIL: resume proof served %d of %d total media bytes after restart; expected a strict partial remainder.\n' \
-                "${post_resume_bytes}" "${MEDIA_SIZE}" >&2
+
+        if ((post_restart_bytes < MEDIA_SIZE)); then
+            printf 'FAIL: clean restart served only %d of %d media bytes; stale partial state appears to have been reused.\n' \
+                "${post_restart_bytes}" "${MEDIA_SIZE}" >&2
             exit 65
         fi
+
         awk -F'|' -v marker="${marker}" '
             $0 == marker { seen=1; next }
             seen && $1 == "REQ" && $2 == "/range/media.mp4" && $3 ~ /^bytes=/ {
@@ -830,12 +851,12 @@ PY_QUIESCENCE_CLIENT
             }
             END { exit !found }
         ' "${SERVER_LOG}" || {
-            printf 'FAIL: resumed transfer did not expose a post-restart Range request.\n' >&2
+            printf 'FAIL: clean restart did not exercise real aria2 Range requests.\n' >&2
             exit 65
         }
     done
 
-    printf 'Real aria2 Range/no-Range/redirect/error/resume integration passed.\n'
+    printf 'Real aria2 Range/no-Range/redirect/error/cancel-clean-restart integration passed.\n'
 
 }
 

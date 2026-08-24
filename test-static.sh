@@ -512,7 +512,7 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
         '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
         'non-owner test cleanup protection'
-    readonly EXPECTED_VERSION='2.1.35'
+    readonly EXPECTED_VERSION='2.2.0'
 
     # Current-version coherence is intentionally checked only on authoritative
     # carriers. Historical versions used by regression/upgrade fixtures are valid
@@ -1051,8 +1051,17 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/progress-monitor.sh" \
         'MAX_SAFE_COUNTER=9000000000000000' 'bounded progress arithmetic'
     assert_file_contains "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
-        'aria2 (>= 1.37.0), ffmpeg, gnupg, unzip, zenity' \
+        'aria2 (>= 1.37.0), python3 (>= 3.10), ffmpeg, gnupg, unzip, zenity' \
         'DEB managed-runtime system dependencies'
+    assert_file_not_contains "${SCRIPT_DIR}/download-video.sh" \
+        '--downloader-args' \
+        'obsolete yt-dlp external-downloader capability is not required'
+    assert_file_contains "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+        'Requires:       python3 >= 3.10' 'RPM private-helper Python minimum'
+    assert_file_contains "${SCRIPT_DIR}/README.md" \
+        'Python **3.10 or newer**' 'English private-helper Python minimum'
+    assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
+        'Python **3.10 ou plus récent**' 'French private-helper Python minimum'
     assert_file_not_contains "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
         'yt-dlp (>= 2026.06.09)' \
         'DEB does not depend on distribution yt-dlp'

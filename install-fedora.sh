@@ -10,7 +10,7 @@ set -Eeuo pipefail
 umask 022
 
 readonly PACKAGE_NAME='yt-dlp-aria2-downloader-gui'
-readonly APP_VERSION='2.1.35'
+readonly APP_VERSION='2.2.0'
 readonly PRIVATE_DIR='/usr/libexec/yt-dlp-aria2-downloader'
 readonly RPM_SIGNING_KEY_NAME='RPM-GPG-KEY-OscarFrog'
 readonly RPM_SIGNING_FINGERPRINT='7B54065FE061E78ED2C96252E3BE996196ABEA7F'
@@ -293,7 +293,7 @@ main() {
         run_root dnf swap --assumeyes --allowerasing ffmpeg-free ffmpeg
     else
         printf 'Installing RPM Fusion ffmpeg and required system dependencies...\n'
-        run_root dnf install --assumeyes --allowerasing ffmpeg aria2 zenity curl gnupg2 unzip
+        run_root dnf install --assumeyes --allowerasing ffmpeg aria2 python3 zenity curl gnupg2 unzip
     fi
 
     printf 'Installing %s...\n' "${PACKAGE_NAME}"
@@ -316,7 +316,7 @@ main() {
         exit 65
     fi
 
-    for command_name in ffmpeg ffprobe aria2c zenity; do
+    for command_name in ffmpeg ffprobe aria2c python3 zenity; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             error "required command is absent after installation: ${command_name}"
             exit 65

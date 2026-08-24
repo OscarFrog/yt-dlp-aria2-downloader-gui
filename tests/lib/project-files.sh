@@ -42,6 +42,7 @@ TEST_SHELL_FILES=(
     tests/lib/assert.sh
     tests/lib/project-files.sh
     tests/mock-integration.sh
+    tests/private-aria2-plan-integration.sh
     tests/runtime-manager-integration.sh
     tests/runtime-manager-hardening-integration.sh
     tests/progress-monitor-integration.sh
@@ -51,9 +52,12 @@ TEST_SHELL_FILES=(
     tests/rpm6-multisig-integration.sh
     tests/ffmpeg-progress-integration.sh
     tests/ffmpeg-real-progress-integration.sh
+    tests/ffmpeg-generation-compatibility.sh
+    tests/ffmpeg-generation-qualification.sh
     tests/hls-remux-duration-integration.sh
     tests/real-tools-integration.sh
     tests/aria2-real-behavior-integration.sh
+    tests/zenity-real-session-qualification.sh
 )
 
 # Development shell tools are part of the canonical validation surface.
@@ -62,6 +66,7 @@ DEVELOPMENT_SHELL_FILES=(
     scripts/dev-tools/ensure-shfmt.sh
     scripts/check-shell-format.sh
     scripts/format-shell.sh
+    scripts/release-evidence-qualification.sh
 )
 
 # Shell files intentionally exempt from the explicit main() entry-point rule:
