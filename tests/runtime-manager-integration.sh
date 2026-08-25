@@ -95,7 +95,10 @@ main() {
 
     TEST_ROOT=$(mktemp -d)
     readonly TEST_ROOT
-    trap cleanup EXIT HUP INT TERM
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
     readonly HOME_DIR="${TEST_ROOT}/home"
     readonly DATA_HOME="${TEST_ROOT}/data"
@@ -163,11 +166,13 @@ EOF_CURL
         sleep 6
     ) &
     lock_holder_pid=$!
-    for _ in {1..50}; do
+    for _ in {1..250}; do
         [[ -e ${lock_holder_ready} ]] && break
+        kill -0 -- "${lock_holder_pid}" 2>/dev/null \
+            || fail 'lock holder exited before publishing readiness'
         sleep 0.02
     done
-    [[ -e ${lock_holder_ready} ]] || fail 'lock holder did not start'
+    [[ -e ${lock_holder_ready} ]] || fail 'lock holder did not start within 5 seconds'
     timeout 2s "${runtime_env[@]}" "${RUNTIME_MANAGER}" path yt-dlp >/dev/null \
         || fail 'path lookup blocked behind the runtime update lock'
 
@@ -179,6 +184,13 @@ EOF_CURL
         || fail 'lock-contention fallback diagnostic is missing'
     kill -TERM -- "${lock_holder_pid}" 2>/dev/null || true
     wait "${lock_holder_pid}" 2>/dev/null || true
+
+    if ! (
+        exec 9>>"${runtime_root}/update.lock"
+        flock --exclusive --nonblock 9
+    ); then
+        fail 'runtime update lock remained held after the lock holder stopped'
+    fi
 
     # Network failure after bootstrap must preserve the verified active runtimes.
     : >"${CURL_LOG}"
@@ -234,6 +246,8 @@ EOF_CURL
     fi
     [[ ! -L ${empty_data}/yt-dlp-aria2-downloader/runtime/yt-dlp/current ]] \
         || fail 'initial offline bootstrap published an unverified yt-dlp runtime'
+    [[ ! -L ${empty_data}/yt-dlp-aria2-downloader/runtime/deno/current ]] \
+        || fail 'initial offline bootstrap published an unverified Deno runtime'
 
     # Architecture mapping is tested hermetically for aarch64 without requiring an
     # ARM runner.

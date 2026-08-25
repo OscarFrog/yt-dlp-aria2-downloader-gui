@@ -110,6 +110,8 @@ signature_count() {
 
     listing=$(LC_ALL=C rpm -qp --nosignature --qf '[%{OPENPGP}\n]' -- "${package}") \
         || fail "unable to query OpenPGP signatures: ${package}"
+    [[ -n ${listing} ]] \
+        || fail "no OpenPGP signatures reported for signed fixture: ${package}"
     mapfile -t signatures <<<"${listing}"
 
     ((${#signatures[@]} > 0)) \
@@ -302,6 +304,30 @@ main() {
         || fail 'RPM v4 fixture unexpectedly accepted a second legacy signature'
     grep -Fq 'already contains a legacy signature' "${legacy_log}" \
         || fail 'RPM v4 second-signature rejection did not report the expected diagnostic'
+
+    # Cross-format qualification: RPM 6 permits v6-style signatures on an RPM
+    # package-format v4 payload. The package format must remain v4 while the
+    # OpenPGP signature array accumulates independent signers.
+    v4_v6_multi="${root}/project-v4-v6-multisig.rpm"
+    cp -- "${source_rpm}" "${v4_v6_multi}"
+
+    sign_rpm_v6 "${home_a}" "${fingerprint_a}" "${pass_a}" "${v4_v6_multi}"
+    v4_v6_format=$(LC_ALL=C rpm -qp --qf '%{rpmformat}\n' -- "${v4_v6_multi}")
+    [[ ${v4_v6_format} == 4 ]] \
+        || fail "RPM v6 signing unexpectedly changed package format: ${v4_v6_format}"
+    v4_v6_count=$(signature_count "${v4_v6_multi}")
+    [[ ${v4_v6_count} == 1 ]] \
+        || fail "RPM v4/v6 fixture should contain one signature after signer A; found ${v4_v6_count}"
+    rpmkeys_fs "${keyring_a}" --checksig "${v4_v6_multi}"
+
+    sign_rpm_v6 "${home_b}" "${fingerprint_b}" "${pass_b}" "${v4_v6_multi}"
+    v4_v6_format=$(LC_ALL=C rpm -qp --qf '%{rpmformat}\n' -- "${v4_v6_multi}")
+    [[ ${v4_v6_format} == 4 ]] \
+        || fail "second RPM v6 signature changed package format: ${v4_v6_format}"
+    v4_v6_count=$(signature_count "${v4_v6_multi}")
+    [[ ${v4_v6_count} == 2 ]] \
+        || fail "RPM v4/v6 fixture should contain two signatures; found ${v4_v6_count}"
+    rpmkeys_fs "${keyring_both}" --checksig "${v4_v6_multi}"
 
     # Scenario: build a package-format v6 fixture and qualify multi-signature
     # semantics independently of the production RPM v4 format.

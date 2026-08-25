@@ -208,7 +208,10 @@ main() {
         || fail 'Private aria2 helper must be a non-executable regular file.'
 
     TEST_ROOT=$(mktemp -d)
-    trap cleanup EXIT HUP INT TERM
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
     # Single direct transfer.
     printf '%s\n' 'Private aria2 plan scenario: single-stream'

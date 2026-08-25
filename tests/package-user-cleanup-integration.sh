@@ -201,9 +201,16 @@ main() {
     printf '%s\n' "${control_candidate}" >"${marker}"
     chmod 600 -- "${marker}"
 
+    control_status=0
     control_output=$(
         bash "${HELPER}" --user-home "${home}" 2>&1
-    )
+    ) || control_status=$?
+    if ((control_status != 0)); then
+        printf 'FAIL: control-character marker cleanup returned %d.\n' \
+            "${control_status}" >&2
+        printf '%s\n' "${control_output}" >&2
+        exit 65
+    fi
     [[ ${control_output} != *$'\033'* ]] || fail 'cleanup reflected an ESC control character from a marker into diagnostics'
     [[ ${control_output} == *'ignoring invalid or multi-line runtime location marker:'* ]] || fail 'cleanup did not diagnose a control-character marker as invalid'
 

@@ -11,10 +11,45 @@ umask 077
 
 PROJECT_DIR=${PROJECT_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)}
 readonly PROJECT_DIR
-readonly BASIC_RUNS=${ARIA2_BEHAVIOR_BASIC_RUNS:-3}
-readonly CANCEL_RESTART_RUNS=${ARIA2_BEHAVIOR_CANCEL_RESTART_RUNS:-10}
-readonly QUIESCENCE_RUNS=${ARIA2_BEHAVIOR_QUIESCENCE_RUNS:-10}
+BASIC_RUNS=${ARIA2_BEHAVIOR_BASIC_RUNS:-3}
+CANCEL_RESTART_RUNS=${ARIA2_BEHAVIOR_CANCEL_RESTART_RUNS:-10}
+QUIESCENCE_RUNS=${ARIA2_BEHAVIOR_QUIESCENCE_RUNS:-10}
+WAIT_SECONDS=${ARIA2_BEHAVIOR_WAIT_SECONDS:-15}
 readonly MIN_COMPLETED_RANGE_BYTES=262144
+
+normalize_bounded_uint() {
+    local name=$1
+    local raw=$2
+    local minimum=$3
+    local maximum=$4
+    local output_name=$5
+    local normalized=0
+
+    [[ ${raw} =~ ^[0-9]{1,6}$ ]] || {
+        printf 'Error: %s must be a decimal integer between %d and %d.\n' \
+            "${name}" "${minimum}" "${maximum}" >&2
+        exit 64
+    }
+    normalized=$((10#${raw}))
+    ((normalized >= minimum && normalized <= maximum)) || {
+        printf 'Error: %s must be between %d and %d; found %s.\n' \
+            "${name}" "${minimum}" "${maximum}" "${raw}" >&2
+        exit 64
+    }
+    printf -v "${output_name}" '%d' "${normalized}"
+}
+
+# Validate tunables before checking dependencies so malformed configuration
+# fails deterministically even on a partially provisioned host.
+normalize_bounded_uint ARIA2_BEHAVIOR_BASIC_RUNS \
+    "${BASIC_RUNS}" 1 1000 BASIC_RUNS
+normalize_bounded_uint ARIA2_BEHAVIOR_CANCEL_RESTART_RUNS \
+    "${CANCEL_RESTART_RUNS}" 1 1000 CANCEL_RESTART_RUNS
+normalize_bounded_uint ARIA2_BEHAVIOR_QUIESCENCE_RUNS \
+    "${QUIESCENCE_RUNS}" 1 1000 QUIESCENCE_RUNS
+normalize_bounded_uint ARIA2_BEHAVIOR_WAIT_SECONDS \
+    "${WAIT_SECONDS}" 1 120 WAIT_SECONDS
+readonly BASIC_RUNS CANCEL_RESTART_RUNS QUIESCENCE_RUNS WAIT_SECONDS
 
 for command_name in aria2c awk bash ffmpeg ffprobe find grep mktemp python3 realpath sed sleep stat tail wc; do
     command -v "${command_name}" >/dev/null 2>&1 || {
@@ -25,32 +60,6 @@ done
 command -v yt-dlp >/dev/null 2>&1 || {
     printf 'Error: required command is absent: yt-dlp\n' >&2
     exit 77
-}
-
-case ${BASIC_RUNS} in
-    '' | *[!0-9]*)
-        printf 'Error: ARIA2_BEHAVIOR_BASIC_RUNS must be a positive integer.\n' >&2
-        exit 64
-        ;;
-    *) ;;
-esac
-case ${CANCEL_RESTART_RUNS} in
-    '' | *[!0-9]*)
-        printf 'Error: ARIA2_BEHAVIOR_CANCEL_RESTART_RUNS must be a positive integer.\n' >&2
-        exit 64
-        ;;
-    *) ;;
-esac
-case ${QUIESCENCE_RUNS} in
-    '' | *[!0-9]*)
-        printf 'Error: ARIA2_BEHAVIOR_QUIESCENCE_RUNS must be a positive integer.\n' >&2
-        exit 64
-        ;;
-    *) ;;
-esac
-((BASIC_RUNS > 0 && CANCEL_RESTART_RUNS > 0 && QUIESCENCE_RUNS > 0)) || {
-    printf 'Error: aria2 behavior repetition counts must be greater than zero.\n' >&2
-    exit 64
 }
 
 TEST_ROOT=$(mktemp -d)
@@ -68,14 +77,59 @@ cleanup() {
     rm -rf -- "${TEST_ROOT}" || true
 }
 
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 assert_av_media() {
     local media_path=$1
-    ffprobe -v error -select_streams v:0 \
-        -show_entries stream=index -of csv=p=0 "${media_path}" \
-        | grep -Eq '^[0-9]+$'
-    ffprobe -v error -select_streams a:0 \
-        -show_entries stream=index -of csv=p=0 "${media_path}" \
-        | grep -Eq '^[0-9]+$'
+    local video_index=''
+    local audio_index=''
+    local attached_pic=''
+
+    video_index=$(
+        ffprobe -v error -select_streams V:0 \
+            -show_entries stream=index -of csv=p=0 "${media_path}"
+    ) || {
+        printf 'FAIL: ffprobe could not inspect content video: %s\n' \
+            "${media_path}" >&2
+        return 65
+    }
+    [[ ${video_index} =~ ^[0-9]+$ ]] || {
+        printf 'FAIL: media has no content video stream: %s\n' \
+            "${media_path}" >&2
+        return 65
+    }
+
+    attached_pic=$(
+        ffprobe -v error -select_streams V:0 \
+            -show_entries stream_disposition=attached_pic \
+            -of default=noprint_wrappers=1:nokey=1 "${media_path}"
+    ) || {
+        printf 'FAIL: ffprobe could not inspect content-video disposition: %s\n' \
+            "${media_path}" >&2
+        return 65
+    }
+    [[ ${attached_pic} == 0 ]] || {
+        printf 'FAIL: selected content video is unexpectedly attached_pic=%s: %s\n' \
+            "${attached_pic:-missing}" "${media_path}" >&2
+        return 65
+    }
+
+    audio_index=$(
+        ffprobe -v error -select_streams a:0 \
+            -show_entries stream=index -of csv=p=0 "${media_path}"
+    ) || {
+        printf 'FAIL: ffprobe could not inspect audio: %s\n' \
+            "${media_path}" >&2
+        return 65
+    }
+    [[ ${audio_index} =~ ^[0-9]+$ ]] || {
+        printf 'FAIL: media has no audio stream: %s\n' \
+            "${media_path}" >&2
+        return 65
+    }
 }
 
 run_engine() {
@@ -137,9 +191,9 @@ assert_private_aria2_invocation() {
 
 wait_for_completed_partial_range() {
     local start_line=$1
-    local deadline=200
-    local count=0
-    while ((count < deadline)); do
+    local deadline=$((SECONDS + WAIT_SECONDS))
+
+    while ((SECONDS < deadline)); do
         if awk -F'|' \
             -v first="${start_line}" \
             -v minimum="${MIN_COMPLETED_RANGE_BYTES}" \
@@ -151,7 +205,6 @@ wait_for_completed_partial_range() {
             return 0
         fi
         sleep 0.05
-        ((count += 1))
     done
     return 1
 }
@@ -167,9 +220,9 @@ server_is_active() {
 
 wait_for_server_quiescence() {
     local activity=''
-    local count=0
+    local deadline=$((SECONDS + WAIT_SECONDS))
 
-    while ((count < 200)); do
+    while ((SECONDS < deadline)); do
         activity=''
         if { IFS= read -r activity <"${SERVER_STATE}"; } 2>/dev/null \
             && [[ ${activity} =~ ^[0-9]+$ ]] \
@@ -177,7 +230,6 @@ wait_for_server_quiescence() {
             return 0
         fi
         sleep 0.05
-        ((count += 1))
     done
     return 1
 }
@@ -259,11 +311,6 @@ run_engine_with_monitor() {
 }
 
 main() {
-    trap cleanup EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-
     mkdir -p -- \
         "${TEST_ROOT}/web" \
         "${TEST_ROOT}/output" \
@@ -528,12 +575,18 @@ PY_SERVER
     python3 "${TEST_ROOT}/server.py" \
         "${TEST_ROOT}/web" "${TEST_ROOT}/port" "${SERVER_LOG}" "${SERVER_STATE}" &
     SERVER_PID=$!
-    for _ in {1..100}; do
+    server_ready_deadline=$((SECONDS + WAIT_SECONDS))
+    while ((SECONDS < server_ready_deadline)); do
         [[ -s ${TEST_ROOT}/port && -s ${SERVER_STATE} ]] && break
+        kill -0 -- "${SERVER_PID}" 2>/dev/null || {
+            printf 'FAIL: local HTTP server exited before publishing readiness.\n' >&2
+            exit 65
+        }
         sleep 0.05
     done
     [[ -s ${TEST_ROOT}/port && -s ${SERVER_STATE} ]] || {
-        printf 'FAIL: local HTTP server did not publish its port/activity state.\n' >&2
+        printf 'FAIL: local HTTP server did not publish its port/activity state within %ds.\n' \
+            "${WAIT_SECONDS}" >&2
         exit 65
     }
     PORT=$(<"${TEST_ROOT}/port")
@@ -591,7 +644,8 @@ PY_QUIESCENCE_CLIENT
         control_pid=$!
 
         activity_seen=false
-        for _ in {1..200}; do
+        activity_deadline=$((SECONDS + WAIT_SECONDS))
+        while ((SECONDS < activity_deadline)); do
             set +e
             server_is_active
             activity_status=$?
@@ -762,23 +816,34 @@ PY_QUIESCENCE_CLIENT
         assert_aria2_used
         assert_private_aria2_invocation
 
-        # Privacy-first cancellation contract: the private aria2 staging area,
-        # partial payload, control file, input file, manifest, and cookie jar
-        # must not survive an ordinary cancellation.
-        if find "${scenario_dir}" -mindepth 1 -maxdepth 1 -print -quit \
-            | grep -q .; then
-            printf 'FAIL: cancellation left private aria2 staging or partial data in the output directory.\n' >&2
-            find "${scenario_dir}" -mindepth 1 -maxdepth 2 \
-                -printf '%y %m %p\n' >&2 || true
-            exit 65
-        fi
-
+        # Wait for in-flight server work to finish before proving the
+        # privacy-first cancellation contract. This makes the filesystem
+        # assertion causally follow transport quiescence.
         set +e
         wait_for_server_quiescence
         quiescence_status=$?
         set -e
         if ((quiescence_status != 0)); then
-            printf 'FAIL: local server did not quiesce after cancellation.\n' >&2
+            printf 'FAIL: local server did not quiesce after cancellation within %ds.\n' \
+                "${WAIT_SECONDS}" >&2
+            exit 65
+        fi
+
+        # The private aria2 staging area, partial payload, control file, input
+        # file, manifest, and cookie jar must not survive ordinary cancellation.
+        cancellation_leftovers=''
+        cancellation_leftovers=$(
+            find "${scenario_dir}" -mindepth 1 -maxdepth 1 -print
+        ) || {
+            printf 'FAIL: unable to inspect cancellation output directory: %s\n' \
+                "${scenario_dir}" >&2
+            exit 65
+        }
+        if [[ -n ${cancellation_leftovers} ]]; then
+            printf 'FAIL: cancellation left private aria2 staging or partial data in the output directory.\n' >&2
+            printf '%s\n' "${cancellation_leftovers}" >&2
+            find "${scenario_dir}" -mindepth 1 -maxdepth 2 \
+                -printf '%y %m %p\n' >&2 || true
             exit 65
         fi
 

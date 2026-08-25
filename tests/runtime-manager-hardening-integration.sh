@@ -79,7 +79,7 @@ EOF_DENO
 }
 
 main() {
-    for command_name in bash chmod env flock grep ln mkdir mktemp readlink rm rmdir sed sha256sum sleep stat uname; do
+    for command_name in bash chmod env find flock grep ln mkdir mktemp readlink rm rmdir sed sha256sum sleep stat uname; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             printf 'Error: required test command is absent: %s\n' "${command_name}" >&2
             exit 127
@@ -121,6 +121,14 @@ for fd_path in /proc/$$/fd/*; do
     target=$(readlink -- "${fd_path}" 2>/dev/null || true)
     [[ ${target} != */yt-dlp-aria2-downloader/runtime/update.lock ]] || : >"${MOCK_FD_LEAK_MARKER:?}"
 done
+if [[ ${MOCK_GPG_VERIFY_FAIL:-0} == 1 ]]; then
+    for arg in "$@"; do
+        if [[ ${arg} == --verify ]]; then
+            printf '%s\n' 'mock OpenPGP verification failure' >&2
+            exit 91
+        fi
+    done
+fi
 exit 0
 EOF_GPG
     chmod 0755 -- "${MOCK_BIN}/gpg"
@@ -286,6 +294,41 @@ EOF_CURL
     fresh_ytdlp_root="${fresh_runtime_root}/yt-dlp"
     fresh_deno_root="${fresh_runtime_root}/deno"
 
+    # A fresh bootstrap must refuse a yt-dlp candidate whose signed manifest
+    # cannot be verified. Import remains successful; only --verify is mutated.
+    VERIFY_FAIL_DATA_HOME="${TEST_ROOT}/verify-fail-data"
+    verify_fail_runtime_root="${VERIFY_FAIL_DATA_HOME}/yt-dlp-aria2-downloader/runtime"
+    verify_fail_ytdlp_root="${verify_fail_runtime_root}/yt-dlp"
+    verify_failure_status=0
+    verify_failure_error=''
+    unverified_candidates=''
+
+    rm -rf -- "${VERIFY_FAIL_DATA_HOME}"
+    verify_failure_error=$(
+        "${runtime_env[@]}" \
+            XDG_DATA_HOME="${VERIFY_FAIL_DATA_HOME}" \
+            MOCK_GPG_VERIFY_FAIL=1 \
+            "${RUNTIME_MANAGER}" ensure 2>&1
+    ) || verify_failure_status=$?
+
+    [[ ${verify_failure_status} == 1 ]] \
+        || fail "signature-failure bootstrap returned ${verify_failure_status}, expected 1"
+    grep -Fq \
+        'yt-dlp bootstrap failed: SHA-256 manifest signature verification failed.' \
+        <<<"${verify_failure_error}" \
+        || fail 'signature-failure bootstrap missed the canonical verification diagnostic'
+    [[ ! -L ${verify_fail_ytdlp_root}/current ]] \
+        || fail 'signature-failure bootstrap activated an unverified yt-dlp runtime'
+    [[ ! -L ${verify_fail_runtime_root}/deno/current ]] \
+        || fail 'signature-failure bootstrap unexpectedly reached Deno activation'
+    if [[ -d ${verify_fail_ytdlp_root} ]]; then
+        unverified_candidates=$(
+            find "${verify_fail_ytdlp_root}" -type f -name "${YTDLP_ASSET}" -print
+        ) || fail 'unable to inspect signature-failure yt-dlp artifacts'
+        [[ -z ${unverified_candidates} ]] \
+            || fail 'signature-failure bootstrap retained an unverified yt-dlp candidate'
+    fi
+
     rm -rf -- "${FRESH_DATA_HOME}"
     : >"${URL_LOG}"
     : >"${GPGCONF_LOG}"
@@ -384,15 +427,29 @@ EOF_CURL
         assert_link_target "${ytdlp_root}/current" 2026.07.04 "rollback B failed at ${iteration}"
     done
 
-    # Missing, unsafe, and invalid previous targets must fail cleanly.
+    # Missing, unsafe, and invalid previous targets must fail with the exact
+    # rollback status and the canonical validator diagnostics.
     rm -f -- "${ytdlp_root}/previous"
     status=0
-    "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null 2>&1 || status=$?
-    [[ ${status} != 0 ]] || fail 'rollback unexpectedly accepted missing previous'
+    rollback_error=''
+    rollback_error=$(
+        "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp 2>&1
+    ) || status=$?
+    [[ ${status} == 1 ]] \
+        || fail "missing previous rollback returned ${status}, expected 1"
+    grep -Fq 'no previous yt-dlp runtime is available.' <<<"${rollback_error}" \
+        || fail 'missing previous rollback diagnostic is not canonical'
+
     ln -s ../escape "${ytdlp_root}/previous"
     status=0
-    "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null 2>&1 || status=$?
-    [[ ${status} != 0 ]] || fail 'rollback accepted unsafe previous target'
+    rollback_error=''
+    rollback_error=$(
+        "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp 2>&1
+    ) || status=$?
+    [[ ${status} == 1 ]] \
+        || fail "unsafe previous rollback returned ${status}, expected 1"
+    grep -Fq 'invalid previous yt-dlp runtime target.' <<<"${rollback_error}" \
+        || fail 'unsafe previous rollback diagnostic is not canonical'
 
     rm -f -- "${ytdlp_root}/previous"
     ln -s $'2026.08.20.123456\ninvalid' "${ytdlp_root}/previous"
@@ -401,7 +458,8 @@ EOF_CURL
     rollback_error=$(
         "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp 2>&1
     ) || status=$?
-    [[ ${status} != 0 ]] || fail 'rollback accepted newline-bearing previous target'
+    [[ ${status} == 1 ]] \
+        || fail "newline-bearing previous rollback returned ${status}, expected 1"
     grep -Fq 'invalid previous yt-dlp runtime target.' <<<"${rollback_error}" \
         || fail 'rollback did not reject the newline target at the canonical validator'
 
@@ -443,11 +501,14 @@ EOF_CURL
         ) &
         holder=$!
         HOLDER_PID=${holder}
-        for _ in {1..100}; do
+        for _ in {1..250}; do
             [[ -e ${ready} ]] && break
-            sleep 0.01
+            kill -0 -- "${holder}" 2>/dev/null \
+                || fail "lock holder ${iteration} exited before publishing readiness"
+            sleep 0.02
         done
-        [[ -e ${ready} ]] || fail "lock holder ${iteration} did not start"
+        [[ -e ${ready} ]] \
+            || fail "lock holder ${iteration} did not start within 5 seconds"
         MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null 2>"${TEST_ROOT}/lock-${iteration}.err" \
             || fail "contention fallback ${iteration} failed"
         grep -Fq 'another runtime update is in progress' "${TEST_ROOT}/lock-${iteration}.err" \

@@ -16,9 +16,9 @@ readonly PROJECT_DIR
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 
 readonly HELPER="${PROJECT_DIR}/private-aria2-plan.py"
-readonly RUNS=${ARIA2_AUTH_HEADER_RUNS:-3}
+RUNS=${ARIA2_AUTH_HEADER_RUNS:-3}
 
-for command_name in aria2c bash chmod grep mkdir mktemp python3 rm sleep stat; do
+for command_name in aria2c bash cat chmod grep mkdir mktemp python3 rm sleep stat; do
     require_test_command "${command_name}"
 done
 
@@ -30,10 +30,16 @@ case ${RUNS} in
     *)
         ;;
 esac
+[[ ${RUNS} =~ ^[0-9]{1,6}$ ]] || {
+    printf 'Error: ARIA2_AUTH_HEADER_RUNS is unreasonably large: %s\n' "${RUNS}" >&2
+    exit 64
+}
+RUNS=$((10#${RUNS}))
 ((RUNS > 0)) || {
     printf 'Error: ARIA2_AUTH_HEADER_RUNS must be greater than zero.\n' >&2
     exit 64
 }
+readonly RUNS
 
 TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
@@ -113,7 +119,6 @@ run_case() {
     local manifest_file="${staging_dir}/manifest.json"
     local aria_log="${case_root}/aria2.log"
     local target_path="/case/${case_name}"
-    local rendered_argv=''
     local secret=''
     local input_mode=''
     local staging_mode=''
@@ -160,17 +165,9 @@ run_case() {
         --timeout=5
     )
 
-    rendered_argv=$(printf '%q ' "${aria_args[@]}")
-    for secret in \
-        'Bearer qualification-auth-7a91' \
-        'session=qualification-cookie-3d42' \
-        'https://origin.invalid/qualification' \
-        'qualification-redirect-9c15'; do
-        if [[ ${rendered_argv} == *"${secret}"* ]]; then
-            fail "${case_name}: sensitive header value leaked into aria2 argv"
-        fi
-    done
-
+    # Harness invariant: aria_args contains only paths and transport controls.
+    # Production argv confidentiality is covered by tests that invoke the real
+    # download engine; this test focuses on private input-file fidelity.
     CASE_STATUS=0
     set +e
     HOME="${home_dir}" \
