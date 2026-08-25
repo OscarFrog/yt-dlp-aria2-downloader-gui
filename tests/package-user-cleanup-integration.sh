@@ -190,7 +190,24 @@ main() {
     assert_absent "${default_data}/${APP_ID}/runtime"
     assert_present "${protected}/keep"
 
-    # Scenario 6: unavailable homes are a non-destructive best-effort skip.
+    # Scenario 6: a marker containing terminal-control characters is
+    # rejected without reflecting those control characters into stderr.
+    home="${root}/home-control-marker"
+    default_data="${home}/.local/share"
+    marker="${default_data}/${APP_ID}/${MARKER}"
+    control_candidate="${root}/control"$'\033'"candidate"
+
+    mkdir -p "${default_data}/${APP_ID}"
+    printf '%s\n' "${control_candidate}" >"${marker}"
+    chmod 600 -- "${marker}"
+
+    control_output=$(
+        bash "${HELPER}" --user-home "${home}" 2>&1
+    )
+    [[ ${control_output} != *$'\033'* ]] || fail 'cleanup reflected an ESC control character from a marker into diagnostics'
+    [[ ${control_output} == *'ignoring invalid or multi-line runtime location marker:'* ]] || fail 'cleanup did not diagnose a control-character marker as invalid'
+
+    # Scenario 7: unavailable homes are a non-destructive best-effort skip.
     bash "${HELPER}" --user-home "${root}/does-not-exist"
 
     printf 'Package user cleanup integration tests passed.\n'

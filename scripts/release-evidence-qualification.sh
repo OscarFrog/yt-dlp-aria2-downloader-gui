@@ -231,7 +231,7 @@ main() {
         *) fail_qualification 'REQUIRE_EXTENDED_QUALIFICATION must be true or false.' ;;
     esac
 
-    for command_name in cat cmp date diff dirname find gh git grep jq mktemp sha256sum sort wc; do
+    for command_name in cat cmp date diff dirname find gh git grep jq mkdir mktemp rm sha256sum sort wc; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             fail_qualification "required command is absent: ${command_name}."
         fi
@@ -263,7 +263,7 @@ main() {
     fi
 
     release_json=$(gh release view "${tag}" -R "${repo}" \
-        --json tagName,isImmutable,assets,url,publishedAt,targetCommitish)
+        --json tagName,isImmutable,assets,url,publishedAt)
     release_tag=$(jq -r '.tagName' <<<"${release_json}")
     release_immutable=$(jq -r '.isImmutable' <<<"${release_json}")
     release_url=$(jq -r '.url' <<<"${release_json}")

@@ -40,8 +40,7 @@ safe_absolute_path() {
 
     [[ ${path} == /* &&
         ${path} != / &&
-        ${path} != *$'\n'* &&
-        ${path} != *$'\r'* ]] || return 1
+        ${path} != *[[:cntrl:]]* ]] || return 1
 
     rest=${path#/}
     while [[ -n ${rest} ]]; do
@@ -308,23 +307,36 @@ run_as_user() {
 
 enumerate_users() {
     local line
+    local getent_output=''
     local _name _passwd uid gid _gecos home _shell key seen_key
     local already_seen=false
+    local passwd_source_usable=false
+    local getent_source_usable=false
     local -a records=()
     local -a seen=()
 
     if [[ -r /etc/passwd ]]; then
+        passwd_source_usable=true
         while IFS= read -r line || [[ -n ${line} ]]; do
             records+=("${line}")
         done </etc/passwd
     fi
 
     if command -v getent >/dev/null 2>&1; then
-        while IFS= read -r line || [[ -n ${line} ]]; do
-            records+=("${line}")
-        done < <(
-            timeout 8s getent passwd 2>/dev/null || true
-        )
+        if getent_output=$(timeout 8s getent passwd 2>/dev/null); then
+            getent_source_usable=true
+            if [[ -n ${getent_output} ]]; then
+                while IFS= read -r line || [[ -n ${line} ]]; do
+                    records+=("${line}")
+                done <<<"${getent_output}"
+            fi
+        fi
+    fi
+
+    if [[ ${passwd_source_usable} == false &&
+        ${getent_source_usable} == false ]]; then
+        warn 'unable to enumerate users from /etc/passwd or getent; skipping all-user cleanup'
+        return 0
     fi
 
     for line in "${records[@]}"; do

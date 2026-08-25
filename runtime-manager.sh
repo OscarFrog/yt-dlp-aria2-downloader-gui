@@ -191,6 +191,7 @@ run_curl() {
         --max-time "${CURL_MAX_TIME_SECONDS}" \
         --retry 3 --retry-delay 1 \
         --retry-max-time "${CURL_RETRY_MAX_TIME_SECONDS}" \
+        --no-progress-meter \
         "$@"
 }
 
@@ -602,6 +603,22 @@ latest_deno_version() {
     return 0
 }
 
+cleanup_ytdlp_bootstrap_work() {
+    local work=$1
+    local gpg_home=$2
+
+    if [[ -n ${gpg_home} ]]; then
+        if [[ -d ${gpg_home} && ! -L ${gpg_home} ]]; then
+            run_timed 5 gpgconf --homedir "${gpg_home}" --kill gpg-agent \
+                >/dev/null 2>&1 || true
+        fi
+        rm -rf -- "${gpg_home}" || true
+    fi
+    if [[ -n ${work} ]]; then
+        rm -rf -- "${work}" || true
+    fi
+}
+
 bootstrap_ytdlp_version() {
     local version=$1
     local work=''
@@ -612,17 +629,20 @@ bootstrap_ytdlp_version() {
 
     [[ ${version} =~ ${YTDLP_CHANNEL_VERSION_PATTERN} ]] || return 1
     base_url="https://github.com/${YTDLP_RELEASE_REPOSITORY}/releases/download/${version}"
-    work=$(mktemp -d --tmpdir=/tmp '.yt-dlp-bootstrap.XXXXXXXX') || return 1
-    gpg_home="${work}/gnupg"
-    if ! mkdir -m 700 -- "${gpg_home}"; then
+    work=$(mktemp -d --tmpdir="${RUNTIME_ROOT}" '.yt-dlp-bootstrap.XXXXXXXX') || return 1
+    gpg_home=$(mktemp -d --tmpdir=/tmp '.yt-dlp-gpg.XXXXXXXX') || {
         rm -rf -- "${work}" || true
+        return 1
+    }
+    if ! chmod 700 -- "${gpg_home}"; then
+        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
         return 1
     fi
 
     if ! run_curl -o "${work}/${YTDLP_ASSET}" "${base_url}/${YTDLP_ASSET}" \
         || ! run_curl -o "${work}/SHA2-256SUMS" "${base_url}/SHA2-256SUMS" \
         || ! run_curl -o "${work}/SHA2-256SUMS.sig" "${base_url}/SHA2-256SUMS.sig"; then
-        rm -rf -- "${work}" || true
+        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
         return 1
     fi
 
@@ -630,7 +650,7 @@ bootstrap_ytdlp_version() {
         gpg --batch --homedir "${gpg_home}" --import "${YTDLP_PUBLIC_KEY}" 2>&1); then
         error 'yt-dlp bootstrap failed: unable to import the signing key.'
         printf '%s\n' "${gpg_output}" >&2
-        rm -rf -- "${work}" || true
+        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
         return 1
     fi
     if ! gpg_output=$(run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" \
@@ -638,7 +658,7 @@ bootstrap_ytdlp_version() {
         --verify "${work}/SHA2-256SUMS.sig" "${work}/SHA2-256SUMS" 2>&1); then
         error 'yt-dlp bootstrap failed: SHA-256 manifest signature verification failed.'
         printf '%s\n' "${gpg_output}" >&2
-        rm -rf -- "${work}" || true
+        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
         return 1
     fi
 
@@ -647,30 +667,30 @@ bootstrap_ytdlp_version() {
         "${work}/SHA2-256SUMS" || true)
     if [[ -z ${sums_line} ]]; then
         error "yt-dlp bootstrap failed: SHA-256 manifest has no entry for ${YTDLP_ASSET}."
-        rm -rf -- "${work}" || true
+        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
         return 1
     fi
-    printf '%s\n' "${sums_line}" >"${work}/CHECKSUM" || {
-        rm -rf -- "${work}" || true
+    if ! printf '%s\n' "${sums_line}" >"${work}/CHECKSUM"; then
+        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
         return 1
-    }
+    fi
     if ! run_timed_in_dir "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" "${work}" \
         sha256sum --check CHECKSUM; then
         error "yt-dlp bootstrap failed: SHA-256 verification failed for ${YTDLP_ASSET}."
-        rm -rf -- "${work}" || true
+        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
         return 1
     fi
 
-    chmod 0755 -- "${work}/${YTDLP_ASSET}" || {
-        rm -rf -- "${work}" || true
-        return 1
-    }
-    if ! install_ytdlp_candidate "${work}/${YTDLP_ASSET}"; then
-        error 'yt-dlp bootstrap failed: downloaded runtime failed validation or activation.'
-        rm -rf -- "${work}" || true
+    if ! chmod 0755 -- "${work}/${YTDLP_ASSET}"; then
+        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
         return 1
     fi
-    rm -rf -- "${work}" || return 1
+    if ! install_ytdlp_candidate "${work}/${YTDLP_ASSET}"; then
+        error 'yt-dlp bootstrap failed: downloaded runtime failed validation or activation.'
+        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
+        return 1
+    fi
+    cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
     return 0
 }
 
@@ -745,6 +765,7 @@ update_ytdlp() {
     current_version=$(LC_ALL=C run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" \
         "${current}" --version 2>/dev/null) || return 1
     current_version=${current_version%%$'\n'*}
+    is_valid_ytdlp_version "${current_version}" || return 1
     latest_ytdlp_version latest_version || return 1
     [[ ${current_version} != "${latest_version}" ]] || return 0
     bootstrap_ytdlp_version "${latest_version}"
@@ -826,7 +847,7 @@ rollback_component() {
         return 1
     }
     previous_target=$(readlink -- "${root}/previous") || return 1
-    [[ ${previous_target} != */* && ${previous_target} != .* ]] || {
+    runtime_target_is_safe "${previous_target}" || {
         error "invalid previous ${component} runtime target."
         return 1
     }
@@ -1022,7 +1043,7 @@ main() {
     readonly DENO_ASSET="deno-${DENO_TARGET}.zip"
 
     for command_name in \
-        bash curl flock gpg grep install ln mkdir mktemp mv readlink realpath rm \
+        bash curl flock gpg gpgconf grep install ln mkdir mktemp mv readlink realpath rm \
         sha256sum stat timeout uname unzip; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             error "required runtime-manager command is absent: ${command_name}"

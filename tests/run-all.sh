@@ -15,8 +15,8 @@ readonly PROJECT_DIR
 
 PROJECT_FILES="${PROJECT_DIR}/tests/lib/project-files.sh"
 readonly PROJECT_FILES
-if [[ ! -r ${PROJECT_FILES} ]]; then
-    printf 'Error: required project file list is not readable: %s\n' \
+if [[ ! -f ${PROJECT_FILES} || -L ${PROJECT_FILES} || ! -r ${PROJECT_FILES} ]]; then
+    printf 'Error: required project file list is not a readable regular file: %s\n' \
         "${PROJECT_FILES}" >&2
     exit 66
 fi
@@ -27,11 +27,26 @@ source "${PROJECT_FILES}"
 
 for array_name in PRODUCTION_SHELL_FILES PACKAGING_SHELL_FILES TEST_SHELL_FILES DEVELOPMENT_SHELL_FILES; do
     if ! array_declaration=$(declare -p "${array_name}" 2>/dev/null) \
-        || [[ ${array_declaration} != 'declare -a '* ]]; then
+        || [[ ! ${array_declaration} =~ ^declare[[:space:]]+-([^[:space:]]+)[[:space:]] ]]; then
         printf 'Error: %s is not an indexed array in %s.\n' \
             "${array_name}" "${PROJECT_FILES}" >&2
         exit 65
     fi
+    array_attributes=${BASH_REMATCH[1]}
+    if [[ ${array_attributes} != *a* || ${array_attributes} == *A* ]]; then
+        printf 'Error: %s is not an indexed array in %s.\n' \
+            "${array_name}" "${PROJECT_FILES}" >&2
+        exit 65
+    fi
+    declare -n array_ref="${array_name}"
+    for array_entry in "${array_ref[@]}"; do
+        if [[ -z ${array_entry} ]]; then
+            printf 'Error: %s contains an empty shell-file entry.\n' \
+                "${array_name}" >&2
+            exit 65
+        fi
+    done
+    unset -n array_ref
 done
 if ((${#PRODUCTION_SHELL_FILES[@]} == 0 || \
     ${#PACKAGING_SHELL_FILES[@]} == 0 || \

@@ -36,7 +36,7 @@ assert_standard_shell_header() {
     local separator_close=''
     local spacer='nonempty'
 
-    {
+    if ! {
         IFS= read -r shebang || true
         IFS= read -r spdx || true
         IFS= read -r separator_open || true
@@ -45,7 +45,11 @@ assert_standard_shell_header() {
         IFS= read -r purpose_line || true
         IFS= read -r separator_close || true
         IFS= read -r spacer || true
-    } <"${absolute_path}"
+    } <"${absolute_path}"; then
+        printf 'FAIL: unable to read canonical shell file: %s.\n' \
+            "${relative_path}" >&2
+        return 65
+    fi
 
     [[ ${shebang} == '#!'* ]] || {
         printf 'FAIL: missing shebang in %s.\n' "${relative_path}" >&2
@@ -699,6 +703,31 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
         'sole rpm-signing reviewer must match the authenticated maintainer' \
         'release preflight binds the sole reviewer to the authenticated maintainer'
+    assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        "readonly RELEASE_TAG_SIGNING_FINGERPRINT='43E5361414863738F0324F2B047B26057E612CDC'" \
+        'release preflight pins the authorized Git tag signer'
+    # shellcheck disable=SC2016 # Literal shell-source assertion.
+    assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        'git verify-tag --raw "${release_tag}"' \
+        'release preflight obtains machine-readable tag verification status'
+    # shellcheck disable=SC2016 # Literal shell-source assertion.
+    assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        '${tag_primary_fingerprint} == "${RELEASE_TAG_SIGNING_FINGERPRINT}"' \
+        'release preflight authorizes the exact tag signer fingerprint'
+    assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        'git rev-parse --show-toplevel' \
+        'release preflight resolves the actual repository root'
+    assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        'unable to query the project version.' \
+        'release preflight diagnoses project-version lookup failure'
+    # shellcheck disable=SC2016 # Literal shell-source assertion.
+    assert_file_contains "${SCRIPT_DIR}/packaging/package-user-cleanup.sh" \
+        '${path} != *[[:cntrl:]]*' \
+        'package cleanup rejects marker path control characters'
+    assert_file_contains "${SCRIPT_DIR}/packaging/package-user-cleanup.sh" \
+        'unable to enumerate users from /etc/passwd or getent; skipping all-user cleanup' \
+        'package cleanup diagnoses unavailable enumeration sources'
+
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'hls_duration_loss_us > hls_duration_tolerance_us' \
         'HLS post-remux duration loss is bounded before publication'
@@ -1234,8 +1263,14 @@ main() {
     # shellcheck disable=SC2016 # Literal GitHub-expression assertion.
     assert_file_not_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" 'group: packages-${{ github.workflow }}-${{ github.ref }}-${{ matrix.scenario }}' 'package workflow does not use matrix at workflow-level concurrency'
 
+    # Executable staging must not depend on an executable /tmp, while the
+    # separate GnuPG homedir stays short enough for Unix-domain socket paths.
+    # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/runtime-manager.sh" \
-        "mktemp -d --tmpdir=/tmp '.yt-dlp-bootstrap.XXXXXXXX'" \
+        'work=$(mktemp -d --tmpdir="${RUNTIME_ROOT}"' \
+        'yt-dlp executable bootstrap staging stays below RUNTIME_ROOT'
+    assert_file_contains "${SCRIPT_DIR}/runtime-manager.sh" \
+        "gpg_home=\$(mktemp -d --tmpdir=/tmp '.yt-dlp-gpg.XXXXXXXX')" \
         'yt-dlp bootstrap keeps the GnuPG socket path short'
     assert_file_contains "${SCRIPT_DIR}/runtime-manager.sh" \
         'require)' 'runtime manager exposes strict no-network require mode'

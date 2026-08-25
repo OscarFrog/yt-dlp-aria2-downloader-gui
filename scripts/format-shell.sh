@@ -15,6 +15,7 @@ main() {
     local ensure_shfmt=''
     local shfmt_binary=''
     local shfmt_version=''
+    local -a shfmt_flags=(-i 4 -ci -bn)
 
     script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
     project_dir=$(cd -- "${script_dir}/.." && pwd -P)
@@ -42,14 +43,30 @@ main() {
         exit 65
     fi
 
-    shfmt_binary=$(bash -- "${ensure_shfmt}")
-    shfmt_version=$("${shfmt_binary}" --version)
+    if ! shfmt_binary=$(bash -- "${ensure_shfmt}"); then
+        printf 'Error: unable to resolve the managed shfmt binary.\n' >&2
+        exit 65
+    fi
+    if [[ -z ${shfmt_binary} ||
+        ${shfmt_binary} == *$'\n'* ||
+        ${shfmt_binary} != /* ||
+        -L ${shfmt_binary} ||
+        ! -f ${shfmt_binary} ||
+        ! -x ${shfmt_binary} ]]; then
+        printf 'Error: shfmt bootstrap returned an invalid executable path.\n' >&2
+        exit 65
+    fi
+    if ! shfmt_version=$("${shfmt_binary}" --version); then
+        printf 'Error: the managed shfmt binary cannot report its version: %s\n' \
+            "${shfmt_binary}" >&2
+        exit 65
+    fi
 
-    printf 'Formatting canonical shell files with %s (-i 4 -ci -bn).\n' \
-        "${shfmt_version}"
+    printf 'Formatting canonical shell files with %s (%s).\n' \
+        "${shfmt_version}" "${shfmt_flags[*]}"
 
     cd -- "${project_dir}"
-    "${shfmt_binary}" -w -i 4 -ci -bn -- "${ALL_SHELL_FILES[@]}"
+    "${shfmt_binary}" -w "${shfmt_flags[@]}" -- "${ALL_SHELL_FILES[@]}"
 }
 
 main "$@"

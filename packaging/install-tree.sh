@@ -9,17 +9,48 @@
 set -Eeuo pipefail
 umask 022
 
+valid_private_dir() {
+    local path=$1
+    local rest=''
+    local component=''
+
+    [[ ${path} == /usr/* &&
+        ${path} != /usr/ &&
+        ${path} != */ &&
+        ${path} != *$'\n'* &&
+        ${path} != *$'\r'* ]] || return 1
+
+    rest=${path#/usr/}
+    while [[ -n ${rest} ]]; do
+        if [[ ${rest} == */* ]]; then
+            component=${rest%%/*}
+            rest=${rest#*/}
+        else
+            component=${rest}
+            rest=''
+        fi
+
+        [[ -n ${component} &&
+            ${component} != . &&
+            ${component} != .. ]] || return 1
+    done
+
+    return 0
+}
+
 if (($# != 3)); then
     printf 'Usage: %s DESTDIR VERSION PRIVATE_DIR\n' "${0##*/}" >&2
     exit 2
 fi
-readonly DESTDIR=$1 VERSION=$2 PRIVATE_DIR=$3
+readonly DESTDIR="$1" VERSION="$2" PRIVATE_DIR="$3"
 readonly PACKAGE_NAME='yt-dlp-aria2-downloader-gui'
 [[ ${DESTDIR} == /* ]] || {
     printf 'Error: DESTDIR must be absolute.\n' >&2
     exit 2
 }
-[[ ${PRIVATE_DIR} == /usr/* && ${PRIVATE_DIR} != */../* ]] || {
+# valid_private_dir is an explicit predicate; failure is handled below.
+# shellcheck disable=SC2310
+valid_private_dir "${PRIVATE_DIR}" || {
     printf 'Error: invalid PRIVATE_DIR.\n' >&2
     exit 2
 }
