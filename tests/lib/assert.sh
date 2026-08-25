@@ -63,6 +63,26 @@ assert_invocable_command() {
     fi
 }
 
+validate_expected_status() {
+    (($# == 3)) || test_error "validate_expected_status requires 3 arguments; got $#."
+    local raw=$1
+    local label=$2
+    local output_name=$3
+    local normalized=''
+
+    [[ ${raw} =~ ^[0-9]+$ ]] \
+        || test_error "${label}: expected status is not an integer: ${raw}"
+    [[ ${raw} =~ ^0*([0-9]{1,3})$ ]] \
+        || test_error "${label}: expected status is outside 0-255: ${raw}"
+
+    normalized=${BASH_REMATCH[1]}
+    [[ -n ${normalized} ]] || normalized=0
+    ((10#${normalized} <= 255)) \
+        || test_error "${label}: expected status is outside 0-255: ${raw}"
+
+    printf -v "${output_name}" '%d' "$((10#${normalized}))"
+}
+
 assert_status() {
     (($# >= 3)) || test_error \
         'assert_status requires an expected status, a label, and a command.'
@@ -72,11 +92,7 @@ assert_status() {
     local actual=0
     local output=''
 
-    [[ ${expected} =~ ^[0-9]+$ ]] \
-        || test_error "${label}: expected status is not an integer: ${expected}"
-    expected=$((10#${expected}))
-    ((expected <= 255)) \
-        || test_error "${label}: expected status is outside 0-255: ${expected}"
+    validate_expected_status "${expected}" "${label}" expected
     assert_invocable_command "$1" "${label}"
 
     ASSERT_OUTPUT=''
@@ -106,11 +122,7 @@ assert_status_split() {
     local stdout_file
     local stderr_file
 
-    [[ ${expected} =~ ^[0-9]+$ ]] \
-        || test_error "${label}: expected status is not an integer: ${expected}"
-    expected=$((10#${expected}))
-    ((expected <= 255)) \
-        || test_error "${label}: expected status is outside 0-255: ${expected}"
+    validate_expected_status "${expected}" "${label}" expected
     assert_invocable_command "$1" "${label}"
 
     temporary_dir=$(mktemp -d) \
@@ -123,7 +135,9 @@ assert_status_split() {
     ("$@") >"${stdout_file}" 2>"${stderr_file}" || actual=$?
     ASSERT_STDOUT=$(<"${stdout_file}")
     ASSERT_STDERR=$(<"${stderr_file}")
-    rm -rf -- "${temporary_dir}"
+    if ! rm -rf -- "${temporary_dir}"; then
+        test_error "${label}: unable to remove output-capture directory: ${temporary_dir}"
+    fi
 
     if ((actual != expected)); then
         printf 'FAIL: %s\n' "${label}" >&2
@@ -156,6 +170,9 @@ assert_text_contains() {
     local needle=$2
     local label=$3
 
+    [[ -n ${needle} ]] \
+        || test_error "${label}: assert_text_contains requires a non-empty needle."
+
     if [[ ${text} != *"${needle}"* ]]; then
         printf 'FAIL: %s\nMissing text: %s\nText:\n%s\n' \
             "${label}" "${needle}" "${text}" >&2
@@ -168,6 +185,9 @@ assert_text_not_contains() {
     local text=$1
     local needle=$2
     local label=$3
+
+    [[ -n ${needle} ]] \
+        || test_error "${label}: assert_text_not_contains requires a non-empty needle."
 
     if [[ ${text} == *"${needle}"* ]]; then
         printf 'FAIL: %s\nUnexpected text: %s\nText:\n%s\n' \
@@ -182,6 +202,9 @@ assert_file_contains() {
     local needle=$2
     local label=$3
     local status=0
+
+    [[ -n ${needle} ]] \
+        || test_error "${label}: assert_file_contains requires a non-empty needle."
 
     assert_readable_file "${file}" "${label}"
     grep -Fq -- "${needle}" "${file}" || status=$?
@@ -202,6 +225,9 @@ assert_file_not_contains() {
     local needle=$2
     local label=$3
     local status=0
+
+    [[ -n ${needle} ]] \
+        || test_error "${label}: assert_file_not_contains requires a non-empty needle."
 
     assert_readable_file "${file}" "${label}"
     grep -Fq -- "${needle}" "${file}" || status=$?
