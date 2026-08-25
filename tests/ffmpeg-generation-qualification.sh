@@ -40,6 +40,10 @@ main() {
 
     resolved_ffmpeg=$(ffmpeg -hide_banner -version | awk 'NR == 1 { print $3; exit }')
     resolved_ffprobe=$(ffprobe -hide_banner -version | awk 'NR == 1 { print $3; exit }')
+    [[ -n ${resolved_ffmpeg} ]] \
+        || fail_test 'unable to resolve the FFmpeg version from ffmpeg -version.'
+    [[ -n ${resolved_ffprobe} ]] \
+        || fail_test 'unable to resolve the FFprobe version from ffprobe -version.'
     case ${resolved_ffmpeg} in
         "${expected}" | "${expected}"-* | "${expected}"+* | "${expected}"~*) ;;
         *) fail_test "resolved FFmpeg ${resolved_ffmpeg} does not match ${expected}." ;;

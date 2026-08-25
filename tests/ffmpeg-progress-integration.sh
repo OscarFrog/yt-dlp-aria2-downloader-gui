@@ -47,6 +47,17 @@ main() {
     readonly RESULT_FILE="${TEST_ROOT}/result.txt"
     readonly CAPTURE_FILE="${TEST_ROOT}/progress.txt"
     readonly FINAL_FILE="${TEST_ROOT}/measured.mkv"
+    wait_seconds=${FFMPEG_PROGRESS_WAIT_SECONDS:-10}
+    [[ ${wait_seconds} =~ ^[0-9]{1,3}$ ]] || {
+        printf 'Error: FFMPEG_PROGRESS_WAIT_SECONDS must be an integer between 1 and 120.\n' >&2
+        exit 64
+    }
+    wait_seconds=$((10#${wait_seconds}))
+    ((wait_seconds >= 1 && wait_seconds <= 120)) || {
+        printf 'Error: FFMPEG_PROGRESS_WAIT_SECONDS must be between 1 and 120.\n' >&2
+        exit 64
+    }
+    readonly wait_seconds
     : >"${LOG_FILE}"
     : >"${CAPTURE_FILE}"
 
@@ -65,7 +76,8 @@ main() {
         'out_time_us=5000000' \
         >>"${LOG_FILE}"
 
-    for _ in {1..100}; do
+    progress_deadline=$((SECONDS + wait_seconds))
+    while ((SECONDS < progress_deadline)); do
         if grep -Fq -- 'Remuxing the media into an MKV container' "${CAPTURE_FILE}" \
             && awk '/^[0-9]+$/ && $1 >= 95 && $1 <= 98 {found=1} END {exit !found}' \
                 "${CAPTURE_FILE}"; then
@@ -73,6 +85,11 @@ main() {
         fi
         sleep 0.05
     done
+    grep -Fq -- 'Remuxing the media into an MKV container' "${CAPTURE_FILE}" || {
+        printf 'FAIL: FFmpeg remux phase message was not rendered.\n' >&2
+        tail -n 40 -- "${CAPTURE_FILE}" >&2 || true
+        exit 1
+    }
     awk '/^[0-9]+$/ && $1 >= 95 && $1 <= 98 {found=1} END {exit !found}' \
         "${CAPTURE_FILE}" || {
         printf 'FAIL: measured FFmpeg progress was not rendered.\n' >&2
@@ -85,8 +102,14 @@ main() {
     kill -TERM -- "${WORKER_PID}" 2>/dev/null || true
     wait "${WORKER_PID}" 2>/dev/null || true
     WORKER_PID=''
-    wait "${MONITOR_PID}"
+    monitor_status=0
+    wait "${MONITOR_PID}" || monitor_status=$?
     MONITOR_PID=''
+    if ((monitor_status != 0)); then
+        printf 'FAIL: progress monitor exited with status %d in measured scenario.\n' \
+            "${monitor_status}" >&2
+        exit 1
+    fi
 
     grep -Fqx -- '100' "${CAPTURE_FILE}" || {
         printf 'FAIL: measured FFmpeg scenario did not reach final 100 percent.\n' >&2
@@ -131,8 +154,15 @@ main() {
     kill -TERM -- "${WORKER_PID}" 2>/dev/null || true
     wait "${WORKER_PID}" 2>/dev/null || true
     WORKER_PID=''
-    wait "${MONITOR_PID}"
+    monitor_status=0
+    wait "${MONITOR_PID}" || monitor_status=$?
     MONITOR_PID=''
+    if ((monitor_status != 0)); then
+        printf 'FAIL: progress monitor exited with status %d in oversized-counter scenario.\n' \
+            "${monitor_status}" >&2
+        cat -- "${overflow_error}" >&2 || true
+        exit 1
+    fi
     grep -Fqx -- '100' "${overflow_capture}" || {
         printf 'FAIL: oversized-counter scenario did not complete.\n' >&2
         exit 1

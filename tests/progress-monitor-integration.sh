@@ -22,6 +22,7 @@ assert_readable_file "${MONITOR}" 'progress monitor'
 
 TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
+trap 'rm -rf -- "${TEST_ROOT}" || true' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -116,7 +117,7 @@ stop_process_bounded() {
         fi
         sleep 0.05
     done
-    return 0
+    fail "process ${pid} did not exit after SIGKILL"
 }
 
 stop_active_processes() {

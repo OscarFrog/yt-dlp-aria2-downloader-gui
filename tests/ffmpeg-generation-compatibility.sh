@@ -229,7 +229,11 @@ qualify_ffmpeg_cancellation() {
         fail_test 'FFmpeg cancellation fixture did not expose a process group.'
     fi
 
-    kill -TERM -- "-${FFMPEG_PGID}"
+    if ! kill -TERM -- "-${FFMPEG_PGID}" 2>/dev/null; then
+        if kill -0 -- "-${FFMPEG_PGID}" 2>/dev/null; then
+            fail_test 'unable to send SIGTERM to the FFmpeg process group.'
+        fi
+    fi
 
     for _ in {1..50}; do
         if ! kill -0 -- "-${FFMPEG_PGID}" 2>/dev/null; then
