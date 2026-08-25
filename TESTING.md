@@ -85,7 +85,9 @@ The automated suite checks, among other things:
 - absence of forced MP3, M4A, or Opus output formats;
 - MKV video selection without forced re-encoding;
 - structured yt-dlp planning and progress records, aria2c console fallback,
-  byte-weighted progress, fragment progress, and unknown-size animation;
+  byte-weighted progress, fragment progress, unknown-size animation, exact
+  private-direct transfer-count preallocation, and protection against
+  pre-download `MetadataParser` hooks being misclassified as final post-processing;
 - separate video/audio transfers, direct audio, HLS, DASH, merge, remux,
   extraction, late progress, and error paths;
 - verification that a local transfer reaching 100% does not complete the global
@@ -145,6 +147,14 @@ The automated suite checks, among other things:
 
 - private GUI URL transfer through owner-only URL and yt-dlp batch files, with
   the requested URL absent from GUI, engine, and yt-dlp process arguments;
+- conservative recovery of abandoned private aria2 staging after SIGKILL,
+  including owner-marker, legacy-fingerprint, symlink, unknown-entry,
+  invalid-mode and cross-destination negative controls;
+- real aria2 loopback qualification of exact `Referer`, `Cookie`,
+  `Authorization`, multi-header and same-origin redirect fidelity, while
+  sensitive header values remain absent from aria2 argv and captured output;
+- a negative helper mutation that drops `Authorization` and must be rejected by
+  the real header-fidelity server;
 - retained-log URL redaction, an 8 MiB retained-size limit, and private live
   diagnostics kept under the runtime temporary directory;
 - complete-video rejection when either the video or audio stream is absent,

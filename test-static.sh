@@ -512,7 +512,7 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
         '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
         'non-owner test cleanup protection'
-    readonly EXPECTED_VERSION='2.2.0'
+    readonly EXPECTED_VERSION='2.2.1'
 
     # Current-version coherence is intentionally checked only on authoritative
     # carriers. Historical versions used by regression/upgrade fixtures are valid
@@ -535,6 +535,30 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
         "version actuelle est la **${EXPECTED_VERSION}**." \
         'French README version'
+    assert_file_contains "${SCRIPT_DIR}/README.md" \
+        "Release ${EXPECTED_VERSION} publishes an architecture-independent DEB" \
+        'English README current DEB release prose'
+    assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
+        "La release ${EXPECTED_VERSION} publie un DEB indépendant de l'architecture" \
+        'French README current DEB release prose'
+    assert_file_contains "${SCRIPT_DIR}/README.md" \
+        "cd yt-dlp-aria2-downloader-gui-${EXPECTED_VERSION}" \
+        'English README portable archive directory'
+    assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
+        "cd yt-dlp-aria2-downloader-gui-${EXPECTED_VERSION}" \
+        'French README portable archive directory'
+    assert_file_contains "${SCRIPT_DIR}/README.md" \
+        "gh release verify v${EXPECTED_VERSION} -R OscarFrog/yt-dlp-aria2-downloader-gui" \
+        'English README current release verification tag'
+    assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
+        "gh release verify v${EXPECTED_VERSION} -R OscarFrog/yt-dlp-aria2-downloader-gui" \
+        'French README current release verification tag'
+    assert_file_contains "${SCRIPT_DIR}/README.md" \
+        "-f tag=v${EXPECTED_VERSION}" \
+        'English README manual release tag input'
+    assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
+        "-f tag=v${EXPECTED_VERSION}" \
+        'French README manual release tag input'
     assert_file_contains "${SCRIPT_DIR}/CHANGELOG.md" \
         "## ${EXPECTED_VERSION} - " \
         'changelog current-version heading'
@@ -715,6 +739,39 @@ main() {
         "${SCRIPT_DIR}/packaging/rpm/build-rpm.sh" \
         'if [[ ${package_format} != 4 ]]; then' \
         'generated RPM package format is independently verified'
+
+    rpm_changelog=$(
+        awk '
+            /^%changelog[[:space:]]*$/ { in_changelog=1; next }
+            in_changelog { print }
+        ' "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec"
+    )
+    assert_text_not_contains "${rpm_changelog}" '%{version}' \
+        'RPM historical changelog does not use the current version macro'
+    assert_text_not_contains "${rpm_changelog}" '%{project_version}' \
+        'RPM historical changelog does not use the project version macro'
+    assert_text_contains "${rpm_changelog}" ' - 2.1.20-1' \
+        'RPM historical 2.1.20 version is stable'
+    assert_text_contains "${rpm_changelog}" ' - 2.1.24-1' \
+        'RPM historical 2.1.24 version is stable'
+    assert_text_contains "${rpm_changelog}" ' - 2.1.25-1' \
+        'RPM historical 2.1.25 version is stable'
+
+    assert_file_contains "${SCRIPT_DIR}/QUALIFICATION_2.2.0.md" \
+        '**Historical qualification document.**' \
+        '2.2.0 qualification is explicitly historical'
+    assert_file_contains "${SCRIPT_DIR}/QUALIFICATION_2.2.0.md" \
+        '**Post-release verification — 2026-08-25.**' \
+        '2.2.0 qualification contains a post-release verification note'
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        'recover_abandoned_private_aria2_staging' \
+        'engine recovers validated abandoned private aria2 staging'
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        "readonly PRIVATE_ARIA2_STAGING_MARKER='.yt-dlp-aria2-owner-v1'" \
+        'new private aria2 staging carries a durable owner marker'
+    assert_file_contains "${SCRIPT_DIR}/tests/aria2-auth-headers-integration.sh" \
+        'Authorization-dropping helper mutation was not detected.' \
+        'private aria2 Authorization fidelity has a negative mutation control'
 
     assert_file_contains \
         "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \

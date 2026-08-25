@@ -1,3 +1,28 @@
+## 2.2.1 - 2026-08-25
+
+### Reliability and progress
+
+- Recover abandoned private aria2 staging after a non-interceptable crash only
+  when ownership, permissions, location and file structure are unambiguous;
+  preserve ambiguous, symlinked or foreign candidates instead of deleting them.
+- Restore meaningful Zenity progress after the 2.2.0 private direct-transfer
+  change by carrying the exact direct transfer count, keeping one aria2 queue
+  item active at a time while preserving per-item split connections, and
+  ignoring yt-dlp `MetadataParser` pre-process hooks as final post-processing.
+- Add regression coverage for the real Fedora/Zenity progress failure observed
+  after 2.2.0.
+
+### Qualification and metadata
+
+- Add a real aria2 loopback matrix for exact `Referer`, `Cookie`,
+  `Authorization`, multiple-header and redirect fidelity, with aria2 argv/output
+  privacy assertions and a dropped-Authorization mutation test.
+- Freeze historical RPM changelog versions at 2.1.20, 2.1.24 and 2.1.25 so
+  future package builds cannot rewrite release history through `%{version}`.
+- Mark `QUALIFICATION_2.2.0.md` explicitly as a historical pre-release plan and
+  add a concise post-release verification note based on the immutable public
+  2.2.0 release.
+
 ## 2.2.0 - 2026-08-24
 
 ### Direct-transfer privacy and publication hardening

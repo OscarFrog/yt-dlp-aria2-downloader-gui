@@ -39,8 +39,8 @@ Environment controls:
   MAX_SCHEDULE_AGE_DAYS=14
   REQUIRE_EXTENDED_QUALIFICATION=false
 
-Set REQUIRE_EXTENDED_QUALIFICATION=true for the final 2.2.0 release so the
-new qualification.yml workflow is also required on the exact release SHA.
+Set REQUIRE_EXTENDED_QUALIFICATION=true for final release qualification when
+qualification.yml must also be required on the exact release SHA.
 EOF_USAGE
 }
 

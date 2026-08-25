@@ -43,6 +43,7 @@ TEST_SHELL_FILES=(
     tests/lib/project-files.sh
     tests/mock-integration.sh
     tests/private-aria2-plan-integration.sh
+    tests/aria2-auth-headers-integration.sh
     tests/runtime-manager-integration.sh
     tests/runtime-manager-hardening-integration.sh
     tests/progress-monitor-integration.sh

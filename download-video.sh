@@ -9,13 +9,15 @@
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.2.0"
+readonly VERSION="2.2.1"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
 readonly SCRIPT_NAME="${0##*/}"
 readonly YTDLP_NO_PLUGINS=1
 export YTDLP_NO_PLUGINS
+readonly PRIVATE_ARIA2_STAGING_MARKER='.yt-dlp-aria2-owner-v1'
+readonly PRIVATE_ARIA2_STAGING_MARKER_VALUE='yt-dlp-aria2-private-staging-v1'
 
 VERSION_AT_LEAST=false
 VERSION_PARSE_VALID=false
@@ -316,6 +318,7 @@ check_runtime_compatibility() {
         --dir \
         --load-cookies \
         --allow-overwrite \
+        --max-concurrent-downloads \
         --auto-file-renaming \
         --enable-color \
         --truncate-console-readout \
@@ -696,6 +699,132 @@ run_supervised_command() {
     return 0
 }
 
+private_aria2_staging_candidate_is_safe() {
+    local candidate=$1
+    local require_marker=$2
+    local candidate_name=${candidate##*/}
+    local candidate_owner=''
+    local candidate_mode=''
+    local candidate_parent=''
+    local entry=''
+    local entry_name=''
+    local entry_owner=''
+    local entry_mode=''
+    local marker_value=''
+    local marker_size=''
+    local marker_seen=false
+    local legacy_plan_seen=false
+    local legacy_cookie_seen=false
+
+    [[ ${candidate_name} =~ ^[.]yt-dlp-aria2[.][A-Za-z0-9]{8}$ ]] || return 1
+    [[ ! -L ${candidate} && -d ${candidate} ]] || return 1
+
+    candidate_owner=$(stat -c '%u' -- "${candidate}" 2>/dev/null) || return 1
+    candidate_mode=$(stat -c '%a' -- "${candidate}" 2>/dev/null) || return 1
+    [[ ${candidate_owner} == "${EUID}" && ${candidate_mode} == 700 ]] || return 1
+
+    candidate_parent=$(realpath -e -- "${candidate}/.." 2>/dev/null) || return 1
+    [[ ${candidate_parent} == "${OUTPUT_DIR}" ]] || return 1
+
+    while IFS= read -r -d '' entry; do
+        entry_name=${entry##*/}
+        [[ ! -L ${entry} && -f ${entry} ]] || return 1
+
+        entry_owner=$(stat -c '%u' -- "${entry}" 2>/dev/null) || return 1
+        entry_mode=$(stat -c '%a' -- "${entry}" 2>/dev/null) || return 1
+        [[ ${entry_owner} == "${EUID}" && ${entry_mode} == 600 ]] || return 1
+
+        case ${entry_name} in
+            "${PRIVATE_ARIA2_STAGING_MARKER}")
+                [[ ${require_marker} == true && ${marker_seen} == false ]] || return 1
+                marker_size=$(stat -c '%s' -- "${entry}" 2>/dev/null) || return 1
+                [[ ${marker_size} == "$((${#PRIVATE_ARIA2_STAGING_MARKER_VALUE} + 1))" ]] \
+                    || return 1
+                marker_value=''
+                IFS= read -r marker_value <"${entry}" || return 1
+                [[ ${marker_value} == "${PRIVATE_ARIA2_STAGING_MARKER_VALUE}" ]] \
+                    || return 1
+                marker_seen=true
+                ;;
+            plan.json)
+                legacy_plan_seen=true
+                ;;
+            cookies.txt)
+                legacy_cookie_seen=true
+                ;;
+            aria2.input | manifest.json | \
+                item-[0-9][0-9][0-9].download | \
+                item-[0-9][0-9][0-9].download.aria2)
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done < <(
+        find "${candidate}" -mindepth 1 -maxdepth 1 -print0 2>/dev/null || true
+    )
+
+    if [[ ${require_marker} == true ]]; then
+        [[ ${marker_seen} == true ]]
+    else
+        [[ ${marker_seen} == false &&
+            ${legacy_plan_seen} == true &&
+            ${legacy_cookie_seen} == true ]]
+    fi
+}
+
+remove_private_aria2_staging_candidate() {
+    local candidate=$1
+    local require_marker=$2
+    local entry=''
+
+    # shellcheck disable=SC2310 # Predicate explicitly handles failures; validation failure stops deletion.
+    private_aria2_staging_candidate_is_safe "${candidate}" "${require_marker}" \
+        || return 1
+
+    while IFS= read -r -d '' entry; do
+        [[ ! -L ${entry} && -f ${entry} ]] || return 1
+        rm -f -- "${entry}" || return 1
+    done < <(
+        find "${candidate}" -mindepth 1 -maxdepth 1 -print0 2>/dev/null || true
+    )
+
+    rmdir -- "${candidate}"
+}
+
+recover_abandoned_private_aria2_staging() {
+    local candidate=''
+    local marker_path=''
+    local require_marker=false
+
+    while IFS= read -r -d '' candidate; do
+        require_marker=false
+        marker_path="${candidate}/${PRIVATE_ARIA2_STAGING_MARKER}"
+
+        if [[ -e ${marker_path} || -L ${marker_path} ]]; then
+            require_marker=true
+        fi
+
+        # shellcheck disable=SC2310 # Validation failure is the preserve path.
+        if private_aria2_staging_candidate_is_safe \
+            "${candidate}" "${require_marker}"; then
+            if ! remove_private_aria2_staging_candidate \
+                "${candidate}" "${require_marker}"; then
+                printf 'Warning: unable to remove validated private aria2 staging: %s\n' \
+                    "${candidate##*/}" >&2
+            fi
+        else
+            printf 'Warning: preserving ambiguous private aria2 staging directory: %s\n' \
+                "${candidate##*/}" >&2
+        fi
+    done < <(
+        find "${OUTPUT_DIR}" \
+            -mindepth 1 -maxdepth 1 \
+            -name '.yt-dlp-aria2.????????' \
+            -print0 2>/dev/null || true
+    )
+}
+
 cleanup_stale_temporary_files() {
     local stale_file
     local -a stale_files=()
@@ -1020,7 +1149,7 @@ main() {
         fi
     fi
 
-    for command_name in aria2c ffmpeg ffprobe python3 sed stdbuf tr realpath grep mktemp mv rm chmod flock mkdir sha256sum stat setsid sleep timeout find; do
+    for command_name in aria2c ffmpeg ffprobe python3 sed stdbuf tr realpath grep mktemp mv rm rmdir chmod flock mkdir sha256sum stat setsid sleep timeout find; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             error "required command \"${command_name}\" was not found."
             exit 127
@@ -1119,6 +1248,7 @@ main() {
     # stored in a private local runtime directory, so no marker is written into the
     # user's media directory and an interrupted process releases it automatically.
     acquire_output_lock "${OUTPUT_DIR}"
+    recover_abandoned_private_aria2_staging
     cleanup_stale_temporary_files
 
     if [[ -n ${RESULT_FILE} ]]; then
@@ -1187,6 +1317,14 @@ main() {
         exit 13
     fi
 
+    PRIVATE_ARIA2_STAGING_MARKER_PATH="${PRIVATE_ARIA2_STAGING}/${PRIVATE_ARIA2_STAGING_MARKER}"
+    if ! printf '%s\n' "${PRIVATE_ARIA2_STAGING_MARKER_VALUE}" \
+        >"${PRIVATE_ARIA2_STAGING_MARKER_PATH}" \
+        || ! chmod 600 -- "${PRIVATE_ARIA2_STAGING_MARKER_PATH}"; then
+        error 'unable to initialize private aria2 staging ownership metadata.'
+        exit 13
+    fi
+
     PRIVATE_ARIA2_PLAN="${PRIVATE_ARIA2_STAGING}/plan.json"
     PRIVATE_ARIA2_COOKIE_JAR="${PRIVATE_ARIA2_STAGING}/cookies.txt"
     PRIVATE_ARIA2_INPUT="${PRIVATE_ARIA2_STAGING}/aria2.input"
@@ -1213,7 +1351,7 @@ main() {
     if [[ ${ARIA2_SUPPORTS_NO_NETRC} == true ]]; then
         ARIA2_ARGUMENTS+=' --no-netrc=true'
     fi
-    ARIA2_ARGUMENTS+=' --allow-overwrite=false --auto-file-renaming=false'
+    ARIA2_ARGUMENTS+=' --allow-overwrite=false --auto-file-renaming=false --max-concurrent-downloads=1'
     ARIA2_ARGUMENTS+=' --console-log-level=warn --enable-color=false --truncate-console-readout=false'
     if [[ ${MACHINE_PROGRESS} == true ]]; then
         # yt-dlp does not currently expose aria2c transfer progress through its
@@ -1328,12 +1466,22 @@ main() {
     fi
 
     PRIVATE_TRANSPORT=''
+    PRIVATE_TRANSFER_COUNT=''
     while IFS= read -r classification_line; do
         case ${classification_line} in
             transport=*)
                 PRIVATE_TRANSPORT=${classification_line#transport=}
                 ;;
             transfer_count=*)
+                if [[ -n ${PRIVATE_TRANSFER_COUNT} ]]; then
+                    error 'the private transfer classifier returned duplicate transfer counts.'
+                    exit 65
+                fi
+                PRIVATE_TRANSFER_COUNT=${classification_line#transfer_count=}
+                if [[ ! ${PRIVATE_TRANSFER_COUNT} =~ ^([1-9]|1[0-6])$ ]]; then
+                    error 'the private transfer classifier returned an invalid transfer count.'
+                    exit 65
+                fi
                 ;;
             *)
                 error 'the private transfer classifier returned unexpected output.'
@@ -1341,6 +1489,11 @@ main() {
                 ;;
         esac
     done <<<"${classification_output}"
+
+    if [[ -z ${PRIVATE_TRANSFER_COUNT} ]]; then
+        error 'the private transfer classifier did not return a transfer count.'
+        exit 65
+    fi
 
     case ${PRIVATE_TRANSPORT} in
         direct | native) ;;
@@ -1372,6 +1525,12 @@ main() {
     fi
 
     if [[ ${PRIVATE_TRANSPORT} == direct ]]; then
+        # The separate PLAN pass used by the private direct path does not emit
+        # yt-dlp's before_dl machine event. Publish the exact non-secret item
+        # count so the GUI can reserve every transfer before aria2 starts.
+        if [[ ${MACHINE_PROGRESS} == true ]]; then
+            printf 'ARIA2_PLAN|%s\n' "${PRIVATE_TRANSFER_COUNT}"
+        fi
         if ! python3 "${private_aria2_helper}" build \
             --plan "${PRIVATE_ARIA2_PLAN}" \
             --output-dir "${OUTPUT_DIR}" \

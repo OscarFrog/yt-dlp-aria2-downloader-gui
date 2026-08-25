@@ -14,7 +14,7 @@ readonly PROJECT_DIR
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 for required_command in \
     awk bash cat chmod date dirname env grep ln mkdir mktemp mv readlink \
-    realpath rm setsid sleep stat timeout touch tr flock sha256sum wc python3; do
+    realpath rm setsid sleep stat timeout touch tr flock sha256sum wc python3 find; do
     require_test_command "${required_command}"
 done
 [[ -r /proc/self/cmdline ]] \
@@ -339,6 +339,7 @@ case ${1:-} in
         '--load-cookies=FILE' \
         '--allow-overwrite[=true|false]' \
         '--auto-file-renaming[=true|false]'
+    printf '%s\n' '-j, --max-concurrent-downloads=<N>'
     if [[ ${MOCK_ARIA2_NO_NETRC_UNAVAILABLE:-0} != 1 ]]; then
         printf '%s\n' '-n, --no-netrc[=true|false]'
     fi
@@ -1503,6 +1504,129 @@ main() {
     flock --unlock "${held_lock_fd}"
     exec {held_lock_fd}>&-
 
+    # Regression guard: a non-interceptable crash must leave a recoverable
+    # owner-marked private staging directory, and the next run may remove only
+    # candidates whose ownership and structure are unambiguous.
+    crash_started="${TEST_ROOT}/private-staging-crash-started"
+    crash_result="${TEST_ROOT}/private-staging-crash-result.txt"
+    crash_log="${TEST_ROOT}/private-staging-crash.log"
+    rm -f -- "${crash_started}" "${crash_result}" "${crash_log}"
+    prepare_argument_log 'private-staging-crash'
+
+    setsid env \
+        YTDLP_ARIA2_SUPERVISED_SESSION=true \
+        MOCK_LONG_DOWNLOAD=1 \
+        MOCK_STARTED_MARKER="${crash_started}" \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" \
+        --mode audio \
+        --result-file "${crash_result}" \
+        -- 'https://example.com/watch?v=private-staging-crash' \
+        >"${crash_log}" 2>&1 &
+    crash_pid=$!
+
+    crash_started_seen=false
+    for ((attempt = 0; attempt < 200; attempt++)); do
+        if [[ -f ${crash_started} ]]; then
+            crash_started_seen=true
+            break
+        fi
+        sleep 0.05
+    done
+    [[ ${crash_started_seen} == true ]] \
+        || fail 'Private staging crash worker did not start.'
+
+    crash_staging=''
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        crash_staging=$(find "${OUTPUT_DIR}" \
+            -mindepth 1 -maxdepth 1 -type d \
+            -name '.yt-dlp-aria2.????????' -print -quit 2>/dev/null || true)
+        [[ -n ${crash_staging} ]] && break
+        sleep 0.05
+    done
+    [[ -n ${crash_staging} && -d ${crash_staging} ]] \
+        || fail 'Crash scenario did not create a private aria2 staging directory.'
+    [[ -f ${crash_staging}/.yt-dlp-aria2-owner-v1 ]] \
+        || fail 'Crash staging ownership marker is missing.'
+
+    kill -KILL -- "-${crash_pid}" 2>/dev/null \
+        || kill -KILL -- "${crash_pid}" 2>/dev/null \
+        || true
+    wait "${crash_pid}" 2>/dev/null || true
+    sleep 0.2
+
+    [[ -d ${crash_staging} ]] \
+        || fail 'SIGKILL unexpectedly ran private staging cleanup.'
+    [[ ! -e ${crash_result} ]] \
+        || fail 'SIGKILL crash published a result-file.'
+
+    legacy_exact="${OUTPUT_DIR}/.yt-dlp-aria2.LEGACY01"
+    ambiguous_marked="${OUTPUT_DIR}/.yt-dlp-aria2.AMBIG001"
+    invalid_mode="${OUTPUT_DIR}/.yt-dlp-aria2.BADMODE1"
+    symlink_target="${TEST_ROOT}/private-staging-symlink-target"
+    symlink_candidate="${OUTPUT_DIR}/.yt-dlp-aria2.SYMLINK1"
+    other_output="${TEST_ROOT}/private-staging-other-output"
+    cross_candidate="${other_output}/.yt-dlp-aria2.CROSS001"
+
+    mkdir -p -- "${legacy_exact}" "${ambiguous_marked}" \
+        "${invalid_mode}" "${symlink_target}" "${cross_candidate}"
+    chmod 700 -- "${legacy_exact}" "${ambiguous_marked}" \
+        "${symlink_target}" "${other_output}" "${cross_candidate}" 2>/dev/null || true
+    chmod 755 -- "${invalid_mode}"
+
+    printf '%s\n' '{}' >"${legacy_exact}/plan.json"
+    printf '%s\n' '# Netscape HTTP Cookie File' >"${legacy_exact}/cookies.txt"
+    chmod 600 -- "${legacy_exact}/plan.json" "${legacy_exact}/cookies.txt"
+
+    printf '%s\n' 'yt-dlp-aria2-private-staging-v1' \
+        >"${ambiguous_marked}/.yt-dlp-aria2-owner-v1"
+    printf '%s\n' 'foreign payload' >"${ambiguous_marked}/foreign.txt"
+    chmod 600 -- \
+        "${ambiguous_marked}/.yt-dlp-aria2-owner-v1" \
+        "${ambiguous_marked}/foreign.txt"
+
+    printf '%s\n' 'yt-dlp-aria2-private-staging-v1' \
+        >"${invalid_mode}/.yt-dlp-aria2-owner-v1"
+    chmod 600 -- "${invalid_mode}/.yt-dlp-aria2-owner-v1"
+
+    printf '%s\n' 'target must survive' >"${symlink_target}/sentinel"
+    ln -s -- "${symlink_target}" "${symlink_candidate}"
+
+    printf '%s\n' 'yt-dlp-aria2-private-staging-v1' \
+        >"${cross_candidate}/.yt-dlp-aria2-owner-v1"
+    chmod 600 -- "${cross_candidate}/.yt-dlp-aria2-owner-v1"
+
+    prepare_argument_log 'private-staging-recovery'
+    assert_status 0 'abandoned private staging recovery' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" \
+        --mode audio \
+        -- 'https://example.com/watch?v=private-staging-recovery'
+
+    [[ ! -e ${crash_staging} ]] \
+        || fail 'Owner-marked crash staging was not recovered.'
+    [[ ! -e ${legacy_exact} ]] \
+        || fail 'Exact legacy staging fingerprint was not recovered.'
+    [[ -d ${ambiguous_marked} ]] \
+        || fail 'Ambiguous marked staging was deleted.'
+    [[ -d ${invalid_mode} ]] \
+        || fail 'Invalid-mode staging was deleted.'
+    [[ -L ${symlink_candidate} && -f ${symlink_target}/sentinel ]] \
+        || fail 'Staging symlink or its target was modified.'
+    [[ -d ${cross_candidate} ]] \
+        || fail 'A different output directory was cleaned cross-destination.'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'preserving ambiguous private aria2 staging directory' \
+        'ambiguous staging preservation diagnostic'
+
+    rm -rf -- \
+        "${ambiguous_marked}" \
+        "${invalid_mode}" \
+        "${symlink_candidate}" \
+        "${symlink_target}" \
+        "${other_output}"
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
     # Scenario: aria2 GUI progress with an unknown total size.
     trimmed_gui_url='https://example.com/watch?v=trimmed'
     gui_url_seen_log="${TEST_ROOT}/gui-private-url-seen.txt"
@@ -1534,6 +1658,8 @@ main() {
         'GUI aria2 summary interval'
     assert_array_contains gui_aria2_arguments '--show-console-readout=true' \
         'machine-progress aria2 readout remains visible on stdout'
+    assert_array_contains gui_aria2_arguments '--max-concurrent-downloads=1' \
+        'GUI direct aria2 keeps one observable transfer item active at a time'
     assert_array_contains gui_aria2_arguments '--stderr=false' \
         'GUI aria2 progress remains on stdout'
 

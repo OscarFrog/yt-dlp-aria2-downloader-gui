@@ -87,6 +87,9 @@ bash -- ./tests/mock-integration.sh
 printf '\n=== Private aria2 plan integration ===\n'
 bash -- ./tests/private-aria2-plan-integration.sh
 
+printf '\n=== Private aria2 authentication/header integration ===\n'
+bash -- ./tests/aria2-auth-headers-integration.sh
+
 printf '\n=== Progress monitor integration ===\n'
 bash -- ./tests/progress-monitor-integration.sh
 

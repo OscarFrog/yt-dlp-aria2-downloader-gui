@@ -313,6 +313,66 @@ main() {
     assert_file_contains "${CAPTURE_FILE}" 'Downloading the media - 75%' \
         'final log bytes are drained after worker exit'
 
+    # Regression 2.2.0: --parse-metadata creates a MetadataParser postprocessor
+    # at yt-dlp's pre_process stage. The generic postprocess progress hook fires
+    # before before_dl/YTDLP_PLAN. It must not move the global Zenity bar into
+    # the 92..98 final post-processing phase.
+    start_scenario metadata-preprocess-before-download video
+    printf '%s\n' \
+        'YTDLP_POSTPROCESS|started|MetadataParser' \
+        'YTDLP_POSTPROCESS|finished|MetadataParser' \
+        >>"${LOG_FILE}"
+    sleep 0.8
+    metadata_preprocess_max=$(max_percentage "${CAPTURE_FILE}")
+    if [[ ! ${metadata_preprocess_max} =~ ^[0-9]+$ ]] \
+        || ((metadata_preprocess_max > 3)); then
+        fail "MetadataParser pre_process advanced Zenity before download: ${metadata_preprocess_max}"
+    fi
+
+    printf '%s\n' \
+        'YTDLP_PLAN|media|22|22|' \
+        'YTDLP_PROGRESS_V2|media|22|downloading|110|1000|0|0|0|11.0%|10.24MiB/s|00:31' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 11%' \
+        'download progress after MetadataParser pre_process'
+    metadata_download_max=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals '14' "${metadata_download_max}" \
+        '11 percent media progress maps to 14 percent global progress'
+    assert_percentages_never_decrease \
+        "${CAPTURE_FILE}" 'MetadataParser pre_process regression'
+    finish_success '/tmp/metadata-preprocess-before-download.mkv'
+
+    # Regression 2.2.0: the private direct PLAN pass knows the transfer count,
+    # but that count was not forwarded to the monitor. With two direct items,
+    # the first completed aria2 item could therefore look like 100% of all
+    # known bytes and jump the global bar to 90% before item 2 appeared.
+    start_scenario private-direct-aria-plan video
+    {
+        printf '%s\n' 'ARIA2_PLAN|2'
+        printf '\r[#a1b2c3 10MiB/10MiB(100%%) CN:8 DL:2MiB ETA:0s]\r'
+    } >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" '100% (aria2c)' \
+        'private direct first aria item'
+    private_first_max=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals '47' "${private_first_max}" \
+        'first of two private direct items cannot fill the download phase'
+    printf '\r[#d4e5f6 2MiB/10MiB(20%%) CN:8 DL:1MiB ETA:8s]\r' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 20% (aria2c)' \
+        'private direct second aria item'
+    assert_percentages_never_decrease \
+        "${CAPTURE_FILE}" 'private direct aria progress'
+    finish_success '/tmp/private-direct-aria-plan.mkv'
+
+    # A combined direct video is one transfer item, not the old video fallback
+    # assumption of two streams.
+    start_scenario private-direct-combined-video video
+    printf '%s\n' 'ARIA2_PLAN|1' >>"${LOG_FILE}"
+    printf '\r[#a1b2c3 4MiB/10MiB(40%%) CN:8 DL:1MiB ETA:6s]\r' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 40% (aria2c)' \
+        'combined direct video uses the exact private transfer count'
+    finish_success '/tmp/private-direct-combined-video.mkv'
+
     # Scenario: direct video transfer handled by aria2c.
     start_scenario direct-aria-video video
     printf '%s\n' 'YTDLP_PLAN|media|18|18|' >>"${LOG_FILE}"

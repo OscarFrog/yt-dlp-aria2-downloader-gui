@@ -531,7 +531,7 @@ PY_HEADER_TYPE
     # originally published by this transaction.
     printf '%s\n' 'Private aria2 plan scenario: conservative rollback identity'
     new_case 'rollback-identity'
-    python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_ROLLBACK'
+    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_ROLLBACK'
 import importlib.util
 import sys
 from pathlib import Path
