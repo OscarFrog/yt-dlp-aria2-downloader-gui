@@ -14,7 +14,7 @@ readonly PROJECT_DIR
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 for required_command in \
     awk bash cat chmod date dirname env grep ln mkdir mktemp mv readlink \
-    realpath rm setsid sleep stat timeout touch tr flock sha256sum wc python3 find; do
+    realpath rm setsid sleep stat timeout touch tr flock sha256sum wc python3 find ps; do
     require_test_command "${required_command}"
 done
 [[ -r /proc/self/cmdline ]] \
@@ -38,8 +38,59 @@ readonly RUNTIME_DIR="${TEST_ROOT}/runtime"
 readonly PROGRESS_CAPTURE="${TEST_ROOT}/gui-progress-aria.txt"
 readonly YTDLP_PROGRESS_CAPTURE="${TEST_ROOT}/gui-progress-ytdlp.txt"
 readonly LIST_ARGS_LOG="${TEST_ROOT}/zenity-list-args.bin"
+GUI_SCENARIO_TIMEOUT_SECONDS=${MOCK_GUI_SCENARIO_TIMEOUT_SECONDS:-30}
+[[ ${GUI_SCENARIO_TIMEOUT_SECONDS} =~ ^[0-9]{1,3}$ ]] || test_error 'MOCK_GUI_SCENARIO_TIMEOUT_SECONDS must be an integer between 1 and 120.'
+GUI_SCENARIO_TIMEOUT_SECONDS=$((10#${GUI_SCENARIO_TIMEOUT_SECONDS}))
+((GUI_SCENARIO_TIMEOUT_SECONDS >= 1 && GUI_SCENARIO_TIMEOUT_SECONDS <= 120)) || test_error 'MOCK_GUI_SCENARIO_TIMEOUT_SECONDS must be between 1 and 120.'
+readonly GUI_SCENARIO_TIMEOUT_SECONDS
+readonly GUI_UNDER_TEST="${MOCK_BIN}/download-video-gui-under-test"
+export MOCK_GUI_REAL="${PROJECT_DIR}/download-video-gui.sh"
+export MOCK_GUI_SCENARIO_TIMEOUT_SECONDS=${GUI_SCENARIO_TIMEOUT_SECONDS}
 mkdir -p -- "${MOCK_BIN}" "${OUTPUT_DIR}" "${HOME_DIR}" "${RUNTIME_DIR}"
 chmod 700 -- "${RUNTIME_DIR}"
+
+cat >"${GUI_UNDER_TEST}" <<'EOF_GUI_TIMEOUT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${MOCK_GUI_REAL:?}"
+: "${MOCK_GUI_SCENARIO_TIMEOUT_SECONDS:?}"
+
+status=0
+timeout --foreground --signal=TERM --kill-after=2s \
+    "${MOCK_GUI_SCENARIO_TIMEOUT_SECONDS}s" \
+    "${MOCK_GUI_REAL}" "$@" || status=$?
+
+case ${status} in
+    124 | 137)
+        printf 'FAIL: bounded GUI scenario timed out after %ss (status %d).\n' \
+            "${MOCK_GUI_SCENARIO_TIMEOUT_SECONDS}" "${status}" >&2
+        ;;
+    *) ;;
+esac
+
+exit "${status}"
+EOF_GUI_TIMEOUT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${MOCK_GUI_REAL:?}"
+: "${MOCK_GUI_SCENARIO_TIMEOUT_SECONDS:?}"
+
+status=0
+timeout --foreground --signal=TERM --kill-after=2s     "${MOCK_GUI_SCENARIO_TIMEOUT_SECONDS}s"     "${MOCK_GUI_REAL}" "$@" || status=$?
+
+case ${status} in
+    124 | 137)
+        printf 'FAIL: bounded GUI scenario timed out after %ss (status %d).
+'             "${MOCK_GUI_SCENARIO_TIMEOUT_SECONDS}" "${status}" >&2
+        ;;
+    *)
+        ;;
+esac
+exit "${status}"
+EOF_GUI_TIMEOUT
+chmod 0755 -- "${GUI_UNDER_TEST}"
 
 cat >"${MOCK_BIN}/yt-dlp" <<'EOF_YTDLP'
 #!/usr/bin/env bash
@@ -88,6 +139,8 @@ fi
 
 : "${MOCK_ARG_LOG:?}"
 : "${MOCK_PLAN_ARG_LOG:?}"
+: "${MOCK_POST_CALL_LOG:?}"
+: "${MOCK_PLAN_CALL_LOG:?}"
 
 dump_single_json=false
 for argument in "$@"; do
@@ -98,8 +151,10 @@ for argument in "$@"; do
 done
 
 if [[ ${dump_single_json} == true ]]; then
+    printf 'call\n' >>"${MOCK_PLAN_CALL_LOG}"
     printf '%s\0' "$@" >"${MOCK_PLAN_ARG_LOG}"
 else
+    printf 'call\n' >>"${MOCK_POST_CALL_LOG}"
     printf '%s\0' "$@" >"${MOCK_ARG_LOG}"
 fi
 
@@ -360,6 +415,7 @@ case ${1:-} in
 
     input_file=''
     download_dir=''
+    cookie_file=''
 
     for argument in "$@"; do
         case ${argument} in
@@ -369,10 +425,26 @@ case ${1:-} in
             --dir=*)
                 download_dir=${argument#*=}
                 ;;
+            --load-cookies=*)
+                cookie_file=${argument#*=}
+                ;;
             *)
                 ;;
         esac
     done
+
+    if [[ -n ${cookie_file} ]]; then
+        if [[ ! -f ${cookie_file} || -L ${cookie_file} ]]; then
+            printf 'Unsafe aria2 cookie file: %s\n' "${cookie_file}" >&2
+            exit 69
+        fi
+        cookie_mode=$(stat -c '%a' -- "${cookie_file}") || exit 69
+        if [[ ${cookie_mode} != 600 ]]; then
+            printf 'Unsafe aria2 cookie-file mode %s: %s\n' \
+                "${cookie_mode}" "${cookie_file}" >&2
+            exit 69
+        fi
+    fi
 
     if [[ -z ${input_file} || -z ${download_dir} ]]; then
         printf 'Unexpected aria2c mock invocation: %q\n' "$*" >&2
@@ -490,6 +562,15 @@ if [[ ${MOCK_FFMPEG_EXIT_STATUS:-0} != 0 ]]; then
     exit "${MOCK_FFMPEG_EXIT_STATUS}"
 fi
 output_path=${!#}
+if [[ -z ${output_path} || ${output_path} != /* || ${output_path} == -* ]]; then
+    printf 'Invalid FFmpeg mock output path: %s\n' "${output_path}" >&2
+    exit 64
+fi
+output_parent=${output_path%/*}
+[[ -d ${output_parent} ]] || {
+    printf 'FFmpeg mock output directory is absent: %s\n' "${output_parent}" >&2
+    exit 64
+}
 printf '%s\n' 'mock remuxed media payload' >"${output_path}"
 EOF_FFMPEG
 chmod +x "${MOCK_BIN}/ffmpeg"
@@ -712,6 +793,12 @@ case " $* " in
     *' --question '*)
         exit 1
         ;;
+    *' --info '*)
+        exit 0
+        ;;
+    *' --text-info '*)
+        exit 0
+        ;;
     *' --error '*)
         if [[ -n ${MOCK_ERROR_CAPTURE:-} ]]; then
             printf '%s\n' "$*" >> "${MOCK_ERROR_CAPTURE}"
@@ -721,7 +808,10 @@ case " $* " in
         exit 99
         ;;
     *)
-        exit 0
+        printf 'Unexpected Zenity mock invocation:' >&2
+        printf ' %q' "$@" >&2
+        printf '\n' >&2
+        exit 98
         ;;
 esac
 EOF_ZENITY
@@ -737,10 +827,15 @@ prepare_argument_log() {
     MOCK_ARG_LOG="${TEST_ROOT}/yt-dlp-post-args-${scenario}.bin"
     MOCK_PLAN_ARG_LOG="${TEST_ROOT}/yt-dlp-plan-args-${scenario}.bin"
     MOCK_ARIA2_ARG_LOG="${TEST_ROOT}/aria2-args-${scenario}.bin"
+    MOCK_POST_CALL_LOG="${TEST_ROOT}/yt-dlp-post-calls-${scenario}.log"
+    MOCK_PLAN_CALL_LOG="${TEST_ROOT}/yt-dlp-plan-calls-${scenario}.log"
     export MOCK_ARG_LOG MOCK_PLAN_ARG_LOG MOCK_ARIA2_ARG_LOG
+    export MOCK_POST_CALL_LOG MOCK_PLAN_CALL_LOG
     : >"${MOCK_ARG_LOG}"
     : >"${MOCK_PLAN_ARG_LOG}"
     : >"${MOCK_ARIA2_ARG_LOG}"
+    : >"${MOCK_POST_CALL_LOG}"
+    : >"${MOCK_PLAN_CALL_LOG}"
 }
 
 read_arguments() {
@@ -749,6 +844,7 @@ read_arguments() {
     local -n output_ref=${output_array}
     output_ref=()
     [[ -f ${file} ]] || fail "Argument log is missing: ${file}"
+    [[ -s ${file} ]] || fail "Argument log is empty: ${file}"
     # shellcheck disable=SC2034 # Assigned through a nameref to the caller array.
     mapfile -d '' -t output_ref <"${file}"
 }
@@ -1019,7 +1115,7 @@ main() {
     env XDG_STATE_HOME="${rotation_state_home}" \
         XDG_CONFIG_HOME="${rotation_config_home}" \
         MOCK_USE_DEFAULT_PROFILE=1 \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     assert_no_test_processes 'log-retention GUI run left worker processes'
 
     [[ ! -e ${old_retained_log} ]] \
@@ -1066,8 +1162,18 @@ main() {
         'audio result FFprobe content-video validation'
     [[ ! -e ${injection_marker} ]] || fail 'The URL was interpreted as shell code.'
 
+    plan_call_count=$(wc -l <"${MOCK_PLAN_CALL_LOG}")
+    post_call_count=$(wc -l <"${MOCK_POST_CALL_LOG}")
+    assert_equals '1' "${plan_call_count}" 'audio engine performs one yt-dlp PLAN invocation'
+    assert_equals '1' "${post_call_count}" 'audio engine performs one yt-dlp POST invocation'
+
     arguments=()
     read_arguments "${MOCK_ARG_LOG}" arguments
+    arguments_text=$(printf '%s\n' "${arguments[@]}")
+    assert_text_not_contains "${arguments_text}" 'http://' \
+        'yt-dlp POST argv contains no HTTP URL'
+    assert_text_not_contains "${arguments_text}" 'https://' \
+        'yt-dlp POST argv contains no HTTPS URL'
     assert_array_contains arguments '--ignore-config' 'yt-dlp ignores user configuration'
     assert_array_contains arguments '--no-playlist' 'yt-dlp disables playlists'
     assert_array_contains arguments '--no-overwrites' 'yt-dlp final-file overwrite protection'
@@ -1098,6 +1204,8 @@ main() {
         'private aria2 cookie-file argument'
     assert_array_contains aria2_arguments '--summary-interval=1' \
         'machine-progress aria2 summary interval'
+    assert_array_contains aria2_arguments '--max-concurrent-downloads=1' \
+        'machine-progress aria2 keeps one observable transfer item active at a time'
     assert_array_contains aria2_arguments '--show-console-readout=true' \
         'machine-progress aria2 console readout'
     assert_array_contains aria2_arguments '--stderr=false' \
@@ -1549,7 +1657,52 @@ main() {
     [[ -f ${crash_staging}/.yt-dlp-aria2-owner-v1 ]] \
         || fail 'Crash staging ownership marker is missing.'
 
-    kill -KILL -- "-${crash_pid}" 2>/dev/null \
+    # Do not derive the process group immediately after `setsid ... &`.
+    # Before util-linux setsid(1) has created the new session, the asynchronous
+    # launcher can still temporarily belong to this test shell's process group.
+    # Resolve the unique non-test PGID only after the worker has published its
+    # started/staging markers, and refuse to signal an ambiguous or self PGID.
+    test_pgid=$(ps -o pgid= -p "$$") \
+        || fail 'Unable to determine the mock integration process group.'
+    test_pgid=${test_pgid//[[:space:]]/}
+    [[ ${test_pgid} =~ ^[1-9][0-9]*$ ]] \
+        || fail "Invalid mock integration PGID: ${test_pgid}"
+
+    crash_pgid=''
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        find_test_processes
+        candidate_pgid=''
+        candidate_ambiguous=false
+
+        for candidate_pid in "${TEST_PROCESS_PIDS[@]}"; do
+            candidate=$(
+                ps -o pgid= -p "${candidate_pid}" 2>/dev/null
+            ) || continue
+            candidate=${candidate//[[:space:]]/}
+            [[ ${candidate} =~ ^[1-9][0-9]*$ ]] || continue
+            [[ ${candidate} != "${test_pgid}" ]] || continue
+
+            if [[ -z ${candidate_pgid} ]]; then
+                candidate_pgid=${candidate}
+            elif [[ ${candidate_pgid} != "${candidate}" ]]; then
+                candidate_ambiguous=true
+                break
+            fi
+        done
+
+        if [[ ${candidate_ambiguous} == false && -n ${candidate_pgid} ]]; then
+            crash_pgid=${candidate_pgid}
+            break
+        fi
+        sleep 0.05
+    done
+
+    [[ ${crash_pgid} =~ ^[1-9][0-9]*$ ]] \
+        || fail 'Unable to resolve the private-staging crash process group.'
+    [[ ${crash_pgid} != "${test_pgid}" ]] \
+        || fail 'Refusing to SIGKILL the mock integration process group.'
+
+    kill -KILL -- "-${crash_pgid}" 2>/dev/null \
         || kill -KILL -- "${crash_pid}" 2>/dev/null \
         || true
     wait "${crash_pid}" 2>/dev/null || true
@@ -1563,15 +1716,15 @@ main() {
     legacy_exact="${OUTPUT_DIR}/.yt-dlp-aria2.LEGACY01"
     ambiguous_marked="${OUTPUT_DIR}/.yt-dlp-aria2.AMBIG001"
     invalid_mode="${OUTPUT_DIR}/.yt-dlp-aria2.BADMODE1"
-    symlink_target="${TEST_ROOT}/private-staging-symlink-target"
+    staging_symlink_target="${TEST_ROOT}/private-staging-symlink-target"
     symlink_candidate="${OUTPUT_DIR}/.yt-dlp-aria2.SYMLINK1"
     other_output="${TEST_ROOT}/private-staging-other-output"
     cross_candidate="${other_output}/.yt-dlp-aria2.CROSS001"
 
     mkdir -p -- "${legacy_exact}" "${ambiguous_marked}" \
-        "${invalid_mode}" "${symlink_target}" "${cross_candidate}"
+        "${invalid_mode}" "${staging_symlink_target}" "${cross_candidate}"
     chmod 700 -- "${legacy_exact}" "${ambiguous_marked}" \
-        "${symlink_target}" "${other_output}" "${cross_candidate}" 2>/dev/null || true
+        "${staging_symlink_target}" "${other_output}" "${cross_candidate}"
     chmod 755 -- "${invalid_mode}"
 
     printf '%s\n' '{}' >"${legacy_exact}/plan.json"
@@ -1589,8 +1742,8 @@ main() {
         >"${invalid_mode}/.yt-dlp-aria2-owner-v1"
     chmod 600 -- "${invalid_mode}/.yt-dlp-aria2-owner-v1"
 
-    printf '%s\n' 'target must survive' >"${symlink_target}/sentinel"
-    ln -s -- "${symlink_target}" "${symlink_candidate}"
+    printf '%s\n' 'target must survive' >"${staging_symlink_target}/sentinel"
+    ln -s -- "${staging_symlink_target}" "${symlink_candidate}"
 
     printf '%s\n' 'yt-dlp-aria2-private-staging-v1' \
         >"${cross_candidate}/.yt-dlp-aria2-owner-v1"
@@ -1611,7 +1764,7 @@ main() {
         || fail 'Ambiguous marked staging was deleted.'
     [[ -d ${invalid_mode} ]] \
         || fail 'Invalid-mode staging was deleted.'
-    [[ -L ${symlink_candidate} && -f ${symlink_target}/sentinel ]] \
+    [[ -L ${symlink_candidate} && -f ${staging_symlink_target}/sentinel ]] \
         || fail 'Staging symlink or its target was modified.'
     [[ -d ${cross_candidate} ]] \
         || fail 'A different output directory was cleaned cross-destination.'
@@ -1623,7 +1776,7 @@ main() {
         "${ambiguous_marked}" \
         "${invalid_mode}" \
         "${symlink_candidate}" \
-        "${symlink_target}" \
+        "${staging_symlink_target}" \
         "${other_output}"
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
@@ -1635,7 +1788,7 @@ main() {
         MOCK_URL_SEEN_LOG="${gui_url_seen_log}" \
         MOCK_ARIA_ONLY=1 \
         MOCK_PROGRESS_CAPTURE="${PROGRESS_CAPTURE}" \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     assert_file_has_line "${PROGRESS_CAPTURE}" '39' 'aria2 progress maps into the global download phase'
     assert_file_contains "${PROGRESS_CAPTURE}" \
         '# Downloading the audio track - 40% (aria2c) - 1.00MiB - 6s remaining' \
@@ -1680,7 +1833,7 @@ main() {
     aria_unknown_capture="${TEST_ROOT}/gui-progress-aria-unknown.txt"
     MOCK_ARIA_NO_PERCENT=1 \
         MOCK_PROGRESS_CAPTURE="${aria_unknown_capture}" \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     assert_file_contains "${aria_unknown_capture}" \
         '# Downloading the audio track - size unknown (aria2c) - 1.00MiB' \
         'aria2 progress without a known total size'
@@ -1704,7 +1857,7 @@ main() {
     prepare_argument_log 'gui-ytdlp-progress'
     MOCK_PLAN_PROTOCOL='m3u8_native' \
         MOCK_PROGRESS_CAPTURE="${YTDLP_PROGRESS_CAPTURE}" \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     assert_file_has_line "${YTDLP_PROGRESS_CAPTURE}" '15' \
         'yt-dlp progress maps into the global download phase'
     assert_file_contains "${YTDLP_PROGRESS_CAPTURE}" \
@@ -1714,7 +1867,7 @@ main() {
 
     prepare_argument_log 'gui-video'
     MOCK_PROFILE='Complete video (MKV)' \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
     video_gui_arguments=()
     read_arguments "${MOCK_ARG_LOG}" video_gui_arguments
@@ -1727,7 +1880,7 @@ main() {
     prepare_argument_log 'gui-youtube-hls'
     MOCK_PROFILE='YouTube video - Firefox cookies (HLS/MKV)' \
         MOCK_ZENITY_ENTRY_VALUE='https://www.youtube.com/watch?v=gui-youtube-hls' \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
     youtube_hls_gui_arguments=()
     read_arguments "${MOCK_ARG_LOG}" youtube_hls_gui_arguments
@@ -1745,7 +1898,7 @@ main() {
     prepare_argument_log 'gui-youtube-hls-default'
     MOCK_USE_DEFAULT_PROFILE=1 \
         MOCK_ZENITY_ENTRY_VALUE='https://youtu.be/gui-youtube-hls-default' \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
     youtube_hls_default_arguments=()
     read_arguments "${MOCK_ARG_LOG}" youtube_hls_default_arguments
@@ -1758,7 +1911,7 @@ main() {
     late_progress_capture="${TEST_ROOT}/gui-progress-late.txt"
     MOCK_LATE_PROGRESS=1 \
         MOCK_PROGRESS_CAPTURE="${late_progress_capture}" \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     progress_check_status=0
     awk '
         $0 == "99" { finalizing_seen = 1; next }
@@ -1793,7 +1946,7 @@ profile=audio-mp3
 EOF_OLD_CONFIG
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     prepare_argument_log 'legacy-profile'
-    MOCK_USE_DEFAULT_PROFILE=1 "${PROJECT_DIR}/download-video-gui.sh"
+    MOCK_USE_DEFAULT_PROFILE=1 "${GUI_UNDER_TEST}"
     assert_file_has_line "${config_file}" 'profile=audio' 'legacy profile migration'
 
     cat >"${config_file}" <<'EOF_BAD_CONFIG'
@@ -1803,14 +1956,14 @@ profile=invalid
 EOF_BAD_CONFIG
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     prepare_argument_log 'malformed-config'
-    MOCK_USE_DEFAULT_PROFILE=1 "${PROJECT_DIR}/download-video-gui.sh"
+    MOCK_USE_DEFAULT_PROFILE=1 "${GUI_UNDER_TEST}"
     assert_file_has_line "${config_file}" 'profile=video' \
         'malformed configuration falls back to video'
 
     printf 'output_dir=%s\nprofile=audio' "${OUTPUT_DIR}" >"${config_file}"
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     prepare_argument_log 'config-without-final-newline'
-    MOCK_USE_DEFAULT_PROFILE=1 "${PROJECT_DIR}/download-video-gui.sh"
+    MOCK_USE_DEFAULT_PROFILE=1 "${GUI_UNDER_TEST}"
     assert_file_has_line "${config_file}" 'profile=audio' \
         'configuration final line without newline is loaded'
 
@@ -1818,7 +1971,7 @@ EOF_BAD_CONFIG
         "${OUTPUT_DIR}" >"${config_file}"
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     prepare_argument_log 'config-crlf'
-    MOCK_USE_DEFAULT_PROFILE=1 "${PROJECT_DIR}/download-video-gui.sh"
+    MOCK_USE_DEFAULT_PROFILE=1 "${GUI_UNDER_TEST}"
     assert_file_has_line "${config_file}" 'profile=audio' \
         'CRLF configuration values are normalized when loaded'
 
@@ -1831,7 +1984,7 @@ EOF_BAD_CONFIG
     env XDG_CONFIG_HOME='relative-config-home' \
         XDG_STATE_HOME='relative-state-home' \
         MOCK_USE_DEFAULT_PROFILE=1 \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     [[ ! -e ${relative_config_dir} && ! -e ${relative_state_dir} ]] \
         || fail 'The GUI used a relative XDG configuration or state path.'
     assert_file_has_line \
@@ -1847,7 +2000,7 @@ EOF_BAD_CONFIG
     MOCK_ZENITY_FILE_STATUS_WITH_FILENAME=255 \
         MOCK_ZENITY_FILE_ERROR='simulated initial-folder failure' \
         MOCK_FILE_SELECTION_ARGS_LOG="${file_selection_args_log}" \
-        "${PROJECT_DIR}/download-video-gui.sh" >/dev/null
+        "${GUI_UNDER_TEST}" >/dev/null
     file_selection_arguments=()
     read_arguments "${file_selection_args_log}" file_selection_arguments
     file_selection_calls=0
@@ -1873,7 +2026,7 @@ EOF_BAD_CONFIG
     logs_before=$(count_logs)
     prepare_argument_log 'inconsistent-result'
     assert_status 1 'missing final path is reported as a failed GUI run' \
-        env MOCK_SKIP_RESULT_FILE=1 "${PROJECT_DIR}/download-video-gui.sh"
+        env MOCK_SKIP_RESULT_FILE=1 "${GUI_UNDER_TEST}"
     logs_after=$(count_logs)
     assert_equals "$((logs_before + 1))" "${logs_after}" \
         'an inconsistent run retains one new log'
@@ -1898,7 +2051,7 @@ EOF_BAD_CONFIG
     assert_status 1 'GUI rejects a result outside the selected destination folder' \
         env MOCK_RESULT_OUTSIDE_OUTPUT=1 \
         MOCK_OUTSIDE_RESULT_PATH="${outside_result_path}" \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     logs_after=$(count_logs)
     assert_equals "$((logs_before + 1))" "${logs_after}" \
         'an outside-directory result retains one diagnostic log'
@@ -1912,7 +2065,7 @@ EOF_BAD_CONFIG
     assert_status 7 'failed GUI download status is propagated' \
         env MOCK_PLAN_PROTOCOL='m3u8_native' \
         MOCK_YTDLP_EXIT_STATUS=7 \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     logs_after=$(count_logs)
     assert_equals "$((logs_before + 1))" "${logs_after}" \
         'a failed download retains one new log'
@@ -1938,7 +2091,7 @@ EOF_BAD_CONFIG
         env XDG_STATE_HOME="${blocked_state_home}" \
         MOCK_USE_DEFAULT_PROFILE=1 \
         MOCK_ERROR_CAPTURE="${state_error_capture}" \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     assert_file_contains "${state_error_capture}" \
         'Unable to create the application state directory.' \
         'state-directory GUI diagnostic'
@@ -1991,10 +2144,11 @@ EOF_BAD_CONFIG
 
     # The GUI owns exactly one setsid session; the engine must reuse it.
     single_session_log="${TEST_ROOT}/single-session-setsid.log"
+    : >"${single_session_log}"
     prepare_argument_log 'single-session-gui'
     assert_status 0 'GUI and engine use one shared process session' \
         env MOCK_SETSID_LOG="${single_session_log}" \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     single_session_calls=$(wc -l <"${single_session_log}")
     assert_equals '1' "${single_session_calls}" \
         'one setsid invocation per GUI download'
@@ -2008,7 +2162,7 @@ EOF_BAD_CONFIG
         env MOCK_PLAN_PROTOCOL='m3u8_native' \
         MOCK_LONG_DOWNLOAD=1 MOCK_CANCEL=1 \
         MOCK_TERMINATION_MARKER="${termination_marker}" \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     wait_for_file "${termination_marker}" 10 'worker group receives TERM'
     assert_no_test_processes 'ordinary cancellation left worker processes'
 
@@ -2025,7 +2179,7 @@ EOF_BAD_CONFIG
             timeout --signal=TERM --kill-after=2s 15s \
             env MOCK_DELAY_PGID_PUBLISH=1 MOCK_CANCEL=1 \
             MOCK_PGID_DELAY_TERMINATION_MARKER="${pgid_delay_marker}" \
-            "${PROJECT_DIR}/download-video-gui.sh"
+            "${GUI_UNDER_TEST}"
         wait_for_file "${pgid_delay_marker}" 10 'delayed PGID worker receives TERM'
         assert_no_test_processes 'delayed-PGID cancellation left worker processes'
     else
@@ -2036,7 +2190,7 @@ EOF_BAD_CONFIG
     # success, not as a misleading cancellation.
     prepare_argument_log 'cancel-after-worker-success'
     assert_status 0 'late cancellation does not hide completed download' \
-        env MOCK_CANCEL_AFTER_EOF=1 "${PROJECT_DIR}/download-video-gui.sh"
+        env MOCK_CANCEL_AFTER_EOF=1 "${GUI_UNDER_TEST}"
     assert_no_test_processes 'late-cancel success left worker processes'
 
     # Scenario: failed PGID publication preserves actual newlines in the error dialog.
@@ -2044,7 +2198,7 @@ EOF_BAD_CONFIG
     prepare_argument_log 'failed-pgid-publication'
     assert_status 1 'failed PGID publication is reported' \
         env MOCK_SETSID_START_STATUS=75 MOCK_ERROR_CAPTURE="${pgid_error_capture}" \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     pgid_error_text=$(<"${pgid_error_capture}")
     assert_text_contains "${pgid_error_text}" \
         $'The download could not start.\n\nLog:' \
@@ -2056,14 +2210,14 @@ EOF_BAD_CONFIG
     error_capture="${TEST_ROOT}/zenity-errors.txt"
     assert_status 1 'URL entry timeout is reported' \
         env MOCK_ZENITY_ENTRY_STATUS=5 MOCK_ERROR_CAPTURE="${error_capture}" \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     assert_file_contains "${error_capture}" 'URL entry dialog timed out' \
         'URL timeout dialog'
 
     : >"${error_capture}"
     assert_status 1 'unexpected Zenity entry error is reported' \
         env MOCK_ZENITY_ENTRY_STATUS=42 MOCK_ERROR_CAPTURE="${error_capture}" \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     assert_file_contains "${error_capture}" 'Zenity could not display' \
         'Zenity entry error dialog'
 
@@ -2182,7 +2336,7 @@ EOF_BAD_CONFIG
         MOCK_STARTED_MARKER="${progress_timeout_started}" \
         MOCK_TERMINATION_MARKER="${progress_timeout_marker}" \
         MOCK_ERROR_CAPTURE="${progress_timeout_errors}" \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     wait_for_file "${progress_timeout_started}" 10 \
         'progress-timeout worker started before injected timeout'
     wait_for_file "${progress_timeout_marker}" 10 \
@@ -2201,7 +2355,7 @@ EOF_BAD_CONFIG
         MOCK_STARTED_MARKER="${progress_error_started}" \
         MOCK_TERMINATION_MARKER="${progress_error_marker}" \
         MOCK_ERROR_CAPTURE="${progress_error_capture}" \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     wait_for_file "${progress_error_started}" 10 \
         'progress-error worker started before injected error'
     wait_for_file "${progress_error_marker}" 10 \
@@ -2214,7 +2368,7 @@ EOF_BAD_CONFIG
     mkdir -p -- "${no_zenity_bin}"
     for required_command in \
         bash chmod date dirname grep mkdir mktemp mv realpath rm sed setsid sleep \
-        stat tail flock sha256sum; do
+        stat tail timeout flock sha256sum; do
         required_command_path=$(command -v "${required_command}") \
             || fail "Required host command was not found: ${required_command}"
         ln -s -- "${required_command_path}" \
@@ -2222,7 +2376,7 @@ EOF_BAD_CONFIG
     done
     assert_status 127 'missing Zenity is reported before GUI startup' \
         env PATH="${no_zenity_bin}" HOME="${HOME_DIR}" \
-        "${PROJECT_DIR}/download-video-gui.sh"
+        "${GUI_UNDER_TEST}"
     assert_text_contains "${ASSERT_OUTPUT}" 'required command "zenity" was not found' \
         'missing Zenity diagnostic'
 
