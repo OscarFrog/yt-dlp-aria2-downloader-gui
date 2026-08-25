@@ -377,6 +377,13 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/tests/run-all.sh" \
         'bash -- ./scripts/check-shell-format.sh' \
         'run-all enforces shfmt before behavioral validation'
+
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        '--max-concurrent-downloads' \
+        'download-video keeps the aria2 concurrent-download capability contract'
+    assert_file_contains "${SCRIPT_DIR}/tests/hls-remux-duration-integration.sh" \
+        '--max-concurrent-downloads=<N>' \
+        'HLS aria2 mock advertises the required concurrent-download capability'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
         'repos/mvdan/sh/releases/latest' \
         'automation discovers the latest stable upstream shfmt release'

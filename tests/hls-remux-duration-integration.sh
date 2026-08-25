@@ -249,6 +249,7 @@ case ${1:-} in
         '--dir=DIR' \
         '--load-cookies=FILE' \
         '--allow-overwrite[=true|false]' \
+        '--max-concurrent-downloads=<N>' \
         '--auto-file-renaming[=true|false]' \
         '--enable-color[=true|false]' \
         '--truncate-console-readout[=true|false]' \
