@@ -13,7 +13,7 @@ readonly PROJECT_DIR
 # shellcheck disable=SC1090
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 
-for required_command in bash grep head mkdir mktemp rm sleep sort tail timeout wc; do
+for required_command in bash grep head mkdir mktemp rm sed sleep sort tail timeout wc; do
     require_test_command "${required_command}"
 done
 
@@ -26,6 +26,42 @@ trap 'rm -rf -- "${TEST_ROOT}" || true' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# Most scenarios validate parsing/state transitions rather than the production
+# 400 ms idle-poll cadence. Exercise those scenarios against an otherwise
+# identical temporary copy with a shorter poll interval. The busy-loop/rate
+# control below still uses the unmodified production monitor.
+FAST_MONITOR="${TEST_ROOT}/progress-monitor-fast.sh"
+readonly FAST_MONITOR
+
+fast_poll_count=$(
+    grep -Fxc -- '            sleep 0.4' "${MONITOR}" || true
+)
+assert_equals '1' "${fast_poll_count}" \
+    'production progress monitor has one expected idle-poll sleep'
+
+short_poll_count_before=$(
+    grep -Fxc -- '            sleep 0.05' "${MONITOR}" || true
+)
+
+sed \
+    's/^            sleep 0[.]4$/            sleep 0.05/' \
+    "${MONITOR}" >"${FAST_MONITOR}"
+
+fast_poll_count_after=$(
+    grep -Fxc -- '            sleep 0.4' "${FAST_MONITOR}" || true
+)
+short_poll_count_after=$(
+    grep -Fxc -- '            sleep 0.05' "${FAST_MONITOR}" || true
+)
+
+assert_equals '0' "${fast_poll_count_after}" \
+    'fast progress monitor contains no production idle-poll sleep'
+assert_equals "$((short_poll_count_before + 1))" "${short_poll_count_after}" \
+    'fast progress monitor changes exactly one idle-poll sleep'
+
+bash -n "${FAST_MONITOR}" \
+    || fail 'generated fast progress monitor is not valid Bash'
 
 # Per-scenario state shared by start_scenario and finish_*.
 SCENARIO_DIR=''
@@ -167,9 +203,59 @@ wait_for_numeric_occurrences() {
     fail "${label}: expected ${expected} occurrences of ${value}; found ${count}"
 }
 
+wait_for_line_count_at_least() {
+    local file=$1
+    local expected=$2
+    local label=$3
+    local attempt
+    local count=0
+
+    for ((attempt = 0; attempt < 300; attempt++)); do
+        if [[ -r ${file} ]]; then
+            count=$(wc -l <"${file}") || count=0
+        else
+            count=0
+        fi
+
+        [[ ${count} =~ ^[0-9]+$ ]] || count=0
+        if ((count >= expected)); then
+            return 0
+        fi
+
+        sleep 0.05
+    done
+
+    fail "${label}: expected at least ${expected} lines; found ${count}"
+}
+
+wait_for_distinct_numeric_values() {
+    local file=$1
+    local expected=$2
+    local label=$3
+    local attempt
+    local count=0
+
+    for ((attempt = 0; attempt < 300; attempt++)); do
+        count=$(
+            grep -E '^[0-9]+$' "${file}" 2>/dev/null \
+                | sort -u \
+                | wc -l
+        ) || count=0
+
+        [[ ${count} =~ ^[0-9]+$ ]] || count=0
+        if ((count >= expected)); then
+            return 0
+        fi
+        sleep 0.05
+    done
+
+    fail "${label}: expected ${expected} distinct numeric values; found ${count}"
+}
+
 start_scenario() {
     local name=$1
     local profile=$2
+    local monitor=${3:-${FAST_MONITOR}}
 
     SCENARIO_DIR="${TEST_ROOT}/${name}"
     LOG_FILE="${SCENARIO_DIR}/download.log"
@@ -181,7 +267,7 @@ start_scenario() {
 
     sleep 300 &
     ACTIVE_WORKER=$!
-    bash "${MONITOR}" \
+    bash "${monitor}" \
         "${LOG_FILE}" "${ACTIVE_WORKER}" "${RESULT_FILE}" "${profile}" \
         "${SCENARIO_DIR}" >"${CAPTURE_FILE}" &
     ACTIVE_MONITOR=$!
@@ -281,7 +367,16 @@ main() {
     # A partial record must be retained until its terminating newline arrives.
     start_scenario partial-progress-record audio
     printf '%s' 'YTDLP_PROGRESS_V2|media|251|downloa' >>"${LOG_FILE}"
-    sleep 0.6
+
+    partial_capture_lines=$(wc -l <"${CAPTURE_FILE}")
+    wait_for_line_count_at_least \
+        "${CAPTURE_FILE}" "$((partial_capture_lines + 2))" \
+        'partial record remains buffered across a monitor cycle'
+
+    assert_file_not_contains \
+        "${CAPTURE_FILE}" 'Downloading the audio track - 25%' \
+        'unterminated partial record is not processed'
+
     printf '%s\n' 'ding|250|1000|0|0|0|25.0%|500KiB/s|00:06' >>"${LOG_FILE}"
     wait_for_text "${CAPTURE_FILE}" 'Downloading the audio track - 25%' \
         'partial progress record is reconstructed'
@@ -289,7 +384,7 @@ main() {
 
     # Removing the log path while the worker is alive must not create a busy loop.
     # The already-open descriptor remains safe, but no new records can arrive.
-    start_scenario reader-unavailable video
+    start_scenario reader-unavailable video "${MONITOR}"
     wait_for_text "${CAPTURE_FILE}" 'Analyzing the webpage...' \
         'reader opens the progress log before its path is removed'
     rm -f -- "${LOG_FILE}"
@@ -323,7 +418,12 @@ main() {
         'YTDLP_POSTPROCESS|started|MetadataParser' \
         'YTDLP_POSTPROCESS|finished|MetadataParser' \
         >>"${LOG_FILE}"
-    sleep 0.8
+
+    metadata_capture_lines=$(wc -l <"${CAPTURE_FILE}")
+    wait_for_line_count_at_least \
+        "${CAPTURE_FILE}" "$((metadata_capture_lines + 2))" \
+        'MetadataParser pre-process records cross a monitor cycle'
+
     metadata_preprocess_max=$(max_percentage "${CAPTURE_FILE}")
     if [[ ! ${metadata_preprocess_max} =~ ^[0-9]+$ ]] \
         || ((metadata_preprocess_max > 3)); then
@@ -572,11 +672,8 @@ main() {
     printf '%s\n' 'YTDLP_PLAN|media|18|18|' >>"${LOG_FILE}"
     printf '\r[#c0ffee 4MiB/0B CN:8 DL:1MiB]\r' >>"${LOG_FILE}"
     wait_for_text "${CAPTURE_FILE}" 'size unknown (aria2c)' 'unknown-size fallback'
-    sleep 0.8
-    unknown_values=$(grep -E '^[0-9]+$' "${CAPTURE_FILE}" | sort -u | wc -l) \
-        || unknown_values=0
-    [[ ${unknown_values} =~ ^[0-9]+$ ]] || unknown_values=0
-    ((unknown_values >= 2)) || fail 'unknown-size progress must remain animated'
+    wait_for_distinct_numeric_values "${CAPTURE_FILE}" 2 \
+        'unknown-size progress remains animated'
     finish_success '/tmp/unknown.mkv'
 
     # A late download line must not replace an active post-processing phase.

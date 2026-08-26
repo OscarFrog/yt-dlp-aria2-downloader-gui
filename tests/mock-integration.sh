@@ -950,7 +950,7 @@ find_test_processes() {
         [[ ${pid} =~ ^[1-9][0-9]*$ ]] || continue
         [[ ${pid} != "$$" && ${pid} != "${BASHPID}" ]] || continue
 
-        cmdline=$(tr '\0' ' ' <"${cmdline_file}" 2>/dev/null) || continue
+        cmdline=$(tr '\0' ' ' 2>/dev/null <"${cmdline_file}") || continue
         [[ ${cmdline} == *"${TEST_ROOT}"* ]] || continue
         TEST_PROCESS_PIDS+=("${pid}")
     done
@@ -971,7 +971,7 @@ assert_no_test_processes() {
     printf 'FAIL: %s\n' "${label}" >&2
     for pid in "${TEST_PROCESS_PIDS[@]}"; do
         if [[ -r /proc/${pid}/cmdline ]]; then
-            cmdline=$(tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null || true)
+            cmdline=$(tr '\0' ' ' 2>/dev/null <"/proc/${pid}/cmdline" || true)
         else
             cmdline='<unavailable>'
         fi
