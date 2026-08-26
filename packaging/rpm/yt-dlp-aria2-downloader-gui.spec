@@ -73,6 +73,9 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Tue Aug 25 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.2.1-1
+- Recover abandoned private aria2 staging conservatively, qualify private HTTP headers, and fix GUI progress.
+
 * Fri Aug 21 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.1.28-1
 - Add OpenPGP signing for the exact Fedora release RPM and fail-closed verification.
 
@@ -82,11 +85,11 @@ fi
 * Fri Aug 21 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.1.26-1
 - Qualify exact previous immutable packages, preserve user runtimes, and harden release verification.
 
-* Thu Aug 20 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - %{version}-1
+* Thu Aug 20 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.1.25-1
 - Close 2.1.24 audit findings: runtime transactions, exact artifacts, upgrades, and immutable releases.
 
-* Thu Aug 20 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - %{version}-1
+* Thu Aug 20 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.1.24-1
 - Fix managed Deno discovery, bound runtime updates, add rollback, and requalify DEB packaging.
 
-* Sun Aug 02 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - %{version}-1
+* Sun Aug 02 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.1.20-1
 - Harden privacy, media validation, progress, dependencies, and release tests.

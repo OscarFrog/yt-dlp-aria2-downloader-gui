@@ -37,7 +37,44 @@ cleanup() {
 }
 
 main() {
-    trap cleanup EXIT HUP INT TERM
+    local invalid_private_dir=''
+    local invalid_root=''
+    local alternate_root=''
+    local alternate_cli_link_target=''
+
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    for invalid_private_dir in \
+        '/usr/' \
+        '/usr/.' \
+        '/usr/..' \
+        '/usr//lib/yt-dlp-aria2-downloader' \
+        '/usr/lib/yt-dlp-aria2-downloader/' \
+        '/usr/lib/../lib/yt-dlp-aria2-downloader' \
+        '/opt/yt-dlp-aria2-downloader' \
+        'usr/lib/yt-dlp-aria2-downloader'; do
+        invalid_root="${root}/invalid-${RANDOM}-${RANDOM}"
+        if bash "${PROJECT_DIR}/packaging/install-tree.sh" \
+            "${invalid_root}" "${version}" "${invalid_private_dir}" \
+            >/dev/null 2>&1; then
+            fail "install-tree accepted unsafe PRIVATE_DIR: ${invalid_private_dir}"
+        fi
+        [[ ! -e ${invalid_root} ]] \
+            || fail "Rejected PRIVATE_DIR created a staging tree: ${invalid_private_dir}"
+    done
+
+    alternate_root="${root}/libexec-case"
+    bash "${PROJECT_DIR}/packaging/install-tree.sh" \
+        "${alternate_root}" "${version}" \
+        '/usr/libexec/yt-dlp-aria2-downloader' >/dev/null
+    alternate_cli_link_target=$(readlink -- \
+        "${alternate_root}/usr/bin/yt-dlp-aria2-downloader")
+    assert_equals '../libexec/yt-dlp-aria2-downloader/download-video.sh' \
+        "${alternate_cli_link_target}" \
+        'packaged CLI libexec symlink target'
 
     bash "${PROJECT_DIR}/packaging/install-tree.sh" \
         "${root}" "${version}" '/usr/lib/yt-dlp-aria2-downloader'

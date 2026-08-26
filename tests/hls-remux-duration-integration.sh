@@ -21,6 +21,17 @@ done
 
 TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
+ENGINE_TIMEOUT_SECONDS=${HLS_ENGINE_TIMEOUT_SECONDS:-60}
+[[ ${ENGINE_TIMEOUT_SECONDS} =~ ^[0-9]{1,3}$ ]] || {
+    printf 'Error: HLS_ENGINE_TIMEOUT_SECONDS must be an integer between 1 and 300.\n' >&2
+    exit 64
+}
+ENGINE_TIMEOUT_SECONDS=$((10#${ENGINE_TIMEOUT_SECONDS}))
+((ENGINE_TIMEOUT_SECONDS >= 1 && ENGINE_TIMEOUT_SECONDS <= 300)) || {
+    printf 'Error: HLS_ENGINE_TIMEOUT_SECONDS must be between 1 and 300.\n' >&2
+    exit 64
+}
+readonly ENGINE_TIMEOUT_SECONDS
 MOCK_BIN="${TEST_ROOT}/bin"
 RUNTIME_DIR="${TEST_ROOT}/runtime"
 mkdir -p -- "${MOCK_BIN}" "${RUNTIME_DIR}" "${TEST_ROOT}/source"
@@ -44,7 +55,8 @@ run_case() {
     export MOCK_MEDIA_SOURCE="${media_source}"
 
     set +e
-    bash "${PROJECT_DIR}/download-video.sh" \
+    timeout --signal=TERM --kill-after=5s "${ENGINE_TIMEOUT_SECONDS}s" \
+        bash "${PROJECT_DIR}/download-video.sh" \
         --mode video \
         --youtube-hls-firefox \
         --output-dir "${output_dir}" \
@@ -52,6 +64,12 @@ run_case() {
         'https://www.youtube.com/watch?v=abc123'
     status=$?
     set -e
+
+    if ((status == 124 || status == 137)); then
+        printf 'FAIL: %s engine execution timed out after %ds (status %d).\n' \
+            "${label}" "${ENGINE_TIMEOUT_SECONDS}" "${status}" >&2
+        exit 65
+    fi
 
     if ((status != expected_status)); then
         printf 'FAIL: %s returned %d instead of %d.\n' \
@@ -69,14 +87,29 @@ run_case() {
             printf 'FAIL: valid HLS final MKV is absent.\n' >&2
             exit 65
         }
-        ffprobe -v error -select_streams v:0 \
+        if ! ffprobe -v error -select_streams V:0 \
             -show_entries stream=index -of csv=p=0 "${final_file}" \
-            | grep -Eq '^[0-9]+$'
-        ffprobe -v error -select_streams a:0 \
+            | grep -Eq '^[0-9]+$'; then
+            printf 'FAIL: valid HLS final MKV has no content video stream: %s\n' \
+                "${final_file}" >&2
+            exit 65
+        fi
+        if ! ffprobe -v error -select_streams a:0 \
             -show_entries stream=index -of csv=p=0 "${final_file}" \
-            | grep -Eq '^[0-9]+$'
-        if find "${output_dir}" -maxdepth 1 -type f -name '*.mp4' -print -quit \
-            | grep -q .; then
+            | grep -Eq '^[0-9]+$'; then
+            printf 'FAIL: valid HLS final MKV has no audio stream: %s\n' \
+                "${final_file}" >&2
+            exit 65
+        fi
+        matching_mp4=''
+        matching_mp4=$(
+            find "${output_dir}" -maxdepth 1 -type f -name '*.mp4' -print
+        ) || {
+            printf 'FAIL: unable to inspect HLS intermediates in %s.\n' \
+                "${output_dir}" >&2
+            exit 65
+        }
+        if [[ -n ${matching_mp4} ]]; then
             printf 'FAIL: successful HLS remux retained its repaired intermediate.\n' >&2
             exit 65
         fi
@@ -85,19 +118,33 @@ run_case() {
             printf 'FAIL: invalid HLS media published a success result.\n' >&2
             exit 65
         }
+        matching_mkv=''
+        matching_mkv=$(
+            find "${output_dir}" -maxdepth 1 -type f -name '*.mkv' -print
+        ) || {
+            printf 'FAIL: unable to inspect HLS MKV outputs in %s.\n' \
+                "${output_dir}" >&2
+            exit 65
+        }
         if [[ ${expected_failure_mkv} == true ]]; then
-            find "${output_dir}" -maxdepth 1 -type f -name '*.mkv' -print -quit \
-                | grep -q . || {
+            [[ -n ${matching_mkv} ]] || {
                 printf 'FAIL: late HLS validation failure did not retain its diagnostic MKV.\n' >&2
                 exit 65
             }
-        elif find "${output_dir}" -maxdepth 1 -type f -name '*.mkv' -print -quit \
-            | grep -q .; then
+        elif [[ -n ${matching_mkv} ]]; then
             printf 'FAIL: duration-rejected HLS media published a final MKV.\n' >&2
             exit 65
         fi
-        find "${output_dir}" -maxdepth 1 -type f -name '*.mp4' -print -quit \
-            | grep -q . || {
+
+        matching_mp4=''
+        matching_mp4=$(
+            find "${output_dir}" -maxdepth 1 -type f -name '*.mp4' -print
+        ) || {
+            printf 'FAIL: unable to inspect repaired HLS intermediates in %s.\n' \
+                "${output_dir}" >&2
+            exit 65
+        }
+        [[ -n ${matching_mp4} ]] || {
             printf 'FAIL: repaired HLS intermediate was not retained for diagnosis.\n' >&2
             exit 65
         }
@@ -249,6 +296,7 @@ case ${1:-} in
         '--dir=DIR' \
         '--load-cookies=FILE' \
         '--allow-overwrite[=true|false]' \
+        '--max-concurrent-downloads=<N>' \
         '--auto-file-renaming[=true|false]' \
         '--enable-color[=true|false]' \
         '--truncate-console-readout[=true|false]' \

@@ -15,6 +15,7 @@ readonly GUI="${PROJECT_DIR}/download-video-gui.sh"
 
 SESSION_ROOT=''
 GUI_PID=''
+GUI_SID=''
 WATCHER_PID=''
 EVIDENCE_DIR=''
 HARNESS_PHASE='startup'
@@ -74,12 +75,12 @@ cleanup() {
         kill -TERM -- "${WATCHER_PID}" 2>/dev/null || true
         wait "${WATCHER_PID}" 2>/dev/null || true
     fi
+    if [[ -n ${GUI_SID} && ${GUI_SID} =~ ^[1-9][0-9]*$ ]]; then
+        kill -TERM -- "-${GUI_SID}" 2>/dev/null || true
+    elif [[ -n ${GUI_PID} ]]; then
+        kill -TERM -- "${GUI_PID}" 2>/dev/null || true
+    fi
     if [[ -n ${GUI_PID} ]]; then
-        if kill -0 -- "-${GUI_PID}" 2>/dev/null; then
-            kill -TERM -- "-${GUI_PID}" 2>/dev/null || true
-        else
-            kill -TERM -- "${GUI_PID}" 2>/dev/null || true
-        fi
         wait "${GUI_PID}" 2>/dev/null || true
     fi
     if [[ -n ${SESSION_ROOT} ]]; then
@@ -104,8 +105,9 @@ relevant_processes() {
 watch_process_topology() {
     local uid=$1
     local gui_pid=$2
-    local topology_file=$3
-    local leak_file=$4
+    local gui_sid=$3
+    local topology_file=$4
+    local leak_file=$5
 
     local topology_timestamp
     local privacy_timestamp
@@ -114,15 +116,18 @@ watch_process_topology() {
         topology_timestamp=$(date --iso-8601=ns)
         privacy_timestamp=$(date --iso-8601=seconds)
         printf -- '--- %s ---\n' "${topology_timestamp}" >>"${topology_file}"
-        ps -u "${uid}" -o pid=,ppid=,pgid=,sid=,comm= >>"${topology_file}" || true
+        ps -u "${uid}" -o pid=,ppid=,pgid=,sid=,comm= \
+            | awk -v target_sid="${gui_sid}" '$4 == target_sid { print }' \
+                >>"${topology_file}" || true
 
-        ps -u "${uid}" -o pid=,comm=,args= \
-            | awk -v timestamp="${privacy_timestamp}" '
-                $2 != "awk" && $2 != "grep" && $2 != "ps" &&
+        ps -u "${uid}" -o pid=,ppid=,pgid=,sid=,comm=,args= \
+            | awk -v target_sid="${gui_sid}" -v timestamp="${privacy_timestamp}" '
+                $4 == target_sid &&
+                $5 != "awk" && $5 != "grep" && $5 != "ps" &&
                 ($0 ~ /(^|[[:space:]\/])(yt-dlp|aria2c|ffmpeg|ffprobe|deno)([[:space:]]|$)/ ||
                  $0 ~ /(download-video\.sh|progress-monitor\.sh)/) &&
                 $0 ~ /https?:\/\// {
-                    print timestamp " potential-url-in-argv pid=" $1 " comm=" $2
+                    print timestamp " potential-url-in-argv pid=" $1 " comm=" $5
                 }
             ' >>"${leak_file}" || true
 
@@ -217,21 +222,33 @@ record_environment() {
 }
 assert_no_residual_processes() {
     local uid=$1
-    local baseline_file=$2
+    local gui_sid=$2
     local evidence_dir=$3
     local current_file="${evidence_dir}/processes-after.txt"
     local residual_file="${evidence_dir}/residual-processes.txt"
+    local attempt
 
-    relevant_processes "${uid}" >"${current_file}"
+    : >"${current_file}"
+    : >"${residual_file}"
 
-    awk -F'|' '
-        NR == FNR { baseline[$1] = 1; next }
-        !baseline[$1] { print }
-    ' "${baseline_file}" "${current_file}" >"${residual_file}"
+    for ((attempt = 0; attempt < 50; attempt++)); do
+        ps -u "${uid}" -o pid=,sid=,comm= \
+            | awk -v target_sid="${gui_sid}" '
+                $2 == target_sid {
+                    print $1 "|" $3
+                }
+            ' >"${current_file}" || true
 
-    if [[ -s ${residual_file} ]]; then
-        fail_test 'download-related processes remained after the GUI exited.'
-    fi
+        if [[ ! -s ${current_file} ]]; then
+            : >"${residual_file}"
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    cp -- "${current_file}" "${residual_file}"
+    fail_test \
+        "download-related processes in GUI session ${gui_sid} remained after the GUI exited."
 }
 
 main() {
@@ -242,12 +259,19 @@ main() {
     local output_dir
     local baseline_file
     local leak_file
+    local session_id_file
+    local actual_sid=''
+    local actual_pgid=''
+    local attempt
     local topology_file
     local raw_gui_stdout
     local raw_gui_stderr
     local gui_status=0
     local answer=''
     local state_url_hits=0
+    local state_file_count=0
+    local state_dir_count=0
+    local state_log_count=0
     local evidence_timestamp=''
     local diagnostic_file
     local command_name
@@ -266,7 +290,7 @@ main() {
             ;;
     esac
 
-    for command_name in awk bash cp date grep id mktemp ps realpath setsid sleep sort wc zenity; do
+    for command_name in awk bash cp date find grep id mktemp ps realpath setsid sleep sort wc zenity; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             fail_test "required command is absent: ${command_name}."
         fi
@@ -317,6 +341,7 @@ main() {
     topology_file="${evidence_dir}/process-topology.txt"
     raw_gui_stdout="${SESSION_ROOT}/gui.stdout"
     raw_gui_stderr="${SESSION_ROOT}/gui.stderr"
+    session_id_file="${SESSION_ROOT}/gui.sid"
     : >"${leak_file}"
     : >"${topology_file}"
 
@@ -330,17 +355,55 @@ main() {
 
     HARNESS_PHASE='launching-gui'
     set +e
+    # The single-quoted child program is intentionally expanded by the child
+    # Bash launched via `bash -c`, not by this qualification harness.
+    # shellcheck disable=SC2016
     XDG_CONFIG_HOME="${SESSION_ROOT}/config" \
         XDG_STATE_HOME="${SESSION_ROOT}/state" \
         setsid --wait \
-        bash "${GUI}" \
+        bash -c '
+            session_id_file=$1
+            shift
+            printf "%s\n" "$$" >"${session_id_file}" || exit 125
+            exec "$@"
+        ' bash "${session_id_file}" bash "${GUI}" \
         >"${raw_gui_stdout}" \
         2>"${raw_gui_stderr}" &
     GUI_PID=$!
     set -e
 
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        [[ -s ${session_id_file} ]] && break
+        kill -0 -- "${GUI_PID}" 2>/dev/null \
+            || fail_test 'GUI launcher exited before publishing its session identity.'
+        sleep 0.05
+    done
+    [[ -s ${session_id_file} ]] \
+        || fail_test 'GUI session identity was not published within 5 seconds.'
+
+    IFS= read -r GUI_SID <"${session_id_file}" \
+        || fail_test 'unable to read the GUI session identity.'
+    [[ ${GUI_SID} =~ ^[1-9][0-9]*$ ]] \
+        || fail_test "invalid GUI session identity: ${GUI_SID}."
+
+    actual_sid=$(ps -o sid= -p "${GUI_SID}" 2>/dev/null) \
+        || fail_test 'unable to verify the published GUI session identity.'
+    actual_sid=${actual_sid//[[:space:]]/}
+    actual_pgid=$(ps -o pgid= -p "${GUI_SID}" 2>/dev/null) \
+        || fail_test 'unable to verify the published GUI process group.'
+    actual_pgid=${actual_pgid//[[:space:]]/}
+    [[ ${actual_sid} == "${GUI_SID}" && ${actual_pgid} == "${GUI_SID}" ]] \
+        || fail_test \
+            "published GUI identity is not the session/process-group leader: sid=${actual_sid} pgid=${actual_pgid} expected=${GUI_SID}."
+
+    {
+        printf 'gui_launcher_pid=%s\n' "${GUI_PID}"
+        printf 'gui_session_id=%s\n' "${GUI_SID}"
+        printf 'gui_process_group_id=%s\n' "${actual_pgid}"
+    } >>"${evidence_dir}/scenario.txt"
+
     watch_process_topology \
-        "${uid}" "${GUI_PID}" "${topology_file}" "${leak_file}" &
+        "${uid}" "${GUI_PID}" "${GUI_SID}" "${topology_file}" "${leak_file}" &
     WATCHER_PID=$!
 
     HARNESS_PHASE='waiting-gui'
@@ -358,8 +421,7 @@ main() {
 
     printf 'gui_exit_status=%d\n' "${gui_status}" >>"${evidence_dir}/scenario.txt"
 
-    sleep 1
-    assert_no_residual_processes "${uid}" "${baseline_file}" "${evidence_dir}"
+    assert_no_residual_processes "${uid}" "${GUI_SID}" "${evidence_dir}"
 
     if [[ -d ${SESSION_ROOT}/state ]]; then
         state_url_hits=$(
@@ -389,7 +451,11 @@ main() {
     printf '\nGUI process exited with status %d.\n' "${gui_status}"
     printf 'No new download-related descendant remains and no URL exposure was detected by the harness.\n'
     printf 'Did the visible Zenity behavior satisfy the scenario instructions with no false success/failure or blocking? [yes/no] '
-    IFS= read -r answer
+    if ! IFS= read -r answer; then
+        printf 'operator_verdict=FAIL_EOF
+' >>"${evidence_dir}/scenario.txt"
+        fail_test 'operator verdict input ended before a yes/no answer was provided.'
+    fi
     case ${answer} in
         y | Y | yes | YES | Yes | oui | OUI | Oui)
             printf 'operator_verdict=PASS\n' >>"${evidence_dir}/scenario.txt"
@@ -400,7 +466,34 @@ main() {
             ;;
     esac
 
-    cp -a -- "${SESSION_ROOT}/state" "${evidence_dir}/isolated-state" 2>/dev/null || true
+    # Retain only whitelisted metadata about isolated application state.
+    # The state tree itself may contain diagnostics or future sensitive fields
+    # that are not covered by the URL-only privacy detector above.
+    if [[ -d ${SESSION_ROOT}/state ]]; then
+        state_file_count=$(
+            find "${SESSION_ROOT}/state" -type f -print | wc -l
+        )
+        state_dir_count=$(
+            find "${SESSION_ROOT}/state" -type d -print | wc -l
+        )
+        state_log_count=$(
+            find "${SESSION_ROOT}/state" -type f -name 'download-*.log' -print | wc -l
+        )
+        {
+            printf 'state_present=yes
+'
+            printf 'state_file_count=%d
+' "${state_file_count}"
+            printf 'state_directory_count=%d
+' "${state_dir_count}"
+            printf 'retained_download_log_count=%d
+' "${state_log_count}"
+        } >"${evidence_dir}/isolated-state-summary.txt"
+    else
+        printf 'state_present=no
+' >"${evidence_dir}/isolated-state-summary.txt"
+    fi
+
     HARNESS_PHASE='completed'
     printf 'Real Zenity scenario %s passed. Evidence: %s\n' \
         "${scenario}" "${evidence_dir}"

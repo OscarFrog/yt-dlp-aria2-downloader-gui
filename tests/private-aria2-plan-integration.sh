@@ -208,7 +208,10 @@ main() {
         || fail 'Private aria2 helper must be a non-executable regular file.'
 
     TEST_ROOT=$(mktemp -d)
-    trap cleanup EXIT HUP INT TERM
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
     # Single direct transfer.
     printf '%s\n' 'Private aria2 plan scenario: single-stream'
@@ -531,7 +534,7 @@ PY_HEADER_TYPE
     # originally published by this transaction.
     printf '%s\n' 'Private aria2 plan scenario: conservative rollback identity'
     new_case 'rollback-identity'
-    python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_ROLLBACK'
+    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_ROLLBACK'
 import importlib.util
 import sys
 from pathlib import Path

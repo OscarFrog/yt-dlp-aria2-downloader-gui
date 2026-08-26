@@ -557,6 +557,44 @@ handle_legacy_progress() {
     message=$(format_download_message "${key}" native "${percent}" "${speed}" "${eta}")
 }
 
+handle_aria_plan() {
+    local _prefix=$1
+    local count_text=$2
+    local count
+    local slot
+    local key
+
+    if [[ ! ${count_text} =~ ^([1-9]|1[0-6])$ ]]; then
+        return 0
+    fi
+    # Ignore a late or duplicate plan rather than resetting progress that has
+    # already been observed.
+    if ((seen_items > 0)); then
+        return 0
+    fi
+
+    count=$((10#${count_text}))
+    planned_items=${count}
+    PLANNED_KEYS=()
+    PLANNED_FORMAT_IDS=()
+
+    # Pre-register every direct item. Without placeholders, the first aria2
+    # item with a known byte total can be mistaken for the whole transfer and
+    # drive the global bar to DOWNLOAD_END before later items have appeared.
+    for ((slot = 1; slot <= count; slot++)); do
+        key="aria-plan:${slot}"
+        PLANNED_KEYS+=("${key}")
+        PLANNED_FORMAT_IDS+=('')
+        register_item "${key}" "${slot}"
+    done
+
+    phase='downloading'
+    if ((stable_percent < DOWNLOAD_START)); then
+        stable_percent=${DOWNLOAD_START}
+    fi
+    message='Preparing the selected media streams...'
+}
+
 handle_aria_progress() {
     local line=$1
     local gid
@@ -673,6 +711,17 @@ handle_postprocess() {
     local _status=$2
     local processor=${3:-}
 
+    # --parse-metadata is implemented by yt-dlp as the MetadataParser
+    # postprocessor and runs at pre_process by default, before the media
+    # download starts. Its progress hook therefore uses the "postprocess"
+    # progress-template even though this is not final media post-processing.
+    # Treating it as such would jump Zenity to POSTPROCESS_START (92%) before
+    # YTDLP_PLAN/download progress arrives, and the monotonic display would
+    # then remain stuck near 92% for the whole transfer.
+    if [[ ${processor} == MetadataParser ]]; then
+        return 0
+    fi
+
     phase='postprocessing'
     postprocessor=${processor}
     if ((stable_percent < POSTPROCESS_START)); then
@@ -690,6 +739,11 @@ process_line() {
     last_line=${line}
 
     case ${line} in
+        ARIA2_PLAN\|*)
+            IFS='|' read -r -a fields <<<"${line}"
+            ((${#fields[@]} == 2)) || return 0
+            handle_aria_plan "${fields[@]:0:2}"
+            ;;
         YTDLP_PLAN\|*)
             IFS='|' read -r -a fields <<<"${line}"
             ((${#fields[@]} <= 5)) || return 0

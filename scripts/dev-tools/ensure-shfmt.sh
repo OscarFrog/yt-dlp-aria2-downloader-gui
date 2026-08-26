@@ -134,8 +134,8 @@ main() {
 
     script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
     pin_file="${script_dir}/shfmt-pin.env"
-    [[ -r ${pin_file} ]] || {
-        fail "shfmt pin file is not readable: ${pin_file}" 66
+    [[ -f ${pin_file} && ! -L ${pin_file} && -r ${pin_file} ]] || {
+        fail "shfmt pin file is missing, non-regular, symbolic, or unreadable: ${pin_file}" 66
         exit $?
     }
 
@@ -213,8 +213,11 @@ main() {
         --location \
         --proto '=https' \
         --tlsv1.2 \
+        --connect-timeout 15 \
+        --max-time 120 \
         --retry 3 \
         --retry-delay 1 \
+        --retry-max-time 180 \
         --silent \
         --show-error \
         --output "${SHFMT_DOWNLOAD_TMP}" \

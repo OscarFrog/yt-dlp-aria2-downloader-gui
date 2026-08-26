@@ -46,6 +46,9 @@ make_ytdlp() {
     cat >"${path}" <<EOF_YTDLP
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -n \${MOCK_YTDLP_EXEC_PATH_LOG:-} ]]; then
+    printf '%s\\n' "\$0" >>"\${MOCK_YTDLP_EXEC_PATH_LOG}"
+fi
 for fd_path in /proc/\$\$/fd/*; do
     target=\$(readlink -- "\${fd_path}" 2>/dev/null || true)
     [[ \${target} != */yt-dlp-aria2-downloader/runtime/update.lock ]] || : >"\${MOCK_FD_LEAK_MARKER:?}"
@@ -76,7 +79,7 @@ EOF_DENO
 }
 
 main() {
-    for command_name in bash chmod env flock grep ln mkdir mktemp readlink rm rmdir sed sha256sum sleep stat uname; do
+    for command_name in bash chmod env find flock grep ln mkdir mktemp readlink rm rmdir sed sha256sum sleep stat uname; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             printf 'Error: required test command is absent: %s\n' "${command_name}" >&2
             exit 127
@@ -96,6 +99,9 @@ main() {
     readonly URL_LOG="${TEST_ROOT}/urls.log"
     readonly FD_LEAK_MARKER="${TEST_ROOT}/fd-leak"
     readonly NETWORK_MARKER="${TEST_ROOT}/network-called"
+    readonly YTDLP_NETWORK_MARKER="${TEST_ROOT}/ytdlp-network-called"
+    readonly GPGCONF_LOG="${TEST_ROOT}/gpgconf.log"
+    readonly YTDLP_EXEC_PATH_LOG="${TEST_ROOT}/ytdlp-exec-paths.log"
     mkdir -p -- "${HOME_DIR}" "${DATA_HOME}" "${MOCK_BIN}"
 
     case $(uname -m) in
@@ -115,9 +121,25 @@ for fd_path in /proc/$$/fd/*; do
     target=$(readlink -- "${fd_path}" 2>/dev/null || true)
     [[ ${target} != */yt-dlp-aria2-downloader/runtime/update.lock ]] || : >"${MOCK_FD_LEAK_MARKER:?}"
 done
+if [[ ${MOCK_GPG_VERIFY_FAIL:-0} == 1 ]]; then
+    for arg in "$@"; do
+        if [[ ${arg} == --verify ]]; then
+            printf '%s\n' 'mock OpenPGP verification failure' >&2
+            exit 91
+        fi
+    done
+fi
 exit 0
 EOF_GPG
     chmod 0755 -- "${MOCK_BIN}/gpg"
+
+    cat >"${MOCK_BIN}/gpgconf" <<'EOF_GPGCONF'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${MOCK_GPGCONF_LOG:?}"
+printf '%s\n' "$*" >>"${MOCK_GPGCONF_LOG}"
+EOF_GPGCONF
+    chmod 0755 -- "${MOCK_BIN}/gpgconf"
 
     cat >"${MOCK_BIN}/unzip" <<'EOF_UNZIP'
 #!/usr/bin/env bash
@@ -154,16 +176,27 @@ output=''
 url=''
 write_out=''
 previous=''
+seen_no_progress=false
 for arg in "$@"; do
     if [[ ${previous} == output ]]; then output=${arg}; previous=''; continue; fi
     if [[ ${previous} == writeout ]]; then write_out=${arg}; previous=''; continue; fi
     case ${arg} in
     -o|--output) previous=output ;;
     --write-out) previous=writeout ;;
+    --no-progress-meter) seen_no_progress=true ;;
     https://*) url=${arg} ;;
     esac
 done
+if [[ ${MOCK_REQUIRE_NO_PROGRESS:-0} == 1 && ${seen_no_progress} != true ]]; then
+    exit 96
+fi
 printf '%s\n' "${url}" >>"${MOCK_URL_LOG}"
+if [[ ${MOCK_YTDLP_NETWORK_FORBIDDEN:-0} == 1 &&
+    (${url} == 'https://github.com/yt-dlp/yt-dlp/releases/latest' ||
+        ${url} == 'https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest') ]]; then
+    : >"${MOCK_YTDLP_NETWORK_MARKER:?}"
+    exit 98
+fi
 if [[ ${MOCK_NETWORK_FORBIDDEN:-0} == 1 ]]; then
     : >"${MOCK_NETWORK_MARKER:?}"
     exit 97
@@ -189,6 +222,9 @@ case ${url} in
         cat >"${output}" <<EOF_YTDLP
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -n \${MOCK_YTDLP_EXEC_PATH_LOG:-} ]]; then
+    printf '%s\\n' "\$0" >>"\${MOCK_YTDLP_EXEC_PATH_LOG}"
+fi
 for fd_path in /proc/\$\$/fd/*; do
     target=\$(readlink -- "\${fd_path}" 2>/dev/null || true)
     [[ \${target} != */yt-dlp-aria2-downloader/runtime/update.lock ]] || : >"\${MOCK_FD_LEAK_MARKER:?}"
@@ -242,7 +278,9 @@ EOF_CURL
 
     runtime_env=(env HOME="${HOME_DIR}" XDG_DATA_HOME="${DATA_HOME}" PATH="${MOCK_BIN}:${PATH}"
         MOCK_URL_LOG="${URL_LOG}" MOCK_FD_LEAK_MARKER="${FD_LEAK_MARKER}"
-        MOCK_NETWORK_MARKER="${NETWORK_MARKER}" MOCK_YTDLP_ASSET="${YTDLP_ASSET}"
+        MOCK_NETWORK_MARKER="${NETWORK_MARKER}" MOCK_YTDLP_NETWORK_MARKER="${YTDLP_NETWORK_MARKER}"
+        MOCK_GPGCONF_LOG="${GPGCONF_LOG}" MOCK_YTDLP_EXEC_PATH_LOG="${YTDLP_EXEC_PATH_LOG}"
+        MOCK_REQUIRE_NO_PROGRESS=1 MOCK_YTDLP_ASSET="${YTDLP_ASSET}"
         MOCK_YTDLP_STABLE_VERSION=2026.07.04 MOCK_YTDLP_NIGHTLY_VERSION=2026.08.20.123456
         MOCK_DENO_LATEST_VERSION=2.9.5 YTDLP_ARIA2_RUNTIME_LOCK_WAIT_SECONDS=1
         YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS=2 YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS=10
@@ -256,9 +294,46 @@ EOF_CURL
     fresh_ytdlp_root="${fresh_runtime_root}/yt-dlp"
     fresh_deno_root="${fresh_runtime_root}/deno"
 
+    # A fresh bootstrap must refuse a yt-dlp candidate whose signed manifest
+    # cannot be verified. Import remains successful; only --verify is mutated.
+    VERIFY_FAIL_DATA_HOME="${TEST_ROOT}/verify-fail-data"
+    verify_fail_runtime_root="${VERIFY_FAIL_DATA_HOME}/yt-dlp-aria2-downloader/runtime"
+    verify_fail_ytdlp_root="${verify_fail_runtime_root}/yt-dlp"
+    verify_failure_status=0
+    verify_failure_error=''
+    unverified_candidates=''
+
+    rm -rf -- "${VERIFY_FAIL_DATA_HOME}"
+    verify_failure_error=$(
+        "${runtime_env[@]}" \
+            XDG_DATA_HOME="${VERIFY_FAIL_DATA_HOME}" \
+            MOCK_GPG_VERIFY_FAIL=1 \
+            "${RUNTIME_MANAGER}" ensure 2>&1
+    ) || verify_failure_status=$?
+
+    [[ ${verify_failure_status} == 1 ]] \
+        || fail "signature-failure bootstrap returned ${verify_failure_status}, expected 1"
+    grep -Fq \
+        'yt-dlp bootstrap failed: SHA-256 manifest signature verification failed.' \
+        <<<"${verify_failure_error}" \
+        || fail 'signature-failure bootstrap missed the canonical verification diagnostic'
+    [[ ! -L ${verify_fail_ytdlp_root}/current ]] \
+        || fail 'signature-failure bootstrap activated an unverified yt-dlp runtime'
+    [[ ! -L ${verify_fail_runtime_root}/deno/current ]] \
+        || fail 'signature-failure bootstrap unexpectedly reached Deno activation'
+    if [[ -d ${verify_fail_ytdlp_root} ]]; then
+        unverified_candidates=$(
+            find "${verify_fail_ytdlp_root}" -type f -name "${YTDLP_ASSET}" -print
+        ) || fail 'unable to inspect signature-failure yt-dlp artifacts'
+        [[ -z ${unverified_candidates} ]] \
+            || fail 'signature-failure bootstrap retained an unverified yt-dlp candidate'
+    fi
+
     rm -rf -- "${FRESH_DATA_HOME}"
     : >"${URL_LOG}"
-    rm -f -- "${FD_LEAK_MARKER}" "${NETWORK_MARKER}"
+    : >"${GPGCONF_LOG}"
+    : >"${YTDLP_EXEC_PATH_LOG}"
+    rm -f -- "${FD_LEAK_MARKER}" "${NETWORK_MARKER}" "${YTDLP_NETWORK_MARKER}"
 
     "${runtime_env[@]}" \
         XDG_DATA_HOME="${FRESH_DATA_HOME}" \
@@ -287,6 +362,15 @@ EOF_CURL
     [[ ! -e ${FD_LEAK_MARKER} ]] \
         || fail 'fresh bootstrap leaked the runtime lock to a child process'
 
+    grep -Fq -- "${fresh_runtime_root}/.yt-dlp-bootstrap." "${YTDLP_EXEC_PATH_LOG}" \
+        || fail 'fresh yt-dlp bootstrap did not execute its candidate below RUNTIME_ROOT'
+    ! grep -Fq -- '/tmp/.yt-dlp-bootstrap.' "${YTDLP_EXEC_PATH_LOG}" \
+        || fail 'fresh yt-dlp bootstrap still executed a candidate from /tmp'
+    grep -Fq -- '--kill gpg-agent' "${GPGCONF_LOG}" \
+        || fail 'fresh yt-dlp bootstrap did not terminate its ephemeral gpg-agent'
+    grep -Fq -- '--homedir /tmp/.yt-dlp-gpg.' "${GPGCONF_LOG}" \
+        || fail 'gpg-agent cleanup did not target the short bootstrap homedir'
+
     # Strict no-network require mode: both success and missing-runtime failure must
     # happen without invoking curl.
     rm -f -- "${NETWORK_MARKER}" "${URL_LOG}"
@@ -298,6 +382,25 @@ EOF_CURL
     [[ ${status} == 69 ]] || fail "missing-runtime require returned ${status}, expected 69"
     [[ ! -e ${NETWORK_MARKER} ]] || fail 'failed require mode invoked the network'
     ln -s 2.8.0 "${deno_root}/current"
+
+    # A malformed active yt-dlp version must be recovered locally before any
+    # yt-dlp update lookup is attempted.
+    make_ytdlp "${ytdlp_root}/2026.06.09/${YTDLP_ASSET}" malformed-version
+    rm -f -- "${YTDLP_NETWORK_MARKER}" "${URL_LOG}"
+    "${runtime_env[@]}" \
+        MOCK_YTDLP_NETWORK_FORBIDDEN=1 \
+        MOCK_DENO_LATEST_VERSION=2.8.0 \
+        "${RUNTIME_MANAGER}" update >/dev/null
+    [[ ! -e ${YTDLP_NETWORK_MARKER} ]] \
+        || fail 'malformed active yt-dlp consulted the network before local recovery'
+    assert_link_target "${ytdlp_root}/current" 2026.03.17 \
+        'malformed active yt-dlp was not rolled back locally'
+
+    # Restore the canonical state for the remaining update/rollback scenarios.
+    make_ytdlp "${ytdlp_root}/2026.06.09/${YTDLP_ASSET}" 2026.06.09
+    rm -f -- "${ytdlp_root}/current" "${ytdlp_root}/previous"
+    ln -s 2026.06.09 "${ytdlp_root}/current"
+    ln -s 2026.03.17 "${ytdlp_root}/previous"
 
     # Scenario group: exact-tag stable update, Deno update, nightly opt-in, then stable.
     : >"${URL_LOG}"
@@ -324,15 +427,42 @@ EOF_CURL
         assert_link_target "${ytdlp_root}/current" 2026.07.04 "rollback B failed at ${iteration}"
     done
 
-    # Missing, unsafe, and invalid previous targets must fail cleanly.
+    # Missing, unsafe, and invalid previous targets must fail with the exact
+    # rollback status and the canonical validator diagnostics.
     rm -f -- "${ytdlp_root}/previous"
     status=0
-    "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null 2>&1 || status=$?
-    [[ ${status} != 0 ]] || fail 'rollback unexpectedly accepted missing previous'
+    rollback_error=''
+    rollback_error=$(
+        "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp 2>&1
+    ) || status=$?
+    [[ ${status} == 1 ]] \
+        || fail "missing previous rollback returned ${status}, expected 1"
+    grep -Fq 'no previous yt-dlp runtime is available.' <<<"${rollback_error}" \
+        || fail 'missing previous rollback diagnostic is not canonical'
+
     ln -s ../escape "${ytdlp_root}/previous"
     status=0
-    "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null 2>&1 || status=$?
-    [[ ${status} != 0 ]] || fail 'rollback accepted unsafe previous target'
+    rollback_error=''
+    rollback_error=$(
+        "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp 2>&1
+    ) || status=$?
+    [[ ${status} == 1 ]] \
+        || fail "unsafe previous rollback returned ${status}, expected 1"
+    grep -Fq 'invalid previous yt-dlp runtime target.' <<<"${rollback_error}" \
+        || fail 'unsafe previous rollback diagnostic is not canonical'
+
+    rm -f -- "${ytdlp_root}/previous"
+    ln -s $'2026.08.20.123456\ninvalid' "${ytdlp_root}/previous"
+    status=0
+    rollback_error=''
+    rollback_error=$(
+        "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp 2>&1
+    ) || status=$?
+    [[ ${status} == 1 ]] \
+        || fail "newline-bearing previous rollback returned ${status}, expected 1"
+    grep -Fq 'invalid previous yt-dlp runtime target.' <<<"${rollback_error}" \
+        || fail 'rollback did not reject the newline target at the canonical validator'
+
     rm -f -- "${ytdlp_root}/previous"
     ln -s 2026.08.20.123456 "${ytdlp_root}/previous"
 
@@ -371,11 +501,14 @@ EOF_CURL
         ) &
         holder=$!
         HOLDER_PID=${holder}
-        for _ in {1..100}; do
+        for _ in {1..250}; do
             [[ -e ${ready} ]] && break
-            sleep 0.01
+            kill -0 -- "${holder}" 2>/dev/null \
+                || fail "lock holder ${iteration} exited before publishing readiness"
+            sleep 0.02
         done
-        [[ -e ${ready} ]] || fail "lock holder ${iteration} did not start"
+        [[ -e ${ready} ]] \
+            || fail "lock holder ${iteration} did not start within 5 seconds"
         MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null 2>"${TEST_ROOT}/lock-${iteration}.err" \
             || fail "contention fallback ${iteration} failed"
         grep -Fq 'another runtime update is in progress' "${TEST_ROOT}/lock-${iteration}.err" \

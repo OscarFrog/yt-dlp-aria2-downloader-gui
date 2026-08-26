@@ -24,6 +24,17 @@ TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
 WORKER_PID=''
 MONITOR_PID=''
+WAIT_SECONDS=${FFMPEG_REAL_PROGRESS_WAIT_SECONDS:-20}
+[[ ${WAIT_SECONDS} =~ ^[0-9]{1,3}$ ]] || {
+    printf 'Error: FFMPEG_REAL_PROGRESS_WAIT_SECONDS must be an integer between 1 and 120.\n' >&2
+    exit 64
+}
+WAIT_SECONDS=$((10#${WAIT_SECONDS}))
+((WAIT_SECONDS >= 1 && WAIT_SECONDS <= 120)) || {
+    printf 'Error: FFMPEG_REAL_PROGRESS_WAIT_SECONDS must be between 1 and 120.\n' >&2
+    exit 64
+}
+readonly WAIT_SECONDS
 
 cleanup() {
     trap - EXIT HUP INT TERM
@@ -72,6 +83,8 @@ main() {
             exit 65
         }
 
+        ready_file="${run_dir}/ready-to-publish"
+        allow_file="${run_dir}/allow-publish"
         (
             printf '%s\n' \
                 'YTDLP_PLAN|media|22|22|' \
@@ -86,14 +99,29 @@ main() {
 
             ffprobe -v error -select_streams v:0 \
                 -show_entries stream=index -of csv=p=0 "${output}" \
-                | grep -Eq '^[0-9]+$'
+                | grep -Eq '^[0-9]+$' || {
+                printf 'FAIL: real FFmpeg output has no video stream on run %d.\n' \
+                    "${run}" >&2
+                exit 65
+            }
             ffprobe -v error -select_streams a:0 \
                 -show_entries stream=index -of csv=p=0 "${output}" \
-                | grep -Eq '^[0-9]+$'
+                | grep -Eq '^[0-9]+$' || {
+                printf 'FAIL: real FFmpeg output has no audio stream on run %d.\n' \
+                    "${run}" >&2
+                exit 65
+            }
 
-            # Regression guard: leave a deliberate window proving global 100 is
-            # gated by result-file publication, not FFmpeg's progress=end record.
-            sleep 0.4
+            : >"${ready_file}"
+            publish_deadline=$((SECONDS + WAIT_SECONDS))
+            while [[ ! -e ${allow_file} ]] && ((SECONDS < publish_deadline)); do
+                sleep 0.05
+            done
+            [[ -e ${allow_file} ]] || {
+                printf 'FAIL: publication handshake timed out on run %d.\n' \
+                    "${run}" >&2
+                exit 65
+            }
             printf '%s\n' "${output}" >"${result_file}"
         ) &
         WORKER_PID=$!
@@ -103,27 +131,57 @@ main() {
             "${run_dir}" >"${capture_file}" &
         MONITOR_PID=$!
 
-        for _ in {1..200}; do
-            if grep -Fq -- 'progress=end' "${log_file}"; then
+        log_deadline=$((SECONDS + WAIT_SECONDS))
+        while ((SECONDS < log_deadline)); do
+            if grep -Fq -- 'progress=end' "${log_file}" && [[ -e ${ready_file} ]]; then
                 break
             fi
             sleep 0.05
         done
         grep -Fq -- 'progress=end' "${log_file}" || {
-            printf 'FAIL: FFmpeg never emitted progress=end on run %d.\n' "${run}" >&2
+            printf 'FAIL: FFmpeg never emitted progress=end on run %d within %ds.\n' \
+                "${run}" "${WAIT_SECONDS}" >&2
             tail -n 40 -- "${log_file}" >&2 || true
+            exit 65
+        }
+        [[ -e ${ready_file} ]] || {
+            printf 'FAIL: FFmpeg worker never reached publication barrier on run %d.\n' \
+                "${run}" >&2
+            tail -n 40 -- "${error_file}" >&2 || true
             exit 65
         }
         grep -Eq '^out_time_us=[0-9]+$' "${log_file}" || {
             printf 'FAIL: FFmpeg out_time_us was not captured on run %d.\n' "${run}" >&2
             exit 65
         }
-        if [[ ! -e ${result_file} ]] && grep -Fxq -- '100' "${capture_file}"; then
+
+        capture_deadline=$((SECONDS + WAIT_SECONDS))
+        while ((SECONDS < capture_deadline)); do
+            if awk '/^[0-9]+$/ && $1 >= 95 && $1 <= 98 {found=1} END {exit !found}' \
+                "${capture_file}"; then
+                break
+            fi
+            sleep 0.05
+        done
+        awk '/^[0-9]+$/ && $1 >= 95 && $1 <= 98 {found=1} END {exit !found}' \
+            "${capture_file}" || {
+            printf 'FAIL: monitor did not render FFmpeg progress before publication on run %d.\n' \
+                "${run}" >&2
+            tail -n 40 -- "${capture_file}" >&2 || true
+            exit 65
+        }
+        [[ ! -e ${result_file} ]] || {
+            printf 'FAIL: worker published result before handshake release on run %d.\n' \
+                "${run}" >&2
+            exit 65
+        }
+        if grep -Fxq -- '100' "${capture_file}"; then
             printf 'FAIL: global 100 appeared before result-file publication on run %d.\n' \
                 "${run}" >&2
             exit 65
         fi
 
+        : >"${allow_file}"
         wait "${WORKER_PID}"
         WORKER_PID=''
         wait "${MONITOR_PID}"

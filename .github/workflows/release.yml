@@ -28,7 +28,7 @@ jobs:
       - name: Install validation dependencies
         run: |
           sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes curl desktop-file-utils gnupg shellcheck unzip
+          sudo apt-get -o Acquire::Retries=3 install --yes aria2 curl desktop-file-utils gnupg shellcheck unzip
       - name: Validate pinned RPM public signing certificate
         env:
           RPM_SIGNING_FINGERPRINT: 7B54065FE061E78ED2C96252E3BE996196ABEA7F
@@ -383,7 +383,7 @@ jobs:
           persist-credentials: false
       - run: |
           sudo apt-get update
-          sudo apt-get install --yes curl desktop-file-utils findutils gnupg shellcheck unzip
+          sudo apt-get install --yes aria2 curl desktop-file-utils findutils gnupg shellcheck unzip
       - name: Build and retest ZIP
         shell: bash
         run: |

@@ -18,6 +18,7 @@ readonly API_VERSION='2026-03-10'
 readonly RPM_SIGNING_FINGERPRINT='7B54065FE061E78ED2C96252E3BE996196ABEA7F'
 readonly RPM_SIGNING_SUBKEY_FINGERPRINT='1F5B769CE48A08AAC0A7D9DDECC9894B41830245'
 readonly RPM_SIGNING_KEY='packaging/keys/RPM-GPG-KEY-OscarFrog'
+readonly RELEASE_TAG_SIGNING_FINGERPRINT='43E5361414863738F0324F2B047B26057E612CDC'
 
 fail() {
     printf 'Error: %s\n' "$*" >&2
@@ -60,8 +61,12 @@ api_capture() {
 }
 
 cleanup() {
-    rm -f -- "${listing}" || true
-    rm -rf -- "${gpg_home}" || true
+    if [[ -n ${listing:-} ]]; then
+        rm -f -- "${listing}" || true
+    fi
+    if [[ -n ${gpg_home:-} ]]; then
+        rm -rf -- "${gpg_home}" || true
+    fi
 }
 
 main() {
@@ -114,17 +119,28 @@ main() {
         exit 77
     }
 
-    for command_name in awk date gh git gpg grep mktemp; do
+    for command_name in awk chmod date gh git gpg grep mktemp rm; do
         command -v -- "${command_name}" >/dev/null 2>&1 \
             || fail "required preflight command is absent: ${command_name}"
     done
 
     readonly repository=${GH_REPO:-${DEFAULT_REPOSITORY}}
-    [[ ${repository} == */* && ${repository} != */*/* ]] \
+    [[ ${repository} =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] \
         || fail "invalid GH_REPO repository coordinate: ${repository}"
 
-    git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-        || fail 'run the preflight from the repository root.'
+    repo_root=''
+    if ! repo_root=$(git rev-parse --show-toplevel); then
+        fail 'unable to resolve the repository root.'
+    fi
+    physical_repo_root=''
+    if ! physical_repo_root=$(cd -- "${repo_root}" && pwd -P); then
+        fail 'unable to resolve the physical repository root.'
+    fi
+    current_dir=''
+    if ! current_dir=$(pwd -P); then
+        fail 'unable to resolve the current physical directory.'
+    fi
+    [[ ${current_dir} == "${physical_repo_root}" ]] || fail 'run the preflight from the repository root.'
 
     head_commit=$(git rev-parse HEAD)
     tag_commit=$(git rev-parse "${release_tag}^{commit}") \
@@ -132,14 +148,29 @@ main() {
     [[ ${tag_commit} == "${head_commit}" ]] \
         || fail "release tag ${release_tag} does not resolve to current HEAD."
 
-    git verify-tag "${release_tag}" >/dev/null 2>&1 \
-        || fail "release tag is not a valid signed tag: ${release_tag}"
+    tag_verification=''
+    if ! tag_verification=$(git verify-tag --raw "${release_tag}" 2>&1 >/dev/null); then
+        fail "release tag is not a valid signed tag: ${release_tag}"
+    fi
+    tag_primary_fingerprint=$(
+        awk '
+            $1 == "[GNUPG:]" && $2 == "VALIDSIG" {
+                fingerprint = (NF >= 12 && $12 != "") ? $12 : $3
+                print toupper(fingerprint)
+            }
+        ' <<<"${tag_verification}"
+    )
+    [[ -n ${tag_primary_fingerprint} &&
+        ${tag_primary_fingerprint} != *$'\n'* ]] || fail "unable to determine the unique signer fingerprint for tag: ${release_tag}"
+    [[ ${tag_primary_fingerprint} == "${RELEASE_TAG_SIGNING_FINGERPRINT}" ]] || fail "release tag signer is not authorized: ${tag_primary_fingerprint}"
 
     git_status=$(git status --porcelain)
     [[ -z ${git_status} ]] \
         || fail 'working tree is not clean.'
 
-    version=$(./download-video.sh --version)
+    if ! version=$(./download-video.sh --version); then
+        fail 'unable to query the project version.'
+    fi
     version=${version##* }
     [[ ${release_tag} == "v${version}" ]] \
         || fail "release tag/version mismatch: tag=${release_tag} project=${version}"
@@ -264,10 +295,16 @@ main() {
         fi
     done
 
-    listing=$(mktemp)
-    gpg_home=$(mktemp -d)
+    listing=''
+    gpg_home=''
     trap cleanup EXIT
-    chmod 700 -- "${gpg_home}"
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    listing=$(mktemp) || fail 'unable to create the signing-certificate listing file.'
+    gpg_home=$(mktemp -d) || fail 'unable to create the temporary GnuPG home.'
+    chmod 700 -- "${gpg_home}" || fail 'unable to secure the temporary GnuPG home.'
 
     LC_ALL=C gpg \
         --homedir "${gpg_home}" \

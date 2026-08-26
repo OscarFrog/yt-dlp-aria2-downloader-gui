@@ -13,7 +13,7 @@ readonly PROJECT_DIR
 # shellcheck disable=SC1090
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 
-for required_command in bash grep head mkdir mktemp rm sleep sort tail timeout wc; do
+for required_command in bash grep head mkdir mktemp rm sed sleep sort tail timeout wc; do
     require_test_command "${required_command}"
 done
 
@@ -22,9 +22,46 @@ assert_readable_file "${MONITOR}" 'progress monitor'
 
 TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
+trap 'rm -rf -- "${TEST_ROOT}" || true' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# Most scenarios validate parsing/state transitions rather than the production
+# 400 ms idle-poll cadence. Exercise those scenarios against an otherwise
+# identical temporary copy with a shorter poll interval. The busy-loop/rate
+# control below still uses the unmodified production monitor.
+FAST_MONITOR="${TEST_ROOT}/progress-monitor-fast.sh"
+readonly FAST_MONITOR
+
+fast_poll_count=$(
+    grep -Fxc -- '            sleep 0.4' "${MONITOR}" || true
+)
+assert_equals '1' "${fast_poll_count}" \
+    'production progress monitor has one expected idle-poll sleep'
+
+short_poll_count_before=$(
+    grep -Fxc -- '            sleep 0.05' "${MONITOR}" || true
+)
+
+sed \
+    's/^            sleep 0[.]4$/            sleep 0.05/' \
+    "${MONITOR}" >"${FAST_MONITOR}"
+
+fast_poll_count_after=$(
+    grep -Fxc -- '            sleep 0.4' "${FAST_MONITOR}" || true
+)
+short_poll_count_after=$(
+    grep -Fxc -- '            sleep 0.05' "${FAST_MONITOR}" || true
+)
+
+assert_equals '0' "${fast_poll_count_after}" \
+    'fast progress monitor contains no production idle-poll sleep'
+assert_equals "$((short_poll_count_before + 1))" "${short_poll_count_after}" \
+    'fast progress monitor changes exactly one idle-poll sleep'
+
+bash -n "${FAST_MONITOR}" \
+    || fail 'generated fast progress monitor is not valid Bash'
 
 # Per-scenario state shared by start_scenario and finish_*.
 SCENARIO_DIR=''
@@ -116,7 +153,7 @@ stop_process_bounded() {
         fi
         sleep 0.05
     done
-    return 0
+    fail "process ${pid} did not exit after SIGKILL"
 }
 
 stop_active_processes() {
@@ -166,9 +203,59 @@ wait_for_numeric_occurrences() {
     fail "${label}: expected ${expected} occurrences of ${value}; found ${count}"
 }
 
+wait_for_line_count_at_least() {
+    local file=$1
+    local expected=$2
+    local label=$3
+    local attempt
+    local count=0
+
+    for ((attempt = 0; attempt < 300; attempt++)); do
+        if [[ -r ${file} ]]; then
+            count=$(wc -l <"${file}") || count=0
+        else
+            count=0
+        fi
+
+        [[ ${count} =~ ^[0-9]+$ ]] || count=0
+        if ((count >= expected)); then
+            return 0
+        fi
+
+        sleep 0.05
+    done
+
+    fail "${label}: expected at least ${expected} lines; found ${count}"
+}
+
+wait_for_distinct_numeric_values() {
+    local file=$1
+    local expected=$2
+    local label=$3
+    local attempt
+    local count=0
+
+    for ((attempt = 0; attempt < 300; attempt++)); do
+        count=$(
+            grep -E '^[0-9]+$' "${file}" 2>/dev/null \
+                | sort -u \
+                | wc -l
+        ) || count=0
+
+        [[ ${count} =~ ^[0-9]+$ ]] || count=0
+        if ((count >= expected)); then
+            return 0
+        fi
+        sleep 0.05
+    done
+
+    fail "${label}: expected ${expected} distinct numeric values; found ${count}"
+}
+
 start_scenario() {
     local name=$1
     local profile=$2
+    local monitor=${3:-${FAST_MONITOR}}
 
     SCENARIO_DIR="${TEST_ROOT}/${name}"
     LOG_FILE="${SCENARIO_DIR}/download.log"
@@ -180,7 +267,7 @@ start_scenario() {
 
     sleep 300 &
     ACTIVE_WORKER=$!
-    bash "${MONITOR}" \
+    bash "${monitor}" \
         "${LOG_FILE}" "${ACTIVE_WORKER}" "${RESULT_FILE}" "${profile}" \
         "${SCENARIO_DIR}" >"${CAPTURE_FILE}" &
     ACTIVE_MONITOR=$!
@@ -280,7 +367,16 @@ main() {
     # A partial record must be retained until its terminating newline arrives.
     start_scenario partial-progress-record audio
     printf '%s' 'YTDLP_PROGRESS_V2|media|251|downloa' >>"${LOG_FILE}"
-    sleep 0.6
+
+    partial_capture_lines=$(wc -l <"${CAPTURE_FILE}")
+    wait_for_line_count_at_least \
+        "${CAPTURE_FILE}" "$((partial_capture_lines + 2))" \
+        'partial record remains buffered across a monitor cycle'
+
+    assert_file_not_contains \
+        "${CAPTURE_FILE}" 'Downloading the audio track - 25%' \
+        'unterminated partial record is not processed'
+
     printf '%s\n' 'ding|250|1000|0|0|0|25.0%|500KiB/s|00:06' >>"${LOG_FILE}"
     wait_for_text "${CAPTURE_FILE}" 'Downloading the audio track - 25%' \
         'partial progress record is reconstructed'
@@ -288,7 +384,7 @@ main() {
 
     # Removing the log path while the worker is alive must not create a busy loop.
     # The already-open descriptor remains safe, but no new records can arrive.
-    start_scenario reader-unavailable video
+    start_scenario reader-unavailable video "${MONITOR}"
     wait_for_text "${CAPTURE_FILE}" 'Analyzing the webpage...' \
         'reader opens the progress log before its path is removed'
     rm -f -- "${LOG_FILE}"
@@ -312,6 +408,71 @@ main() {
     finish_success '/tmp/final-log-drain.mkv'
     assert_file_contains "${CAPTURE_FILE}" 'Downloading the media - 75%' \
         'final log bytes are drained after worker exit'
+
+    # Regression 2.2.0: --parse-metadata creates a MetadataParser postprocessor
+    # at yt-dlp's pre_process stage. The generic postprocess progress hook fires
+    # before before_dl/YTDLP_PLAN. It must not move the global Zenity bar into
+    # the 92..98 final post-processing phase.
+    start_scenario metadata-preprocess-before-download video
+    printf '%s\n' \
+        'YTDLP_POSTPROCESS|started|MetadataParser' \
+        'YTDLP_POSTPROCESS|finished|MetadataParser' \
+        >>"${LOG_FILE}"
+
+    metadata_capture_lines=$(wc -l <"${CAPTURE_FILE}")
+    wait_for_line_count_at_least \
+        "${CAPTURE_FILE}" "$((metadata_capture_lines + 2))" \
+        'MetadataParser pre-process records cross a monitor cycle'
+
+    metadata_preprocess_max=$(max_percentage "${CAPTURE_FILE}")
+    if [[ ! ${metadata_preprocess_max} =~ ^[0-9]+$ ]] \
+        || ((metadata_preprocess_max > 3)); then
+        fail "MetadataParser pre_process advanced Zenity before download: ${metadata_preprocess_max}"
+    fi
+
+    printf '%s\n' \
+        'YTDLP_PLAN|media|22|22|' \
+        'YTDLP_PROGRESS_V2|media|22|downloading|110|1000|0|0|0|11.0%|10.24MiB/s|00:31' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 11%' \
+        'download progress after MetadataParser pre_process'
+    metadata_download_max=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals '14' "${metadata_download_max}" \
+        '11 percent media progress maps to 14 percent global progress'
+    assert_percentages_never_decrease \
+        "${CAPTURE_FILE}" 'MetadataParser pre_process regression'
+    finish_success '/tmp/metadata-preprocess-before-download.mkv'
+
+    # Regression 2.2.0: the private direct PLAN pass knows the transfer count,
+    # but that count was not forwarded to the monitor. With two direct items,
+    # the first completed aria2 item could therefore look like 100% of all
+    # known bytes and jump the global bar to 90% before item 2 appeared.
+    start_scenario private-direct-aria-plan video
+    {
+        printf '%s\n' 'ARIA2_PLAN|2'
+        printf '\r[#a1b2c3 10MiB/10MiB(100%%) CN:8 DL:2MiB ETA:0s]\r'
+    } >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" '100% (aria2c)' \
+        'private direct first aria item'
+    private_first_max=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals '47' "${private_first_max}" \
+        'first of two private direct items cannot fill the download phase'
+    printf '\r[#d4e5f6 2MiB/10MiB(20%%) CN:8 DL:1MiB ETA:8s]\r' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 20% (aria2c)' \
+        'private direct second aria item'
+    assert_percentages_never_decrease \
+        "${CAPTURE_FILE}" 'private direct aria progress'
+    finish_success '/tmp/private-direct-aria-plan.mkv'
+
+    # A combined direct video is one transfer item, not the old video fallback
+    # assumption of two streams.
+    start_scenario private-direct-combined-video video
+    printf '%s\n' 'ARIA2_PLAN|1' >>"${LOG_FILE}"
+    printf '\r[#a1b2c3 4MiB/10MiB(40%%) CN:8 DL:1MiB ETA:6s]\r' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 40% (aria2c)' \
+        'combined direct video uses the exact private transfer count'
+    finish_success '/tmp/private-direct-combined-video.mkv'
 
     # Scenario: direct video transfer handled by aria2c.
     start_scenario direct-aria-video video
@@ -511,11 +672,8 @@ main() {
     printf '%s\n' 'YTDLP_PLAN|media|18|18|' >>"${LOG_FILE}"
     printf '\r[#c0ffee 4MiB/0B CN:8 DL:1MiB]\r' >>"${LOG_FILE}"
     wait_for_text "${CAPTURE_FILE}" 'size unknown (aria2c)' 'unknown-size fallback'
-    sleep 0.8
-    unknown_values=$(grep -E '^[0-9]+$' "${CAPTURE_FILE}" | sort -u | wc -l) \
-        || unknown_values=0
-    [[ ${unknown_values} =~ ^[0-9]+$ ]] || unknown_values=0
-    ((unknown_values >= 2)) || fail 'unknown-size progress must remain animated'
+    wait_for_distinct_numeric_values "${CAPTURE_FILE}" 2 \
+        'unknown-size progress remains animated'
     finish_success '/tmp/unknown.mkv'
 
     # A late download line must not replace an active post-processing phase.

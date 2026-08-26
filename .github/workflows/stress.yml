@@ -13,9 +13,14 @@ concurrency:
 
 jobs:
   mock-stress:
-    name: Mock process/cancellation stress (20x deterministic jitter)
+    name: Mock process/cancellation stress shard ${{ matrix.shard }}/4
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -32,7 +37,10 @@ jobs:
           ffmpeg_timings=(0 0.01 0.04 0.08)
           supervisor_timings=(0 0.005 0.01 0.02)
 
-          for iteration in {1..20}; do
+          shard=${{ matrix.shard }}
+          shard_count=4
+
+          for ((iteration = shard; iteration <= 20; iteration += shard_count)); do
             index=$((iteration - 1))
             cancel=${cancel_timings[index % ${#cancel_timings[@]}]}
             late_cancel=${late_cancel_timings[index % ${#late_cancel_timings[@]}]}
@@ -54,6 +62,30 @@ jobs:
                 MOCK_SETSID_START_JITTER_SECONDS="${supervisor}" \
                 bash ./tests/mock-integration.sh
           done
+
+  mock-stress-gate:
+    name: Mock process/cancellation stress (20x deterministic jitter)
+    if: ${{ always() }}
+    needs:
+      - mock-stress
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require all cancellation stress shards
+        shell: bash
+        env:
+          MOCK_STRESS_RESULT: ${{ needs.mock-stress.result }}
+        run: |
+          set -Eeuo pipefail
+
+          if [[ ${MOCK_STRESS_RESULT} != success ]]; then
+            printf 'Mock cancellation stress matrix finished with result: %s\n' \
+              "${MOCK_STRESS_RESULT}" >&2
+            exit 1
+          fi
+
+          printf '%s\n' \
+            'All 20 deterministic cancellation stress iterations passed.'
 
   runtime-hardening-stress:
     name: Runtime-manager hardening stress (10x)

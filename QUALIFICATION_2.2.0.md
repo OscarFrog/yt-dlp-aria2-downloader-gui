@@ -1,5 +1,18 @@
 # Qualification plan for 2.2.0
 
+> **Historical qualification document.** This file preserves the pre-release
+> qualification plan and wording used while 2.2.0 was being prepared. Statements
+> such as `pre-release`, `pending`, and `publication remains gated` below describe
+> that historical phase; they are not the current release status.
+>
+> **Post-release verification — 2026-08-25.** GitHub reports release `v2.2.0`
+> as published at `2026-08-24T21:28:11Z` and immutable. The release tag resolves
+> to source commit `e4ea92e196564211bbd6847877cbc3bc41ae1ae8`. The published
+> release exposes the versioned RPM, DEB and ZIP together with `install-fedora.sh`,
+> `SHA256SUMS`, and `RPM-GPG-KEY-OscarFrog`. This post-release note does not
+> retroactively mark individual pre-release gates below as executed when their
+> operator evidence is not reproduced in this document.
+
 Status: **pre-release remediation and qualification**.
 
 The initial qualification-only patch did not change the functional download

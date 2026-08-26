@@ -36,7 +36,7 @@ assert_standard_shell_header() {
     local separator_close=''
     local spacer='nonempty'
 
-    {
+    if ! {
         IFS= read -r shebang || true
         IFS= read -r spdx || true
         IFS= read -r separator_open || true
@@ -45,7 +45,11 @@ assert_standard_shell_header() {
         IFS= read -r purpose_line || true
         IFS= read -r separator_close || true
         IFS= read -r spacer || true
-    } <"${absolute_path}"
+    } <"${absolute_path}"; then
+        printf 'FAIL: unable to read canonical shell file: %s.\n' \
+            "${relative_path}" >&2
+        return 65
+    fi
 
     [[ ${shebang} == '#!'* ]] || {
         printf 'FAIL: missing shebang in %s.\n' "${relative_path}" >&2
@@ -373,6 +377,13 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/tests/run-all.sh" \
         'bash -- ./scripts/check-shell-format.sh' \
         'run-all enforces shfmt before behavioral validation'
+
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        '--max-concurrent-downloads' \
+        'download-video keeps the aria2 concurrent-download capability contract'
+    assert_file_contains "${SCRIPT_DIR}/tests/hls-remux-duration-integration.sh" \
+        '--max-concurrent-downloads=<N>' \
+        'HLS aria2 mock advertises the required concurrent-download capability'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
         'repos/mvdan/sh/releases/latest' \
         'automation discovers the latest stable upstream shfmt release'
@@ -512,7 +523,7 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
         '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
         'non-owner test cleanup protection'
-    readonly EXPECTED_VERSION='2.2.0'
+    readonly EXPECTED_VERSION='2.2.1'
 
     # Current-version coherence is intentionally checked only on authoritative
     # carriers. Historical versions used by regression/upgrade fixtures are valid
@@ -535,6 +546,30 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
         "version actuelle est la **${EXPECTED_VERSION}**." \
         'French README version'
+    assert_file_contains "${SCRIPT_DIR}/README.md" \
+        "Release ${EXPECTED_VERSION} publishes an architecture-independent DEB" \
+        'English README current DEB release prose'
+    assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
+        "La release ${EXPECTED_VERSION} publie un DEB indépendant de l'architecture" \
+        'French README current DEB release prose'
+    assert_file_contains "${SCRIPT_DIR}/README.md" \
+        "cd yt-dlp-aria2-downloader-gui-${EXPECTED_VERSION}" \
+        'English README portable archive directory'
+    assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
+        "cd yt-dlp-aria2-downloader-gui-${EXPECTED_VERSION}" \
+        'French README portable archive directory'
+    assert_file_contains "${SCRIPT_DIR}/README.md" \
+        "gh release verify v${EXPECTED_VERSION} -R OscarFrog/yt-dlp-aria2-downloader-gui" \
+        'English README current release verification tag'
+    assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
+        "gh release verify v${EXPECTED_VERSION} -R OscarFrog/yt-dlp-aria2-downloader-gui" \
+        'French README current release verification tag'
+    assert_file_contains "${SCRIPT_DIR}/README.md" \
+        "-f tag=v${EXPECTED_VERSION}" \
+        'English README manual release tag input'
+    assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
+        "-f tag=v${EXPECTED_VERSION}" \
+        'French README manual release tag input'
     assert_file_contains "${SCRIPT_DIR}/CHANGELOG.md" \
         "## ${EXPECTED_VERSION} - " \
         'changelog current-version heading'
@@ -675,6 +710,31 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
         'sole rpm-signing reviewer must match the authenticated maintainer' \
         'release preflight binds the sole reviewer to the authenticated maintainer'
+    assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        "readonly RELEASE_TAG_SIGNING_FINGERPRINT='43E5361414863738F0324F2B047B26057E612CDC'" \
+        'release preflight pins the authorized Git tag signer'
+    # shellcheck disable=SC2016 # Literal shell-source assertion.
+    assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        'git verify-tag --raw "${release_tag}"' \
+        'release preflight obtains machine-readable tag verification status'
+    # shellcheck disable=SC2016 # Literal shell-source assertion.
+    assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        '${tag_primary_fingerprint} == "${RELEASE_TAG_SIGNING_FINGERPRINT}"' \
+        'release preflight authorizes the exact tag signer fingerprint'
+    assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        'git rev-parse --show-toplevel' \
+        'release preflight resolves the actual repository root'
+    assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        'unable to query the project version.' \
+        'release preflight diagnoses project-version lookup failure'
+    # shellcheck disable=SC2016 # Literal shell-source assertion.
+    assert_file_contains "${SCRIPT_DIR}/packaging/package-user-cleanup.sh" \
+        '${path} != *[[:cntrl:]]*' \
+        'package cleanup rejects marker path control characters'
+    assert_file_contains "${SCRIPT_DIR}/packaging/package-user-cleanup.sh" \
+        'unable to enumerate users from /etc/passwd or getent; skipping all-user cleanup' \
+        'package cleanup diagnoses unavailable enumeration sources'
+
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'hls_duration_loss_us > hls_duration_tolerance_us' \
         'HLS post-remux duration loss is bounded before publication'
@@ -715,6 +775,39 @@ main() {
         "${SCRIPT_DIR}/packaging/rpm/build-rpm.sh" \
         'if [[ ${package_format} != 4 ]]; then' \
         'generated RPM package format is independently verified'
+
+    rpm_changelog=$(
+        awk '
+            /^%changelog[[:space:]]*$/ { in_changelog=1; next }
+            in_changelog { print }
+        ' "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec"
+    )
+    assert_text_not_contains "${rpm_changelog}" '%{version}' \
+        'RPM historical changelog does not use the current version macro'
+    assert_text_not_contains "${rpm_changelog}" '%{project_version}' \
+        'RPM historical changelog does not use the project version macro'
+    assert_text_contains "${rpm_changelog}" ' - 2.1.20-1' \
+        'RPM historical 2.1.20 version is stable'
+    assert_text_contains "${rpm_changelog}" ' - 2.1.24-1' \
+        'RPM historical 2.1.24 version is stable'
+    assert_text_contains "${rpm_changelog}" ' - 2.1.25-1' \
+        'RPM historical 2.1.25 version is stable'
+
+    assert_file_contains "${SCRIPT_DIR}/QUALIFICATION_2.2.0.md" \
+        '**Historical qualification document.**' \
+        '2.2.0 qualification is explicitly historical'
+    assert_file_contains "${SCRIPT_DIR}/QUALIFICATION_2.2.0.md" \
+        '**Post-release verification — 2026-08-25.**' \
+        '2.2.0 qualification contains a post-release verification note'
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        'recover_abandoned_private_aria2_staging' \
+        'engine recovers validated abandoned private aria2 staging'
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        "readonly PRIVATE_ARIA2_STAGING_MARKER='.yt-dlp-aria2-owner-v1'" \
+        'new private aria2 staging carries a durable owner marker'
+    assert_file_contains "${SCRIPT_DIR}/tests/aria2-auth-headers-integration.sh" \
+        'Authorization-dropping helper mutation was not detected.' \
+        'private aria2 Authorization fidelity has a negative mutation control'
 
     assert_file_contains \
         "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
@@ -1177,8 +1270,14 @@ main() {
     # shellcheck disable=SC2016 # Literal GitHub-expression assertion.
     assert_file_not_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" 'group: packages-${{ github.workflow }}-${{ github.ref }}-${{ matrix.scenario }}' 'package workflow does not use matrix at workflow-level concurrency'
 
+    # Executable staging must not depend on an executable /tmp, while the
+    # separate GnuPG homedir stays short enough for Unix-domain socket paths.
+    # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/runtime-manager.sh" \
-        "mktemp -d --tmpdir=/tmp '.yt-dlp-bootstrap.XXXXXXXX'" \
+        'work=$(mktemp -d --tmpdir="${RUNTIME_ROOT}"' \
+        'yt-dlp executable bootstrap staging stays below RUNTIME_ROOT'
+    assert_file_contains "${SCRIPT_DIR}/runtime-manager.sh" \
+        "gpg_home=\$(mktemp -d --tmpdir=/tmp '.yt-dlp-gpg.XXXXXXXX')" \
         'yt-dlp bootstrap keeps the GnuPG socket path short'
     assert_file_contains "${SCRIPT_DIR}/runtime-manager.sh" \
         'require)' 'runtime manager exposes strict no-network require mode'

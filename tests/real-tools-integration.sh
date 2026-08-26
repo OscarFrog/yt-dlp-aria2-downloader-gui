@@ -40,12 +40,45 @@ cleanup() {
 
 assert_media_streams() {
     local media_path=$1
-    ffprobe -v error -select_streams v:0 \
-        -show_entries stream=index -of csv=p=0 "${media_path}" \
-        | grep -Eq '^[0-9]+$'
-    ffprobe -v error -select_streams a:0 \
-        -show_entries stream=index -of csv=p=0 "${media_path}" \
-        | grep -Eq '^[0-9]+$'
+    local video_index=''
+    local audio_index=''
+
+    video_index=$(
+        ffprobe -v error -select_streams V:0 \
+            -show_entries stream=index -of csv=p=0 "${media_path}"
+    ) || {
+        printf 'FAIL: unable to inspect content video stream: %s\n' \
+            "${media_path}" >&2
+        return 65
+    }
+    [[ ${video_index} =~ ^[0-9]+$ ]] || {
+        printf 'FAIL: media has no content video stream: %s\n' \
+            "${media_path}" >&2
+        return 65
+    }
+
+    audio_index=$(
+        ffprobe -v error -select_streams a:0 \
+            -show_entries stream=index -of csv=p=0 "${media_path}"
+    ) || {
+        printf 'FAIL: unable to inspect audio stream: %s\n' \
+            "${media_path}" >&2
+        return 65
+    }
+    [[ ${audio_index} =~ ^[0-9]+$ ]] || {
+        printf 'FAIL: media has no audio stream: %s\n' \
+            "${media_path}" >&2
+        return 65
+    }
+
+    ffmpeg -hide_banner -loglevel error -xerror -nostdin \
+        -i "${media_path}" \
+        -map 0:V:0 -map 0:a:0 -t 0.5 -f null - \
+        >/dev/null 2>&1 || {
+        printf 'FAIL: media streams are present but not decodable: %s\n' \
+            "${media_path}" >&2
+        return 65
+    }
 }
 
 assert_audio_only_codec() {
@@ -573,7 +606,20 @@ PY_COVER_MUTATION
     # Opus codec-preservation assertion. The repository source is never changed.
     mutated_audio_engine="${TEST_ROOT}/download-video-audio-mutated.sh"
     cp -- "${PROJECT_DIR}/download-video.sh" "${mutated_audio_engine}"
-    sed -i 's/--audio-format best/--audio-format mp3/' "${mutated_audio_engine}"
+    python3 - "${mutated_audio_engine}" <<'PY_FORCE_MP3'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+needle = "--audio-format best"
+count = text.count(needle)
+if count != 1:
+    raise SystemExit(
+        f"forced-MP3 mutation expected exactly one {needle!r}; found {count}"
+    )
+path.write_text(text.replace(needle, "--audio-format mp3", 1), encoding="utf-8")
+PY_FORCE_MP3
     grep -Fq -- '--audio-format mp3' "${mutated_audio_engine}" || {
         printf 'FAIL: unable to create the forced-MP3 audio mutation.\n' >&2
         exit 65
