@@ -211,6 +211,7 @@ if (($# == 1)) && [[ $1 == '--help' ]]; then
         '--extractor-args KEY:ARGS' \
         '-O, --print [WHEN:]TEMPLATE' \
         '--progress-template TEMPLATE' \
+        '--progress-delta SECONDS' \
         '--print-to-file TEMPLATE FILE' \
         '--parse-metadata [WHEN:]FROM:TO' \
         '--fixup POLICY' \
