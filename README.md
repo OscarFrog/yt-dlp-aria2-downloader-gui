@@ -39,7 +39,7 @@ The project uses `yt-dlp` for media extraction, `aria2c` to accelerate direct
 HTTP(S) downloads through a private aria2 input file, and FFmpeg to merge,
 remux, or extract streams. DASH and HLS streams deliberately remain on yt-dlp's
 native downloader. The current version
-is **2.2.1**.
+is **2.2.2**.
 
 ## Recommended installation
 
@@ -50,7 +50,7 @@ For **Fedora 44 or newer**, download these four assets:
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.2.1-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.2.2-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -58,7 +58,7 @@ Verify the downloaded files, then run the supported Fedora bootstrap:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.2.1-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.2.2-1.fc44.noarch.rpm
 ```
 
 The bootstrap enables RPM Fusion Free when needed, replaces `ffmpeg-free` with
@@ -67,7 +67,7 @@ the application RPM, validates the FFmpeg provider, and initializes the
 per-user yt-dlp and Deno runtimes.
 
 For **Debian or Ubuntu**, download the versioned DEB and `SHA256SUMS`, verify
-it, then install it with `sudo apt install ./yt-dlp-aria2-downloader-gui_2.2.1-1_all.deb`.
+it, then install it with `sudo apt install ./yt-dlp-aria2-downloader-gui_2.2.2-1_all.deb`.
 For **other GNU/Linux distributions or portable use**, use the versioned ZIP or
 a Git checkout. The managed yt-dlp and Deno runtimes currently support Linux
 `x86_64` and `aarch64`.
@@ -164,8 +164,8 @@ both build provenance and immutable-release identity:
 
 ```bash
 gh attestation verify ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.2.1 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.2.1 ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.2.2 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.2.2 ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 `SHA256SUMS` remains useful for offline/local integrity checks; the GitHub
@@ -215,8 +215,8 @@ but it must execute the workflow from the exact release tag:
 
 ```bash
 gh workflow run release.yml \
-  --ref v2.2.1 \
-  -f tag=v2.2.1 \
+  --ref v2.2.2 \
+  -f tag=v2.2.2 \
   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
@@ -260,7 +260,7 @@ Download:
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.2.1-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.2.2-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -273,7 +273,7 @@ sha256sum --ignore-missing --check SHA256SUMS
 Then run:
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.2.1-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.2.2-1.fc44.noarch.rpm
 ```
 
 The bootstrap refuses an unsigned release RPM. It validates that
@@ -310,11 +310,11 @@ verified before activation.
 
 ### Debian and Ubuntu
 
-Release 2.2.1 publishes an architecture-independent DEB aligned with the same
+Release 2.2.2 publishes an architecture-independent DEB aligned with the same
 managed-runtime model as Fedora. Download:
 
 ```text
-yt-dlp-aria2-downloader-gui_2.2.1-1_all.deb
+yt-dlp-aria2-downloader-gui_2.2.2-1_all.deb
 SHA256SUMS
 ```
 
@@ -322,7 +322,7 @@ Verify and install it:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.2.1-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.2.2-1_all.deb
 ```
 
 The DEB depends on the normal system tools (`aria2c`, Python 3.10+,
@@ -400,7 +400,7 @@ desktop installation from the current user's home directory.
 Download these release assets:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.2.1.zip
+yt-dlp-aria2-downloader-gui-2.2.2.zip
 SHA256SUMS
 ```
 
@@ -408,8 +408,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.2.1.zip
-cd yt-dlp-aria2-downloader-gui-2.2.1
+unzip yt-dlp-aria2-downloader-gui-2.2.2.zip
+cd yt-dlp-aria2-downloader-gui-2.2.2
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install

@@ -523,7 +523,7 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
         '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
         'non-owner test cleanup protection'
-    readonly EXPECTED_VERSION='2.2.1'
+    readonly EXPECTED_VERSION='2.2.2'
 
     # Current-version coherence is intentionally checked only on authoritative
     # carriers. Historical versions used by regression/upgrade fixtures are valid
@@ -806,8 +806,8 @@ main() {
         "readonly PRIVATE_ARIA2_STAGING_MARKER='.yt-dlp-aria2-owner-v1'" \
         'new private aria2 staging carries a durable owner marker'
     assert_file_contains "${SCRIPT_DIR}/tests/aria2-auth-headers-integration.sh" \
-        'Authorization-dropping helper mutation was not detected.' \
-        'private aria2 Authorization fidelity has a negative mutation control'
+        'unsafe mutant demonstrates real aria2 cross-origin replay' \
+        'private aria2 cross-origin replay has a negative mutation control'
 
     assert_file_contains \
         "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
@@ -1132,7 +1132,7 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         'live-download-log.' 'live log remains in the private runtime directory'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        "probe_stream stream_present \"\${final_path}\" 'v:0'" 'complete-video video stream validation'
+        "probe_stream stream_present \"\${final_path}\" 'V:0'" 'complete-video content-video stream validation'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         "probe_stream stream_present \"\${final_path}\" 'a:0'" 'complete-video audio stream validation'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \

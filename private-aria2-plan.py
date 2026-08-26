@@ -27,6 +27,14 @@ EXIT_VALIDATION = 65
 EXIT_IO = 70
 
 HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+DIRECT_REPLAY_SAFE_HEADERS = frozenset(
+    {
+        "accept",
+        "accept-language",
+        "sec-fetch-mode",
+        "user-agent",
+    }
+)
 FORMAT_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 EXTENSION_RE = re.compile(r"^[A-Za-z0-9]+$")
 STAGING_NAME_RE = re.compile(r"^item-[0-9]{3}\.download$")
@@ -222,6 +230,27 @@ def validate_headers(value: object) -> dict[str, str]:
     return headers
 
 
+def direct_headers_are_replay_safe(headers: dict[str, str]) -> bool:
+    return all(
+        header_name.lower() in DIRECT_REPLAY_SAFE_HEADERS
+        for header_name in headers
+    )
+
+
+def format_id_is_representable(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and FORMAT_ID_RE.fullmatch(value) is not None
+    )
+
+
+def extension_is_representable(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and EXTENSION_RE.fullmatch(value) is not None
+    )
+
+
 def component_destination(
     root_destination: Path,
     format_info: dict[str, object],
@@ -229,10 +258,10 @@ def component_destination(
     format_id = format_info.get("format_id")
     extension = format_info.get("ext")
 
-    if not isinstance(format_id, str) or not FORMAT_ID_RE.fullmatch(format_id):
+    if not format_id_is_representable(format_id):
         raise PlanError("requested format has an unsafe format_id")
 
-    if not isinstance(extension, str) or not EXTENSION_RE.fullmatch(extension):
+    if not extension_is_representable(extension):
         raise PlanError("requested format has an unsafe extension")
 
     base = root_destination.with_suffix(f".{extension}")
@@ -345,6 +374,10 @@ def build_plan(args: argparse.Namespace) -> int:
             )
 
         headers = validate_headers(transfer.get("http_headers"))
+        if not direct_headers_are_replay_safe(headers):
+            raise PlanError(
+                "HTTP headers require native yt-dlp transport"
+            )
 
         staging_name = f"item-{index:03d}.download"
 
@@ -432,6 +465,15 @@ def classify_plan(args: argparse.Namespace) -> int:
                 raise PlanError(
                     "requested format is not a JSON object"
                 )
+
+            if (
+                not format_id_is_representable(raw_format.get("format_id"))
+                or not extension_is_representable(raw_format.get("ext"))
+            ):
+                print("transport=native")
+                print(f"transfer_count={len(requested_formats)}")
+                return 0
+
             transfers.append(raw_format)
 
     for transfer in transfers:
@@ -443,7 +485,11 @@ def classify_plan(args: argparse.Namespace) -> int:
             return 0
 
         validate_url(transfer.get("url"))
-        validate_headers(transfer.get("http_headers"))
+        headers = validate_headers(transfer.get("http_headers"))
+        if not direct_headers_are_replay_safe(headers):
+            print("transport=native")
+            print(f"transfer_count={len(transfers)}")
+            return 0
 
     print("transport=direct")
     print(f"transfer_count={len(transfers)}")

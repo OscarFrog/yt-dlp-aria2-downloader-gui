@@ -31,11 +31,31 @@ validate_bounded_uint() {
     local value=$2
     local minimum=$3
     local maximum=$4
+    local output_variable=${5:-}
+    local normalized=''
+    local numeric_value=0
 
-    if [[ ! ${value} =~ ^[0-9]+$ ]] \
-        || ((10#${value} < minimum || 10#${value} > maximum)); then
+    if [[ ! ${value} =~ ^0*([0-9]+)$ ]]; then
         error "${name} must be an integer between ${minimum} and ${maximum}; found ${value}."
         return 1
+    fi
+    normalized=${BASH_REMATCH[1]}
+
+    # All configured maxima are intentionally small. Bound digit length before
+    # Bash arithmetic so a fixed-width integer overflow can never wrap into range.
+    if ((${#normalized} > ${#maximum})); then
+        error "${name} must be an integer between ${minimum} and ${maximum}; found ${value}."
+        return 1
+    fi
+
+    numeric_value=$((10#${normalized}))
+    if ((numeric_value < minimum || numeric_value > maximum)); then
+        error "${name} must be an integer between ${minimum} and ${maximum}; found ${value}."
+        return 1
+    fi
+
+    if [[ -n ${output_variable} ]]; then
+        printf -v "${output_variable}" '%d' "${numeric_value}" || return 1
     fi
     return 0
 }
@@ -482,28 +502,47 @@ parse_deno_version() {
 validate_deno() {
     local candidate=$1
     local version=''
-    local major=0
-    local minor=0
-    local patch=0
+    local major=''
+    local minor=''
 
     if ! parse_deno_version "${candidate}" version; then
         return 1
     fi
 
-    if [[ ! ${version} =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+    if [[ ! ${version} =~ ^([0-9]+)\.([0-9]+)\.[0-9]+ ]]; then
         return 1
     fi
     major=${BASH_REMATCH[1]}
     minor=${BASH_REMATCH[2]}
-    patch=${BASH_REMATCH[3]}
 
-    if ((10#${major} > 2 || (\
-        10#${major} == 2 && 10#${minor} > 3) || (\
-        10#${major} == 2 && 10#${minor} == 3 && 10#${patch} >= 0))); then
+    [[ ${major} =~ ^0*([0-9]+)$ ]] || return 1
+    major=${BASH_REMATCH[1]}
+    [[ ${minor} =~ ^0*([0-9]+)$ ]] || return 1
+    minor=${BASH_REMATCH[1]}
+
+    # The minimum is Deno 2.3.0. Compare normalized decimal components
+    # without Bash arithmetic so arbitrarily long version components cannot
+    # overflow fixed-width shell integers.
+    if ((${#major} > 1)); then
         return 0
     fi
-
-    return 1
+    case ${major} in
+        [3-9])
+            return 0
+            ;;
+        2)
+            if ((${#minor} > 1)); then
+                return 0
+            fi
+            case ${minor} in
+                [3-9]) return 0 ;;
+                *) return 1 ;;
+            esac
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 install_ytdlp_candidate() {
@@ -930,15 +969,35 @@ update_runtime() {
 
 ensure_runtime_locked() {
     local lock_status=0
+
     if acquire_runtime_lock; then
         lock_status=0
     else
         lock_status=$?
-        error 'unable to acquire the runtime update lock.'
+        if ((lock_status == 75)) && validate_active_runtimes; then
+            warning 'another runtime update is in progress; using the active verified runtimes.'
+            return 0
+        fi
+        if ((lock_status == 75)); then
+            error 'runtime update lock timed out and no valid active runtimes are available.'
+        else
+            error 'unable to acquire the runtime update lock.'
+        fi
         return "${lock_status}"
     fi
+
     recover_all_activation_transactions || return 1
-    ensure_runtime
+    ensure_runtime || return 1
+
+    recover_invalid_active_runtime yt-dlp || {
+        error 'the active yt-dlp runtime is invalid and rollback failed.'
+        return 1
+    }
+    recover_invalid_active_runtime deno || {
+        error 'the active Deno runtime is invalid and rollback failed.'
+        return 1
+    }
+    return 0
 }
 
 rollback_runtime_locked() {
@@ -1002,7 +1061,7 @@ main() {
         "RUNTIME_VALIDATE_TIMEOUT_SECONDS:${RUNTIME_VALIDATE_TIMEOUT_SECONDS}:5:120"; do
         IFS=: read -r setting_name setting_value setting_min setting_max <<<"${setting}"
         validate_bounded_uint "${setting_name}" "${setting_value}" \
-            "${setting_min}" "${setting_max}" || exit 64
+            "${setting_min}" "${setting_max}" "${setting_name}" || exit 64
     done
     readonly RUNTIME_LOCK_WAIT_SECONDS CURL_CONNECT_TIMEOUT_SECONDS
     readonly CURL_MAX_TIME_SECONDS CURL_RETRY_MAX_TIME_SECONDS

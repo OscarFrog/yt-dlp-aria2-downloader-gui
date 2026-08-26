@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : tests/run-all-signal-integration.sh
+# Purpose     : Verify run-all interruption terminates complete child process groups.
+# ==============================================================================
+
+set -Eeuo pipefail
+umask 077
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+PROJECT_DIR=$(cd -- "${SCRIPT_DIR}/.." && pwd -P)
+readonly SCRIPT_DIR PROJECT_DIR
+TEST_ROOT=''
+REAL_BASH=$(command -v bash)
+REAL_SLEEP=$(command -v sleep)
+readonly REAL_BASH REAL_SLEEP
+
+cleanup() {
+    trap - EXIT HUP INT TERM
+    if [[ -n ${TEST_ROOT} ]]; then
+        rm -rf -- "${TEST_ROOT}" || true
+    fi
+}
+
+main() {
+    local mock_bin
+
+    for command_name in bash chmod mktemp python3 rm sleep; do
+        command -v "${command_name}" >/dev/null 2>&1 || {
+            printf 'Error: required test command is absent: %s\n' \
+                "${command_name}" >&2
+            return 127
+        }
+    done
+
+    TEST_ROOT=$(mktemp -d)
+    trap cleanup EXIT
+    trap 'return 129' HUP
+    trap 'return 130' INT
+    trap 'return 143' TERM
+
+    mock_bin="${TEST_ROOT}/bin"
+    mkdir -p -- "${mock_bin}"
+
+    cat >"${mock_bin}/shellcheck" <<'EOF_SHELLCHECK'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${1:-} == --version ]]; then
+    printf '%s\n' 'ShellCheck - synthetic run-all signal fixture'
+fi
+exit 0
+EOF_SHELLCHECK
+    chmod 0755 -- "${mock_bin}/shellcheck"
+
+    cat >"${mock_bin}/bash" <<'EOF_BASH_MOCK'
+#!/bin/bash
+set -Eeuo pipefail
+: "${REAL_BASH:?}"
+: "${REAL_SLEEP:?}"
+
+if [[ ${MOCK_IGNORE_SIGNALS:-0} == 1 ]]; then
+    trap '' HUP INT TERM
+fi
+
+if [[ " $* " == *' ./tests/runtime-manager-integration.sh '* ]]; then
+    : "${MOCK_IMMEDIATE_MARKER:?}"
+    : "${MOCK_DESCENDANT_MARKER:?}"
+    printf '%s\n' "$$" >"${MOCK_IMMEDIATE_MARKER}"
+    "${REAL_BASH}" -c '
+        marker=$1
+        sleep_bin=$2
+        ignore_signals=$3
+        if [[ ${ignore_signals} == 1 ]]; then
+            trap "" HUP INT TERM
+        fi
+        printf "%s\n" "$$" >"${marker}"
+        exec "${sleep_bin}" 60
+    ' bash         "${MOCK_DESCENDANT_MARKER}"         "${REAL_SLEEP}"         "${MOCK_IGNORE_SIGNALS:-0}" &
+    wait "$!"
+fi
+
+exit 0
+EOF_BASH_MOCK
+    chmod 0755 -- "${mock_bin}/bash"
+
+    env \
+        REAL_BASH="${REAL_BASH}" \
+        REAL_SLEEP="${REAL_SLEEP}" \
+        PROJECT_DIR="${PROJECT_DIR}" \
+        TEST_ROOT="${TEST_ROOT}" \
+        MOCK_BIN="${mock_bin}" \
+        python3 <<'PY_CONTROLLER'
+import os
+import pathlib
+import signal
+import subprocess
+import time
+
+project_dir = pathlib.Path(os.environ["PROJECT_DIR"])
+test_root = pathlib.Path(os.environ["TEST_ROOT"])
+mock_bin = pathlib.Path(os.environ["MOCK_BIN"])
+real_bash = os.environ["REAL_BASH"]
+real_sleep = os.environ["REAL_SLEEP"]
+
+
+def running(pid: int) -> bool:
+    stat_path = pathlib.Path(f"/proc/{pid}/stat")
+    try:
+        fields = stat_path.read_text(encoding="ascii").split()
+    except FileNotFoundError:
+        return False
+    if len(fields) >= 3 and fields[2] == "Z":
+        return False
+    return True
+
+
+def wait_marker(path: pathlib.Path, runner: subprocess.Popen[bytes]) -> int:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if path.exists() and path.stat().st_size:
+            return int(path.read_text(encoding="ascii").strip())
+        if runner.poll() is not None:
+            raise AssertionError(
+                f"run-all exited before marker {path.name}: {runner.returncode}"
+            )
+        time.sleep(0.02)
+    raise AssertionError(f"timed out waiting for marker {path}")
+
+
+def wait_gone(pid: int) -> bool:
+    deadline = time.monotonic() + 6
+    while time.monotonic() < deadline:
+        if not running(pid):
+            return True
+        time.sleep(0.05)
+    return not running(pid)
+
+
+def terminate_if_needed(pid: int) -> None:
+    if not running(pid):
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+for name, sig, expected in (
+    ("int", signal.SIGINT, 130),
+    ("term", signal.SIGTERM, 143),
+):
+    immediate_marker = test_root / f"{name}-immediate.pid"
+    descendant_marker = test_root / f"{name}-descendant.pid"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{mock_bin}:/usr/bin:/bin",
+            "REAL_BASH": real_bash,
+            "REAL_SLEEP": real_sleep,
+            "MOCK_IMMEDIATE_MARKER": str(immediate_marker),
+            "MOCK_DESCENDANT_MARKER": str(descendant_marker),
+        }
+    )
+
+    runner = subprocess.Popen(
+        [real_bash, str(project_dir / "tests/run-all.sh")],
+        cwd=project_dir,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    immediate_pid = 0
+    descendant_pid = 0
+    try:
+        immediate_pid = wait_marker(immediate_marker, runner)
+        descendant_pid = wait_marker(descendant_marker, runner)
+        os.kill(runner.pid, sig)
+        try:
+            return_code = runner.wait(timeout=10)
+        except subprocess.TimeoutExpired as exc:
+            raise AssertionError(f"run-all did not terminate for {name}") from exc
+
+        stderr = (runner.stderr.read() if runner.stderr else b"").decode(
+            "utf-8", errors="replace"
+        )
+        if return_code != expected:
+            raise AssertionError(
+                f"run-all {name} returned {return_code}, expected {expected}: {stderr}"
+            )
+        if not wait_gone(immediate_pid):
+            raise AssertionError(
+                f"run-all {name} left immediate suite process {immediate_pid}"
+            )
+        if not wait_gone(descendant_pid):
+            raise AssertionError(
+                f"run-all {name} left descendant process {descendant_pid}"
+            )
+    finally:
+        if runner.poll() is None:
+            runner.kill()
+            runner.wait(timeout=5)
+        if immediate_pid:
+            terminate_if_needed(immediate_pid)
+        if descendant_pid:
+            terminate_if_needed(descendant_pid)
+
+# A second fatal signal during the grace period must not interrupt cleanup.
+# The synthetic child and descendant ignore TERM/INT so run-all must reach its
+# KILL escalation after the second signal arrives.
+immediate_marker = test_root / "reentrant-immediate.pid"
+descendant_marker = test_root / "reentrant-descendant.pid"
+env = os.environ.copy()
+env.update(
+    {
+        "PATH": f"{mock_bin}:/usr/bin:/bin",
+        "REAL_BASH": real_bash,
+        "REAL_SLEEP": real_sleep,
+        "MOCK_IMMEDIATE_MARKER": str(immediate_marker),
+        "MOCK_DESCENDANT_MARKER": str(descendant_marker),
+        "MOCK_IGNORE_SIGNALS": "1",
+    }
+)
+
+runner = subprocess.Popen(
+    [real_bash, str(project_dir / "tests/run-all.sh")],
+    cwd=project_dir,
+    env=env,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.PIPE,
+)
+immediate_pid = 0
+descendant_pid = 0
+try:
+    immediate_pid = wait_marker(immediate_marker, runner)
+    descendant_pid = wait_marker(descendant_marker, runner)
+    os.kill(runner.pid, signal.SIGINT)
+    time.sleep(0.25)
+    if runner.poll() is not None:
+        raise AssertionError(
+            f"run-all exited before the second signal: {runner.returncode}"
+        )
+    os.kill(runner.pid, signal.SIGTERM)
+    try:
+        return_code = runner.wait(timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(
+            "run-all did not finish cleanup after repeated signals"
+        ) from exc
+
+    stderr = (runner.stderr.read() if runner.stderr else b"").decode(
+        "utf-8", errors="replace"
+    )
+    if return_code != 130:
+        raise AssertionError(
+            f"run-all repeated-signal cleanup returned {return_code}, "
+            f"expected 130: {stderr}"
+        )
+    if not wait_gone(immediate_pid):
+        raise AssertionError(
+            f"run-all repeated-signal cleanup left immediate process "
+            f"{immediate_pid}"
+        )
+    if not wait_gone(descendant_pid):
+        raise AssertionError(
+            f"run-all repeated-signal cleanup left descendant "
+            f"{descendant_pid}"
+        )
+finally:
+    if runner.poll() is None:
+        runner.kill()
+        runner.wait(timeout=5)
+    if immediate_pid:
+        terminate_if_needed(immediate_pid)
+    if descendant_pid:
+        terminate_if_needed(descendant_pid)
+
+# Generic os.execvp OSError handling is defensive hardening. Do not qualify it with an ENOEXEC text fixture: POSIX execvp falls back to a shell interpreter for that case.
+
+print("run-all signal/descendant integration passed.")
+PY_CONTROLLER
+}
+
+main "$@"

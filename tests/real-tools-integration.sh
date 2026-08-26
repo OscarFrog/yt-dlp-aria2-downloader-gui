@@ -456,11 +456,74 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
-old = "probe_stream stream_present \"${final_path}\" 'V:0'"
-new = "probe_stream stream_present \"${final_path}\" 'v:0'"
-if text.count(old) != 1:
-    raise SystemExit("expected exactly one audio-mode V:0 validator anchor")
-path.write_text(text.replace(old, new, 1), encoding="utf-8")
+lines = text.splitlines(keepends=True)
+
+function_start = next(
+    (
+        index
+        for index, line in enumerate(lines)
+        if line.rstrip("\n") == "validate_final_media_file() {"
+    ),
+    None,
+)
+if function_start is None:
+    raise SystemExit("validate_final_media_file function is absent")
+
+function_end = next(
+    (
+        index
+        for index in range(function_start + 1, len(lines))
+        if lines[index].rstrip("\n") == "}"
+    ),
+    None,
+)
+if function_end is None:
+    raise SystemExit("validate_final_media_file function end is absent")
+
+audio_start = next(
+    (
+        index
+        for index in range(function_start + 1, function_end)
+        if lines[index].strip() == "audio)"
+    ),
+    None,
+)
+if audio_start is None:
+    raise SystemExit("audio validation branch is absent")
+
+audio_end = next(
+    (
+        index
+        for index in range(audio_start + 1, function_end)
+        if lines[index].strip() == ";;"
+    ),
+    None,
+)
+if audio_end is None:
+    raise SystemExit("audio validation branch end is absent")
+
+old_selector = 'probe_stream stream_present "${final_path}" \'V:0\''
+new_selector = 'probe_stream stream_present "${final_path}" \'v:0\''
+
+matches = [
+    index
+    for index in range(audio_start, audio_end + 1)
+    if old_selector in lines[index]
+]
+if len(matches) != 1:
+    raise SystemExit(
+        "expected exactly one V:0 validator inside the audio branch; "
+        f"found {len(matches)}"
+    )
+
+selector_index = matches[0]
+lines[selector_index] = lines[selector_index].replace(
+    old_selector,
+    new_selector,
+    1,
+)
+
+path.write_text("".join(lines), encoding="utf-8")
 PY_COVER_MUTATION
     mutated_cover_dir="${TEST_ROOT}/output/audio-cover-mutated"
     mutated_cover_result="${TEST_ROOT}/audio-cover-mutated.result"

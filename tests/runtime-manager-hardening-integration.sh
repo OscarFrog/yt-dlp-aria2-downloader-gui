@@ -286,6 +286,63 @@ EOF_CURL
         YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS=2 YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS=10
         YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS=10 YTDLP_ARIA2_RUNTIME_VALIDATE_TIMEOUT_SECONDS=5)
 
+    validation_bin="${TEST_ROOT}/validation-bin"
+    validation_external_marker="${TEST_ROOT}/validation-external-called"
+    mkdir -p -- "${validation_bin}"
+    for wrapped_command in curl flock timeout; do
+        cat >"${validation_bin}/${wrapped_command}" <<'EOF_VALIDATION_EXTERNAL'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${MOCK_VALIDATION_EXTERNAL_MARKER:?}"
+printf '%s\n' "${0##*/}" >>"${MOCK_VALIDATION_EXTERNAL_MARKER}"
+exit 99
+EOF_VALIDATION_EXTERNAL
+        chmod 0755 -- "${validation_bin}/${wrapped_command}"
+    done
+
+    for setting_pair in \
+        'YTDLP_ARIA2_RUNTIME_LOCK_WAIT_SECONDS:RUNTIME_LOCK_WAIT_SECONDS' \
+        'YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS:CURL_CONNECT_TIMEOUT_SECONDS' \
+        'YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS:CURL_MAX_TIME_SECONDS' \
+        'YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS:CURL_RETRY_MAX_TIME_SECONDS' \
+        'YTDLP_ARIA2_RUNTIME_VALIDATE_TIMEOUT_SECONDS:RUNTIME_VALIDATE_TIMEOUT_SECONDS'; do
+        IFS=: read -r environment_name diagnostic_name <<<"${setting_pair}"
+        for overflow_value in \
+            18446744073709551617 \
+            99999999999999999999999999999999999999; do
+            rm -f -- "${validation_external_marker}"
+            status=0
+            validation_error=''
+            validation_error=$(
+                "${runtime_env[@]}" \
+                    PATH="${validation_bin}:${MOCK_BIN}:/usr/bin:/bin" \
+                    MOCK_VALIDATION_EXTERNAL_MARKER="${validation_external_marker}" \
+                    "${environment_name}=${overflow_value}" \
+                    "${RUNTIME_MANAGER}" versions 2>&1
+            ) || status=$?
+            [[ ${status} == 64 ]] \
+                || fail "${environment_name} overflow ${overflow_value} returned ${status}, expected 64"
+            grep -Fq \
+                "${diagnostic_name} must be an integer between" \
+                <<<"${validation_error}" \
+                || fail "${environment_name} overflow diagnostic is missing"
+            [[ ! -e ${validation_external_marker} ]] \
+                || fail "${environment_name} overflow reached an external timeout/lock command"
+        done
+    done
+
+    # Deno version comparison must remain correct even when a syntactically
+    # valid component is wider than Bash's fixed-width arithmetic.
+    for deno_overflow_case in 'overflow-major:18446744073709551618.0.0' 'overflow-minor:2.18446744073709551618.0'; do
+        IFS=: read -r deno_overflow_name deno_overflow_version <<<"${deno_overflow_case}"
+        make_deno "${deno_root}/${deno_overflow_name}/deno" "${deno_overflow_version}"
+        rm -f -- "${deno_root}/current"
+        ln -s -- "${deno_overflow_name}" "${deno_root}/current"
+        MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" require >/dev/null || fail "Deno oversized semantic version was rejected: ${deno_overflow_version}"
+    done
+    rm -f -- "${deno_root}/current"
+    ln -s 2.8.0 "${deno_root}/current"
+
     # A completely empty managed-runtime tree must bootstrap both components.
     # This specifically exercises ensure_runtime -> bootstrap_ytdlp/bootstrap_deno,
     # rather than only the already-installed update paths.
@@ -382,6 +439,20 @@ EOF_CURL
     [[ ${status} == 69 ]] || fail "missing-runtime require returned ${status}, expected 69"
     [[ ! -e ${NETWORK_MARKER} ]] || fail 'failed require mode invoked the network'
     ln -s 2.8.0 "${deno_root}/current"
+
+    # `ensure` must validate an executable active runtime and recover locally
+    # instead of accepting a corrupted current target.
+    make_ytdlp "${ytdlp_root}/2026.06.09/${YTDLP_ASSET}" malformed-version
+    rm -f -- "${NETWORK_MARKER}" "${URL_LOG}"
+    MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" ensure >/dev/null
+    [[ ! -e ${NETWORK_MARKER} ]] || fail 'ensure consulted the network while recovering an invalid active yt-dlp'
+    assert_link_target "${ytdlp_root}/current" 2026.03.17 'ensure did not roll back an invalid active yt-dlp runtime'
+
+    # Restore the canonical state before independently qualifying update recovery.
+    make_ytdlp "${ytdlp_root}/2026.06.09/${YTDLP_ASSET}" 2026.06.09
+    rm -f -- "${ytdlp_root}/current" "${ytdlp_root}/previous"
+    ln -s 2026.06.09 "${ytdlp_root}/current"
+    ln -s 2026.03.17 "${ytdlp_root}/previous"
 
     # A malformed active yt-dlp version must be recovered locally before any
     # yt-dlp update lookup is attempted.
@@ -513,6 +584,12 @@ EOF_CURL
             || fail "contention fallback ${iteration} failed"
         grep -Fq 'another runtime update is in progress' "${TEST_ROOT}/lock-${iteration}.err" \
             || fail "contention diagnostic ${iteration} missing"
+
+        if ((iteration == 1)); then
+            MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" ensure >/dev/null 2>"${TEST_ROOT}/lock-ensure.err" || fail 'ensure did not reuse valid active runtimes during lock contention'
+            grep -Fq 'another runtime update is in progress; using the active verified runtimes.' "${TEST_ROOT}/lock-ensure.err" || fail 'ensure contention fallback diagnostic is missing'
+        fi
+
         kill -TERM -- "${holder}" 2>/dev/null || true
         wait "${holder}" 2>/dev/null || true
         HOLDER_PID=''

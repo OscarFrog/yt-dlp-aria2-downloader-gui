@@ -169,6 +169,13 @@ assert_aria2_used() {
     }
 }
 
+assert_aria2_not_used() {
+    [[ ! -s ${ARIA2_INVOCATION_LOG} ]] || {
+        printf 'FAIL: native-fallback scenario unexpectedly crossed the real aria2c boundary.\n' >&2
+        return 65
+    }
+}
+
 assert_private_aria2_invocation() {
     grep -Fq -- '--input-file=' "${ARIA2_INVOCATION_LOG}" || {
         printf 'FAIL: real aria2c invocation did not use --input-file.\n' >&2
@@ -706,7 +713,7 @@ PY_QUIESCENCE_CLIENT
         : >"${ARIA2_INVOCATION_LOG}"
         start_line=$(($(wc -l <"${SERVER_LOG}") + 1))
         run_engine "range-${iteration}" \
-            "http://127.0.0.1:${PORT}/source/range.html"
+            "http://127.0.0.1:${PORT}/range/media.mp4"
         ((RUN_STATUS == 0)) || {
             printf 'FAIL: Range scenario returned %d.\n' "${RUN_STATUS}" >&2
             exit 65
@@ -727,7 +734,7 @@ PY_QUIESCENCE_CLIENT
         : >"${ARIA2_INVOCATION_LOG}"
         start_line=$(($(wc -l <"${SERVER_LOG}") + 1))
         run_engine "no-range-${iteration}" \
-            "http://127.0.0.1:${PORT}/source/no-range.html"
+            "http://127.0.0.1:${PORT}/no-range/media.mp4"
         ((RUN_STATUS == 0)) || {
             printf 'FAIL: no-Range scenario returned %d.\n' "${RUN_STATUS}" >&2
             exit 65
@@ -758,8 +765,8 @@ PY_QUIESCENCE_CLIENT
             exit 65
         }
         assert_av_media "${RUN_FINAL_FILE}"
-        assert_aria2_used
-        assert_private_aria2_invocation
+        # Page-derived Referer is intentionally non-replay-safe.
+        assert_aria2_not_used
         tail -n +"${start_line}" "${SERVER_LOG}" \
             | awk -F'|' '
                 $1 == "REQ" && $2 == "/redirect/media.mp4" && $4 == 302 { redirect=1 }
@@ -782,8 +789,8 @@ PY_QUIESCENCE_CLIENT
             printf 'FAIL: HTTP error scenario published a result-file.\n' >&2
             exit 65
         }
-        assert_aria2_used
-        assert_private_aria2_invocation
+        # Page-derived Referer is intentionally non-replay-safe.
+        assert_aria2_not_used
         tail -n +"${start_line}" "${SERVER_LOG}" \
             | grep -Fq 'REQ|/error/media.mp4|' || {
             printf 'FAIL: deterministic HTTP error endpoint was never reached.\n' >&2
@@ -804,7 +811,7 @@ PY_QUIESCENCE_CLIENT
 
         : >"${ARIA2_INVOCATION_LOG}"
         run_engine_with_monitor "${scenario}" \
-            "http://127.0.0.1:${PORT}/source/resume.html" true
+            "http://127.0.0.1:${PORT}/range/media.mp4?resume=1" true
         ((RUN_STATUS != 0)) || {
             printf 'FAIL: canceled resume setup unexpectedly returned success.\n' >&2
             exit 65
@@ -858,7 +865,7 @@ PY_QUIESCENCE_CLIENT
             --mode video \
             --output-dir "${scenario_dir}" \
             --result-file "${result_file}" \
-            "http://127.0.0.1:${PORT}/source/resume.html" \
+            "http://127.0.0.1:${PORT}/range/media.mp4?resume=1" \
             >"${TEST_ROOT}/${scenario}.restart.stdout" 2>&1
         RUN_STATUS=$?
         set -e
@@ -921,7 +928,7 @@ PY_QUIESCENCE_CLIENT
         }
     done
 
-    printf 'Real aria2 Range/no-Range/redirect/error/cancel-clean-restart integration passed.\n'
+    printf 'Real aria2 Range/no-Range/cancel-clean-restart and native Referer-fallback integration passed.\n'
 
 }
 

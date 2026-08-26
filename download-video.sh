@@ -9,7 +9,7 @@
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.2.1"
+readonly VERSION="2.2.2"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -254,6 +254,7 @@ check_runtime_compatibility() {
         --extractor-args \
         --print \
         --progress-template \
+        --progress-delta \
         --print-to-file \
         --parse-metadata \
         --cookies \
@@ -915,7 +916,7 @@ validate_final_media_file() {
 
     case ${mode} in
         video)
-            probe_stream stream_present "${final_path}" 'v:0'
+            probe_stream stream_present "${final_path}" 'V:0'
             probe_status=$?
             ((probe_status == 0)) || return 1
             [[ ${stream_present} == true ]] || return 1
@@ -1470,6 +1471,10 @@ main() {
     while IFS= read -r classification_line; do
         case ${classification_line} in
             transport=*)
+                if [[ -n ${PRIVATE_TRANSPORT} ]]; then
+                    error 'the private transfer classifier returned duplicate transports.'
+                    exit 65
+                fi
                 PRIVATE_TRANSPORT=${classification_line#transport=}
                 ;;
             transfer_count=*)
@@ -1639,7 +1644,14 @@ main() {
             hls_source_duration_us=''
             probe_duration_microseconds \
                 hls_source_duration_us "${hls_source_path}" 2>/dev/null
-            if [[ ${MACHINE_PROGRESS} == true && ${hls_source_duration_us} =~ ^[1-9][0-9]*$ ]]; then
+            if [[ ! ${hls_source_duration_us} =~ ^[1-9][0-9]*$ ]]; then
+                emit_machine_postprocess error FFmpegVideoRemuxer
+                error 'unable to determine the repaired HLS source duration; refusing an unverifiable remux.'
+                printf 'The repaired HLS intermediate was retained at: %s\n' \
+                    "${hls_source_path}" >&2
+                exit 65
+            fi
+            if [[ ${MACHINE_PROGRESS} == true ]]; then
                 printf 'FFMPEG_PROGRESS_DURATION|%s\n' "${hls_source_duration_us}"
             fi
             if ! HLS_REMUX_TMP=$(mktemp \
@@ -1678,9 +1690,14 @@ main() {
             hls_final_duration_us=''
             probe_duration_microseconds \
                 hls_final_duration_us "${HLS_REMUX_TMP}" 2>/dev/null
-            if [[ ${hls_source_duration_us} =~ ^[1-9][0-9]*$ &&
-                ${hls_final_duration_us} =~ ^[1-9][0-9]*$ ]] \
-                && ((hls_final_duration_us < hls_source_duration_us)); then
+            if [[ ! ${hls_final_duration_us} =~ ^[1-9][0-9]*$ ]]; then
+                emit_machine_postprocess error FFmpegVideoRemuxer
+                error 'unable to determine the remuxed MKV duration; refusing to publish an unverifiable result.'
+                printf 'The repaired HLS intermediate was retained at: %s\n' \
+                    "${hls_source_path}" >&2
+                exit 65
+            fi
+            if ((hls_final_duration_us < hls_source_duration_us)); then
                 # Stream-copy remuxes may shift/drop a small amount of timestamp
                 # padding. Permit 2% loss, with a 0.5 s floor and 5 s ceiling, but
                 # fail closed on a materially shortened result. This is deliberately

@@ -3,7 +3,7 @@
 # ==============================================================================
 # Project     : yt-dlp-aria2-downloader-gui
 # File        : tests/aria2-auth-headers-integration.sh
-# Purpose     : Qualify private aria2 HTTP header fidelity and confidentiality.
+# Purpose     : Qualify safe aria2 headers and cross-origin secret isolation.
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -16,36 +16,9 @@ readonly PROJECT_DIR
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 
 readonly HELPER="${PROJECT_DIR}/private-aria2-plan.py"
-RUNS=${ARIA2_AUTH_HEADER_RUNS:-3}
-
-for command_name in aria2c bash cat chmod grep mkdir mktemp python3 rm sleep stat; do
-    require_test_command "${command_name}"
-done
-
-case ${RUNS} in
-    '' | *[!0-9]*)
-        printf 'Error: ARIA2_AUTH_HEADER_RUNS must be a positive integer.\n' >&2
-        exit 64
-        ;;
-    *)
-        ;;
-esac
-[[ ${RUNS} =~ ^[0-9]{1,6}$ ]] || {
-    printf 'Error: ARIA2_AUTH_HEADER_RUNS is unreasonably large: %s\n' "${RUNS}" >&2
-    exit 64
-}
-RUNS=$((10#${RUNS}))
-((RUNS > 0)) || {
-    printf 'Error: ARIA2_AUTH_HEADER_RUNS must be greater than zero.\n' >&2
-    exit 64
-}
-readonly RUNS
-
-TEST_ROOT=$(mktemp -d)
-readonly TEST_ROOT
+TEST_ROOT=''
 SERVER_PID=''
-PORT=''
-CASE_STATUS=0
+ORIGIN_PORT=''
 
 cleanup() {
     trap - EXIT HUP INT TERM
@@ -53,48 +26,54 @@ cleanup() {
         kill -TERM -- "${SERVER_PID}" 2>/dev/null || true
         wait "${SERVER_PID}" 2>/dev/null || true
     fi
-    rm -rf -- "${TEST_ROOT}" || true
+    if [[ -n ${TEST_ROOT} ]]; then
+        rm -rf -- "${TEST_ROOT}" || true
+    fi
 }
 
 write_plan() {
-    local case_name=$1
-    local plan_file=$2
-    local output_dir=$3
-    local url=$4
+    local plan_file=$1
+    local output_dir=$2
+    local url=$3
+    local mode=$4
 
-    python3 - "${case_name}" "${plan_file}" "${output_dir}" "${url}" <<'PY_PLAN'
+    python3 - "${plan_file}" "${output_dir}" "${url}" "${mode}" <<'PY_PLAN'
 import json
 import os
 import sys
 from pathlib import Path
 
-case_name, plan_name, output_name, url = sys.argv[1:]
-plan_file = Path(plan_name)
-output_dir = Path(output_name)
+plan_file = Path(sys.argv[1])
+output_dir = Path(sys.argv[2])
+url = sys.argv[3]
+mode = sys.argv[4]
 
 AUTH = "Bearer qualification-auth-7a91"
 COOKIE = "session=qualification-cookie-3d42"
 REFERER = "https://origin.invalid/qualification"
-REDIRECT = "qualification-redirect-9c15"
 
 headers = {
-    "no-auth": {},
-    "referer": {"Referer": REFERER},
-    "cookie": {"Cookie": COOKIE},
+    "safe": {
+        "User-Agent": "qualification-agent",
+        "Accept": "application/octet-stream",
+        "Accept-Language": "en",
+        "Sec-Fetch-Mode": "navigate",
+    },
     "authorization": {"Authorization": AUTH},
-    "multiheaders": {
+    "cookie": {"Cookie": COOKIE},
+    "referer": {"Referer": REFERER},
+    "custom": {"X-Qualification": "custom-secret-like-header"},
+    "proxy-authorization": {"Proxy-Authorization": "Basic c2VjcmV0"},
+    "cross-origin": {
         "Authorization": AUTH,
         "Cookie": COOKIE,
-        "Referer": REFERER,
-        "X-Qualification": "multi-header-proof",
     },
-    "redirect": {"X-Redirect-Proof": REDIRECT},
-}[case_name]
+}[mode]
 
 payload = {
     "requested_downloads": [
         {
-            "filename": str(output_dir / f"{case_name}.bin"),
+            "filename": str(output_dir / f"{mode}.bin"),
             "url": url,
             "protocol": "http",
             "http_headers": headers,
@@ -106,246 +85,285 @@ os.chmod(plan_file, 0o600)
 PY_PLAN
 }
 
-run_case() {
-    local case_name=$1
-    local iteration=$2
-    local helper=${3:-${HELPER}}
-    local case_root="${TEST_ROOT}/${case_name}-${iteration}-${helper##*/}"
-    local output_dir="${case_root}/output"
-    local staging_dir="${output_dir}/.yt-dlp-aria2-test"
-    local home_dir="${case_root}/home"
-    local plan_file="${case_root}/plan.json"
-    local input_file="${staging_dir}/aria2.input"
-    local manifest_file="${staging_dir}/manifest.json"
-    local aria_log="${case_root}/aria2.log"
-    local target_path="/case/${case_name}"
-    local secret=''
-    local input_mode=''
-    local staging_mode=''
-    local -a aria_args=()
+classify_plan() {
+    local plan_file=$1
+    local helper=${2:-${HELPER}}
+    python3 "${helper}" classify --plan "${plan_file}"
+}
 
-    if [[ ${case_name} == redirect ]]; then
-        target_path='/redirect/start'
-    fi
-
-    mkdir -p -- "${staging_dir}" "${home_dir}"
-    chmod 700 -- "${staging_dir}" "${home_dir}"
-
-    write_plan \
-        "${case_name}" \
-        "${plan_file}" \
-        "${output_dir}" \
-        "http://127.0.0.1:${PORT}${target_path}"
+build_plan() {
+    local helper=$1
+    local plan_file=$2
+    local output_dir=$3
+    local staging_dir=$4
 
     python3 "${helper}" build \
         --plan "${plan_file}" \
         --output-dir "${output_dir}" \
         --staging-dir "${staging_dir}" \
-        --aria2-input "${input_file}" \
-        --manifest "${manifest_file}" \
-        >/dev/null
+        --aria2-input "${staging_dir}/aria2.input" \
+        --manifest "${staging_dir}/manifest.json"
+}
 
-    input_mode=$(stat -c '%a' -- "${input_file}")
-    staging_mode=$(stat -c '%a' -- "${staging_dir}")
-    assert_equals '600' "${input_mode}" "${case_name} private aria2 input mode"
-    assert_equals '700' "${staging_mode}" "${case_name} private staging mode"
+run_aria2() {
+    local staging_dir=$1
+    local log_file=$2
 
-    aria_args=(
-        --input-file="${input_file}"
-        --dir="${staging_dir}"
-        --file-allocation=none
-        --no-conf=true
-        --allow-overwrite=false
-        --auto-file-renaming=false
-        --summary-interval=0
-        --console-log-level=warn
-        --max-tries=1
-        --retry-wait=0
-        --connect-timeout=5
-        --timeout=5
-    )
-
-    # Harness invariant: aria_args contains only paths and transport controls.
-    # Production argv confidentiality is covered by tests that invoke the real
-    # download engine; this test focuses on private input-file fidelity.
-    CASE_STATUS=0
-    set +e
-    HOME="${home_dir}" \
+    HOME="${TEST_ROOT}/home" \
         HTTP_PROXY='' HTTPS_PROXY='' ALL_PROXY='' \
         http_proxy='' https_proxy='' all_proxy='' \
         NO_PROXY='127.0.0.1,localhost' no_proxy='127.0.0.1,localhost' \
-        aria2c "${aria_args[@]}" >"${aria_log}" 2>&1
-    CASE_STATUS=$?
-    set -e
-
-    if ((CASE_STATUS == 0)); then
-        [[ -s ${staging_dir}/item-000.download ]] \
-            || fail "${case_name}: aria2 succeeded without the expected payload"
-    fi
-
-    for secret in \
-        'Bearer qualification-auth-7a91' \
-        'session=qualification-cookie-3d42' \
-        'https://origin.invalid/qualification' \
-        'qualification-redirect-9c15'; do
-        if grep -Fq -- "${secret}" "${aria_log}"; then
-            fail "${case_name}: sensitive header value leaked into aria2 output"
-        fi
-    done
+        aria2c \
+        --input-file="${staging_dir}/aria2.input" \
+        --dir="${staging_dir}" \
+        --file-allocation=none \
+        --no-conf=true \
+        --allow-overwrite=false \
+        --auto-file-renaming=false \
+        --summary-interval=0 \
+        --console-log-level=warn \
+        --max-tries=1 \
+        --retry-wait=0 \
+        --connect-timeout=5 \
+        --timeout=5 >"${log_file}" 2>&1
 }
 
 main() {
+    local plan_file
+    local output_dir
+    local staging_dir
+    local classification
+    local unsafe_mode
+    local mutant
+    local leak_file
+    local server_log
+    local server_line
+
+    for command_name in aria2c chmod grep mkdir mktemp python3 rm sleep stat; do
+        require_test_command "${command_name}"
+    done
+
+    TEST_ROOT=$(mktemp -d)
+    leak_file="${TEST_ROOT}/cross-origin-leak.txt"
     trap cleanup EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    trap 'return 129' HUP
+    trap 'return 130' INT
+    trap 'return 143' TERM
+    mkdir -p -- "${TEST_ROOT}/home"
 
     cat >"${TEST_ROOT}/server.py" <<'PY_SERVER'
 import http.server
 import pathlib
 import socketserver
 import sys
-import urllib.parse
+import threading
 
-port_file = pathlib.Path(sys.argv[1])
+ports_file = pathlib.Path(sys.argv[1])
+leak_file = pathlib.Path(sys.argv[2])
 
 AUTH = "Bearer qualification-auth-7a91"
 COOKIE = "session=qualification-cookie-3d42"
-REFERER = "https://origin.invalid/qualification"
-REDIRECT = "qualification-redirect-9c15"
-BODY = b"header-fidelity-ok\n"
+BODY = b"header-policy-ok\n"
 
-EXPECTED = {
-    "no-auth": {},
-    "referer": {"Referer": REFERER},
-    "cookie": {"Cookie": COOKIE},
-    "authorization": {"Authorization": AUTH},
-    "multiheaders": {
-        "Authorization": AUTH,
-        "Cookie": COOKIE,
-        "Referer": REFERER,
-        "X-Qualification": "multi-header-proof",
-    },
-    "redirect": {"X-Redirect-Proof": REDIRECT},
-}
 
-class Handler(http.server.BaseHTTPRequestHandler):
+class QuietHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, _format, *args):
         return
 
-    def _send_body(self, status, body=b""):
+    def send_body(self, status, body=b""):
         self.send_response(status)
-        self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         if self.command != "HEAD" and body:
             self.wfile.write(body)
 
-    def _check_case(self, case_name):
-        expected = EXPECTED[case_name]
-        for name, value in expected.items():
-            if self.headers.get(name) != value:
-                self._send_body(403)
-                return
 
-        if case_name == "no-auth":
-            for name in ("Authorization", "Cookie", "Referer"):
-                if self.headers.get(name) is not None:
-                    self._send_body(403)
-                    return
+class SinkHandler(QuietHandler):
+    def dispatch(self):
+        auth = self.headers.get("Authorization")
+        cookie = self.headers.get("Cookie")
+        if auth is not None or cookie is not None:
+            leak_file.write_text(
+                f"Authorization={auth!r}\nCookie={cookie!r}\n",
+                encoding="utf-8",
+            )
+        self.send_body(200, BODY)
 
-        self._send_body(200, BODY)
+    do_GET = dispatch
+    do_HEAD = dispatch
 
-    def _dispatch(self):
-        parsed = urllib.parse.urlsplit(self.path)
-        if parsed.path == "/redirect/start":
-            self.send_response(302)
-            self.send_header("Location", "/case/redirect")
-            self.send_header("Content-Length", "0")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return
-
-        if parsed.path.startswith("/case/"):
-            case_name = parsed.path.removeprefix("/case/")
-            if case_name not in EXPECTED:
-                self._send_body(404)
-                return
-            self._check_case(case_name)
-            return
-
-        self._send_body(404)
-
-    def do_GET(self):
-        self._dispatch()
-
-    def do_HEAD(self):
-        self._dispatch()
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-with Server(("127.0.0.1", 0), Handler) as server:
-    port_file.write_text(str(server.server_address[1]), encoding="ascii")
-    server.serve_forever()
+
+sink = Server(("127.0.0.1", 0), SinkHandler)
+sink_port = sink.server_address[1]
+
+
+class OriginHandler(QuietHandler):
+    def dispatch(self):
+        if self.path == "/safe":
+            expected = {
+                "User-Agent": "qualification-agent",
+                "Accept": "application/octet-stream",
+                "Accept-Language": "en",
+                "Sec-Fetch-Mode": "navigate",
+            }
+            if any(self.headers.get(k) != v for k, v in expected.items()):
+                self.send_body(403)
+                return
+            self.send_body(200, BODY)
+            return
+
+        if self.path == "/redirect-safe":
+            self.send_response(302)
+            self.send_header("Location", "/safe")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        if self.path == "/cross-origin":
+            if (
+                self.headers.get("Authorization") != AUTH
+                or self.headers.get("Cookie") != COOKIE
+            ):
+                self.send_body(403)
+                return
+            self.send_response(302)
+            self.send_header(
+                "Location", f"http://127.0.0.1:{sink_port}/sink"
+            )
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        self.send_body(404)
+
+    do_GET = dispatch
+    do_HEAD = dispatch
+
+
+origin = Server(("127.0.0.1", 0), OriginHandler)
+ports_file.write_text(
+    f"{origin.server_address[1]} {sink_port}\n",
+    encoding="ascii",
+)
+threading.Thread(target=sink.serve_forever, daemon=True).start()
+origin.serve_forever()
 PY_SERVER
 
-    python3 "${TEST_ROOT}/server.py" "${TEST_ROOT}/port" &
+    server_log="${TEST_ROOT}/server.log"
+    python3 "${TEST_ROOT}/server.py" \
+        "${TEST_ROOT}/ports" "${leak_file}" \
+        >"${server_log}" 2>&1 &
     SERVER_PID=$!
     for _ in {1..100}; do
-        [[ -s ${TEST_ROOT}/port ]] && break
+        [[ -s ${TEST_ROOT}/ports ]] && break
+        if ! kill -0 -- "${SERVER_PID}" 2>/dev/null; then
+            while IFS= read -r server_line || [[ -n ${server_line} ]]; do
+                printf 'server.py: %s\n' "${server_line}" >&2
+            done <"${server_log}"
+            fail 'header-policy HTTP servers exited before publishing their ports'
+        fi
         sleep 0.05
     done
-    [[ -s ${TEST_ROOT}/port ]] \
-        || fail 'Header-fidelity HTTP server did not publish its port.'
-    PORT=$(<"${TEST_ROOT}/port")
-    readonly PORT
+    if [[ ! -s ${TEST_ROOT}/ports ]]; then
+        while IFS= read -r server_line || [[ -n ${server_line} ]]; do
+            printf 'server.py: %s\n' "${server_line}" >&2
+        done <"${server_log}"
+        fail 'header-policy HTTP servers did not publish their ports'
+    fi
+    read -r ORIGIN_PORT _ <"${TEST_ROOT}/ports"
+    readonly ORIGIN_PORT
 
-    for ((iteration = 1; iteration <= RUNS; iteration++)); do
-        for case_name in \
-            no-auth \
-            referer \
-            cookie \
-            authorization \
-            multiheaders \
-            redirect; do
-            printf 'Private aria2 header scenario: %s %d/%d\n' \
-                "${case_name}" "${iteration}" "${RUNS}"
-            run_case "${case_name}" "${iteration}"
-            assert_equals '0' "${CASE_STATUS}" \
-                "${case_name} exact header fidelity through real aria2"
-        done
+    for path in safe redirect-safe; do
+        output_dir="${TEST_ROOT}/${path}/output"
+        staging_dir="${output_dir}/.yt-dlp-aria2-test"
+        plan_file="${TEST_ROOT}/${path}/plan.json"
+        mkdir -p -- "${staging_dir}"
+        chmod 700 -- "${staging_dir}"
+        write_plan "${plan_file}" "${output_dir}" \
+            "http://127.0.0.1:${ORIGIN_PORT}/${path}" safe
+
+        classification=$(classify_plan "${plan_file}")
+        assert_text_contains "${classification}" 'transport=direct' \
+            "${path} remains direct"
+        assert_status 0 "${path} private aria2 plan build" \
+            build_plan "${HELPER}" "${plan_file}" "${output_dir}" "${staging_dir}"
+        assert_status 0 "${path} real aria2 transfer" \
+            run_aria2 "${staging_dir}" "${TEST_ROOT}/${path}.aria2.log"
     done
 
-    mutant="${TEST_ROOT}/private-aria2-plan-drop-authorization.py"
+    for unsafe_mode in \
+        authorization cookie referer custom proxy-authorization; do
+        output_dir="${TEST_ROOT}/${unsafe_mode}/output"
+        staging_dir="${output_dir}/.yt-dlp-aria2-test"
+        plan_file="${TEST_ROOT}/${unsafe_mode}/plan.json"
+        mkdir -p -- "${staging_dir}"
+        chmod 700 -- "${staging_dir}"
+        write_plan "${plan_file}" "${output_dir}" \
+            "http://127.0.0.1:${ORIGIN_PORT}/safe" "${unsafe_mode}"
+
+        classification=$(classify_plan "${plan_file}")
+        assert_text_contains "${classification}" 'transport=native' \
+            "${unsafe_mode} forces native transport"
+        assert_status 65 "${unsafe_mode} direct build is fail-closed" \
+            build_plan "${HELPER}" "${plan_file}" "${output_dir}" "${staging_dir}"
+        [[ ! -e ${staging_dir}/aria2.input ]] \
+            || fail "${unsafe_mode}: unsafe aria2 input was created"
+    done
+
+    output_dir="${TEST_ROOT}/cross-origin/output"
+    staging_dir="${output_dir}/.yt-dlp-aria2-test"
+    plan_file="${TEST_ROOT}/cross-origin/plan.json"
+    mkdir -p -- "${staging_dir}"
+    chmod 700 -- "${staging_dir}"
+    write_plan "${plan_file}" "${output_dir}" \
+        "http://127.0.0.1:${ORIGIN_PORT}/cross-origin" cross-origin
+
+    classification=$(classify_plan "${plan_file}")
+    assert_text_contains "${classification}" 'transport=native' \
+        'cross-origin secret plan forces native transport'
+    assert_status 65 'cross-origin secret direct build is rejected' \
+        build_plan "${HELPER}" "${plan_file}" "${output_dir}" "${staging_dir}"
+    [[ ! -e ${staging_dir}/aria2.input && ! -e ${staging_dir}/manifest.json ]] \
+        || fail 'cross-origin rejection left private aria2 artifacts'
+    [[ ! -e ${leak_file} ]] \
+        || fail 'cross-origin sink received a secret on the safe path'
+
+    mutant="${TEST_ROOT}/private-aria2-plan-unsafe-mutant.py"
     python3 - "${HELPER}" "${mutant}" <<'PY_MUTANT'
 import sys
 from pathlib import Path
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
-needle = "for header_name in sorted(headers):"
-replacement = (
-    'for header_name in sorted('
-    'name for name in headers if name.lower() != "authorization"):'
-)
-if needle not in source:
-    raise SystemExit("mutation anchor is absent")
-Path(sys.argv[2]).write_text(
-    source.replace(needle, replacement, 1),
-    encoding="utf-8",
-)
+needle = "if not direct_headers_are_replay_safe(headers):"
+if source.count(needle) != 2:
+    raise SystemExit("expected two replay-safety guards")
+source = source.replace(needle, "if False:", 2)
+Path(sys.argv[2]).write_text(source, encoding="utf-8")
 PY_MUTANT
     chmod 600 -- "${mutant}"
 
-    printf '%s\n' 'Private aria2 header mutation: dropped Authorization'
-    run_case authorization mutation "${mutant}"
-    if ((CASE_STATUS == 0)); then
-        fail 'Authorization-dropping helper mutation was not detected.'
-    fi
+    classification=$(classify_plan "${plan_file}" "${mutant}")
+    assert_text_contains "${classification}" 'transport=direct' \
+        'unsafe mutant disables native cross-origin classification'
+
+    assert_status 0 'unsafe mutant can build the vulnerable aria2 plan' \
+        build_plan "${mutant}" "${plan_file}" "${output_dir}" "${staging_dir}"
+    assert_status 0 'unsafe mutant demonstrates real aria2 cross-origin replay' \
+        run_aria2 "${staging_dir}" "${TEST_ROOT}/cross-origin-mutant.log"
+    assert_file_contains "${leak_file}" \
+        'Bearer qualification-auth-7a91' \
+        'cross-origin Authorization replay fixture'
+    assert_file_contains "${leak_file}" \
+        'session=qualification-cookie-3d42' \
+        'cross-origin Cookie replay fixture'
 
     printf '%s\n' 'Private aria2 authentication/header integration tests passed.'
 }
