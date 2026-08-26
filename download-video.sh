@@ -9,7 +9,7 @@
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.2.1"
+readonly VERSION="2.2.2"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -915,7 +915,7 @@ validate_final_media_file() {
 
     case ${mode} in
         video)
-            probe_stream stream_present "${final_path}" 'v:0'
+            probe_stream stream_present "${final_path}" 'V:0'
             probe_status=$?
             ((probe_status == 0)) || return 1
             [[ ${stream_present} == true ]] || return 1

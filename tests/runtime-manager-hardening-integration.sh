@@ -286,6 +286,51 @@ EOF_CURL
         YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS=2 YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS=10
         YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS=10 YTDLP_ARIA2_RUNTIME_VALIDATE_TIMEOUT_SECONDS=5)
 
+    validation_bin="${TEST_ROOT}/validation-bin"
+    validation_external_marker="${TEST_ROOT}/validation-external-called"
+    mkdir -p -- "${validation_bin}"
+    for wrapped_command in curl flock timeout; do
+        cat >"${validation_bin}/${wrapped_command}" <<'EOF_VALIDATION_EXTERNAL'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${MOCK_VALIDATION_EXTERNAL_MARKER:?}"
+printf '%s\n' "${0##*/}" >>"${MOCK_VALIDATION_EXTERNAL_MARKER}"
+exit 99
+EOF_VALIDATION_EXTERNAL
+        chmod 0755 -- "${validation_bin}/${wrapped_command}"
+    done
+
+    for setting_pair in \
+        'YTDLP_ARIA2_RUNTIME_LOCK_WAIT_SECONDS:RUNTIME_LOCK_WAIT_SECONDS' \
+        'YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS:CURL_CONNECT_TIMEOUT_SECONDS' \
+        'YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS:CURL_MAX_TIME_SECONDS' \
+        'YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS:CURL_RETRY_MAX_TIME_SECONDS' \
+        'YTDLP_ARIA2_RUNTIME_VALIDATE_TIMEOUT_SECONDS:RUNTIME_VALIDATE_TIMEOUT_SECONDS'; do
+        IFS=: read -r environment_name diagnostic_name <<<"${setting_pair}"
+        for overflow_value in \
+            18446744073709551617 \
+            99999999999999999999999999999999999999; do
+            rm -f -- "${validation_external_marker}"
+            status=0
+            validation_error=''
+            validation_error=$(
+                "${runtime_env[@]}" \
+                    PATH="${validation_bin}:${MOCK_BIN}:/usr/bin:/bin" \
+                    MOCK_VALIDATION_EXTERNAL_MARKER="${validation_external_marker}" \
+                    "${environment_name}=${overflow_value}" \
+                    "${RUNTIME_MANAGER}" versions 2>&1
+            ) || status=$?
+            [[ ${status} == 64 ]] \
+                || fail "${environment_name} overflow ${overflow_value} returned ${status}, expected 64"
+            grep -Fq \
+                "${diagnostic_name} must be an integer between" \
+                <<<"${validation_error}" \
+                || fail "${environment_name} overflow diagnostic is missing"
+            [[ ! -e ${validation_external_marker} ]] \
+                || fail "${environment_name} overflow reached an external timeout/lock command"
+        done
+    done
+
     # A completely empty managed-runtime tree must bootstrap both components.
     # This specifically exercises ensure_runtime -> bootstrap_ytdlp/bootstrap_deno,
     # rather than only the already-installed update paths.

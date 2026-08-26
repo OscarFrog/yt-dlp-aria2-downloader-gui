@@ -73,6 +73,12 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Wed Aug 26 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.2.2-1
+- Prevent unsafe HTTP-header replay across aria2 redirects.
+- Require real content video during final-media validation.
+- Terminate complete run-all process groups on interruption.
+- Harden runtime timeout bounds against Bash arithmetic overflow.
+
 * Tue Aug 25 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.2.1-1
 - Recover abandoned private aria2 staging conservatively, qualify private HTTP headers, and fix GUI progress.
 

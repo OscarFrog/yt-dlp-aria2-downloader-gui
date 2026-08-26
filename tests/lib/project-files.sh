@@ -39,6 +39,7 @@ PACKAGING_SHELL_FILES=(
 TEST_SHELL_FILES=(
     test-static.sh
     tests/run-all.sh
+    tests/run-all-signal-integration.sh
     tests/lib/assert.sh
     tests/lib/project-files.sh
     tests/mock-integration.sh

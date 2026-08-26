@@ -586,6 +586,19 @@ for argument in "$@"; do
         probe_previous='-select_streams'
     fi
 done
+if [[ ${MOCK_FFPROBE_COVER_ART_ONLY:-0} == 1 ]]; then
+    case ${selector} in
+        v:0 | a:0)
+            printf '0\n'
+            exit 0
+            ;;
+        V:0)
+            exit 0
+            ;;
+        *)
+            ;;
+    esac
+fi
 if [[ ${MOCK_FFPROBE_MISSING_AUDIO:-0} == 1 && ${selector} == 'a:0' ]]; then
     exit 0
 fi
@@ -594,8 +607,22 @@ if [[ ${MOCK_FFPROBE_EXIT_STATUS:-0} != 0 ]]; then
     exit "${MOCK_FFPROBE_EXIT_STATUS}"
 fi
 if [[ ${selector} == 'V:0' && ${MOCK_FFPROBE_CONTENT_VIDEO:-0} != 1 ]]; then
-    exit 0
+    ffprobe_audio_mode=false
+
+    if [[ -f ${MOCK_ARG_LOG:-} ]]; then
+        while IFS= read -r -d '' ffprobe_mode_argument; do
+            if [[ ${ffprobe_mode_argument} == '--extract-audio' ]]; then
+                ffprobe_audio_mode=true
+                break
+            fi
+        done <"${MOCK_ARG_LOG}"
+    fi
+
+    if [[ ${ffprobe_audio_mode} == true ]]; then
+        exit 0
+    fi
 fi
+
 if [[ ${MOCK_FFPROBE_EMPTY:-0} != 1 ]]; then
     printf '0\n'
 fi
@@ -1381,6 +1408,18 @@ main() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'final media file failed FFprobe validation' \
         'missing-audio validation diagnostic'
+
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    prepare_argument_log 'video-cover-art-only-validation'
+    assert_status 65 'complete-video mode rejects audio plus attached cover art' \
+        env MOCK_FFPROBE_COVER_ART_ONLY=1 \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode video \
+        -- 'https://example.com/watch?v=video-cover-art-only'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'final media file failed FFprobe validation' \
+        'cover-art-only validation diagnostic'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     existing_audio_path="${OUTPUT_DIR}/Mock media [abc123].webm"
     printf '%s\n' 'preserve existing audio result' >"${existing_audio_path}"

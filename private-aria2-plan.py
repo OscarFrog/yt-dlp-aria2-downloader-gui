@@ -27,6 +27,14 @@ EXIT_VALIDATION = 65
 EXIT_IO = 70
 
 HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+DIRECT_REPLAY_SAFE_HEADERS = frozenset(
+    {
+        "accept",
+        "accept-language",
+        "sec-fetch-mode",
+        "user-agent",
+    }
+)
 FORMAT_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 EXTENSION_RE = re.compile(r"^[A-Za-z0-9]+$")
 STAGING_NAME_RE = re.compile(r"^item-[0-9]{3}\.download$")
@@ -222,6 +230,13 @@ def validate_headers(value: object) -> dict[str, str]:
     return headers
 
 
+def direct_headers_are_replay_safe(headers: dict[str, str]) -> bool:
+    return all(
+        header_name.lower() in DIRECT_REPLAY_SAFE_HEADERS
+        for header_name in headers
+    )
+
+
 def component_destination(
     root_destination: Path,
     format_info: dict[str, object],
@@ -345,6 +360,10 @@ def build_plan(args: argparse.Namespace) -> int:
             )
 
         headers = validate_headers(transfer.get("http_headers"))
+        if not direct_headers_are_replay_safe(headers):
+            raise PlanError(
+                "HTTP headers require native yt-dlp transport"
+            )
 
         staging_name = f"item-{index:03d}.download"
 
@@ -443,7 +462,11 @@ def classify_plan(args: argparse.Namespace) -> int:
             return 0
 
         validate_url(transfer.get("url"))
-        validate_headers(transfer.get("http_headers"))
+        headers = validate_headers(transfer.get("http_headers"))
+        if not direct_headers_are_replay_safe(headers):
+            print("transport=native")
+            print(f"transfer_count={len(transfers)}")
+            return 0
 
     print("transport=direct")
     print(f"transfer_count={len(transfers)}")

@@ -1,3 +1,35 @@
+## 2.2.2 - 2026-08-26
+
+### Security and reliability
+
+- Keep wrapper-managed direct aria2 downloads behind a strict replay-safe
+  HTTP-header allowlist. Credential-bearing, Referer, proxy-authorization and
+  arbitrary custom headers now remain on yt-dlp's native transport instead of
+  being replayed by aria2 across redirects.
+- Require FFprobe `V:0` content video for complete-video validation so an
+  attached picture, thumbnail or cover art cannot satisfy the video-stream
+  requirement.
+- Run each `tests/run-all.sh` suite in its own process-group/session boundary
+  and terminate the complete group on HUP, INT or TERM, including descendants
+  and bounded SIGKILL fallback.
+- Validate and canonicalize runtime lock/network timeout integers before Bash
+  arithmetic or use by `flock`, `curl` or `timeout`, preventing fixed-width
+  arithmetic overflow from bypassing configured bounds.
+
+### Qualification
+
+- Add a real two-origin aria2 redirect qualification with an unsafe mutation
+  proving Authorization/Cookie cross-origin replay when the protection is
+  removed.
+- Add audio-plus-cover-art rejection coverage for complete-video FFprobe
+  validation.
+- Add standalone and nested INT/TERM process-tree qualification for
+  `tests/run-all.sh`.
+- Add oversized-decimal rejection tests for every configurable runtime
+  lock/network timeout bound.
+- Keep the complete static, ShellCheck, mock, packaging, runtime, aria2 and
+  progress validation suite green.
+
 ## 2.2.1 - 2026-08-25
 
 ### Reliability and progress

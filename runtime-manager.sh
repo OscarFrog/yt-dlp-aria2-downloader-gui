@@ -31,11 +31,31 @@ validate_bounded_uint() {
     local value=$2
     local minimum=$3
     local maximum=$4
+    local output_variable=${5:-}
+    local normalized=''
+    local numeric_value=0
 
-    if [[ ! ${value} =~ ^[0-9]+$ ]] \
-        || ((10#${value} < minimum || 10#${value} > maximum)); then
+    if [[ ! ${value} =~ ^0*([0-9]+)$ ]]; then
         error "${name} must be an integer between ${minimum} and ${maximum}; found ${value}."
         return 1
+    fi
+    normalized=${BASH_REMATCH[1]}
+
+    # All configured maxima are intentionally small. Bound digit length before
+    # Bash arithmetic so a fixed-width integer overflow can never wrap into range.
+    if ((${#normalized} > ${#maximum})); then
+        error "${name} must be an integer between ${minimum} and ${maximum}; found ${value}."
+        return 1
+    fi
+
+    numeric_value=$((10#${normalized}))
+    if ((numeric_value < minimum || numeric_value > maximum)); then
+        error "${name} must be an integer between ${minimum} and ${maximum}; found ${value}."
+        return 1
+    fi
+
+    if [[ -n ${output_variable} ]]; then
+        printf -v "${output_variable}" '%d' "${numeric_value}" || return 1
     fi
     return 0
 }
@@ -1002,7 +1022,7 @@ main() {
         "RUNTIME_VALIDATE_TIMEOUT_SECONDS:${RUNTIME_VALIDATE_TIMEOUT_SECONDS}:5:120"; do
         IFS=: read -r setting_name setting_value setting_min setting_max <<<"${setting}"
         validate_bounded_uint "${setting_name}" "${setting_value}" \
-            "${setting_min}" "${setting_max}" || exit 64
+            "${setting_min}" "${setting_max}" "${setting_name}" || exit 64
     done
     readonly RUNTIME_LOCK_WAIT_SECONDS CURL_CONNECT_TIMEOUT_SECONDS
     readonly CURL_MAX_TIME_SECONDS CURL_RETRY_MAX_TIME_SECONDS

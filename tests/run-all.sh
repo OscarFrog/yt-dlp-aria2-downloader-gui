@@ -7,6 +7,10 @@
 # ==============================================================================
 
 set -euo pipefail
+# Bash forces SIGINT/SIGQUIT to be ignored for asynchronous commands when job
+# control is disabled. run_child therefore uses a tiny Python trampoline that
+# restores those signal dispositions before creating a dedicated session.
+set +m
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly SCRIPT_DIR
@@ -62,14 +66,50 @@ if ((${#PRODUCTION_SHELL_FILES[@]} == 0 || \
 fi
 
 CURRENT_CHILD_PID=''
+CURRENT_CHILD_PGID=''
 
 run_child() {
     local status=0
 
-    "$@" &
+    python3 - "$@" <<'PY_CHILD' &
+import os
+import signal
+import sys
+
+# Bash starts asynchronous commands with SIGINT/SIGQUIT ignored when job
+# control is disabled. A non-interactive shell started in that state cannot
+# subsequently trap those signals, so restore them before exec.
+for signal_name in ("SIGINT", "SIGQUIT", "SIGPIPE", "SIGXFSZ", "SIGXFZ"):
+    signal_number = getattr(signal, signal_name, None)
+    if signal_number is not None:
+        signal.signal(signal_number, signal.SIG_DFL)
+
+os.setsid()
+
+try:
+    os.execvp(sys.argv[1], sys.argv[1:])
+except FileNotFoundError:
+    os._exit(127)
+except PermissionError:
+    os._exit(126)
+PY_CHILD
+
     CURRENT_CHILD_PID=$!
+    CURRENT_CHILD_PGID=${CURRENT_CHILD_PID}
+
+    # Wait briefly for os.setsid() to publish the new process group. This keeps
+    # signal delivery deterministic even if interruption races with startup.
+    for _ in {1..50}; do
+        if kill -0 -- "-${CURRENT_CHILD_PGID}" 2>/dev/null; then
+            break
+        fi
+        kill -0 -- "${CURRENT_CHILD_PID}" 2>/dev/null || break
+        sleep 0.01
+    done
+
     wait "${CURRENT_CHILD_PID}" || status=$?
     CURRENT_CHILD_PID=''
+    CURRENT_CHILD_PGID=''
     return "${status}"
 }
 
@@ -80,18 +120,45 @@ handle_signal() {
     trap - HUP INT TERM
 
     if [[ -n ${CURRENT_CHILD_PID} ]]; then
-        kill "-${signal_name}" -- "${CURRENT_CHILD_PID}" 2>/dev/null || true
+        if [[ -n ${CURRENT_CHILD_PGID} ]]; then
+            for _ in {1..20}; do
+                if kill -0 -- "-${CURRENT_CHILD_PGID}" 2>/dev/null; then
+                    break
+                fi
+                kill -0 -- "${CURRENT_CHILD_PID}" 2>/dev/null || break
+                sleep 0.01
+            done
+        fi
+
+        if [[ -n ${CURRENT_CHILD_PGID} ]] \
+            && kill -0 -- "-${CURRENT_CHILD_PGID}" 2>/dev/null; then
+            kill "-${signal_name}" -- "-${CURRENT_CHILD_PGID}" 2>/dev/null || true
+        else
+            kill "-${signal_name}" -- "${CURRENT_CHILD_PID}" 2>/dev/null || true
+        fi
+
         for _ in {1..50}; do
+            if [[ -n ${CURRENT_CHILD_PGID} ]] \
+                && kill -0 -- "-${CURRENT_CHILD_PGID}" 2>/dev/null; then
+                sleep 0.1
+                continue
+            fi
             if ! kill -0 -- "${CURRENT_CHILD_PID}" 2>/dev/null; then
                 break
             fi
             sleep 0.1
         done
-        if kill -0 -- "${CURRENT_CHILD_PID}" 2>/dev/null; then
+
+        if [[ -n ${CURRENT_CHILD_PGID} ]] \
+            && kill -0 -- "-${CURRENT_CHILD_PGID}" 2>/dev/null; then
+            kill -KILL -- "-${CURRENT_CHILD_PGID}" 2>/dev/null || true
+        elif kill -0 -- "${CURRENT_CHILD_PID}" 2>/dev/null; then
             kill -KILL -- "${CURRENT_CHILD_PID}" 2>/dev/null || true
         fi
+
         wait "${CURRENT_CHILD_PID}" 2>/dev/null || true
         CURRENT_CHILD_PID=''
+        CURRENT_CHILD_PGID=''
     fi
 
     exit "${exit_status}"
@@ -103,7 +170,7 @@ trap 'handle_signal TERM 143' TERM
 
 cd -- "${PROJECT_DIR}"
 
-for command_name in shellcheck sleep; do
+for command_name in python3 shellcheck sleep; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         printf 'Error: required validation command is absent: %s\n' \
             "${command_name}" >&2
@@ -136,6 +203,9 @@ run_child shellcheck -x -o all -- "${DEVELOPMENT_SHELL_FILES[@]}"
 
 printf '\n=== Runtime-manager integration ===\n'
 run_child bash -- ./tests/runtime-manager-integration.sh
+
+printf '\n=== run-all signal/descendant integration ===\n'
+run_child bash -- ./tests/run-all-signal-integration.sh
 
 printf '\n=== Runtime-manager hardening integration ===\n'
 run_child bash -- ./tests/runtime-manager-hardening-integration.sh
