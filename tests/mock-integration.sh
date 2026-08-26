@@ -70,25 +70,6 @@ case ${status} in
 esac
 
 exit "${status}"
-EOF_GUI_TIMEOUT'
-#!/usr/bin/env bash
-set -euo pipefail
-
-: "${MOCK_GUI_REAL:?}"
-: "${MOCK_GUI_SCENARIO_TIMEOUT_SECONDS:?}"
-
-status=0
-timeout --foreground --signal=TERM --kill-after=2s     "${MOCK_GUI_SCENARIO_TIMEOUT_SECONDS}s"     "${MOCK_GUI_REAL}" "$@" || status=$?
-
-case ${status} in
-    124 | 137)
-        printf 'FAIL: bounded GUI scenario timed out after %ss (status %d).
-'             "${MOCK_GUI_SCENARIO_TIMEOUT_SECONDS}" "${status}" >&2
-        ;;
-    *)
-        ;;
-esac
-exit "${status}"
 EOF_GUI_TIMEOUT
 chmod 0755 -- "${GUI_UNDER_TEST}"
 
@@ -278,6 +259,10 @@ for argument in "$@"; do
     fi
 done
 
+if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
+    trap 'printf terminated > "${MOCK_TERMINATION_MARKER:?}"; exit 143' TERM INT
+fi
+
 if [[ ${load_info_json} != true ]]; then
     if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
         printf '\r[#a1b2c3 4.0MiB/0B CN:8 DL:1.00MiB]\r'
@@ -293,7 +278,6 @@ if [[ ${load_info_json} != true ]]; then
 fi
 
 if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
-    trap 'printf terminated > "${MOCK_TERMINATION_MARKER:?}"; exit 143' TERM INT
     sleep "${MOCK_WORKER_START_JITTER_SECONDS:-0}"
     if [[ -n ${MOCK_STARTED_MARKER:-} ]]; then
         printf started >"${MOCK_STARTED_MARKER}"
