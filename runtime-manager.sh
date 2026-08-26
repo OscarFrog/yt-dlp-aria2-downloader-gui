@@ -502,28 +502,47 @@ parse_deno_version() {
 validate_deno() {
     local candidate=$1
     local version=''
-    local major=0
-    local minor=0
-    local patch=0
+    local major=''
+    local minor=''
 
     if ! parse_deno_version "${candidate}" version; then
         return 1
     fi
 
-    if [[ ! ${version} =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+    if [[ ! ${version} =~ ^([0-9]+)\.([0-9]+)\.[0-9]+ ]]; then
         return 1
     fi
     major=${BASH_REMATCH[1]}
     minor=${BASH_REMATCH[2]}
-    patch=${BASH_REMATCH[3]}
 
-    if ((10#${major} > 2 || (\
-        10#${major} == 2 && 10#${minor} > 3) || (\
-        10#${major} == 2 && 10#${minor} == 3 && 10#${patch} >= 0))); then
+    [[ ${major} =~ ^0*([0-9]+)$ ]] || return 1
+    major=${BASH_REMATCH[1]}
+    [[ ${minor} =~ ^0*([0-9]+)$ ]] || return 1
+    minor=${BASH_REMATCH[1]}
+
+    # The minimum is Deno 2.3.0. Compare normalized decimal components
+    # without Bash arithmetic so arbitrarily long version components cannot
+    # overflow fixed-width shell integers.
+    if ((${#major} > 1)); then
         return 0
     fi
-
-    return 1
+    case ${major} in
+        [3-9])
+            return 0
+            ;;
+        2)
+            if ((${#minor} > 1)); then
+                return 0
+            fi
+            case ${minor} in
+                [3-9]) return 0 ;;
+                *) return 1 ;;
+            esac
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 install_ytdlp_candidate() {
@@ -950,15 +969,35 @@ update_runtime() {
 
 ensure_runtime_locked() {
     local lock_status=0
+
     if acquire_runtime_lock; then
         lock_status=0
     else
         lock_status=$?
-        error 'unable to acquire the runtime update lock.'
+        if ((lock_status == 75)) && validate_active_runtimes; then
+            warning 'another runtime update is in progress; using the active verified runtimes.'
+            return 0
+        fi
+        if ((lock_status == 75)); then
+            error 'runtime update lock timed out and no valid active runtimes are available.'
+        else
+            error 'unable to acquire the runtime update lock.'
+        fi
         return "${lock_status}"
     fi
+
     recover_all_activation_transactions || return 1
-    ensure_runtime
+    ensure_runtime || return 1
+
+    recover_invalid_active_runtime yt-dlp || {
+        error 'the active yt-dlp runtime is invalid and rollback failed.'
+        return 1
+    }
+    recover_invalid_active_runtime deno || {
+        error 'the active Deno runtime is invalid and rollback failed.'
+        return 1
+    }
+    return 0
 }
 
 rollback_runtime_locked() {

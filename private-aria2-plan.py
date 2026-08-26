@@ -237,6 +237,20 @@ def direct_headers_are_replay_safe(headers: dict[str, str]) -> bool:
     )
 
 
+def format_id_is_representable(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and FORMAT_ID_RE.fullmatch(value) is not None
+    )
+
+
+def extension_is_representable(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and EXTENSION_RE.fullmatch(value) is not None
+    )
+
+
 def component_destination(
     root_destination: Path,
     format_info: dict[str, object],
@@ -244,10 +258,10 @@ def component_destination(
     format_id = format_info.get("format_id")
     extension = format_info.get("ext")
 
-    if not isinstance(format_id, str) or not FORMAT_ID_RE.fullmatch(format_id):
+    if not format_id_is_representable(format_id):
         raise PlanError("requested format has an unsafe format_id")
 
-    if not isinstance(extension, str) or not EXTENSION_RE.fullmatch(extension):
+    if not extension_is_representable(extension):
         raise PlanError("requested format has an unsafe extension")
 
     base = root_destination.with_suffix(f".{extension}")
@@ -451,6 +465,15 @@ def classify_plan(args: argparse.Namespace) -> int:
                 raise PlanError(
                     "requested format is not a JSON object"
                 )
+
+            if (
+                not format_id_is_representable(raw_format.get("format_id"))
+                or not extension_is_representable(raw_format.get("ext"))
+            ):
+                print("transport=native")
+                print(f"transfer_count={len(requested_formats)}")
+                return 0
+
             transfers.append(raw_format)
 
     for transfer in transfers:

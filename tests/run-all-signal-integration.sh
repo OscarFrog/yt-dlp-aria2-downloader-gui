@@ -60,6 +60,10 @@ set -Eeuo pipefail
 : "${REAL_BASH:?}"
 : "${REAL_SLEEP:?}"
 
+if [[ ${MOCK_IGNORE_SIGNALS:-0} == 1 ]]; then
+    trap '' HUP INT TERM
+fi
+
 if [[ " $* " == *' ./tests/runtime-manager-integration.sh '* ]]; then
     : "${MOCK_IMMEDIATE_MARKER:?}"
     : "${MOCK_DESCENDANT_MARKER:?}"
@@ -67,9 +71,13 @@ if [[ " $* " == *' ./tests/runtime-manager-integration.sh '* ]]; then
     "${REAL_BASH}" -c '
         marker=$1
         sleep_bin=$2
+        ignore_signals=$3
+        if [[ ${ignore_signals} == 1 ]]; then
+            trap "" HUP INT TERM
+        fi
         printf "%s\n" "$$" >"${marker}"
         exec "${sleep_bin}" 60
-    ' bash "${MOCK_DESCENDANT_MARKER}" "${REAL_SLEEP}" &
+    ' bash         "${MOCK_DESCENDANT_MARKER}"         "${REAL_SLEEP}"         "${MOCK_IGNORE_SIGNALS:-0}" &
     wait "$!"
 fi
 
@@ -197,6 +205,78 @@ for name, sig, expected in (
             terminate_if_needed(immediate_pid)
         if descendant_pid:
             terminate_if_needed(descendant_pid)
+
+# A second fatal signal during the grace period must not interrupt cleanup.
+# The synthetic child and descendant ignore TERM/INT so run-all must reach its
+# KILL escalation after the second signal arrives.
+immediate_marker = test_root / "reentrant-immediate.pid"
+descendant_marker = test_root / "reentrant-descendant.pid"
+env = os.environ.copy()
+env.update(
+    {
+        "PATH": f"{mock_bin}:/usr/bin:/bin",
+        "REAL_BASH": real_bash,
+        "REAL_SLEEP": real_sleep,
+        "MOCK_IMMEDIATE_MARKER": str(immediate_marker),
+        "MOCK_DESCENDANT_MARKER": str(descendant_marker),
+        "MOCK_IGNORE_SIGNALS": "1",
+    }
+)
+
+runner = subprocess.Popen(
+    [real_bash, str(project_dir / "tests/run-all.sh")],
+    cwd=project_dir,
+    env=env,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.PIPE,
+)
+immediate_pid = 0
+descendant_pid = 0
+try:
+    immediate_pid = wait_marker(immediate_marker, runner)
+    descendant_pid = wait_marker(descendant_marker, runner)
+    os.kill(runner.pid, signal.SIGINT)
+    time.sleep(0.25)
+    if runner.poll() is not None:
+        raise AssertionError(
+            f"run-all exited before the second signal: {runner.returncode}"
+        )
+    os.kill(runner.pid, signal.SIGTERM)
+    try:
+        return_code = runner.wait(timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(
+            "run-all did not finish cleanup after repeated signals"
+        ) from exc
+
+    stderr = (runner.stderr.read() if runner.stderr else b"").decode(
+        "utf-8", errors="replace"
+    )
+    if return_code != 130:
+        raise AssertionError(
+            f"run-all repeated-signal cleanup returned {return_code}, "
+            f"expected 130: {stderr}"
+        )
+    if not wait_gone(immediate_pid):
+        raise AssertionError(
+            f"run-all repeated-signal cleanup left immediate process "
+            f"{immediate_pid}"
+        )
+    if not wait_gone(descendant_pid):
+        raise AssertionError(
+            f"run-all repeated-signal cleanup left descendant "
+            f"{descendant_pid}"
+        )
+finally:
+    if runner.poll() is None:
+        runner.kill()
+        runner.wait(timeout=5)
+    if immediate_pid:
+        terminate_if_needed(immediate_pid)
+    if descendant_pid:
+        terminate_if_needed(descendant_pid)
+
+# Generic os.execvp OSError handling is defensive hardening. Do not qualify it with an ENOEXEC text fixture: POSIX execvp falls back to a shell interpreter for that case.
 
 print("run-all signal/descendant integration passed.")
 PY_CONTROLLER

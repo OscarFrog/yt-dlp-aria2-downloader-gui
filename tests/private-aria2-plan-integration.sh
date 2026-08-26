@@ -319,6 +319,53 @@ PY
     [[ -f ${OUTPUT_DIR}/merged.fa1.m4a ]] \
         || fail 'Audio component was not published.'
 
+    # Replay-safe HTTP transfers whose component metadata cannot be represented
+    # by the private direct builder must fall back to native yt-dlp.
+    printf '%s\n' 'Private aria2 plan scenario: unrepresentable direct metadata'
+    new_case 'unrepresentable-direct-metadata'
+    python3 - "${PLAN_FILE}" "${OUTPUT_DIR}" <<'PY_UNREPRESENTABLE'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+output_dir = Path(sys.argv[2])
+
+payload = {
+    "requested_downloads": [
+        {
+            "filename": str(output_dir / "merged.mkv"),
+            "requested_formats": [
+                {
+                    "format_id": "video",
+                    "ext": "unknown_video",
+                    "url": "https://example.invalid/video",
+                    "protocol": "https",
+                    "http_headers": {
+                        "User-Agent": "qualification-agent",
+                    },
+                },
+            ],
+        }
+    ]
+}
+
+path.write_text(
+    json.dumps(payload, ensure_ascii=False) + "\n",
+    encoding="utf-8",
+)
+os.chmod(path, 0o600)
+PY_UNREPRESENTABLE
+
+    assert_status 0 'unrepresentable direct metadata classification' run_classify
+    assert_text_contains "${ASSERT_OUTPUT}" 'transport=native' 'unrepresentable component metadata falls back to native'
+    assert_text_contains "${ASSERT_OUTPUT}" 'transfer_count=1' 'unrepresentable component metadata transfer count'
+
+    assert_status 65 'unrepresentable metadata remains rejected by direct build' run_build
+    assert_text_contains "${ASSERT_OUTPUT}" 'unsafe extension' 'unrepresentable component metadata direct-build diagnostic'
+    [[ ! -e ${ARIA2_INPUT} && ! -e ${MANIFEST} ]] || fail 'Unrepresentable component metadata created aria2 artifacts.'
+
     # Fragmented transports remain native yt-dlp downloads.
     printf '%s\n' 'Private aria2 plan scenario: native transport classification'
     new_case 'native-transport'

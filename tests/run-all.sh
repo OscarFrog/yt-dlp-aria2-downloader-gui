@@ -90,7 +90,7 @@ try:
     os.execvp(sys.argv[1], sys.argv[1:])
 except FileNotFoundError:
     os._exit(127)
-except PermissionError:
+except OSError:
     os._exit(126)
 PY_CHILD
 
@@ -117,7 +117,9 @@ handle_signal() {
     local signal_name=$1
     local exit_status=$2
 
-    trap - HUP INT TERM
+    # Once cleanup starts, finish terminating the active process group
+    # deterministically instead of letting a second signal interrupt escalation.
+    trap '' HUP INT TERM
 
     if [[ -n ${CURRENT_CHILD_PID} ]]; then
         if [[ -n ${CURRENT_CHILD_PGID} ]]; then

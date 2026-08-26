@@ -87,7 +87,8 @@ PY_PLAN
 
 classify_plan() {
     local plan_file=$1
-    python3 "${HELPER}" classify --plan "${plan_file}"
+    local helper=${2:-${HELPER}}
+    python3 "${helper}" classify --plan "${plan_file}"
 }
 
 build_plan() {
@@ -135,6 +136,8 @@ main() {
     local unsafe_mode
     local mutant
     local leak_file
+    local server_log
+    local server_line
 
     for command_name in aria2c chmod grep mkdir mktemp python3 rm sleep stat; do
         require_test_command "${command_name}"
@@ -254,15 +257,27 @@ threading.Thread(target=sink.serve_forever, daemon=True).start()
 origin.serve_forever()
 PY_SERVER
 
+    server_log="${TEST_ROOT}/server.log"
     python3 "${TEST_ROOT}/server.py" \
-        "${TEST_ROOT}/ports" "${leak_file}" &
+        "${TEST_ROOT}/ports" "${leak_file}" \
+        >"${server_log}" 2>&1 &
     SERVER_PID=$!
     for _ in {1..100}; do
         [[ -s ${TEST_ROOT}/ports ]] && break
+        if ! kill -0 -- "${SERVER_PID}" 2>/dev/null; then
+            while IFS= read -r server_line || [[ -n ${server_line} ]]; do
+                printf 'server.py: %s\n' "${server_line}" >&2
+            done <"${server_log}"
+            fail 'header-policy HTTP servers exited before publishing their ports'
+        fi
         sleep 0.05
     done
-    [[ -s ${TEST_ROOT}/ports ]] \
-        || fail 'header-policy HTTP servers did not publish their ports'
+    if [[ ! -s ${TEST_ROOT}/ports ]]; then
+        while IFS= read -r server_line || [[ -n ${server_line} ]]; do
+            printf 'server.py: %s\n' "${server_line}" >&2
+        done <"${server_log}"
+        fail 'header-policy HTTP servers did not publish their ports'
+    fi
     read -r ORIGIN_PORT _ <"${TEST_ROOT}/ports"
     readonly ORIGIN_PORT
 
@@ -316,6 +331,8 @@ PY_SERVER
         'cross-origin secret plan forces native transport'
     assert_status 65 'cross-origin secret direct build is rejected' \
         build_plan "${HELPER}" "${plan_file}" "${output_dir}" "${staging_dir}"
+    [[ ! -e ${staging_dir}/aria2.input && ! -e ${staging_dir}/manifest.json ]] \
+        || fail 'cross-origin rejection left private aria2 artifacts'
     [[ ! -e ${leak_file} ]] \
         || fail 'cross-origin sink received a secret on the safe path'
 
@@ -332,6 +349,10 @@ source = source.replace(needle, "if False:", 2)
 Path(sys.argv[2]).write_text(source, encoding="utf-8")
 PY_MUTANT
     chmod 600 -- "${mutant}"
+
+    classification=$(classify_plan "${plan_file}" "${mutant}")
+    assert_text_contains "${classification}" 'transport=direct' \
+        'unsafe mutant disables native cross-origin classification'
 
     assert_status 0 'unsafe mutant can build the vulnerable aria2 plan' \
         build_plan "${mutant}" "${plan_file}" "${output_dir}" "${staging_dir}"

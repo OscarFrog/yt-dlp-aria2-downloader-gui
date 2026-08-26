@@ -98,6 +98,7 @@ if (($# == 1)) && [[ $1 == '--help' ]]; then
         '--extractor-args KEY:ARGS' \
         '-O, --print [WHEN:]TEMPLATE' \
         '--progress-template' \
+        '--progress-delta SECONDS' \
         '--print-to-file' \
         '--cookies FILE' \
         '--dump-single-json' \
@@ -575,8 +576,16 @@ if [[ -n ${MOCK_FFPROBE_ARG_LOG:-} ]]; then
 fi
 
 selector=''
+duration_probe=false
+media_path=''
 probe_previous=''
 for argument in "$@"; do
+    media_path=${argument}
+
+    if [[ ${argument} == 'format=duration' ]]; then
+        duration_probe=true
+    fi
+
     if [[ ${probe_previous} == '-select_streams' ]]; then
         selector=${argument}
         probe_previous=''
@@ -605,6 +614,22 @@ fi
 if [[ ${MOCK_FFPROBE_EXIT_STATUS:-0} != 0 ]]; then
     printf 'Simulated FFprobe validation failure.\n' >&2
     exit "${MOCK_FFPROBE_EXIT_STATUS}"
+fi
+if [[ ${duration_probe} == true ]]; then
+    if [[ ${MOCK_FFPROBE_DURATION_EMPTY:-0} == 1 ]]; then
+        exit 0
+    fi
+    if [[ ${MOCK_FFPROBE_MKV_DURATION_EMPTY:-0} == 1 &&
+        ${media_path} == *.mkv ]]; then
+        exit 0
+    fi
+
+    if [[ ${media_path} == *.mkv ]]; then
+        printf '%s\n' "${MOCK_FFPROBE_MKV_DURATION:-120.000000}"
+    else
+        printf '%s\n' "${MOCK_FFPROBE_DURATION:-120.000000}"
+    fi
+    exit 0
 fi
 if [[ ${selector} == 'V:0' && ${MOCK_FFPROBE_CONTENT_VIDEO:-0} != 1 ]]; then
     ffprobe_audio_mode=false
@@ -1508,6 +1533,28 @@ main() {
     [[ -f "${OUTPUT_DIR}/Mock media [abc123].mp4" ]] \
         || fail 'An HLS target collision did not retain the repaired MP4.'
     rm -f -- "${hls_existing_target}" "${OUTPUT_DIR}/Mock media [abc123].mp4"
+
+    prepare_argument_log 'youtube-hls-source-duration-missing'
+    youtube_hls_source_duration_result="${TEST_ROOT}/youtube-hls-source-duration-result.txt"
+    rm -f -- "${youtube_hls_source_duration_result}"
+    assert_status 65 'YouTube HLS refuses a remux with an unknown source duration' env MOCK_FFPROBE_DURATION_EMPTY=1 "${PROJECT_DIR}/download-video.sh" --output-dir "${OUTPUT_DIR}" --mode video --youtube-hls-firefox --machine-progress --result-file "${youtube_hls_source_duration_result}" -- 'https://www.youtube.com/watch?v=youtube-hls-source-duration'
+    assert_text_contains "${ASSERT_OUTPUT}" 'unable to determine the repaired HLS source duration' 'unknown HLS source duration diagnostic'
+    assert_text_contains "${ASSERT_OUTPUT}" 'YTDLP_POSTPROCESS|error|FFmpegVideoRemuxer' 'unknown HLS source duration machine error'
+    [[ ! -e ${youtube_hls_source_duration_result} ]] || fail 'Unknown HLS source duration published a result file.'
+    [[ -f "${OUTPUT_DIR}/Mock media [abc123].mp4" ]] || fail 'Unknown HLS source duration did not retain the repaired MP4.'
+    [[ ! -e "${OUTPUT_DIR}/Mock media [abc123].mkv" ]] || fail 'Unknown HLS source duration published an MKV.'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].mp4"
+
+    prepare_argument_log 'youtube-hls-final-duration-missing'
+    youtube_hls_final_duration_result="${TEST_ROOT}/youtube-hls-final-duration-result.txt"
+    rm -f -- "${youtube_hls_final_duration_result}"
+    assert_status 65 'YouTube HLS refuses an MKV with an unknown remuxed duration' env MOCK_FFPROBE_MKV_DURATION_EMPTY=1 "${PROJECT_DIR}/download-video.sh" --output-dir "${OUTPUT_DIR}" --mode video --youtube-hls-firefox --machine-progress --result-file "${youtube_hls_final_duration_result}" -- 'https://www.youtube.com/watch?v=youtube-hls-final-duration'
+    assert_text_contains "${ASSERT_OUTPUT}" 'unable to determine the remuxed MKV duration' 'unknown remuxed MKV duration diagnostic'
+    assert_text_contains "${ASSERT_OUTPUT}" 'YTDLP_POSTPROCESS|error|FFmpegVideoRemuxer' 'unknown remuxed MKV duration machine error'
+    [[ ! -e ${youtube_hls_final_duration_result} ]] || fail 'Unknown remuxed MKV duration published a result file.'
+    [[ -f "${OUTPUT_DIR}/Mock media [abc123].mp4" ]] || fail 'Unknown remuxed MKV duration did not retain the repaired MP4.'
+    [[ ! -e "${OUTPUT_DIR}/Mock media [abc123].mkv" ]] || fail 'Unknown remuxed MKV duration published a final MKV.'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].mp4"
 
     prepare_argument_log 'youtube-hls-remux-failure'
     youtube_hls_failed_result="${TEST_ROOT}/youtube-hls-failed-result.txt"
