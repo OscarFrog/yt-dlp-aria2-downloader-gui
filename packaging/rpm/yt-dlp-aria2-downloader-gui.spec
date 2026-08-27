@@ -66,6 +66,8 @@ fi
 %{_libexecdir}/yt-dlp-aria2-downloader/keys/yt-dlp-public.key
 %{_datadir}/applications/yt-dlp-aria2-downloader.desktop
 %{_datadir}/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg
+%{_mandir}/man1/yt-dlp-aria2-downloader.1*
+%{_mandir}/man1/yt-dlp-aria2-downloader-gui.1*
 %dir %{_docdir}/%{name}
 %doc %{_docdir}/%{name}/README.md
 %doc %{_docdir}/%{name}/README.fr.md
@@ -73,6 +75,10 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Thu Aug 27 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.2.5-1
+- Add package manual pages shared with the Debian package.
+- Deduplicate package runtime-preservation qualification helpers.
+
 * Thu Aug 27 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.2.4-1
 - Preserve replacement or ambiguous private aria2 staging during active cleanup.
 - Add deterministic pathname-replacement regression coverage.

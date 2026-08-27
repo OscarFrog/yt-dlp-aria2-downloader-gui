@@ -606,7 +606,7 @@ jobs:
       - name: Install DEB build tools
         run: |
           sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes desktop-file-utils
+          sudo apt-get -o Acquire::Retries=3 install --yes desktop-file-utils lintian
       - name: Build, lifecycle, reinstall, and upgrade DEB
         env:
           PREVIOUS_VERSION: ${{ needs.previous-release.outputs.version }}
@@ -625,6 +625,7 @@ jobs:
           bash packaging/deb/build-deb.sh "${version}" dist
           shopt -s nullglob; packages=(dist/*.deb); shopt -u nullglob
           ((${#packages[@]} == 1))
+          lintian --fail-on error "${packages[0]}"
           sudo bash packaging/deb/test-package-lifecycle.sh "${packages[0]}" "${version}"
           shopt -s nullglob
           old=("${PREVIOUS_DIR}"/*.deb)

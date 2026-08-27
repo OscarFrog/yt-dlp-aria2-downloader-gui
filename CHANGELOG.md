@@ -1,3 +1,26 @@
+## 2.2.5 - 2026-08-27
+
+### Packaging correctness and lifecycle
+
+- Make Debian `remove` and `purge` non-destructive for per-user runtime,
+  configuration, state, and cache by dropping unnecessary DEB maintainer hooks
+  and the RPM-only all-user cleanup helper from the DEB payload.
+- Add Debian manual pages, a Debian changelog, machine-readable copyright
+  metadata, and package-file checksums.
+- Stop redundantly declaring unversioned Essential Debian dependencies while
+  retaining explicit application/runtime requirements.
+
+### Qualification and maintainability
+
+- Deduplicate the DEB/RPM upgrade runtime-preservation snapshot and assertion
+  helpers into one shared test library while keeping APT/dpkg and DNF/RPM
+  lifecycle orchestration independent.
+- Qualify Debian install, remove, purge, remove-to-purge, reinstall, and upgrade
+  paths with explicit per-user runtime preservation assertions.
+- Add Lintian error gating for the built DEB, stronger package-identity and
+  diagnostic checks, deterministic fixture cleanup, and stricter staging-path
+  validation.
+
 ## 2.2.4 - 2026-08-27
 
 ### Filesystem safety and reliability

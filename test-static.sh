@@ -606,7 +606,7 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
         '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
         'non-owner test cleanup protection'
-    readonly EXPECTED_VERSION='2.2.4'
+    readonly EXPECTED_VERSION='2.2.5'
 
     # Current-version coherence is intentionally checked only on authoritative
     # carriers. Historical versions used by regression/upgrade fixtures are valid
@@ -959,9 +959,10 @@ main() {
         "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
         "if [ \"\$1\" -eq 0 ]; then" \
         'RPM user cleanup runs only on final erase'
-    assert_file_contains "${SCRIPT_DIR}/packaging/deb/prerm" \
-        "if [ \"\$#\" -eq 1 ] && [ -x \"\${HELPER}\" ]; then" \
-        'DEB user cleanup excludes remove-in-favour replacement'
+    [[ ! -e ${SCRIPT_DIR}/packaging/deb/postinst &&
+        ! -e ${SCRIPT_DIR}/packaging/deb/prerm &&
+        ! -e ${SCRIPT_DIR}/packaging/deb/postrm ]] \
+        || fail 'DEB package source still contains unnecessary maintainer scripts.'
     assert_file_contains "${SCRIPT_DIR}/packaging/install-tree.sh" \
         'packaging/package-user-cleanup.sh' \
         'package tree ships user cleanup helper'
@@ -1439,7 +1440,8 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/packaging/rpm/test-package-upgrade.sh" \
         'RPM upgrade passed:' 'RPM previous-to-current upgrade test'
     assert_file_contains "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
-        'DEB upgrade passed:' 'DEB previous-to-current upgrade test'
+        'DEB upgrade passed with user-runtime preservation:' \
+        'DEB previous-to-current upgrade test'
 
     assert_file_contains \
         "${SCRIPT_DIR}/packaging/rpm/build-rpm.sh" \
@@ -1501,13 +1503,15 @@ main() {
         'tests/runtime-manager-hardening-integration.sh' \
         'runtime hardening integration is executed by stress CI'
 
+    assert_file_contains "${SCRIPT_DIR}/tests/lib/package-runtime-preservation.sh" \
+        'runtime_tree_snapshot() {' \
+        'shared package-upgrade helper snapshots the complete managed-runtime tree'
     assert_file_contains "${SCRIPT_DIR}/packaging/rpm/test-package-upgrade.sh" \
-        'runtime_tree_snapshot() {' \
-        'RPM upgrade snapshots the complete managed-runtime tree'
-
+        "source \"\${PROJECT_DIR}/tests/lib/package-runtime-preservation.sh\"" \
+        'RPM upgrade reuses the shared runtime-preservation helper'
     assert_file_contains "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
-        'runtime_tree_snapshot() {' \
-        'DEB upgrade snapshots the complete managed-runtime tree'
+        "source \"\${PROJECT_DIR}/tests/lib/package-runtime-preservation.sh\"" \
+        'DEB upgrade reuses the shared runtime-preservation helper'
 
     assert_file_contains "${SCRIPT_DIR}/packaging/rpm/test-package-upgrade.sh" \
         "assert_runtime_preserved 'installation of previous package'" \
@@ -1530,8 +1534,11 @@ main() {
         'DEB package upgrade preserves user runtime data'
 
     assert_file_contains "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
-        "assert_runtime_removed 'final package removal'" \
-        'DEB final package removal cleans managed user runtime data'
+        "assert_runtime_preserved 'final DEB package removal'" \
+        'DEB final package removal preserves managed user runtime data'
+    assert_file_contains "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
+        "assert_runtime_preserved 'DEB remove-to-purge transition'" \
+        'DEB remove-to-purge transition preserves managed user runtime data'
 
     assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
         '### Vidéo YouTube HLS authentifiée' \
@@ -1549,13 +1556,9 @@ main() {
         '## Release maintainer preflight' \
         'testing documentation contains immutable-release maintainer preflight'
 
-    assert_file_contains "${SCRIPT_DIR}/packaging/rpm/test-package-upgrade.sh" \
-        'refusing to clean runtime probe through unsafe runtime root' \
-        'RPM cleanup refuses an unsafe runtime root'
-
-    assert_file_contains "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
-        'refusing to clean runtime probe through unsafe runtime root' \
-        'DEB cleanup refuses an unsafe runtime root'
+    assert_file_contains "${SCRIPT_DIR}/tests/lib/package-runtime-preservation.sh" \
+        'refusing to clean package runtime probe through unsafe runtime root' \
+        'shared package-runtime cleanup refuses an unsafe runtime root'
 
     assert_file_contains "${SCRIPT_DIR}/CHANGELOG.md" \
         'deterministic archive snapshot of the per-user managed-runtime' \
