@@ -13,7 +13,7 @@ readonly PROJECT_DIR
 # shellcheck disable=SC1090
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 
-for required_command in bash grep head mkdir mktemp rm sed sleep sort tail timeout wc; do
+for required_command in bash grep head mkdir mktemp rm sed sleep sort tail timeout tr wc; do
     require_test_command "${required_command}"
 done
 
@@ -381,6 +381,19 @@ main() {
     wait_for_text "${CAPTURE_FILE}" 'Downloading the audio track - 25%' \
         'partial progress record is reconstructed'
     finish_success '/tmp/partial-record.webm'
+
+    # An oversized logical record may end in the same 64 KiB read as a valid
+    # machine record. Discard only the oversized record; never the valid record
+    # that follows its newline.
+    start_scenario oversized-record-recovery audio
+    {
+        head -c 1048577 /dev/zero | tr '\0' 'X'
+        printf '\n%s\n' \
+            'YTDLP_PROGRESS_V2|media|251|downloading|250|1000|0|0|0|25.0%|500KiB/s|00:06'
+    } >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the audio track - 25%' \
+        'valid progress after oversized record is preserved'
+    finish_success '/tmp/oversized-record-recovery.webm'
 
     # Removing the log path while the worker is alive must not create a busy loop.
     # The already-open descriptor remains safe, but no new records can arrive.

@@ -843,19 +843,50 @@ render_tick() {
 
 consume_log_data() {
     local chunk=$1
+    local prefix
     local line
 
-    pending_data+=${chunk}
-    if ((${#pending_data} > MAX_PENDING_CHARS)); then
-        pending_data=''
-        message='Progress information contained an oversized record; the download continues...'
+    chunk=${chunk//$'\r'/$'\n'}
+
+    # Keep pattern matching bounded to the current 64 KiB read. Accumulating an
+    # oversized logical record and then applying Bash glob substitutions to the
+    # complete >1 MiB string is unnecessarily expensive. pending_data therefore
+    # contains only a bounded unterminated prefix.
+    while [[ -n ${chunk} ]]; do
+        if [[ ${discarding_oversized_record} == true ]]; then
+            if [[ ${chunk} != *$'\n'* ]]; then
+                return 0
+            fi
+            chunk=${chunk#*$'\n'}
+            discarding_oversized_record=false
+            continue
+        fi
+
+        if [[ ${chunk} == *$'\n'* ]]; then
+            prefix=${chunk%%$'\n'*}
+            chunk=${chunk#*$'\n'}
+
+            if ((${#pending_data} + ${#prefix} > MAX_PENDING_CHARS)); then
+                pending_data=''
+                message='Progress information contained an oversized record; the download continues...'
+                continue
+            fi
+
+            line=${pending_data}${prefix}
+            pending_data=''
+            process_line "${line}"
+            continue
+        fi
+
+        if ((${#pending_data} + ${#chunk} > MAX_PENDING_CHARS)); then
+            pending_data=''
+            discarding_oversized_record=true
+            message='Progress information contained an oversized record; the download continues...'
+            return 0
+        fi
+
+        pending_data+=${chunk}
         return 0
-    fi
-    pending_data=${pending_data//$'\r'/$'\n'}
-    while [[ ${pending_data} == *$'\n'* ]]; do
-        line=${pending_data%%$'\n'*}
-        pending_data=${pending_data#*$'\n'}
-        process_line "${line}"
     done
 }
 
@@ -941,6 +972,7 @@ main() {
     fi
 
     pending_data=''
+    discarding_oversized_record=false
 
     while true; do
         chunk=''

@@ -90,7 +90,10 @@ assert_audio_only_codec() {
     actual_codec=$(
         ffprobe -v error -select_streams a:0 \
             -show_entries stream=codec_name -of csv=p=0 "${media_path}"
-    ) || return 65
+    ) || {
+        printf 'FAIL: unable to inspect audio codec: %s\n' "${media_path}" >&2
+        return 65
+    }
     [[ ${actual_codec} == "${expected_codec}" ]] || {
         printf 'FAIL: audio codec changed from %s to %s.\n' \
             "${expected_codec}" "${actual_codec}" >&2
@@ -99,7 +102,11 @@ assert_audio_only_codec() {
     video_index=$(
         ffprobe -v error -select_streams v:0 \
             -show_entries stream=index -of csv=p=0 "${media_path}"
-    ) || return 65
+    ) || {
+        printf 'FAIL: unable to inspect audio-result video streams: %s\n' \
+            "${media_path}" >&2
+        return 65
+    }
     [[ -z ${video_index} ]] || {
         printf 'FAIL: audio result unexpectedly retained a video stream.\n' >&2
         return 65
@@ -117,7 +124,11 @@ assert_audio_cover_codec() {
     actual_codec=$(
         ffprobe -v error -select_streams a:0 \
             -show_entries stream=codec_name -of csv=p=0 "${media_path}"
-    ) || return 65
+    ) || {
+        printf 'FAIL: unable to inspect cover-art audio codec: %s\n' \
+            "${media_path}" >&2
+        return 65
+    }
     [[ ${actual_codec} == "${expected_codec}" ]] || {
         printf 'FAIL: cover-art audio codec changed from %s to %s.\n' \
             "${expected_codec}" "${actual_codec}" >&2
@@ -127,7 +138,11 @@ assert_audio_cover_codec() {
     cover_index=$(
         ffprobe -v error -select_streams v:0 \
             -show_entries stream=index -of csv=p=0 "${media_path}"
-    ) || return 65
+    ) || {
+        printf 'FAIL: unable to inspect cover-art video attachment: %s\n' \
+            "${media_path}" >&2
+        return 65
+    }
     [[ ${cover_index} =~ ^[0-9]+$ ]] || {
         printf 'FAIL: cover-art audio result has no video attachment.\n' >&2
         return 65
@@ -136,7 +151,11 @@ assert_audio_cover_codec() {
     content_video_index=$(
         ffprobe -v error -select_streams V:0 \
             -show_entries stream=index -of csv=p=0 "${media_path}"
-    ) || return 65
+    ) || {
+        printf 'FAIL: unable to inspect cover-art content video: %s\n' \
+            "${media_path}" >&2
+        return 65
+    }
     [[ -z ${content_video_index} ]] || {
         printf 'FAIL: cover-art audio result unexpectedly contains content video.\n' >&2
         return 65
@@ -146,7 +165,11 @@ assert_audio_cover_codec() {
         ffprobe -v error -select_streams v:0 \
             -show_entries stream_disposition=attached_pic \
             -of default=noprint_wrappers=1:nokey=1 "${media_path}"
-    ) || return 65
+    ) || {
+        printf 'FAIL: unable to inspect cover-art disposition: %s\n' \
+            "${media_path}" >&2
+        return 65
+    }
     [[ ${attached_pic} == 1 ]] || {
         printf 'FAIL: video attachment is not marked attached_pic.\n' >&2
         return 65
@@ -160,21 +183,38 @@ run_engine() {
     local engine=${4:-"${PROJECT_DIR}/download-video.sh"}
     local scenario_dir="${TEST_ROOT}/output/${scenario}"
     local result_file="${TEST_ROOT}/${scenario}.result"
+    local output_file="${TEST_ROOT}/${scenario}.stdout"
+    local engine_status=0
 
     RUN_FINAL_FILE=''
     mkdir -p -- "${scenario_dir}"
-    rm -f -- "${result_file}"
+    rm -f -- "${result_file}" "${output_file}"
+    set +e
     bash "${engine}" \
         --mode "${mode}" \
         --output-dir "${scenario_dir}" \
         --result-file "${result_file}" \
-        "${url}" >"${TEST_ROOT}/${scenario}.stdout"
+        "${url}" >"${output_file}" 2>&1
+    engine_status=$?
+    set -e
+    if ((engine_status != 0)); then
+        printf 'FAIL: %s engine returned status %d.\n' \
+            "${scenario}" "${engine_status}" >&2
+        sed -n '1,160p' -- "${output_file}" >&2 || true
+        return 65
+    fi
     [[ -s ${result_file} ]] || {
         printf 'FAIL: %s did not publish a result file.\n' "${scenario}" >&2
         return 65
     }
-    IFS= read -r RUN_FINAL_FILE <"${result_file}" || return 65
-    [[ -n ${RUN_FINAL_FILE} ]] || return 65
+    if ! IFS= read -r RUN_FINAL_FILE <"${result_file}"; then
+        printf 'FAIL: %s published an unreadable result file.\n' "${scenario}" >&2
+        return 65
+    fi
+    [[ -n ${RUN_FINAL_FILE} ]] || {
+        printf 'FAIL: %s published an empty result path.\n' "${scenario}" >&2
+        return 65
+    }
 }
 
 assert_native_fragment_routing() {
@@ -445,6 +485,110 @@ EOF_ARIA2_SHIM
     cp -- "${PROJECT_DIR}/private-aria2-plan.py" "${TEST_ROOT}/private-aria2-plan.py"
     chmod 644 -- "${TEST_ROOT}/private-aria2-plan.py"
 
+    # VAL-001 regression: create a clean physical truncation that still exposes
+    # both expected streams and retains fewer content-video packets. A temporary
+    # engine injects it immediately before final validation. The production
+    # packet-tail consistency gate must reject it and withhold the result-file.
+    val001_truncated="${TEST_ROOT}/val001-truncated.mkv"
+    python3 - "${direct_final}" "${val001_truncated}" <<'PY_VAL001_TRUNCATE'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+target = Path(sys.argv[2])
+payload = source.read_bytes()
+if len(payload) < 1024:
+    raise SystemExit("VAL-001 source fixture is unexpectedly small")
+target.write_bytes(payload[: max(1, len(payload) // 2)])
+PY_VAL001_TRUNCATE
+
+    val001_video_index=$(
+        ffprobe -v error -select_streams V:0 \
+            -show_entries stream=index -of csv=p=0 "${val001_truncated}" 2>/dev/null
+    ) || true
+    val001_audio_index=$(
+        ffprobe -v error -select_streams a:0 \
+            -show_entries stream=index -of csv=p=0 "${val001_truncated}" 2>/dev/null
+    ) || true
+    val001_full_packets=$(
+        ffprobe -v error -select_streams V:0 -count_packets \
+            -show_entries stream=nb_read_packets -of csv=p=0 "${direct_final}"
+    )
+    val001_truncated_packets=$(
+        ffprobe -v error -select_streams V:0 -count_packets \
+            -show_entries stream=nb_read_packets -of csv=p=0 \
+            "${val001_truncated}" 2>/dev/null
+    ) || true
+
+    [[ ${val001_video_index} =~ ^[0-9]+$ &&
+        ${val001_audio_index} =~ ^[0-9]+$ &&
+        ${val001_full_packets} =~ ^[0-9]+$ &&
+        ${val001_truncated_packets} =~ ^[0-9]+$ &&
+        ${val001_truncated_packets} -lt ${val001_full_packets} ]] || {
+        printf '%s\n' \
+            'FAIL: VAL-001 clean-truncation fixture is not structurally suitable.' >&2
+        exit 65
+    }
+
+    val001_mutant="${TEST_ROOT}/download-video-val001-mutant.sh"
+    cp -- "${PROJECT_DIR}/download-video.sh" "${val001_mutant}"
+    python3 - "${val001_mutant}" <<'PY_VAL001_MUTATE'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+needle = "        emit_machine_postprocess started MediaValidation\n"
+if text.count(needle) != 1:
+    raise SystemExit(
+        f"VAL-001 mutation expected one validation anchor; found {text.count(needle)}"
+    )
+injection = """        if [[ -n ${VAL001_REPLACEMENT:-} ]]; then
+            cp -- "${VAL001_REPLACEMENT}" "${final_media_path}" || {
+                error 'VAL-001 fixture injection failed.'
+                exit 70
+            }
+        fi
+
+"""
+path.write_text(text.replace(needle, injection + needle, 1), encoding="utf-8")
+PY_VAL001_MUTATE
+    chmod 700 -- "${val001_mutant}"
+
+    val001_output_dir="${TEST_ROOT}/output/val001-tail"
+    val001_result="${TEST_ROOT}/val001-tail.result"
+    val001_log="${TEST_ROOT}/val001-tail.stdout"
+    mkdir -p -- "${val001_output_dir}"
+    val001_status=0
+    VAL001_REPLACEMENT="${val001_truncated}" \
+        bash "${val001_mutant}" \
+        --mode video \
+        --output-dir "${val001_output_dir}" \
+        --result-file "${val001_result}" \
+        "http://127.0.0.1:${PORT}/av.mp4" \
+        >"${val001_log}" 2>&1 || val001_status=$?
+
+    if ((val001_status != 65)); then
+        printf 'FAIL: VAL-001 mutant returned %d instead of 65.\n' \
+            "${val001_status}" >&2
+        sed -n '1,160p' -- "${val001_log}" >&2 || true
+        exit 65
+    fi
+    [[ ! -e ${val001_result} ]] || {
+        printf '%s\n' \
+            'FAIL: VAL-001 clean truncation published a result-file.' >&2
+        exit 65
+    }
+    grep -Fq -- 'the final media file failed FFprobe validation:' \
+        "${val001_log}" || {
+        printf '%s\n' \
+            'FAIL: VAL-001 clean truncation failed for an unexpected reason.' >&2
+        sed -n '1,160p' -- "${val001_log}" >&2 || true
+        exit 65
+    }
+    printf '%s\n' \
+        'Expected regression detected: metadata-parseable clean truncation was rejected.'
+
     # Mutation test: change only the final audio validator's V:0 selector to v:0
     # in a temporary engine copy. The valid attached-cover fixture must then be
     # rejected, proving this test kills that regression.
@@ -554,6 +698,13 @@ PY_COVER_MUTATION
     # with EX_DATAERR instead of publishing an audio success result.
     mutated_no_extract_engine="${TEST_ROOT}/download-video-no-extract-mutated.sh"
     cp -- "${PROJECT_DIR}/download-video.sh" "${mutated_no_extract_engine}"
+    extract_audio_count=$(grep -Ec '^[[:space:]]*--extract-audio[[:space:]]*$' \
+        "${mutated_no_extract_engine}" || true)
+    if [[ ${extract_audio_count} != 1 ]]; then
+        printf 'FAIL: no-extract mutation expected one target; found %s.\n' \
+            "${extract_audio_count}" >&2
+        exit 65
+    fi
     sed -i '/^[[:space:]]*--extract-audio[[:space:]]*$/d' "${mutated_no_extract_engine}"
     if grep -Eq '^[[:space:]]*--extract-audio[[:space:]]*$' "${mutated_no_extract_engine}"; then
         printf 'FAIL: unable to create the no-extract audio mutation.\n' >&2
@@ -581,6 +732,12 @@ PY_COVER_MUTATION
         printf 'FAIL: unextracted A/V audio mutation published a result-file.\n' >&2
         exit 65
     }
+    grep -Fq -- 'the final media file failed FFprobe validation:' \
+        "${TEST_ROOT}/audio-no-extract-mutated.stdout" || {
+        printf 'FAIL: audio-no-extract-mutated failed for an unexpected reason.\n' >&2
+        sed -n '1,120p' -- "${TEST_ROOT}/audio-no-extract-mutated.stdout" >&2 || true
+        exit 65
+    }
 
     # Negative control: an attached cover must not hide a real content-video
     # stream. Reuse the no-extract mutant so A/V+cover reaches final validation.
@@ -604,6 +761,12 @@ PY_COVER_MUTATION
     fi
     [[ ! -e ${mutated_no_extract_cover_result} ]] || {
         printf 'FAIL: unextracted A/V+cover mutation published a result-file.\n' >&2
+        exit 65
+    }
+    grep -Fq -- 'the final media file failed FFprobe validation:' \
+        "${TEST_ROOT}/audio-no-extract-cover-mutated.stdout" || {
+        printf 'FAIL: audio-no-extract-cover-mutated failed for an unexpected reason.\n' >&2
+        sed -n '1,120p' -- "${TEST_ROOT}/audio-no-extract-cover-mutated.stdout" >&2 || true
         exit 65
     }
 
@@ -714,6 +877,7 @@ PY_FORCE_MP3
     }
     grep -Fq -- 'audio codec changed from opus to mp3' "${mutation_diagnostic}" || {
         printf 'FAIL: forced-MP3 mutation failed for an unexpected reason.\n' >&2
+        sed -n '1,120p' -- "${mutation_diagnostic}" >&2 || true
         exit 65
     }
     printf 'Expected mutation detected: forced MP3 was rejected by Opus preservation.\n'
