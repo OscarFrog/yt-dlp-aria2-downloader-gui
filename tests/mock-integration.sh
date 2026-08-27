@@ -1764,6 +1764,115 @@ main() {
     flock --unlock "${held_lock_fd}"
     exec {held_lock_fd}>&-
 
+    # Regression guard: active private staging cleanup must not follow a
+    # pathname that has been replaced by a different filesystem object.
+    replacement_started="${TEST_ROOT}/private-staging-replacement-started"
+    replacement_result="${TEST_ROOT}/private-staging-replacement-result.txt"
+    replacement_log="${TEST_ROOT}/private-staging-replacement.log"
+    replacement_original="${TEST_ROOT}/private-staging-original"
+
+    rm -f -- \
+        "${replacement_started}" \
+        "${replacement_result}" \
+        "${replacement_log}"
+    rm -rf -- "${replacement_original}"
+
+    prepare_argument_log 'private-staging-active-replacement'
+
+    env MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_LONG_DOWNLOAD=1 \
+        MOCK_STARTED_MARKER="${replacement_started}" \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" \
+        --mode audio \
+        --result-file "${replacement_result}" \
+        -- 'https://example.com/watch?v=private-staging-active-replacement' \
+        >"${replacement_log}" 2>&1 &
+    replacement_pid=$!
+
+    wait_for_file "${replacement_started}" 10 \
+        'private staging replacement worker startup'
+
+    replacement_staging=''
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        replacement_staging=$(find "${OUTPUT_DIR}" \
+            -mindepth 1 -maxdepth 1 -type d \
+            -name '.yt-dlp-aria2.????????' -print -quit 2>/dev/null || true)
+        [[ -n ${replacement_staging} ]] && break
+        sleep 0.05
+    done
+
+    [[ -n ${replacement_staging} && -d ${replacement_staging} ]] \
+        || fail 'Replacement scenario did not create private aria2 staging.'
+    [[ -f ${replacement_staging}/.yt-dlp-aria2-owner-v1 ]] \
+        || fail 'Replacement scenario staging ownership marker is missing.'
+
+    # Move the transaction-owned directory away and create a different
+    # directory at exactly the pathname retained by PRIVATE_ARIA2_STAGING.
+    mv -- "${replacement_staging}" "${replacement_original}"
+
+    mkdir -- "${replacement_staging}"
+    chmod 700 -- "${replacement_staging}"
+
+    printf '%s\n' 'yt-dlp-aria2-private-staging-v1' \
+        >"${replacement_staging}/.yt-dlp-aria2-owner-v1"
+    printf '%s\n' 'foreign replacement must survive active cleanup' \
+        >"${replacement_staging}/foreign-sentinel"
+
+    chmod 600 -- \
+        "${replacement_staging}/.yt-dlp-aria2-owner-v1" \
+        "${replacement_staging}/foreign-sentinel"
+
+    # TERM drives the real engine shutdown/EXIT cleanup path. The worker was
+    # synchronized above; no timing window or arbitrary production sleep is
+    # required to reproduce the replacement condition.
+    kill -TERM -- "${replacement_pid}" 2>/dev/null \
+        || fail 'Unable to terminate private staging replacement worker.'
+
+    replacement_status=0
+    wait "${replacement_pid}" 2>/dev/null || replacement_status=$?
+
+    assert_equals '143' "${replacement_status}" \
+        'private staging replacement TERM exit status'
+    assert_no_test_processes \
+        'private staging replacement left worker processes'
+
+    [[ -f ${replacement_staging}/foreign-sentinel ]] \
+        || fail 'Active cleanup deleted the foreign replacement staging directory.'
+    [[ -d ${replacement_original} ]] \
+        || fail 'Active cleanup unexpectedly followed the moved original staging.'
+
+    assert_file_contains "${replacement_log}" \
+        'preserving ambiguous active private aria2 staging directory' \
+        'active staging replacement preservation diagnostic'
+
+    rm -rf -- \
+        "${replacement_staging}" \
+        "${replacement_original}"
+    rm -f -- \
+        "${replacement_started}" \
+        "${replacement_result}" \
+        "${replacement_log}" \
+        "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    # The conservative replacement protection must not turn ordinary owned
+    # staging into a leak: a normal successful transaction still cleans it.
+    prepare_argument_log 'private-staging-normal-cleanup'
+    assert_status 0 'owned active private staging is cleaned normally' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" \
+        --mode audio \
+        -- 'https://example.com/watch?v=private-staging-normal-cleanup'
+
+    owned_staging_leftover=$(find "${OUTPUT_DIR}" \
+        -mindepth 1 -maxdepth 1 -type d \
+        -name '.yt-dlp-aria2.????????' -print -quit 2>/dev/null || true)
+
+    [[ -z ${owned_staging_leftover} ]] \
+        || fail 'A normal transaction left owned private aria2 staging behind.'
+
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
     # Regression guard: a non-interceptable crash must leave a recoverable
     # owner-marked private staging directory, and the next run may remove only
     # candidates whose ownership and structure are unambiguous.

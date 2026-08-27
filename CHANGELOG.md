@@ -1,3 +1,22 @@
+## 2.2.4 - 2026-08-27
+
+### Filesystem safety and reliability
+
+- Harden active private aria2 staging cleanup so a different directory that
+  replaces the transaction-owned staging pathname is preserved instead of
+  being recursively deleted.
+- Reuse the conservative private-staging ownership validation for active EXIT
+  cleanup, keeping ambiguous or foreign contents intact.
+
+### Qualification
+
+- Add deterministic fault-injection coverage that replaces the active staging
+  pathname before EXIT cleanup and proves that foreign replacement contents
+  survive.
+- Verify that valid transaction-owned staging still cleans normally and that
+  existing crash recovery, process-group supervision, private aria2 rollback,
+  progress, runtime, packaging and cleanup suites remain green.
+
 ## 2.2.3 - 2026-08-27
 
 ### Security and reliability
