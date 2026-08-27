@@ -16,27 +16,3 @@ space_redirects = false
 keep_padding = false
 function_next_line = false
 minify = false
-
-[packaging/deb/postinst]
-shell_variant = posix
-indent_style = space
-indent_size = 4
-binary_next_line = true
-switch_case_indent = true
-simplify = false
-
-[packaging/deb/prerm]
-shell_variant = posix
-indent_style = space
-indent_size = 4
-binary_next_line = true
-switch_case_indent = true
-simplify = false
-
-[packaging/deb/postrm]
-shell_variant = posix
-indent_style = space
-indent_size = 4
-binary_next_line = true
-switch_case_indent = true
-simplify = false

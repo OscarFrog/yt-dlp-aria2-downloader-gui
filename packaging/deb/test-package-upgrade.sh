@@ -25,7 +25,7 @@ done
     printf 'Error: DEB upgrade test must run as root.\n' >&2
     exit 77
 }
-for command_name in apt-get dpkg-query grep mkdir mktemp realpath rm rmdir sha256sum tar; do
+for command_name in apt-get dirname dpkg dpkg-query grep mkdir mktemp realpath rm rmdir sha256sum tar; do
     command -v "${command_name}" >/dev/null 2>&1 || {
         printf 'Error: required command is absent: %s\n' "${command_name}" >&2
         exit 127
@@ -33,7 +33,16 @@ for command_name in apt-get dpkg-query grep mkdir mktemp realpath rm rmdir sha25
 done
 old_package=$(realpath -e -- "${OLD_INPUT}")
 new_package=$(realpath -e -- "${NEW_INPUT}")
-[[ ${old_package} == *.deb && ${new_package} == *.deb ]] || exit 2
+if [[ ! -f ${old_package} || ${old_package} != *.deb ]]; then
+    printf 'Error: old package is not a regular DEB file: %s\n' \
+        "${old_package}" >&2
+    exit 2
+fi
+if [[ ! -f ${new_package} || ${new_package} != *.deb ]]; then
+    printf 'Error: new package is not a regular DEB file: %s\n' \
+        "${new_package}" >&2
+    exit 2
+fi
 if dpkg-query -W -f='${Status}' "${PACKAGE_NAME}" 2>/dev/null \
     | grep -Fqx -- 'install ok installed'; then
     printf 'Error: %s must not be installed before the upgrade test.\n' "${PACKAGE_NAME}" >&2
@@ -51,166 +60,104 @@ if [[ ${DATA_HOME} != /* ]]; then
     DATA_HOME="${HOME}/.local/share"
 fi
 readonly DATA_HOME
-
 RUNTIME_ROOT="${DATA_HOME}/yt-dlp-aria2-downloader/runtime"
 readonly RUNTIME_ROOT
-runtime_root_created=false
-runtime_probe_dir=''
 
-if [[ -e ${RUNTIME_ROOT} || -L ${RUNTIME_ROOT} ]]; then
-    if [[ ! -d ${RUNTIME_ROOT} || -L ${RUNTIME_ROOT} ]]; then
-        printf 'Error: unsafe pre-existing runtime root: %s\n' \
-            "${RUNTIME_ROOT}" >&2
-        exit 65
-    fi
-else
-    mkdir -p -- "${RUNTIME_ROOT}" || {
-        printf 'Error: unable to create runtime preservation fixture root: %s\n' \
-            "${RUNTIME_ROOT}" >&2
-        exit 65
-    }
-    runtime_root_created=true
-fi
-
-runtime_probe_dir=$(mktemp -d \
-    "${RUNTIME_ROOT}/.package-upgrade-preservation.XXXXXX") || {
-    printf '%s\n' \
-        'Error: unable to create runtime preservation probe.' >&2
-    exit 65
-}
-
-printf 'package-upgrade-preservation:%s->%s\n' \
-    "${OLD_VERSION}" "${NEW_VERSION}" \
-    >"${runtime_probe_dir}/sentinel"
-
-runtime_tree_snapshot() {
-    local runtime_parent runtime_name digest
-
-    runtime_parent=${RUNTIME_ROOT%/*}
-    runtime_name=${RUNTIME_ROOT##*/}
-
-    digest=$(
-        tar \
-            --sort=name \
-            --mtime='UTC 1970-01-01' \
-            --owner=0 \
-            --group=0 \
-            --numeric-owner \
-            --format=gnu \
-            -cf - \
-            -C "${runtime_parent}" \
-            "${runtime_name}" \
-            | sha256sum
-    ) || return 1
-
-    printf '%s\n' "${digest%% *}"
-}
-
-assert_runtime_preserved() {
-    local stage=$1
-    local current_digest
-    local snapshot_status=0
-
-    if [[ ! -d ${RUNTIME_ROOT} || -L ${RUNTIME_ROOT} ]]; then
-        printf 'Error: runtime root disappeared or became unsafe during %s.\n' \
-            "${stage}" >&2
-        return 65
-    fi
-
-    set +e
-    current_digest=$(runtime_tree_snapshot)
-    snapshot_status=$?
-    set -e
-
-    if ((snapshot_status != 0)); then
-        printf 'Error: unable to snapshot runtime tree during %s.\n' \
-            "${stage}" >&2
-        return 65
-    fi
-
-    if [[ ${current_digest} != "${runtime_tree_baseline}" ]]; then
-        printf 'Error: per-user runtime tree changed during %s.\n' \
-            "${stage}" >&2
-        return 65
-    fi
-
-    return 0
-}
-
-assert_runtime_removed() {
-    local stage=$1
-
-    if [[ -e ${RUNTIME_ROOT} || -L ${RUNTIME_ROOT} ]]; then
-        printf 'Error: per-user runtime remains after %s: %s\n' \
-            "${stage}" "${RUNTIME_ROOT}" >&2
-        return 65
-    fi
-
-    return 0
-}
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+PROJECT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)
+readonly SCRIPT_DIR PROJECT_DIR
+# shellcheck source=tests/lib/package-runtime-preservation.sh
+source "${PROJECT_DIR}/tests/lib/package-runtime-preservation.sh"
 
 cleanup() {
     if [[ ${installed} == true ]]; then
         DEBIAN_FRONTEND=noninteractive apt-get remove --yes \
             "${PACKAGE_NAME}" >/dev/null 2>&1 || true
     fi
+    package_runtime_fixture_cleanup
+}
 
-    if [[ -n ${runtime_probe_dir} &&
-        ${runtime_probe_dir} == "${RUNTIME_ROOT}/.package-upgrade-preservation."* &&
-        (-e ${RUNTIME_ROOT} || -L ${RUNTIME_ROOT}) ]]; then
-        if [[ -d ${RUNTIME_ROOT} && ! -L ${RUNTIME_ROOT} ]]; then
-            rm -rf -- "${runtime_probe_dir}"
-        else
-            printf 'Warning: refusing to clean runtime probe through unsafe runtime root: %s\n' \
-                "${RUNTIME_ROOT}" >&2
-        fi
-    fi
+assert_installed_package_version() {
+    local expected_version=$1
+    local stage=$2
+    local installed_package_version=''
 
-    if [[ ${runtime_root_created} == true ]]; then
-        rmdir -- "${RUNTIME_ROOT}" >/dev/null 2>&1 || true
+    installed_package_version=$(dpkg-query -W -f='${Version}' "${PACKAGE_NAME}") || {
+        printf 'Error: unable to read installed DEB version during %s.\n' \
+            "${stage}" >&2
+        return 65
+    }
+    if [[ ${installed_package_version} != "${expected_version}-1" ]]; then
+        printf 'Error: unexpected installed DEB version during %s: %s (expected %s-1).\n' \
+            "${stage}" "${installed_package_version}" "${expected_version}" >&2
+        return 65
     fi
+    return 0
 }
 
 main() {
-    set +e
-    runtime_tree_baseline=$(runtime_tree_snapshot)
-    runtime_tree_snapshot_status=$?
-    set -e
+    local old_version_output=''
+    local new_version_output=''
+    local status=''
+    local path=''
 
-    if ((runtime_tree_snapshot_status != 0)); then
-        printf '%s\n' \
-            'Error: unable to create baseline runtime snapshot.' >&2
-        exit 65
-    fi
     trap cleanup EXIT
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
+    package_runtime_fixture_prepare \
+        "package-upgrade-preservation:${OLD_VERSION}->${NEW_VERSION}"
+
     DEBIAN_FRONTEND=noninteractive apt-get install --yes "${old_package}"
     installed=true
+    assert_installed_package_version "${OLD_VERSION}" 'previous package installation'
     assert_runtime_preserved 'installation of previous package'
     old_version_output=$(/usr/bin/yt-dlp-aria2-downloader --version)
-    [[ ${old_version_output} == "yt-dlp-aria2-downloader version ${OLD_VERSION}" ]]
+    [[ ${old_version_output} == "yt-dlp-aria2-downloader version ${OLD_VERSION}" ]] || {
+        printf 'Error: previous DEB executable reports an unexpected version: %s\n' \
+            "${old_version_output}" >&2
+        exit 65
+    }
+
     DEBIAN_FRONTEND=noninteractive apt-get install --yes "${new_package}"
+    assert_installed_package_version "${NEW_VERSION}" 'package upgrade'
     assert_runtime_preserved 'package upgrade'
     new_version_output=$(/usr/bin/yt-dlp-aria2-downloader --version)
-    [[ ${new_version_output} == "yt-dlp-aria2-downloader version ${NEW_VERSION}" ]]
-    [[ -x /usr/bin/yt-dlp-aria2-downloader-gui ]]
-    [[ -x /usr/lib/yt-dlp-aria2-downloader/runtime-manager.sh ]]
+    [[ ${new_version_output} == "yt-dlp-aria2-downloader version ${NEW_VERSION}" ]] || {
+        printf 'Error: upgraded DEB executable reports an unexpected version: %s\n' \
+            "${new_version_output}" >&2
+        exit 65
+    }
+    [[ -x /usr/bin/yt-dlp-aria2-downloader-gui ]] || {
+        printf '%s\n' 'Error: upgraded DEB GUI launcher is absent.' >&2
+        exit 65
+    }
+    [[ -x /usr/lib/yt-dlp-aria2-downloader/runtime-manager.sh ]] || {
+        printf '%s\n' 'Error: upgraded DEB runtime manager is absent.' >&2
+        exit 65
+    }
+
     DEBIAN_FRONTEND=noninteractive apt-get remove --yes "${PACKAGE_NAME}"
     installed=false
-    assert_runtime_removed 'final package removal'
+    assert_runtime_preserved 'final DEB package removal'
+
+    dpkg --purge "${PACKAGE_NAME}"
+    assert_runtime_preserved 'DEB remove-to-purge transition'
+
     status=$(dpkg-query -W -f='${Status}' "${PACKAGE_NAME}" 2>/dev/null || true)
-    [[ ${status} != 'install ok installed' ]]
+    [[ ${status} != 'install ok installed' ]] || {
+        printf '%s\n' 'Error: DEB remains installed after upgrade/removal.' >&2
+        exit 65
+    }
     for path in "/usr/lib/yt-dlp-aria2-downloader" "/usr/share/doc/${PACKAGE_NAME}"; do
         [[ ! -e ${path} && ! -L ${path} ]] || {
             printf 'Error: DEB upgrade/removal left a private path: %s\n' "${path}" >&2
             exit 65
         }
     done
-    printf 'DEB upgrade passed: %s -> %s.\n' "${OLD_VERSION}" "${NEW_VERSION}"
-
+    printf 'DEB upgrade passed with user-runtime preservation: %s -> %s.\n' \
+        "${OLD_VERSION}" "${NEW_VERSION}"
 }
 
 main "$@"

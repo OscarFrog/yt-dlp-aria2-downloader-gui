@@ -25,9 +25,6 @@ PACKAGING_SHELL_FILES=(
     packaging/install-tree.sh
     packaging/package-user-cleanup.sh
     packaging/deb/build-deb.sh
-    packaging/deb/postinst
-    packaging/deb/prerm
-    packaging/deb/postrm
     packaging/deb/test-package-lifecycle.sh
     packaging/deb/test-package-upgrade.sh
     packaging/rpm/build-rpm.sh
@@ -41,6 +38,7 @@ TEST_SHELL_FILES=(
     tests/run-all.sh
     tests/run-all-signal-integration.sh
     tests/lib/assert.sh
+    tests/lib/package-runtime-preservation.sh
     tests/lib/project-files.sh
     tests/mock-integration.sh
     tests/private-aria2-plan-integration.sh
@@ -72,15 +70,13 @@ DEVELOPMENT_SHELL_FILES=(
 )
 
 # Shell files intentionally exempt from the explicit main() entry-point rule:
-# POSIX maintainer hooks, sourced libraries, and tiny linear Bash executables.
+# sourced libraries and tiny linear Bash executables.
 # shellcheck disable=SC2034 # Array is read by test-static.sh.
 MAIN_EXEMPT_SHELL_FILES=(
     packaging/install-tree.sh
-    packaging/deb/postinst
-    packaging/deb/prerm
-    packaging/deb/postrm
     tests/run-all.sh
     tests/lib/assert.sh
+    tests/lib/package-runtime-preservation.sh
     tests/lib/project-files.sh
 )
 

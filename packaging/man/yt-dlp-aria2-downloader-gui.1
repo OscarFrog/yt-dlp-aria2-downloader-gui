@@ -1,0 +1,30 @@
+.TH YT-DLP-ARIA2-DOWNLOADER-GUI 1 "" "yt-dlp aria2 downloader" "User Commands"
+.SH NAME
+yt-dlp-aria2-downloader-gui \- Zenity interface for yt-dlp aria2 downloader
+.SH SYNOPSIS
+.B yt-dlp-aria2-downloader-gui
+.SH DESCRIPTION
+.B yt-dlp-aria2-downloader-gui
+starts the Zenity graphical interface. It lets the user select a download
+profile and destination, then supervises a single
+.BR yt-dlp-aria2-downloader (1)
+session with progress reporting and cancellation.
+.PP
+The graphical interface supports complete MKV video, authenticated YouTube HLS
+video using Firefox cookies, and native-format audio profiles.
+.SH FILES
+.TP
+.I ~/.config/yt-dlp-aria2-downloader/gui.conf
+Default GUI configuration file when
+.B XDG_CONFIG_HOME
+is not set.
+.TP
+.I ~/.local/state/yt-dlp-aria2-downloader/
+Default retained GUI state and diagnostic-log location when
+.B XDG_STATE_HOME
+is not set.
+.SH SEE ALSO
+.BR yt-dlp-aria2-downloader (1),
+.BR zenity (1)
+.SH HOMEPAGE
+https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui

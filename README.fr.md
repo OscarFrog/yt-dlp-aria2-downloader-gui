@@ -39,7 +39,7 @@ une seule URL avec l'un des trois profils suivants :
 Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
 les téléchargements directs HTTP(S) via un fichier d'entrée aria2 privé et
 FFmpeg pour fusionner, remuxer ou extraire les flux. Les flux DASH et HLS restent
-volontairement traités par le téléchargeur natif de yt-dlp. La version actuelle est la **2.2.4**.
+volontairement traités par le téléchargeur natif de yt-dlp. La version actuelle est la **2.2.5**.
 
 ## Installation recommandée
 
@@ -50,7 +50,7 @@ Pour **Fedora 44 ou une version plus récente**, téléchargez ces quatre fichie
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.2.4-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.2.5-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -58,7 +58,7 @@ Vérifiez les fichiers téléchargés puis lancez le bootstrap Fedora officiel :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.2.4-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.2.5-1.fc44.noarch.rpm
 ```
 
 Le bootstrap active RPM Fusion Free si nécessaire, remplace `ffmpeg-free` par
@@ -68,7 +68,7 @@ runtimes yt-dlp et Deno propres à l'utilisateur.
 
 Pour **Debian ou Ubuntu**, téléchargez le DEB versionné et `SHA256SUMS`,
 vérifiez-les puis installez le paquet avec `sudo apt install
-./yt-dlp-aria2-downloader-gui_2.2.4-1_all.deb`. Pour **les autres distributions
+./yt-dlp-aria2-downloader-gui_2.2.5-1_all.deb`. Pour **les autres distributions
 GNU/Linux ou une utilisation portable**, utilisez le ZIP versionné ou un clone
 Git. Les runtimes yt-dlp et Deno gérés automatiquement prennent actuellement en
 charge Linux `x86_64` et `aarch64`.
@@ -175,8 +175,8 @@ l'identité de la release :
 
 ```bash
 gh attestation verify ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.2.4 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.2.4 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.2.5 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.2.5 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 `SHA256SUMS` reste utile pour un contrôle local ou hors ligne ; les attestations
@@ -228,7 +228,7 @@ de déploiement **tag** sélectionnée `v*`. La reprise manuelle reste disponibl
 mais elle doit exécuter le workflow depuis le tag exact de la release :
 
 ```bash
-gh workflow run release.yml   --ref v2.2.4   -f tag=v2.2.4   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref v2.2.5   -f tag=v2.2.5   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Le workflow refuse indépendamment toute exécution manuelle dont le type de ref,
@@ -273,7 +273,7 @@ Téléchargez :
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.2.4-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.2.5-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -286,7 +286,7 @@ sha256sum --ignore-missing --check SHA256SUMS
 Puis lancez :
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.2.4-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.2.5-1.fc44.noarch.rpm
 ```
 
 Le bootstrap refuse par défaut un RPM de release non signé. Il vérifie que
@@ -321,11 +321,11 @@ de l'utilisateur et vérifiés avant activation.
 
 ### Debian et Ubuntu
 
-La release 2.2.4 publie un DEB indépendant de l'architecture, aligné sur le
+La release 2.2.5 publie un DEB indépendant de l'architecture, aligné sur le
 même modèle de runtimes gérés que Fedora. Téléchargez :
 
 ```text
-yt-dlp-aria2-downloader-gui_2.2.4-1_all.deb
+yt-dlp-aria2-downloader-gui_2.2.5-1_all.deb
 SHA256SUMS
 ```
 
@@ -333,13 +333,16 @@ Vérifiez puis installez :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.2.4-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.2.5-1_all.deb
 ```
 
-Le DEB dépend des outils système habituels (`aria2c`, Python 3.10+,
-FFmpeg/FFprobe, Zenity, curl, GnuPG, unzip, coreutils, grep, findutils et util-linux), mais **ne dépend
-pas de paquets yt-dlp ou Deno fournis par la distribution**. yt-dlp et Deno sont
-installés et vérifiés dans le runtime de l'utilisateur au premier lancement.
+Le DEB dépend explicitement d'`aria2`, de Python 3.10+, de FFmpeg/FFprobe,
+de Zenity, curl, GnuPG, unzip et du thème d'icônes hicolor. GNU coreutils, grep,
+findutils, sed et util-linux sont fournis par la base Essential de Debian/Ubuntu
+et ne sont pas redéclarés inutilement comme dépendances non versionnées. Le DEB
+**ne dépend pas de paquets yt-dlp ou Deno fournis par la distribution**. yt-dlp
+et Deno sont installés et vérifiés dans le runtime de l'utilisateur au premier
+lancement.
 
 ### Commandes installées par les paquets
 
@@ -370,13 +373,19 @@ Debian/Ubuntu :
 sudo apt remove yt-dlp-aria2-downloader-gui
 ```
 
-Une **désinstallation finale du paquet** effectue désormais un nettoyage
-best-effort du runtime géré propre à chaque utilisateur ainsi que des artefacts
-XDG historiques portant exactement le nom `yt-dlp-aria2-downloader-gui`, pour
-les utilisateurs dont le dossier personnel est disponible. Une **mise à niveau
-du paquet ne déclenche pas ce nettoyage**.
+Sous Fedora, une **désinstallation finale du RPM** continue d'effectuer un
+nettoyage best-effort du runtime géré propre à chaque utilisateur ainsi que des
+artefacts XDG historiques portant exactement le nom
+`yt-dlp-aria2-downloader-gui`, pour les utilisateurs dont le dossier personnel
+est disponible. Une mise à niveau du RPM ne déclenche pas ce nettoyage.
 
-Le nettoyage repose volontairement sur une liste blanche de chemins. Il
+Sous Debian/Ubuntu, `apt remove` et `apt purge` suppriment le payload système du
+paquet mais préservent volontairement les runtimes, la configuration, l'état et
+le cache propres à chaque utilisateur. Une réinstallation reste ainsi non
+destructive et aucun script du gestionnaire de paquets ne parcourt les dossiers
+personnels.
+
+Le nettoyage Fedora repose volontairement sur une liste blanche de chemins. Il
 supprime le runtime géré sous
 `${XDG_DATA_HOME:-$HOME/.local/share}/yt-dlp-aria2-downloader/runtime/` et les
 anciens chemins `yt-dlp-aria2-downloader-gui` connus dans les emplacements XDG
@@ -384,8 +393,8 @@ de données, configuration, état et cache. Il ne recherche pas récursivement
 dans le dossier personnel tous les fichiers dont le nom ressemble à celui du
 paquet.
 
-À partir de la 2.1.27, le gestionnaire de runtime enregistre le
-`XDG_DATA_HOME` réellement utilisé afin qu'une désinstallation ultérieure
+Pour le nettoyage RPM, à partir de la 2.1.27, le gestionnaire de runtime
+enregistre le `XDG_DATA_HOME` réellement utilisé afin qu'une désinstallation ultérieure
 puisse aussi retrouver un emplacement de données personnalisé. Un emplacement
 XDG personnalisé utilisé uniquement par une ancienne version et jamais observé
 par la 2.1.27 ne peut pas être reconstitué automatiquement de manière sûre.
@@ -419,7 +428,7 @@ courant.
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.2.4.zip
+yt-dlp-aria2-downloader-gui-2.2.5.zip
 SHA256SUMS
 ```
 
@@ -427,8 +436,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.2.4.zip
-cd yt-dlp-aria2-downloader-gui-2.2.4
+unzip yt-dlp-aria2-downloader-gui-2.2.5.zip
+cd yt-dlp-aria2-downloader-gui-2.2.5
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install

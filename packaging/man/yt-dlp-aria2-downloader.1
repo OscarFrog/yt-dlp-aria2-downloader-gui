@@ -1,0 +1,57 @@
+.TH YT-DLP-ARIA2-DOWNLOADER 1 "" "yt-dlp aria2 downloader" "User Commands"
+.SH NAME
+yt-dlp-aria2-downloader \- download one video or audio track with managed yt-dlp and aria2
+.SH SYNOPSIS
+.B yt-dlp-aria2-downloader
+.RI [ OPTIONS ] " VIDEO_URL"
+.SH DESCRIPTION
+.B yt-dlp-aria2-downloader
+is the command-line engine for yt-dlp aria2 downloader. It downloads one URL
+as a complete MKV video or as the best available native audio track. Direct
+HTTP(S) media may use aria2; DASH and HLS remain on yt-dlp's native downloader.
+yt-dlp and Deno are managed in per-user runtime storage and verified before use.
+.SH OPTIONS
+.TP
+.BR -o ", " --output-dir " " DIR
+Write the final media into DIR.
+.TP
+.BR -m ", " --mode " " MODE
+Select
+.B video
+or
+.BR audio .
+Video mode produces a complete MKV. Audio mode preserves the source codec and
+container whenever possible.
+.TP
+.B --machine-progress
+Emit stable machine-readable plan and progress records.
+.TP
+.B --youtube-hls-firefox
+For YouTube video mode, read Firefox cookies and use the authenticated HLS
+fallback before remuxing to MKV.
+.TP
+.B --result-file " " FILE
+Write the final media path to FILE.
+.TP
+.B --url-file " " FILE
+Read the single URL from a private regular file instead of a positional
+argument.
+.TP
+.BR -h ", " --help
+Display command help.
+.TP
+.BR -V ", " --version
+Display the program version.
+.SH FILES
+.TP
+.I ~/.local/share/yt-dlp-aria2-downloader/
+Default per-user data and managed runtime location when
+.B XDG_DATA_HOME
+is not set.
+.SH SEE ALSO
+.BR yt-dlp-aria2-downloader-gui (1),
+.BR yt-dlp (1),
+.BR aria2c (1),
+.BR ffmpeg (1)
+.SH HOMEPAGE
+https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui
