@@ -3,7 +3,7 @@
 # ==============================================================================
 # Project     : yt-dlp-aria2-downloader-gui
 # File        : packaging/package-user-cleanup.sh
-# Purpose     : Safely remove package-owned per-user data during package removal.
+# Purpose     : Safely remove RPM-managed per-user data during final package erase.
 # ==============================================================================
 
 # Security invariants:
@@ -13,7 +13,7 @@
 # - only an explicit path allowlist is removed;
 # - marker contents are data, never sourced/eval'ed;
 # - symlinked parent components below an authorized XDG root are never crossed;
-# - cleanup failure must not break dpkg/rpm removal.
+# - cleanup failure must not break RPM package removal.
 
 set -u -o pipefail
 umask 077
@@ -22,6 +22,7 @@ readonly APP_ID='yt-dlp-aria2-downloader'
 readonly LEGACY_GUI_ID='yt-dlp-aria2-downloader-gui'
 readonly MARKER_NAME='.package-runtime-data-home-v1'
 readonly RUNTIME_OWNER_SENTINEL='.package-runtime-owner-v1'
+readonly MAX_METADATA_BYTES=4096
 
 SELF=$(realpath -e -- "${BASH_SOURCE[0]}") || {
     printf 'Warning: unable to resolve package cleanup helper path.\n' >&2
@@ -69,6 +70,25 @@ safe_home() {
 
 safe_xdg_base() {
     safe_absolute_path "$1"
+}
+
+metadata_file_is_bounded() {
+    local path=$1
+    local size=''
+
+    [[ -f ${path} && ! -L ${path} ]] || return 1
+    size=$(stat -c '%s' -- "${path}" 2>/dev/null) || return 1
+    [[ ${size} =~ ^[0-9]{1,4}$ ]] || return 1
+    ((10#${size} <= MAX_METADATA_BYTES))
+}
+
+home_owned_by_effective_user() {
+    local home=$1
+    local owner=''
+
+    [[ -d ${home} ]] || return 1
+    owner=$(stat -Lc '%u' -- "${home}" 2>/dev/null) || return 1
+    [[ ${owner} == "${EUID}" ]]
 }
 
 path_has_symlink_parent_below_base() {
@@ -127,17 +147,36 @@ remove_exact() {
     return 0
 }
 
+rmdir_exact_if_empty() {
+    local base=$1
+    local path=$2
+
+    safe_xdg_base "${base}" || return 1
+    safe_absolute_path "${path}" || return 1
+    [[ ${path} == "${base}/"* ]] || return 1
+    path_has_symlink_parent_below_base "${base}" "${path}" && return 1
+
+    if [[ -d ${path} && ! -L ${path} ]]; then
+        rmdir -- "${path}" 2>/dev/null || true
+    fi
+    return 0
+}
+
 remove_legacy_icons() {
     local data_home=$1
     local path
+    local nullglob_was_set=false
     local -a icons=()
 
+    shopt -q nullglob && nullglob_was_set=true
     shopt -s nullglob
     icons=(
         "${data_home}/icons/hicolor/"*/apps/"${LEGACY_GUI_ID}.png"
         "${data_home}/icons/hicolor/"*/apps/"${LEGACY_GUI_ID}.svg"
     )
-    shopt -u nullglob
+    if [[ ${nullglob_was_set} == false ]]; then
+        shopt -u nullglob
+    fi
 
     for path in "${icons[@]}"; do
         remove_exact "${data_home}" "${path}" || true
@@ -156,13 +195,13 @@ custom_runtime_root_is_owned() {
     if path_has_symlink_parent_below_base "${base}" "${sentinel}"; then
         return 1
     fi
-    [[ -f ${sentinel} && ! -L ${sentinel} ]] || return 1
+    metadata_file_is_bounded "${sentinel}" || return 1
 
     owner=$(stat -c '%u' -- "${sentinel}" 2>/dev/null) || return 1
     mode=$(stat -c '%a' -- "${sentinel}" 2>/dev/null) || return 1
     [[ ${owner} == "${EUID}" && ${mode} == 600 ]] || return 1
 
-    mapfile -t lines <"${sentinel}" || return 1
+    mapfile -t -n 5 lines <"${sentinel}" || return 1
     ((${#lines[@]} == 4)) || return 1
     [[ ${lines[0]} == "app=${APP_ID}" ]] || return 1
     [[ ${lines[1]} == "uid=${EUID}" ]] || return 1
@@ -210,7 +249,8 @@ cleanup_one_home() {
 
     if [[ ${marker_parent_safe} == true &&
         -f ${marker} && ! -L ${marker} ]]; then
-        if mapfile -t marker_lines <"${marker}" \
+        if metadata_file_is_bounded "${marker}" \
+            && mapfile -t -n 2 marker_lines <"${marker}" \
             && ((${#marker_lines[@]} == 1)); then
             candidate=${marker_lines[0]}
         else
@@ -245,7 +285,7 @@ cleanup_one_home() {
         remove_exact \
             "${data_home}" \
             "${data_home}/${APP_ID}/${RUNTIME_OWNER_SENTINEL}" || true
-        rmdir -- "${data_home}/${APP_ID}" 2>/dev/null || true
+        rmdir_exact_if_empty "${data_home}" "${data_home}/${APP_ID}" || true
     done
 
     remove_exact "${config_home}" "${config_home}/${LEGACY_GUI_ID}" || true
@@ -257,7 +297,7 @@ cleanup_one_home() {
     remove_exact "${default_data}" "${marker}" || true
 
     # Preserve a possible portable ZIP/Git launcher in the parent.
-    rmdir -- "${default_data}/${APP_ID}" 2>/dev/null || true
+    rmdir_exact_if_empty "${default_data}" "${default_data}/${APP_ID}" || true
 
     return 0
 }
@@ -267,7 +307,10 @@ run_as_user() {
     local gid=$2
     local home=$3
 
-    safe_home "${home}" || return 0
+    safe_home "${home}" || {
+        warn "refusing invalid HOME for uid=${uid}: ${home}"
+        return 0
+    }
 
     if [[ ! -d ${home} ]]; then
         warn "user home unavailable, skipping uid=${uid}: ${home}"
@@ -275,8 +318,16 @@ run_as_user() {
     fi
 
     if ((uid == 0)); then
-        HOME="${home}" USER=root LOGNAME=root \
-            "${SELF}" --user-home "${home}" || true
+        timeout 30s \
+            env -i \
+            HOME="${home}" \
+            USER=root \
+            LOGNAME=root \
+            PATH='/usr/sbin:/usr/bin:/sbin:/bin' \
+            "${SELF}" --user-home "${home}" || {
+            warn "cleanup failed or timed out for uid=0 home=${home}; continuing"
+            return 0
+        }
         return 0
     fi
 
@@ -308,12 +359,11 @@ run_as_user() {
 enumerate_users() {
     local line
     local getent_output=''
-    local _name _passwd uid gid _gecos home _shell key seen_key
-    local already_seen=false
+    local _name _passwd uid gid _gecos home _shell key
     local passwd_source_usable=false
     local getent_source_usable=false
     local -a records=()
-    local -a seen=()
+    local -A seen=()
 
     if [[ -r /etc/passwd ]]; then
         passwd_source_usable=true
@@ -346,17 +396,13 @@ enumerate_users() {
         [[ ${uid:-} =~ ^[0-9]+$ ]] || continue
         [[ ${gid:-} =~ ^[0-9]+$ ]] || continue
         safe_home "${home:-}" || continue
+        while [[ ${home} == */ && ${home} != / ]]; do
+            home=${home%/}
+        done
 
         key="${uid}:${home}"
-        already_seen=false
-        for seen_key in "${seen[@]}"; do
-            if [[ ${seen_key} == "${key}" ]]; then
-                already_seen=true
-                break
-            fi
-        done
-        [[ ${already_seen} == false ]] || continue
-        seen+=("${key}")
+        [[ -z ${seen["${key}"]+x} ]] || continue
+        seen["${key}"]=1
 
         run_as_user "${uid}" "${gid}" "${home}"
     done
@@ -392,6 +438,14 @@ main() {
                 usage
                 exit 2
             }
+            safe_home "$2" || {
+                warn "refusing invalid HOME: $2"
+                exit 64
+            }
+            if [[ -d $2 ]] && ! home_owned_by_effective_user "$2"; then
+                warn "refusing --user-home for a HOME not owned by effective uid ${EUID}: $2"
+                exit 77
+            fi
             cleanup_one_home "$2"
             ;;
 
@@ -407,6 +461,10 @@ main() {
             [[ $2 =~ ^[0-9]+$ && $3 =~ ^[0-9]+$ ]] || {
                 usage
                 exit 2
+            }
+            safe_home "$4" || {
+                warn "refusing invalid HOME: $4"
+                exit 64
             }
             run_as_user "$2" "$3" "$4"
             ;;

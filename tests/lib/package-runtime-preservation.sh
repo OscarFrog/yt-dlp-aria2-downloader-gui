@@ -6,14 +6,16 @@
 # Purpose     : Share package-upgrade runtime preservation fixtures and assertions.
 # ==============================================================================
 
-# RUNTIME_ROOT is a required caller-provided absolute path.
-# shellcheck disable=SC2154
+# Caller contract: RUNTIME_ROOT must be set to an absolute path before any
+# helper in this sourced library is invoked.
+# shellcheck disable=SC2154 # RUNTIME_ROOT is supplied by the sourcing package test.
 
 PACKAGE_RUNTIME_ROOT_CREATED=false
 PACKAGE_RUNTIME_PARENT_CREATED=false
 PACKAGE_RUNTIME_PROBE_DIR=''
 PACKAGE_RUNTIME_BASELINE=''
 
+# Print a deterministic SHA-256 snapshot of the complete RUNTIME_ROOT tree.
 runtime_tree_snapshot() {
     local runtime_parent=''
     local runtime_name=''
@@ -41,6 +43,7 @@ runtime_tree_snapshot() {
     printf '%s\n' "${digest%% *}"
 }
 
+# Remove only fixture paths created by this library and reset shared state.
 package_runtime_fixture_cleanup() {
     local runtime_parent=''
 
@@ -71,6 +74,7 @@ package_runtime_fixture_cleanup() {
     PACKAGE_RUNTIME_BASELINE=''
 }
 
+# Create a sentinel fixture below RUNTIME_ROOT and record its baseline digest.
 package_runtime_fixture_prepare() {
     local sentinel_text=$1
     local runtime_parent=''
@@ -130,6 +134,7 @@ package_runtime_fixture_prepare() {
     return 0
 }
 
+# Verify that RUNTIME_ROOT still matches the recorded fixture baseline.
 assert_runtime_preserved() {
     local stage=$1
     local current_digest=''
@@ -156,6 +161,7 @@ assert_runtime_preserved() {
     return 0
 }
 
+# Verify that RUNTIME_ROOT no longer exists after an RPM final erase.
 assert_runtime_removed() {
     local stage=$1
 

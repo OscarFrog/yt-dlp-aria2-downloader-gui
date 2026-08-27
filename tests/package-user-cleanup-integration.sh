@@ -217,6 +217,63 @@ main() {
     # Scenario 7: unavailable homes are a non-destructive best-effort skip.
     bash "${HELPER}" --user-home "${root}/does-not-exist"
 
+    # Scenario 8: oversized metadata is rejected before mapfile can load it.
+    home="${root}/home-oversized-marker"
+    default_data="${home}/.local/share"
+    marker="${default_data}/${APP_ID}/${MARKER}"
+    custom_data="${root}/custom-oversized-marker"
+    mkdir -p \
+        "${default_data}/${APP_ID}" \
+        "${custom_data}/${APP_ID}/runtime/valuable"
+    touch "${custom_data}/${APP_ID}/runtime/valuable/keep"
+    printf -v oversized_marker '%*s' 5000 ''
+    printf '%s\n' "${oversized_marker}" >"${marker}"
+    chmod 600 -- "${marker}"
+
+    bash "${HELPER}" --user-home "${home}"
+    assert_present "${custom_data}/${APP_ID}/runtime/valuable/keep"
+
+    # Scenario 9: when this integration itself runs as root, direct privileged
+    # --user-home cleanup must refuse a HOME owned by another UID.
+    if ((EUID == 0)) && command -v chown >/dev/null 2>&1; then
+        foreign_home="${root}/foreign-owned-home"
+        mkdir -p "${foreign_home}/.local/share/${APP_ID}/runtime/valuable"
+        touch "${foreign_home}/.local/share/${APP_ID}/runtime/valuable/keep"
+        chown -R 65534:65534 "${foreign_home}"
+        foreign_status=0
+        foreign_output=$(
+            bash "${HELPER}" --user-home "${foreign_home}" 2>&1
+        ) || foreign_status=$?
+        [[ ${foreign_status} == 77 ]] \
+            || fail "root cross-user --user-home returned ${foreign_status}, expected 77"
+        grep -Fq 'not owned by effective uid' <<<"${foreign_output}" \
+            || fail 'root cross-user --user-home diagnostic is missing'
+        assert_present "${foreign_home}/.local/share/${APP_ID}/runtime/valuable/keep"
+        chown -R 0:0 "${foreign_home}"
+
+        # Scenario 10: ownership validation follows a HOME symlink and refuses
+        # a root-owned link whose target belongs to another UID.
+        foreign_target="${root}/foreign-owned-home-target"
+        foreign_link_home="${root}/foreign-owned-home-link"
+        mkdir -p \
+            "${foreign_target}/.local/share/${APP_ID}/runtime/valuable"
+        touch \
+            "${foreign_target}/.local/share/${APP_ID}/runtime/valuable/keep"
+        chown -R 65534:65534 "${foreign_target}"
+        ln -s -- "${foreign_target}" "${foreign_link_home}"
+        foreign_status=0
+        foreign_output=$(
+            bash "${HELPER}" --user-home "${foreign_link_home}" 2>&1
+        ) || foreign_status=$?
+        [[ ${foreign_status} == 77 ]] \
+            || fail "root cross-user symlinked --user-home returned ${foreign_status}, expected 77"
+        grep -Fq 'not owned by effective uid' <<<"${foreign_output}" \
+            || fail 'root cross-user symlinked --user-home diagnostic is missing'
+        assert_present \
+            "${foreign_target}/.local/share/${APP_ID}/runtime/valuable/keep"
+        chown -R 0:0 "${foreign_target}"
+    fi
+
     printf 'Package user cleanup integration tests passed.\n'
 
 }

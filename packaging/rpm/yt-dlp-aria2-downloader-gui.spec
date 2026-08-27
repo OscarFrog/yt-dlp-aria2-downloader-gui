@@ -75,6 +75,10 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Thu Aug 27 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.2.6-1
+- Harden shell/workflow consistency checks and runtime-manager diagnostics.
+- Harden RPM per-user cleanup metadata and privilege boundaries.
+
 * Thu Aug 27 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.2.5-1
 - Add package manual pages shared with the Debian package.
 - Deduplicate package runtime-preservation qualification helpers.

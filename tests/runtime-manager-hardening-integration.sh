@@ -148,7 +148,13 @@ for fd_path in /proc/$$/fd/*; do
     target=$(readlink -- "${fd_path}" 2>/dev/null || true)
     [[ ${target} != */yt-dlp-aria2-downloader/runtime/update.lock ]] || : >"${MOCK_FD_LEAK_MARKER:?}"
 done
-archive=${!#}
+archive=''
+requested_deno=false
+for arg in "$@"; do
+    [[ ${arg} == *.zip ]] && archive=${arg}
+    [[ ${arg} == deno ]] && requested_deno=true
+done
+[[ -n ${archive} && ${requested_deno} == true ]]
 version=$(sed -n 's/^deno-archive=//p' "${archive}")
 [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 cat >deno <<EOF_DENO
@@ -219,6 +225,7 @@ case ${url} in
     version=${url#*/releases/download/}; version=${version%%/*}; name=${url##*/}
     case ${name} in
     yt-dlp_linux|yt-dlp_linux_aarch64)
+        candidate_version=${MOCK_YTDLP_ASSET_VERSION_OVERRIDE:-${version}}
         cat >"${output}" <<EOF_YTDLP
 #!/usr/bin/env bash
 set -euo pipefail
@@ -230,7 +237,7 @@ for fd_path in /proc/\$\$/fd/*; do
     [[ \${target} != */yt-dlp-aria2-downloader/runtime/update.lock ]] || : >"\${MOCK_FD_LEAK_MARKER:?}"
 done
 case \${1:-} in
---version) printf '%s\\n' '${version}' ;;
+--version) printf '%s\\n' '${candidate_version}' ;;
 --help) printf '%s\\n' --break-match-filters --js-runtimes --list-impersonate-targets --no-update ;;
 --list-impersonate-targets) printf '%s\\n' 'Chrome-140 Linux curl_cffi' ;;
 *) exit 64 ;;
@@ -342,6 +349,35 @@ EOF_VALIDATION_EXTERNAL
     done
     rm -f -- "${deno_root}/current"
     ln -s 2.8.0 "${deno_root}/current"
+
+    # Invalid path requests must fail with a precise usage diagnostic.
+    path_status=0
+    path_error=$(
+        "${runtime_env[@]}" "${RUNTIME_MANAGER}" path invalid-component 2>&1
+    ) || path_status=$?
+    [[ ${path_status} == 2 ]] \
+        || fail "invalid path component returned ${path_status}, expected 2"
+    grep -Fq 'unknown runtime component for path:' <<<"${path_error}" \
+        || fail 'invalid path component diagnostic is missing'
+
+    # A downloaded executable whose own version does not match the immutable
+    # release tag must never be activated.
+    MISMATCH_DATA_HOME="${TEST_ROOT}/version-mismatch-data"
+    mismatch_ytdlp_root="${MISMATCH_DATA_HOME}/yt-dlp-aria2-downloader/runtime/yt-dlp"
+    rm -rf -- "${MISMATCH_DATA_HOME}"
+    mismatch_status=0
+    mismatch_error=$(
+        "${runtime_env[@]}" \
+            XDG_DATA_HOME="${MISMATCH_DATA_HOME}" \
+            MOCK_YTDLP_ASSET_VERSION_OVERRIDE=2026.07.05 \
+            "${RUNTIME_MANAGER}" ensure 2>&1
+    ) || mismatch_status=$?
+    [[ ${mismatch_status} == 1 ]] \
+        || fail "mismatched yt-dlp candidate returned ${mismatch_status}, expected 1"
+    grep -Fq 'does not match resolved release' <<<"${mismatch_error}" \
+        || fail 'mismatched yt-dlp candidate diagnostic is missing'
+    [[ ! -L ${mismatch_ytdlp_root}/current ]] \
+        || fail 'mismatched yt-dlp candidate was activated'
 
     # A completely empty managed-runtime tree must bootstrap both components.
     # This specifically exercises ensure_runtime -> bootstrap_ytdlp/bootstrap_deno,
