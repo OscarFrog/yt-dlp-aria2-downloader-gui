@@ -73,6 +73,10 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Thu Aug 27 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.2.4-1
+- Preserve replacement or ambiguous private aria2 staging during active cleanup.
+- Add deterministic pathname-replacement regression coverage.
+
 * Thu Aug 27 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.2.3-1
 - Harden direct URL replay safety and overflow-safe numeric validation.
 - Strengthen private aria2 rollback, final-media tail validation, and progress recovery.

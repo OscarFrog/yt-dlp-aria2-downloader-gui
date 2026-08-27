@@ -9,7 +9,7 @@
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.2.3"
+readonly VERSION="2.2.4"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -76,9 +76,13 @@ cleanup() {
         rm -f -- "${YTDLP_BATCH_FILE_TMP}" || true
     fi
     if [[ -n ${PRIVATE_ARIA2_STAGING} &&
-        -d ${PRIVATE_ARIA2_STAGING} &&
-        ! -L ${PRIVATE_ARIA2_STAGING} ]]; then
-        rm -rf -- "${PRIVATE_ARIA2_STAGING}" || true
+        (-e ${PRIVATE_ARIA2_STAGING} || -L ${PRIVATE_ARIA2_STAGING}) ]]; then
+        # shellcheck disable=SC2310 # Cleanup preserves staging that no longer validates.
+        if ! remove_private_aria2_staging_candidate \
+            "${PRIVATE_ARIA2_STAGING}" true; then
+            printf 'Warning: preserving ambiguous active private aria2 staging directory: %s\n' \
+                "${PRIVATE_ARIA2_STAGING##*/}" >&2
+        fi
     fi
     if [[ -n ${OUTPUT_LOCK_FD} ]]; then
         flock --unlock "${OUTPUT_LOCK_FD}" 2>/dev/null || true
