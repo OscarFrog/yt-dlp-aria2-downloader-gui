@@ -150,18 +150,21 @@ The automated suite checks, among other things:
 - conservative recovery of abandoned private aria2 staging after SIGKILL,
   including owner-marker, legacy-fingerprint, symlink, unknown-entry,
   invalid-mode and cross-destination negative controls;
-- real aria2 loopback qualification of exact `Referer`, `Cookie`,
-  `Authorization`, multi-header and same-origin redirect fidelity, while
-  sensitive header values remain absent from aria2 argv and captured output;
-- a negative helper mutation that drops `Authorization` and must be rejected by
-  the real header-fidelity server;
+- real two-origin aria2 qualification proving that replay-safe direct
+  headers can stay on private aria2 while `Referer`, `Cookie`, `Authorization`,
+  proxy authorization and non-allowlisted custom headers force native yt-dlp;
+- an unsafe helper mutation proving the cross-origin credential-replay risk when
+  that native-fallback guard is removed, while protected runs keep secrets out
+  of aria2 argv and captured output;
 - retained-log URL redaction, an 8 MiB retained-size limit, and private live
   diagnostics kept under the runtime temporary directory;
 - complete-video rejection when either the video or audio stream is absent,
   plus audio-mode rejection when a content-video stream remains in the final file;
 - real MP3/ID3 attached-cover qualification proving `v:0` sees cover art while
   `V:0` does not, with a temporary `V:0` -> `v:0` validator mutant that must be killed;
-- conditional Deno requirements and YouTube-only remote EJS fallback;
+- managed Deno requirements for YouTube extraction and use of the EJS
+  components bundled with the managed official yt-dlp runtime, without asking
+  the downloader for `--remote-components ejs:npm`;
 - measured wrapper-managed FFmpeg remux progress and bounded progress arithmetic;
 - a complementary real-FFmpeg `-progress pipe:1` integration, repeated three
   times, proving parseable `out_time_us`, monotone/bounded global progress and
@@ -174,11 +177,11 @@ The automated suite checks, among other things:
   attached-cover audio, HLS and DASH transfers using generated media and loopback HTTP servers, with
   transparent shims proving that real aria2c is used for direct transfers and
   not for HLS/DASH fragments;
-- controlled real aria2 Range/no-Range/redirect/error behavior plus interrupted
-  transfer resumption, with explicit server active-request state around the
-  restart marker/accounting boundary, no premature result-file/global 100%,
-  FFprobe-valid finals, and proof that a resumed run transfers a strict
-  remainder instead of the complete object again;
+- controlled real aria2 Range/no-Range/redirect/error behavior plus
+  cancellation and clean restart, with explicit server active-request state
+  around the restart/accounting boundary, no premature result-file/global 100%,
+  removal of private aria2 staging/partials, and FFprobe-valid finals; native
+  yt-dlp `.part` resumption remains available when supported upstream;
 - managed-runtime operation with Deno outside PATH, bounded lock/network waits,
   strict zero-network `require` mode, exact-tag stable/nightly/stable switching,
   lock-descriptor isolation, ten-cycle contention/double-rollback stress,
@@ -209,6 +212,36 @@ The automated suite checks, among other things:
 - a separate read-only post-publication job that freshly downloads the public
   release and proves byte identity with the tested Actions artifacts, rechecks
   `SHA256SUMS`, and verifies provenance against the exact tag commit.
+
+
+### Final-validation scope
+
+`VAL-001` is closed by an end-to-end reproduction and regression. A controlled
+12.021-second MKV truncated to 80% retained `V:0`, `a:0` and the original
+container duration while its content-video packet count fell from 288 to 229;
+the pre-fix engine still returned success and published the result-file.
+
+Final publication still checks the expected streams and retains the HLS-specific
+duration guard. In addition, when FFprobe exposes finite `start_time` and
+`duration` metadata, the engine seeks near the declared end and requires the
+final required A/V timeline to reach within 2% of that timeline, with a
+one-second floor. Audio mode requires `a:0` to reach that boundary. Video mode
+already requires both `V:0` and `a:0` structurally and accepts the tail when
+either required stream reaches it, so a legitimate longer audio tail does not
+turn a valid video into a false truncation. The probe reads packets from a
+near-tail interval to EOF and is bounded by the same 15-second FFprobe deadline;
+it does not decode the complete media. If finite timeline metadata is
+unavailable, the existing structural validation remains the fallback.
+
+The permanent real-tool regression injects a metadata-parseable physical
+truncation immediately before final validation and requires exit 65 with no
+published result-file. The mock suite separately qualifies the tail threshold.
+
+Race-sensitive qualification continues to repeat process-group cancellation,
+PGID publication, quiescence, and clean-restart scenarios. A theoretical signal
+window between asynchronous process creation and Bash's `$!` assignment is kept
+under stress observation; production supervision is not made more complex until
+a surviving descendant is reproduced.
 
 ## GitHub Actions
 

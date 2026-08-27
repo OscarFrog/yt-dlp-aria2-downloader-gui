@@ -10,8 +10,11 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: real-tools-${{ github.workflow }}-${{ github.ref }}
+  group: real-tools-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
 
 jobs:
   pinned-local-media:
@@ -28,15 +31,50 @@ jobs:
         with:
           persist-credentials: false
       - name: Install real engines
+        env:
+          YT_DLP_VERSION: ${{ matrix.yt_dlp_version }}
         run: |
+          set -Eeuo pipefail
           sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes aria2 ffmpeg python3-venv
+          sudo env DEBIAN_FRONTEND=noninteractive \
+            apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
+            aria2 ffmpeg python3-venv
+
+          case ${YT_DLP_VERSION} in
+            2026.6.9)
+              yt_dlp_sha=442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4
+              ;;
+            2026.7.4)
+              yt_dlp_sha=f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266
+              ;;
+            2026.8.19)
+              yt_dlp_sha=1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf
+              ;;
+            *)
+              printf 'Error: no approved yt-dlp wheel digest for %s.\n' \
+                "${YT_DLP_VERSION}" >&2
+              exit 65
+              ;;
+          esac
+
+          requirements="${RUNNER_TEMP}/yt-dlp-requirements.txt"
+          printf 'yt-dlp==%s --hash=sha256:%s\n' \
+            "${YT_DLP_VERSION}" "${yt_dlp_sha}" >"${requirements}"
+
           python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
           "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
-            --disable-pip-version-check "yt-dlp==${{ matrix.yt_dlp_version }}"
-          echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >> "${GITHUB_PATH}"
-      - name: Record yt-dlp version
-        run: yt-dlp --version
+            --disable-pip-version-check \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement "${requirements}"
+          echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
+      - name: Record resolved tool versions
+        run: |
+          set -Eeuo pipefail
+          printf 'yt-dlp: %s\n' "$(yt-dlp --version)"
+          aria2c --version | awk 'NR == 1 { first = $0 } END { print first }'
+          ffmpeg -hide_banner -version | awk 'NR == 1 { first = $0 } END { print first }'
+          ffprobe -hide_banner -version | awk 'NR == 1 { first = $0 } END { print first }'
       - name: Run direct, audio, HLS and DASH boundary qualification (3x)
         shell: bash
         run: |
@@ -79,13 +117,22 @@ jobs:
       - name: Install real engines and current yt-dlp stable
         run: |
           sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes aria2 ffmpeg python3-venv
+          sudo env DEBIAN_FRONTEND=noninteractive \
+            apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
+            aria2 ffmpeg python3-venv
           python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
           "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
-            --disable-pip-version-check --upgrade yt-dlp
-          echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >> "${GITHUB_PATH}"
-      - name: Record resolved current stable yt-dlp version
-        run: yt-dlp --version
+            --disable-pip-version-check \
+            --only-binary=:all: \
+            --upgrade yt-dlp
+          echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
+      - name: Record resolved current-stable tool versions
+        run: |
+          set -Eeuo pipefail
+          printf 'yt-dlp: %s\n' "$(yt-dlp --version)"
+          aria2c --version | awk 'NR == 1 { first = $0 } END { print first }'
+          ffmpeg -hide_banner -version | awk 'NR == 1 { first = $0 } END { print first }'
+          ffprobe -hide_banner -version | awk 'NR == 1 { first = $0 } END { print first }'
       - name: Run current-stable routing qualification (3x)
         shell: bash
         run: |

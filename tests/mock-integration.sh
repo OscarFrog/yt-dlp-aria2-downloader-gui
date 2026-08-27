@@ -571,20 +571,31 @@ case ${1:-} in
     ;;
 esac
 
-if [[ -n ${MOCK_FFPROBE_ARG_LOG:-} ]]; then
-    printf '%s\0' "$@" >"${MOCK_FFPROBE_ARG_LOG}"
-fi
-
 selector=''
 duration_probe=false
+timeline_probe=false
+tail_probe=false
+show_packets=false
 media_path=''
 probe_previous=''
 for argument in "$@"; do
     media_path=${argument}
 
-    if [[ ${argument} == 'format=duration' ]]; then
-        duration_probe=true
-    fi
+    case ${argument} in
+        format=duration)
+            duration_probe=true
+            ;;
+        format=start_time,duration)
+            timeline_probe=true
+            ;;
+        packet=pts_time,dts_time,duration_time)
+            tail_probe=true
+            ;;
+        -show_packets)
+            show_packets=true
+            ;;
+        *) ;;
+    esac
 
     if [[ ${probe_previous} == '-select_streams' ]]; then
         selector=${argument}
@@ -595,6 +606,14 @@ for argument in "$@"; do
         probe_previous='-select_streams'
     fi
 done
+
+# Preserve the pre-existing oracle: the generic argument log represents the
+# structural stream probe, not the later VAL-001 timeline/tail probes.
+if [[ -n ${MOCK_FFPROBE_ARG_LOG:-} &&
+    ${timeline_probe} != true && ${tail_probe} != true ]]; then
+    printf '%s\0' "$@" >"${MOCK_FFPROBE_ARG_LOG}"
+fi
+
 if [[ ${MOCK_FFPROBE_COVER_ART_ONLY:-0} == 1 ]]; then
     case ${selector} in
         v:0 | a:0)
@@ -604,8 +623,7 @@ if [[ ${MOCK_FFPROBE_COVER_ART_ONLY:-0} == 1 ]]; then
         V:0)
             exit 0
             ;;
-        *)
-            ;;
+        *) ;;
     esac
 fi
 if [[ ${MOCK_FFPROBE_MISSING_AUDIO:-0} == 1 && ${selector} == 'a:0' ]]; then
@@ -614,6 +632,40 @@ fi
 if [[ ${MOCK_FFPROBE_EXIT_STATUS:-0} != 0 ]]; then
     printf 'Simulated FFprobe validation failure.\n' >&2
     exit "${MOCK_FFPROBE_EXIT_STATUS}"
+fi
+if [[ ${timeline_probe} == true ]]; then
+    printf '{"format":{"start_time":"%s","duration":"%s"}}\n' \
+        "${MOCK_FFPROBE_START_TIME:-0.000000}" \
+        "${MOCK_FFPROBE_TIMELINE_DURATION:-120.000000}"
+    exit 0
+fi
+if [[ ${tail_probe} == true ]]; then
+    [[ ${show_packets} == true ]] || {
+        printf '%s\n' 'VAL-001 tail probe omitted -show_packets.' >&2
+        exit 64
+    }
+
+    tail_pts=${MOCK_FFPROBE_TAIL_PTS:-119.500000}
+    tail_dts=${MOCK_FFPROBE_TAIL_DTS:-${tail_pts}}
+    tail_duration=${MOCK_FFPROBE_TAIL_DURATION:-0.500000}
+
+    case ${selector} in
+        V:0)
+            tail_pts=${MOCK_FFPROBE_VIDEO_TAIL_PTS:-${tail_pts}}
+            tail_dts=${MOCK_FFPROBE_VIDEO_TAIL_DTS:-${tail_pts}}
+            tail_duration=${MOCK_FFPROBE_VIDEO_TAIL_DURATION:-${tail_duration}}
+            ;;
+        a:0)
+            tail_pts=${MOCK_FFPROBE_AUDIO_TAIL_PTS:-${tail_pts}}
+            tail_dts=${MOCK_FFPROBE_AUDIO_TAIL_DTS:-${tail_pts}}
+            tail_duration=${MOCK_FFPROBE_AUDIO_TAIL_DURATION:-${tail_duration}}
+            ;;
+        *) ;;
+    esac
+
+    printf '{"packets":[{"pts_time":"%s","dts_time":"%s","duration_time":"%s"}]}\n' \
+        "${tail_pts}" "${tail_dts}" "${tail_duration}"
+    exit 0
 fi
 if [[ ${duration_probe} == true ]]; then
     if [[ ${MOCK_FFPROBE_DURATION_EMPTY:-0} == 1 ]]; then
@@ -1534,6 +1586,36 @@ main() {
         || fail 'An HLS target collision did not retain the repaired MP4.'
     rm -f -- "${hls_existing_target}" "${OUTPUT_DIR}/Mock media [abc123].mp4"
 
+    # 2^64+1 seconds must be rejected before Bash arithmetic. Converting first
+    # wraps this value to 1 on a typical 64-bit shell and can turn an absurd
+    # source duration into a plausible one-second value.
+    for oversized_hls_duration in \
+        '18446744073709551617.000000' \
+        '0000000000000000000018446744073709551617.000000'; do
+        prepare_argument_log "youtube-hls-duration-overflow-${oversized_hls_duration//[^[:alnum:]]/_}"
+        oversized_duration_result="${TEST_ROOT}/youtube-hls-duration-overflow.result"
+        rm -f -- "${oversized_duration_result}" \
+            "${OUTPUT_DIR}/Mock media [abc123].mp4" \
+            "${OUTPUT_DIR}/Mock media [abc123].mkv"
+        assert_status 65 'oversized HLS source duration is rejected before arithmetic' \
+            env MOCK_FFPROBE_DURATION="${oversized_hls_duration}" \
+            "${PROJECT_DIR}/download-video.sh" \
+            --output-dir "${OUTPUT_DIR}" --mode video \
+            --youtube-hls-firefox --machine-progress \
+            --result-file "${oversized_duration_result}" \
+            -- 'https://www.youtube.com/watch?v=youtube-hls-duration-overflow'
+        assert_text_contains "${ASSERT_OUTPUT}" \
+            'unable to determine the repaired HLS source duration' \
+            'oversized HLS duration diagnostic'
+        [[ ! -e ${oversized_duration_result} ]] \
+            || fail 'Oversized HLS duration published a result file.'
+        [[ -f "${OUTPUT_DIR}/Mock media [abc123].mp4" ]] \
+            || fail 'Oversized HLS duration did not retain the repaired source.'
+        [[ ! -e "${OUTPUT_DIR}/Mock media [abc123].mkv" ]] \
+            || fail 'Oversized HLS duration published an MKV.'
+        rm -f -- "${OUTPUT_DIR}/Mock media [abc123].mp4"
+    done
+
     prepare_argument_log 'youtube-hls-source-duration-missing'
     youtube_hls_source_duration_result="${TEST_ROOT}/youtube-hls-source-duration-result.txt"
     rm -f -- "${youtube_hls_source_duration_result}"
@@ -2337,6 +2419,76 @@ EOF_BAD_CONFIG
     assert_text_contains "${ASSERT_OUTPUT}" \
         'final media file failed FFprobe validation' \
         'FFprobe failure diagnostic'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    # Fixed-width Bash arithmetic must never see unbounded external version
+    # components. 2^64+1 wraps to 1 on common 64-bit Bash builds, so these
+    # cases are a deterministic negative control for conversion-before-bound.
+    for oversized_version_case in \
+        '18446744073709551617.0.0' \
+        '0000000000000000000018446744073709551617.0.0'; do
+        rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+        prepare_argument_log "yt-version-overflow-${oversized_version_case//[^[:alnum:]]/_}"
+        assert_status 0 "mathematically newer huge yt-dlp version ${oversized_version_case}" \
+            env MOCK_YTDLP_VERSION="${oversized_version_case}" \
+            "${PROJECT_DIR}/download-video.sh" \
+            --output-dir "${OUTPUT_DIR}" \
+            -- 'https://example.com/watch?v=huge-version'
+    done
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    prepare_argument_log 'aria2-version-overflow'
+    assert_status 0 'mathematically newer huge aria2 version is accepted safely' \
+        env MOCK_ARIA2_VERSION='18446744073709551617.0.0' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" \
+        -- 'https://example.com/watch?v=huge-aria2-version'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    prepare_argument_log 'deno-version-overflow'
+    assert_status 0 'mathematically newer huge Deno version is accepted safely' \
+        env MOCK_DENO_VERSION='18446744073709551617.0.0' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" \
+        -- 'https://www.youtube.com/watch?v=huge-deno-version'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    prepare_argument_log 'ffprobe-valid-av-tail-skew'
+    valid_tail_skew_result="${TEST_ROOT}/valid-tail-skew-result.txt"
+    rm -f -- "${valid_tail_skew_result}" \
+        "${OUTPUT_DIR}/Mock media [abc123].webm"
+    assert_status 0 \
+        'video remains valid when audio reaches the declared tail after content video ends' \
+        env MOCK_FFPROBE_VIDEO_TAIL_PTS='90.000000' \
+        MOCK_FFPROBE_VIDEO_TAIL_DURATION='0.000000' \
+        MOCK_FFPROBE_AUDIO_TAIL_PTS='119.500000' \
+        MOCK_FFPROBE_AUDIO_TAIL_DURATION='0.500000' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode video \
+        --result-file "${valid_tail_skew_result}" \
+        -- 'https://example.com/watch?v=valid-av-tail-skew'
+    [[ -s ${valid_tail_skew_result} ]] \
+        || fail 'Valid A/V tail-skew media did not publish a result file.'
+    rm -f -- "${valid_tail_skew_result}" \
+        "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    prepare_argument_log 'ffprobe-tail-truncation'
+    truncated_tail_result="${TEST_ROOT}/truncated-tail-result.txt"
+    rm -f -- "${truncated_tail_result}" \
+        "${OUTPUT_DIR}/Mock media [abc123].webm"
+    assert_status 65 \
+        'metadata-parseable media whose primary stream ends far before the declared duration is rejected' \
+        env MOCK_FFPROBE_TAIL_PTS='90.000000' \
+        MOCK_FFPROBE_TAIL_DURATION='0.000000' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode video \
+        --result-file "${truncated_tail_result}" \
+        -- 'https://example.com/watch?v=truncated-tail'
+    [[ ! -e ${truncated_tail_result} ]] \
+        || fail 'Tail-truncated media published a result file.'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'final media file failed FFprobe validation' \
+        'tail-truncation validation diagnostic'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     assert_status 1 'old yt-dlp version is rejected' \

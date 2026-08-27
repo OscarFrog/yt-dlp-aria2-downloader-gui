@@ -9,7 +9,7 @@
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.2.2"
+readonly VERSION="2.2.3"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -150,30 +150,68 @@ emit_machine_postprocess() {
     fi
 }
 
+normalize_decimal_component() {
+    local output_variable=$1
+    local value=$2
+
+    # Strip all leading zeroes without converting the external decimal string.
+    # Bash arithmetic uses fixed-width integers, so conversion must happen only
+    # after a caller has proved that the value is representable.
+    value=${value#"${value%%[!0]*}"}
+    [[ -n ${value} ]] || value=0
+    printf -v "${output_variable}" '%s' "${value}"
+}
+
+compare_decimal_components() {
+    local output_variable=$1
+    local left=$2
+    local right=$3
+    local result=0
+    local LC_ALL=C
+
+    if ((${#left} > ${#right})); then
+        result=1
+    elif ((${#left} < ${#right})); then
+        result=-1
+    elif [[ ${left} > ${right} ]]; then
+        result=1
+    elif [[ ${left} < ${right} ]]; then
+        result=-1
+    fi
+
+    printf -v "${output_variable}" '%d' "${result}"
+}
+
 compare_versions() {
     local current=$1
     local minimum=$2
-    local current_major
-    local current_minor
-    local current_patch
+    local current_triplet=''
+    local current_major=''
+    local current_minor=''
+    local current_patch=''
     local current_suffix=''
     local current_is_prerelease=false
-    local minimum_major
-    local minimum_minor
-    local minimum_patch
+    local minimum_major=''
+    local minimum_minor=''
+    local minimum_patch=''
+    local major_comparison=0
+    local minor_comparison=0
+    local patch_comparison=0
 
     VERSION_AT_LEAST=false
     VERSION_PARSE_VALID=false
 
     # Installed versions may contain a suffix; the configured minimum below
-    # must remain a strict three-component version.
+    # must remain a strict three-component version. Components stay as decimal
+    # strings until their mathematical order has been established.
     if [[ ! ${current} =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
         return 0
     fi
-    current_major=$((10#${BASH_REMATCH[1]}))
-    current_minor=$((10#${BASH_REMATCH[2]}))
-    current_patch=$((10#${BASH_REMATCH[3]}))
-    current_suffix=${current#"${BASH_REMATCH[0]}"}
+    current_triplet=${BASH_REMATCH[0]}
+    normalize_decimal_component current_major "${BASH_REMATCH[1]}"
+    normalize_decimal_component current_minor "${BASH_REMATCH[2]}"
+    normalize_decimal_component current_patch "${BASH_REMATCH[3]}"
+    current_suffix=${current#"${current_triplet}"}
     if [[ ${current_suffix} =~ ^-(alpha|beta|pre|preview|rc)([.0-9-]|$) ]]; then
         current_is_prerelease=true
     fi
@@ -181,22 +219,22 @@ compare_versions() {
     if [[ ! ${minimum} =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
         return 0
     fi
-    minimum_major=$((10#${BASH_REMATCH[1]}))
-    minimum_minor=$((10#${BASH_REMATCH[2]}))
-    minimum_patch=$((10#${BASH_REMATCH[3]}))
+    normalize_decimal_component minimum_major "${BASH_REMATCH[1]}"
+    normalize_decimal_component minimum_minor "${BASH_REMATCH[2]}"
+    normalize_decimal_component minimum_patch "${BASH_REMATCH[3]}"
     VERSION_PARSE_VALID=true
 
+    compare_decimal_components major_comparison "${current_major}" "${minimum_major}"
+    compare_decimal_components minor_comparison "${current_minor}" "${minimum_minor}"
+    compare_decimal_components patch_comparison "${current_patch}" "${minimum_patch}"
+
     if [[ ${current_is_prerelease} == true ]] \
-        && ((current_major == minimum_major && \
-        current_minor == minimum_minor && \
-        current_patch == minimum_patch)); then
+        && ((major_comparison == 0 && minor_comparison == 0 && patch_comparison == 0)); then
         return 0
     fi
 
-    if ((current_major > minimum_major || (\
-        current_major == minimum_major && current_minor > minimum_minor) || (\
-        current_major == minimum_major && current_minor == minimum_minor && \
-        current_patch >= minimum_patch))); then
+    if ((major_comparison > 0 || (major_comparison == 0 && minor_comparison > 0) || (\
+        major_comparison == 0 && minor_comparison == 0 && patch_comparison >= 0))); then
         VERSION_AT_LEAST=true
     fi
 }
@@ -882,6 +920,7 @@ probe_duration_microseconds() {
     local seconds=''
     local fraction=''
     local duration_microseconds=''
+    local seconds_bound_comparison=1
 
     if duration=$(
         timeout --signal=TERM --kill-after=2s 15s \
@@ -895,7 +934,10 @@ probe_duration_microseconds() {
             fraction=${BASH_REMATCH[3]:-0}
             fraction="${fraction}000000"
             fraction=${fraction:0:6}
-            if ((10#${seconds} <= 9000000000000)); then
+            normalize_decimal_component seconds "${seconds}"
+            compare_decimal_components \
+                seconds_bound_comparison "${seconds}" '9000000000000'
+            if ((seconds_bound_comparison <= 0)); then
                 duration_microseconds=$((\
                     10#${seconds} * 1000000 + 10#${fraction}))
             fi
@@ -906,11 +948,202 @@ probe_duration_microseconds() {
     return 0
 }
 
+validate_stream_tail_reaches_target() {
+    local media_path=$1
+    local selector=$2
+    local seek_seconds=$3
+    local target_seconds=$4
+    local -a probe_statuses=()
+
+    # Exit status contract:
+    #   0 = the selected stream reaches the acceptance threshold
+    #   1 = probe succeeded but the selected stream ends before the threshold
+    #   2 = FFprobe/parser failure; fail closed
+    LC_ALL=C timeout --signal=TERM --kill-after=2s 15s \
+        ffprobe -v error \
+        -read_intervals "${seek_seconds}%" \
+        -select_streams "${selector}" \
+        -show_packets \
+        -show_entries packet=pts_time,dts_time,duration_time \
+        -of json \
+        "${media_path}" 2>/dev/null \
+        | python3 -c '
+import json
+import sys
+from decimal import Decimal, InvalidOperation
+
+threshold = Decimal(sys.argv[1])
+try:
+    payload = json.load(sys.stdin)
+except (TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(2)
+
+for packet in payload.get("packets", []):
+    raw_timestamp = packet.get("pts_time")
+    if raw_timestamp in (None, "N/A"):
+        raw_timestamp = packet.get("dts_time")
+    if raw_timestamp in (None, "N/A"):
+        continue
+
+    try:
+        timestamp = Decimal(str(raw_timestamp))
+    except (InvalidOperation, ValueError):
+        continue
+    if not timestamp.is_finite():
+        continue
+
+    packet_duration = Decimal(0)
+    raw_duration = packet.get("duration_time")
+    if raw_duration not in (None, "N/A"):
+        try:
+            candidate = Decimal(str(raw_duration))
+            if candidate.is_finite() and candidate > 0:
+                packet_duration = candidate
+        except (InvalidOperation, ValueError):
+            pass
+
+    if timestamp + packet_duration >= threshold:
+        raise SystemExit(0)
+
+raise SystemExit(1)
+' "${target_seconds}"
+
+    probe_statuses=("${PIPESTATUS[@]}")
+    if ((${#probe_statuses[@]} != 2 || probe_statuses[0] != 0)); then
+        return 2
+    fi
+
+    case ${probe_statuses[1]} in
+        0 | 1) return "${probe_statuses[1]}" ;;
+        *) return 2 ;;
+    esac
+}
+
+validate_media_tail_consistency() {
+    local media_path=$1
+    local mode=$2
+    local timeline=''
+    local start_microseconds=''
+    local duration_microseconds=''
+    local tolerance_microseconds=0
+    local target_microseconds=0
+    local seek_microseconds=0
+    local max_positive_start=0
+    local target_seconds=''
+    local seek_seconds=''
+    local timeline_status=0
+    local tail_probe_status=0
+
+    timeline=$(
+        timeout --signal=TERM --kill-after=2s 15s \
+            ffprobe -v error \
+            -show_entries format=start_time,duration \
+            -of json \
+            "${media_path}" 2>/dev/null \
+            | python3 -c '
+import json
+import sys
+from decimal import Decimal, InvalidOperation
+
+try:
+    payload = json.load(sys.stdin)
+    format_info = payload.get("format") or {}
+    start = Decimal(str(format_info["start_time"]))
+    duration = Decimal(str(format_info["duration"]))
+except (KeyError, TypeError, ValueError, InvalidOperation, json.JSONDecodeError):
+    raise SystemExit(0)
+
+limit = Decimal("9000000000000")
+if (
+    not start.is_finite()
+    or not duration.is_finite()
+    or duration <= 0
+    or abs(start) > limit
+    or duration > limit
+):
+    raise SystemExit(0)
+
+scale = Decimal(1000000)
+print(int(start * scale), int(duration * scale))
+'
+    )
+    timeline_status=$?
+    ((timeline_status == 0)) || return 1
+
+    [[ -n ${timeline} ]] || return 0
+    read -r start_microseconds duration_microseconds <<<"${timeline}"
+    [[ ${start_microseconds} =~ ^-?[0-9]+$ ]] || return 0
+    [[ ${duration_microseconds} =~ ^[0-9]+$ ]] || return 0
+
+    tolerance_microseconds=$((duration_microseconds / 50))
+    if ((tolerance_microseconds < 1000000)); then
+        tolerance_microseconds=1000000
+    fi
+    if ((duration_microseconds <= tolerance_microseconds)); then
+        return 0
+    fi
+
+    target_microseconds=$((duration_microseconds - tolerance_microseconds))
+
+    if ((start_microseconds > 0)); then
+        max_positive_start=$((9000000000000000000 - target_microseconds))
+        if ((start_microseconds > max_positive_start)); then
+            return 0
+        fi
+    fi
+    target_microseconds=$((start_microseconds + target_microseconds))
+    if ((target_microseconds <= 0)); then
+        return 0
+    fi
+
+    seek_microseconds=$((target_microseconds - 10000000))
+    if ((seek_microseconds < 0)); then
+        seek_microseconds=0
+    fi
+
+    printf -v target_seconds '%d.%06d' \
+        "$((target_microseconds / 1000000))" \
+        "$((target_microseconds % 1000000))"
+    printf -v seek_seconds '%d.%06d' \
+        "$((seek_microseconds / 1000000))" \
+        "$((seek_microseconds % 1000000))"
+
+    case ${mode} in
+        video)
+            validate_stream_tail_reaches_target \
+                "${media_path}" 'V:0' "${seek_seconds}" "${target_seconds}"
+            tail_probe_status=$?
+            case ${tail_probe_status} in
+                0) return 0 ;;
+                1) ;;
+                *) return 1 ;;
+            esac
+
+            validate_stream_tail_reaches_target \
+                "${media_path}" 'a:0' "${seek_seconds}" "${target_seconds}"
+            tail_probe_status=$?
+            ((tail_probe_status == 0)) || return 1
+            return 0
+            ;;
+        audio)
+            validate_stream_tail_reaches_target \
+                "${media_path}" 'a:0' "${seek_seconds}" "${target_seconds}"
+            tail_probe_status=$?
+            ((tail_probe_status == 0)) || return 1
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 validate_final_media_file() {
     local final_path=$1
     local mode=$2
     local stream_present=false
     local probe_status=0
+    local tail_status=0
 
     [[ -f ${final_path} && -s ${final_path} ]] || return 1
 
@@ -939,6 +1172,10 @@ validate_final_media_file() {
             return 2
             ;;
     esac
+
+    validate_media_tail_consistency "${final_path}" "${mode}"
+    tail_status=$?
+    ((tail_status == 0)) || return 1
     return 0
 }
 
@@ -1068,7 +1305,11 @@ main() {
             error 'the URL file must be a readable regular file and not a symbolic link.'
             exit 2
         fi
-        url_file_owner=$(stat -c '%u' -- "${URL_FILE}" 2>/dev/null || true)
+        url_file_owner=''
+        if ! url_file_owner=$(stat -c '%u' -- "${URL_FILE}" 2>/dev/null); then
+            error 'unable to determine the URL file owner.'
+            exit 2
+        fi
         if [[ ${url_file_owner} != "${EUID}" ]]; then
             error 'the URL file must be owned by the current user.'
             exit 2
@@ -1465,6 +1706,10 @@ main() {
         error 'unable to classify the selected download transport.'
         exit 65
     fi
+    if [[ -z ${classification_output} ]]; then
+        error 'the private transfer classifier returned no output.'
+        exit 65
+    fi
 
     PRIVATE_TRANSPORT=''
     PRIVATE_TRANSFER_COUNT=''
@@ -1495,6 +1740,10 @@ main() {
         esac
     done <<<"${classification_output}"
 
+    if [[ -z ${PRIVATE_TRANSPORT} ]]; then
+        error 'the private transfer classifier did not return a transport.'
+        exit 65
+    fi
     if [[ -z ${PRIVATE_TRANSFER_COUNT} ]]; then
         error 'the private transfer classifier did not return a transfer count.'
         exit 65
@@ -1768,6 +2017,10 @@ main() {
             error "the final media file failed FFprobe validation: ${final_media_path}"
             printf '%s\n' \
                 'The media file was retained for diagnosis and was not published as a successful result.' >&2
+            if [[ -n ${HLS_SOURCE_TO_CLEAN} ]]; then
+                printf 'The repaired HLS intermediate was retained at: %s\n' \
+                    "${HLS_SOURCE_TO_CLEAN}" >&2
+            fi
             exit 65
         fi
         emit_machine_postprocess finished MediaValidation

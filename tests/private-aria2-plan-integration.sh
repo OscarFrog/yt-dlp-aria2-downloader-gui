@@ -430,6 +430,66 @@ PY_UNREPRESENTABLE
     assert_text_not_contains "${ASSERT_OUTPUT}" 'Traceback (most recent call last)' \
         'malformed URL controlled diagnostic'
 
+    # Credential-bearing userinfo in media URLs must never be replayed by the
+    # wrapper-managed aria2 path. Classification falls back to native yt-dlp;
+    # a forced direct build remains fail-closed.
+    printf '%s\n' 'Private aria2 plan scenario: URL userinfo native fallback'
+    userinfo_index=0
+    for userinfo_url in \
+        'https://user:pass@example.invalid/media.mp4' \
+        'https://user@example.invalid/media.mp4'; do
+        ((userinfo_index += 1))
+        new_case "userinfo-${userinfo_index}"
+        write_single_plan \
+            "${userinfo_url}" \
+            "${OUTPUT_DIR}/final.mp4" \
+            'qualification-agent'
+
+        assert_status 0 'userinfo URL classification' run_classify
+        assert_text_contains "${ASSERT_OUTPUT}" 'transport=native' \
+            'userinfo URL stays on native yt-dlp'
+        assert_text_contains "${ASSERT_OUTPUT}" 'transfer_count=1' \
+            'userinfo URL transfer count'
+        assert_status 65 'forced userinfo direct build is rejected' run_build
+        assert_text_contains "${ASSERT_OUTPUT}" \
+            'URL user information requires native yt-dlp transport' \
+            'userinfo direct-build diagnostic'
+        [[ ! -e ${ARIA2_INPUT} && ! -e ${MANIFEST} ]] \
+            || fail 'Userinfo URL created private aria2 artifacts.'
+    done
+
+    # Python's JSON parser accepts isolated UTF-16 surrogate escapes. The helper
+    # must reject them as validation data before UTF-8 serialization can emit a
+    # raw traceback or an ambiguous exit status.
+    printf '%s\n' 'Private aria2 plan scenario: isolated Unicode surrogate rejection'
+    new_case 'unicode-surrogate'
+    python3 - "${PLAN_FILE}" "${OUTPUT_DIR}" <<'PY_SURROGATE'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+output_dir = Path(sys.argv[2])
+payload = {
+    "requested_downloads": [
+        {
+            "filename": str(output_dir) + "/bad\ud800.mp4",
+            "url": "https://example.invalid/media.mp4",
+            "protocol": "https",
+            "http_headers": {"User-Agent": "qualification-agent"},
+        }
+    ]
+}
+path.write_text(json.dumps(payload, ensure_ascii=True) + "\n", encoding="utf-8")
+os.chmod(path, 0o600)
+PY_SURROGATE
+    assert_status 65 'isolated Unicode surrogate is rejected cleanly' run_build
+    assert_text_not_contains "${ASSERT_OUTPUT}" 'Traceback (most recent call last)' \
+        'isolated surrogate does not produce a traceback'
+    [[ ! -e ${ARIA2_INPUT} && ! -e ${MANIFEST} ]] \
+        || fail 'Isolated surrogate rejection left private artifacts.'
+
     # Header values are a strict JSON string boundary; do not coerce arrays,
     # numbers, booleans, or objects into aria2 input syntax.
     printf '%s\n' 'Private aria2 plan scenario: non-string header rejection'
@@ -607,6 +667,167 @@ module.rollback_publication([(source, destination, identity)])
 assert destination.read_text(encoding="utf-8") == "foreign\n"
 assert not source.exists()
 PY_ROLLBACK
+
+    # A destination is registered for rollback immediately after os.link(). If
+    # post-link verification itself raises, rollback must still remove only the
+    # helper-owned hardlink and leave the original staging inode available.
+    printf '%s\n' 'Private aria2 plan scenario: post-link verification rollback'
+    new_case 'post-link-verification-rollback'
+    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_POST_LINK'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+helper_path = Path(sys.argv[1])
+case_root = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("private_aria2_plan_post_link", helper_path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+source = case_root / "source"
+destination = case_root / "destination"
+source.write_text("payload\n", encoding="utf-8")
+original_identity = (source.lstat().st_dev, source.lstat().st_ino)
+moved = []
+real_match = module.path_matches_identity
+raised = False
+
+def injected_match(path, identity):
+    global raised
+    if path == destination and not raised:
+        raised = True
+        raise OSError("injected post-link verification failure")
+    return real_match(path, identity)
+
+module.path_matches_identity = injected_match
+try:
+    module.publish_without_overwrite(source, destination, moved)
+except OSError:
+    pass
+else:
+    raise SystemExit("post-link fault injection did not fail")
+finally:
+    module.path_matches_identity = real_match
+
+assert len(moved) == 1, moved
+failures = module.rollback_publication(moved)
+assert failures == [], failures
+assert source.exists()
+assert (source.lstat().st_dev, source.lstat().st_ino) == original_identity
+assert not os.path.lexists(destination)
+PY_POST_LINK
+
+    # Rollback failure is no longer silent: callers receive the list of final
+    # names that could not be restored, without deleting an identity-mismatched
+    # foreign destination.
+    printf '%s\n' 'Private aria2 plan scenario: rollback failure reporting'
+    new_case 'rollback-failure-reporting'
+    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_ROLLBACK_FAILURE'
+import importlib.util
+import sys
+from pathlib import Path
+
+helper_path = Path(sys.argv[1])
+case_root = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("private_aria2_plan_rollback_failure", helper_path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+source = case_root / "occupied-source"
+destination = case_root / "published"
+destination.write_text("published\n", encoding="utf-8")
+st = destination.lstat()
+identity = (st.st_dev, st.st_ino)
+source.write_text("foreign\n", encoding="utf-8")
+
+failures = module.rollback_publication([(source, destination, identity)])
+assert failures == [destination.name], failures
+assert source.read_text(encoding="utf-8") == "foreign\n"
+assert destination.read_text(encoding="utf-8") == "published\n"
+PY_ROLLBACK_FAILURE
+
+    # An I/O failure while writing a private file remains an I/O failure. Invalid
+    # Unicode is validation data, but fsync/write failures must not be collapsed
+    # into PlanError/EX_DATAERR.
+    printf '%s\n' 'Private aria2 plan scenario: private-file I/O error class'
+    new_case 'private-file-io-error'
+    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_PRIVATE_IO'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+helper_path = Path(sys.argv[1])
+case_root = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("private_aria2_plan_io_error", helper_path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+target = case_root / "private-output"
+real_fsync = module.os.fsync
+
+
+def injected_fsync(_fd):
+    raise OSError("injected fsync failure")
+
+
+module.os.fsync = injected_fsync
+try:
+    module.write_private_new(target, "payload\n")
+except OSError:
+    pass
+except module.PlanError as exc:
+    raise SystemExit("private-file I/O failure was collapsed into PlanError") from exc
+else:
+    raise SystemExit("private-file I/O fault injection did not fail")
+finally:
+    module.os.fsync = real_fsync
+
+assert not os.path.lexists(target)
+PY_PRIVATE_IO
+
+    # If a previously published destination is replaced before a later item
+    # fails, and the staging source is already gone, rollback cannot claim that
+    # the original component was restored. Preserve the foreign destination and
+    # report the incomplete rollback.
+    printf '%s\n' 'Private aria2 plan scenario: replaced-destination rollback reporting'
+    new_case 'replaced-destination-rollback'
+    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_REPLACED_DEST'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+helper_path = Path(sys.argv[1])
+case_root = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("private_aria2_plan_replaced_dest", helper_path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+source = case_root / "source"
+destination = case_root / "destination"
+anchor = case_root / "original-inode-anchor"
+
+source.write_text("original\n", encoding="utf-8")
+identity = (source.lstat().st_dev, source.lstat().st_ino)
+os.link(source, destination, follow_symlinks=False)
+os.link(source, anchor, follow_symlinks=False)
+source.unlink()
+
+destination.unlink()
+destination.write_text("foreign\n", encoding="utf-8")
+
+failures = module.rollback_publication([(source, destination, identity)])
+assert failures == [destination.name], failures
+assert not os.path.lexists(source)
+assert destination.read_text(encoding="utf-8") == "foreign\n"
+assert anchor.read_text(encoding="utf-8") == "original\n"
+PY_REPLACED_DEST
 
     printf '%s\n' 'Private aria2 plan integration tests passed.'
 }

@@ -55,6 +55,7 @@ def reject_controls(value: str, label: str, *, reject_whitespace: bool) -> None:
         if (
             codepoint < 0x20
             or codepoint == 0x7F
+            or 0xD800 <= codepoint <= 0xDFFF
             or (reject_whitespace and character.isspace())
         ):
             raise PlanError(f"{label} contains an unsafe control/whitespace character")
@@ -186,7 +187,7 @@ def resolve_destination(
     return resolved_parent / candidate.name
 
 
-def validate_url(value: object) -> str:
+def validate_url(value: object) -> tuple[str, bool]:
     if not isinstance(value, str) or not value:
         raise PlanError("requested format has no URL")
 
@@ -200,7 +201,8 @@ def validate_url(value: object) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise PlanError("only absolute HTTP(S) format URLs are accepted")
 
-    return value
+    has_userinfo = parsed.username is not None or parsed.password is not None
+    return value, has_userinfo
 
 
 def validate_headers(value: object) -> dict[str, str]:
@@ -288,11 +290,24 @@ def write_private_new(path: Path, payload: str) -> None:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+    except UnicodeError as exc:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise PlanError(f"unable to write private file: {path.name}") from exc
+    except OSError:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     except Exception:
         try:
             path.unlink(missing_ok=True)
-        finally:
-            raise
+        except OSError:
+            pass
+        raise
 
 
 def build_plan(args: argparse.Namespace) -> int:
@@ -365,7 +380,9 @@ def build_plan(args: argparse.Namespace) -> int:
     for index, (transfer, destination) in enumerate(
         zip(transfers, destinations, strict=True)
     ):
-        url = validate_url(transfer.get("url"))
+        url, has_userinfo = validate_url(transfer.get("url"))
+        if has_userinfo:
+            raise PlanError("URL user information requires native yt-dlp transport")
 
         protocol = transfer.get("protocol")
         if protocol not in {"http", "https"}:
@@ -484,7 +501,11 @@ def classify_plan(args: argparse.Namespace) -> int:
             print(f"transfer_count={len(transfers)}")
             return 0
 
-        validate_url(transfer.get("url"))
+        _url, has_userinfo = validate_url(transfer.get("url"))
+        if has_userinfo:
+            print("transport=native")
+            print(f"transfer_count={len(transfers)}")
+            return 0
         headers = validate_headers(transfer.get("http_headers"))
         if not direct_headers_are_replay_safe(headers):
             print("transport=native")
@@ -523,6 +544,7 @@ def path_matches_identity(path: Path, identity: tuple[int, int]) -> bool:
 def publish_without_overwrite(
     source: Path,
     destination: Path,
+    moved: list[tuple[Path, Path, tuple[int, int]]],
 ) -> tuple[int, int]:
     try:
         source_stat = source.lstat()
@@ -544,6 +566,10 @@ def publish_without_overwrite(
             f"unable to publish downloaded component: {destination.name}"
         ) from exc
 
+    # From this point the helper has created a final-directory name. Record it
+    # before verification so every later exception participates in rollback.
+    moved.append((source, destination, source_identity))
+
     if not path_matches_identity(destination, source_identity):
         raise PlanError(
             f"published destination changed unexpectedly: {destination.name}"
@@ -562,19 +588,43 @@ def publish_without_overwrite(
 
 def rollback_publication(
     moved: list[tuple[Path, Path, tuple[int, int]]],
-) -> None:
+) -> list[str]:
+    failures: list[str] = []
+
     for source, destination, identity in reversed(moved):
         try:
-            if source.exists() or not path_matches_identity(destination, identity):
+            destination_is_ours = path_matches_identity(destination, identity)
+            source_is_ours = path_matches_identity(source, identity)
+        except OSError:
+            failures.append(destination.name)
+            continue
+
+        if not destination_is_ours:
+            if not source_is_ours:
+                failures.append(destination.name)
+            continue
+
+        try:
+            if source_is_ours:
+                # A post-link step failed before source unlink. Removing only our
+                # matching destination restores the original staging-only state.
+                destination.unlink()
+                continue
+
+            if os.path.lexists(source):
+                # Never overwrite a path another process created in staging.
+                failures.append(destination.name)
                 continue
 
             os.link(destination, source, follow_symlinks=False)
-
-            # Rollback is conservative: never remove a path whose inode changed.
             if path_matches_identity(destination, identity):
                 destination.unlink()
+            else:
+                failures.append(destination.name)
         except OSError:
-            pass
+            failures.append(destination.name)
+
+    return failures
 
 
 def commit_plan(args: argparse.Namespace) -> int:
@@ -662,10 +712,14 @@ def commit_plan(args: argparse.Namespace) -> int:
 
     try:
         for source, destination in publications:
-            identity = publish_without_overwrite(source, destination)
-            moved.append((source, destination, identity))
-    except Exception:
-        rollback_publication(moved)
+            publish_without_overwrite(source, destination, moved)
+    except Exception as exc:
+        rollback_failures = rollback_publication(moved)
+        if rollback_failures:
+            raise PlanError(
+                "publication failed and rollback could not restore "
+                f"{len(rollback_failures)} component(s)"
+            ) from exc
         raise
 
     print(f"published_count={len(moved)}")

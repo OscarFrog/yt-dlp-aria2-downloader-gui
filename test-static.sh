@@ -259,10 +259,56 @@ shfmt_candidate_job_policy() {
     fi
     # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
     [[ ${job_block} != *'${{ secrets.'* ]] || return 65
-    [[ ${job_block} == *'bash ./scripts/format-shell.sh'* ]] || return 65
-    [[ ${job_block} == *'bash ./tests/run-all.sh'* ]] || return 65
+    [[ ${job_block} == *"if: github.ref == 'refs/heads/main'"* ]] || return 65
+    [[ ${job_block} == *'Reformat with candidate shfmt in a no-network sandbox'* ]] || return 65
+    [[ ${job_block} == *'docker build'* ]] || return 65
+    [[ ${job_block} == *'--network=none'* ]] || return 65
+    [[ ${job_block} == *'--read-only'* ]] || return 65
+    [[ ${job_block} == *'--cap-drop=ALL'* ]] || return 65
+    [[ ${job_block} == *'--security-opt=no-new-privileges'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal workflow shell expression, not local expansion.
+    [[ ${job_block} == *'"${GITHUB_WORKSPACE}/.git:/workspace/.git:ro"'* ]] || return 65
     [[ ${job_block} == *'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'* ]] || return 65
     [[ ${job_block} == *"if: steps.detect.outputs.update == 'true'"* ]] || return 65
+    [[ ${job_block} != *'bash ./scripts/format-shell.sh'* ]] || return 65
+    [[ ${job_block} != *'bash ./tests/run-all.sh'* ]] || return 65
+    [[ ${job_block} != *'actions/cache@'* ]] || return 65
+    return 0
+}
+
+shfmt_verifier_job_policy() {
+    local job_block=$1
+
+    [[ ${job_block} == *'permissions:'* ]] || return 65
+    [[ ${job_block} == *'contents: read'* ]] || return 65
+    if grep -Eq '^[[:space:]]+[[:alnum:]_-]+:[[:space:]]+write[[:space:]]*$' \
+        <<<"${job_block}"; then
+        return 65
+    fi
+    # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
+    [[ ${job_block} != *'${{ secrets.'* ]] || return 65
+    [[ ${job_block} == *"if: github.ref == 'refs/heads/main' && needs.prepare-shfmt-update.outputs.update == 'true'"* ]] || return 65
+    [[ ${job_block} == *'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
+    [[ ${job_block} == *'EXPECTED_BASE_SHA: ${{ github.sha }}'* ]] || return 65
+    # shellcheck disable=SC2016 # Dynamic checkout refs are forbidden in the verifier.
+    [[ ${job_block} != *'ref: ${{'* ]] || return 65
+    [[ ${job_block} == *'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
+    [[ ${job_block} == *'shfmt-candidate-${{ github.run_id }}-${{ github.run_attempt }}'* ]] || return 65
+    [[ ${job_block} == *"trusted_shfmt=\$(bash ./scripts/dev-tools/ensure-shfmt.sh)"* ]] || return 65
+    [[ ${job_block} == *"canonical_manifest \"\${baseline}\""* ]] || return 65
+    [[ ${job_block} == *"canonical_manifest \"\${after}\""* ]] || return 65
+    [[ ${job_block} == *"cmp -s -- \"\${baseline}\" \"\${after}\""* ]] || return 65
+    [[ ${job_block} == *'candidate shfmt pin file differs from the exact data-only schema'* ]] || return 65
+    [[ ${job_block} == *'verifier rejected upstream shfmt tag provenance'* ]] || return 65
+    [[ ${job_block} == *'Validate verified formatter and project'* ]] || return 65
+    [[ ${job_block} == *'bash ./tests/run-all.sh'* ]] || return 65
+    [[ ${job_block} == *'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
+    [[ ${job_block} == *'shfmt-verified-${{ github.run_id }}-${{ github.run_attempt }}'* ]] || return 65
+    [[ ${job_block} != *'bash ./scripts/format-shell.sh'* ]] || return 65
+    [[ ${job_block} != *'actions/cache@'* ]] || return 65
     return 0
 }
 
@@ -272,11 +318,15 @@ shfmt_publish_job_policy() {
     [[ ${job_block} == *'permissions:'* ]] || return 65
     [[ ${job_block} == *'contents: write'* ]] || return 65
     [[ ${job_block} == *'pull-requests: write'* ]] || return 65
-    [[ ${job_block} == *"if: needs.prepare-shfmt-update.outputs.update == 'true'"* ]] || return 65
+    [[ ${job_block} == *"if: github.ref == 'refs/heads/main' && needs.prepare-shfmt-update.outputs.update == 'true'"* ]] || return 65
     [[ ${job_block} == *'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'* ]] || return 65
     # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
-    [[ ${job_block} == *'ref: ${{ needs.prepare-shfmt-update.outputs.base_sha }}'* ]] || return 65
+    [[ ${job_block} == *'EXPECTED_BASE_SHA: ${{ github.sha }}'* ]] || return 65
+    # shellcheck disable=SC2016 # Dynamic checkout refs are forbidden in the privileged publisher.
+    [[ ${job_block} != *'ref: ${{'* ]] || return 65
     [[ ${job_block} == *'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
+    [[ ${job_block} == *'shfmt-verified-${{ github.run_id }}-${{ github.run_attempt }}'* ]] || return 65
     [[ ${job_block} == *'git fetch --no-tags origin'* ]] || return 65
     [[ ${job_block} == *'python3 - tests/lib/project-files.sh'* ]] || return 65
     [[ ${job_block} != *'git ls-files -z'* ]] || return 65
@@ -287,6 +337,7 @@ shfmt_publish_job_policy() {
     [[ ${job_block} != *'scripts/format-shell.sh'* ]] || return 65
     [[ ${job_block} != *'scripts/dev-tools/ensure-shfmt.sh'* ]] || return 65
     [[ ${job_block} != *'bash ./tests/run-all.sh'* ]] || return 65
+    [[ ${job_block} != *'actions/cache@'* ]] || return 65
     if grep -Eq '^[[:space:]]+(bash[[:space:]]+\./|source[[:space:]]+\./|\./(tests|scripts)/)' \
         <<<"${job_block}"; then
         return 65
@@ -297,14 +348,18 @@ shfmt_publish_job_policy() {
 assert_shfmt_update_workflow_policy() {
     local workflow="${SCRIPT_DIR}/.github/workflows/shfmt-update.yml"
     local candidate_block=''
+    local verifier_block=''
     local publish_block=''
     local mutated=''
 
     candidate_block=$(workflow_job_block "${workflow}" prepare-shfmt-update)
+    verifier_block=$(workflow_job_block "${workflow}" verify-shfmt-update)
     publish_block=$(workflow_job_block "${workflow}" publish-shfmt-pr)
 
     [[ -n ${candidate_block} ]] \
         || fail 'shfmt updater read-only candidate job is missing.'
+    [[ -n ${verifier_block} ]] \
+        || fail 'shfmt updater fresh verifier job is missing.'
     [[ -n ${publish_block} ]] \
         || fail 'shfmt updater privileged publication job is missing.'
 
@@ -312,7 +367,10 @@ assert_shfmt_update_workflow_policy() {
     # on errexit inside their bodies.
     # shellcheck disable=SC2310
     shfmt_candidate_job_policy "${candidate_block}" \
-        || fail 'shfmt updater candidate job violates the read-only trust boundary.'
+        || fail 'shfmt updater candidate job violates the sandboxed read-only trust boundary.'
+    # shellcheck disable=SC2310
+    shfmt_verifier_job_policy "${verifier_block}" \
+        || fail 'shfmt updater verifier job violates the fresh read-only trust boundary.'
     # shellcheck disable=SC2310
     shfmt_publish_job_policy "${publish_block}" \
         || fail 'shfmt updater publication job violates the privileged trust boundary.'
@@ -324,7 +382,32 @@ assert_shfmt_update_workflow_policy() {
         fail 'shfmt updater policy did not reject candidate repository write permission.'
     fi
 
-    mutated="${publish_block}"$'\n''      bash ./scripts/format-shell.sh'
+    mutated="${candidate_block}"$'
+''      bash ./scripts/format-shell.sh'
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if shfmt_candidate_job_policy "${mutated}"; then
+        fail 'shfmt updater policy did not reject direct project execution after candidate formatting.'
+    fi
+
+    mutated=${verifier_block//bash .\/tests\/run-all.sh/true}
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if shfmt_verifier_job_policy "${mutated}"; then
+        fail 'shfmt updater policy did not reject removal of post-verification project tests.'
+    fi
+
+    # shellcheck disable=SC2016 # Deliberate unsafe dynamic checkout mutation.
+    mutated="${verifier_block}"$'
+''          ref: ${{ needs.prepare-shfmt-update.outputs.base_sha }}'
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if shfmt_verifier_job_policy "${mutated}"; then
+        fail 'shfmt updater policy did not reject a dynamic verifier checkout ref.'
+    fi
+
+    mutated="${publish_block}"$'
+''      bash ./scripts/format-shell.sh'
     # Predicate failure is expected for this negative-control mutation.
     # shellcheck disable=SC2310
     if shfmt_publish_job_policy "${mutated}"; then
@@ -388,11 +471,11 @@ main() {
         'repos/mvdan/sh/releases/latest' \
         'automation discovers the latest stable upstream shfmt release'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
-        'bash ./scripts/format-shell.sh' \
-        'automation reformats with the candidate shfmt release'
+        'Reformat with candidate shfmt in a no-network sandbox' \
+        'automation reformats with the candidate shfmt inside an isolated sandbox'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
-        'bash ./tests/run-all.sh' \
-        'automation validates the formatter update before PR creation'
+        'Validate verified formatter and project' \
+        'automation validates the formatter update only after fresh verification'
 
     for file in "${ALL_SHELL_FILES[@]}"; do
         assert_standard_shell_header "${file}"
@@ -523,7 +606,7 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
         '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
         'non-owner test cleanup protection'
-    readonly EXPECTED_VERSION='2.2.2'
+    readonly EXPECTED_VERSION='2.2.3'
 
     # Current-version coherence is intentionally checked only on authoritative
     # carriers. Historical versions used by regression/upgrade fixtures are valid
@@ -582,8 +665,8 @@ main() {
         'release validates executable-reported version'
     # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        '[[ ${reported_version} == "${version}" ]]' \
-        'release binds executable version to release tag'
+        'expected_reported_version="download-video.sh version ${version}"' \
+        'release binds the exact executable version output to the release tag'
     # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'grep -Fqx "readonly VERSION=\"${version}\"" download-video.sh' \
@@ -672,6 +755,65 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/shell.yml" \
         'cancel-in-progress: true' \
         'outdated validation runs are cancelled'
+
+    # shellcheck disable=SC2016
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
+        'RUNTIME_STRESS_RESULT: ${{ needs.runtime-hardening-stress.result }}' \
+        'required stress gate includes runtime-manager stress'
+    # shellcheck disable=SC2016
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
+        'PACKAGE_STRESS_RESULT: ${{ needs.package-cleanup-stress.result }}' \
+        'required stress gate includes package-cleanup stress'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
+        'readonly rpmfusion_fingerprint=E9A491A3DE247814E7E067EAE06F8ECDD651FF2E' \
+        'Fedora qualification pins the RPM Fusion bootstrap signer'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
+        'rpmfusion-free-release-44-3.noarch' \
+        'Fedora qualification pins the reviewed RPM Fusion bootstrap NEVRA'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'verify-shfmt-update:' \
+        'shfmt updater uses a separate fresh read-only verifier job'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'canonical equivalence under the previously trusted shfmt' \
+        'shfmt updater documents the independent semantic boundary'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'shfmt-tested-tree.sha256' \
+        'shfmt updater binds the privileged tree to the verified read-only tree'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'shfmt automation may not modify its canonical inventory controller' \
+        'shfmt updater protects its canonical inventory controller'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'candidate shfmt pin file differs from the exact data-only schema' \
+        'shfmt updater enforces an exact data-only pin schema'
+
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        "if: github.ref == 'refs/heads/main'" \
+        'scheduled/manual shfmt updater is bound to main'
+    # shellcheck disable=SC2016 # Literal GitHub Actions expression assertion.
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'EXPECTED_BASE_SHA: ${{ github.sha }}' \
+        'shfmt verifier/publisher bind to the immutable workflow event SHA'
+    assert_file_not_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'needs.prepare-shfmt-update.outputs.base_sha' \
+        'shfmt updater never selects code or artifacts from a propagated job SHA'
+    # shellcheck disable=SC2016 # Literal GitHub Actions expression assertion.
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'shfmt-candidate-${{ github.run_id }}-${{ github.run_attempt }}' \
+        'candidate shfmt handoff is scoped to the workflow run attempt'
+    # shellcheck disable=SC2016 # Literal GitHub Actions expression assertion.
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'shfmt-verified-${{ github.run_id }}-${{ github.run_attempt }}' \
+        'verified shfmt handoff is scoped to the workflow run attempt'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        '--network=none' \
+        'candidate shfmt executes without network access'
+    # shellcheck disable=SC2016 # Literal shell-source assertion.
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        '"${GITHUB_WORKSPACE}/.git:/workspace/.git:ro"' \
+        'candidate shfmt cannot modify repository metadata'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'Validate verified formatter and project' \
+        'project tests run only after fresh formatter verification'
 
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
         'Qualify RPM v4/v6 signature semantics (3x)' \

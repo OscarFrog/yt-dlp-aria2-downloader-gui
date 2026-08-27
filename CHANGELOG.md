@@ -1,3 +1,39 @@
+## 2.2.3 - 2026-08-27
+
+### Security and reliability
+
+- Keep media URLs containing URI userinfo on yt-dlp's native transport instead
+  of replaying those embedded credentials through wrapper-managed aria2.
+- Compare external version components and FFprobe durations without entering
+  unbounded decimal strings into fixed-width Bash arithmetic.
+- Harden private aria2 publication rollback and reject invalid Unicode
+  surrogates without raw Python tracebacks.
+- Preserve valid progress records that follow an oversized log record.
+
+### Qualification and diagnostics
+
+- Add userinfo, huge-decimal, oversized-progress and private-publication
+  failure-path regressions while strengthening real-tool mutation diagnostics.
+- Clarify retained HLS intermediate, classifier and result-file failures.
+- Keep race-sensitive process-group scenarios under repeated stress without
+  adding hot-path synchronization or changing transfer concurrency.
+- Harden release/package/shfmt qualification trust boundaries, bind the required
+  stress gate to every stress family, authenticate the Fedora RPM Fusion
+  bootstrap, hash-pin reproducible yt-dlp wheels and isolate event concurrency.
+- Use all available public-runner CPUs for the verified FFmpeg 9 source build
+  without introducing executable dependency caches into the release trust path.
+- Bind scheduled/manual shfmt automation to the immutable main run revision,
+  scope handoffs per run, sandbox the candidate formatter without network access
+  and defer project-code execution until the fresh verifier accepts the patch.
+
+### Documentation
+
+- Align direct-header routing, private aria2 clean-restart behavior, managed EJS
+  behavior and bilingual downloader documentation with the implemented policy.
+- Reject metadata-parseable clean truncation by checking that the required
+  A/V packet timeline reaches the declared container tail, while tolerating
+  legitimate audio/video duration skew and avoiding a full-file decode.
+
 ## 2.2.2 - 2026-08-26
 
 ### Security and reliability

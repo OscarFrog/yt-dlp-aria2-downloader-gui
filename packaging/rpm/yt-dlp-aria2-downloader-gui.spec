@@ -73,6 +73,11 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Thu Aug 27 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.2.3-1
+- Harden direct URL replay safety and overflow-safe numeric validation.
+- Strengthen private aria2 rollback, final-media tail validation, and progress recovery.
+- Align current documentation and qualification with the implemented behavior.
+
 * Wed Aug 26 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.2.2-1
 - Prevent unsafe HTTP-header replay across aria2 redirects.
 - Require real content video during final-media validation.

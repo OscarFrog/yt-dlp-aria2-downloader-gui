@@ -157,8 +157,16 @@ run_engine() {
             printf 'FAIL: %s succeeded without publishing a result-file.\n' "${scenario}" >&2
             return 65
         }
-        IFS= read -r RUN_FINAL_FILE <"${result_file}" || return 65
-        [[ -n ${RUN_FINAL_FILE} ]] || return 65
+        if ! IFS= read -r RUN_FINAL_FILE <"${result_file}"; then
+            printf 'FAIL: %s published an unreadable result-file.\n' \
+                "${scenario}" >&2
+            return 65
+        fi
+        if [[ -z ${RUN_FINAL_FILE} ]]; then
+            printf 'FAIL: %s published an empty final result path.\n' \
+                "${scenario}" >&2
+            return 65
+        fi
     fi
 }
 

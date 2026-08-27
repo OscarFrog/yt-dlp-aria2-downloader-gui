@@ -8,7 +8,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: stress-${{ github.workflow }}-${{ github.ref }}
+  group: stress-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -26,6 +26,8 @@ jobs:
         with:
           persist-credentials: false
       - name: Repeat race-sensitive integration scenarios with bounded jitter
+        env:
+          STRESS_SHARD: ${{ matrix.shard }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -37,8 +39,12 @@ jobs:
           ffmpeg_timings=(0 0.01 0.04 0.08)
           supervisor_timings=(0 0.005 0.01 0.02)
 
-          shard=${{ matrix.shard }}
+          shard=${STRESS_SHARD}
           shard_count=4
+          if [[ ! ${shard} =~ ^[1-4]$ ]]; then
+            printf 'Error: invalid stress shard: %s\n' "${shard}" >&2
+            exit 65
+          fi
 
           for ((iteration = shard; iteration <= 20; iteration += shard_count)); do
             index=$((iteration - 1))
@@ -68,6 +74,8 @@ jobs:
     if: ${{ always() }}
     needs:
       - mock-stress
+      - runtime-hardening-stress
+      - package-cleanup-stress
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -75,17 +83,23 @@ jobs:
         shell: bash
         env:
           MOCK_STRESS_RESULT: ${{ needs.mock-stress.result }}
+          RUNTIME_STRESS_RESULT: ${{ needs.runtime-hardening-stress.result }}
+          PACKAGE_STRESS_RESULT: ${{ needs.package-cleanup-stress.result }}
         run: |
           set -Eeuo pipefail
 
-          if [[ ${MOCK_STRESS_RESULT} != success ]]; then
-            printf 'Mock cancellation stress matrix finished with result: %s\n' \
-              "${MOCK_STRESS_RESULT}" >&2
-            exit 1
+          if [[ ${MOCK_STRESS_RESULT} != success ||
+              ${RUNTIME_STRESS_RESULT} != success ||
+              ${PACKAGE_STRESS_RESULT} != success ]]; then
+            printf 'Stress qualification results: mock=%s runtime=%s package=%s\n' \
+              "${MOCK_STRESS_RESULT}" \
+              "${RUNTIME_STRESS_RESULT}" \
+              "${PACKAGE_STRESS_RESULT}" >&2
+            exit 65
           fi
 
           printf '%s\n' \
-            'All 20 deterministic cancellation stress iterations passed.'
+            'All cancellation, runtime-manager and package-cleanup stress qualifications passed.'
 
   runtime-hardening-stress:
     name: Runtime-manager hardening stress (10x)
