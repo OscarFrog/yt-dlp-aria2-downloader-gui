@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   prepare-shfmt-update:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -21,23 +22,12 @@ jobs:
     outputs:
       update: ${{ steps.detect.outputs.update }}
       latest: ${{ steps.detect.outputs.latest }}
-      base_sha: ${{ steps.base.outputs.sha }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Record base revision
-        id: base
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          base_sha=$(git rev-parse HEAD)
-          [[ ${base_sha} =~ ^[0-9a-f]{40}$ ]]
-          printf 'sha=%s\n' "${base_sha}" >>"${GITHUB_OUTPUT}"
 
       - name: Install validation dependencies
         run: |
@@ -181,6 +171,31 @@ jobs:
           [[ ${amd64_sha} =~ ^[0-9a-f]{64}$ ]]
           [[ ${arm64_sha} =~ ^[0-9a-f]{64}$ ]]
 
+          case $(uname -m) in
+            x86_64 | amd64)
+              native_arch='amd64'
+              native_sha=${amd64_sha}
+              ;;
+            aarch64 | arm64)
+              native_arch='arm64'
+              native_sha=${arm64_sha}
+              ;;
+            *)
+              printf 'Error: unsupported runner architecture for shfmt sandbox: %s\n' \
+                "$(uname -m)" >&2
+              exit 69
+              ;;
+          esac
+
+          candidate_dir="${RUNNER_TEMP}/shfmt-candidate-binary"
+          mkdir -p -- "${candidate_dir}"
+          cp -- \
+            "${work_dir}/shfmt_v${SHFMT_VERSION}_linux_${native_arch}" \
+            "${candidate_dir}/shfmt"
+          chmod 0555 -- "${candidate_dir}/shfmt"
+          printf '%s  shfmt\n' "${native_sha}" \
+            >"${candidate_dir}/shfmt.sha256"
+
           python3 - \
             "${SHFMT_VERSION}" \
             "${amd64_sha}" \
@@ -210,15 +225,146 @@ jobs:
           path.write_text(text, encoding="utf-8")
           PY
 
-      - name: Reformat with new shfmt
+      - name: Reformat with candidate shfmt in a no-network sandbox
         if: steps.detect.outputs.update == 'true'
         shell: bash
-        run: bash ./scripts/format-shell.sh
+        run: |
+          set -Eeuo pipefail
+          umask 077
 
-      - name: Validate updated formatter and project
-        if: steps.detect.outputs.update == 'true'
-        shell: bash
-        run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/run-all.sh
+          candidate_dir="${RUNNER_TEMP}/shfmt-candidate-binary"
+          shell_file=$(mktemp)
+          docker_context=$(mktemp -d)
+          image="shfmt-candidate:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          container="shfmt-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          cleanup_candidate_sandbox() {
+            docker rm -f "${container}" >/dev/null 2>&1 || true
+            docker image rm -f "${image}" >/dev/null 2>&1 || true
+            rm -f -- "${shell_file}"
+            rm -rf -- "${docker_context}"
+          }
+          trap cleanup_candidate_sandbox EXIT
+
+          command -v docker >/dev/null 2>&1 || {
+            printf 'Error: docker is required for isolated candidate shfmt execution.\n' >&2
+            exit 127
+          }
+
+          (
+            cd "${candidate_dir}"
+            sha256sum --check shfmt.sha256
+          )
+
+          python3 - tests/lib/project-files.sh >"${shell_file}" <<'PY'
+          from pathlib import Path
+          import shlex
+          import sys
+
+          inventory = Path(sys.argv[1])
+          arrays = {
+              "PRODUCTION_SHELL_FILES",
+              "PACKAGING_SHELL_FILES",
+              "TEST_SHELL_FILES",
+              "DEVELOPMENT_SHELL_FILES",
+          }
+          active = None
+          seen = set()
+          entries = []
+          for raw_line in inventory.read_text(encoding="utf-8").splitlines():
+              stripped = raw_line.strip()
+              if active is None:
+                  matched = next(
+                      (name for name in arrays if stripped == f"{name}=("),
+                      None,
+                  )
+                  if matched is not None:
+                      if matched in seen:
+                          raise SystemExit(f"duplicate canonical array: {matched}")
+                      seen.add(matched)
+                      active = matched
+                  continue
+              if stripped == ")":
+                  active = None
+                  continue
+              if not stripped or stripped.startswith("#"):
+                  continue
+              fields = shlex.split(stripped, comments=True, posix=True)
+              if len(fields) != 1 or "$" in fields[0]:
+                  raise SystemExit(
+                      f"unsupported canonical inventory entry: {raw_line}"
+                  )
+              entry = fields[0]
+              path = Path(entry)
+              if path.is_absolute() or ".." in path.parts:
+                  raise SystemExit(f"unsafe canonical inventory path: {entry}")
+              entries.append(entry)
+          if active is not None:
+              raise SystemExit(f"unterminated canonical array: {active}")
+          if seen != arrays:
+              missing = ", ".join(sorted(arrays - seen))
+              raise SystemExit(f"missing canonical arrays: {missing}")
+          if not entries:
+              raise SystemExit("canonical shell inventory is empty")
+          for entry in sorted(set(entries)):
+              print(entry)
+          PY
+
+          mapfile -t shell_files <"${shell_file}"
+          ((${#shell_files[@]} > 0))
+
+          for file in "${shell_files[@]}"; do
+            [[ -f ${file} && ! -L ${file} ]] || {
+              printf 'Error: unsafe canonical shell file for candidate sandbox: %s\n' \
+                "${file}" >&2
+              exit 65
+            }
+          done
+
+          cp -- "${candidate_dir}/shfmt" "${docker_context}/shfmt"
+          cat >"${docker_context}/Dockerfile" <<'DOCKERFILE'
+          FROM scratch
+          COPY shfmt /shfmt
+          ENTRYPOINT ["/shfmt"]
+          DOCKERFILE
+
+          docker build \
+            --network=none \
+            --tag "${image}" \
+            "${docker_context}"
+
+          timeout --signal=TERM --kill-after=10s 30s \
+            docker run \
+              --rm \
+              --network=none \
+              --read-only \
+              --cap-drop=ALL \
+              --security-opt=no-new-privileges \
+              --pids-limit=64 \
+              --memory=512m \
+              --cpus=2 \
+              --user "$(id -u):$(id -g)" \
+              "${image}" \
+              --version
+
+          timeout --signal=TERM --kill-after=10s 2m \
+            docker run \
+              --name "${container}" \
+              --rm \
+              --network=none \
+              --read-only \
+              --cap-drop=ALL \
+              --security-opt=no-new-privileges \
+              --pids-limit=64 \
+              --memory=512m \
+              --cpus=2 \
+              --user "$(id -u):$(id -g)" \
+              --volume "${GITHUB_WORKSPACE}:/workspace:rw" \
+              --volume "${GITHUB_WORKSPACE}/.git:/workspace/.git:ro" \
+              --workdir /workspace \
+              "${image}" \
+              -w -i 4 -ci -bn -- \
+              "${shell_files[@]}"
 
       - name: Build data-only shfmt handoff
         if: steps.detect.outputs.update == 'true'
@@ -250,7 +396,7 @@ jobs:
         if: steps.detect.outputs.update == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: shfmt-candidate-${{ steps.base.outputs.sha }}
+          name: shfmt-candidate-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/shfmt-update-handoff/shfmt-update.patch
             ${{ runner.temp }}/shfmt-update-handoff/shfmt-update.patch.sha256
@@ -260,18 +406,17 @@ jobs:
 
   verify-shfmt-update:
     needs: prepare-shfmt-update
-    if: needs.prepare-shfmt-update.outputs.update == 'true'
+    if: github.ref == 'refs/heads/main' && needs.prepare-shfmt-update.outputs.update == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
     env:
-      EXPECTED_BASE_SHA: ${{ needs.prepare-shfmt-update.outputs.base_sha }}
+      EXPECTED_BASE_SHA: ${{ github.sha }}
       SHFMT_VERSION: ${{ needs.prepare-shfmt-update.outputs.latest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.prepare-shfmt-update.outputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Install verifier dependencies
@@ -279,11 +424,11 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 update
           sudo env DEBIAN_FRONTEND=noninteractive \
             apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
-            curl findutils python3
+            aria2 curl desktop-file-utils findutils gnupg procps python3 shellcheck unzip
       - name: Download untrusted candidate handoff
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
-          name: shfmt-candidate-${{ needs.prepare-shfmt-update.outputs.base_sha }}
+          name: shfmt-candidate-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/shfmt-candidate-handoff
       - name: Verify formatter-only semantics and upstream provenance
         env:
@@ -542,10 +687,14 @@ jobs:
             scripts/dev-tools/shfmt-pin.env \
             "${verified_shell_files[@]}" \
             >"${verified_dir}/shfmt-tested-tree.sha256"
+      - name: Validate verified formatter and project
+        shell: bash
+        run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/run-all.sh
+
       - name: Upload verified data-only shfmt handoff
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: shfmt-verified-${{ needs.prepare-shfmt-update.outputs.base_sha }}
+          name: shfmt-verified-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/shfmt-verified-handoff/shfmt-update.patch
             ${{ runner.temp }}/shfmt-verified-handoff/shfmt-update.patch.sha256
@@ -558,27 +707,26 @@ jobs:
     needs:
       - prepare-shfmt-update
       - verify-shfmt-update
-    if: needs.prepare-shfmt-update.outputs.update == 'true'
+    if: github.ref == 'refs/heads/main' && needs.prepare-shfmt-update.outputs.update == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
       pull-requests: write
     env:
-      EXPECTED_BASE_SHA: ${{ needs.prepare-shfmt-update.outputs.base_sha }}
+      EXPECTED_BASE_SHA: ${{ github.sha }}
       SHFMT_VERSION: ${{ needs.prepare-shfmt-update.outputs.latest }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.prepare-shfmt-update.outputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Download verified data-only shfmt handoff
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
-          name: shfmt-verified-${{ needs.prepare-shfmt-update.outputs.base_sha }}
+          name: shfmt-verified-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/shfmt-update-handoff
 
       - name: Verify base and apply allowlisted patch

@@ -22,6 +22,9 @@
   bootstrap, hash-pin reproducible yt-dlp wheels and isolate event concurrency.
 - Use all available public-runner CPUs for the verified FFmpeg 9 source build
   without introducing executable dependency caches into the release trust path.
+- Bind scheduled/manual shfmt automation to the immutable main run revision,
+  scope handoffs per run, sandbox the candidate formatter without network access
+  and defer project-code execution until the fresh verifier accepts the patch.
 
 ### Documentation
 
