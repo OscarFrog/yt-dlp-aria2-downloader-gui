@@ -18,6 +18,8 @@ readonly RUNTIME_OWNER_SENTINEL='.package-runtime-owner-v1'
 readonly DENO_RELEASE_REPOSITORY='denoland/deno'
 readonly DEFAULT_YTDLP_CHANNEL='stable'
 
+LOCK_FD=''
+
 error() {
     printf 'Error: %s\n' "$*" >&2
 }
@@ -92,6 +94,7 @@ ensure_private_directory() {
 }
 
 record_runtime_data_home() {
+    local data_home=$1
     local registry_root="${HOME}/.local/share/${APP_ID}"
     local managed_data_root="${data_home}/${APP_ID}"
     local marker="${registry_root}/.package-runtime-data-home-v1"
@@ -99,10 +102,10 @@ record_runtime_data_home() {
     local marker_temporary=''
     local sentinel_temporary=''
 
-    # The sentinel is a non-secret ownership proof used by package final-removal
+    # The sentinel is a non-secret ownership proof used by RPM final-removal
     # cleanup. It makes a custom marker alone insufficient to authorize deletion.
     if ! ensure_private_directory "${managed_data_root}"; then
-        warning 'unable to secure managed data root; custom-XDG package cleanup will remain conservative.'
+        warning 'unable to secure managed data root; custom-XDG RPM cleanup will remain conservative.'
         return 0
     fi
 
@@ -138,7 +141,7 @@ data=%s
     fi
 
     if ! ensure_private_directory "${registry_root}"; then
-        warning 'unable to create runtime-location registry; package uninstall may not discover a custom XDG_DATA_HOME.'
+        warning 'unable to create runtime-location registry; RPM final-erase cleanup may not discover a custom XDG_DATA_HOME.'
         return 0
     fi
 
@@ -204,6 +207,25 @@ acquire_runtime_lock() {
     return 0
 }
 
+run_child() (
+    if [[ -n ${LOCK_FD:-} ]]; then
+        exec {LOCK_FD}>&- || return 1
+    fi
+    exec "$@"
+)
+
+run_timed_in_dir() (
+    local seconds=$1
+    local directory=$2
+    shift 2
+
+    if [[ -n ${LOCK_FD:-} ]]; then
+        exec {LOCK_FD}>&- || return 1
+    fi
+    cd -- "${directory}" || return 1
+    exec timeout --signal=TERM --kill-after=5s "${seconds}s" "$@"
+)
+
 run_curl() {
     run_child curl \
         --fail --location --proto '=https' --tlsv1.2 \
@@ -249,8 +271,14 @@ read_runtime_link() {
     local path="${root}/${name}"
 
     if [[ -L ${path} ]]; then
-        target=$(readlink -- "${path}") || return 1
-        runtime_target_is_safe "${target}" || return 1
+        target=$(readlink -- "${path}") || {
+            error "unable to read runtime link: ${path}"
+            return 1
+        }
+        runtime_target_is_safe "${target}" || {
+            error "runtime link has an unsafe target: ${path} -> ${target}"
+            return 1
+        }
     elif [[ -e ${path} ]]; then
         error "runtime link path is not a symbolic link: ${path}"
         return 1
@@ -547,6 +575,7 @@ validate_deno() {
 
 install_ytdlp_candidate() {
     local candidate=$1
+    local expected_version=$2
     local version=''
     local version_dir=''
     local staged=''
@@ -556,6 +585,14 @@ install_ytdlp_candidate() {
         "${candidate}" --version) || return 1
     version=${version%%$'\n'*}
     is_valid_ytdlp_version "${version}" || return 1
+    if [[ ${version} != "${expected_version}" ]]; then
+        error "yt-dlp candidate version ${version} does not match resolved release ${expected_version}."
+        return 1
+    fi
+    [[ ${version} =~ ${YTDLP_CHANNEL_VERSION_PATTERN} ]] || {
+        error "yt-dlp candidate version does not match selected ${YTDLP_CHANNEL} channel: ${version}"
+        return 1
+    }
 
     version_dir="${YTDLP_ROOT}/${version}"
     if [[ -L ${version_dir} || (-e ${version_dir} && ! -d ${version_dir}) ]]; then
@@ -724,7 +761,7 @@ bootstrap_ytdlp_version() {
         cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
         return 1
     fi
-    if ! install_ytdlp_candidate "${work}/${YTDLP_ASSET}"; then
+    if ! install_ytdlp_candidate "${work}/${YTDLP_ASSET}" "${version}"; then
         error 'yt-dlp bootstrap failed: downloaded runtime failed validation or activation.'
         cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
         return 1
@@ -771,7 +808,7 @@ bootstrap_deno_version() {
     if ! run_timed_in_dir "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" "${work}" \
         sha256sum --check CHECKSUM >/dev/null \
         || ! run_timed_in_dir "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" "${work}" \
-            unzip -q -- "${DENO_ASSET}"; then
+            unzip -q -- "${DENO_ASSET}" deno; then
         error 'Deno bootstrap failed: checksum verification or extraction failed.'
         rm -rf -- "${work}" || true
         return 1
@@ -1015,6 +1052,20 @@ rollback_runtime_locked() {
 }
 
 main() {
+    local data_home=''
+    local script_path=''
+    local machine_arch=''
+    local setting=''
+    local setting_name=''
+    local setting_value=''
+    local setting_min=''
+    local setting_max=''
+    local command_name=''
+    local ytdlp=''
+    local deno=''
+    local ytdlp_version=''
+    local deno_version=''
+
     if [[ -z ${HOME:-} || ${HOME} != /* || ${HOME} == / ||
         ${HOME} == *$'\n'* || ${HOME} == *$'\r'* ]]; then
         error 'HOME must be a safe absolute non-root path.'
@@ -1084,7 +1135,6 @@ main() {
     readonly YTDLP_PUBLIC_KEY
 
     machine_arch=$(uname -m)
-    readonly machine_arch
     case ${machine_arch} in
         x86_64)
             readonly YTDLP_ASSET='yt-dlp_linux'
@@ -1113,40 +1163,8 @@ main() {
     ensure_private_directory "${RUNTIME_ROOT}" || exit $?
     ensure_private_directory "${YTDLP_ROOT}" || exit $?
     ensure_private_directory "${DENO_ROOT}" || exit $?
-    record_runtime_data_home
-
-    LOCK_FD=''
+    record_runtime_data_home "${data_home}"
     trap release_runtime_lock EXIT
-
-    run_child() (
-        if [[ -n ${LOCK_FD:-} ]]; then
-            exec {LOCK_FD}>&-
-        fi
-        exec "$@"
-    )
-
-    run_in_dir() (
-        local directory=$1
-        shift
-
-        if [[ -n ${LOCK_FD:-} ]]; then
-            exec {LOCK_FD}>&- || return 1
-        fi
-        cd -- "${directory}" || return 1
-        exec "$@"
-    )
-
-    run_timed_in_dir() (
-        local seconds=$1
-        local directory=$2
-        shift 2
-
-        if [[ -n ${LOCK_FD:-} ]]; then
-            exec {LOCK_FD}>&- || return 1
-        fi
-        cd -- "${directory}" || return 1
-        exec timeout --signal=TERM --kill-after=5s "${seconds}s" "$@"
-    )
 
     case ${1:-} in
         require)
@@ -1159,7 +1177,19 @@ main() {
             update_runtime
             ;;
         path)
-            component_path "${2:-}"
+            (($# == 2)) || {
+                error 'path requires exactly one component: yt-dlp or deno.'
+                exit 2
+            }
+            case $2 in
+                yt-dlp | deno)
+                    component_path "$2"
+                    ;;
+                *)
+                    error "unknown runtime component for path: $2"
+                    exit 2
+                    ;;
+            esac
             ;;
         rollback)
             rollback_runtime_locked "${2:-}"

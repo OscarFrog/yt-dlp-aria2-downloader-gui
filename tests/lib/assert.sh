@@ -20,16 +20,19 @@ ASSERT_STDOUT=''
 # shellcheck disable=SC2034 # Read by test suites that source this file.
 ASSERT_STDERR=''
 
+# Abort the current test with an assertion-failure message.
 fail() {
     printf 'FAIL: %s\n' "$*" >&2
     exit 1
 }
 
+# Abort the current test for invalid harness usage or setup.
 test_error() {
     printf 'TEST ERROR: %s\n' "$*" >&2
     exit 2
 }
 
+# Require one command name to resolve through PATH.
 require_test_command() {
     (($# == 1)) || test_error "require_test_command requires 1 argument; got $#."
     local command_name=$1
@@ -41,6 +44,7 @@ require_test_command() {
     fi
 }
 
+# Require a path to be a readable regular file.
 assert_readable_file() {
     (($# == 2)) || test_error "assert_readable_file requires 2 arguments; got $#."
     local file=$1
@@ -50,6 +54,7 @@ assert_readable_file() {
     [[ -r ${file} ]] || fail "${label}: file is not readable: ${file}"
 }
 
+# Require a command name or explicit path to be invocable.
 assert_invocable_command() {
     (($# == 2)) || test_error "assert_invocable_command requires 2 arguments; got $#."
     local command_name=$1
@@ -63,6 +68,7 @@ assert_invocable_command() {
     fi
 }
 
+# Normalize an expected exit status into 0..255 and assign it by name.
 validate_expected_status() {
     (($# == 3)) || test_error "validate_expected_status requires 3 arguments; got $#."
     local raw=$1
@@ -83,6 +89,7 @@ validate_expected_status() {
     printf -v "${output_name}" '%d' "$((10#${normalized}))"
 }
 
+# Run a command, require its status, and expose combined output in ASSERT_OUTPUT.
 assert_status() {
     (($# >= 3)) || test_error \
         'assert_status requires an expected status, a label, and a command.'
@@ -111,6 +118,7 @@ assert_status() {
     ASSERT_OUTPUT=${output}
 }
 
+# Run a command and expose validated stdout/stderr separately.
 assert_status_split() {
     (($# >= 3)) || test_error \
         'assert_status_split requires an expected status, a label, and a command.'
@@ -151,6 +159,7 @@ assert_status_split() {
     fi
 }
 
+# Require exact string equality.
 assert_equals() {
     (($# == 3)) || test_error "assert_equals requires 3 arguments; got $#."
     local expected=$1
@@ -164,6 +173,7 @@ assert_equals() {
     fi
 }
 
+# Require a string to contain a non-empty literal fragment.
 assert_text_contains() {
     (($# == 3)) || test_error "assert_text_contains requires 3 arguments; got $#."
     local text=$1
@@ -180,6 +190,7 @@ assert_text_contains() {
     fi
 }
 
+# Require a string not to contain a non-empty literal fragment.
 assert_text_not_contains() {
     (($# == 3)) || test_error "assert_text_not_contains requires 3 arguments; got $#."
     local text=$1
@@ -196,6 +207,7 @@ assert_text_not_contains() {
     fi
 }
 
+# Require a readable file to contain a literal fragment.
 assert_file_contains() {
     (($# == 3)) || test_error "assert_file_contains requires 3 arguments; got $#."
     local file=$1
@@ -219,6 +231,7 @@ assert_file_contains() {
     esac
 }
 
+# Require a readable file not to contain a literal fragment.
 assert_file_not_contains() {
     (($# == 3)) || test_error "assert_file_not_contains requires 3 arguments; got $#."
     local file=$1
@@ -242,6 +255,7 @@ assert_file_not_contains() {
     esac
 }
 
+# Require a readable file to contain one exact complete line.
 assert_file_has_line() {
     (($# == 3)) || test_error "assert_file_has_line requires 3 arguments; got $#."
     local file=$1
@@ -262,6 +276,7 @@ assert_file_has_line() {
     esac
 }
 
+# Require a readable file not to contain one exact complete line.
 assert_file_has_no_line() {
     (($# == 3)) || test_error "assert_file_has_no_line requires 3 arguments; got $#."
     local file=$1

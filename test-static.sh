@@ -7,6 +7,7 @@
 # ==============================================================================
 
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly SCRIPT_DIR
@@ -19,8 +20,9 @@ if ((${#ALL_SHELL_FILES[@]} == 0)); then
     printf 'Error: ALL_SHELL_FILES is empty.\n' >&2
     exit 65
 fi
-# Contract: every canonical shell file uses the standard header.
+# Contract: every canonical shell file uses the standard Bash header.
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
+readonly EXPECTED_VERSION='2.2.6'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SHELL_INVENTORY_FILE=''
 
@@ -35,24 +37,30 @@ assert_standard_shell_header() {
     local purpose_line=''
     local separator_close=''
     local spacer='nonempty'
+    local -a header_lines=()
 
-    if ! {
-        IFS= read -r shebang || true
-        IFS= read -r spdx || true
-        IFS= read -r separator_open || true
-        IFS= read -r project_line || true
-        IFS= read -r file_line || true
-        IFS= read -r purpose_line || true
-        IFS= read -r separator_close || true
-        IFS= read -r spacer || true
-    } <"${absolute_path}"; then
+    if ! mapfile -t -n 8 header_lines <"${absolute_path}"; then
         printf 'FAIL: unable to read canonical shell file: %s.\n' \
             "${relative_path}" >&2
         return 65
     fi
+    if ((${#header_lines[@]} != 8)); then
+        printf 'FAIL: canonical shell header is truncated in %s; expected 8 lines, found %d.\n' \
+            "${relative_path}" "${#header_lines[@]}" >&2
+        return 65
+    fi
 
-    [[ ${shebang} == '#!'* ]] || {
-        printf 'FAIL: missing shebang in %s.\n' "${relative_path}" >&2
+    shebang=${header_lines[0]}
+    spdx=${header_lines[1]}
+    separator_open=${header_lines[2]}
+    project_line=${header_lines[3]}
+    file_line=${header_lines[4]}
+    purpose_line=${header_lines[5]}
+    separator_close=${header_lines[6]}
+    spacer=${header_lines[7]}
+
+    [[ ${shebang} == '#!/usr/bin/env bash' ]] || {
+        printf 'FAIL: non-standard Bash shebang in %s.\n' "${relative_path}" >&2
         return 65
     }
     [[ ${spdx} == '# SPDX-License-Identifier: MIT' ]] || {
@@ -78,7 +86,8 @@ assert_standard_shell_header() {
         return 65
     }
     [[ -z ${spacer} ]] || {
-        printf 'FAIL: missing blank line after standard header in %s.\n' "${relative_path}" >&2
+        printf 'FAIL: missing blank line after standard header in %s.\n' \
+            "${relative_path}" >&2
         return 65
     }
     return 0
@@ -128,15 +137,27 @@ assert_main_entry_structure() {
 assert_no_historical_comment_labels() {
     local relative_path=$1
     local absolute_path="${SCRIPT_DIR}/${relative_path}"
-    local historical_regex='^[[:space:]]*#[[:space:]]*((P[A]TCH|A[U]D)-[0-9]+|Version[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+)'
+    local historical_regex='^[[:space:]]*#[[:space:]]*((P[A]TCH|A[U]D)-[0-9]+)'
+    local matches=''
+    local status=0
 
-    if grep -En -- "${historical_regex}" "${absolute_path}" >/dev/null; then
-        printf 'FAIL: historical patch/audit/version label found in %s.\n' \
-            "${relative_path}" >&2
-        grep -En -- "${historical_regex}" "${absolute_path}" >&2 || true
-        return 65
-    fi
-    return 0
+    matches=$(grep -En -- "${historical_regex}" "${absolute_path}") || status=$?
+    case ${status} in
+        0)
+            printf 'FAIL: historical patch/audit label found in %s.\n' \
+                "${relative_path}" >&2
+            printf '%s\n' "${matches}" >&2
+            return 65
+            ;;
+        1)
+            return 0
+            ;;
+        *)
+            printf 'FAIL: unable to scan comments in %s (grep status %d).\n' \
+                "${relative_path}" "${status}" >&2
+            return 65
+            ;;
+    esac
 }
 
 cleanup_static_test() {
@@ -161,13 +182,14 @@ assert_shell_inventory_is_canonical() {
     fi
 
     if [[ -e ${SCRIPT_DIR}/.git || -L ${SCRIPT_DIR}/.git ]]; then
-        if ! git -c "safe.directory=${SCRIPT_DIR}" -C "${SCRIPT_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        if ! git -c "safe.directory=${SCRIPT_DIR}" -C "${SCRIPT_DIR}" \
+            rev-parse --is-inside-work-tree >/dev/null 2>&1; then
             cleanup_static_test
             printf 'FAIL: unable to validate the project Git worktree.\n' >&2
             return 65
         fi
-
-        if ! git -c "safe.directory=${SCRIPT_DIR}" -C "${SCRIPT_DIR}" ls-files -co --exclude-standard -z >"${SHELL_INVENTORY_FILE}"; then
+        if ! git -c "safe.directory=${SCRIPT_DIR}" -C "${SCRIPT_DIR}" \
+            ls-files -co --exclude-standard -z >"${SHELL_INVENTORY_FILE}"; then
             cleanup_static_test
             printf 'FAIL: unable to enumerate tracked/non-ignored project files.\n' >&2
             return 65
@@ -184,6 +206,12 @@ assert_shell_inventory_is_canonical() {
     while IFS= read -r -d '' candidate; do
         if [[ ${inventory_is_absolute} == true ]]; then
             candidate=${candidate#"${SCRIPT_DIR}/"}
+            if [[ ${candidate} == /* ]]; then
+                printf 'FAIL: Git-free inventory path escaped project root: %s\n' \
+                    "${candidate}" >&2
+                inventory_status=65
+                continue
+            fi
         fi
         [[ -f ${SCRIPT_DIR}/${candidate} ]] || continue
 
@@ -193,15 +221,10 @@ assert_shell_inventory_is_canonical() {
 
         if [[ ${candidate} == *.sh ]]; then
             is_shell_candidate=true
+        elif [[ ${first_line} =~ ^\#![[:space:]]*/(usr/)?bin/(sh|bash|dash|ash|ksh|zsh)([[:space:]].*)?$ ||
+            ${first_line} =~ ^\#![[:space:]]*/usr/bin/env([[:space:]]+-S)?[[:space:]]+(sh|bash|dash|ash|ksh|zsh)([[:space:]].*)?$ ]]; then
+            is_shell_candidate=true
         fi
-
-        case ${first_line} in
-            '#!/usr/bin/env bash' | '#!/bin/bash' | '#!/bin/sh' | '#!/usr/bin/env sh')
-                is_shell_candidate=true
-                ;;
-            *)
-                ;;
-        esac
 
         [[ ${is_shell_candidate} == true ]] || continue
 
@@ -217,7 +240,6 @@ assert_shell_inventory_is_canonical() {
             printf 'FAIL: shell file is not in the canonical inventory: %s\n' \
                 "${candidate}" >&2
             inventory_status=65
-            break
         fi
     done <"${SHELL_INVENTORY_FILE}"
 
@@ -248,24 +270,209 @@ workflow_job_block() {
     ' "${workflow}"
 }
 
+job_permissions_block() {
+    local job_block=$1
+
+    awk '
+        /^    permissions:[[:space:]]*$/ {
+            in_permissions = 1
+            print
+            next
+        }
+        in_permissions && /^      [[:alnum:]_-]+:[[:space:]]*[^[:space:]].*$/ {
+            line = $0
+            sub(/[[:space:]]+#.*$/, "", line)
+            sub(/[[:space:]]+$/, "", line)
+            print line
+            next
+        }
+        in_permissions {
+            exit
+        }
+    ' <<<"${job_block}"
+}
+
+mutation_must_change() {
+    local original=$1
+    local mutated=$2
+    local label=$3
+
+    [[ ${mutated} != "${original}" ]] || {
+        printf 'FAIL: negative-control mutation no longer matches: %s\n' \
+            "${label}" >&2
+        return 65
+    }
+    return 0
+}
+
+docker_run_blocks_are_hardened() {
+    local job_block=$1
+    local line=''
+    local in_docker_run=false
+    local has_network_none=false
+    local has_read_only=false
+    local has_cap_drop=false
+    local has_no_new_privileges=false
+    local accepts_docker_options=false
+    local docker_run_count=0
+    local hardened_docker_run_count=0
+
+    while IFS= read -r line; do
+        if [[ ${in_docker_run} == false ]]; then
+            if [[ ${line} =~ ^[[:space:]]*docker[[:space:]]+run[[:space:]]+\\[[:space:]]*$ ]]; then
+                in_docker_run=true
+                has_network_none=false
+                has_read_only=false
+                has_cap_drop=false
+                has_no_new_privileges=false
+                accepts_docker_options=true
+                docker_run_count=$((docker_run_count + 1))
+            fi
+            continue
+        fi
+
+        if [[ ${accepts_docker_options} == true &&
+            ${line} =~ ^[[:space:]]+--network=none[[:space:]]+\\[[:space:]]*$ ]]; then
+            has_network_none=true
+        elif [[ ${accepts_docker_options} == true &&
+            ${line} =~ ^[[:space:]]+--read-only[[:space:]]+\\[[:space:]]*$ ]]; then
+            has_read_only=true
+        elif [[ ${accepts_docker_options} == true &&
+            ${line} =~ ^[[:space:]]+--cap-drop=ALL[[:space:]]+\\[[:space:]]*$ ]]; then
+            has_cap_drop=true
+        elif [[ ${accepts_docker_options} == true &&
+            ${line} =~ ^[[:space:]]+--security-opt=no-new-privileges[[:space:]]+\\[[:space:]]*$ ]]; then
+            has_no_new_privileges=true
+        elif [[ ${accepts_docker_options} == true &&
+            ! ${line} =~ ^[[:space:]]+--[^[:space:]]+([[:space:]]+.*)?\\[[:space:]]*$ ]]; then
+            # Docker options stop at the image argument. Matching option-like
+            # text after that point would validate container arguments instead.
+            accepts_docker_options=false
+        fi
+
+        if [[ ! ${line} =~ \\[[:space:]]*$ ]]; then
+            if [[ ${has_network_none} == true &&
+                ${has_read_only} == true &&
+                ${has_cap_drop} == true &&
+                ${has_no_new_privileges} == true ]]; then
+                hardened_docker_run_count=$((hardened_docker_run_count + 1))
+            fi
+            in_docker_run=false
+        fi
+    done <<<"${job_block}"
+
+    [[ ${in_docker_run} == false ]] || return 65
+    ((docker_run_count == 2 && hardened_docker_run_count == 2))
+}
+
+publisher_job_executes_repo_shell() {
+    local job_block=$1
+    local line=''
+    local command_name=''
+    local script_path=''
+    local word=''
+    local index=0
+    local word_count=0
+    local -a words=()
+
+    while IFS= read -r line; do
+        words=()
+        read -r -a words <<<"${line}"
+        word_count=${#words[@]}
+        ((word_count > 0)) || continue
+        index=0
+
+        while ((index < word_count)); do
+            word=${words[index]}
+            case ${word} in
+                command)
+                    index=$((index + 1))
+                    ;;
+                env)
+                    index=$((index + 1))
+                    while ((index < word_count)); do
+                        word=${words[index]}
+                        if [[ ${word} == -* || ${word} == *=* ]]; then
+                            index=$((index + 1))
+                        else
+                            break
+                        fi
+                    done
+                    ;;
+                timeout)
+                    index=$((index + 1))
+                    while ((index < word_count)) && [[ ${words[index]} == -* ]]; do
+                        index=$((index + 1))
+                    done
+                    ((index < word_count)) && index=$((index + 1))
+                    ;;
+                sudo)
+                    index=$((index + 1))
+                    while ((index < word_count)) && [[ ${words[index]} == -* ]]; do
+                        index=$((index + 1))
+                    done
+                    ;;
+                *)
+                    break
+                    ;;
+            esac
+        done
+
+        ((index < word_count)) || continue
+        command_name=${words[index]}
+        script_path=${command_name}
+        case ${command_name} in
+            bash | sh)
+                index=$((index + 1))
+                while ((index < word_count)) && [[ ${words[index]} == -* ]]; do
+                    if [[ ${words[index]} == -- ]]; then
+                        index=$((index + 1))
+                        break
+                    fi
+                    index=$((index + 1))
+                done
+                ((index < word_count)) || continue
+                script_path=${words[index]}
+                ;;
+            source | .)
+                index=$((index + 1))
+                ((index < word_count)) || continue
+                script_path=${words[index]}
+                ;;
+            *)
+                ;;
+        esac
+
+        script_path=${script_path#\"}
+        script_path=${script_path%\"}
+        script_path=${script_path#\'}
+        script_path=${script_path%\'}
+        script_path=${script_path%;}
+        script_path=${script_path%\\}
+        if [[ ${script_path} != /* && ${script_path} == *.sh ]]; then
+            return 0
+        fi
+    done <<<"${job_block}"
+
+    return 1
+}
+
 shfmt_candidate_job_policy() {
     local job_block=$1
 
-    [[ ${job_block} == *'permissions:'* ]] || return 65
-    [[ ${job_block} == *'contents: read'* ]] || return 65
-    if grep -Eq '^[[:space:]]+[[:alnum:]_-]+:[[:space:]]+write[[:space:]]*$' \
-        <<<"${job_block}"; then
-        return 65
-    fi
+    local permissions=''
+
+    permissions=$(job_permissions_block "${job_block}")
+    [[ ${permissions} == $'    permissions:\n      contents: read' ]] || return 65
     # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
     [[ ${job_block} != *'${{ secrets.'* ]] || return 65
     [[ ${job_block} == *"if: github.ref == 'refs/heads/main'"* ]] || return 65
     [[ ${job_block} == *'Reformat with candidate shfmt in a no-network sandbox'* ]] || return 65
-    [[ ${job_block} == *'docker build'* ]] || return 65
-    [[ ${job_block} == *'--network=none'* ]] || return 65
-    [[ ${job_block} == *'--read-only'* ]] || return 65
-    [[ ${job_block} == *'--cap-drop=ALL'* ]] || return 65
-    [[ ${job_block} == *'--security-opt=no-new-privileges'* ]] || return 65
+    [[ ${job_block} == *$'          docker build \\\n            --network=none \\\n            --tag '* ]] || return 65
+    # Predicate failure rejects a candidate job whose Docker commands are not
+    # each individually hardened.
+    # shellcheck disable=SC2310
+    docker_run_blocks_are_hardened "${job_block}" || return 65
     # shellcheck disable=SC2016 # Literal workflow shell expression, not local expansion.
     [[ ${job_block} == *'"${GITHUB_WORKSPACE}/.git:/workspace/.git:ro"'* ]] || return 65
     [[ ${job_block} == *'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'* ]] || return 65
@@ -279,12 +486,10 @@ shfmt_candidate_job_policy() {
 shfmt_verifier_job_policy() {
     local job_block=$1
 
-    [[ ${job_block} == *'permissions:'* ]] || return 65
-    [[ ${job_block} == *'contents: read'* ]] || return 65
-    if grep -Eq '^[[:space:]]+[[:alnum:]_-]+:[[:space:]]+write[[:space:]]*$' \
-        <<<"${job_block}"; then
-        return 65
-    fi
+    local permissions=''
+
+    permissions=$(job_permissions_block "${job_block}")
+    [[ ${permissions} == $'    permissions:\n      contents: read' ]] || return 65
     # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
     [[ ${job_block} != *'${{ secrets.'* ]] || return 65
     [[ ${job_block} == *"if: github.ref == 'refs/heads/main' && needs.prepare-shfmt-update.outputs.update == 'true'"* ]] || return 65
@@ -315,9 +520,10 @@ shfmt_verifier_job_policy() {
 shfmt_publish_job_policy() {
     local job_block=$1
 
-    [[ ${job_block} == *'permissions:'* ]] || return 65
-    [[ ${job_block} == *'contents: write'* ]] || return 65
-    [[ ${job_block} == *'pull-requests: write'* ]] || return 65
+    local permissions=''
+
+    permissions=$(job_permissions_block "${job_block}")
+    [[ ${permissions} == $'    permissions:\n      contents: write\n      pull-requests: write' ]] || return 65
     [[ ${job_block} == *"if: github.ref == 'refs/heads/main' && needs.prepare-shfmt-update.outputs.update == 'true'"* ]] || return 65
     [[ ${job_block} == *'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'* ]] || return 65
     # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
@@ -338,8 +544,9 @@ shfmt_publish_job_policy() {
     [[ ${job_block} != *'scripts/dev-tools/ensure-shfmt.sh'* ]] || return 65
     [[ ${job_block} != *'bash ./tests/run-all.sh'* ]] || return 65
     [[ ${job_block} != *'actions/cache@'* ]] || return 65
-    if grep -Eq '^[[:space:]]+(bash[[:space:]]+\./|source[[:space:]]+\./|\./(tests|scripts)/)' \
-        <<<"${job_block}"; then
+    # Predicate success identifies forbidden repository-controlled execution.
+    # shellcheck disable=SC2310
+    if publisher_job_executes_repo_shell "${job_block}"; then
         return 65
     fi
     return 0
@@ -351,6 +558,15 @@ assert_shfmt_update_workflow_policy() {
     local verifier_block=''
     local publish_block=''
     local mutated=''
+    local unsafe_publisher_command=''
+    local read_only_line=$'              --read-only \\'
+    local -a unsafe_publisher_commands=(
+        './download-video.sh'
+        'bash ./runtime-manager.sh'
+        './install-gui.sh'
+        'timeout 10s bash ./tests/foo.sh'
+        'command bash ./scripts/foo.sh'
+    )
 
     candidate_block=$(workflow_job_block "${workflow}" prepare-shfmt-update)
     verifier_block=$(workflow_job_block "${workflow}" verify-shfmt-update)
@@ -376,10 +592,32 @@ assert_shfmt_update_workflow_policy() {
         || fail 'shfmt updater publication job violates the privileged trust boundary.'
 
     mutated=${candidate_block//contents: read/contents: write}
+    mutation_must_change "${candidate_block}" "${mutated}" 'candidate contents write'
     # Predicate failure is expected for this negative-control mutation.
     # shellcheck disable=SC2310
     if shfmt_candidate_job_policy "${mutated}"; then
         fail 'shfmt updater policy did not reject candidate repository write permission.'
+    fi
+
+    mutated=${candidate_block/$'    permissions:\n      contents: read'/$'    permissions: write-all'}
+    mutation_must_change "${candidate_block}" "${mutated}" 'candidate write-all'
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if shfmt_candidate_job_policy "${mutated}"; then
+        fail 'shfmt updater policy did not reject candidate write-all permission.'
+    fi
+
+    mutated=${candidate_block/"${read_only_line}"/}
+    mutated+=$'\n          cat <<\x27DECOY\x27\n              --read-only \\\n          DECOY'
+    mutation_must_change \
+        "${candidate_block}" \
+        "${mutated}" \
+        'candidate Docker read-only relocation'
+    # Predicate failure is expected when an option is moved outside its
+    # contiguous docker run command even if the raw line count stays unchanged.
+    # shellcheck disable=SC2310
+    if shfmt_candidate_job_policy "${mutated}"; then
+        fail 'shfmt updater policy did not bind read-only to both Docker runs.'
     fi
 
     mutated="${candidate_block}"$'
@@ -391,6 +629,7 @@ assert_shfmt_update_workflow_policy() {
     fi
 
     mutated=${verifier_block//bash .\/tests\/run-all.sh/true}
+    mutation_must_change "${verifier_block}" "${mutated}" 'verifier test removal'
     # Predicate failure is expected for this negative-control mutation.
     # shellcheck disable=SC2310
     if shfmt_verifier_job_policy "${mutated}"; then
@@ -414,7 +653,18 @@ assert_shfmt_update_workflow_policy() {
         fail 'shfmt updater policy did not reject candidate-code execution in publication.'
     fi
 
+    for unsafe_publisher_command in "${unsafe_publisher_commands[@]}"; do
+        mutated="${publish_block}"$'\n'"      ${unsafe_publisher_command}"
+        # Predicate failure is expected for every form of repository-controlled
+        # shell execution in the privileged publisher.
+        # shellcheck disable=SC2310
+        if shfmt_publish_job_policy "${mutated}"; then
+            fail "shfmt updater policy allowed publisher command: ${unsafe_publisher_command}"
+        fi
+    done
+
     mutated=${publish_block//git apply --check/git apply}
+    mutation_must_change "${publish_block}" "${mutated}" 'publisher git apply check removal'
     # Predicate failure is expected for this negative-control mutation.
     # shellcheck disable=SC2310
     if shfmt_publish_job_policy "${mutated}"; then
@@ -422,6 +672,7 @@ assert_shfmt_update_workflow_policy() {
     fi
 
     mutated=${publish_block//comm -23/comm -13}
+    mutation_must_change "${publish_block}" "${mutated}" 'publisher allowlist mutation'
     # Predicate failure is expected for this negative-control mutation.
     # shellcheck disable=SC2310
     if shfmt_publish_job_policy "${mutated}"; then
@@ -429,6 +680,7 @@ assert_shfmt_update_workflow_policy() {
     fi
 
     mutated=${publish_block//core.hooksPath=\/dev\/null/core.hooksPath=.git\/hooks}
+    mutation_must_change "${publish_block}" "${mutated}" 'publisher hooks mutation'
     # Predicate failure is expected for this negative-control mutation.
     # shellcheck disable=SC2310
     if shfmt_publish_job_policy "${mutated}"; then
@@ -606,7 +858,6 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
         '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
         'non-owner test cleanup protection'
-    readonly EXPECTED_VERSION='2.2.5'
 
     # Current-version coherence is intentionally checked only on authoritative
     # carriers. Historical versions used by regression/upgrade fixtures are valid

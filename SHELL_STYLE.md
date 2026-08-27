@@ -12,7 +12,8 @@ Explicit project conventions and exceptions take precedence:
 
 - indentation is **4 spaces**, not Google's 2-space default;
 - canonical Bash executables use `#!/usr/bin/env bash`;
-- Debian maintainer hooks remain POSIX `/bin/sh`;
+- the canonical shell inventory currently contains Bash scripts only; any future
+  POSIX `sh` exception must be explicit in both the inventory and validation;
 - `runtime-manager.sh` deliberately retains its no-errexit execution model;
 - line length is advisory when exact URLs, regular expressions, protocol
   templates, package metadata, fixtures, or four-space indentation make
@@ -40,6 +41,26 @@ the `main()` rule in `tests/lib/project-files.sh`.
 
 Functions and ordinary local variables use `lower_snake_case`. Constants,
 exports and top-level readonly values use `UPPER_SNAKE_CASE`.
+
+## Comment contract
+
+Comments are written in English and are durable maintenance documentation,
+not a chronological patch log.
+
+- Explain **why** a guard, fallback, timeout, trust boundary, or safety
+  invariant exists; do not paraphrase obvious syntax.
+- Keep release, audit, patch, and finding history in `CHANGELOG.md`, issues,
+  pull requests, or qualification reports rather than permanent code comments.
+- Sourced libraries document callable helpers concisely, including
+  non-obvious caller-provided globals, shared outputs, or return contracts.
+- Keep ShellCheck directives immediately adjacent to the command or compound
+  command they affect. A `disable=` directive carries nearby rationale;
+  `source=` directives identify the static source corresponding to a dynamic
+  source path.
+- Tests may use durable labels such as `Scenario`, `Regression guard`,
+  `Mutation test`, `Negative control`, and `Positive controls`.
+- Durable future work belongs in an issue or pull request rather than an
+  open-ended `TODO`/`FIXME` comment.
 
 ## shfmt contract
 
@@ -76,11 +97,11 @@ Apply canonical formatting:
 the validation suite.
 
 The formatter bootstrap downloads the exact pinned upstream GitHub release
-asset when the verified binary is absent from the local managed tool directory. The downloaded
-asset must match the SHA-256 recorded in `shfmt-pin.env` before execution. This
-integrity check applies to an already approved project pin; a digest computed
-from a newly discovered candidate is not, by itself, an independent upstream
-authentication root.
+asset when the verified binary is absent from the local managed tool directory.
+The downloaded asset must match the SHA-256 recorded in `shfmt-pin.env` before
+execution. This integrity check applies to an already approved project pin; a
+digest computed from a newly discovered candidate is not, by itself, an
+independent upstream authentication root.
 
 ## Canonical shell inventory
 

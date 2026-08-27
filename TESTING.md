@@ -42,9 +42,10 @@ Apply the canonical format:
 ```
 
 The project contract is `shfmt -i 4 -ci -bn`, with simplification disabled.
-`tests/run-all.sh` performs the non-mutating check automatically. If the pinned
-upstream binary is absent from the local managed tool directory, the bootstrap downloads the
-exact GitHub release asset and verifies its SHA-256 before execution.
+`tests/run-all.sh` performs the non-mutating check automatically. If the
+pinned upstream binary is absent from the local managed tool directory, the
+bootstrap downloads the exact GitHub release asset and verifies its SHA-256
+before execution.
 
 The scheduled `.github/workflows/shfmt-update.yml` workflow detects a newer
 stable upstream release, updates the pin/checksums, reformats all canonical
@@ -71,13 +72,21 @@ source ./tests/lib/project-files.sh
 shellcheck -x -o all "${ALL_SHELL_FILES[@]}"
 ```
 
+The mechanically testable parts of the comment contract are enforced by
+`test-static.sh` (canonical headers and rejection of historical patch/audit
+labels). The quality and accuracy of rationale/API prose remain review
+requirements rather than brittle regex policy.
+
 ## Covered behavior
 
 The automated suite checks, among other things:
 
-- shell-comment policy: preserve ShellCheck directives and non-obvious rationale, use durable `Scenario`, `Mutation test`, `Regression guard`, `Negative control`, and `Positive controls` labels in tests, and reject permanent `PATCH`/`AUD`/version-history labels;
+- shell-comment policy: preserve ShellCheck directives and non-obvious
+  rationale, use durable `Scenario`, `Mutation test`, `Regression guard`,
+  `Negative control`, and `Positive controls` labels in tests, and reject
+  permanent `PATCH`/`AUD` labels;
 - project-version coherence across active scripts, documentation and release workflow surfaces, while keeping historical CHANGELOG entries exempt;
-- standardized headers on every canonical shell script, including an SPDX MIT tag, project name, repository-relative file name and purpose;
+- standardized Bash headers on every canonical shell script, including the canonical interpreter line, an SPDX MIT tag, project name, repository-relative file name and purpose;
 - argument validation, terminal `--`, and exactly one URL per run;
 - preservation of URLs containing shell metacharacters;
 - trimming of leading and trailing whitespace entered in the GUI;
@@ -184,6 +193,8 @@ The automated suite checks, among other things:
   yt-dlp `.part` resumption remains available when supported upstream;
 - managed-runtime operation with Deno outside PATH, bounded lock/network waits,
   strict zero-network `require` mode, exact-tag stable/nightly/stable switching,
+  exact executable-version binding to the resolved yt-dlp release tag,
+  single-member Deno archive extraction, explicit invalid-`path` diagnostics,
   lock-descriptor isolation, ten-cycle contention/double-rollback stress,
   interrupted-activation journal recovery, explicit/automatic rollback, and
   x86_64/aarch64 asset mapping.
@@ -192,13 +203,14 @@ The automated suite checks, among other things:
   bytes rather than rebuilding the previous version from source;
 - preservation of a deterministic archive snapshot of the per-user
   managed-runtime tree across previous package installation and package
-  upgrade, followed by allowlisted managed-runtime cleanup on final package
-  removal;
+  upgrade, followed by allowlisted cleanup on final RPM removal and explicit
+  DEB preservation through remove and purge;
 - package-cleanup integration coverage for a custom `XDG_DATA_HOME`, exact
   legacy `-gui` paths, preservation of unrelated similarly named files, and
   preservation of a portable ZIP/Git launcher;
-- adversarial cleanup coverage for forged and multi-line custom-XDG markers,
-  symlinked ownership sentinels, missing homes, and terminal runtime symlinks;
+- adversarial cleanup coverage for forged, multi-line, and oversized
+  custom-XDG metadata, symlinked ownership sentinels, missing homes, terminal
+  runtime symlinks, and refusal of direct root cleanup for a non-root HOME;
 - refusal to traverse symlinked intermediate cleanup components beneath
   authorized XDG roots, with that cleanup safety suite repeated ten times in
   stress CI;
@@ -270,10 +282,11 @@ consumer bootstrap, removes materialized signing secrets as soon as they are no
 longer needed, and explicitly terminates its temporary `gpg-agent`. The
 identical signed RPM is then installed on Fedora 44 in `fresh` and
 `ffmpeg-free` scenarios through the supported RPM Fusion bootstrap. The
-architecture-independent DEB is built on Ubuntu 24.04, installed with APT, and
-removed again. Both lifecycle checks verify the managed-runtime manager and
-embedded yt-dlp signing key; the DEB no longer depends on distribution yt-dlp
-or Deno packages.
+architecture-independent DEB is built on Ubuntu 24.04 and qualified through
+install, remove, purge, remove-to-purge, reinstall, and previous-release upgrade
+paths. The DEB lifecycle deliberately preserves per-user managed runtime/state
+while still verifying the runtime manager and embedded yt-dlp signing key; it
+no longer depends on distribution yt-dlp or Deno packages.
 
 
 `.github/workflows/real-tools.yml` installs actual yt-dlp, aria2c, FFmpeg, and
@@ -307,11 +320,12 @@ requests that exact subkey, and cryptographically verifies the result before
 publication. RPM `OPENPGP:pgpsig` output is diagnostic metadata only and is not
 treated as a full-fingerprint authorization primitive.
 The resulting signed RPM bytes are the exact bytes
-requalified in Fedora `fresh` and `ffmpeg-free` and later published. RPM and DEB upgrade tests use the previously published
-immutable package bytes and verify that a deterministic archive snapshot of
-the per-user managed-runtime tree remains unchanged across installation and
-upgrade. Final package removal then verifies that the managed runtime has been
-removed by the package cleanup hook.
+requalified in Fedora `fresh` and `ffmpeg-free` and later published. RPM and DEB
+upgrade tests use the previously published immutable package bytes and verify
+that a deterministic archive snapshot of the per-user managed-runtime tree
+remains unchanged across installation and upgrade. Final RPM erase then verifies
+allowlisted managed-runtime cleanup, while DEB remove and purge verify that the
+same per-user runtime remains unchanged.
 
 The publication job downloads the exact tested current artifacts, adds the
 public `RPM-GPG-KEY-OscarFrog` certificate, generates one shared SHA256SUMS file,

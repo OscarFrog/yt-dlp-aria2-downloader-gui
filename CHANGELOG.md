@@ -1,3 +1,26 @@
+## 2.2.6 - 2026-08-27
+
+### Code consistency and hardening
+
+- Harden static shell/workflow policy checks so canonical headers, inventory
+  discovery, privileged shfmt publication boundaries, and mutation controls
+  fail closed with precise diagnostics.
+- Refactor runtime-manager helper scope, remove dead helper code, make
+  package-cleanup registration explicitly RPM best-effort, improve path/link
+  diagnostics, bind downloaded yt-dlp candidates to the exact resolved
+  release version, and extract only the expected Deno executable.
+- Harden RPM per-user cleanup by binding direct user-home cleanup to the
+  effective UID, bounding metadata parsing, applying a timeout/minimal
+  environment to root cleanup too, restoring shell-option state, and using
+  associative UID/HOME deduplication.
+- Align permanent shell/comment/testing documentation with the post-2.2.5
+  RPM-vs-DEB lifecycle split and document sourced-library APIs.
+
+### Scope
+
+- No downloader routing, media selection, aria2/FFmpeg behavior, GUI process
+  supervision, progress calculation, or DEB remove/purge policy changes.
+
 ## 2.2.5 - 2026-08-27
 
 ### Packaging correctness and lifecycle
