@@ -582,8 +582,8 @@ main() {
         'release validates executable-reported version'
     # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        '[[ ${reported_version} == "${version}" ]]' \
-        'release binds executable version to release tag'
+        'expected_reported_version="download-video.sh version ${version}"' \
+        'release binds the exact executable version output to the release tag'
     # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'grep -Fqx "readonly VERSION=\"${version}\"" download-video.sh' \
@@ -672,6 +672,36 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/shell.yml" \
         'cancel-in-progress: true' \
         'outdated validation runs are cancelled'
+
+    # shellcheck disable=SC2016
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
+        'RUNTIME_STRESS_RESULT: ${{ needs.runtime-hardening-stress.result }}' \
+        'required stress gate includes runtime-manager stress'
+    # shellcheck disable=SC2016
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
+        'PACKAGE_STRESS_RESULT: ${{ needs.package-cleanup-stress.result }}' \
+        'required stress gate includes package-cleanup stress'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
+        'readonly rpmfusion_fingerprint=E9A491A3DE247814E7E067EAE06F8ECDD651FF2E' \
+        'Fedora qualification pins the RPM Fusion bootstrap signer'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
+        'rpmfusion-free-release-44-3.noarch' \
+        'Fedora qualification pins the reviewed RPM Fusion bootstrap NEVRA'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'verify-shfmt-update:' \
+        'shfmt updater uses a separate fresh read-only verifier job'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'canonical equivalence under the previously trusted shfmt' \
+        'shfmt updater documents the independent semantic boundary'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'shfmt-tested-tree.sha256' \
+        'shfmt updater binds the privileged tree to the verified read-only tree'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'shfmt automation may not modify its canonical inventory controller' \
+        'shfmt updater protects its canonical inventory controller'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
+        'candidate shfmt pin file differs from the exact data-only schema' \
+        'shfmt updater enforces an exact data-only pin schema'
 
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
         'Qualify RPM v4/v6 signature semantics (3x)' \

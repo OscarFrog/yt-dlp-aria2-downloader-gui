@@ -19,6 +19,7 @@ fail_test() {
 
 main() {
     local expected=${EXPECTED_FFMPEG_VERSION:-}
+    local expected_ytdlp=${EXPECTED_YTDLP_VERSION:-}
     local iteration
     local resolved_ffmpeg
     local resolved_ffprobe
@@ -30,6 +31,9 @@ main() {
 
     if [[ -z ${expected} ]]; then
         fail_test 'EXPECTED_FFMPEG_VERSION must name the generation under qualification.'
+    fi
+    if [[ -z ${expected_ytdlp} ]]; then
+        fail_test 'EXPECTED_YTDLP_VERSION must name the yt-dlp version under qualification.'
     fi
 
     for command_name in aria2c awk bash ffmpeg ffprobe timeout yt-dlp; do
@@ -56,6 +60,9 @@ main() {
     ffmpeg_line=$(ffmpeg -hide_banner -version | awk 'NR == 1 { first = $0 } END { print first }')
     ffprobe_line=$(ffprobe -hide_banner -version | awk 'NR == 1 { first = $0 } END { print first }')
     ytdlp_version=$(yt-dlp --version)
+    if [[ ${ytdlp_version} != "${expected_ytdlp}" ]]; then
+        fail_test "resolved yt-dlp ${ytdlp_version} does not match ${expected_ytdlp}."
+    fi
     aria2_line=$(aria2c --version | awk 'NR == 1 { first = $0 } END { print first }')
 
     printf '=== FFmpeg generation qualification ===\n'

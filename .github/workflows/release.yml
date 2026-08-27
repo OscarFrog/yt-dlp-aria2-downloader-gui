@@ -13,13 +13,65 @@ permissions:
 env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 concurrency:
-  group: release-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  group: release-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 jobs:
   validate:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
+      - name: Validate release tag identity before checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          if [[ ! ${RELEASE_TAG} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Error: invalid semantic release tag: %s\n' "${RELEASE_TAG}" >&2
+            exit 65
+          fi
+
+          if [[ ${GITHUB_EVENT_NAME} == workflow_dispatch ]]; then
+            if [[ ${GITHUB_REF_TYPE} != tag ||
+                ${GITHUB_REF_NAME} != "${RELEASE_TAG}" ]]; then
+              printf 'Error: manual release recovery must run from the exact requested tag ref.\n' >&2
+              exit 65
+            fi
+          fi
+
+          tag_ref=$(
+            gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" \
+              --jq '[.object.type,.object.sha] | @tsv'
+          )
+          IFS=$'\t' read -r tag_object_type tag_object_sha <<<"${tag_ref}"
+          if [[ ${tag_object_type} != tag ||
+              ! ${tag_object_sha} =~ ^[0-9a-f]{40}$ ]]; then
+            printf 'Error: release ref must resolve to an annotated tag object: %s\n' \
+              "${RELEASE_TAG}" >&2
+            exit 65
+          fi
+
+          tag_verification=$(
+            gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object_sha}" \
+              --jq '[.tag,.object.type,.object.sha,.verification.verified,.verification.reason] | @tsv'
+          )
+          IFS=$'\t' read -r verified_tag target_type target_sha verified reason \
+            <<<"${tag_verification}"
+
+          if [[ ${verified_tag} != "${RELEASE_TAG}" ||
+              ${target_type} != commit ||
+              ! ${target_sha} =~ ^[0-9a-f]{40}$ ||
+              ${verified} != true ||
+              ${reason} != valid ]]; then
+            printf 'Error: release tag failed GitHub signature verification: tag=%s type=%s verified=%s reason=%s\n' \
+              "${verified_tag:-<missing>}" \
+              "${target_type:-<missing>}" \
+              "${verified:-<missing>}" \
+              "${reason:-<missing>}" >&2
+            exit 65
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_TAG }}
@@ -126,8 +178,12 @@ jobs:
           git merge-base --is-ancestor "${tag_commit}" origin/main
           version=${RELEASE_TAG#v}
           reported_version=$(./download-video.sh --version)
-          reported_version=${reported_version##* }
-          [[ ${reported_version} == "${version}" ]]
+          expected_reported_version="download-video.sh version ${version}"
+          if [[ ${reported_version} != "${expected_reported_version}" ]]; then
+            printf 'Error: release executable version mismatch: expected=%q actual=%q\n' \
+              "${expected_reported_version}" "${reported_version}" >&2
+            exit 65
+          fi
           grep -Fqx "readonly VERSION=\"${version}\"" download-video.sh
           grep -Fqx "readonly APP_VERSION='${version}'" install-fedora.sh
           grep -Fq "is **${version}**." README.md
@@ -277,8 +333,31 @@ jobs:
             exit 65
           fi
 
-          grep -Fq "  ${rpms[0]##*/}" previous/SHA256SUMS
-          grep -Fq "  ${debs[0]##*/}" previous/SHA256SUMS
+          require_checksum_entry() {
+            local checksum_file=$1
+            local expected_name=$2
+            local entry_count
+
+            entry_count=$(
+              awk -v expected="${expected_name}" '
+                length($0) >= 67 &&
+                substr($0, 65, 2) == "  " &&
+                substr($0, 67) == expected &&
+                substr($0, 1, 64) ~ /^[[:xdigit:]]+$/ {
+                  count++
+                }
+                END { print count + 0 }
+              ' "${checksum_file}"
+            )
+            if [[ ${entry_count} != 1 ]]; then
+              printf 'Error: expected exactly one SHA256SUMS entry for %s; found %s.\n' \
+                "${expected_name}" "${entry_count}" >&2
+              return 65
+            fi
+          }
+
+          require_checksum_entry previous/SHA256SUMS "${rpms[0]##*/}"
+          require_checksum_entry previous/SHA256SUMS "${debs[0]##*/}"
 
           (
             cd previous
@@ -301,7 +380,8 @@ jobs:
               "${asset}" \
               --repo "${GITHUB_REPOSITORY}" \
               --signer-workflow "${signer_workflow}" \
-              --source-digest "${PREVIOUS_COMMIT}"
+              --source-digest "${PREVIOUS_COMMIT}" \
+              --source-ref "refs/tags/${PREVIOUS_TAG}"
           done
 
           (
@@ -319,6 +399,7 @@ jobs:
             previous/PREVIOUS_SHA256SUMS
           if-no-files-found: error
           retention-days: 1
+          overwrite: true
 
   real-tools:
     needs: validate
@@ -334,13 +415,41 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
       - name: Install real engines
+        env:
+          YT_DLP_VERSION: ${{ matrix.yt_dlp_version }}
+        shell: bash
         run: |
+          set -Eeuo pipefail
           sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes aria2 ffmpeg python3-venv
+          sudo env DEBIAN_FRONTEND=noninteractive \
+            apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
+            aria2 ffmpeg python3-venv
+
+          case ${YT_DLP_VERSION} in
+            2026.6.9)
+              yt_dlp_sha=442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4
+              ;;
+            2026.8.19)
+              yt_dlp_sha=1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf
+              ;;
+            *)
+              printf 'Error: no approved release yt-dlp wheel digest for %s.\n' \
+                "${YT_DLP_VERSION}" >&2
+              exit 65
+              ;;
+          esac
+
+          requirements="${RUNNER_TEMP}/release-yt-dlp-requirements.txt"
+          printf 'yt-dlp==%s --hash=sha256:%s\n' \
+            "${YT_DLP_VERSION}" "${yt_dlp_sha}" >"${requirements}"
+
           python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
           "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
-            --disable-pip-version-check "yt-dlp==${{ matrix.yt_dlp_version }}"
-          echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >> "${GITHUB_PATH}"
+            --disable-pip-version-check \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement "${requirements}"
+          echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
       - name: Run hermetic routing integration (3x)
         shell: bash
         run: |
@@ -401,6 +510,7 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
 
   rpm-build:
     needs: [validate, real-tools]
@@ -441,6 +551,7 @@ jobs:
           path: dist/*.rpm
           if-no-files-found: error
           retention-days: 1
+          overwrite: true
 
   rpm-sign:
     needs: rpm-build
@@ -650,6 +761,7 @@ jobs:
           path: dist/*.rpm
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
 
   rpm-test:
     needs: [rpm-sign, previous-release]
@@ -664,9 +776,13 @@ jobs:
         scenario: [fresh, ffmpeg-free]
     steps:
       - name: Install RPM test tools
+        env:
+          PACKAGE_SCENARIO: ${{ matrix.scenario }}
+        shell: bash
         run: |
+          set -Eeuo pipefail
           dnf install --assumeyes cpio desktop-file-utils findutils git gnupg2 gzip rpm-build rpm-sign tar
-          if [[ '${{ matrix.scenario }}' == 'ffmpeg-free' ]]; then
+          if [[ ${PACKAGE_SCENARIO} == ffmpeg-free ]]; then
             dnf install --assumeyes ffmpeg-free
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -901,6 +1017,7 @@ jobs:
           path: dist/*.deb
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
 
   publish:
     needs: [zip, rpm-test, deb]
@@ -957,7 +1074,11 @@ jobs:
             for payload in "${payloads[@]}" dist/SHA256SUMS; do
               name=${payload##*/}
               gh release download "${RELEASE_TAG}" --dir "${existing}" --pattern "${name}"
-              cmp -s -- "${payload}" "${existing}/${name}"
+              if ! cmp -s -- "${payload}" "${existing}/${name}"; then
+                printf 'Error: existing release asset differs byte-for-byte from tested artifact: %s\n' \
+                  "${name}" >&2
+                exit 65
+              fi
             done
           else
             gh release create "${RELEASE_TAG}" "${payloads[@]}" dist/SHA256SUMS \
@@ -1005,9 +1126,14 @@ jobs:
             done
             return 1
           }
-          verify_with_retry gh release verify "${RELEASE_TAG}"
+          verify_with_retry gh release verify \
+            "${RELEASE_TAG}" \
+            -R "${GITHUB_REPOSITORY}"
           for payload in "${payloads[@]}" dist/SHA256SUMS; do
-            verify_with_retry gh release verify-asset "${RELEASE_TAG}" "${payload}"
+            verify_with_retry gh release verify-asset \
+              "${RELEASE_TAG}" \
+              "${payload}" \
+              -R "${GITHUB_REPOSITORY}"
           done
 
   verify-published:

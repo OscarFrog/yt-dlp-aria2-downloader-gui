@@ -11,8 +11,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: qualification-${{ github.workflow }}-${{ github.ref }}
+  group: qualification-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
 
 jobs:
   ffmpeg-ubuntu-6:
@@ -26,13 +29,15 @@ jobs:
       - name: Install real tools
         run: |
           sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes aria2 ffmpeg python3-venv
+          sudo env DEBIAN_FRONTEND=noninteractive \
+            apt-get -o Acquire::Retries=3 install --yes --no-install-recommends aria2 ffmpeg python3-venv
           python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
           "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
             --disable-pip-version-check 'yt-dlp==2026.8.19'
           echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
       - name: Qualify FFmpeg 6.1.1 generation
         env:
+          EXPECTED_YTDLP_VERSION: 2026.08.19
           EXPECTED_FFMPEG_VERSION: 6.1.1
         run: |
           timeout --signal=TERM --kill-after=10s 25m \
@@ -44,11 +49,86 @@ jobs:
     container: fedora:44
     timeout-minutes: 35
     steps:
-      - name: Install Fedora bootstrap tools and RPM Fusion
+      - name: Install Fedora bootstrap tools and authenticated RPM Fusion
         run: |
-          dnf install --assumeyes ca-certificates curl findutils gawk git grep gzip procps-ng python3 python3-pip sed tar util-linux xz
+          set -Eeuo pipefail
+          umask 077
+
+          readonly rpmfusion_fingerprint=E9A491A3DE247814E7E067EAE06F8ECDD651FF2E
+          readonly rpmfusion_nevra=rpmfusion-free-release-44-3.noarch
+          bootstrap_dir=$(mktemp -d)
+          gpg_home=$(mktemp -d)
+          key_listing=$(mktemp)
+          rpm_keyring="${bootstrap_dir}/rpm-keyring"
+          trap 'rm -rf -- "${bootstrap_dir}" "${gpg_home}"; rm -f -- "${key_listing}"' EXIT
+
+          chmod 700 -- "${gpg_home}"
+          mkdir -p -- "${rpm_keyring}"
+          chmod 700 -- "${rpm_keyring}"
+
           dnf install --assumeyes \
-            https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm
+            ca-certificates curl findutils gawk git gnupg2 grep gzip procps-ng \
+            python3 python3-pip rpm sed tar util-linux xz
+
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --retry 3 --retry-all-errors \
+            --output "${bootstrap_dir}/RPM-GPG-KEY-rpmfusion-free-fedora-2020" \
+            'https://download1.rpmfusion.org/free/fedora/RPM-GPG-KEY-rpmfusion-free-fedora-2020'
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --retry 3 --retry-all-errors \
+            --output "${bootstrap_dir}/rpmfusion-free-release-44.noarch.rpm" \
+            'https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm'
+
+          gpg --homedir "${gpg_home}" --batch --no-options \
+            --with-colons --show-keys --fingerprint \
+            "${bootstrap_dir}/RPM-GPG-KEY-rpmfusion-free-fedora-2020" \
+            >"${key_listing}"
+
+          primary_count=$(
+            awk -F: '$1 == "pub" { count++ } END { print count + 0 }' \
+              "${key_listing}"
+          )
+          primary_fingerprint=$(
+            awk -F: \
+              '$1 == "pub" { want=1; next }
+               want && $1 == "fpr" {
+                 print toupper($10)
+                 exit
+               }' \
+              "${key_listing}"
+          )
+          if [[ ${primary_count} != 1 ||
+              ${primary_fingerprint} != "${rpmfusion_fingerprint}" ]]; then
+            printf 'Error: unexpected RPM Fusion bootstrap key: count=%s fingerprint=%s\n' \
+              "${primary_count}" "${primary_fingerprint:-<missing>}" >&2
+            exit 65
+          fi
+
+          rpmkeys \
+            --define "_keyring fs" \
+            --define "_keyringpath ${rpm_keyring}" \
+            --define "_keyring_lockpath ${rpm_keyring}/.keyring.lock" \
+            --define "_rpmlock_path ${rpm_keyring}/.rpm.lock" \
+            --import "${bootstrap_dir}/RPM-GPG-KEY-rpmfusion-free-fedora-2020"
+          rpmkeys \
+            --define "_keyring fs" \
+            --define "_keyringpath ${rpm_keyring}" \
+            --define "_keyring_lockpath ${rpm_keyring}/.keyring.lock" \
+            --define "_rpmlock_path ${rpm_keyring}/.rpm.lock" \
+            --checksig "${bootstrap_dir}/rpmfusion-free-release-44.noarch.rpm"
+
+          resolved_nevra=$(
+            rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' \
+              "${bootstrap_dir}/rpmfusion-free-release-44.noarch.rpm"
+          )
+          if [[ ${resolved_nevra} != "${rpmfusion_nevra}" ]]; then
+            printf 'Error: unexpected RPM Fusion bootstrap package: %s\n' \
+              "${resolved_nevra}" >&2
+            exit 65
+          fi
+
+          dnf install --assumeyes \
+            "${bootstrap_dir}/rpmfusion-free-release-44.noarch.rpm"
           dnf install --assumeyes aria2 ffmpeg
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -61,6 +141,7 @@ jobs:
           echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
       - name: Qualify FFmpeg 8.1.2 generation
         env:
+          EXPECTED_YTDLP_VERSION: 2026.08.19
           EXPECTED_FFMPEG_VERSION: 8.1.2
         run: |
           timeout --signal=TERM --kill-after=10s 25m \
@@ -77,7 +158,8 @@ jobs:
       - name: Install build and test dependencies
         run: |
           sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes \
+          sudo env DEBIAN_FRONTEND=noninteractive \
+            apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
             aria2 build-essential curl gnupg libmp3lame-dev libopus-dev \
             libx264-dev nasm pkg-config python3-venv xz-utils
       - name: Download, verify and build FFmpeg 9.0.1
@@ -130,12 +212,19 @@ jobs:
           signature_primary_fingerprint=$(
             awk '
               $1 == "[GNUPG:]" && $2 == "VALIDSIG" {
-                print toupper(NF >= 12 ? $12 : $3)
+                if (NF < 12 || $12 == "") {
+                  exit 65
+                }
+                print toupper($12)
                 exit
               }
             ' <<<"${verify_status}"
           )
-          [[ ${signature_primary_fingerprint} == "${fingerprint}" ]]
+          if [[ ${signature_primary_fingerprint} != "${fingerprint}" ]]; then
+            printf 'Error: FFmpeg source signature primary fingerprint mismatch: %s\n' \
+              "${signature_primary_fingerprint:-<missing>}" >&2
+            exit 65
+          fi
 
           tar -xf "ffmpeg-${version}.tar.xz"
           cd -- "ffmpeg-${version}"
@@ -148,7 +237,7 @@ jobs:
             --enable-libmp3lame \
             --enable-libopus \
             --enable-libx264
-          make -j2
+          make -j"$(nproc)"
           make install
 
           echo "${prefix}/bin" >>"${GITHUB_PATH}"
@@ -160,6 +249,7 @@ jobs:
           echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
       - name: Qualify FFmpeg 9.0.1 generation
         env:
+          EXPECTED_YTDLP_VERSION: 2026.08.19
           EXPECTED_FFMPEG_VERSION: 9.0.1
         run: |
           timeout --signal=TERM --kill-after=10s 25m \

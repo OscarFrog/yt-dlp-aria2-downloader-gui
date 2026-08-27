@@ -29,8 +29,14 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          version=$(./download-video.sh --version)
-          version=${version##* }
+          version_output=$(./download-video.sh --version)
+          if [[ ${version_output} =~ ^download-video\.sh[[:space:]]version[[:space:]]([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version=${BASH_REMATCH[1]}
+          else
+            printf 'Error: unexpected download-video.sh --version output: %q\n' \
+              "${version_output}" >&2
+            exit 65
+          fi
           package="yt-dlp-aria2-downloader-gui-${version}"
           scratch=$(mktemp -d)
           trap 'rm -rf -- "${scratch}"' EXIT
@@ -74,16 +80,35 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          current_version=$(./download-video.sh --version)
-          current_version=${current_version##* }
-
-          if [[ ! ${current_version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            printf 'Error: invalid current project version: %s\n' \
-              "${current_version}" >&2
+          version_output=$(./download-video.sh --version)
+          if [[ ${version_output} =~ ^download-video\.sh[[:space:]]version[[:space:]]([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            current_version=${BASH_REMATCH[1]}
+          else
+            printf 'Error: unexpected download-video.sh --version output: %q\n' \
+              "${version_output}" >&2
             exit 65
           fi
 
           current_tag="v${current_version}"
+          if [[ ${GITHUB_EVENT_NAME} == pull_request ]] &&
+              git show-ref --verify --quiet "refs/tags/${current_tag}"; then
+            printf 'Error: project version already has a release tag: %s\n' \
+              "${current_tag}" >&2
+            exit 65
+          fi
+
+          highest_tag=$(
+            {
+              git tag --list 'v[0-9]*.[0-9]*.[0-9]*'
+              printf '%s\n' "${current_tag}"
+            } | LC_ALL=C sort -Vr -u | sed -n '1p'
+          )
+          if [[ ${highest_tag} != "${current_tag}" ]]; then
+            printf 'Error: project version %s is not newer than the existing release set (highest=%s).\n' \
+              "${current_tag}" "${highest_tag}" >&2
+            exit 65
+          fi
+
           found_current=false
           previous_tag=''
 
@@ -105,12 +130,6 @@ jobs:
               printf '%s\n' "${current_tag}"
             } | LC_ALL=C sort -Vr -u
           )
-
-          if [[ ${found_current} != true ]]; then
-            printf 'Error: current project version was not found in semantic ordering: %s\n' \
-              "${current_tag}" >&2
-            exit 65
-          fi
 
           if [[ ! ${previous_tag} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             printf 'Error: unable to resolve the release preceding %s.\n' \
@@ -197,8 +216,31 @@ jobs:
             exit 65
           fi
 
-          grep -Fq "  ${rpms[0]##*/}" previous/SHA256SUMS
-          grep -Fq "  ${debs[0]##*/}" previous/SHA256SUMS
+          require_checksum_entry() {
+            local checksum_file=$1
+            local expected_name=$2
+            local entry_count
+
+            entry_count=$(
+              awk -v expected="${expected_name}" '
+                length($0) >= 67 &&
+                substr($0, 65, 2) == "  " &&
+                substr($0, 67) == expected &&
+                substr($0, 1, 64) ~ /^[[:xdigit:]]+$/ {
+                  count++
+                }
+                END { print count + 0 }
+              ' "${checksum_file}"
+            )
+            if [[ ${entry_count} != 1 ]]; then
+              printf 'Error: expected exactly one SHA256SUMS entry for %s; found %s.\n' \
+                "${expected_name}" "${entry_count}" >&2
+              return 65
+            fi
+          }
+
+          require_checksum_entry previous/SHA256SUMS "${rpms[0]##*/}"
+          require_checksum_entry previous/SHA256SUMS "${debs[0]##*/}"
 
           (
             cd previous
@@ -221,7 +263,8 @@ jobs:
               "${asset}" \
               --repo "${GITHUB_REPOSITORY}" \
               --signer-workflow "${signer_workflow}" \
-              --source-digest "${PREVIOUS_COMMIT}"
+              --source-digest "${PREVIOUS_COMMIT}" \
+              --source-ref "refs/tags/${PREVIOUS_TAG}"
           done
 
           (
@@ -239,6 +282,7 @@ jobs:
             previous/PREVIOUS_SHA256SUMS
           if-no-files-found: error
           retention-days: 1
+          overwrite: true
 
   rpm-build:
     name: Fedora 44 RPM build-once
@@ -257,7 +301,14 @@ jobs:
         run: |
           set -Eeuo pipefail
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-          version=$(./download-video.sh --version); version=${version##* }
+          version_output=$(./download-video.sh --version)
+          if [[ ${version_output} =~ ^download-video\.sh[[:space:]]version[[:space:]]([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version=${BASH_REMATCH[1]}
+          else
+            printf 'Error: unexpected download-video.sh --version output: %q\n' \
+              "${version_output}" >&2
+            exit 65
+          fi
           bash packaging/rpm/build-rpm.sh "${version}" dist
       - name: Qualify RPM v4/v6 signature semantics (3x)
         shell: bash
@@ -279,6 +330,7 @@ jobs:
           path: dist/*.rpm
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
 
   rpm:
     name: Fedora 44 RPM (${{ matrix.scenario }})
@@ -296,9 +348,13 @@ jobs:
         scenario: [fresh, ffmpeg-free]
     steps:
       - name: Install test tools
+        env:
+          PACKAGE_SCENARIO: ${{ matrix.scenario }}
+        shell: bash
         run: |
+          set -Eeuo pipefail
           dnf install --assumeyes cpio desktop-file-utils findutils git gnupg2 gzip rpm-build rpm-sign tar
-          if [[ '${{ matrix.scenario }}' == 'ffmpeg-free' ]]; then
+          if [[ ${PACKAGE_SCENARIO} == ffmpeg-free ]]; then
             dnf install --assumeyes ffmpeg-free
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -330,9 +386,13 @@ jobs:
           wrong_rpm=$(mktemp --suffix=.rpm)
           wrong_passphrase=$(mktemp)
           wrong_verify_keyring="${wrong_home}/rpm-keyring"
+          wrong_fingerprint=''
           log=$(mktemp)
 
           cleanup_wrong_signer() {
+            if [[ -n ${wrong_fingerprint} ]]; then
+              rpmkeys --erase "${wrong_fingerprint}" >/dev/null 2>&1 || true
+            fi
             rm -rf -- "${wrong_home}" || true
             rm -f --               "${wrong_public}"               "${wrong_rpm}"               "${wrong_passphrase}"               "${log}" || true
           }
@@ -418,6 +478,9 @@ jobs:
           [[ ${status} -eq 65 ]]
           grep -Fq 'RPM OpenPGP signature verification failed against the isolated pinned certificate.' "${log}"
 
+          rpmkeys --erase "${wrong_fingerprint}"
+          wrong_fingerprint=''
+
       - name: Confirm unsigned PR RPM is rejected by release bootstrap
         shell: bash
         run: |
@@ -474,7 +537,14 @@ jobs:
             exit 65
           fi
 
-          version=$(./download-video.sh --version); version=${version##* }
+          version_output=$(./download-video.sh --version)
+          if [[ ${version_output} =~ ^download-video\.sh[[:space:]]version[[:space:]]([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version=${BASH_REMATCH[1]}
+          else
+            printf 'Error: unexpected download-video.sh --version output: %q\n' \
+              "${version_output}" >&2
+            exit 65
+          fi
           shopt -s nullglob; packages=(dist/*.rpm); shopt -u nullglob
           ((${#packages[@]} == 1))
           bash packaging/rpm/test-package-lifecycle.sh "${packages[0]}" "${version}"
@@ -502,8 +572,14 @@ jobs:
             sha256sum --check PREVIOUS_SHA256SUMS
           )
 
-          version=$(./download-video.sh --version)
-          version=${version##* }
+          version_output=$(./download-video.sh --version)
+          if [[ ${version_output} =~ ^download-video\.sh[[:space:]]version[[:space:]]([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version=${BASH_REMATCH[1]}
+          else
+            printf 'Error: unexpected download-video.sh --version output: %q\n' \
+              "${version_output}" >&2
+            exit 65
+          fi
 
           HOME="${PACKAGE_TEST_HOME}" bash packaging/rpm/test-package-upgrade.sh \
             "${old[0]}" \
@@ -538,7 +614,14 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          version=$(./download-video.sh --version); version=${version##* }
+          version_output=$(./download-video.sh --version)
+          if [[ ${version_output} =~ ^download-video\.sh[[:space:]]version[[:space:]]([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version=${BASH_REMATCH[1]}
+          else
+            printf 'Error: unexpected download-video.sh --version output: %q\n' \
+              "${version_output}" >&2
+            exit 65
+          fi
           bash packaging/deb/build-deb.sh "${version}" dist
           shopt -s nullglob; packages=(dist/*.deb); shopt -u nullglob
           ((${#packages[@]} == 1))
@@ -569,3 +652,4 @@ jobs:
           path: dist/*.deb
           if-no-files-found: error
           retention-days: 7
+          overwrite: true

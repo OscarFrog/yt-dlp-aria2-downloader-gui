@@ -17,6 +17,11 @@
 - Clarify retained HLS intermediate, classifier and result-file failures.
 - Keep race-sensitive process-group scenarios under repeated stress without
   adding hot-path synchronization or changing transfer concurrency.
+- Harden release/package/shfmt qualification trust boundaries, bind the required
+  stress gate to every stress family, authenticate the Fedora RPM Fusion
+  bootstrap, hash-pin reproducible yt-dlp wheels and isolate event concurrency.
+- Use all available public-runner CPUs for the verified FFmpeg 9 source build
+  without introducing executable dependency caches into the release trust path.
 
 ### Documentation
 

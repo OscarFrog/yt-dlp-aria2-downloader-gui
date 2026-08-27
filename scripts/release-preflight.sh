@@ -168,10 +168,14 @@ main() {
     [[ -z ${git_status} ]] \
         || fail 'working tree is not clean.'
 
-    if ! version=$(./download-video.sh --version); then
+    if ! version_output=$(./download-video.sh --version); then
         fail 'unable to query the project version.'
     fi
-    version=${version##* }
+    if [[ ${version_output} =~ ^download-video\.sh[[:space:]]version[[:space:]]([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+        version=${BASH_REMATCH[1]}
+    else
+        fail "unexpected project version output: ${version_output}"
+    fi
     [[ ${release_tag} == "v${version}" ]] \
         || fail "release tag/version mismatch: tag=${release_tag} project=${version}"
 
