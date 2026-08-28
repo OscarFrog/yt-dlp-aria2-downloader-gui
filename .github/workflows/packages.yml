@@ -76,6 +76,8 @@ jobs:
 
       - name: Resolve previous semantic-version release
         id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -111,6 +113,12 @@ jobs:
 
           found_current=false
           previous_tag=''
+          published_release_tags=$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --paginate \
+              --jq '.[] | select(.draft == false and .prerelease == false and .published_at != null) | .tag_name'
+          )
 
           while IFS= read -r candidate; do
             [[ ${candidate} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
@@ -126,8 +134,8 @@ jobs:
             break
           done < <(
             {
-              git tag --list 'v[0-9]*.[0-9]*.[0-9]*'
               printf '%s\n' "${current_tag}"
+              printf '%s\n' "${published_release_tags}"
             } | LC_ALL=C sort -Vr -u
           )
 

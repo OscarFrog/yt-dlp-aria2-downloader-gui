@@ -1,3 +1,15 @@
+## 2.3.3 - 2026-08-28
+
+### Release automation
+
+- Align the release workflow's English and French development-version checks
+  with the README wording, with a static regression that fails before a release
+  tag is created if either contract drifts again.
+- Resolve the upgrade baseline from stable published GitHub Releases rather
+  than every repository tag, so a protected tag whose workflow stopped before
+  publication cannot hide the latest immutable package release. Ancestry,
+  immutability, checksum, asset-identity and provenance checks remain required.
+
 ## 2.3.2 - 2026-08-28
 
 ### Security
@@ -19,10 +31,6 @@
 - Keep the English and French installation examples aligned with the exact RPM,
   DEB and ZIP names from the latest published GitHub release, independently of
   the development version carried by `main`.
-- Keep the release workflow's English and French development-version checks
-  aligned with the README wording, with a static regression that fails before
-  a release tag is created if either contract drifts again.
-
 ### Validation performance
 
 - Build and probe the immutable real-FFmpeg input fixture once, shorten its
