@@ -689,7 +689,7 @@ jobs:
             >"${verified_dir}/shfmt-tested-tree.sha256"
       - name: Validate verified formatter and project
         shell: bash
-        run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/run-all.sh
+        run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/run-all.sh --jobs 4
 
       - name: Upload verified data-only shfmt handoff
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

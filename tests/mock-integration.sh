@@ -12,6 +12,86 @@ PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly PROJECT_DIR
 # shellcheck disable=SC1090
 source "${PROJECT_DIR}/tests/lib/assert.sh"
+
+readonly -a MOCK_GROUPS=(
+    engine
+    engine-core
+    engine-hls
+    engine-staging
+    gui
+    gui-progress
+    gui-state
+    signals
+    runtime
+    runtime-compat
+    runtime-validation
+)
+
+MOCK_GROUP='all'
+
+mock_usage() {
+    cat <<'EOF_USAGE'
+Usage: tests/mock-integration.sh [--group GROUP | --list-groups]
+
+Run every mock scenario by default. GROUP is one of:
+  engine          Complete engine aggregate, in historical scenario order.
+  engine-core     Core audio/video, result, and failure behavior.
+  engine-hls      Authenticated YouTube HLS and remux behavior.
+  engine-staging  Private aria2 staging and crash recovery behavior.
+  gui             Complete GUI aggregate, in historical scenario order.
+  gui-progress    GUI progress rendering, profiles, and completion behavior.
+  gui-state       GUI configuration, file selection, logs, and state behavior.
+  signals         CLI/GUI signal forwarding and cancellation behavior.
+  runtime         Complete runtime/validation aggregate.
+  runtime-compat  Runtime versions, capabilities, and dependencies.
+  runtime-validation  Worker, media, progress-error, and GUI dependency validation.
+EOF_USAGE
+}
+
+parse_mock_arguments() {
+    while (($# > 0)); do
+        case $1 in
+            --group)
+                (($# >= 2)) || test_error '--group requires one argument.'
+                MOCK_GROUP=$2
+                shift
+                ;;
+            --group=*)
+                MOCK_GROUP=${1#--group=}
+                ;;
+            --list-groups)
+                printf '%s\n' "${MOCK_GROUPS[@]}"
+                exit 0
+                ;;
+            -h | --help)
+                mock_usage
+                exit 0
+                ;;
+            *)
+                test_error "unknown mock-integration option: $1"
+                ;;
+        esac
+        shift
+    done
+
+    if [[ ${MOCK_GROUP} == all ]]; then
+        return 0
+    fi
+
+    local group
+    for group in "${MOCK_GROUPS[@]}"; do
+        [[ ${MOCK_GROUP} == "${group}" ]] && return 0
+    done
+    test_error "unknown mock-integration group: ${MOCK_GROUP}"
+}
+
+mock_group_enabled() {
+    (($# == 1)) || return 2
+    [[ ${MOCK_GROUP} == all || ${MOCK_GROUP} == "$1" ]]
+}
+
+parse_mock_arguments "$@"
+
 for required_command in \
     awk bash cat chmod date dirname env grep ln mkdir mktemp mv readlink \
     realpath rm setsid sleep stat timeout touch tr flock sha256sum wc python3 find ps; do
@@ -1125,25 +1205,21 @@ cleanup_test_root() {
     exit "${status}"
 }
 
-main() {
-    count_logs() (
-        local log_dir="${XDG_STATE_HOME}/yt-dlp-aria2-downloader"
-        local -a logs=()
+count_logs() (
+    local log_dir="${XDG_STATE_HOME}/yt-dlp-aria2-downloader"
+    local -a logs=()
 
-        if [[ ! -d ${log_dir} ]]; then
-            printf '0\n'
-            return 0
-        fi
+    if [[ ! -d ${log_dir} ]]; then
+        printf '0\n'
+        return 0
+    fi
 
-        shopt -s nullglob
-        logs=("${log_dir}"/download-*.log)
-        printf '%d\n' "${#logs[@]}"
-    )
+    shopt -s nullglob
+    logs=("${log_dir}"/download-*.log)
+    printf '%d\n' "${#logs[@]}"
+)
 
-    trap cleanup_test_root EXIT
-
-    # Exercise the ownership guard explicitly. This subshell installs the same
-    # cleanup trap, but it must not remove the parent suite's workspace.
+test_mock_cleanup_owner_guard() {
     printf '%s\n' 'Mock scenario: cleanup-owner-guard'
     (
         trap cleanup_test_root EXIT
@@ -1151,6 +1227,12 @@ main() {
     )
     [[ -d ${TEST_ROOT} ]] \
         || fail 'A non-owner Bash process removed the complete test root.'
+}
+
+initialize_mock_integration() {
+    local managed_mock mocked_command resolved_mock
+
+    trap cleanup_test_root EXIT
 
     TEST_PROCESS_PIDS=()
 
@@ -1177,6 +1259,12 @@ main() {
         assert_equals "${MOCK_BIN}/${mocked_command}" "${resolved_mock}" \
             "${mocked_command} mock selection"
     done
+}
+
+test_mock_engine_log_retention() {
+    local old_retained_log recent_retained_log rotation_config_home
+    local rotation_log_dir rotation_state_home symlink_log symlink_target
+    local unrelated_old_file
 
     # Retained diagnostic logs older than 15 days are removed at GUI startup.
     # Newer logs, unrelated files, and symbolic links must remain untouched.
@@ -1222,6 +1310,17 @@ main() {
     # shared output directory. The private aria2 commit path intentionally
     # refuses to overwrite an existing destination.
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+}
+
+test_mock_engine_audio_downloads() {
+    local aria2_arguments_text arguments_text content_video_result
+    local expected_output_template ffprobe_argument_log forbidden_audio_format
+    local injection_marker malicious_url missing_target_result normalized_result
+    local normalized_result_file plan_call_count post_call_count result_file
+    local runtime_lock_dir runtime_lock_file url_seen_log
+    local -a arguments aria2_arguments aria_without_netrc_arguments
+    local -a aria_without_netrc_direct_arguments ffprobe_arguments plan_arguments
+    local -a runtime_lock_files
 
     # Scenario: audio mode covers quoting, locale stabilization, option/value pairing,
     # and result-path reporting.
@@ -1382,8 +1481,8 @@ main() {
     runtime_lock_dir="${XDG_RUNTIME_DIR}/yt-dlp-aria2-downloader"
     [[ -d ${runtime_lock_dir} && ! -L ${runtime_lock_dir} ]] \
         || fail 'The engine did not create a private XDG runtime lock directory.'
-    runtime_lock_mode=$(stat -c '%a' -- "${runtime_lock_dir}")
-    assert_equals '700' "${runtime_lock_mode}" 'XDG runtime lock-directory permissions'
+    assert_path_mode "${runtime_lock_dir}" 700 \
+        'XDG runtime lock-directory permissions'
     shopt -s nullglob
     runtime_lock_files=("${runtime_lock_dir}"/*.lock)
     shopt -u nullglob
@@ -1392,8 +1491,8 @@ main() {
     for runtime_lock_file in "${runtime_lock_files[@]}"; do
         [[ -f ${runtime_lock_file} && ! -L ${runtime_lock_file} ]] \
             || fail "Unsafe runtime lock entry: ${runtime_lock_file}"
-        runtime_lock_mode=$(stat -c '%a' -- "${runtime_lock_file}")
-        assert_equals '600' "${runtime_lock_mode}" 'destination lock-file permissions'
+        assert_path_mode "${runtime_lock_file}" 600 \
+            'destination lock-file permissions'
     done
 
     # The preceding successful direct-transfer scenario leaves its
@@ -1440,6 +1539,11 @@ main() {
         'https://example.com/a' -- 'https://example.com/b'
     assert_text_contains "${ASSERT_OUTPUT}" 'exactly one video URL is required.' \
         'duplicate URL after -- diagnostic'
+}
+
+test_mock_engine_video_downloads() {
+    local existing_audio_path
+    local -a arguments video_aria2_arguments
 
     # Scenario: video mode.
     # The preceding successful direct-transfer scenario leaves the
@@ -1515,6 +1619,15 @@ main() {
         'final media destination already exists; refusing to overwrite it.' \
         'existing media collision engine diagnostic'
     rm -f -- "${existing_audio_path}"
+}
+
+test_mock_engine_youtube_hls() {
+    local hls_collision_result hls_existing_target oversized_duration_result
+    local oversized_hls_duration youtube_hls_failed_result
+    local youtube_hls_ffmpeg_args youtube_hls_final_duration_result
+    local youtube_hls_result youtube_hls_source_duration_result
+    local -a youtube_hls_arguments youtube_hls_ffmpeg_arguments
+    local -a youtube_hls_path_files
 
     # Scenario: authenticated YouTube HLS profile.
     prepare_argument_log 'youtube-hls-engine'
@@ -1684,6 +1797,11 @@ main() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         '--youtube-hls-firefox requires a YouTube URL.' \
         'YouTube HLS URL diagnostic'
+}
+
+test_mock_engine_failure_paths() {
+    local atomic_result_file existing_result_file held_lock_fd
+    local lock_file lock_key lock_root
 
     # Scenario group: engine failures before yt-dlp invocation.
     prepare_argument_log 'invalid-output'
@@ -1763,6 +1881,16 @@ main() {
         'concurrent output lock diagnostic'
     flock --unlock "${held_lock_fd}"
     exec {held_lock_fd}>&-
+}
+
+test_mock_engine_private_staging() {
+    local ambiguous_marked attempt candidate candidate_ambiguous candidate_pgid
+    local candidate_pid crash_log crash_pgid crash_pid crash_result
+    local crash_staging crash_started crash_started_seen cross_candidate
+    local invalid_mode legacy_exact other_output owned_staging_leftover
+    local replacement_log replacement_original replacement_pid
+    local replacement_result replacement_staging replacement_started
+    local replacement_status staging_symlink_target symlink_candidate test_pgid
 
     # Regression guard: active private staging cleanup must not follow a
     # pathname that has been replaced by a different filesystem object.
@@ -2040,6 +2168,44 @@ main() {
         "${staging_symlink_target}" \
         "${other_output}"
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+}
+
+run_mock_engine_core_group() {
+    test_mock_cleanup_owner_guard
+    test_mock_engine_log_retention
+    test_mock_engine_audio_downloads
+    test_mock_engine_video_downloads
+    test_mock_engine_failure_paths
+}
+
+run_mock_engine_hls_group() {
+    test_mock_engine_youtube_hls
+}
+
+run_mock_engine_staging_group() {
+    test_mock_engine_private_staging
+}
+
+run_mock_engine_group() {
+    run_mock_engine_core_group
+    run_mock_engine_hls_group
+    run_mock_engine_staging_group
+}
+
+run_selected_mock_engine_group() {
+    case ${MOCK_GROUP} in
+        all | engine) run_mock_engine_group ;;
+        engine-core) run_mock_engine_core_group ;;
+        engine-hls) run_mock_engine_hls_group ;;
+        engine-staging) run_mock_engine_staging_group ;;
+        *) ;;
+    esac
+}
+
+test_mock_gui_aria_progress() {
+    local aria_unknown_capture gui_aria2_arguments_text gui_url_seen_log
+    local trimmed_gui_url
+    local -a gui_arguments gui_aria2_arguments
 
     # Scenario: aria2 GUI progress with an unknown total size.
     trimmed_gui_url='https://example.com/watch?v=trimmed'
@@ -2099,6 +2265,12 @@ main() {
         '# Downloading the audio track - size unknown (aria2c) - 1.00MiB' \
         'aria2 progress without a known total size'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+}
+
+test_mock_gui_profiles() {
+    local config_file expected_profile_label removed_profile_label
+    local -a list_arguments video_gui_arguments youtube_hls_default_arguments
+    local -a youtube_hls_gui_arguments
 
     # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
     list_arguments=()
@@ -2166,6 +2338,11 @@ main() {
     assert_option_value youtube_hls_default_arguments '--cookies-from-browser' 'firefox' \
         'persisted GUI YouTube HLS profile'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].mkv"
+}
+
+test_mock_gui_progress_completion() {
+    local config_file current_log_count late_progress_capture
+    local progress_check_status
 
     # Regression guard: post-processing progress must never regress.
     prepare_argument_log 'gui-late-progress'
@@ -2199,8 +2376,14 @@ main() {
     current_log_count=$(count_logs)
     assert_equals '0' "${current_log_count}" \
         'confirmed successful GUI downloads must not retain logs'
+}
+
+test_mock_gui_config_recovery() {
+    local config_file relative_config_dir relative_state_dir
 
     # Scenario group: legacy and malformed configuration recovery.
+    config_file="${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf"
+    mkdir -p -- "${config_file%/*}"
     cat >"${config_file}" <<EOF_OLD_CONFIG
 output_dir=${OUTPUT_DIR}
 profile=audio-mp3
@@ -2252,6 +2435,12 @@ EOF_BAD_CONFIG
         "${HOME}/.config/yt-dlp-aria2-downloader/gui.conf" \
         "output_dir=${OUTPUT_DIR}" \
         'relative XDG homes fall back to HOME'
+}
+
+test_mock_gui_file_selection() {
+    local argument file_selection_args_log file_selection_calls
+    local filename_attempts
+    local -a file_selection_arguments
 
     # Scenario: file chooser fallback after a GTK/Zenity initial-directory failure.
     file_selection_args_log="${TEST_ROOT}/file-selection-args.bin"
@@ -2281,6 +2470,12 @@ EOF_BAD_CONFIG
     done
     assert_equals '2' "${file_selection_calls}" 'file chooser fallback call count'
     assert_equals '1' "${filename_attempts}" 'preselected file chooser attempt count'
+}
+
+test_mock_gui_diagnostic_logs() {
+    local failure_record_found log_dir log_record_found logs_after logs_before
+    local outside_result_path retained_log
+    local -a failed_logs inconsistent_logs
 
     # Scenario group: diagnostic log retention and cleanup.
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
@@ -2342,6 +2537,10 @@ EOF_BAD_CONFIG
     done
     [[ ${failure_record_found} == true ]] \
         || fail 'No retained log contains the simulated failure.'
+}
+
+test_mock_gui_state_initialization() {
+    local blocked_state_home state_error_capture
 
     # Initialization failures must be visible when the GUI is launched without a terminal.
     blocked_state_home="${TEST_ROOT}/blocked-state-home"
@@ -2356,6 +2555,38 @@ EOF_BAD_CONFIG
     assert_file_contains "${state_error_capture}" \
         'Unable to create the application state directory.' \
         'state-directory GUI diagnostic'
+}
+
+run_mock_gui_progress_group() {
+    test_mock_gui_aria_progress
+    test_mock_gui_profiles
+    test_mock_gui_progress_completion
+}
+
+run_mock_gui_state_group() {
+    test_mock_gui_config_recovery
+    test_mock_gui_file_selection
+    test_mock_gui_diagnostic_logs
+    test_mock_gui_state_initialization
+}
+
+run_mock_gui_group() {
+    run_mock_gui_progress_group
+    run_mock_gui_state_group
+}
+
+run_selected_mock_gui_group() {
+    case ${MOCK_GROUP} in
+        all | gui) run_mock_gui_group ;;
+        gui-progress) run_mock_gui_progress_group ;;
+        gui-state) run_mock_gui_state_group ;;
+        *) ;;
+    esac
+}
+
+test_mock_signal_cli_download() {
+    local cli_engine_pid cli_engine_status cli_signal_log cli_started_marker
+    local cli_termination_marker
 
     # A signal sent only to the CLI wrapper PID must reach the isolated yt-dlp
     # process group and must not leave aria2c/FFmpeg-style descendants behind.
@@ -2379,6 +2610,11 @@ EOF_BAD_CONFIG
     assert_equals '143' "${cli_engine_status}" 'CLI TERM exit status'
     wait_for_file "${cli_termination_marker}" 10 'CLI child process receives TERM'
     assert_no_test_processes 'CLI signal forwarding left worker processes'
+}
+
+test_mock_signal_cli_ffmpeg() {
+    local ffmpeg_engine_pid ffmpeg_engine_status ffmpeg_signal_log
+    local ffmpeg_started_marker ffmpeg_termination_marker
 
     # A signal sent only to the CLI wrapper during the custom HLS FFmpeg remux must
     # reach FFmpeg and preserve the requested shell exit status.
@@ -2402,6 +2638,10 @@ EOF_BAD_CONFIG
     assert_equals '143' "${ffmpeg_engine_status}" 'CLI FFmpeg TERM exit status'
     wait_for_file "${ffmpeg_termination_marker}" 10 'CLI FFmpeg receives TERM'
     assert_no_test_processes 'CLI FFmpeg signal forwarding left worker processes'
+}
+
+test_mock_signal_gui_session() {
+    local single_session_calls single_session_log
 
     # The GUI owns exactly one setsid session; the engine must reuse it.
     single_session_log="${TEST_ROOT}/single-session-setsid.log"
@@ -2414,6 +2654,10 @@ EOF_BAD_CONFIG
     assert_equals '1' "${single_session_calls}" \
         'one setsid invocation per GUI download'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+}
+
+test_mock_signal_gui_cancellation() {
+    local pgid_delay_marker termination_marker
 
     # Scenario: user cancellation terminates the complete process group.
     termination_marker="${TEST_ROOT}/terminated"
@@ -2453,6 +2697,10 @@ EOF_BAD_CONFIG
     assert_status 0 'late cancellation does not hide completed download' \
         env MOCK_CANCEL_AFTER_EOF=1 "${GUI_UNDER_TEST}"
     assert_no_test_processes 'late-cancel success left worker processes'
+}
+
+test_mock_signal_gui_startup_error() {
+    local pgid_error_capture pgid_error_text
 
     # Scenario: failed PGID publication preserves actual newlines in the error dialog.
     pgid_error_capture="${TEST_ROOT}/pgid-start-error.txt"
@@ -2466,6 +2714,10 @@ EOF_BAD_CONFIG
         'startup error uses real newlines'
     assert_text_not_contains "${pgid_error_text}" '\\n\\nLog:' \
         'startup error has no literal newline escapes'
+}
+
+test_mock_signal_zenity_status() {
+    local error_capture
 
     # Scenario group: Zenity dialog status mapping.
     error_capture="${TEST_ROOT}/zenity-errors.txt"
@@ -2481,6 +2733,19 @@ EOF_BAD_CONFIG
         "${GUI_UNDER_TEST}"
     assert_file_contains "${error_capture}" 'Zenity could not display' \
         'Zenity entry error dialog'
+}
+
+run_mock_signal_group() {
+    test_mock_signal_cli_download
+    test_mock_signal_cli_ffmpeg
+    test_mock_signal_gui_session
+    test_mock_signal_gui_cancellation
+    test_mock_signal_gui_startup_error
+    test_mock_signal_zenity_status
+}
+
+test_mock_runtime_version_formats() {
+    local compatible_ytdlp_version
 
     # Scenario group: runtime version and capability handling.
     for compatible_ytdlp_version in \
@@ -2503,6 +2768,10 @@ EOF_BAD_CONFIG
         -- 'https://example.com/watch?v=bad-version'
     assert_text_contains "${ASSERT_OUTPUT}" 'unable to parse the yt-dlp version' \
         'unparseable yt-dlp diagnostic'
+}
+
+test_mock_runtime_worker_failure() {
+    local invalid_probe_result
 
     prepare_argument_log 'immediate-worker-failure'
     assert_status 23 'an immediate yt-dlp failure preserves its real status' \
@@ -2529,6 +2798,10 @@ EOF_BAD_CONFIG
         'final media file failed FFprobe validation' \
         'FFprobe failure diagnostic'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+}
+
+test_mock_runtime_version_overflow() {
+    local oversized_version_case
 
     # Fixed-width Bash arithmetic must never see unbounded external version
     # components. 2^64+1 wraps to 1 on common 64-bit Bash builds, so these
@@ -2561,6 +2834,10 @@ EOF_BAD_CONFIG
         --output-dir "${OUTPUT_DIR}" \
         -- 'https://www.youtube.com/watch?v=huge-deno-version'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+}
+
+test_mock_runtime_media_validation() {
+    local truncated_tail_result valid_tail_skew_result
 
     prepare_argument_log 'ffprobe-valid-av-tail-skew'
     valid_tail_skew_result="${TEST_ROOT}/valid-tail-skew-result.txt"
@@ -2599,6 +2876,11 @@ EOF_BAD_CONFIG
         'final media file failed FFprobe validation' \
         'tail-truncation validation diagnostic'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+}
+
+test_mock_runtime_dependencies() {
+    local managed_deno_args managed_deno_output
+    local -a managed_deno_arguments
 
     assert_status 1 'old yt-dlp version is rejected' \
         env MOCK_YTDLP_VERSION=2026.06.08 \
@@ -2652,6 +2934,11 @@ EOF_BAD_CONFIG
         env MOCK_ARIA2_DESCRIPTION_ONLY=1 \
         "${PROJECT_DIR}/download-video.sh" \
         -- 'https://example.com/watch?v=missing-aria2-option'
+}
+
+test_mock_runtime_progress_errors() {
+    local progress_error_capture progress_error_marker progress_error_started
+    local progress_timeout_errors progress_timeout_marker progress_timeout_started
 
     # Progress-dialog timeout and unexpected error terminate the worker group.
     # Synchronize the injected Zenity failure with a worker-start marker so the
@@ -2693,6 +2980,10 @@ EOF_BAD_CONFIG
         'progress-error worker receives TERM'
     assert_file_contains "${progress_error_capture}" 'status 42' \
         'unexpected progress status diagnostic'
+}
+
+test_mock_runtime_missing_zenity() {
+    local no_zenity_bin required_command required_command_path
 
     # Scenario: missing Zenity is a dependency error, not a graphical crash.
     no_zenity_bin="${TEST_ROOT}/no-zenity-bin"
@@ -2710,9 +3001,60 @@ EOF_BAD_CONFIG
         "${GUI_UNDER_TEST}"
     assert_text_contains "${ASSERT_OUTPUT}" 'required command "zenity" was not found' \
         'missing Zenity diagnostic'
+}
 
-    printf 'Mock integration tests passed.\n'
+run_mock_runtime_compat_group() {
+    test_mock_runtime_version_formats
+    test_mock_runtime_version_overflow
+    test_mock_runtime_dependencies
+}
 
+run_mock_runtime_validation_group() {
+    test_mock_runtime_worker_failure
+    test_mock_runtime_media_validation
+    test_mock_runtime_progress_errors
+    test_mock_runtime_missing_zenity
+}
+
+run_mock_runtime_group() {
+    test_mock_runtime_version_formats
+    test_mock_runtime_worker_failure
+    test_mock_runtime_version_overflow
+    test_mock_runtime_media_validation
+    test_mock_runtime_dependencies
+    test_mock_runtime_progress_errors
+    test_mock_runtime_missing_zenity
+}
+
+run_selected_mock_runtime_group() {
+    case ${MOCK_GROUP} in
+        all | runtime) run_mock_runtime_group ;;
+        runtime-compat) run_mock_runtime_compat_group ;;
+        runtime-validation) run_mock_runtime_validation_group ;;
+        *) ;;
+    esac
+}
+
+report_mock_integration_completion() {
+    if [[ ${MOCK_GROUP} == all ]]; then
+        printf 'Mock integration tests passed.\n'
+    else
+        printf 'Mock integration group passed: %s.\n' "${MOCK_GROUP}"
+    fi
+}
+
+main() {
+    initialize_mock_integration
+
+    run_selected_mock_engine_group
+    run_selected_mock_gui_group
+    # shellcheck disable=SC2310 # Group predicates intentionally drive execution.
+    if mock_group_enabled signals; then
+        run_mock_signal_group
+    fi
+    run_selected_mock_runtime_group
+
+    report_mock_integration_completion
 }
 
 main "$@"

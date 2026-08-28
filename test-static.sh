@@ -22,7 +22,7 @@ if ((${#ALL_SHELL_FILES[@]} == 0)); then
 fi
 # Contract: every canonical shell file uses the standard Bash header.
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
-readonly EXPECTED_VERSION='2.2.6'
+readonly EXPECTED_VERSION='2.3.0'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SHELL_INVENTORY_FILE=''
 
@@ -688,14 +688,50 @@ assert_shfmt_update_workflow_policy() {
     fi
 }
 
-main() {
-    trap cleanup_static_test EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+test_static_tooling_contracts() {
+    local engine_phase gui_phase mock_engine_group mock_engine_suite
+    local mock_gui_group mock_gui_suite mock_phase
+    local mock_runtime_group mock_runtime_suite
+    local runtime_phase scheduler_phase shfmt_phase signal_phase static_phase
+    local workflow_file
 
     assert_shell_inventory_is_canonical
     assert_shfmt_update_workflow_policy
+    assert_file_contains "${SCRIPT_DIR}/tests/lib/assert.sh" \
+        'assert_path_mode() {' \
+        'shared permission-mode assertion'
+    for static_phase in \
+        test_static_tooling_contracts \
+        test_static_shell_interface_contracts \
+        test_static_release_contracts \
+        test_static_cleanup_and_qualification_contracts \
+        test_static_packaging_signing_contracts \
+        test_static_application_contracts \
+        test_static_package_contracts \
+        test_static_runtime_regression_contracts \
+        test_static_upgrade_and_supply_chain_contracts; do
+        assert_file_contains "${SCRIPT_DIR}/test-static.sh" \
+            "${static_phase}() {" \
+            "static validation phase ${static_phase}"
+    done
+    assert_status 65 'shfmt bootstrap rejects a relative cache root' \
+        env SHFMT_TOOL_ROOT=relative \
+        "${SCRIPT_DIR}/scripts/dev-tools/ensure-shfmt.sh"
+    for shfmt_phase in \
+        require_shfmt_commands \
+        load_shfmt_pin \
+        select_shfmt_platform \
+        resolve_shfmt_cache \
+        prepare_shfmt_cache \
+        download_shfmt_asset \
+        publish_shfmt_binary; do
+        assert_file_contains "${SCRIPT_DIR}/scripts/dev-tools/ensure-shfmt.sh" \
+            "${shfmt_phase}() {" \
+            "shfmt bootstrap phase ${shfmt_phase}"
+    done
+    assert_file_contains "${SCRIPT_DIR}/scripts/dev-tools/ensure-shfmt.sh" \
+        "local resolved_version_dir=''" \
+        'shfmt cache directory does not shadow its caller output variable'
 
     assert_file_contains "${SCRIPT_DIR}/.editorconfig" \
         'indent_size = 4' \
@@ -712,6 +748,155 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/tests/run-all.sh" \
         'bash -- ./scripts/check-shell-format.sh' \
         'run-all enforces shfmt before behavioral validation'
+    for workflow_file in \
+        .github/workflows/shell.yml \
+        .github/workflows/packages.yml \
+        .github/workflows/release.yml \
+        .github/workflows/shfmt-update.yml; do
+        assert_file_contains "${SCRIPT_DIR}/${workflow_file}" \
+            'tests/run-all.sh --jobs 4' \
+            "${workflow_file} enables bounded parallel validation"
+    done
+    assert_status 0 'run-all lists its canonical integration suites' \
+        "${SCRIPT_DIR}/tests/run-all.sh" --list
+    assert_text_contains "${ASSERT_OUTPUT}" 'runtime-manager-hardening' \
+        'run-all suite list includes runtime hardening'
+    for mock_engine_suite in \
+        mock-engine-core \
+        mock-engine-hls \
+        mock-engine-staging; do
+        assert_text_contains "${ASSERT_OUTPUT}" "${mock_engine_suite}" \
+            "run-all suite list includes ${mock_engine_suite} coverage"
+    done
+    for mock_gui_suite in mock-gui-progress mock-gui-state; do
+        assert_text_contains "${ASSERT_OUTPUT}" "${mock_gui_suite}" \
+            "run-all suite list includes ${mock_gui_suite} coverage"
+    done
+    assert_text_contains "${ASSERT_OUTPUT}" 'mock-signals' \
+        'run-all suite list includes mock signal coverage'
+    for mock_runtime_suite in mock-runtime-compat mock-runtime-validation; do
+        assert_text_contains "${ASSERT_OUTPUT}" "${mock_runtime_suite}" \
+            "run-all suite list includes ${mock_runtime_suite} coverage"
+    done
+    assert_status 2 'run-all rejects conflicting validation profiles' \
+        "${SCRIPT_DIR}/tests/run-all.sh" --fast --full
+    assert_status 2 'run-all rejects zero integration concurrency' \
+        "${SCRIPT_DIR}/tests/run-all.sh" --jobs 0 --list
+    assert_status 0 'mock integration lists its parallel-safe groups' \
+        "${SCRIPT_DIR}/tests/mock-integration.sh" --list-groups
+    assert_text_contains "${ASSERT_OUTPUT}" 'engine' \
+        'mock integration group list includes engine coverage'
+    for mock_engine_group in engine-core engine-hls engine-staging; do
+        assert_text_contains "${ASSERT_OUTPUT}" "${mock_engine_group}" \
+            "mock integration group list includes ${mock_engine_group} coverage"
+    done
+    assert_text_contains "${ASSERT_OUTPUT}" 'gui' \
+        'mock integration group list includes GUI coverage'
+    for mock_gui_group in gui-progress gui-state; do
+        assert_text_contains "${ASSERT_OUTPUT}" "${mock_gui_group}" \
+            "mock integration group list includes ${mock_gui_group} coverage"
+    done
+    assert_text_contains "${ASSERT_OUTPUT}" 'signals' \
+        'mock integration group list includes signal coverage'
+    assert_text_contains "${ASSERT_OUTPUT}" 'runtime' \
+        'mock integration group list includes runtime coverage'
+    for mock_runtime_group in runtime-compat runtime-validation; do
+        assert_text_contains "${ASSERT_OUTPUT}" "${mock_runtime_group}" \
+            "mock integration group list includes ${mock_runtime_group} coverage"
+    done
+    assert_status 2 'mock integration rejects an unknown group' \
+        "${SCRIPT_DIR}/tests/mock-integration.sh" --group unknown
+    for mock_phase in \
+        initialize_mock_integration \
+        run_mock_engine_group \
+        run_mock_engine_core_group \
+        run_mock_engine_hls_group \
+        run_mock_engine_staging_group \
+        run_selected_mock_engine_group \
+        run_mock_gui_progress_group \
+        run_mock_gui_state_group \
+        run_mock_gui_group \
+        run_selected_mock_gui_group \
+        run_mock_signal_group \
+        run_mock_runtime_compat_group \
+        run_mock_runtime_validation_group \
+        run_mock_runtime_group \
+        run_selected_mock_runtime_group \
+        report_mock_integration_completion; do
+        assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+            "${mock_phase}() {" \
+            "mock integration phase ${mock_phase}"
+    done
+    for engine_phase in \
+        test_mock_cleanup_owner_guard \
+        test_mock_engine_log_retention \
+        test_mock_engine_audio_downloads \
+        test_mock_engine_video_downloads \
+        test_mock_engine_youtube_hls \
+        test_mock_engine_failure_paths \
+        test_mock_engine_private_staging; do
+        assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+            "${engine_phase}() {" \
+            "mock engine phase ${engine_phase}"
+    done
+    for gui_phase in \
+        test_mock_gui_aria_progress \
+        test_mock_gui_profiles \
+        test_mock_gui_progress_completion \
+        test_mock_gui_config_recovery \
+        test_mock_gui_file_selection \
+        test_mock_gui_diagnostic_logs \
+        test_mock_gui_state_initialization; do
+        assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+            "${gui_phase}() {" \
+            "mock GUI phase ${gui_phase}"
+    done
+    for signal_phase in \
+        test_mock_signal_cli_download \
+        test_mock_signal_cli_ffmpeg \
+        test_mock_signal_gui_session \
+        test_mock_signal_gui_cancellation \
+        test_mock_signal_gui_startup_error \
+        test_mock_signal_zenity_status; do
+        assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+            "${signal_phase}() {" \
+            "mock signal phase ${signal_phase}"
+    done
+    for runtime_phase in \
+        test_mock_runtime_version_formats \
+        test_mock_runtime_worker_failure \
+        test_mock_runtime_version_overflow \
+        test_mock_runtime_media_validation \
+        test_mock_runtime_dependencies \
+        test_mock_runtime_progress_errors \
+        test_mock_runtime_missing_zenity; do
+        assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+            "${runtime_phase}() {" \
+            "mock runtime phase ${runtime_phase}"
+    done
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shell.yml" \
+        'bash ./tests/run-all.sh --jobs 4' \
+        'shell CI enables bounded integration-suite concurrency'
+    assert_file_contains "${SCRIPT_DIR}/tests/lib/test-runner.sh" \
+        'test_runner_wait_any() {' \
+        'test runner exposes completion-driven child collection'
+    for scheduler_phase in \
+        run_shellcheck_validations \
+        initialize_integration_schedule \
+        start_integration_suite \
+        collect_completed_integration_suite \
+        report_integration_suites \
+        run_integration_suites; do
+        assert_file_contains "${SCRIPT_DIR}/tests/run-all.sh" \
+            "${scheduler_phase}() {" \
+            "integration scheduler phase ${scheduler_phase}"
+    done
+    assert_file_not_contains "${SCRIPT_DIR}/tests/run-all.sh" \
+        'run_suite_batch() {' \
+        'integration scheduler has no fixed-batch barrier'
+    assert_file_contains "${SCRIPT_DIR}/tests/test-runner-integration.sh" \
+        "assert_equals '23' \"\${status}\"" \
+        'wait-any qualification preserves failed child status'
 
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         '--max-concurrent-downloads' \
@@ -728,6 +913,11 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
         'Validate verified formatter and project' \
         'automation validates the formatter update only after fresh verification'
+}
+
+test_static_shell_interface_contracts() {
+    local file installer_phase installer_test_phase required_probe
+    local -a engine_locale_probes
 
     for file in "${ALL_SHELL_FILES[@]}"; do
         assert_standard_shell_header "${file}"
@@ -795,6 +985,27 @@ main() {
 
     assert_status 2 'installer requires one command' \
         "${SCRIPT_DIR}/install-gui.sh"
+    for installer_phase in \
+        validate_install_environment \
+        require_installer_commands \
+        validate_install_arguments \
+        initialize_install_paths \
+        install_launcher \
+        uninstall_launcher \
+        dispatch_install_action; do
+        assert_file_contains "${SCRIPT_DIR}/install-gui.sh" \
+            "${installer_phase}() {" \
+            "desktop installer phase ${installer_phase}"
+    done
+    for installer_test_phase in \
+        test_installer_initial_installation \
+        test_installer_reinstallation \
+        test_installer_failure_modes \
+        test_installer_uninstall_lifecycle; do
+        assert_file_contains "${SCRIPT_DIR}/tests/installer-integration.sh" \
+            "${installer_test_phase}() {" \
+            "installer integration phase ${installer_test_phase}"
+    done
 
     assert_file_contains \
         "${SCRIPT_DIR}/download-video-gui.sh" \
@@ -858,6 +1069,10 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
         '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
         'non-owner test cleanup protection'
+}
+
+test_static_release_contracts() {
+    local engine_reported_version evidence_phase preflight_phase
 
     # Current-version coherence is intentionally checked only on authoritative
     # carriers. Historical versions used by regression/upgrade fixtures are valid
@@ -1094,6 +1309,62 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'manual release recovery must run from a tag ref' \
         'manual release recovery is bound to an exact tag ref'
+    assert_status 2 'release preflight requires confirmations and a tag' \
+        "${SCRIPT_DIR}/scripts/release-preflight.sh"
+    assert_status 77 'release preflight rejects missing operator confirmations' \
+        "${SCRIPT_DIR}/scripts/release-preflight.sh" "v${EXPECTED_VERSION}"
+    for preflight_phase in \
+        parse_preflight_arguments \
+        require_preflight_commands \
+        resolve_preflight_repository \
+        verify_release_tag \
+        verify_release_tree_and_version \
+        verify_immutable_releases \
+        verify_signing_environment \
+        verify_signing_secret_scope \
+        inspect_preflight_rpm_certificate \
+        check_preflight_rpm_signing_expiry \
+        validate_preflight_rpm_certificate \
+        verify_rpm_signing_certificate \
+        report_release_preflight; do
+        assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+            "${preflight_phase}() {" \
+            "release preflight phase ${preflight_phase}"
+    done
+    assert_status 0 'release evidence qualification exposes help' \
+        "${SCRIPT_DIR}/scripts/release-evidence-qualification.sh" --help
+    assert_status 65 'release evidence qualification rejects an invalid tag' \
+        "${SCRIPT_DIR}/scripts/release-evidence-qualification.sh" \
+        invalid-tag 0000000000000000000000000000000000000000
+    for evidence_phase in \
+        parse_qualification_arguments \
+        require_qualification_commands \
+        initialize_qualification_workspace \
+        resolve_release_identity \
+        download_and_verify_release_assets \
+        collect_exact_sha_runs \
+        collect_scheduled_runs \
+        resolve_qualification_report \
+        write_exact_sha_run_line \
+        write_scheduled_run_line \
+        write_qualification_report; do
+        assert_file_contains "${SCRIPT_DIR}/scripts/release-evidence-qualification.sh" \
+            "${evidence_phase}() {" \
+            "release evidence phase ${evidence_phase}"
+    done
+    for evidence_output_local in \
+        workspace_public_dir \
+        workspace_inventory_file \
+        workspace_actual_inventory_file \
+        resolved_repo \
+        resolved_release_url \
+        resolved_release_immutable \
+        resolved_release_published_at; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/scripts/release-evidence-qualification.sh" \
+            "local ${evidence_output_local}=" \
+            "release evidence output local ${evidence_output_local}"
+    done
     assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
         '--confirm-single-maintainer-self-review' \
         'release preflight requires explicit single-maintainer self-review acknowledgement'
@@ -1120,6 +1391,11 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
         'unable to query the project version.' \
         'release preflight diagnoses project-version lookup failure'
+}
+
+test_static_cleanup_and_qualification_contracts() {
+    local aria2_behavior_phase cleanup_phase cleanup_scenario real_tools_phase
+
     # shellcheck disable=SC2016 # Literal shell-source assertion.
     assert_file_contains "${SCRIPT_DIR}/packaging/package-user-cleanup.sh" \
         '${path} != *[[:cntrl:]]*' \
@@ -1127,13 +1403,67 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/packaging/package-user-cleanup.sh" \
         'unable to enumerate users from /etc/passwd or getent; skipping all-user cleanup' \
         'package cleanup diagnoses unavailable enumeration sources'
+    assert_status 2 'package cleanup requires an explicit mode' \
+        "${SCRIPT_DIR}/packaging/package-user-cleanup.sh"
+    assert_status 64 'package cleanup rejects an unsafe user HOME' \
+        "${SCRIPT_DIR}/packaging/package-user-cleanup.sh" --user-home /
+    for cleanup_phase in \
+        initialize_cleanup_helper_path \
+        discover_cleanup_data_homes \
+        cleanup_registered_data_home \
+        cleanup_standard_user_paths \
+        cleanup_one_home \
+        run_as_user \
+        enumerate_users \
+        run_all_users_mode \
+        run_user_home_mode \
+        run_numeric_home_mode; do
+        assert_file_contains "${SCRIPT_DIR}/packaging/package-user-cleanup.sh" \
+            "${cleanup_phase}() {" \
+            "package cleanup phase ${cleanup_phase}"
+    done
+    for cleanup_scenario in \
+        test_valid_custom_xdg_cleanup \
+        test_forged_marker_preservation \
+        test_multiline_marker_rejection \
+        test_symlinked_sentinel_rejection \
+        test_terminal_runtime_symlink \
+        test_control_character_marker \
+        test_unavailable_home \
+        test_oversized_marker \
+        test_foreign_owned_home_rejection \
+        test_symlinked_foreign_home_rejection; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/tests/package-user-cleanup-integration.sh" \
+            "${cleanup_scenario}() {" \
+            "package cleanup integration scenario ${cleanup_scenario}"
+    done
 
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        'hls_duration_loss_us > hls_duration_tolerance_us' \
+        'hls_duration_loss_us <= hls_duration_tolerance_us' \
         'HLS post-remux duration loss is bounded before publication'
     assert_file_contains "${SCRIPT_DIR}/tests/real-tools-integration.sh" \
         "--downloader 'dash,m3u8:native'" \
         'real-tool qualification defends native DASH/HLS routing'
+    for real_tools_phase in \
+        prepare_real_tool_fixtures \
+        test_real_direct_audio_scenarios \
+        test_real_media_validation_mutations \
+        test_real_fragment_routing_and_mutations; do
+        assert_file_contains "${SCRIPT_DIR}/tests/real-tools-integration.sh" \
+            "${real_tools_phase}() {" \
+            "real-tool integration phase ${real_tools_phase}"
+    done
+    for aria2_behavior_phase in \
+        prepare_aria2_behavior_fixtures \
+        test_aria2_server_quiescence \
+        test_aria2_transport_behavior \
+        test_aria2_cancel_clean_restart; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/tests/aria2-real-behavior-integration.sh" \
+            "${aria2_behavior_phase}() {" \
+            "real aria2 behavior phase ${aria2_behavior_phase}"
+    done
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/real-tools.yml" \
         'schedule:' \
         'current stable yt-dlp is checked on a scheduled workflow'
@@ -1158,6 +1488,10 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
         'Package cleanup hardening stress (10x)' \
         'package cleanup safety is repeatedly stress-tested'
+}
+
+test_static_packaging_signing_contracts() {
+    local fedora_phase rpm6_phase rpm_changelog
 
     assert_file_contains \
         "${SCRIPT_DIR}/packaging/rpm/build-rpm.sh" \
@@ -1168,6 +1502,18 @@ main() {
         "${SCRIPT_DIR}/packaging/rpm/build-rpm.sh" \
         'if [[ ${package_format} != 4 ]]; then' \
         'generated RPM package format is independently verified'
+    for rpm6_phase in \
+        validate_rpm6_environment \
+        prepare_rpm6_workspace \
+        prepare_rpm6_signers \
+        test_rpm_v4_legacy_signature \
+        test_rpm_v4_v6_multisig \
+        test_rpm_v6_multisig_semantics; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/tests/rpm6-multisig-integration.sh" \
+            "${rpm6_phase}() {" \
+            "RPM 6 qualification phase ${rpm6_phase}"
+    done
 
     rpm_changelog=$(
         awk '
@@ -1221,6 +1567,40 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
         "readonly RPM_SIGNING_FINGERPRINT='7B54065FE061E78ED2C96252E3BE996196ABEA7F'" \
         'Fedora bootstrap pins the RPM signing fingerprint'
+    assert_status 2 'Fedora bootstrap requires one RPM argument' \
+        "${SCRIPT_DIR}/install-fedora.sh"
+    for fedora_phase in \
+        parse_fedora_arguments \
+        require_fedora_installer_commands \
+        initialize_fedora_paths \
+        validate_rpm_identity \
+        inspect_rpm_signature \
+        resolve_rpm_signing_key \
+        detect_supported_fedora \
+        ensure_rpm_verification_gpg \
+        inspect_rpm_signing_certificate \
+        validate_rpm_signing_certificate \
+        verify_rpm_with_pinned_keyring \
+        verify_signed_rpm \
+        authenticate_signed_rpm \
+        enable_rpm_fusion \
+        install_media_dependencies \
+        install_application_rpm \
+        validate_installed_system \
+        update_managed_runtimes \
+        report_fedora_installation; do
+        assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
+            "${fedora_phase}() {" \
+            "Fedora bootstrap phase ${fedora_phase}"
+    done
+    for fedora_output_local in \
+        parsed_allow_unsigned_dev \
+        parsed_rpm_argument \
+        detected_ffmpeg_vendor; do
+        assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
+            "local ${fedora_output_local}=" \
+            "Fedora bootstrap output local ${fedora_output_local}"
+    done
     assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
         "readonly RPM_SIGNING_SUBKEY_FINGERPRINT='1F5B769CE48A08AAC0A7D9DDECC9894B41830245'" \
         'Fedora bootstrap pins the dedicated RPM signing subkey'
@@ -1372,6 +1752,12 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'git merge-base --is-ancestor "${tag_commit}" origin/main' \
         'release tag ancestry validation'
+}
+
+test_static_application_contracts() {
+    local aria2_header_test_phase engine_phase gui_phase monitor_phase
+    local ffmpeg_progress_test_phase ffmpeg_real_test_phase monitor_test_phase
+    local hls_remux_test_phase private_plan_test_phase
 
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'umask 077' \
@@ -1415,6 +1801,34 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'if [[ ${ARIA2_SUPPORTS_NO_NETRC} == true ]]; then' \
         'aria2 receives no-netrc only when the build advertises it'
+    for engine_phase in \
+        check_ytdlp_runtime \
+        check_deno_runtime \
+        check_ytdlp_capabilities \
+        check_aria2_runtime \
+        check_aria2_capabilities \
+        check_setsid_capabilities \
+        check_runtime_compatibility \
+        parse_arguments \
+        resolve_requested_url \
+        validate_mode_selection \
+        initialize_runtime_dependencies \
+        prepare_output_directory \
+        prepare_private_work_files \
+        configure_download_options \
+        plan_selected_transport \
+        configure_download_reporting \
+        execute_selected_transport \
+        normalize_successful_path_record \
+        validate_hls_duration_parity \
+        publish_hls_remux_result \
+        remux_hls_result \
+        validate_and_publish_result \
+        finalize_download; do
+        assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+            "${engine_phase}() {" \
+            "engine phase ${engine_phase}"
+    done
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'validate_final_media_file() {' \
         'final media FFprobe validation'
@@ -1424,14 +1838,105 @@ main() {
         'mode-specific FFprobe stream validation'
     # shellcheck disable=SC2016 # Literal shell-source assertion.
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        'mv -nT -- "${HLS_REMUX_TMP}" "${hls_final_path}"' \
+        'mv -nT -- "${HLS_REMUX_TMP}" "${final_path}"' \
         'HLS publication never treats the target as a directory'
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         'YTDLP_ARIA2_SUPERVISED_SESSION=true' \
         'GUI requests reuse of its single process session without a public option'
+    for gui_phase in \
+        initialize_gui_environment \
+        collect_download_request \
+        prepare_gui_session \
+        start_download_worker \
+        run_progress_dialog \
+        resolve_confirmed_final_path \
+        show_success_dialog \
+        handle_worker_result; do
+        assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+            "${gui_phase}() {" \
+            "GUI phase ${gui_phase}"
+    done
+    for monitor_phase in \
+        initialize_progress_inputs \
+        initialize_progress_state \
+        open_progress_log \
+        drain_progress_log \
+        monitor_worker_progress \
+        report_progress_completion; do
+        assert_file_contains "${SCRIPT_DIR}/progress-monitor.sh" \
+            "${monitor_phase}() {" \
+            "progress monitor phase ${monitor_phase}"
+    done
+    for monitor_test_phase in \
+        test_monitor_reader_lifecycle \
+        test_monitor_planning_progress \
+        test_monitor_direct_transfer_progress \
+        test_monitor_native_transfer_progress \
+        test_monitor_composite_and_postprocess_progress \
+        test_monitor_failure_and_input_hardening; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/tests/progress-monitor-integration.sh" \
+            "${monitor_test_phase}() {" \
+            "progress monitor integration phase ${monitor_test_phase}"
+    done
+    for private_plan_test_phase in \
+        test_private_plan_classification \
+        test_private_plan_input_validation \
+        test_private_plan_publication_safety \
+        test_private_plan_rollback_safety; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/tests/private-aria2-plan-integration.sh" \
+            "${private_plan_test_phase}() {" \
+            "private aria2 plan phase ${private_plan_test_phase}"
+    done
+    for aria2_header_test_phase in \
+        prepare_aria2_header_servers \
+        test_replay_safe_aria2_headers \
+        test_unsafe_aria2_header_policy; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/tests/aria2-auth-headers-integration.sh" \
+            "${aria2_header_test_phase}() {" \
+            "aria2 header integration phase ${aria2_header_test_phase}"
+    done
+    for ffmpeg_progress_test_phase in \
+        test_measured_ffmpeg_progress \
+        test_oversized_ffmpeg_counters; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/tests/ffmpeg-progress-integration.sh" \
+            "${ffmpeg_progress_test_phase}() {" \
+            "simulated FFmpeg progress phase ${ffmpeg_progress_test_phase}"
+    done
+    for ffmpeg_real_test_phase in \
+        create_real_ffmpeg_fixture \
+        run_real_ffmpeg_worker \
+        wait_for_worker_barrier \
+        wait_for_prepublication_progress \
+        assert_real_progress_history \
+        test_real_ffmpeg_progress_run; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/tests/ffmpeg-real-progress-integration.sh" \
+            "${ffmpeg_real_test_phase}() {" \
+            "real FFmpeg progress phase ${ffmpeg_real_test_phase}"
+    done
+    for hls_remux_test_phase in \
+        prepare_hls_media_fixtures \
+        prepare_hls_runtime_mocks \
+        test_hls_remux_duration_cases; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/tests/hls-remux-duration-integration.sh" \
+            "${hls_remux_test_phase}() {" \
+            "HLS remux duration phase ${hls_remux_test_phase}"
+    done
     assert_file_contains "${SCRIPT_DIR}/progress-monitor.sh" \
         'PROFILE OUTPUT_DIR' \
         'progress monitor receives the canonical destination'
+}
+
+test_static_package_contracts() {
+    local README_EN_TEXT README_FR_TEXT
+    local deb_build_phase deb_lifecycle_phase install_tree_phase
+    local lifecycle_assertion packaging_test_phase rpm_build_phase rpm_lifecycle_phase
+
     README_EN_TEXT=$(<"${SCRIPT_DIR}/README.md")
     README_FR_TEXT=$(<"${SCRIPT_DIR}/README.fr.md")
     readonly README_EN_TEXT README_FR_TEXT
@@ -1454,10 +1959,71 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/packaging/yt-dlp-aria2-downloader.desktop" \
         'TryExec=/usr/bin/yt-dlp-aria2-downloader-gui' \
         'packaged desktop launcher command'
+    for packaging_test_phase in \
+        test_rejected_private_directories \
+        test_alternate_private_directory \
+        assert_packaged_executables \
+        assert_packaged_entrypoints \
+        assert_packaged_desktop_entry \
+        assert_packaged_assets \
+        test_packaged_install_tree; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/tests/packaging-integration.sh" \
+            "${packaging_test_phase}() {" \
+            "packaging integration phase ${packaging_test_phase}"
+    done
     assert_file_contains "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
         'dpkg-deb --root-owner-group --build' 'native DEB construction'
+    assert_file_contains "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
+        'local built_package_path=' \
+        'DEB output path does not shadow its caller output variable'
+    # shellcheck disable=SC2016 # Literal shadowed output-path declaration.
+    assert_file_not_contains "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
+        'local package_path="${RESOLVED_OUTPUT_DIR}/' \
+        'DEB builder does not shadow its caller package path'
+    assert_status 2 'DEB builder requires a semantic version' \
+        "${SCRIPT_DIR}/packaging/deb/build-deb.sh"
+    assert_status 2 'DEB builder rejects a malformed version' \
+        "${SCRIPT_DIR}/packaging/deb/build-deb.sh" malformed-version
+    for deb_build_phase in \
+        parse_deb_build_arguments \
+        require_deb_build_commands \
+        initialize_deb_build_paths \
+        validate_deb_source_tree \
+        initialize_deb_output_directory \
+        initialize_deb_workspace \
+        resolve_deb_build_timestamp \
+        stage_deb_payload \
+        write_deb_documentation \
+        write_deb_control_metadata \
+        write_deb_checksums \
+        build_deb_package \
+        validate_deb_package; do
+        assert_file_contains "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
+            "${deb_build_phase}() {" \
+            "DEB build phase ${deb_build_phase}"
+    done
     assert_file_contains "${SCRIPT_DIR}/packaging/rpm/build-rpm.sh" \
         'rpmbuild -bb' 'native RPM construction'
+    assert_status 2 'RPM builder requires a semantic version' \
+        "${SCRIPT_DIR}/packaging/rpm/build-rpm.sh"
+    assert_status 2 'RPM builder rejects a malformed version' \
+        "${SCRIPT_DIR}/packaging/rpm/build-rpm.sh" malformed-version
+    for rpm_build_phase in \
+        parse_rpm_build_arguments \
+        require_rpm_build_commands \
+        initialize_rpm_build_paths \
+        validate_rpm_source_tree \
+        initialize_rpm_output_directory \
+        initialize_rpm_workspace \
+        prepare_rpmbuild_tree \
+        build_rpm_payload \
+        publish_rpm_artifact \
+        validate_rpm_artifact; do
+        assert_file_contains "${SCRIPT_DIR}/packaging/rpm/build-rpm.sh" \
+            "${rpm_build_phase}() {" \
+            "RPM build phase ${rpm_build_phase}"
+    done
     [[ ! -e ${SCRIPT_DIR}/docs/images ]] \
         || fail 'Obsolete screenshot directory remains in the project.'
 
@@ -1493,6 +2059,75 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/packaging/install-tree.sh" \
         'usr/share/icons/hicolor/scalable/apps' \
         'Freedesktop hicolor icon installation'
+    assert_status 2 'package-tree installer requires three arguments' \
+        "${SCRIPT_DIR}/packaging/install-tree.sh"
+    assert_status 2 'package-tree installer rejects a malformed version' \
+        "${SCRIPT_DIR}/packaging/install-tree.sh" \
+        '/tmp/package-tree-static-test' malformed-version \
+        '/usr/lib/yt-dlp-aria2-downloader'
+    for install_tree_phase in \
+        parse_install_tree_arguments \
+        validate_install_tree_arguments \
+        require_install_tree_commands \
+        initialize_install_tree_paths \
+        validate_packaging_inputs \
+        install_private_payload \
+        install_shared_payload \
+        install_package_launchers; do
+        assert_file_contains "${SCRIPT_DIR}/packaging/install-tree.sh" \
+            "${install_tree_phase}() {" \
+            "package-tree installation phase ${install_tree_phase}"
+    done
+    for lifecycle_assertion in \
+        assert_package_cli_version \
+        assert_common_package_payload \
+        assert_package_paths_absent; do
+        assert_file_contains "${SCRIPT_DIR}/tests/lib/package-lifecycle.sh" \
+            "${lifecycle_assertion}() {" \
+            "shared package lifecycle assertion ${lifecycle_assertion}"
+    done
+    assert_status 2 'DEB lifecycle test requires package and version' \
+        "${SCRIPT_DIR}/packaging/deb/test-package-lifecycle.sh"
+    assert_status 2 'DEB lifecycle test rejects a malformed version' \
+        "${SCRIPT_DIR}/packaging/deb/test-package-lifecycle.sh" \
+        missing.deb malformed-version
+    for deb_lifecycle_phase in \
+        parse_deb_lifecycle_arguments \
+        require_deb_lifecycle_environment \
+        initialize_deb_lifecycle_paths \
+        validate_deb_dependencies \
+        validate_deb_initial_state \
+        initialize_deb_lifecycle_workspace \
+        inspect_deb_payload \
+        install_initial_deb \
+        remove_and_purge_deb \
+        reinstall_and_purge_deb; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/packaging/deb/test-package-lifecycle.sh" \
+            "${deb_lifecycle_phase}() {" \
+            "DEB lifecycle phase ${deb_lifecycle_phase}"
+    done
+    assert_status 2 'RPM lifecycle test requires package and version' \
+        "${SCRIPT_DIR}/packaging/rpm/test-package-lifecycle.sh"
+    assert_status 2 'RPM lifecycle test rejects a malformed version' \
+        "${SCRIPT_DIR}/packaging/rpm/test-package-lifecycle.sh" \
+        missing.rpm malformed-version
+    for rpm_lifecycle_phase in \
+        parse_rpm_lifecycle_arguments \
+        require_rpm_lifecycle_environment \
+        initialize_rpm_lifecycle_paths \
+        validate_rpm_dependencies \
+        validate_rpm_initial_state \
+        initialize_rpm_lifecycle_workspace \
+        inspect_rpm_payload \
+        install_initial_rpm \
+        remove_rpm \
+        reinstall_and_remove_rpm; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/packaging/rpm/test-package-lifecycle.sh" \
+            "${rpm_lifecycle_phase}() {" \
+            "RPM lifecycle phase ${rpm_lifecycle_phase}"
+    done
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
         'packaging/deb/test-package-lifecycle.sh' \
         'DEB installation and removal validation'
@@ -1509,6 +2144,10 @@ main() {
         'install-gui.sh' 'DEB does not run the per-user launcher installer'
     assert_file_not_contains "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
         'install-gui.sh' 'RPM does not run the per-user launcher installer'
+}
+
+test_static_runtime_regression_contracts() {
+    local hardening_phase runtime_manager_test_phase runtime_phase
 
     # Regression contracts for runtime, release, playlist, HLS, packaging, and supply-chain behavior.
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
@@ -1595,6 +2234,27 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/runtime-manager.sh" \
         "readonly DEFAULT_YTDLP_CHANNEL='stable'" \
         'managed yt-dlp defaults to the stable channel'
+    for runtime_phase in \
+        initialize_runtime_layout \
+        initialize_runtime_policy \
+        initialize_runtime_platform \
+        prepare_runtime_storage \
+        print_runtime_versions \
+        dispatch_runtime_command; do
+        assert_file_contains "${SCRIPT_DIR}/runtime-manager.sh" \
+            "${runtime_phase}() {" \
+            "runtime manager phase ${runtime_phase}"
+    done
+    for runtime_manager_test_phase in \
+        prepare_runtime_manager_fixture \
+        test_runtime_paths_and_locking \
+        test_runtime_offline_and_rollback \
+        test_runtime_bootstrap_and_architecture; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/tests/runtime-manager-integration.sh" \
+            "${runtime_manager_test_phase}() {" \
+            "runtime manager integration phase ${runtime_manager_test_phase}"
+    done
     assert_file_contains "${SCRIPT_DIR}/runtime-manager.sh" \
         "YTDLP_RELEASE_REPOSITORY='yt-dlp/yt-dlp'" \
         'managed yt-dlp stable release repository'
@@ -1688,11 +2348,106 @@ main() {
         'RPM matrix downloads one shared artifact'
     assert_file_contains "${SCRIPT_DIR}/tests/run-all.sh" \
         'runtime-manager-hardening-integration.sh' 'runtime hardening suite is mandatory'
+    for hardening_phase in \
+        initialize_runtime_hardening_workspace \
+        write_runtime_hardening_mocks \
+        initialize_runtime_hardening_fixtures \
+        test_runtime_setting_bounds \
+        test_oversized_deno_versions \
+        test_invalid_runtime_path \
+        test_mismatched_ytdlp_candidate \
+        test_signature_failure_bootstrap \
+        test_fresh_runtime_bootstrap \
+        test_no_network_require \
+        test_invalid_active_runtime_recovery \
+        test_runtime_updates \
+        test_repeated_rollbacks \
+        test_invalid_rollback_targets \
+        test_activation_journal_recovery \
+        test_runtime_lock_hardening; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/tests/runtime-manager-hardening-integration.sh" \
+            "${hardening_phase}() {" \
+            "runtime hardening phase ${hardening_phase}"
+    done
+    # shellcheck disable=SC2016 # Literal shell-source assertion.
+    assert_file_contains \
+        "${SCRIPT_DIR}/tests/runtime-manager-hardening-integration.sh" \
+        'ROLLBACK_RUNS=${RUNTIME_HARDENING_ROLLBACK_RUNS:-3}' \
+        'runtime hardening uses a bounded ordinary rollback repetition count'
+    # shellcheck disable=SC2016 # Literal shell-source assertion.
+    assert_file_contains \
+        "${SCRIPT_DIR}/tests/runtime-manager-hardening-integration.sh" \
+        'CONTENTION_RUNS=${RUNTIME_HARDENING_CONTENTION_RUNS:-3}' \
+        'runtime hardening uses a bounded ordinary contention repetition count'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
+        'RUNTIME_HARDENING_ROLLBACK_RUNS: 10' \
+        'runtime hardening stress restores ten rollback cycles per run'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
+        'RUNTIME_HARDENING_CONTENTION_RUNS: 10' \
+        'runtime hardening stress restores ten contention cycles per run'
+    assert_status 64 'runtime hardening rejects zero rollback repetitions' \
+        env RUNTIME_HARDENING_ROLLBACK_RUNS=0 \
+        "${SCRIPT_DIR}/tests/runtime-manager-hardening-integration.sh"
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'RUNTIME_HARDENING_ROLLBACK_RUNS must be between 1 and 100.' \
+        'runtime hardening rollback repetition diagnostic'
+    assert_status 64 'runtime hardening rejects excessive contention repetitions' \
+        env RUNTIME_HARDENING_CONTENTION_RUNS=101 \
+        "${SCRIPT_DIR}/tests/runtime-manager-hardening-integration.sh"
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'RUNTIME_HARDENING_CONTENTION_RUNS must be between 1 and 100.' \
+        'runtime hardening contention repetition diagnostic'
+}
+
+test_static_upgrade_and_supply_chain_contracts() {
+    local deb_upgrade_phase rpm_upgrade_phase
+
     assert_file_contains "${SCRIPT_DIR}/packaging/rpm/test-package-upgrade.sh" \
         'RPM upgrade passed:' 'RPM previous-to-current upgrade test'
     assert_file_contains "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
         'DEB upgrade passed with user-runtime preservation:' \
         'DEB previous-to-current upgrade test'
+    assert_status 2 'DEB upgrade test requires two packages and two versions' \
+        "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh"
+    assert_status 2 'DEB upgrade test rejects a malformed version' \
+        "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
+        missing-old.deb missing-new.deb malformed-version "${EXPECTED_VERSION}"
+    for deb_upgrade_phase in \
+        parse_deb_upgrade_arguments \
+        require_deb_upgrade_environment \
+        initialize_deb_upgrade_paths \
+        validate_deb_upgrade_initial_state \
+        initialize_deb_upgrade_cleanup \
+        assert_installed_deb_version \
+        install_previous_deb \
+        upgrade_deb_package \
+        remove_upgraded_deb; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
+            "${deb_upgrade_phase}() {" \
+            "DEB upgrade phase ${deb_upgrade_phase}"
+    done
+    assert_status 2 'RPM upgrade test requires two packages and two versions' \
+        "${SCRIPT_DIR}/packaging/rpm/test-package-upgrade.sh"
+    assert_status 2 'RPM upgrade test rejects a malformed version' \
+        "${SCRIPT_DIR}/packaging/rpm/test-package-upgrade.sh" \
+        missing-old.rpm missing-new.rpm malformed-version "${EXPECTED_VERSION}"
+    for rpm_upgrade_phase in \
+        parse_rpm_upgrade_arguments \
+        require_rpm_upgrade_environment \
+        initialize_rpm_upgrade_paths \
+        validate_rpm_upgrade_initial_state \
+        initialize_rpm_upgrade_cleanup \
+        assert_installed_rpm_version \
+        install_previous_rpm \
+        upgrade_rpm_package \
+        remove_upgraded_rpm; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/packaging/rpm/test-package-upgrade.sh" \
+            "${rpm_upgrade_phase}() {" \
+            "RPM upgrade phase ${rpm_upgrade_phase}"
+    done
 
     assert_file_contains \
         "${SCRIPT_DIR}/packaging/rpm/build-rpm.sh" \
@@ -1912,9 +2667,24 @@ main() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'supported Fedora bootstrap runtime survived final RPM removal' \
         'release CI checks bootstrap runtime removal'
+}
 
+main() {
+    trap cleanup_static_test EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    test_static_tooling_contracts
+    test_static_shell_interface_contracts
+    test_static_release_contracts
+    test_static_cleanup_and_qualification_contracts
+    test_static_packaging_signing_contracts
+    test_static_application_contracts
+    test_static_package_contracts
+    test_static_runtime_regression_contracts
+    test_static_upgrade_and_supply_chain_contracts
     printf '%s\n' 'Static tests passed.'
-
 }
 
 main "$@"

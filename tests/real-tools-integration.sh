@@ -28,6 +28,11 @@ readonly TEST_ROOT
 SERVER_PID=''
 REAL_ARIA2=$(command -v aria2c)
 readonly REAL_ARIA2
+PORT=''
+ARIA2_INVOCATION_LOG=''
+RUN_FINAL_FILE=''
+REAL_DIRECT_FINAL=''
+REAL_SOURCE_OPUS_CODEC=''
 
 cleanup() {
     trap - EXIT HUP INT TERM
@@ -222,12 +227,7 @@ assert_native_fragment_routing() {
     grep -Fq -- "--downloader 'dash,m3u8:native'" "${engine}"
 }
 
-main() {
-    trap cleanup EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-
+prepare_real_tool_fixtures() {
     mkdir -p -- \
         "${TEST_ROOT}/web/hls" \
         "${TEST_ROOT}/web/dash" \
@@ -373,23 +373,26 @@ EOF_ARIA2_SHIM
     export YTDLP_ARIA2_YTDLP_BIN
     export YTDLP_DISABLE_REMOTE_EJS=1
 
-    RUN_FINAL_FILE=''
-
     # shellcheck disable=SC2310 # Predicate failure is the assertion result.
     assert_native_fragment_routing "${PROJECT_DIR}/download-video.sh" || {
         printf 'FAIL: native DASH/HLS routing invariant is absent.\n' >&2
         exit 65
     }
+}
+
+test_real_direct_audio_scenarios() {
+    local audio_final combined_final combined_source_codec cover_final
+    local opus_final source_audio_codec source_cover_codec
 
     # Scenario: direct HTTP must cross the real aria2c boundary.
     : >"${ARIA2_INVOCATION_LOG}"
     run_engine video direct "http://127.0.0.1:${PORT}/av.mp4"
-    direct_final=${RUN_FINAL_FILE}
-    [[ -f ${direct_final} ]] || {
+    REAL_DIRECT_FINAL=${RUN_FINAL_FILE}
+    [[ -f ${REAL_DIRECT_FINAL} ]] || {
         printf 'FAIL: direct HTTP result is absent.\n' >&2
         exit 65
     }
-    assert_media_streams "${direct_final}"
+    assert_media_streams "${REAL_DIRECT_FINAL}"
     [[ -s ${ARIA2_INVOCATION_LOG} ]] || {
         printf 'FAIL: direct HTTP transfer did not invoke real aria2c.\n' >&2
         exit 65
@@ -416,14 +419,14 @@ EOF_ARIA2_SHIM
 
     # Scenario: Opus/WebM audio-only preserves the source codec without forced conversion.
     : >"${ARIA2_INVOCATION_LOG}"
-    source_opus_codec=$(
+    REAL_SOURCE_OPUS_CODEC=$(
         ffprobe -v error -select_streams a:0 \
             -show_entries stream=codec_name -of csv=p=0 \
             "${TEST_ROOT}/web/audio-opus.webm"
     )
-    [[ ${source_opus_codec} == opus ]] || {
+    [[ ${REAL_SOURCE_OPUS_CODEC} == opus ]] || {
         printf 'FAIL: generated Opus fixture has unexpected codec: %s.\n' \
-            "${source_opus_codec}" >&2
+            "${REAL_SOURCE_OPUS_CODEC}" >&2
         exit 65
     }
     run_engine audio audio-opus "http://127.0.0.1:${PORT}/audio-opus.webm"
@@ -432,7 +435,7 @@ EOF_ARIA2_SHIM
         printf 'FAIL: Opus audio result is absent.\n' >&2
         exit 65
     }
-    assert_audio_only_codec "${opus_final}" "${source_opus_codec}"
+    assert_audio_only_codec "${opus_final}" "${REAL_SOURCE_OPUS_CODEC}"
     [[ -s ${ARIA2_INVOCATION_LOG} ]] || {
         printf 'FAIL: direct Opus transfer did not invoke real aria2c.\n' >&2
         exit 65
@@ -478,6 +481,16 @@ EOF_ARIA2_SHIM
         printf 'FAIL: attached-cover direct audio did not invoke real aria2c.\n' >&2
         exit 65
     }
+}
+
+test_real_media_validation_mutations() {
+    local extract_audio_count mutated_cover_dir mutated_cover_engine
+    local mutated_cover_result mutated_cover_status mutated_no_extract_cover_dir
+    local mutated_no_extract_cover_result mutated_no_extract_cover_status
+    local mutated_no_extract_dir mutated_no_extract_engine mutated_no_extract_result
+    local mutated_no_extract_status val001_audio_index val001_full_packets
+    local val001_log val001_mutant val001_output_dir val001_result val001_status
+    local val001_truncated val001_truncated_packets val001_video_index
 
     # Mutation tests execute temporary copies of the engine. Keep the private
     # aria2 planning helper beside those copies so direct HTTP reaches the
@@ -490,7 +503,7 @@ EOF_ARIA2_SHIM
     # engine injects it immediately before final validation. The production
     # packet-tail consistency gate must reject it and withhold the result-file.
     val001_truncated="${TEST_ROOT}/val001-truncated.mkv"
-    python3 - "${direct_final}" "${val001_truncated}" <<'PY_VAL001_TRUNCATE'
+    python3 - "${REAL_DIRECT_FINAL}" "${val001_truncated}" <<'PY_VAL001_TRUNCATE'
 import sys
 from pathlib import Path
 
@@ -512,7 +525,7 @@ PY_VAL001_TRUNCATE
     ) || true
     val001_full_packets=$(
         ffprobe -v error -select_streams V:0 -count_packets \
-            -show_entries stream=nb_read_packets -of csv=p=0 "${direct_final}"
+            -show_entries stream=nb_read_packets -of csv=p=0 "${REAL_DIRECT_FINAL}"
     )
     val001_truncated_packets=$(
         ffprobe -v error -select_streams V:0 -count_packets \
@@ -538,17 +551,17 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
-needle = "        emit_machine_postprocess started MediaValidation\n"
+needle = "    emit_machine_postprocess started MediaValidation\n"
 if text.count(needle) != 1:
     raise SystemExit(
         f"VAL-001 mutation expected one validation anchor; found {text.count(needle)}"
     )
-injection = """        if [[ -n ${VAL001_REPLACEMENT:-} ]]; then
-            cp -- "${VAL001_REPLACEMENT}" "${final_media_path}" || {
-                error 'VAL-001 fixture injection failed.'
-                exit 70
-            }
-        fi
+injection = """    if [[ -n ${VAL001_REPLACEMENT:-} ]]; then
+        cp -- "${VAL001_REPLACEMENT}" "${final_media_path}" || {
+            error 'VAL-001 fixture injection failed.'
+            exit 70
+        }
+    fi
 
 """
 path.write_text(text.replace(needle, injection + needle, 1), encoding="utf-8")
@@ -769,6 +782,12 @@ PY_COVER_MUTATION
         sed -n '1,120p' -- "${TEST_ROOT}/audio-no-extract-cover-mutated.stdout" >&2 || true
         exit 65
     }
+}
+
+test_real_fragment_routing_and_mutations() {
+    local dash_final hls_final mutated_audio_codec mutated_audio_engine
+    local mutated_audio_final mutated_engine mutation_diagnostic mutation_status
+    local video_only_status
 
     # Scenario: HLS fragments stay on yt-dlp's native downloader.
     : >"${ARIA2_INVOCATION_LOG}"
@@ -857,7 +876,7 @@ PY_FORCE_MP3
     mutation_diagnostic="${TEST_ROOT}/audio-mutation.expected.stderr"
     set +e
     assert_audio_only_codec \
-        "${mutated_audio_final}" "${source_opus_codec}" \
+        "${mutated_audio_final}" "${REAL_SOURCE_OPUS_CODEC}" \
         2>"${mutation_diagnostic}"
     mutation_status=$?
     set -e
@@ -881,9 +900,19 @@ PY_FORCE_MP3
         exit 65
     }
     printf 'Expected mutation detected: forced MP3 was rejected by Opus preservation.\n'
+}
 
+main() {
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    prepare_real_tool_fixtures
+    test_real_direct_audio_scenarios
+    test_real_media_validation_mutations
+    test_real_fragment_routing_and_mutations
     printf 'Real-tool direct/audio/Opus/fallback/cover/HLS/DASH integration passed.\n'
-
 }
 
 main "$@"

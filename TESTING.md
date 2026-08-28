@@ -6,6 +6,7 @@ project. It is intentionally independent of a particular release date.
 ## Contents
 
 - [Complete local test suite](#complete-local-test-suite)
+- [Fast feedback, timing and concurrency](#fast-feedback-timing-and-concurrency)
 - [Shell formatting](#shell-formatting)
 - [Bash syntax](#bash-syntax)
 - [ShellCheck](#shellcheck)
@@ -23,6 +24,62 @@ Run from the repository root:
 ```bash
 ./tests/run-all.sh
 ```
+
+The default is intentionally the complete `full` profile with one integration
+suite at a time. This preserves the release-equivalent local contract and the
+most readable live output.
+
+## Fast feedback, timing and concurrency
+
+For a shorter development loop, run the static checks and the integration
+suites marked as fast:
+
+```bash
+./tests/run-all.sh --fast --jobs 4
+```
+
+Run the complete contract with up to four independent integration suites in
+parallel:
+
+```bash
+./tests/run-all.sh --full --jobs 4
+```
+
+Every static step and integration suite reports its elapsed time. The four
+independent ShellCheck inventories share the requested job limit, while shfmt
+and static behavioral validation remain ordered prerequisites. Parallel output
+is buffered separately and printed in canonical manifest order, so completion
+races do not produce interleaved logs. The integration scheduler immediately
+reuses a slot when any suite finishes; a short suite therefore cannot leave a
+worker idle while an unrelated long suite is still running. Interruption still
+terminates every supervised validation process group and its descendants.
+
+The complete mock contract is divided into eight isolated scheduler suites
+(`engine-core`, `engine-hls`, `engine-staging`, `gui-progress`, `gui-state`,
+`signals`, `runtime-compat`, and `runtime-validation`) so `run-all.sh --jobs N`
+can schedule its hermetic scenarios concurrently. The `engine`, `gui`, and
+`runtime` groups remain convenient aggregates of their respective subgroups,
+and running the mock script without an option still executes every scenario in
+the historical order. A single group can be targeted while developing:
+
+```bash
+./tests/mock-integration.sh --group gui-progress
+```
+
+Use `./tests/mock-integration.sh --list-groups` to list the accepted group
+names. These groups use independent temporary homes, output directories, and
+mock binaries when the top-level runner executes them concurrently.
+
+List the integration manifest and fast-profile membership without running any
+validation:
+
+```bash
+./tests/run-all.sh --list
+```
+
+`YTDLP_ARIA2_TEST_JOBS` supplies the default concurrency when `--jobs` is not
+provided. Values are restricted to `1..32`. The fast profile is a developer
+convenience, not a substitute for the complete suite before review or release.
 
 ## Shell formatting
 
@@ -195,7 +252,8 @@ The automated suite checks, among other things:
   strict zero-network `require` mode, exact-tag stable/nightly/stable switching,
   exact executable-version binding to the resolved yt-dlp release tag,
   single-member Deno archive extraction, explicit invalid-`path` diagnostics,
-  lock-descriptor isolation, ten-cycle contention/double-rollback stress,
+  lock-descriptor isolation, repeated contention/double-rollback coverage
+  (three cycles in ordinary validation and ten per dedicated stress run),
   interrupted-activation journal recovery, explicit/automatic rollback, and
   x86_64/aarch64 asset mapping.
 - package reinstall plus real previous-immutable-release -> current upgrade
@@ -466,7 +524,7 @@ requests and pushes to `main`:
   bounded deterministic timing variations around cancellation, late
   cancel/success arbitration, PGID publication, worker/FFmpeg startup, and
   `setsid` startup;
-- the runtime-manager hardening integration suite ten times, repeatedly
-  exercising fresh bootstrap, strict zero-network behavior, exact-tag
-  resolution, activation-journal recovery, lock contention, and rollback
-  transactions.
+- the runtime-manager hardening integration suite ten times with ten internal
+  lock-contention and double-rollback cycles per run, repeatedly exercising
+  fresh bootstrap, strict zero-network behavior, exact-tag resolution,
+  activation-journal recovery, lock contention, and rollback transactions.

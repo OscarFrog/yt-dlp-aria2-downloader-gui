@@ -54,7 +54,7 @@ jobs:
 
           (
             cd "${scratch}/extract/${package}"
-            bash ./tests/run-all.sh
+            bash ./tests/run-all.sh --jobs 4
           )
 
   previous-release:

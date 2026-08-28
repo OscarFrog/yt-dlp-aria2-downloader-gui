@@ -24,14 +24,18 @@ readonly MARKER_NAME='.package-runtime-data-home-v1'
 readonly RUNTIME_OWNER_SENTINEL='.package-runtime-owner-v1'
 readonly MAX_METADATA_BYTES=4096
 
-SELF=$(realpath -e -- "${BASH_SOURCE[0]}") || {
-    printf 'Warning: unable to resolve package cleanup helper path.\n' >&2
-    exit 66
-}
-readonly SELF
+SELF=''
 
 warn() {
     printf 'Warning: %s\n' "$*" >&2
+}
+
+initialize_cleanup_helper_path() {
+    if ! SELF=$(realpath -e -- "${BASH_SOURCE[0]}"); then
+        warn 'unable to resolve package cleanup helper path.'
+        exit 66
+    fi
+    readonly SELF
 }
 
 safe_absolute_path() {
@@ -211,36 +215,16 @@ custom_runtime_root_is_owned() {
     return 0
 }
 
-cleanup_one_home() {
+discover_cleanup_data_homes() {
     local home=$1
-    local default_data
-    local data_home
-    local config_home
-    local state_home
-    local cache_home
-    local marker
+    local default_data=$2
+    local -n discovered_data_homes=$3
+    local marker="${default_data}/${APP_ID}/${MARKER_NAME}"
     local candidate=''
     local marker_parent_safe=true
-    local -a data_homes=()
     local -a marker_lines=()
 
-    safe_home "${home}" || {
-        warn "refusing invalid HOME: ${home}"
-        return 64
-    }
-
-    if [[ ! -d ${home} ]]; then
-        warn "HOME is unavailable or not mounted; skipping: ${home}"
-        return 0
-    fi
-
-    default_data="${home}/.local/share"
-    config_home="${home}/.config"
-    state_home="${home}/.local/state"
-    cache_home="${home}/.cache"
-    data_homes=("${default_data}")
-
-    marker="${default_data}/${APP_ID}/${MARKER_NAME}"
+    discovered_data_homes=("${default_data}")
 
     if path_has_symlink_parent_below_base "${default_data}" "${marker}"; then
         marker_parent_safe=false
@@ -261,32 +245,43 @@ cleanup_one_home() {
             warn "ignoring invalid or multi-line runtime location marker: ${marker}"
         elif [[ ${candidate} != "${default_data}" ]]; then
             if custom_runtime_root_is_owned "${candidate}" "${home}"; then
-                data_homes+=("${candidate}")
+                discovered_data_homes+=("${candidate}")
             else
                 warn "custom runtime marker lacks a matching ownership sentinel; preserving: ${candidate}"
             fi
         fi
     fi
+}
 
-    for data_home in "${data_homes[@]}"; do
-        safe_xdg_base "${data_home}" || continue
-        remove_exact "${data_home}" "${data_home}/${APP_ID}/runtime" || true
-        remove_exact "${data_home}" "${data_home}/${LEGACY_GUI_ID}" || true
-        remove_exact \
-            "${data_home}" \
-            "${data_home}/applications/${LEGACY_GUI_ID}.desktop" || true
-        remove_exact \
-            "${data_home}" \
-            "${data_home}/metainfo/${LEGACY_GUI_ID}.metainfo.xml" || true
-        remove_exact \
-            "${data_home}" \
-            "${data_home}/appdata/${LEGACY_GUI_ID}.appdata.xml" || true
-        remove_legacy_icons "${data_home}"
-        remove_exact \
-            "${data_home}" \
-            "${data_home}/${APP_ID}/${RUNTIME_OWNER_SENTINEL}" || true
-        rmdir_exact_if_empty "${data_home}" "${data_home}/${APP_ID}" || true
-    done
+cleanup_registered_data_home() {
+    local data_home=$1
+
+    safe_xdg_base "${data_home}" || return 0
+    remove_exact "${data_home}" "${data_home}/${APP_ID}/runtime" || true
+    remove_exact "${data_home}" "${data_home}/${LEGACY_GUI_ID}" || true
+    remove_exact \
+        "${data_home}" \
+        "${data_home}/applications/${LEGACY_GUI_ID}.desktop" || true
+    remove_exact \
+        "${data_home}" \
+        "${data_home}/metainfo/${LEGACY_GUI_ID}.metainfo.xml" || true
+    remove_exact \
+        "${data_home}" \
+        "${data_home}/appdata/${LEGACY_GUI_ID}.appdata.xml" || true
+    remove_legacy_icons "${data_home}"
+    remove_exact \
+        "${data_home}" \
+        "${data_home}/${APP_ID}/${RUNTIME_OWNER_SENTINEL}" || true
+    rmdir_exact_if_empty "${data_home}" "${data_home}/${APP_ID}" || true
+}
+
+cleanup_standard_user_paths() {
+    local home=$1
+    local default_data=$2
+    local config_home="${home}/.config"
+    local state_home="${home}/.local/state"
+    local cache_home="${home}/.cache"
+    local marker="${default_data}/${APP_ID}/${MARKER_NAME}"
 
     remove_exact "${config_home}" "${config_home}/${LEGACY_GUI_ID}" || true
     remove_exact \
@@ -298,7 +293,31 @@ cleanup_one_home() {
 
     # Preserve a possible portable ZIP/Git launcher in the parent.
     rmdir_exact_if_empty "${default_data}" "${default_data}/${APP_ID}" || true
+}
 
+cleanup_one_home() {
+    local home=$1
+    local default_data="${home}/.local/share"
+    local data_home=''
+    local -a data_homes=()
+
+    safe_home "${home}" || {
+        warn "refusing invalid HOME: ${home}"
+        return 64
+    }
+
+    if [[ ! -d ${home} ]]; then
+        warn "HOME is unavailable or not mounted; skipping: ${home}"
+        return 0
+    fi
+
+    discover_cleanup_data_homes "${home}" "${default_data}" data_homes
+
+    for data_home in "${data_homes[@]}"; do
+        cleanup_registered_data_home "${data_home}"
+    done
+
+    cleanup_standard_user_paths "${home}" "${default_data}"
     return 0
 }
 
@@ -419,56 +438,61 @@ Usage:
 EOF
 }
 
+run_all_users_mode() {
+    ((EUID == 0)) || {
+        warn '--all-users must run as root'
+        exit 77
+    }
+    (($# == 1)) || {
+        usage
+        exit 2
+    }
+    enumerate_users
+}
+
+run_user_home_mode() {
+    (($# == 2)) || {
+        usage
+        exit 2
+    }
+    safe_home "$2" || {
+        warn "refusing invalid HOME: $2"
+        exit 64
+    }
+    if [[ -d $2 ]] && ! home_owned_by_effective_user "$2"; then
+        warn "refusing --user-home for a HOME not owned by effective uid ${EUID}: $2"
+        exit 77
+    fi
+    cleanup_one_home "$2"
+}
+
+run_numeric_home_mode() {
+    (($# == 4)) || {
+        usage
+        exit 2
+    }
+    ((EUID == 0)) || {
+        warn '--numeric-home must run as root'
+        exit 77
+    }
+    [[ $2 =~ ^[0-9]+$ && $3 =~ ^[0-9]+$ ]] || {
+        usage
+        exit 2
+    }
+    safe_home "$4" || {
+        warn "refusing invalid HOME: $4"
+        exit 64
+    }
+    run_as_user "$2" "$3" "$4"
+}
+
 main() {
+    initialize_cleanup_helper_path
+
     case ${1:-} in
-        --all-users)
-            ((EUID == 0)) || {
-                warn '--all-users must run as root'
-                exit 77
-            }
-            (($# == 1)) || {
-                usage
-                exit 2
-            }
-            enumerate_users
-            ;;
-
-        --user-home)
-            (($# == 2)) || {
-                usage
-                exit 2
-            }
-            safe_home "$2" || {
-                warn "refusing invalid HOME: $2"
-                exit 64
-            }
-            if [[ -d $2 ]] && ! home_owned_by_effective_user "$2"; then
-                warn "refusing --user-home for a HOME not owned by effective uid ${EUID}: $2"
-                exit 77
-            fi
-            cleanup_one_home "$2"
-            ;;
-
-        --numeric-home)
-            (($# == 4)) || {
-                usage
-                exit 2
-            }
-            ((EUID == 0)) || {
-                warn '--numeric-home must run as root'
-                exit 77
-            }
-            [[ $2 =~ ^[0-9]+$ && $3 =~ ^[0-9]+$ ]] || {
-                usage
-                exit 2
-            }
-            safe_home "$4" || {
-                warn "refusing invalid HOME: $4"
-                exit 64
-            }
-            run_as_user "$2" "$3" "$4"
-            ;;
-
+        --all-users) run_all_users_mode "$@" ;;
+        --user-home) run_user_home_mode "$@" ;;
+        --numeric-home) run_numeric_home_mode "$@" ;;
         *)
             usage
             exit 2

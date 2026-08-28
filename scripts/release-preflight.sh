@@ -69,10 +69,14 @@ cleanup() {
     fi
 }
 
-main() {
-    confirm_admin_bypass=false
-    confirm_tag_policy=false
-    confirm_single_maintainer_self_review=false
+parse_preflight_arguments() {
+    local output_variable=$1
+    local confirm_admin_bypass=false
+    local confirm_tag_policy=false
+    local confirm_single_maintainer_self_review=false
+    local parsed_release_tag=''
+    shift
+
     while (($# > 1)); do
         case $1 in
             --confirm-admin-bypass-disabled)
@@ -97,9 +101,9 @@ main() {
         exit 2
     }
 
-    readonly release_tag=$1
-    [[ ${release_tag} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-        || fail "invalid semantic release tag: ${release_tag}"
+    parsed_release_tag=$1
+    [[ ${parsed_release_tag} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+        || fail "invalid semantic release tag: ${parsed_release_tag}"
     [[ ${confirm_admin_bypass} == true ]] || {
         printf '%s\n' \
             'Error: confirm in GitHub Settings > Environments > rpm-signing that administrator bypass is disabled.' >&2
@@ -118,29 +122,48 @@ main() {
         usage
         exit 77
     }
+    printf -v "${output_variable}" '%s' "${parsed_release_tag}"
+}
+
+require_preflight_commands() {
+    local command_name=''
 
     for command_name in awk chmod date gh git gpg grep mktemp rm; do
         command -v -- "${command_name}" >/dev/null 2>&1 \
             || fail "required preflight command is absent: ${command_name}"
     done
+}
 
-    readonly repository=${GH_REPO:-${DEFAULT_REPOSITORY}}
-    [[ ${repository} =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] \
-        || fail "invalid GH_REPO repository coordinate: ${repository}"
+resolve_preflight_repository() {
+    local output_variable=$1
+    local resolved_repository=${GH_REPO:-${DEFAULT_REPOSITORY}}
+    local repo_root=''
+    local physical_repo_root=''
+    local current_dir=''
 
-    repo_root=''
+    [[ ${resolved_repository} =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] \
+        || fail "invalid GH_REPO repository coordinate: ${resolved_repository}"
+
     if ! repo_root=$(git rev-parse --show-toplevel); then
         fail 'unable to resolve the repository root.'
     fi
-    physical_repo_root=''
     if ! physical_repo_root=$(cd -- "${repo_root}" && pwd -P); then
         fail 'unable to resolve the physical repository root.'
     fi
-    current_dir=''
     if ! current_dir=$(pwd -P); then
         fail 'unable to resolve the current physical directory.'
     fi
     [[ ${current_dir} == "${physical_repo_root}" ]] || fail 'run the preflight from the repository root.'
+    printf -v "${output_variable}" '%s' "${resolved_repository}"
+}
+
+verify_release_tag() {
+    local release_tag=$1
+    local output_variable=$2
+    local head_commit=''
+    local tag_commit=''
+    local tag_verification=''
+    local tag_primary_fingerprint=''
 
     head_commit=$(git rev-parse HEAD)
     tag_commit=$(git rev-parse "${release_tag}^{commit}") \
@@ -148,7 +171,6 @@ main() {
     [[ ${tag_commit} == "${head_commit}" ]] \
         || fail "release tag ${release_tag} does not resolve to current HEAD."
 
-    tag_verification=''
     if ! tag_verification=$(git verify-tag --raw "${release_tag}" 2>&1 >/dev/null); then
         fail "release tag is not a valid signed tag: ${release_tag}"
     fi
@@ -163,6 +185,14 @@ main() {
     [[ -n ${tag_primary_fingerprint} &&
         ${tag_primary_fingerprint} != *$'\n'* ]] || fail "unable to determine the unique signer fingerprint for tag: ${release_tag}"
     [[ ${tag_primary_fingerprint} == "${RELEASE_TAG_SIGNING_FINGERPRINT}" ]] || fail "release tag signer is not authorized: ${tag_primary_fingerprint}"
+    printf -v "${output_variable}" '%s' "${tag_commit}"
+}
+
+verify_release_tree_and_version() {
+    local release_tag=$1
+    local git_status=''
+    local version_output=''
+    local version=''
 
     git_status=$(git status --porcelain)
     [[ -z ${git_status} ]] \
@@ -181,6 +211,11 @@ main() {
 
     [[ -f ${RPM_SIGNING_KEY} && ! -L ${RPM_SIGNING_KEY} ]] \
         || fail "RPM signing public certificate is missing or unsafe: ${RPM_SIGNING_KEY}"
+}
+
+verify_immutable_releases() {
+    local repository=$1
+    local immutable=''
 
     immutable=$(
         api_capture \
@@ -190,8 +225,20 @@ main() {
     )
     [[ ${immutable} == true ]] \
         || fail 'GitHub Immutable Releases are not enabled.'
+}
 
-    environment_endpoint="repos/${repository}/environments/${SIGNING_ENVIRONMENT}"
+verify_signing_environment() {
+    local repository=$1
+    local environment_endpoint="repos/${repository}/environments/${SIGNING_ENVIRONMENT}"
+    local required_reviewer_rules=''
+    local reviewer_count=''
+    local reviewer_login=''
+    local authenticated_login=''
+    local prevent_self_review=''
+    local custom_policies=''
+    local deployment_policy_output=''
+    local -a deployment_policies=()
+
     required_reviewer_rules=$(
         api_capture \
             'unable to query rpm-signing required reviewers.' \
@@ -261,6 +308,17 @@ main() {
         || fail "rpm-signing must have exactly one deployment policy; found ${#deployment_policies[@]}."
     [[ ${deployment_policies[0]} == 'v*' ]] \
         || fail "rpm-signing deployment policy must be exactly v*; found ${deployment_policies[0]}."
+}
+
+verify_signing_secret_scope() {
+    local repository=$1
+    local environment_endpoint="repos/${repository}/environments/${SIGNING_ENVIRONMENT}"
+    local environment_secret_output=''
+    local repository_secret_output=''
+    local required_secret=''
+    local signing_secret=''
+    local -a environment_secrets=()
+    local -a repository_secrets=()
 
     environment_secret_output=$(
         api_capture \
@@ -269,7 +327,6 @@ main() {
             --paginate \
             --jq '.secrets[]?.name'
     )
-    environment_secrets=()
     if [[ -n ${environment_secret_output} ]]; then
         mapfile -t environment_secrets <<<"${environment_secret_output}"
     fi
@@ -287,7 +344,6 @@ main() {
             --paginate \
             --jq '.secrets[]?.name'
     )
-    repository_secrets=()
     if [[ -n ${repository_secret_output} ]]; then
         mapfile -t repository_secrets <<<"${repository_secret_output}"
     fi
@@ -298,17 +354,11 @@ main() {
             fail "signing secret must not also exist at repository scope: ${signing_secret}"
         fi
     done
+}
 
-    listing=''
-    gpg_home=''
-    trap cleanup EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-
-    listing=$(mktemp) || fail 'unable to create the signing-certificate listing file.'
-    gpg_home=$(mktemp -d) || fail 'unable to create the temporary GnuPG home.'
-    chmod 700 -- "${gpg_home}" || fail 'unable to secure the temporary GnuPG home.'
+inspect_preflight_rpm_certificate() {
+    local listing=$1
+    local gpg_home=$2
 
     LC_ALL=C gpg \
         --homedir "${gpg_home}" \
@@ -319,6 +369,29 @@ main() {
         --fingerprint \
         "${RPM_SIGNING_KEY}" >"${listing}" \
         || fail 'unable to inspect RPM signing public certificate.'
+}
+
+check_preflight_rpm_signing_expiry() {
+    local signing_expires=$1
+    local now remaining_seconds remaining_days
+
+    [[ ${signing_expires} =~ ^[0-9]+$ ]] \
+        || fail 'unable to determine signing subkey expiry.'
+    now=$(date +%s)
+    remaining_seconds=$((signing_expires - now))
+    ((remaining_seconds > 0)) \
+        || fail 'RPM signing subkey is expired.'
+    remaining_days=$((remaining_seconds / 86400))
+    if ((remaining_days <= 90)); then
+        printf 'Warning: RPM signing subkey expires in %d day(s).\n' \
+            "${remaining_days}" >&2
+    fi
+}
+
+validate_preflight_rpm_certificate() {
+    local listing=$1
+    local primary_count primary_fingerprint primary_capabilities
+    local signing_subkey_count signing_subkey_record signing_subkey signing_expires
 
     primary_count=$(
         awk -F: '$1 == "pub" { count++ } END { print count + 0 }' "${listing}"
@@ -377,18 +450,31 @@ main() {
         || fail "certificate must contain exactly one usable signing subkey; found ${signing_subkey_count}."
     [[ ${signing_subkey} == "${RPM_SIGNING_SUBKEY_FINGERPRINT}" ]] \
         || fail "expected signing subkey is absent or unusable: ${RPM_SIGNING_SUBKEY_FINGERPRINT}"
-    [[ ${signing_expires} =~ ^[0-9]+$ ]] \
-        || fail 'unable to determine signing subkey expiry.'
+    check_preflight_rpm_signing_expiry "${signing_expires}"
+}
 
-    now=$(date +%s)
-    remaining_seconds=$((signing_expires - now))
-    ((remaining_seconds > 0)) \
-        || fail 'RPM signing subkey is expired.'
-    remaining_days=$((remaining_seconds / 86400))
-    if ((remaining_days <= 90)); then
-        printf 'Warning: RPM signing subkey expires in %d day(s).\n' \
-            "${remaining_days}" >&2
-    fi
+verify_rpm_signing_certificate() {
+    (
+        local listing=''
+        local gpg_home=''
+
+        trap cleanup EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+
+        listing=$(mktemp) || fail 'unable to create the signing-certificate listing file.'
+        gpg_home=$(mktemp -d) || fail 'unable to create the temporary GnuPG home.'
+        chmod 700 -- "${gpg_home}" || fail 'unable to secure the temporary GnuPG home.'
+
+        inspect_preflight_rpm_certificate "${listing}" "${gpg_home}"
+        validate_preflight_rpm_certificate "${listing}"
+    )
+}
+
+report_release_preflight() {
+    local release_tag=$1
+    local tag_commit=$2
 
     printf 'Release preflight passed for %s at %s.\n' \
         "${release_tag}" "${tag_commit}"
@@ -400,7 +486,23 @@ main() {
         'Deployment policy type: operator explicitly confirmed v* is a TAG policy.'
     printf '%s\n' \
         'Single-maintainer self-review: operator explicitly confirmed intentional.'
+}
 
+main() {
+    local release_tag=''
+    local repository=''
+    local tag_commit=''
+
+    parse_preflight_arguments release_tag "$@"
+    require_preflight_commands
+    resolve_preflight_repository repository
+    verify_release_tag "${release_tag}" tag_commit
+    verify_release_tree_and_version "${release_tag}"
+    verify_immutable_releases "${repository}"
+    verify_signing_environment "${repository}"
+    verify_signing_secret_scope "${repository}"
+    verify_rpm_signing_certificate
+    report_release_preflight "${release_tag}" "${tag_commit}"
 }
 
 main "$@"

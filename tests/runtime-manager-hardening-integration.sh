@@ -12,24 +12,27 @@ umask 077
 PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly PROJECT_DIR
 readonly RUNTIME_MANAGER="${PROJECT_DIR}/runtime-manager.sh"
+# shellcheck disable=SC1090 # Resolve the shared library from the repository root.
+source "${PROJECT_DIR}/tests/lib/assert.sh"
 
-fail() {
-    printf 'FAIL: %s\n' "$*" >&2
-    exit 1
-}
-
-assert_link_target() {
-    local link_path=$1
-    local expected=$2
-    local label=$3
-    local actual=''
-
-    if ! actual=$(readlink -- "${link_path}"); then
-        fail "${label}: unable to read link ${link_path}"
-    fi
-    [[ ${actual} == "${expected}" ]] \
-        || fail "${label}: expected ${expected}, found ${actual}"
-}
+TEST_ROOT=''
+HOLDER_PID=''
+HOME_DIR=''
+DATA_HOME=''
+MOCK_BIN=''
+URL_LOG=''
+FD_LEAK_MARKER=''
+NETWORK_MARKER=''
+YTDLP_NETWORK_MARKER=''
+GPGCONF_LOG=''
+YTDLP_EXEC_PATH_LOG=''
+YTDLP_ASSET=''
+ROLLBACK_RUNS=${RUNTIME_HARDENING_ROLLBACK_RUNS:-3}
+CONTENTION_RUNS=${RUNTIME_HARDENING_CONTENTION_RUNS:-3}
+runtime_root=''
+ytdlp_root=''
+deno_root=''
+runtime_env=()
 
 cleanup() {
     trap - EXIT HUP INT TERM
@@ -38,6 +41,26 @@ cleanup() {
         wait "${HOLDER_PID}" 2>/dev/null || true
     fi
     rm -rf -- "${TEST_ROOT}" || true
+}
+
+validate_hardening_run_count() {
+    local variable_name=$1
+    local environment_name=$2
+    local value=${!variable_name}
+
+    [[ ${value} =~ ^[0-9]{1,3}$ ]] || {
+        printf 'Error: %s must be an integer between 1 and 100.\n' \
+            "${environment_name}" >&2
+        exit 64
+    }
+    value=$((10#${value}))
+    ((value >= 1 && value <= 100)) || {
+        printf 'Error: %s must be between 1 and 100.\n' \
+            "${environment_name}" >&2
+        exit 64
+    }
+    printf -v "${variable_name}" '%d' "${value}"
+    readonly "${variable_name}"
 }
 
 make_ytdlp() {
@@ -78,7 +101,14 @@ EOF_DENO
     chmod 0755 -- "${path}"
 }
 
-main() {
+initialize_runtime_hardening_workspace() {
+    local command_name=''
+
+    validate_hardening_run_count \
+        ROLLBACK_RUNS RUNTIME_HARDENING_ROLLBACK_RUNS
+    validate_hardening_run_count \
+        CONTENTION_RUNS RUNTIME_HARDENING_CONTENTION_RUNS
+
     for command_name in bash chmod env find flock grep ln mkdir mktemp readlink rm rmdir sed sha256sum sleep stat uname; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             printf 'Error: required test command is absent: %s\n' "${command_name}" >&2
@@ -88,7 +118,6 @@ main() {
 
     TEST_ROOT=$(mktemp -d)
     readonly TEST_ROOT
-    HOLDER_PID=''
     trap cleanup EXIT
     trap 'exit 129' HUP
     trap 'exit 130' INT
@@ -113,7 +142,9 @@ main() {
             ;;
     esac
     readonly YTDLP_ASSET
+}
 
+write_runtime_hardening_mocks() {
     cat >"${MOCK_BIN}/gpg" <<'EOF_GPG'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -269,7 +300,9 @@ EOF_YTDLP
 esac
 EOF_CURL
     chmod 0755 -- "${MOCK_BIN}/curl"
+}
 
+initialize_runtime_hardening_fixtures() {
     runtime_root="${DATA_HOME}/yt-dlp-aria2-downloader/runtime"
     ytdlp_root="${runtime_root}/yt-dlp"
     deno_root="${runtime_root}/deno"
@@ -292,9 +325,19 @@ EOF_CURL
         MOCK_DENO_LATEST_VERSION=2.9.5 YTDLP_ARIA2_RUNTIME_LOCK_WAIT_SECONDS=1
         YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS=2 YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS=10
         YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS=10 YTDLP_ARIA2_RUNTIME_VALIDATE_TIMEOUT_SECONDS=5)
+}
 
-    validation_bin="${TEST_ROOT}/validation-bin"
-    validation_external_marker="${TEST_ROOT}/validation-external-called"
+test_runtime_setting_bounds() {
+    local validation_bin="${TEST_ROOT}/validation-bin"
+    local validation_external_marker="${TEST_ROOT}/validation-external-called"
+    local wrapped_command=''
+    local setting_pair=''
+    local environment_name=''
+    local diagnostic_name=''
+    local overflow_value=''
+    local validation_error=''
+    local status=0
+
     mkdir -p -- "${validation_bin}"
     for wrapped_command in curl flock timeout; do
         cat >"${validation_bin}/${wrapped_command}" <<'EOF_VALIDATION_EXTERNAL'
@@ -337,6 +380,12 @@ EOF_VALIDATION_EXTERNAL
                 || fail "${environment_name} overflow reached an external timeout/lock command"
         done
     done
+}
+
+test_oversized_deno_versions() {
+    local deno_overflow_case=''
+    local deno_overflow_name=''
+    local deno_overflow_version=''
 
     # Deno version comparison must remain correct even when a syntactically
     # valid component is wider than Bash's fixed-width arithmetic.
@@ -349,9 +398,13 @@ EOF_VALIDATION_EXTERNAL
     done
     rm -f -- "${deno_root}/current"
     ln -s 2.8.0 "${deno_root}/current"
+}
+
+test_invalid_runtime_path() {
+    local path_status=0
+    local path_error=''
 
     # Invalid path requests must fail with a precise usage diagnostic.
-    path_status=0
     path_error=$(
         "${runtime_env[@]}" "${RUNTIME_MANAGER}" path invalid-component 2>&1
     ) || path_status=$?
@@ -359,16 +412,20 @@ EOF_VALIDATION_EXTERNAL
         || fail "invalid path component returned ${path_status}, expected 2"
     grep -Fq 'unknown runtime component for path:' <<<"${path_error}" \
         || fail 'invalid path component diagnostic is missing'
+}
+
+test_mismatched_ytdlp_candidate() {
+    local mismatch_data_home="${TEST_ROOT}/version-mismatch-data"
+    local mismatch_ytdlp_root="${mismatch_data_home}/yt-dlp-aria2-downloader/runtime/yt-dlp"
+    local mismatch_status=0
+    local mismatch_error=''
 
     # A downloaded executable whose own version does not match the immutable
     # release tag must never be activated.
-    MISMATCH_DATA_HOME="${TEST_ROOT}/version-mismatch-data"
-    mismatch_ytdlp_root="${MISMATCH_DATA_HOME}/yt-dlp-aria2-downloader/runtime/yt-dlp"
-    rm -rf -- "${MISMATCH_DATA_HOME}"
-    mismatch_status=0
+    rm -rf -- "${mismatch_data_home}"
     mismatch_error=$(
         "${runtime_env[@]}" \
-            XDG_DATA_HOME="${MISMATCH_DATA_HOME}" \
+            XDG_DATA_HOME="${mismatch_data_home}" \
             MOCK_YTDLP_ASSET_VERSION_OVERRIDE=2026.07.05 \
             "${RUNTIME_MANAGER}" ensure 2>&1
     ) || mismatch_status=$?
@@ -378,28 +435,22 @@ EOF_VALIDATION_EXTERNAL
         || fail 'mismatched yt-dlp candidate diagnostic is missing'
     [[ ! -L ${mismatch_ytdlp_root}/current ]] \
         || fail 'mismatched yt-dlp candidate was activated'
+}
 
-    # A completely empty managed-runtime tree must bootstrap both components.
-    # This specifically exercises ensure_runtime -> bootstrap_ytdlp/bootstrap_deno,
-    # rather than only the already-installed update paths.
-    FRESH_DATA_HOME="${TEST_ROOT}/fresh-data"
-    fresh_runtime_root="${FRESH_DATA_HOME}/yt-dlp-aria2-downloader/runtime"
-    fresh_ytdlp_root="${fresh_runtime_root}/yt-dlp"
-    fresh_deno_root="${fresh_runtime_root}/deno"
+test_signature_failure_bootstrap() {
+    local verify_fail_data_home="${TEST_ROOT}/verify-fail-data"
+    local verify_fail_runtime_root="${verify_fail_data_home}/yt-dlp-aria2-downloader/runtime"
+    local verify_fail_ytdlp_root="${verify_fail_runtime_root}/yt-dlp"
+    local verify_failure_status=0
+    local verify_failure_error=''
+    local unverified_candidates=''
 
     # A fresh bootstrap must refuse a yt-dlp candidate whose signed manifest
     # cannot be verified. Import remains successful; only --verify is mutated.
-    VERIFY_FAIL_DATA_HOME="${TEST_ROOT}/verify-fail-data"
-    verify_fail_runtime_root="${VERIFY_FAIL_DATA_HOME}/yt-dlp-aria2-downloader/runtime"
-    verify_fail_ytdlp_root="${verify_fail_runtime_root}/yt-dlp"
-    verify_failure_status=0
-    verify_failure_error=''
-    unverified_candidates=''
-
-    rm -rf -- "${VERIFY_FAIL_DATA_HOME}"
+    rm -rf -- "${verify_fail_data_home}"
     verify_failure_error=$(
         "${runtime_env[@]}" \
-            XDG_DATA_HOME="${VERIFY_FAIL_DATA_HOME}" \
+            XDG_DATA_HOME="${verify_fail_data_home}" \
             MOCK_GPG_VERIFY_FAIL=1 \
             "${RUNTIME_MANAGER}" ensure 2>&1
     ) || verify_failure_status=$?
@@ -421,15 +472,24 @@ EOF_VALIDATION_EXTERNAL
         [[ -z ${unverified_candidates} ]] \
             || fail 'signature-failure bootstrap retained an unverified yt-dlp candidate'
     fi
+}
 
-    rm -rf -- "${FRESH_DATA_HOME}"
+test_fresh_runtime_bootstrap() {
+    local fresh_data_home="${TEST_ROOT}/fresh-data"
+    local fresh_runtime_root="${fresh_data_home}/yt-dlp-aria2-downloader/runtime"
+    local fresh_ytdlp_root="${fresh_runtime_root}/yt-dlp"
+    local fresh_deno_root="${fresh_runtime_root}/deno"
+
+    # A completely empty managed-runtime tree must bootstrap both components.
+    # This exercises the bootstrap paths, not only already-installed updates.
+    rm -rf -- "${fresh_data_home}"
     : >"${URL_LOG}"
     : >"${GPGCONF_LOG}"
     : >"${YTDLP_EXEC_PATH_LOG}"
     rm -f -- "${FD_LEAK_MARKER}" "${NETWORK_MARKER}" "${YTDLP_NETWORK_MARKER}"
 
     "${runtime_env[@]}" \
-        XDG_DATA_HOME="${FRESH_DATA_HOME}" \
+        XDG_DATA_HOME="${fresh_data_home}" \
         "${RUNTIME_MANAGER}" ensure >/dev/null
 
     assert_link_target \
@@ -463,6 +523,10 @@ EOF_VALIDATION_EXTERNAL
         || fail 'fresh yt-dlp bootstrap did not terminate its ephemeral gpg-agent'
     grep -Fq -- '--homedir /tmp/.yt-dlp-gpg.' "${GPGCONF_LOG}" \
         || fail 'gpg-agent cleanup did not target the short bootstrap homedir'
+}
+
+test_no_network_require() {
+    local status=0
 
     # Strict no-network require mode: both success and missing-runtime failure must
     # happen without invoking curl.
@@ -475,7 +539,9 @@ EOF_VALIDATION_EXTERNAL
     [[ ${status} == 69 ]] || fail "missing-runtime require returned ${status}, expected 69"
     [[ ! -e ${NETWORK_MARKER} ]] || fail 'failed require mode invoked the network'
     ln -s 2.8.0 "${deno_root}/current"
+}
 
+test_invalid_active_runtime_recovery() {
     # `ensure` must validate an executable active runtime and recover locally
     # instead of accepting a corrupted current target.
     make_ytdlp "${ytdlp_root}/2026.06.09/${YTDLP_ASSET}" malformed-version
@@ -508,7 +574,9 @@ EOF_VALIDATION_EXTERNAL
     rm -f -- "${ytdlp_root}/current" "${ytdlp_root}/previous"
     ln -s 2026.06.09 "${ytdlp_root}/current"
     ln -s 2026.03.17 "${ytdlp_root}/previous"
+}
 
+test_runtime_updates() {
     # Scenario group: exact-tag stable update, Deno update, nightly opt-in, then stable.
     : >"${URL_LOG}"
     rm -f -- "${FD_LEAK_MARKER}"
@@ -525,14 +593,23 @@ EOF_VALIDATION_EXTERNAL
     "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null
     assert_link_target "${ytdlp_root}/current" 2026.07.04 'nightly -> stable failed'
     assert_link_target "${ytdlp_root}/previous" 2026.08.20.123456 'nightly rollback target missing'
+}
 
-    # Ten double-rollbacks must always return to the exact initial state.
-    for ((iteration = 1; iteration <= 10; iteration++)); do
+test_repeated_rollbacks() {
+    local iteration=0
+
+    # Repeated double-rollbacks must always return to the exact initial state.
+    for ((iteration = 1; iteration <= ROLLBACK_RUNS; iteration++)); do
         "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null
         assert_link_target "${ytdlp_root}/current" 2026.08.20.123456 "rollback A failed at ${iteration}"
         "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null
         assert_link_target "${ytdlp_root}/current" 2026.07.04 "rollback B failed at ${iteration}"
     done
+}
+
+test_invalid_rollback_targets() {
+    local status=0
+    local rollback_error=''
 
     # Missing, unsafe, and invalid previous targets must fail with the exact
     # rollback status and the canonical validator diagnostics.
@@ -572,7 +649,9 @@ EOF_VALIDATION_EXTERNAL
 
     rm -f -- "${ytdlp_root}/previous"
     ln -s 2026.08.20.123456 "${ytdlp_root}/previous"
+}
 
+test_activation_journal_recovery() {
     # Scenario: journal recovery repairs previous after commit and restores the
     # pre-activation previous pointer after an interrupted activation.
     printf 'old=2026.08.20.123456\nprevious=2026.03.17\nnew=2026.07.04\n' >"${ytdlp_root}/.activation-journal"
@@ -588,9 +667,16 @@ EOF_VALIDATION_EXTERNAL
     printf 'old=2026.08.20.123456\nprevious=2026.03.17\nnew=2026.07.04\n' >"${ytdlp_root}/.activation-journal"
     MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" ensure >/dev/null
     assert_link_target "${ytdlp_root}/previous" 2026.03.17 'aborted journal recovery failed'
+}
 
-    # Distinguish lock path errors (73) from contention (75), then stress the
-    # contention fallback ten times with verified active runtimes and no network.
+test_runtime_lock_hardening() {
+    local status=0
+    local iteration=0
+    local ready=''
+    local holder=''
+
+    # Distinguish lock path errors (73) from contention (75), then repeatedly
+    # exercise the fallback with verified active runtimes and no network.
     rm -f -- "${runtime_root}/update.lock"
     mkdir "${runtime_root}/update.lock"
     status=0
@@ -598,7 +684,7 @@ EOF_VALIDATION_EXTERNAL
     [[ ${status} == 73 ]] || fail "unsafe lock path returned ${status}, expected 73"
     rmdir "${runtime_root}/update.lock"
 
-    for ((iteration = 1; iteration <= 10; iteration++)); do
+    for ((iteration = 1; iteration <= CONTENTION_RUNS; iteration++)); do
         ready="${TEST_ROOT}/lock-ready-${iteration}"
         (
             exec 9>>"${runtime_root}/update.lock"
@@ -630,9 +716,27 @@ EOF_VALIDATION_EXTERNAL
         wait "${holder}" 2>/dev/null || true
         HOLDER_PID=''
     done
+}
+
+main() {
+    initialize_runtime_hardening_workspace
+    write_runtime_hardening_mocks
+    initialize_runtime_hardening_fixtures
+    test_runtime_setting_bounds
+    test_oversized_deno_versions
+    test_invalid_runtime_path
+    test_mismatched_ytdlp_candidate
+    test_signature_failure_bootstrap
+    test_fresh_runtime_bootstrap
+    test_no_network_require
+    test_invalid_active_runtime_recovery
+    test_runtime_updates
+    test_repeated_rollbacks
+    test_invalid_rollback_targets
+    test_activation_journal_recovery
+    test_runtime_lock_hardening
 
     printf 'Runtime-manager hardening integration passed.\n'
-
 }
 
 main "$@"

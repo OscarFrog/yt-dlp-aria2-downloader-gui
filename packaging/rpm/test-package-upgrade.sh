@@ -9,73 +9,121 @@
 set -Eeuo pipefail
 umask 077
 
-if (($# != 4)); then
-    printf 'Usage: %s OLD.rpm NEW.rpm OLD_VERSION NEW_VERSION\n' "${0##*/}" >&2
-    exit 2
-fi
-readonly OLD_INPUT=$1 NEW_INPUT=$2 OLD_VERSION=$3 NEW_VERSION=$4
 readonly PACKAGE_NAME='yt-dlp-aria2-downloader-gui'
-for version in "${OLD_VERSION}" "${NEW_VERSION}"; do
-    [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-        printf 'Error: invalid package version: %s\n' "${version}" >&2
-        exit 2
-    }
-done
-((EUID == 0)) || {
-    printf 'Error: RPM upgrade test must run as root.\n' >&2
-    exit 77
-}
-for command_name in dirname dnf mkdir mktemp realpath rm rmdir rpm sha256sum tar; do
-    command -v "${command_name}" >/dev/null 2>&1 || {
-        printf 'Error: required command is absent: %s\n' "${command_name}" >&2
-        exit 127
-    }
-done
-old_package=$(realpath -e -- "${OLD_INPUT}")
-new_package=$(realpath -e -- "${NEW_INPUT}")
-if [[ ! -f ${old_package} || ${old_package} != *.rpm ]]; then
-    printf 'Error: old package is not a regular RPM file: %s\n' \
-        "${old_package}" >&2
-    exit 2
-fi
-if [[ ! -f ${new_package} || ${new_package} != *.rpm ]]; then
-    printf 'Error: new package is not a regular RPM file: %s\n' \
-        "${new_package}" >&2
-    exit 2
-fi
-if rpm -q "${PACKAGE_NAME}" >/dev/null 2>&1; then
-    printf 'Error: %s must not be installed before the upgrade test.\n' "${PACKAGE_NAME}" >&2
-    exit 65
-fi
-installed=false
 
-if [[ -z ${HOME:-} || ${HOME} != /* ]]; then
-    printf 'Error: HOME must be an absolute path for the upgrade test.\n' >&2
-    exit 64
-fi
-
-DATA_HOME=${XDG_DATA_HOME:-${HOME}/.local/share}
-if [[ ${DATA_HOME} != /* ]]; then
-    DATA_HOME="${HOME}/.local/share"
-fi
-readonly DATA_HOME
-RUNTIME_ROOT="${DATA_HOME}/yt-dlp-aria2-downloader/runtime"
-readonly RUNTIME_ROOT
-
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-PROJECT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)
-readonly SCRIPT_DIR PROJECT_DIR
-# shellcheck source=tests/lib/package-runtime-preservation.sh
-source "${PROJECT_DIR}/tests/lib/package-runtime-preservation.sh"
+package_installed=false
 
 cleanup() {
-    if [[ ${installed} == true ]]; then
+    if [[ ${package_installed} == true ]]; then
         dnf remove --assumeyes "${PACKAGE_NAME}" >/dev/null 2>&1 || true
     fi
     package_runtime_fixture_cleanup
 }
 
-assert_installed_package_version() {
+parse_rpm_upgrade_arguments() {
+    local version=''
+
+    if (($# != 4)); then
+        printf 'Usage: %s OLD.rpm NEW.rpm OLD_VERSION NEW_VERSION\n' \
+            "${0##*/}" >&2
+        exit 2
+    fi
+    readonly OLD_INPUT=$1
+    readonly NEW_INPUT=$2
+    readonly OLD_VERSION=$3
+    readonly NEW_VERSION=$4
+
+    for version in "${OLD_VERSION}" "${NEW_VERSION}"; do
+        [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            printf 'Error: invalid package version: %s\n' "${version}" >&2
+            exit 2
+        }
+    done
+}
+
+require_rpm_upgrade_environment() {
+    local command_name=''
+
+    ((EUID == 0)) || {
+        printf 'Error: RPM upgrade test must run as root.\n' >&2
+        exit 77
+    }
+    for command_name in \
+        desktop-file-validate dirname dnf grep mkdir mktemp realpath rm rmdir \
+        rpm sha256sum tar; do
+        command -v "${command_name}" >/dev/null 2>&1 || {
+            printf 'Error: required command is absent: %s\n' \
+                "${command_name}" >&2
+            exit 127
+        }
+    done
+}
+
+initialize_rpm_upgrade_paths() {
+    local script_parent=''
+
+    if ! OLD_PACKAGE=$(realpath -e -- "${OLD_INPUT}"); then
+        printf 'Error: unable to resolve previous RPM package: %s\n' \
+            "${OLD_INPUT}" >&2
+        exit 2
+    fi
+    readonly OLD_PACKAGE
+    if ! NEW_PACKAGE=$(realpath -e -- "${NEW_INPUT}"); then
+        printf 'Error: unable to resolve current RPM package: %s\n' \
+            "${NEW_INPUT}" >&2
+        exit 2
+    fi
+    readonly NEW_PACKAGE
+    [[ -f ${OLD_PACKAGE} && ${OLD_PACKAGE} == *.rpm ]] || {
+        printf 'Error: previous package is not a regular RPM file: %s\n' \
+            "${OLD_PACKAGE}" >&2
+        exit 2
+    }
+    [[ -f ${NEW_PACKAGE} && ${NEW_PACKAGE} == *.rpm ]] || {
+        printf 'Error: current package is not a regular RPM file: %s\n' \
+            "${NEW_PACKAGE}" >&2
+        exit 2
+    }
+
+    if [[ -z ${HOME:-} || ${HOME} != /* ]]; then
+        printf 'Error: HOME must be an absolute path for the upgrade test.\n' >&2
+        exit 64
+    fi
+    DATA_HOME=${XDG_DATA_HOME:-${HOME}/.local/share}
+    if [[ ${DATA_HOME} != /* ]]; then
+        DATA_HOME="${HOME}/.local/share"
+    fi
+    readonly DATA_HOME
+    RUNTIME_ROOT="${DATA_HOME}/yt-dlp-aria2-downloader/runtime"
+    readonly RUNTIME_ROOT
+
+    script_parent=$(dirname -- "${BASH_SOURCE[0]}")
+    SCRIPT_DIR=$(cd -- "${script_parent}" && pwd -P)
+    readonly SCRIPT_DIR
+    PROJECT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)
+    readonly PROJECT_DIR
+    # shellcheck source=tests/lib/package-lifecycle.sh
+    source "${PROJECT_DIR}/tests/lib/package-lifecycle.sh"
+    # shellcheck source=tests/lib/package-runtime-preservation.sh
+    source "${PROJECT_DIR}/tests/lib/package-runtime-preservation.sh"
+}
+
+validate_rpm_upgrade_initial_state() {
+    if rpm -q "${PACKAGE_NAME}" >/dev/null 2>&1; then
+        printf 'Error: %s must not be installed before the upgrade test.\n' \
+            "${PACKAGE_NAME}" >&2
+        exit 65
+    fi
+}
+
+initialize_rpm_upgrade_cleanup() {
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+}
+
+assert_installed_rpm_version() {
     local expected_version=$1
     local stage=$2
     local installed_package_version=''
@@ -90,69 +138,56 @@ assert_installed_package_version() {
             "${stage}" "${installed_package_version}" "${expected_version}" >&2
         return 65
     fi
-    return 0
+    assert_package_cli_version RPM "${expected_version}" "${stage}"
 }
 
-main() {
-    local old_version_output=''
-    local new_version_output=''
-    local path=''
-
-    trap cleanup EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-
-    package_runtime_fixture_prepare \
-        "package-upgrade-preservation:${OLD_VERSION}->${NEW_VERSION}"
-
+install_previous_rpm() {
     dnf install --assumeyes --allowerasing --nogpgcheck \
-        --setopt=install_weak_deps=False "${old_package}"
-    installed=true
-    assert_installed_package_version "${OLD_VERSION}" 'previous package installation'
+        --setopt=install_weak_deps=False "${OLD_PACKAGE}"
+    package_installed=true
+    assert_installed_rpm_version \
+        "${OLD_VERSION}" 'previous package installation'
     assert_runtime_preserved 'installation of previous package'
-    old_version_output=$(/usr/bin/yt-dlp-aria2-downloader --version)
-    [[ ${old_version_output} == "yt-dlp-aria2-downloader version ${OLD_VERSION}" ]] || {
-        printf 'Error: previous RPM executable reports an unexpected version: %s\n' \
-            "${old_version_output}" >&2
-        exit 65
-    }
+}
 
+upgrade_rpm_package() {
     dnf install --assumeyes --allowerasing --nogpgcheck \
-        --setopt=install_weak_deps=False "${new_package}"
-    assert_installed_package_version "${NEW_VERSION}" 'package upgrade'
+        --setopt=install_weak_deps=False "${NEW_PACKAGE}"
+    assert_installed_rpm_version "${NEW_VERSION}" 'package upgrade'
     assert_runtime_preserved 'package upgrade'
-    new_version_output=$(/usr/bin/yt-dlp-aria2-downloader --version)
-    [[ ${new_version_output} == "yt-dlp-aria2-downloader version ${NEW_VERSION}" ]] || {
-        printf 'Error: upgraded RPM executable reports an unexpected version: %s\n' \
-            "${new_version_output}" >&2
-        exit 65
-    }
-    [[ -x /usr/bin/yt-dlp-aria2-downloader-gui ]] || {
-        printf '%s\n' 'Error: upgraded RPM GUI launcher is absent.' >&2
-        exit 65
-    }
+    assert_common_package_payload RPM
     [[ -x /usr/libexec/yt-dlp-aria2-downloader/runtime-manager.sh ]] || {
         printf '%s\n' 'Error: upgraded RPM runtime manager is absent.' >&2
         exit 65
     }
+}
 
+remove_upgraded_rpm() {
     dnf remove --assumeyes "${PACKAGE_NAME}"
-    installed=false
+    package_installed=false
     assert_runtime_removed 'final package removal'
     if rpm -q "${PACKAGE_NAME}" >/dev/null 2>&1; then
         printf 'Error: RPM remains installed after upgrade/removal.\n' >&2
         exit 65
     fi
-    for path in \
-        /usr/libexec/yt-dlp-aria2-downloader \
+    assert_package_paths_absent RPM 'upgrade removal' \
+        '/usr/libexec/yt-dlp-aria2-downloader' \
         "/usr/share/doc/${PACKAGE_NAME}" \
-        "/usr/share/licenses/${PACKAGE_NAME}"; do
-        [[ ! -e ${path} && ! -L ${path} ]] || {
-            printf 'Error: RPM upgrade/removal left a private path: %s\n' "${path}" >&2
-            exit 65
-        }
-    done
+        "/usr/share/licenses/${PACKAGE_NAME}"
+}
+
+main() {
+    parse_rpm_upgrade_arguments "$@"
+    require_rpm_upgrade_environment
+    initialize_rpm_upgrade_paths
+    validate_rpm_upgrade_initial_state
+    initialize_rpm_upgrade_cleanup
+    package_runtime_fixture_prepare \
+        "package-upgrade-preservation:${OLD_VERSION}->${NEW_VERSION}"
+    install_previous_rpm
+    upgrade_rpm_package
+    remove_upgraded_rpm
+
     printf 'RPM upgrade passed: %s -> %s.\n' "${OLD_VERSION}" "${NEW_VERSION}"
 }
 

@@ -1,3 +1,41 @@
+## 2.3.0 - 2026-08-28
+
+### Architecture and consistency
+
+- Apply the canonical shell structure, four-space formatting, headers,
+  comments, local-variable scope, and bottom-level orchestration consistently
+  across the engine, GUI, runtime manager, installers, package builders,
+  lifecycle tests, release tooling, and integration suites.
+- Split runtime compatibility, HLS remux publication, Fedora RPM certificate
+  authentication, release preflight, qualification reporting, and large test
+  scenarios into focused phases with explicit trust and cleanup boundaries.
+- Deduplicate package lifecycle orchestration and assertion helpers, including
+  symlink targets and Unix permission modes, while removing obsolete helpers
+  and unnecessary test prerequisites.
+
+### Validation performance and coverage
+
+- Add fast/full validation profiles, elapsed-time reporting, supervised
+  process-group execution, buffered deterministic output, completion-driven
+  scheduling, and bounded parallel ShellCheck validation.
+- Divide the mock contract into independent engine, GUI, signal, runtime, and
+  validation groups so local and CI runs can use four-way parallelism while
+  preserving aggregate groups and historical scenario order.
+- Keep ordinary runtime-hardening repetitions short while restoring ten-cycle
+  rollback/contention coverage inside the dedicated ten-run stress workflow.
+- Expand and modularize real FFmpeg, HLS duration, aria2 behavior/header,
+  private publication, runtime rollback, installer, packaging, and runner
+  qualifications; the full local contract now completes in about one minute.
+
+### Release and packaging
+
+- Run bounded parallel validation for source, archive, package, release, and
+  verified-formatter CI paths, with static contracts protecting the scheduler
+  groups and security-sensitive phases.
+- Preserve behavior and artifact compatibility while strengthening version,
+  RPM signing-certificate, immutable-release, package-upgrade, and diagnostic
+  validation for the 2.3.0 release.
+
 ## 2.2.6 - 2026-08-27
 
 ### Code consistency and hardening

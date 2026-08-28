@@ -36,16 +36,9 @@ cleanup() {
     rm -rf -- "${root}"
 }
 
-main() {
+test_rejected_private_directories() {
     local invalid_private_dir=''
     local invalid_root=''
-    local alternate_root=''
-    local alternate_cli_link_target=''
-
-    trap cleanup EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
 
     for invalid_private_dir in \
         '/usr/' \
@@ -65,21 +58,24 @@ main() {
         [[ ! -e ${invalid_root} ]] \
             || fail "Rejected PRIVATE_DIR created a staging tree: ${invalid_private_dir}"
     done
+}
 
-    alternate_root="${root}/libexec-case"
+test_alternate_private_directory() {
+    local alternate_root="${root}/libexec-case"
+
     bash "${PROJECT_DIR}/packaging/install-tree.sh" \
         "${alternate_root}" "${version}" \
         '/usr/libexec/yt-dlp-aria2-downloader' >/dev/null
-    alternate_cli_link_target=$(readlink -- \
-        "${alternate_root}/usr/bin/yt-dlp-aria2-downloader")
-    assert_equals '../libexec/yt-dlp-aria2-downloader/download-video.sh' \
-        "${alternate_cli_link_target}" \
+    assert_link_target \
+        "${alternate_root}/usr/bin/yt-dlp-aria2-downloader" \
+        '../libexec/yt-dlp-aria2-downloader/download-video.sh' \
         'packaged CLI libexec symlink target'
+}
 
-    bash "${PROJECT_DIR}/packaging/install-tree.sh" \
-        "${root}" "${version}" '/usr/lib/yt-dlp-aria2-downloader'
+assert_packaged_executables() {
+    local private_dir=$1
+    local executable
 
-    private_dir="${root}/usr/lib/yt-dlp-aria2-downloader"
     for executable in \
         download-video.sh \
         download-video-gui.sh \
@@ -88,34 +84,40 @@ main() {
         package-user-cleanup.sh; do
         [[ -x ${private_dir}/${executable} && ! -L ${private_dir}/${executable} ]] \
             || fail "Missing packaged executable: ${executable}"
-        mode=$(stat -c '%a' -- "${private_dir}/${executable}")
-        assert_equals '755' "${mode}" "${executable} permissions"
+        assert_path_mode "${private_dir}/${executable}" 755 \
+            "${executable} permissions"
     done
 
-    private_aria2_helper="${private_dir}/private-aria2-plan.py"
+    local private_aria2_helper="${private_dir}/private-aria2-plan.py"
     [[ -f ${private_aria2_helper} &&
         ! -L ${private_aria2_helper} &&
         ! -x ${private_aria2_helper} ]] \
         || fail 'Missing or unsafe packaged private aria2 helper.'
-    helper_mode=$(stat -c '%a' -- "${private_aria2_helper}")
-    assert_equals '644' "${helper_mode}" \
+    assert_path_mode "${private_aria2_helper}" 644 \
         'private-aria2-plan.py permissions'
+}
 
-    cli_link_target=$(readlink -- \
-        "${root}/usr/bin/yt-dlp-aria2-downloader")
-    gui_link_target=$(readlink -- \
-        "${root}/usr/bin/yt-dlp-aria2-downloader-gui")
+assert_packaged_entrypoints() {
+    local packaged_version
+
     packaged_version=$(
         "${root}/usr/bin/yt-dlp-aria2-downloader" --version
     )
-    assert_equals '../lib/yt-dlp-aria2-downloader/download-video.sh' \
-        "${cli_link_target}" 'packaged CLI symlink target'
-    assert_equals '../lib/yt-dlp-aria2-downloader/download-video-gui.sh' \
-        "${gui_link_target}" 'packaged GUI symlink target'
+    assert_link_target \
+        "${root}/usr/bin/yt-dlp-aria2-downloader" \
+        '../lib/yt-dlp-aria2-downloader/download-video.sh' \
+        'packaged CLI symlink target'
+    assert_link_target \
+        "${root}/usr/bin/yt-dlp-aria2-downloader-gui" \
+        '../lib/yt-dlp-aria2-downloader/download-video-gui.sh' \
+        'packaged GUI symlink target'
     assert_equals "yt-dlp-aria2-downloader version ${version}" \
         "${packaged_version}" 'packaged CLI version'
+}
 
-    desktop_file="${root}/usr/share/applications/yt-dlp-aria2-downloader.desktop"
+assert_packaged_desktop_entry() {
+    local desktop_file="${root}/usr/share/applications/yt-dlp-aria2-downloader.desktop"
+
     desktop-file-validate --no-hints "${desktop_file}"
     assert_file_contains "${desktop_file}" \
         'Exec=/usr/bin/yt-dlp-aria2-downloader-gui' 'system desktop Exec'
@@ -123,19 +125,22 @@ main() {
         'TryExec=/usr/bin/yt-dlp-aria2-downloader-gui' 'system desktop TryExec'
     assert_file_contains "${desktop_file}" \
         'Icon=yt-dlp-aria2-downloader' 'dedicated packaged icon name'
+}
 
-    icon_file="${root}/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg"
+assert_packaged_assets() {
+    local private_dir=$1
+    local icon_file="${root}/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg"
+    local document document_path key_file
+
     [[ -f ${icon_file} && ! -L ${icon_file} ]] \
         || fail 'Missing packaged application icon.'
-    icon_mode=$(stat -c '%a' -- "${icon_file}")
-    assert_equals '644' "${icon_mode}" 'packaged icon permissions'
+    assert_path_mode "${icon_file}" 644 'packaged icon permissions'
 
     for document in README.md README.fr.md CHANGELOG.md; do
         document_path="${root}/usr/share/doc/yt-dlp-aria2-downloader-gui/${document}"
         [[ -f ${document_path} && ! -L ${document_path} ]] \
             || fail "Missing packaged document: ${document}"
-        mode=$(stat -c '%a' -- "${document_path}")
-        assert_equals '644' "${mode}" "${document} permissions"
+        assert_path_mode "${document_path}" 644 "${document} permissions"
     done
 
     [[ ! -e ${root}/usr/share/doc/yt-dlp-aria2-downloader-gui/tests ]] \
@@ -147,11 +152,31 @@ main() {
     key_file="${private_dir}/keys/yt-dlp-public.key"
     [[ -f ${key_file} && ! -L ${key_file} ]] \
         || fail 'Package tree is missing the yt-dlp signing key.'
-    key_mode=$(stat -c '%a' -- "${key_file}")
-    assert_equals '644' "${key_mode}" 'packaged yt-dlp signing-key permissions'
+    assert_path_mode "${key_file}" 644 \
+        'packaged yt-dlp signing-key permissions'
+}
 
+test_packaged_install_tree() {
+    local private_dir="${root}/usr/lib/yt-dlp-aria2-downloader"
+
+    bash "${PROJECT_DIR}/packaging/install-tree.sh" \
+        "${root}" "${version}" '/usr/lib/yt-dlp-aria2-downloader'
+    assert_packaged_executables "${private_dir}"
+    assert_packaged_entrypoints
+    assert_packaged_desktop_entry
+    assert_packaged_assets "${private_dir}"
+}
+
+main() {
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    test_rejected_private_directories
+    test_alternate_private_directory
+    test_packaged_install_tree
     printf 'Packaging integration tests passed.\n'
-
 }
 
 main "$@"

@@ -9,7 +9,7 @@
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.2.6"
+readonly VERSION="2.3.0"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -243,18 +243,8 @@ compare_versions() {
     fi
 }
 
-check_runtime_compatibility() {
+check_ytdlp_runtime() {
     local yt_dlp_version
-    local deno_name=''
-    local deno_version=''
-    local deno_output=''
-    local _=''
-    local yt_dlp_help
-    local aria2_version_line
-    local aria2_version
-    local aria2_help
-    local required_option
-    local setsid_help
 
     if ! yt_dlp_version=$(LC_ALL=C "${YTDLP_BIN}" --version 2>/dev/null); then
         error 'unable to determine the yt-dlp version.'
@@ -270,6 +260,13 @@ check_runtime_compatibility() {
         error "yt-dlp ${MIN_YT_DLP_VERSION} or later is required; found ${yt_dlp_version}."
         return 1
     fi
+}
+
+check_deno_runtime() {
+    local deno_name=''
+    local deno_version=''
+    local deno_output=''
+    local _=''
 
     JS_RUNTIME_AVAILABLE=false
     if [[ -n ${DENO_BIN:-} && -x ${DENO_BIN} ]] \
@@ -286,6 +283,11 @@ check_runtime_compatibility() {
         error "Deno ${MIN_DENO_VERSION} or later is required for YouTube extraction."
         return 1
     fi
+}
+
+check_ytdlp_capabilities() {
+    local required_option
+    local yt_dlp_help
 
     if ! yt_dlp_help=$(LC_ALL=C "${YTDLP_BIN}" --help 2>&1); then
         error 'unable to inspect yt-dlp capabilities.'
@@ -329,6 +331,11 @@ check_runtime_compatibility() {
             return 1
         fi
     fi
+}
+
+check_aria2_runtime() {
+    local aria2_version
+    local aria2_version_line
 
     if ! aria2_version_line=$(LC_ALL=C aria2c --version 2>/dev/null); then
         error 'unable to determine the aria2c version.'
@@ -349,6 +356,11 @@ check_runtime_compatibility() {
         error "aria2c ${MIN_ARIA2_VERSION} or later is required; found ${aria2_version}."
         return 1
     fi
+}
+
+check_aria2_capabilities() {
+    local aria2_help
+    local required_option
 
     if ! aria2_help=$(LC_ALL=C aria2c --help=#all 2>&1); then
         error 'unable to inspect aria2c capabilities.'
@@ -382,6 +394,11 @@ check_runtime_compatibility() {
         <<<"${aria2_help}"; then
         ARIA2_SUPPORTS_NO_NETRC=true
     fi
+}
+
+check_setsid_capabilities() {
+    local required_option
+    local setsid_help
 
     if ! setsid_help=$(LC_ALL=C setsid --help 2>&1); then
         error 'unable to inspect setsid capabilities.'
@@ -395,6 +412,15 @@ check_runtime_compatibility() {
             return 1
         fi
     done
+}
+
+check_runtime_compatibility() {
+    check_ytdlp_runtime
+    check_deno_runtime
+    check_ytdlp_capabilities
+    check_aria2_runtime
+    check_aria2_capabilities
+    check_setsid_capabilities
 }
 
 require_value() {
@@ -1209,12 +1235,9 @@ normalize_path_record() {
     return 0
 }
 
-main() {
-    trap cleanup EXIT
-    trap 'request_shutdown HUP 129' HUP
-    trap 'request_shutdown INT 130' INT
-    trap 'request_shutdown TERM 143' TERM
-
+# Parse only the public CLI surface. Semantic URL/mode validation is kept in
+# dedicated phases so main() remains an orchestration function.
+parse_arguments() {
     OUTPUT_DIR=''
     MODE='video'
     MACHINE_PROGRESS=false
@@ -1299,6 +1322,14 @@ main() {
                 ;;
         esac
     done
+}
+
+# Resolve the single URL from argv or its private file and classify its host.
+resolve_requested_url() {
+    local url_file_owner=''
+    local url_line=''
+    local url_line_count=0
+    local url_authority=''
 
     if [[ -n ${URL_FILE} ]]; then
         if ((${#POSITIONAL_ARGUMENTS[@]} != 0)); then
@@ -1374,7 +1405,10 @@ main() {
             ;;
     esac
     readonly URL_HOST IS_YOUTUBE_URL
+}
 
+# Validate option combinations after URL classification is available.
+validate_mode_selection() {
     case ${MODE} in
         video | audio) ;;
         *)
@@ -1394,6 +1428,15 @@ main() {
             exit 2
         fi
     fi
+}
+
+# Resolve required commands, adjacent helpers, and managed runtime executables.
+initialize_runtime_dependencies() {
+    local command_name
+    local script_path
+    local script_dir
+    local runtime_manager
+    local runtime_action
 
     for command_name in aria2c ffmpeg ffprobe python3 sed stdbuf tr realpath grep mktemp mv rm rmdir chmod flock mkdir sha256sum stat setsid sleep timeout find; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
@@ -1408,15 +1451,15 @@ main() {
     }
     script_dir=${script_path%/*}
     runtime_manager="${script_dir}/runtime-manager.sh"
-    private_aria2_helper="${script_dir}/private-aria2-plan.py"
+    PRIVATE_ARIA2_HELPER="${script_dir}/private-aria2-plan.py"
 
-    if [[ -L ${private_aria2_helper} ||
-        ! -f ${private_aria2_helper} ||
-        ! -r ${private_aria2_helper} ]]; then
-        error "private aria2 helper is missing or unsafe: ${private_aria2_helper}"
+    if [[ -L ${PRIVATE_ARIA2_HELPER} ||
+        ! -f ${PRIVATE_ARIA2_HELPER} ||
+        ! -r ${PRIVATE_ARIA2_HELPER} ]]; then
+        error "private aria2 helper is missing or unsafe: ${PRIVATE_ARIA2_HELPER}"
         exit 66
     fi
-    readonly private_aria2_helper
+    readonly PRIVATE_ARIA2_HELPER
 
     if [[ ${YTDLP_ARIA2_SKIP_RUNTIME_UPDATE:-0} == 1 ]]; then
         YTDLP_BIN=${YTDLP_ARIA2_YTDLP_BIN:-$(command -v yt-dlp 2>/dev/null || true)}
@@ -1459,7 +1502,10 @@ main() {
     # errexit inside the function body under Bash's documented rules.
     check_runtime_compatibility
     readonly ARIA2_SUPPORTS_NO_NETRC
+}
 
+# Canonicalize and lock the destination before creating any transfer state.
+prepare_output_directory() {
     if [[ -z ${OUTPUT_DIR} ]]; then
         OUTPUT_DIR=${PWD}
     fi
@@ -1480,8 +1526,8 @@ main() {
     fi
     readonly OUTPUT_DIR
 
-    # --output is an yt-dlp output template. Escape literal percent signs from the
-    # real destination path so directories containing '%' are handled correctly.
+    # --output is an yt-dlp output template. Escape literal percent signs from
+    # the real destination path.
     OUTPUT_DIR_TEMPLATE=${OUTPUT_DIR//%/%%}
     readonly OUTPUT_DIR_TEMPLATE
 
@@ -1490,12 +1536,16 @@ main() {
         exit 13
     fi
 
-    # Keep one same-user writer per canonical destination directory. The lock is
-    # stored in a private local runtime directory, so no marker is written into the
-    # user's media directory and an interrupted process releases it automatically.
+    # Keep one same-user writer per canonical destination directory.
     acquire_output_lock "${OUTPUT_DIR}"
     recover_abandoned_private_aria2_staging
     cleanup_stale_temporary_files
+}
+
+# Create private path records and aria2/yt-dlp transfer metadata.
+prepare_private_work_files() {
+    local result_parent
+    local staging_marker_path
 
     if [[ -n ${RESULT_FILE} ]]; then
         if [[ ${RESULT_FILE} == *$'\n'* || ${RESULT_FILE} == *$'\r'* ]]; then
@@ -1529,8 +1579,7 @@ main() {
     fi
 
     if [[ -z ${RESULT_FILE_TMP} ]]; then
-        # Always retain the final yt-dlp path internally. This permits uniform
-        # FFprobe validation for ordinary CLI runs as well as GUI and HLS runs.
+        # Always retain the final yt-dlp path internally for FFprobe validation.
         if ! INTERNAL_PATH_FILE_TMP=$(mktemp \
             --tmpdir="${OUTPUT_DIR}" \
             '.yt-dlp-path.XXXXXXXX'); then
@@ -1563,10 +1612,10 @@ main() {
         exit 13
     fi
 
-    PRIVATE_ARIA2_STAGING_MARKER_PATH="${PRIVATE_ARIA2_STAGING}/${PRIVATE_ARIA2_STAGING_MARKER}"
+    staging_marker_path="${PRIVATE_ARIA2_STAGING}/${PRIVATE_ARIA2_STAGING_MARKER}"
     if ! printf '%s\n' "${PRIVATE_ARIA2_STAGING_MARKER_VALUE}" \
-        >"${PRIVATE_ARIA2_STAGING_MARKER_PATH}" \
-        || ! chmod 600 -- "${PRIVATE_ARIA2_STAGING_MARKER_PATH}"; then
+        >"${staging_marker_path}" \
+        || ! chmod 600 -- "${staging_marker_path}"; then
         error 'unable to initialize private aria2 staging ownership metadata.'
         exit 13
     fi
@@ -1585,6 +1634,12 @@ main() {
         error 'unable to initialize private transfer metadata.'
         exit 13
     fi
+}
+
+# Build immutable aria2 arguments and the mutable yt-dlp execution option set.
+configure_download_options() {
+    local aria2_arguments
+    local video_format
 
     printf '%s version %s\n' "${SCRIPT_NAME}" "${VERSION}"
     printf 'Download directory: %s\n' "${OUTPUT_DIR}"
@@ -1593,23 +1648,20 @@ main() {
         printf '%s\n' 'YouTube access: Firefox cookies with web_safari HLS'
     fi
 
-    ARIA2_ARGUMENTS='-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true'
+    aria2_arguments='-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true'
     if [[ ${ARIA2_SUPPORTS_NO_NETRC} == true ]]; then
-        ARIA2_ARGUMENTS+=' --no-netrc=true'
+        aria2_arguments+=' --no-netrc=true'
     fi
-    ARIA2_ARGUMENTS+=' --allow-overwrite=false --auto-file-renaming=false --max-concurrent-downloads=1'
-    ARIA2_ARGUMENTS+=' --console-log-level=warn --enable-color=false --truncate-console-readout=false'
+    aria2_arguments+=' --allow-overwrite=false --auto-file-renaming=false --max-concurrent-downloads=1'
+    aria2_arguments+=' --console-log-level=warn --enable-color=false --truncate-console-readout=false'
     if [[ ${MACHINE_PROGRESS} == true ]]; then
-        # yt-dlp does not currently expose aria2c transfer progress through its
-        # own progress hooks. yt-dlp captures stderr from external downloaders and
-        # normally replays it only on failure, so aria2c's periodic readout must
-        # remain on stdout to reach the GUI log during a successful transfer.
-        ARIA2_ARGUMENTS+=' --summary-interval=1 --show-console-readout=true --stderr=false'
+        # aria2c's periodic readout must remain on stdout to reach the GUI log
+        # during a successful transfer.
+        aria2_arguments+=' --summary-interval=1 --show-console-readout=true --stderr=false'
     else
-        ARIA2_ARGUMENTS+=' --summary-interval=0'
+        aria2_arguments+=' --summary-interval=0'
     fi
-    readonly ARIA2_ARGUMENTS
-    read -r -a ARIA2_DIRECT_OPTIONS <<<"${ARIA2_ARGUMENTS}"
+    read -r -a ARIA2_DIRECT_OPTIONS <<<"${aria2_arguments}"
     readonly -a ARIA2_DIRECT_OPTIONS
 
     YT_DLP_OPTIONS=(
@@ -1632,8 +1684,6 @@ main() {
         --continue
         --progress-delta 1
         # Fragmented DASH/HLS transfers remain on yt-dlp's native downloader.
-        # Direct HTTP(S) transfers are classified and delegated to aria2 below
-        # through a private input file, never through aria2 argv.
         --downloader 'dash,m3u8:native'
         --concurrent-fragments 1
     )
@@ -1643,9 +1693,6 @@ main() {
     fi
 
     if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
-        # This explicit profile reads the authenticated Firefox session and asks
-        # YouTube's web_safari client for HLS formats. Current yt-dlp guidance notes
-        # that these HLS URLs do not require a GVS PO Token at this time.
         YT_DLP_OPTIONS+=(
             --cookies-from-browser firefox
             --extractor-args 'youtube:player_client=web_safari'
@@ -1653,18 +1700,13 @@ main() {
         )
     fi
 
-    if [[ ${MODE} == 'video' ]]; then
-        # Keep both container options. --merge-output-format covers separate
-        # video/audio streams, while --remux-video covers the combined-format fallback.
+    if [[ ${MODE} == video ]]; then
         if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
-            VIDEO_FORMAT='(bv*+ba/b)[protocol^=m3u8]'
+            video_format='(bv*+ba/b)[protocol^=m3u8]'
         else
-            VIDEO_FORMAT='bv*+ba/b'
+            video_format='bv*+ba/b'
         fi
-        YT_DLP_OPTIONS+=(--format "${VIDEO_FORMAT}")
-        # The authenticated HLS profile must let yt-dlp run FixupM3u8 before this
-        # wrapper performs its final MKV remux. Scheduling VideoRemuxer here would
-        # make yt-dlp treat the fixup as redundant and skip it.
+        YT_DLP_OPTIONS+=(--format "${video_format}")
         if [[ ${YOUTUBE_HLS_FIREFOX} != true ]]; then
             YT_DLP_OPTIONS+=(
                 --merge-output-format mkv
@@ -1672,9 +1714,6 @@ main() {
             )
         fi
     else
-        # Match the dedicated download-audio.sh behavior: select the best
-        # audio-only stream, fall back to the best combined stream when necessary,
-        # extract audio, and preserve the source codec/container whenever possible.
         YT_DLP_OPTIONS+=(
             --format 'ba/b'
             --extract-audio
@@ -1682,8 +1721,14 @@ main() {
             --audio-quality 0
         )
     fi
+}
 
-    PLAN_OPTIONS=(
+# Run the metadata-only PLAN pass and validate the transport classifier output.
+plan_selected_transport() {
+    local plan_status
+    local classification_output=''
+    local classification_line
+    local -a plan_options=(
         "${YT_DLP_OPTIONS[@]}"
         --skip-download
         --no-clean-info-json
@@ -1692,7 +1737,7 @@ main() {
 
     run_supervised_command \
         "${YTDLP_BIN}" \
-        "${PLAN_OPTIONS[@]}" \
+        "${plan_options[@]}" \
         --batch-file "${YTDLP_BATCH_FILE_TMP}" \
         >"${PRIVATE_ARIA2_PLAN}"
 
@@ -1703,9 +1748,8 @@ main() {
         exit "${plan_status}"
     fi
 
-    classification_output=''
     if ! classification_output=$(python3 \
-        "${private_aria2_helper}" classify \
+        "${PRIVATE_ARIA2_HELPER}" classify \
         --plan "${PRIVATE_ARIA2_PLAN}"); then
         error 'unable to classify the selected download transport.'
         exit 65
@@ -1760,6 +1804,12 @@ main() {
             exit 65
             ;;
     esac
+    readonly PRIVATE_TRANSPORT PRIVATE_TRANSFER_COUNT
+}
+
+# Add progress and final-path reporting only after the PLAN option set is fixed.
+configure_download_reporting() {
+    local path_record_template
 
     if [[ ${MACHINE_PROGRESS} == true ]]; then
         YT_DLP_OPTIONS+=(
@@ -1773,23 +1823,26 @@ main() {
     fi
 
     PATH_RECORD_TMP=${RESULT_FILE_TMP:-${INTERNAL_PATH_FILE_TMP}}
+    readonly PATH_RECORD_TMP
     if [[ -n ${PATH_RECORD_TMP} ]]; then
-        # The FILE argument is itself an output template, so literal % characters
-        # in the temporary path must be doubled.
+        # The FILE argument is itself an output template.
         path_record_template=${PATH_RECORD_TMP//%/%%}
         YT_DLP_OPTIONS+=(
             --print-to-file 'after_move:%(filepath)s' "${path_record_template}"
         )
     fi
+}
+
+# Execute either the private aria2 direct path or yt-dlp's native transport.
+execute_selected_transport() {
+    local aria2_status
+    local commit_status
 
     if [[ ${PRIVATE_TRANSPORT} == direct ]]; then
-        # The separate PLAN pass used by the private direct path does not emit
-        # yt-dlp's before_dl machine event. Publish the exact non-secret item
-        # count so the GUI can reserve every transfer before aria2 starts.
         if [[ ${MACHINE_PROGRESS} == true ]]; then
             printf 'ARIA2_PLAN|%s\n' "${PRIVATE_TRANSFER_COUNT}"
         fi
-        if ! python3 "${private_aria2_helper}" build \
+        if ! python3 "${PRIVATE_ARIA2_HELPER}" build \
             --plan "${PRIVATE_ARIA2_PLAN}" \
             --output-dir "${OUTPUT_DIR}" \
             --staging-dir "${PRIVATE_ARIA2_STAGING}" \
@@ -1800,8 +1853,7 @@ main() {
             exit 65
         fi
 
-        # aria2 diagnostics can contain the URI on failures. Keep progress
-        # output, but redact every HTTP(S) token before it reaches CLI/GUI logs.
+        # Redact every HTTP(S) token from aria2 diagnostics.
         run_supervised_command bash -c '
             set -o pipefail
             "$@" 2>&1 |
@@ -1823,7 +1875,7 @@ main() {
 
         if ((aria2_status == 0)); then
             commit_status=0
-            python3 "${private_aria2_helper}" commit \
+            python3 "${PRIVATE_ARIA2_HELPER}" commit \
                 --manifest "${PRIVATE_ARIA2_MANIFEST}" \
                 >/dev/null || commit_status=$?
 
@@ -1855,211 +1907,281 @@ main() {
         exit 13
     fi
     YTDLP_BATCH_FILE_TMP=''
-    if ((DOWNLOAD_STATUS == 0)); then
-        if [[ -n ${PATH_RECORD_TMP} ]]; then
-            set +e
-            normalize_path_record "${PATH_RECORD_TMP}" "${OUTPUT_DIR}"
-            path_record_status=$?
-            set -e
-            case ${path_record_status} in
-                0) ;;
-                1)
-                    error 'yt-dlp did not report a valid final media path inside the destination directory.'
-                    exit 1
-                    ;;
-                *)
-                    error 'unable to normalize the final media path record.'
-                    exit 13
-                    ;;
-            esac
+}
+
+# Normalize yt-dlp's last reported result and enforce destination containment.
+normalize_successful_path_record() {
+    local path_record_status
+
+    [[ -n ${PATH_RECORD_TMP} ]] || return 0
+
+    set +e
+    normalize_path_record "${PATH_RECORD_TMP}" "${OUTPUT_DIR}"
+    path_record_status=$?
+    set -e
+    case ${path_record_status} in
+        0) ;;
+        1)
+            error 'yt-dlp did not report a valid final media path inside the destination directory.'
+            exit 1
+            ;;
+        *)
+            error 'unable to normalize the final media path record.'
+            exit 13
+            ;;
+    esac
+}
+
+# Reject a remux whose verified duration loses more than the bounded tolerance.
+validate_hls_duration_parity() {
+    local source_duration_us=$1
+    local final_duration_us=$2
+    local source_path=$3
+    local hls_duration_tolerance_us
+    local hls_duration_loss_us
+
+    ((final_duration_us < source_duration_us)) || return 0
+
+    # Permit 2% timestamp loss, with a 0.5 s floor and 5 s ceiling.
+    hls_duration_tolerance_us=$((source_duration_us / 50))
+    if ((hls_duration_tolerance_us < 500000)); then
+        hls_duration_tolerance_us=500000
+    elif ((hls_duration_tolerance_us > 5000000)); then
+        hls_duration_tolerance_us=5000000
+    fi
+    hls_duration_loss_us=$((source_duration_us - final_duration_us))
+    if ((hls_duration_loss_us <= hls_duration_tolerance_us)); then
+        return 0
+    fi
+
+    emit_machine_postprocess error FFmpegVideoRemuxer
+    error 'the remuxed MKV is substantially shorter than the repaired HLS source.'
+    printf 'Source duration: %s us; remuxed duration: %s us; allowed loss: %s us.\n' \
+        "${source_duration_us}" \
+        "${final_duration_us}" \
+        "${hls_duration_tolerance_us}" >&2
+    printf 'The repaired HLS intermediate was retained at: %s\n' \
+        "${source_path}" >&2
+    exit 65
+}
+
+# Atomically publish a verified HLS remux and update the private path record.
+publish_hls_remux_result() {
+    local source_path=$1
+    local final_path=$2
+
+    if ! mv -nT -- "${HLS_REMUX_TMP}" "${final_path}"; then
+        emit_machine_postprocess error FFmpegVideoRemuxer
+        error 'unable to publish the final MKV file.'
+        exit 13
+    fi
+    if [[ -e ${HLS_REMUX_TMP} || -L ${HLS_REMUX_TMP} ]]; then
+        emit_machine_postprocess error FFmpegVideoRemuxer
+        error "the final MKV appeared during publication; refusing to overwrite it: ${final_path}"
+        exit 13
+    fi
+    HLS_REMUX_TMP=''
+    if ! printf '%s\n' "${final_path}" >"${PATH_RECORD_TMP}"; then
+        error 'unable to record the final MKV path.'
+        printf 'The repaired HLS intermediate was retained at: %s\n' \
+            "${source_path}" >&2
+        exit 13
+    fi
+    emit_machine_postprocess finished FFmpegVideoRemuxer
+    if [[ ${source_path} != "${final_path}" ]]; then
+        HLS_SOURCE_TO_CLEAN=${source_path}
+    fi
+}
+
+# Remux the authenticated YouTube HLS intermediate and verify duration parity.
+remux_hls_result() {
+    local hls_source_path
+    local hls_source_dir
+    local hls_source_name
+    local hls_source_stem
+    local hls_final_path
+    local hls_source_duration_us=''
+    local hls_final_duration_us=''
+    local ffmpeg_status
+
+    hls_source_path=$(<"${PATH_RECORD_TMP}") || {
+        error 'unable to read the repaired HLS file path.'
+        exit 13
+    }
+
+    hls_source_dir=${hls_source_path%/*}
+    if [[ ${hls_source_dir} == "${hls_source_path}" ]]; then
+        hls_source_dir='.'
+    fi
+    hls_source_name=${hls_source_path##*/}
+    hls_source_stem=${hls_source_name%.*}
+    hls_final_path="${hls_source_dir}/${hls_source_stem}.mkv"
+
+    if [[ -e ${hls_final_path} || -L ${hls_final_path} ]]; then
+        error "the final MKV already exists; refusing to overwrite it: ${hls_final_path}"
+        exit 13
+    fi
+
+    emit_machine_postprocess started FFmpegVideoRemuxer
+    probe_duration_microseconds \
+        hls_source_duration_us "${hls_source_path}" 2>/dev/null
+    if [[ ! ${hls_source_duration_us} =~ ^[1-9][0-9]*$ ]]; then
+        emit_machine_postprocess error FFmpegVideoRemuxer
+        error 'unable to determine the repaired HLS source duration; refusing an unverifiable remux.'
+        printf 'The repaired HLS intermediate was retained at: %s\n' \
+            "${hls_source_path}" >&2
+        exit 65
+    fi
+    if [[ ${MACHINE_PROGRESS} == true ]]; then
+        printf 'FFMPEG_PROGRESS_DURATION|%s\n' "${hls_source_duration_us}"
+    fi
+    if ! HLS_REMUX_TMP=$(mktemp \
+        --tmpdir="${hls_source_dir}" \
+        --suffix='.mkv' \
+        '.yt-dlp-remux.XXXXXXXX'); then
+        emit_machine_postprocess error FFmpegVideoRemuxer
+        error 'unable to create the temporary MKV file.'
+        exit 13
+    fi
+
+    run_supervised_command \
+        ffmpeg \
+        -hide_banner \
+        -loglevel warning \
+        -nostdin \
+        -nostats \
+        -stats_period 0.5 \
+        -progress pipe:1 \
+        -i "${hls_source_path}" \
+        -map 0 \
+        -dn \
+        -ignore_unknown \
+        -c copy \
+        -y \
+        "${HLS_REMUX_TMP}"
+    ffmpeg_status=${DOWNLOAD_STATUS}
+    if ((ffmpeg_status != 0)); then
+        emit_machine_postprocess error FFmpegVideoRemuxer
+        error "unable to remux the repaired HLS file into MKV (FFmpeg status ${ffmpeg_status})."
+        printf 'The repaired HLS intermediate was retained at: %s\n' \
+            "${hls_source_path}" >&2
+        exit "${ffmpeg_status}"
+    fi
+
+    probe_duration_microseconds \
+        hls_final_duration_us "${HLS_REMUX_TMP}" 2>/dev/null
+    if [[ ! ${hls_final_duration_us} =~ ^[1-9][0-9]*$ ]]; then
+        emit_machine_postprocess error FFmpegVideoRemuxer
+        error 'unable to determine the remuxed MKV duration; refusing to publish an unverifiable result.'
+        printf 'The repaired HLS intermediate was retained at: %s\n' \
+            "${hls_source_path}" >&2
+        exit 65
+    fi
+    validate_hls_duration_parity \
+        "${hls_source_duration_us}" \
+        "${hls_final_duration_us}" \
+        "${hls_source_path}"
+    publish_hls_remux_result "${hls_source_path}" "${hls_final_path}"
+}
+
+# Validate the final media and atomically publish or discard its path record.
+validate_and_publish_result() {
+    local final_media_path=''
+    local validation_status
+
+    if ! { IFS= read -r final_media_path <"${PATH_RECORD_TMP}"; } 2>/dev/null \
+        || [[ -z ${final_media_path} ]]; then
+        error 'unable to read the final media path for validation.'
+        exit 13
+    fi
+
+    emit_machine_postprocess started MediaValidation
+
+    # Do not invoke validation in a conditional context: Bash would disable
+    # errexit throughout the complete validation function.
+    set +e
+    validate_final_media_file "${final_media_path}" "${MODE}"
+    validation_status=$?
+    set -e
+
+    if ((validation_status != 0)); then
+        emit_machine_postprocess error MediaValidation
+        error "the final media file failed FFprobe validation: ${final_media_path}"
+        printf '%s\n' \
+            'The media file was retained for diagnosis and was not published as a successful result.' >&2
+        if [[ -n ${HLS_SOURCE_TO_CLEAN} ]]; then
+            printf 'The repaired HLS intermediate was retained at: %s\n' \
+                "${HLS_SOURCE_TO_CLEAN}" >&2
         fi
+        exit 65
+    fi
+    emit_machine_postprocess finished MediaValidation
 
-        if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
-            hls_source_path=$(<"${PATH_RECORD_TMP}") || {
-                error 'unable to read the repaired HLS file path.'
-                exit 13
-            }
-
-            hls_source_dir=${hls_source_path%/*}
-            if [[ ${hls_source_dir} == "${hls_source_path}" ]]; then
-                hls_source_dir='.'
-            fi
-            hls_source_name=${hls_source_path##*/}
-            hls_source_stem=${hls_source_name%.*}
-            hls_final_path="${hls_source_dir}/${hls_source_stem}.mkv"
-
-            if [[ -e ${hls_final_path} || -L ${hls_final_path} ]]; then
-                error "the final MKV already exists; refusing to overwrite it: ${hls_final_path}"
-                exit 13
-            fi
-
-            emit_machine_postprocess started FFmpegVideoRemuxer
-            hls_source_duration_us=''
-            probe_duration_microseconds \
-                hls_source_duration_us "${hls_source_path}" 2>/dev/null
-            if [[ ! ${hls_source_duration_us} =~ ^[1-9][0-9]*$ ]]; then
-                emit_machine_postprocess error FFmpegVideoRemuxer
-                error 'unable to determine the repaired HLS source duration; refusing an unverifiable remux.'
-                printf 'The repaired HLS intermediate was retained at: %s\n' \
-                    "${hls_source_path}" >&2
-                exit 65
-            fi
-            if [[ ${MACHINE_PROGRESS} == true ]]; then
-                printf 'FFMPEG_PROGRESS_DURATION|%s\n' "${hls_source_duration_us}"
-            fi
-            if ! HLS_REMUX_TMP=$(mktemp \
-                --tmpdir="${hls_source_dir}" \
-                --suffix='.mkv' \
-                '.yt-dlp-remux.XXXXXXXX'); then
-                emit_machine_postprocess error FFmpegVideoRemuxer
-                error 'unable to create the temporary MKV file.'
-                exit 13
-            fi
-
-            run_supervised_command \
-                ffmpeg \
-                -hide_banner \
-                -loglevel warning \
-                -nostdin \
-                -nostats \
-                -stats_period 0.5 \
-                -progress pipe:1 \
-                -i "${hls_source_path}" \
-                -map 0 \
-                -dn \
-                -ignore_unknown \
-                -c copy \
-                -y \
-                "${HLS_REMUX_TMP}"
-            ffmpeg_status=${DOWNLOAD_STATUS}
-            if ((ffmpeg_status != 0)); then
-                emit_machine_postprocess error FFmpegVideoRemuxer
-                error "unable to remux the repaired HLS file into MKV (FFmpeg status ${ffmpeg_status})."
-                printf 'The repaired HLS intermediate was retained at: %s\n' \
-                    "${hls_source_path}" >&2
-                exit "${ffmpeg_status}"
-            fi
-
-            hls_final_duration_us=''
-            probe_duration_microseconds \
-                hls_final_duration_us "${HLS_REMUX_TMP}" 2>/dev/null
-            if [[ ! ${hls_final_duration_us} =~ ^[1-9][0-9]*$ ]]; then
-                emit_machine_postprocess error FFmpegVideoRemuxer
-                error 'unable to determine the remuxed MKV duration; refusing to publish an unverifiable result.'
-                printf 'The repaired HLS intermediate was retained at: %s\n' \
-                    "${hls_source_path}" >&2
-                exit 65
-            fi
-            if ((hls_final_duration_us < hls_source_duration_us)); then
-                # Stream-copy remuxes may shift/drop a small amount of timestamp
-                # padding. Permit 2% loss, with a 0.5 s floor and 5 s ceiling, but
-                # fail closed on a materially shortened result. This is deliberately
-                # metadata-only validation; do not decode the complete media again.
-                hls_duration_tolerance_us=$((hls_source_duration_us / 50))
-                if ((hls_duration_tolerance_us < 500000)); then
-                    hls_duration_tolerance_us=500000
-                elif ((hls_duration_tolerance_us > 5000000)); then
-                    hls_duration_tolerance_us=5000000
-                fi
-                hls_duration_loss_us=$((hls_source_duration_us - hls_final_duration_us))
-                if ((hls_duration_loss_us > hls_duration_tolerance_us)); then
-                    emit_machine_postprocess error FFmpegVideoRemuxer
-                    error 'the remuxed MKV is substantially shorter than the repaired HLS source.'
-                    printf 'Source duration: %s us; remuxed duration: %s us; allowed loss: %s us.\n' \
-                        "${hls_source_duration_us}" \
-                        "${hls_final_duration_us}" \
-                        "${hls_duration_tolerance_us}" >&2
-                    printf 'The repaired HLS intermediate was retained at: %s\n' \
-                        "${hls_source_path}" >&2
-                    exit 65
-                fi
-            fi
-
-            if ! mv -nT -- "${HLS_REMUX_TMP}" "${hls_final_path}"; then
-                emit_machine_postprocess error FFmpegVideoRemuxer
-                error 'unable to publish the final MKV file.'
-                exit 13
-            fi
-            if [[ -e ${HLS_REMUX_TMP} || -L ${HLS_REMUX_TMP} ]]; then
-                emit_machine_postprocess error FFmpegVideoRemuxer
-                error "the final MKV appeared during publication; refusing to overwrite it: ${hls_final_path}"
-                exit 13
-            fi
-            HLS_REMUX_TMP=''
-            if ! printf '%s\n' "${hls_final_path}" >"${PATH_RECORD_TMP}"; then
-                error 'unable to record the final MKV path.'
-                printf 'The repaired HLS intermediate was retained at: %s\n' \
-                    "${hls_source_path}" >&2
-                exit 13
-            fi
-            emit_machine_postprocess finished FFmpegVideoRemuxer
-            if [[ ${hls_source_path} != "${hls_final_path}" ]]; then
-                HLS_SOURCE_TO_CLEAN=${hls_source_path}
-            fi
-        fi
-
-        final_media_path=''
-        if ! { IFS= read -r final_media_path <"${PATH_RECORD_TMP}"; } 2>/dev/null \
-            || [[ -z ${final_media_path} ]]; then
-            error 'unable to read the final media path for validation.'
+    if [[ -n ${RESULT_FILE} ]]; then
+        if ! mv -nT -- "${RESULT_FILE_TMP}" "${RESULT_FILE}"; then
+            error 'unable to publish the result file.'
             exit 13
         fi
-
-        emit_machine_postprocess started MediaValidation
-
-        # Call the validation function outside a conditional context. Bash disables
-        # errexit throughout a function invoked by if, !, &&, or ||, which could
-        # otherwise hide an unexpected failure inside the validation routine.
-        set +e
-        validate_final_media_file \
-            "${final_media_path}" "${MODE}"
-        validation_status=$?
-        set -e
-
-        if ((validation_status != 0)); then
-            emit_machine_postprocess error MediaValidation
-            error "the final media file failed FFprobe validation: ${final_media_path}"
-            printf '%s\n' \
-                'The media file was retained for diagnosis and was not published as a successful result.' >&2
-            if [[ -n ${HLS_SOURCE_TO_CLEAN} ]]; then
-                printf 'The repaired HLS intermediate was retained at: %s\n' \
-                    "${HLS_SOURCE_TO_CLEAN}" >&2
-            fi
-            exit 65
+        if [[ -e ${RESULT_FILE_TMP} || -L ${RESULT_FILE_TMP} ]]; then
+            error 'the result file appeared during publication; refusing to overwrite it.'
+            exit 13
         fi
-        emit_machine_postprocess finished MediaValidation
-
-        if [[ -n ${RESULT_FILE} ]]; then
-            if ! mv -nT -- "${RESULT_FILE_TMP}" "${RESULT_FILE}"; then
-                error 'unable to publish the result file.'
-                exit 13
-            fi
-            if [[ -e ${RESULT_FILE_TMP} || -L ${RESULT_FILE_TMP} ]]; then
-                error 'the result file appeared during publication; refusing to overwrite it.'
-                exit 13
-            fi
-            RESULT_FILE_TMP=''
-        elif [[ -n ${INTERNAL_PATH_FILE_TMP} ]]; then
-            if ! rm -f -- "${INTERNAL_PATH_FILE_TMP}"; then
-                error 'unable to remove the internal result-path file.'
-                exit 13
-            fi
-            INTERNAL_PATH_FILE_TMP=''
+        RESULT_FILE_TMP=''
+    elif [[ -n ${INTERNAL_PATH_FILE_TMP} ]]; then
+        if ! rm -f -- "${INTERNAL_PATH_FILE_TMP}"; then
+            error 'unable to remove the internal result-path file.'
+            exit 13
         fi
+        INTERNAL_PATH_FILE_TMP=''
+    fi
 
-        if [[ -n ${HLS_SOURCE_TO_CLEAN} ]]; then
-            if ! rm -f -- "${HLS_SOURCE_TO_CLEAN}"; then
-                printf 'Warning: unable to remove the repaired HLS intermediate: %s\n' \
-                    "${HLS_SOURCE_TO_CLEAN}" >&2
-            fi
-            HLS_SOURCE_TO_CLEAN=''
+    if [[ -n ${HLS_SOURCE_TO_CLEAN} ]]; then
+        if ! rm -f -- "${HLS_SOURCE_TO_CLEAN}"; then
+            printf 'Warning: unable to remove the repaired HLS intermediate: %s\n' \
+                "${HLS_SOURCE_TO_CLEAN}" >&2
         fi
-        printf '\nDownload completed successfully.\n'
-    else
+        HLS_SOURCE_TO_CLEAN=''
+    fi
+}
+
+# Convert transport status into the final validated success/failure contract.
+finalize_download() {
+    local status
+
+    if ((DOWNLOAD_STATUS != 0)); then
         status=${DOWNLOAD_STATUS}
         printf '\nDownload failed with exit code %d.\n' "${status}" >&2
         exit "${status}"
     fi
+
+    normalize_successful_path_record
+    if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
+        remux_hls_result
+    fi
+    validate_and_publish_result
+    printf '\nDownload completed successfully.\n'
+}
+
+main() {
+    trap cleanup EXIT
+    trap 'request_shutdown HUP 129' HUP
+    trap 'request_shutdown INT 130' INT
+    trap 'request_shutdown TERM 143' TERM
+
+    parse_arguments "$@"
+    resolve_requested_url
+    validate_mode_selection
+    initialize_runtime_dependencies
+
+    prepare_output_directory
+
+    prepare_private_work_files
+
+    configure_download_options
+    plan_selected_transport
+    configure_download_reporting
+    execute_selected_transport
+    finalize_download
 
 }
 

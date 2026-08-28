@@ -674,7 +674,6 @@ handle_ffmpeg_duration() {
     ffmpeg_duration_us=$(sanitize_integer "${duration_text}")
     ffmpeg_out_time_us=0
     phase='postprocessing'
-    postprocessor='FFmpegVideoRemuxer'
     if ((stable_percent < POSTPROCESS_START)); then
         stable_percent=${POSTPROCESS_START}
     fi
@@ -723,11 +722,10 @@ handle_postprocess() {
     fi
 
     phase='postprocessing'
-    postprocessor=${processor}
     if ((stable_percent < POSTPROCESS_START)); then
         stable_percent=${POSTPROCESS_START}
     fi
-    message=$(postprocess_message "${postprocessor}")
+    message=$(postprocess_message "${processor}")
 }
 
 process_line() {
@@ -890,9 +888,12 @@ consume_log_data() {
     done
 }
 
-main() {
-    trap cleanup EXIT
-    trap 'exit 0' PIPE
+initialize_progress_inputs() {
+    local log_file=''
+    local worker_pid=''
+    local result_file=''
+    local profile=''
+    local output_dir=''
 
     readonly DOWNLOAD_START=5
     readonly DOWNLOAD_END=90
@@ -907,35 +908,42 @@ main() {
         exit 2
     fi
 
-    readonly LOG_FILE=$1
-    readonly WORKER_PID=$2
-    readonly RESULT_FILE=$3
-    readonly PROFILE=$4
-    OUTPUT_DIR=$5
+    log_file=$1
+    worker_pid=$2
+    result_file=$3
+    profile=$4
+    output_dir=$5
 
-    if ! OUTPUT_DIR=$(realpath -e -- "${OUTPUT_DIR}" 2>/dev/null) \
-        || [[ ! -d ${OUTPUT_DIR} ]]; then
+    if ! output_dir=$(realpath -e -- "${output_dir}" 2>/dev/null) \
+        || [[ ! -d ${output_dir} ]]; then
         printf 'Error: invalid output directory: %s\n' "$5" >&2
         exit 2
     fi
-    readonly OUTPUT_DIR
 
-    if [[ ! ${WORKER_PID} =~ ^[1-9][0-9]*$ ]]; then
-        printf 'Error: invalid worker PID: %s\n' "${WORKER_PID}" >&2
+    if [[ ! ${worker_pid} =~ ^[1-9][0-9]*$ ]]; then
+        printf 'Error: invalid worker PID: %s\n' "${worker_pid}" >&2
         exit 2
     fi
-    case ${PROFILE} in
+    case ${profile} in
         video | audio) ;;
         *)
-            printf 'Error: invalid profile: %s\n' "${PROFILE}" >&2
+            printf 'Error: invalid profile: %s\n' "${profile}" >&2
             exit 2
             ;;
     esac
-    if [[ ! -f ${LOG_FILE} || ! -r ${LOG_FILE} ]]; then
-        printf 'Error: progress log is missing or unreadable: %s\n' "${LOG_FILE}" >&2
+    if [[ ! -f ${log_file} || ! -r ${log_file} ]]; then
+        printf 'Error: progress log is missing or unreadable: %s\n' "${log_file}" >&2
         exit 66
     fi
 
+    readonly LOG_FILE=${log_file}
+    readonly WORKER_PID=${worker_pid}
+    readonly RESULT_FILE=${result_file}
+    readonly PROFILE=${profile}
+    readonly OUTPUT_DIR=${output_dir}
+}
+
+initialize_progress_state() {
     declare -gA ITEM_PERCENT=()
     declare -gA ITEM_DOWNLOADED=()
     declare -gA ITEM_TOTAL=()
@@ -955,24 +963,44 @@ main() {
     display_percent=0
     message='Analyzing the webpage...'
     phase='analyzing'
-    postprocessor=''
     ffmpeg_duration_us=0
     ffmpeg_out_time_us=0
     last_line=''
     RESOLVED_KEY=''
     SANITIZED_IDENTIFIER=''
+    pending_data=''
+    discarding_oversized_record=false
+}
 
+open_progress_log() {
     # Read the regular log file directly through a persistent descriptor. Bash's
     # read -N returns all bytes currently available at EOF, including a partial
     # record, so no asynchronous tail/tr pipeline or timed-read fragment can be
     # lost. Carriage-return console updates are normalized in memory.
     if ! exec 3<"${LOG_FILE}"; then
         printf 'Error: unable to open progress log: %s\n' "${LOG_FILE}" >&2
-        exit 66
+        return 66
     fi
+}
 
-    pending_data=''
-    discarding_oversized_record=false
+drain_progress_log() {
+    local chunk=''
+
+    while true; do
+        chunk=''
+        IFS= read -r -N 65536 chunk <&3 || true
+        [[ -n ${chunk} ]] || break
+        consume_log_data "${chunk}"
+    done
+    if [[ -n ${pending_data} ]]; then
+        process_line "${pending_data}"
+        pending_data=''
+    fi
+}
+
+monitor_worker_progress() {
+    local chunk=''
+    local read_status=0
 
     while true; do
         chunk=''
@@ -998,16 +1026,7 @@ main() {
             # The worker has stopped, but it may have appended bytes after the read
             # at the top of this iteration. Drain the regular file to its final EOF
             # before processing a last unterminated record.
-            while true; do
-                chunk=''
-                IFS= read -r -N 65536 chunk <&3 || true
-                [[ -n ${chunk} ]] || break
-                consume_log_data "${chunk}"
-            done
-            if [[ -n ${pending_data} ]]; then
-                process_line "${pending_data}"
-                pending_data=''
-            fi
+            drain_progress_log
             # A closed Zenity pipe ends the monitor normally.
             # shellcheck disable=SC2310
             render_tick || exit 0
@@ -1021,7 +1040,9 @@ main() {
             sleep 0.4
         fi
     done
+}
 
+report_progress_completion() {
     # The atomic result file is necessary but not sufficient: confirm that its
     # final path names an actual regular file before presenting 100 percent.
     # shellcheck disable=SC2310 # Predicate failure is the expected incomplete case.
@@ -1033,7 +1054,17 @@ main() {
     else
         emit_progress "${display_percent}" 'Download ended before the final file was confirmed.' || exit 0
     fi
+}
 
+main() {
+    trap cleanup EXIT
+    trap 'exit 0' PIPE
+
+    initialize_progress_inputs "$@"
+    initialize_progress_state
+    open_progress_log
+    monitor_worker_progress
+    report_progress_completion
 }
 
 main "$@"

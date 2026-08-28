@@ -19,6 +19,22 @@
 set -Eeuo pipefail
 umask 077
 
+root=''
+home_a=''
+home_b=''
+keyring_a=''
+keyring_b=''
+keyring_both=''
+pass_a=''
+pass_b=''
+pub_a=''
+pub_b=''
+fingerprint_a=''
+fingerprint_b=''
+rpm_version=''
+project_format=''
+V6_RPM=''
+
 fail() {
     printf 'FAIL: %s\n' "$*" >&2
     exit 65
@@ -205,9 +221,10 @@ SPEC
     V6_RPM=${packages[0]}
 }
 
-main() {
-    (($# == 1)) || fail 'usage: rpm6-multisig-integration.sh UNSIGNED_PROJECT.rpm'
-    readonly source_rpm=$1
+validate_rpm6_environment() {
+    local source_rpm=$1
+    local command_name signature_state
+
     [[ -f ${source_rpm} && ! -L ${source_rpm} ]] \
         || fail "project RPM is not a regular file: ${source_rpm}"
 
@@ -230,9 +247,10 @@ main() {
     )
     [[ ${signature_state} == unsigned ]] \
         || fail 'project fixture must start from an unsigned RPM'
+}
 
+prepare_rpm6_workspace() {
     root=$(mktemp -d)
-    readonly root
     home_a="${root}/gpg-a"
     home_b="${root}/gpg-b"
     keyring_a="${root}/keyring-a"
@@ -258,7 +276,9 @@ main() {
     chmod 600 -- "${pass_a}" "${pass_b}"
 
     V6_RPM=''
+}
 
+prepare_rpm6_signers() {
     generate_key "${home_a}" \
         'yt-dlp-aria2 RPM6 multisig A <rpm6-multisig-a@example.invalid>'
     generate_key "${home_b}" \
@@ -282,11 +302,16 @@ main() {
     rpmkeys_fs "${keyring_b}" --import "${pub_b}"
     rpmkeys_fs "${keyring_both}" --import "${pub_a}"
     rpmkeys_fs "${keyring_both}" --import "${pub_b}"
+}
+
+test_rpm_v4_legacy_signature() {
+    local source_rpm=$1
+    local legacy_one="${root}/project-v4-one-signer.rpm"
+    local legacy_log="${root}/project-v4-second-signer.log"
+    local legacy_count second_legacy_status
 
     # Production model: Fedora's RPM v4 package format and one v4-compatible
     # OpenPGP signature. Prove that a second legacy signer cannot be appended.
-    legacy_one="${root}/project-v4-one-signer.rpm"
-    legacy_log="${root}/project-v4-second-signer.log"
     cp -- "${source_rpm}" "${legacy_one}"
     sign_rpm_v4 "${home_a}" "${fingerprint_a}" "${pass_a}" "${legacy_one}"
 
@@ -304,11 +329,16 @@ main() {
         || fail 'RPM v4 fixture unexpectedly accepted a second legacy signature'
     grep -Fq 'already contains a legacy signature' "${legacy_log}" \
         || fail 'RPM v4 second-signature rejection did not report the expected diagnostic'
+}
+
+test_rpm_v4_v6_multisig() {
+    local source_rpm=$1
+    local v4_v6_multi="${root}/project-v4-v6-multisig.rpm"
+    local v4_v6_count v4_v6_format
 
     # Cross-format qualification: RPM 6 permits v6-style signatures on an RPM
     # package-format v4 payload. The package format must remain v4 while the
     # OpenPGP signature array accumulates independent signers.
-    v4_v6_multi="${root}/project-v4-v6-multisig.rpm"
     cp -- "${source_rpm}" "${v4_v6_multi}"
 
     sign_rpm_v6 "${home_a}" "${fingerprint_a}" "${pass_a}" "${v4_v6_multi}"
@@ -328,6 +358,13 @@ main() {
     [[ ${v4_v6_count} == 2 ]] \
         || fail "RPM v4/v6 fixture should contain two signatures; found ${v4_v6_count}"
     rpmkeys_fs "${keyring_both}" --checksig "${v4_v6_multi}"
+}
+
+test_rpm_v6_multisig_semantics() {
+    local v6_rpm v6_format v6_state
+    local a_only b_only a_then_b b_then_a corrupt_then_b signature_a
+    local a_only_count b_only_count a_then_b_count b_then_a_count corrupt_count
+    local wrong_key_status corrupt_status
 
     # Scenario: build a package-format v6 fixture and qualify multi-signature
     # semantics independently of the production RPM v4 format.
@@ -396,10 +433,22 @@ main() {
     set -e
     ((corrupt_status != 0)) \
         || fail 'RPM 6 accepted one corrupt known signature alongside one valid signature'
+}
+
+main() {
+    local source_rpm
+
+    (($# == 1)) || fail 'usage: rpm6-multisig-integration.sh UNSIGNED_PROJECT.rpm'
+    source_rpm=$1
+    validate_rpm6_environment "${source_rpm}"
+    prepare_rpm6_workspace
+    prepare_rpm6_signers
+    test_rpm_v4_legacy_signature "${source_rpm}"
+    test_rpm_v4_v6_multisig "${source_rpm}"
+    test_rpm_v6_multisig_semantics
 
     printf 'Project RPM format: v%s (single-signature production model confirmed).\n' "${project_format}"
     printf 'RPM v6 multi-signature qualification passed (%s).\n' "${rpm_version}"
-
 }
 
 main "$@"

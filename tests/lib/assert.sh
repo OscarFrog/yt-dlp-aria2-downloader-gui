@@ -54,6 +54,36 @@ assert_readable_file() {
     [[ -r ${file} ]] || fail "${label}: file is not readable: ${file}"
 }
 
+# Require a symbolic link to resolve to the expected textual target.
+assert_link_target() {
+    (($# == 3)) || test_error "assert_link_target requires 3 arguments; got $#."
+    local link_path=$1
+    local expected_target=$2
+    local label=$3
+    local actual_target=''
+
+    if ! actual_target=$(readlink -- "${link_path}"); then
+        fail "${label}: unable to read link ${link_path}"
+    fi
+    [[ ${actual_target} == "${expected_target}" ]] \
+        || fail "${label}: expected ${expected_target}, found ${actual_target}"
+}
+
+# Require a path to expose the expected numeric permission mode.
+assert_path_mode() {
+    (($# == 3)) || test_error "assert_path_mode requires 3 arguments; got $#."
+    local path=$1
+    local expected_mode=$2
+    local label=$3
+    local actual_mode=''
+
+    if ! actual_mode=$(stat -c '%a' -- "${path}"); then
+        fail "${label}: unable to read permissions for ${path}"
+    fi
+    [[ ${actual_mode} == "${expected_mode}" ]] \
+        || fail "${label}: expected mode ${expected_mode}, found ${actual_mode}"
+}
+
 # Require a command name or explicit path to be invocable.
 assert_invocable_command() {
     (($# == 2)) || test_error "assert_invocable_command requires 2 arguments; got $#."

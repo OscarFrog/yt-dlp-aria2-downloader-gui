@@ -51,6 +51,7 @@ ZENITY_STATUS=0
 ZENITY_ERROR=''
 RUNTIME_TMPDIR=''
 WAITED_WORKER_STATUS=''
+WORKER_STATUS=''
 LOG_FILE=''
 LOG_RETAINED=false
 LOG_TIMESTAMP=''
@@ -735,11 +736,14 @@ wait_for_worker_pgid() {
     return 1
 }
 
-main() {
-    trap cleanup EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+# Validate host capabilities and resolve the adjacent production scripts.
+initialize_gui_environment() {
+    local command_name
+    local required_option
+    local setsid_help
+    local resolve_status
+    local version_output=''
+    local version_value=''
 
     for command_name in bash chmod date dirname grep mkdir mktemp mv realpath rm sed setsid sleep stat tail zenity; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
@@ -749,23 +753,21 @@ main() {
         fi
     done
 
-    SETSID_HELP=$(LC_ALL=C setsid --help 2>&1) || {
+    setsid_help=$(LC_ALL=C setsid --help 2>&1) || {
         printf 'Error: unable to inspect setsid capabilities.\n' >&2
         exit 127
     }
-    readonly SETSID_HELP
     for required_option in --fork --wait; do
         if ! grep -Eq -- \
             "^[[:space:]]*(-[^[:space:]]+,[[:space:]]+)?${required_option}([=[:space:]]|$)" \
-            <<<"${SETSID_HELP}"; then
+            <<<"${setsid_help}"; then
             printf 'Error: this version of setsid does not support %s.\n' \
                 "${required_option}" >&2
             exit 127
         fi
     done
 
-    # resolve_runtime_tmpdir validates both the preferred and fallback paths.
-    # shellcheck disable=SC2310
+    # shellcheck disable=SC2310 # Both preferred and fallback paths are checked.
     if ! resolve_runtime_tmpdir RUNTIME_TMPDIR; then
         printf '%s\n' 'Error: no usable temporary directory is available.' >&2
         exit 1
@@ -793,8 +795,6 @@ main() {
         exit 1
     fi
 
-    version_output=''
-    version_value=''
     if version_output=$("${DOWNLOAD_SCRIPT}" --version 2>/dev/null); then
         version_value=${version_output##* }
         if [[ ${version_value} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -802,9 +802,14 @@ main() {
         fi
     fi
     readonly APP_DIALOG_TITLE
-    unset version_output version_value
 
     load_settings
+}
+
+# Collect and persist one valid URL/profile/destination request.
+collect_download_request() {
+    local status
+    local settings_status
 
     URL=''
     PROFILE=''
@@ -821,21 +826,15 @@ main() {
         set -e
 
         case ${status} in
-            0)
-                break
-                ;;
-            1)
-                exit 0
-                ;;
-            2)
-                continue
-                ;;
+            0) break ;;
+            1) exit 0 ;;
+            2) continue ;;
             5)
-                show_error "The URL entry dialog timed out."
+                show_error 'The URL entry dialog timed out.'
                 exit 1
                 ;;
             *)
-                show_error "Zenity could not display the URL entry dialog."
+                show_error 'Zenity could not display the URL entry dialog.'
                 exit 1
                 ;;
         esac
@@ -848,12 +847,8 @@ main() {
         set -e
 
         case ${status} in
-            0)
-                break
-                ;;
-            1)
-                exit 0
-                ;;
+            0) break ;;
+            1) exit 0 ;;
             2)
                 show_error 'The selected profile is invalid.'
                 continue
@@ -863,7 +858,7 @@ main() {
                 exit 1
                 ;;
             *)
-                show_error "Zenity could not display the profile selection dialog."
+                show_error 'Zenity could not display the profile selection dialog.'
                 exit 1
                 ;;
         esac
@@ -876,15 +871,9 @@ main() {
         set -e
 
         case ${status} in
-            0)
-                break
-                ;;
-            1)
-                exit 0
-                ;;
-            2)
-                continue
-                ;;
+            0) break ;;
+            1) exit 0 ;;
+            2) continue ;;
             5)
                 show_error 'The folder selection dialog timed out.'
                 exit 1
@@ -893,10 +882,10 @@ main() {
                 if [[ -n ${ZENITY_ERROR} ]]; then
                     show_error "Zenity could not display the folder selection dialog.
 
-    Technical details:
-    ${ZENITY_ERROR}"
+Technical details:
+${ZENITY_ERROR}"
                 else
-                    show_error "Zenity could not display the folder selection dialog."
+                    show_error 'Zenity could not display the folder selection dialog.'
                 fi
                 exit 1
                 ;;
@@ -910,17 +899,20 @@ main() {
     if ((settings_status != 0)); then
         printf 'Warning: GUI settings could not be saved.\n' >&2
     fi
+}
 
+# Create the private session state and build the engine command.
+prepare_gui_session() {
     if [[ -L ${STATE_DIR} ]]; then
         show_error "The application state path must not be a symbolic link.
 
-    Path: ${STATE_DIR}"
+Path: ${STATE_DIR}"
         exit 1
     fi
     if ! mkdir -p -- "${STATE_DIR}"; then
         show_error "Unable to create the application state directory.
 
-    Path: ${STATE_DIR}"
+Path: ${STATE_DIR}"
         exit 1
     fi
     chmod 700 -- "${STATE_DIR}" 2>/dev/null || true
@@ -942,7 +934,7 @@ main() {
     readonly RESULT_FILE="${TEMP_DIR}/result.txt"
     readonly PGID_FILE="${TEMP_DIR}/pgid"
     if ! chmod 600 -- "${LOG_FILE}"; then
-        show_error "Unable to secure the private live diagnostic log."
+        show_error 'Unable to secure the private live diagnostic log.'
         exit 1
     fi
 
@@ -981,8 +973,13 @@ main() {
             exit 2
             ;;
     esac
+}
 
-    # shellcheck disable=SC2016  # Variables are expanded by the intentionally nested shell.
+# Start the isolated engine session and require a controllable process group.
+start_download_worker() {
+    local pgid_status
+
+    # shellcheck disable=SC2016 # Expanded by the intentionally nested shell.
     YTDLP_ARIA2_SUPERVISED_SESSION=true LC_ALL=C setsid --fork --wait bash -c '
         pgid_file=$1
         shift
@@ -1008,6 +1005,14 @@ main() {
         show_error "The download could not start."$'\n\n'"Log: ${LOG_FILE}"
         exit 1
     fi
+}
+
+# Run the progress pipeline, map dialog outcomes, and reap the engine worker.
+run_progress_dialog() {
+    local -a pipeline_status=()
+    local monitor_status
+    local zenity_status
+    local worker_status=''
 
     set +e
     monitor_progress \
@@ -1022,11 +1027,9 @@ main() {
     pipeline_status=("${PIPESTATUS[@]}")
     set -e
 
-    # A closed Zenity input pipe is a normal monitor exit. Any other non-zero
-    # monitor status is a technical failure and must not be hidden by Zenity's EOF.
+    # Zenity closing its input is normal; other monitor failures are technical.
     monitor_status=${pipeline_status[0]:-1}
     zenity_status=${pipeline_status[1]:-1}
-    worker_status=''
     if ((monitor_status != 0)); then
         # shellcheck disable=SC2310
         if ! stop_worker; then
@@ -1049,8 +1052,6 @@ main() {
             WORKER_PGID=''
         fi
 
-        # If the worker completed successfully just before the Cancel response was
-        # processed, report the completed file instead of a misleading cancellation.
         if ((zenity_status == 1 && worker_status == 0)); then
             zenity_status=0
         elif ((zenity_status == 1)); then
@@ -1061,7 +1062,7 @@ main() {
                 --width=420 || true
             exit 130
         elif ((zenity_status == 5)); then
-            show_error "The progress dialog timed out; the download was stopped."
+            show_error 'The progress dialog timed out; the download was stopped.'
             exit 1
         else
             show_error "The progress dialog exited with status ${zenity_status}."
@@ -1086,114 +1087,142 @@ main() {
         fi
     fi
 
-    if ((worker_status == 0)); then
-        final_path=''
-        result_path=''
-        if [[ -s ${RESULT_FILE} ]]; then
-            while IFS= read -r result_path || [[ -n ${result_path} ]]; do
-                if [[ -n ${result_path} ]]; then
-                    final_path=${result_path}
-                fi
-            done <"${RESULT_FILE}"
-        fi
+    WORKER_STATUS=${worker_status}
+}
 
-        resolved_final_path=''
-        if [[ -n ${final_path} ]]; then
-            resolved_final_path=$(realpath -e -- "${final_path}" 2>/dev/null || true)
-        fi
+# Resolve the final result and prove that it belongs to the selected directory.
+resolve_confirmed_final_path() {
+    (($# == 1)) || return 2
+    local output_name=$1
+    local candidate=''
+    local result_path=''
+    local resolved=''
 
-        result_is_valid=false
-        if [[ -n ${resolved_final_path} && -f ${resolved_final_path} ]]; then
-            if [[ ${OUTPUT_DIR} == / || ${resolved_final_path} == "${OUTPUT_DIR}"/* ]]; then
-                result_is_valid=true
-                final_path=${resolved_final_path}
+    if [[ -s ${RESULT_FILE} ]]; then
+        while IFS= read -r result_path || [[ -n ${result_path} ]]; do
+            if [[ -n ${result_path} ]]; then
+                candidate=${result_path}
             fi
-        fi
+        done <"${RESULT_FILE}"
+    fi
 
-        if [[ ${result_is_valid} != true ]]; then
+    if [[ -n ${candidate} ]]; then
+        resolved=$(realpath -e -- "${candidate}" 2>/dev/null || true)
+    fi
+    [[ -n ${resolved} && -f ${resolved} ]] || return 1
+    [[ ${OUTPUT_DIR} == / || ${resolved} == "${OUTPUT_DIR}"/* ]] || return 1
+
+    printf -v "${output_name}" '%s' "${resolved}"
+}
+
+# Present the successful result and handle open-folder/new-download actions.
+show_success_dialog() {
+    (($# == 1)) || return 2
+    local final_path=$1
+    local success_text='The download is complete.'
+    local log_notice=''
+    local success_action=''
+    local success_status
+
+    success_text+=$'\n\nFile: '
+    success_text+="${final_path}"
+    if rm -f -- "${LOG_FILE}"; then
+        LOG_FILE=''
+    else
+        retain_sanitized_log
+        log_notice=$'\n\nWarning: the successful-download log could not be deleted.\nLog: '
+        log_notice+="${LOG_FILE}"
+    fi
+    success_text+="${log_notice}"
+
+    run_zenity_capture success_action --question \
+        --title="${APP_DIALOG_TITLE}" \
+        --text="${success_text}" \
+        --no-markup \
+        --extra-button='New download' \
+        --ok-label='Open folder' \
+        --cancel-label='Close' \
+        --width=700
+    success_status=${ZENITY_STATUS}
+
+    if [[ ${success_action} == 'New download' ]]; then
+        # exec does not run EXIT cleanup; remove the completed private session.
+        if [[ -n ${TEMP_DIR} && -d ${TEMP_DIR} ]]; then
+            rm -rf -- "${TEMP_DIR}"
+        fi
+        TEMP_DIR=''
+        exec bash "${SCRIPT_DIR}/download-video-gui.sh"
+    fi
+
+    case ${success_status} in
+        0)
+            if command -v xdg-open >/dev/null 2>&1; then
+                xdg-open "${OUTPUT_DIR}" >/dev/null 2>&1 &
+            fi
+            ;;
+        1) ;;
+        5)
+            show_error 'The completion dialog timed out.'
+            ;;
+        *)
+            if [[ -n ${ZENITY_ERROR} ]]; then
+                show_error "Zenity could not display the completion dialog.
+
+Technical details:
+${ZENITY_ERROR}"
+            else
+                show_error 'Zenity could not display the completion dialog.'
+            fi
+            ;;
+    esac
+}
+
+# Convert the worker status into a confirmed success dialog or retained failure.
+handle_worker_result() {
+    local confirmed_path=''
+
+    if ((WORKER_STATUS == 0)); then
+        # shellcheck disable=SC2310 # Failure produces a user-facing diagnostic.
+        if ! resolve_confirmed_final_path confirmed_path; then
             retain_sanitized_log
             show_error "The downloader completed, but the final media file could not be confirmed inside the selected destination folder."$'\n\n'"Log: ${LOG_FILE}"
             exit 1
         fi
-
-        success_text='The download is complete.'
-        success_text+=$'\n\nFile: '
-        success_text+="${final_path}"
-        log_notice=''
-        if rm -f -- "${LOG_FILE}"; then
-            LOG_FILE=''
-        else
-            retain_sanitized_log
-            log_notice=$'\n\nWarning: the successful-download log could not be deleted.\nLog: '
-            log_notice+="${LOG_FILE}"
-        fi
-        success_text+="${log_notice}"
-
-        success_action=''
-        run_zenity_capture success_action --question \
-            --title="${APP_DIALOG_TITLE}" \
-            --text="${success_text}" \
-            --no-markup \
-            --extra-button='New download' \
-            --ok-label='Open folder' \
-            --cancel-label='Close' \
-            --width=700
-        success_status=${ZENITY_STATUS}
-
-        if [[ ${success_action} == 'New download' ]]; then
-            # exec does not run the EXIT trap. WORKER_PID is already empty, and the
-            # completed download's temporary directory must be removed explicitly.
-            # Its log was deleted only when the final media file was confirmed.
-            if [[ -n ${TEMP_DIR} && -d ${TEMP_DIR} ]]; then
-                rm -rf -- "${TEMP_DIR}"
-            fi
-            TEMP_DIR=''
-
-            exec bash "${SCRIPT_DIR}/download-video-gui.sh"
-        fi
-
-        case ${success_status} in
-            0)
-                if command -v xdg-open >/dev/null 2>&1; then
-                    xdg-open "${OUTPUT_DIR}" >/dev/null 2>&1 &
-                fi
-                ;;
-            1)
-                # Close button or window close action.
-                ;;
-            5)
-                show_error 'The completion dialog timed out.'
-                ;;
-            *)
-                if [[ -n ${ZENITY_ERROR} ]]; then
-                    show_error "Zenity could not display the completion dialog.
-
-    Technical details:
-    ${ZENITY_ERROR}"
-                else
-                    show_error "Zenity could not display the completion dialog."
-                fi
-                ;;
-        esac
-    else
-        retain_sanitized_log
-        if zenity --question \
-            --title="Download failed" \
-            --text="The download failed with status ${worker_status}.
-
-    View the log?" \
-            --no-markup \
-            --ok-label='View log' \
-            --cancel-label='Close' \
-            --width=540; then
-            zenity --text-info \
-                --title="Sanitized diagnostic log - ${APP_NAME}" \
-                --filename="${LOG_FILE}" \
-                --width=950 \
-                --height=650 || true
-        fi
-        exit "${worker_status}"
+        show_success_dialog "${confirmed_path}"
+        return 0
     fi
+
+    retain_sanitized_log
+    if zenity --question \
+        --title='Download failed' \
+        --text="The download failed with status ${WORKER_STATUS}.
+
+View the log?" \
+        --no-markup \
+        --ok-label='View log' \
+        --cancel-label='Close' \
+        --width=540; then
+        zenity --text-info \
+            --title="Sanitized diagnostic log - ${APP_NAME}" \
+            --filename="${LOG_FILE}" \
+            --width=950 \
+            --height=650 || true
+    fi
+    exit "${WORKER_STATUS}"
+}
+
+main() {
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    initialize_gui_environment
+    collect_download_request
+    prepare_gui_session
+    start_download_worker
+    run_progress_dialog
+    handle_worker_result
 
 }
 

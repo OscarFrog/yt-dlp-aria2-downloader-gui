@@ -335,8 +335,9 @@ assert_percentages_never_decrease() {
     fi
 }
 
-main() {
-    trap 'stop_active_processes; rm -rf -- "${TEST_ROOT}" || true' EXIT
+test_monitor_reader_lifecycle() {
+    local partial_capture_lines pipe_log pipe_result pipe_scenario_dir
+    local pipe_status pipe_worker reader_value_count
 
     # Closing the Zenity side of the pipe must end the monitor normally instead of
     # leaking a SIGPIPE status to the GUI pipeline.
@@ -421,6 +422,11 @@ main() {
     finish_success '/tmp/final-log-drain.mkv'
     assert_file_contains "${CAPTURE_FILE}" 'Downloading the media - 75%' \
         'final log bytes are drained after worker exit'
+}
+
+test_monitor_planning_progress() {
+    local metadata_capture_lines metadata_download_max metadata_preprocess_max
+    local private_first_max
 
     # Regression 2.2.0: --parse-metadata creates a MetadataParser postprocessor
     # at yt-dlp's pre_process stage. The generic postprocess progress hook fires
@@ -486,6 +492,10 @@ main() {
     wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 40% (aria2c)' \
         'combined direct video uses the exact private transfer count'
     finish_success '/tmp/private-direct-combined-video.mkv'
+}
+
+test_monitor_direct_transfer_progress() {
+    local weighted_max
 
     # Scenario: direct video transfer handled by aria2c.
     start_scenario direct-aria-video video
@@ -530,6 +540,10 @@ main() {
         'YTDLP_PROGRESS_V2|media|251|finished|1000|1000|0|0|0|100.0%|1MiB/s|00:00' \
         >>"${LOG_FILE}"
     finish_success '/tmp/audio.webm'
+}
+
+test_monitor_native_transfer_progress() {
+    local bootstrap_max
 
     # Scenario: one file downloaded directly by yt-dlp.
     start_scenario native-single video
@@ -609,6 +623,10 @@ main() {
     wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 40%' \
         'DASH estimated-byte percentage'
     finish_success '/tmp/dash.mkv'
+}
+
+test_monitor_composite_and_postprocess_progress() {
+    local first_max
 
     # Separate video and audio streams: the first local 100% must stay below global completion.
     start_scenario composite-video-audio video
@@ -700,6 +718,10 @@ main() {
     assert_file_not_contains "${CAPTURE_FILE}" 'Downloading the media - 10%' \
         'late download output is ignored after post-processing starts'
     finish_success '/tmp/late.mkv'
+}
+
+test_monitor_failure_and_input_hardening() {
+    local hostile_id hostile_marker
 
     # Negative control: download and post-processing failures never emit completion.
     start_scenario download-error video
@@ -750,9 +772,18 @@ main() {
     start_scenario missing-final-file video
     printf '%s\n' "${SCENARIO_DIR}/missing-output.mkv" >"${RESULT_FILE}"
     finish_failure
+}
 
+main() {
+    trap 'stop_active_processes; rm -rf -- "${TEST_ROOT}" || true' EXIT
+
+    test_monitor_reader_lifecycle
+    test_monitor_planning_progress
+    test_monitor_direct_transfer_progress
+    test_monitor_native_transfer_progress
+    test_monitor_composite_and_postprocess_progress
+    test_monitor_failure_and_input_hardening
     printf '%s\n' 'Progress-monitor integration tests passed.'
-
 }
 
 main "$@"

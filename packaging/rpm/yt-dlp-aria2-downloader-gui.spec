@@ -75,6 +75,10 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Fri Aug 28 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.0-1
+- Unify shell architecture, runtime checks, packaging, and release validation.
+- Parallelize profiled validation while retaining dedicated stress coverage.
+
 * Thu Aug 27 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.2.6-1
 - Harden shell/workflow consistency checks and runtime-manager diagnostics.
 - Harden RPM per-user cleanup metadata and privilege boundaries.

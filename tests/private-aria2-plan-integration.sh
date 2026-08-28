@@ -191,27 +191,15 @@ run_commit() {
 assert_private_file() {
     local path=$1
     local label=$2
-    local mode
 
     [[ -f ${path} && ! -L ${path} ]] \
         || fail "${label} is not a regular non-symlink file."
 
-    mode=$(stat -c '%a' -- "${path}")
-    assert_equals '600' "${mode}" "${label} permissions"
+    assert_path_mode "${path}" 600 "${label} permissions"
 }
 
-main() {
-    require_test_command python3
-    require_test_command stat
-
-    [[ -f ${HELPER} && ! -L ${HELPER} && ! -x ${HELPER} ]] \
-        || fail 'Private aria2 helper must be a non-executable regular file.'
-
-    TEST_ROOT=$(mktemp -d)
-    trap cleanup EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+test_private_plan_classification() {
+    local uri_count
 
     # Single direct transfer.
     printf '%s\n' 'Private aria2 plan scenario: single-stream'
@@ -381,6 +369,10 @@ PY_UNREPRESENTABLE
 
     [[ ! -e ${ARIA2_INPUT} && ! -e ${MANIFEST} ]] \
         || fail 'Native classification unexpectedly created aria2 artifacts.'
+}
+
+test_private_plan_input_validation() {
+    local userinfo_index userinfo_url
 
     # URL TAB injection.
     printf '%s\n' 'Private aria2 plan scenario: URL TAB rejection'
@@ -565,6 +557,10 @@ PY_HEADER_TYPE
         || fail 'Destination symlink target was unexpectedly published.'
     [[ -f ${STAGING_DIR}/item-000.download ]] \
         || fail 'Destination symlink refusal removed the staging source.'
+}
+
+test_private_plan_publication_safety() {
+    local existing_content
 
     # Plan must itself be private.
     printf '%s\n' 'Private aria2 plan scenario: plan permissions'
@@ -636,7 +632,9 @@ PY_HEADER_TYPE
 
     [[ -f ${STAGING_DIR}/item-000.download ]] \
         || fail 'Overwrite refusal removed the staging source.'
+}
 
+test_private_plan_rollback_safety() {
     # Rollback must never delete a destination that no longer has the inode
     # originally published by this transaction.
     printf '%s\n' 'Private aria2 plan scenario: conservative rollback identity'
@@ -828,7 +826,25 @@ assert not os.path.lexists(source)
 assert destination.read_text(encoding="utf-8") == "foreign\n"
 assert anchor.read_text(encoding="utf-8") == "original\n"
 PY_REPLACED_DEST
+}
 
+main() {
+    require_test_command python3
+    require_test_command stat
+
+    [[ -f ${HELPER} && ! -L ${HELPER} && ! -x ${HELPER} ]] \
+        || fail 'Private aria2 helper must be a non-executable regular file.'
+
+    TEST_ROOT=$(mktemp -d)
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    test_private_plan_classification
+    test_private_plan_input_validation
+    test_private_plan_publication_safety
+    test_private_plan_rollback_safety
     printf '%s\n' 'Private aria2 plan integration tests passed.'
 }
 

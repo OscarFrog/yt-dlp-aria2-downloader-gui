@@ -189,7 +189,7 @@ jobs:
           grep -Fq "is **${version}**." README.md
           grep -Fq "version actuelle est la **${version}**" README.fr.md
           grep -Fq "## ${version} - " CHANGELOG.md
-      - run: bash ./tests/run-all.sh
+      - run: bash ./tests/run-all.sh --jobs 4
 
 
   previous-release:
@@ -503,7 +503,7 @@ jobs:
           unzip -t "dist/${package}.zip"
           extracted=$(mktemp -d); trap 'rm -rf -- "${extracted}"' EXIT
           unzip -q "dist/${package}.zip" -d "${extracted}"
-          (cd "${extracted}/${package}" && bash ./tests/run-all.sh)
+          (cd "${extracted}/${package}" && bash ./tests/run-all.sh --jobs 4)
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-zip
