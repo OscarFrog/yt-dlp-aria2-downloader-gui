@@ -122,7 +122,7 @@ if [[ ${1:-} == -qp ]]; then
         ${query_format} != *'%{RELEASE}'* ]]; then
         rpm_path=${*: -1}
         [[ $(<"${rpm_path}") == verified-rpm ]] || exit 1
-        printf '%s\n' yt-dlp-aria2-downloader-gui 2.3.4 noarch
+        printf '%s\n' yt-dlp-aria2-downloader-gui 2.3.5 noarch
         exit 0
     fi
     printf '%s\n' \

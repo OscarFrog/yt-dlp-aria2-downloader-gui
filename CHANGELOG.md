@@ -1,3 +1,11 @@
+## 2.3.5 - 2026-08-29
+
+### Documentation
+
+- Align every English and French installation example with the immutable
+  v2.3.4 RPM, DEB and ZIP, while opening the next development version so its
+  package identity cannot collide with the published release tag.
+
 ## 2.3.4 - 2026-08-28
 
 ### Test reliability

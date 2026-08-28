@@ -75,6 +75,9 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sat Aug 29 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.5-1
+- Align package documentation with v2.3.4 and open the next development version.
+
 * Fri Aug 28 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.4-1
 - Make startup-signal qualification deterministic under parallel load.
 
