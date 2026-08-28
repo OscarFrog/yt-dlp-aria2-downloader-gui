@@ -24,7 +24,7 @@ fi
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 # The development tree can lead the latest installable GitHub release. Keep the
 # two contracts explicit so README package names never advertise absent assets.
-readonly EXPECTED_VERSION='2.3.2'
+readonly EXPECTED_VERSION='2.3.3'
 readonly EXPECTED_PUBLISHED_VERSION='2.3.1'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SHELL_INVENTORY_FILE=''
@@ -1121,6 +1121,7 @@ test_static_shell_interface_contracts() {
 
 test_static_release_contracts() {
     local engine_reported_version evidence_phase preflight_phase readme_path
+    local release_workflow
 
     # Current-version coherence is intentionally checked only on authoritative
     # carriers. Historical versions used by regression/upgrade fixtures are valid
@@ -1216,6 +1217,29 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'grep -Fqx "readonly APP_VERSION='\''${version}'\''" install-fedora.sh' \
         'release validates Fedora bootstrap version constant'
+    # shellcheck disable=SC2016
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
+        'grep -Fq "development version is **${version}**." README.md' \
+        'release validates English README development version'
+    # shellcheck disable=SC2016
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
+        'grep -Fq "développement actuelle est la **${version}**." README.fr.md' \
+        'release validates French README development version'
+    for release_workflow in \
+        "${SCRIPT_DIR}/.github/workflows/packages.yml" \
+        "${SCRIPT_DIR}/.github/workflows/release.yml"; do
+        # shellcheck disable=SC2016
+        assert_file_contains "${release_workflow}" \
+            'repos/${GITHUB_REPOSITORY}/releases?per_page=100' \
+            'previous-release resolution uses published GitHub Releases'
+        assert_file_contains "${release_workflow}" \
+            'select(.draft == false and .prerelease == false and .published_at != null)' \
+            'previous-release resolution excludes unpublished and prerelease records'
+        # shellcheck disable=SC2016
+        assert_file_contains "${release_workflow}" \
+            'printf '\''%s\n'\'' "${published_release_tags}"' \
+            'previous-release candidates come from published release tags'
+    done
     # Header metadata is intentionally version-agnostic; release coherence is
     # verified through authoritative version carriers.
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
