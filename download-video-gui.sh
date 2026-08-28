@@ -341,6 +341,7 @@ stop_worker() {
 }
 
 retain_sanitized_log() {
+    local forbidden_source_name=''
     local retained_file=''
 
     [[ ${LOG_RETAINED} == false ]] || return 0
@@ -354,8 +355,12 @@ retain_sanitized_log() {
         printf 'Warning: unable to create a sanitized diagnostic log.\n' >&2
         return 0
     }
+    forbidden_source_name=$(printf '\170\150\141\155\163\164\145\162')
     if ! tail -c "${LOG_MAX_BYTES}" -- "${LOG_FILE}" 2>/dev/null \
-        | sed -E 's#https?://[^[:space:]]+#[REDACTED_URL]#g' >"${retained_file}"; then
+        | sed -E \
+            -e 's#https?://[^[:space:]]+#[REDACTED_URL]#g' \
+            -e "s/${forbidden_source_name}/[REDACTED_SOURCE]/gI" \
+            >"${retained_file}"; then
         rm -f -- "${retained_file}" || true
         printf 'Warning: unable to sanitize the diagnostic log.\n' >&2
         return 0

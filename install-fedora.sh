@@ -10,11 +10,16 @@ set -Eeuo pipefail
 umask 022
 
 readonly PACKAGE_NAME='yt-dlp-aria2-downloader-gui'
-readonly APP_VERSION='2.3.0'
+readonly APP_VERSION='2.3.1'
 readonly PRIVATE_DIR='/usr/libexec/yt-dlp-aria2-downloader'
 readonly RPM_SIGNING_KEY_NAME='RPM-GPG-KEY-OscarFrog'
 readonly RPM_SIGNING_FINGERPRINT='7B54065FE061E78ED2C96252E3BE996196ABEA7F'
 readonly RPM_SIGNING_SUBKEY_FINGERPRINT='1F5B769CE48A08AAC0A7D9DDECC9894B41830245'
+readonly RPM_FUSION_SUPPORTED_FEDORA='44'
+readonly RPM_FUSION_SIGNING_FINGERPRINT='E9A491A3DE247814E7E067EAE06F8ECDD651FF2E'
+readonly RPM_FUSION_RELEASE_NEVRA='rpmfusion-free-release-44-3.noarch'
+readonly RPM_FUSION_KEY_URL='https://download1.rpmfusion.org/free/fedora/RPM-GPG-KEY-rpmfusion-free-fedora-2020'
+readonly RPM_FUSION_RELEASE_URL='https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm'
 
 error() {
     printf 'Error: %s\n' "$*" >&2
@@ -174,8 +179,8 @@ detect_supported_fedora() {
         error 'unable to determine the Fedora release.'
         exit 69
     }
-    if ((detected_version < 44)); then
-        error "Fedora 44 or newer is required; found Fedora ${detected_version}."
+    if [[ ${detected_version} != "${RPM_FUSION_SUPPORTED_FEDORA}" ]]; then
+        error "Fedora ${RPM_FUSION_SUPPORTED_FEDORA} is the only qualified release; found Fedora ${detected_version}."
         exit 69
     fi
     printf -v "${output_variable}" '%s' "${detected_version}"
@@ -364,13 +369,145 @@ authenticate_signed_rpm() {
     run_root rpmkeys --import "${key_path}"
 }
 
+ensure_rpm_fusion_bootstrap_tools() {
+    local command_name=''
+    local -a missing_packages=()
+
+    command -v curl >/dev/null 2>&1 || missing_packages+=(curl)
+    command -v gpg >/dev/null 2>&1 || missing_packages+=(gnupg2)
+    if ((${#missing_packages[@]} > 0)); then
+        printf 'Installing Fedora-repository bootstrap prerequisites...\n'
+        run_root dnf install --assumeyes ca-certificates "${missing_packages[@]}"
+    fi
+    for command_name in curl gpg; do
+        command -v "${command_name}" >/dev/null 2>&1 || {
+            error "required RPM Fusion authentication command is absent: ${command_name}"
+            exit 127
+        }
+    done
+}
+
+validate_rpm_fusion_certificate() {
+    local gpg_output=$1
+    local primary_count=''
+    local primary_fingerprint=''
+    local primary_validity=''
+
+    primary_count=$(
+        awk -F: '$1 == "pub" { count++ } END { print count + 0 }' \
+            "${gpg_output}"
+    )
+    primary_fingerprint=$(
+        awk -F: \
+            '$1 == "pub" { want=1; next }
+             want && $1 == "fpr" {
+                 print toupper($10)
+                 exit
+             }' \
+            "${gpg_output}"
+    )
+    primary_validity=$(
+        awk -F: '$1 == "pub" { print $2; exit }' "${gpg_output}"
+    )
+
+    if [[ ${primary_count} != 1 ||
+        ${primary_fingerprint} != "${RPM_FUSION_SIGNING_FINGERPRINT}" ||
+        ${primary_validity} == r || ${primary_validity} == e ]]; then
+        error "unexpected RPM Fusion bootstrap certificate: count=${primary_count} fingerprint=${primary_fingerprint:-missing} validity=${primary_validity:-missing}"
+        exit 65
+    fi
+}
+
+validate_rpm_fusion_release_identity() {
+    local rpm_path=$1
+    local resolved_nevra=''
+
+    resolved_nevra=$(rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' \
+        -- "${rpm_path}") || {
+        error 'unable to inspect the RPM Fusion bootstrap package.'
+        exit 65
+    }
+    if [[ ${resolved_nevra} != "${RPM_FUSION_RELEASE_NEVRA}" ]]; then
+        error "unexpected RPM Fusion bootstrap package: ${resolved_nevra:-missing}"
+        exit 65
+    fi
+}
+
 enable_rpm_fusion() {
     local fedora_version=$1
+    local installed_nevra=''
 
-    if ! rpm -q rpmfusion-free-release >/dev/null 2>&1; then
-        printf 'Enabling RPM Fusion Free...\n'
-        run_root dnf install --assumeyes "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${fedora_version}.noarch.rpm"
+    if installed_nevra=$(rpm -q --qf \
+        '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' \
+        rpmfusion-free-release 2>/dev/null); then
+        [[ ${installed_nevra} == "${RPM_FUSION_RELEASE_NEVRA}" ]] || {
+            error "installed RPM Fusion release package is outside the qualified contract: ${installed_nevra:-missing}"
+            exit 65
+        }
+        return 0
     fi
+    [[ ${fedora_version} == "${RPM_FUSION_SUPPORTED_FEDORA}" ]] || {
+        error "no authenticated RPM Fusion bootstrap is pinned for Fedora ${fedora_version}."
+        exit 69
+    }
+
+    ensure_rpm_fusion_bootstrap_tools
+    (
+        local bootstrap_root=''
+        local gpg_home=''
+        local gpg_output=''
+        local key_path=''
+        local release_rpm=''
+        local rpm_verify_keyring=''
+
+        bootstrap_root=$(mktemp -d) || {
+            error 'unable to create the RPM Fusion verification directory.'
+            exit 70
+        }
+        chmod 700 -- "${bootstrap_root}"
+        trap 'rm -rf -- "${bootstrap_root:-}"' EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+
+        gpg_home="${bootstrap_root}/gnupg"
+        gpg_output="${bootstrap_root}/key.colons"
+        key_path="${bootstrap_root}/RPM-GPG-KEY-rpmfusion-free-fedora-2020"
+        release_rpm="${bootstrap_root}/rpmfusion-free-release-44.noarch.rpm"
+        rpm_verify_keyring="${bootstrap_root}/rpm-keyring"
+        mkdir -p -- "${gpg_home}" "${rpm_verify_keyring}"
+        chmod 700 -- "${gpg_home}" "${rpm_verify_keyring}"
+
+        printf 'Downloading authenticated RPM Fusion metadata...\n'
+        curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 120 \
+            --retry 3 --retry-all-errors \
+            --output "${key_path}" "${RPM_FUSION_KEY_URL}" || {
+            error 'unable to download the RPM Fusion signing certificate.'
+            exit 69
+        }
+        curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 120 \
+            --retry 3 --retry-all-errors \
+            --output "${release_rpm}" "${RPM_FUSION_RELEASE_URL}" || {
+            error 'unable to download the RPM Fusion bootstrap package.'
+            exit 69
+        }
+
+        inspect_rpm_signing_certificate \
+            "${key_path}" "${gpg_home}" "${gpg_output}"
+        validate_rpm_fusion_certificate "${gpg_output}"
+        verify_rpm_with_pinned_keyring \
+            "${release_rpm}" "${key_path}" "${rpm_verify_keyring}"
+        validate_rpm_fusion_release_identity "${release_rpm}"
+
+        printf 'Importing authenticated RPM Fusion certificate: %s\n' \
+            "${RPM_FUSION_SIGNING_FINGERPRINT}"
+        run_root rpmkeys --import "${key_path}"
+        printf 'Enabling authenticated RPM Fusion Free...\n'
+        run_root dnf install --assumeyes \
+            --setopt=localpkg_gpgcheck=True "${release_rpm}"
+    )
 }
 
 install_media_dependencies() {

@@ -50,6 +50,7 @@ TEST_SHELL_FILES=(
     tests/runtime-manager-hardening-integration.sh
     tests/progress-monitor-integration.sh
     tests/installer-integration.sh
+    tests/install-fedora-authentication-integration.sh
     tests/packaging-integration.sh
     tests/package-user-cleanup-integration.sh
     tests/rpm6-multisig-integration.sh

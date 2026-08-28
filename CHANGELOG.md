@@ -1,3 +1,39 @@
+## 2.3.1 - 2026-08-28
+
+### Security and supply chain
+
+- Authenticate the Fedora 44 RPM Fusion bootstrap before any privileged
+  transaction by pinning its OpenPGP fingerprint and NEVRA, verifying both in
+  isolated keyrings, and requiring DNF local-package signature checks.
+- Route HTTPS plans away from affected aria2 1.37.x GnuTLS builds while
+  retaining direct acceleration for unaffected TLS backends and corrected
+  aria2 generations.
+- Require the release workflow to verify the exact authorized tag-signing
+  fingerprint locally instead of trusting a generic GitHub verification flag.
+
+### Process reliability and diagnostics
+
+- Defer signals arriving inside the test-runner launch/registration critical
+  section until the new child PID and process group are fully supervised, and
+  close the final replay window so a later signal cannot supersede the first.
+- Synchronize cancellation and private-staging signal fixtures with observable
+  worker readiness, and preserve the intended signal status under load.
+- Redact the forbidden external source label from engine diagnostics and
+  retained GUI logs, with a repository-wide static gate against reintroduction;
+  keep the streaming redactor alive through cancellation to avoid SIGPIPE races.
+- Enforce owner-only URL-file permissions and report bounded, secret-safe
+  FFprobe validation reasons for rejected final media.
+
+### Consistency and release evidence
+
+- Remove the dead signal alias and harden the output-by-name helpers exposed by
+  the audit's dynamic-scope mutations.
+- Verify administrator bypass and the exact deployment tag-policy type through
+  the GitHub API, paginate exact-SHA workflow lookup, and retry transient public
+  evidence operations with a bounded budget.
+- Align Fedora support, English/French documentation, testing scope and static
+  content policy with the implemented v2.3.1 guarantees.
+
 ## 2.3.0 - 2026-08-28
 
 ### Architecture and consistency

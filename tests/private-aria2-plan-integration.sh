@@ -171,10 +171,25 @@ PY_INNER
 
 run_classify() {
     python3 "${HELPER}" classify \
+        --allow-https-direct \
         --plan "${PLAN_FILE}"
 }
 
 run_build() {
+    python3 "${HELPER}" build \
+        --allow-https-direct \
+        --plan "${PLAN_FILE}" \
+        --output-dir "${OUTPUT_DIR}" \
+        --staging-dir "${STAGING_DIR}" \
+        --aria2-input "${ARIA2_INPUT}" \
+        --manifest "${MANIFEST}"
+}
+
+run_classify_without_https_opt_in() {
+    python3 "${HELPER}" classify --plan "${PLAN_FILE}"
+}
+
+run_build_without_https_opt_in() {
     python3 "${HELPER}" build \
         --plan "${PLAN_FILE}" \
         --output-dir "${OUTPUT_DIR}" \
@@ -828,6 +843,29 @@ assert anchor.read_text(encoding="utf-8") == "original\n"
 PY_REPLACED_DEST
 }
 
+test_https_direct_requires_explicit_opt_in() {
+    printf '%s\n' 'Private aria2 plan scenario: HTTPS direct opt-in'
+    new_case 'https-direct-opt-in'
+    write_single_plan \
+        'https://example.invalid/media.mp4' \
+        "${OUTPUT_DIR}/final.mp4" \
+        'qualification-agent'
+
+    assert_status 0 'HTTPS classification without opt-in' \
+        run_classify_without_https_opt_in
+    assert_text_contains "${ASSERT_OUTPUT}" 'transport=native' \
+        'HTTPS defaults to native transport'
+    assert_status 65 'HTTPS direct build without opt-in is rejected' \
+        run_build_without_https_opt_in
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'HTTPS requires native yt-dlp transport on this aria2 build' \
+        'HTTPS build rejection explains the transport policy'
+
+    assert_status 0 'reviewed HTTPS classification opt-in' run_classify
+    assert_text_contains "${ASSERT_OUTPUT}" 'transport=direct' \
+        'reviewed HTTPS opt-in permits direct transport'
+}
+
 main() {
     require_test_command python3
     require_test_command stat
@@ -845,6 +883,7 @@ main() {
     test_private_plan_input_validation
     test_private_plan_publication_safety
     test_private_plan_rollback_safety
+    test_https_direct_requires_explicit_opt_in
     printf '%s\n' 'Private aria2 plan integration tests passed.'
 }
 
