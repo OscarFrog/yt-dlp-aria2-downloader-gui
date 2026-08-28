@@ -2878,6 +2878,7 @@ test_mock_managed_runtime_attestation() {
     # A managed launch consumes one runtime-manager attestation and must not
     # repeat the yt-dlp/Deno discovery commands already covered by that proof.
     prepare_argument_log 'managed-runtime-attestation'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     : >"${MOCK_RUNTIME_MANAGER_LOG}"
     : >"${ytdlp_control_log}"
     : >"${deno_control_log}"
