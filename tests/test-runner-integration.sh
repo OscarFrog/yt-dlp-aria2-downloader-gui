@@ -38,10 +38,18 @@ set -u
 set -T
 source "$1"
 marker=$2
+registration_gate=$3
 runner_pid=$BASHPID
 
 _test_runner_exec_child() {
+    local attempt=0
+
     printf '%s\n' "$BASHPID" >"${marker}"
+    for ((attempt = 0; attempt < 2000; attempt++)); do
+        [[ -e ${registration_gate} ]] && break
+        sleep 0.001
+    done
+    [[ -e ${registration_gate} ]] || exit 70
     kill -INT -- "${runner_pid}"
     exec sleep 30
 }
@@ -64,8 +72,15 @@ test_runner_terminate_children() {
 }
 
 startup_debug_gate() {
+    local attempt=0
+
     if [[ ${BASH_COMMAND} == 'child_pid=$!' ]]; then
-        sleep 0.02
+        : >"${registration_gate}"
+        for ((attempt = 0; attempt < 2000; attempt++)); do
+            [[ -n ${TEST_RUNNER_DEFERRED_SIGNAL} ]] && return 0
+            sleep 0.001 || true
+        done
+        return 70
     fi
 }
 
@@ -102,25 +117,45 @@ with tempfile.TemporaryDirectory(prefix="runner-startup-stress-") as temp_dir:
     root = pathlib.Path(temp_dir)
     for iteration in range(30):
         marker = root / f"child-{iteration}.pid"
+        registration_gate = root / f"registration-{iteration}.ready"
         fixture_env = os.environ.copy()
         fixture_env["YTDLP_ARIA2_TEST_CHILD_TOKEN"] = str(marker)
-        result = subprocess.run(
-            ["bash", "-c", fixture, "bash", str(library), str(marker)],
+        process = subprocess.Popen(
+            [
+                "bash",
+                "-c",
+                fixture,
+                "bash",
+                str(library),
+                str(marker),
+                str(registration_gate),
+            ],
             env=fixture_env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            timeout=5,
-            check=False,
+            start_new_session=True,
         )
+        try:
+            _, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired as error:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            _, stderr = process.communicate()
+            raise AssertionError(
+                f"startup signal iteration {iteration} timed out: "
+                f"{stderr.decode(errors='replace')}"
+            ) from error
         child_pid = 0
         if marker.exists():
             child_pid = int(marker.read_text(encoding="ascii").strip())
         try:
-            if result.returncode != 130:
+            if process.returncode != 130:
                 raise AssertionError(
                     f"startup signal iteration {iteration} returned "
-                    f"{result.returncode}, expected first-signal status 130: "
-                    f"{result.stderr.decode(errors='replace')}"
+                    f"{process.returncode}, expected first-signal status 130: "
+                    f"{stderr.decode(errors='replace')}"
                 )
             if not child_pid:
                 raise AssertionError(
