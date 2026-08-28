@@ -9,7 +9,7 @@
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.3.3"
+readonly VERSION="2.3.4"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"

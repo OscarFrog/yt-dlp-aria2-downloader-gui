@@ -1,3 +1,11 @@
+## 2.3.4 - 2026-08-28
+
+### Test reliability
+
+- Replace the startup-signal stress test's timing delay with a deterministic
+  parent/child registration handshake, and terminate the complete fixture
+  process group if its bounded failure envelope expires.
+
 ## 2.3.3 - 2026-08-28
 
 ### Release automation
