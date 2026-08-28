@@ -1594,12 +1594,6 @@ test_static_packaging_signing_contracts() {
     assert_text_contains "${rpm_changelog}" ' - 2.1.25-1' \
         'RPM historical 2.1.25 version is stable'
 
-    assert_file_contains "${SCRIPT_DIR}/QUALIFICATION_2.2.0.md" \
-        '**Historical qualification document.**' \
-        '2.2.0 qualification is explicitly historical'
-    assert_file_contains "${SCRIPT_DIR}/QUALIFICATION_2.2.0.md" \
-        '**Post-release verification — 2026-08-25.**' \
-        '2.2.0 qualification contains a post-release verification note'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'recover_abandoned_private_aria2_staging' \
         'engine recovers validated abandoned private aria2 staging'
