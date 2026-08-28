@@ -39,19 +39,21 @@ The project uses `yt-dlp` for media extraction, `aria2c` to accelerate eligible
 direct downloads through a private aria2 input file, and FFmpeg to merge,
 remux, or extract streams. HTTPS automatically stays on yt-dlp's native
 transport when the installed aria2 TLS backend lacks the required certificate
-validation hardening. DASH and HLS streams also remain native. The current version
-is **2.3.2**.
+validation hardening. DASH and HLS streams also remain native. The current
+development version is **2.3.2**.
+The latest published package release is **2.3.1**.
 
 ## Recommended installation
 
 Open the [latest GitHub release](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
+The exact asset names below match the currently published v2.3.1 release.
 
 For **Fedora 44**, download these four assets:
 
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.3.2-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.3.1-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -59,7 +61,7 @@ Verify the downloaded files, then run the supported Fedora bootstrap:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.2-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.1-1.fc44.noarch.rpm
 ```
 
 The bootstrap authenticates and enables RPM Fusion Free when needed, replaces
@@ -68,7 +70,7 @@ the application RPM, validates the FFmpeg provider, and initializes the
 per-user yt-dlp and Deno runtimes.
 
 For **Debian or Ubuntu**, download the versioned DEB and `SHA256SUMS`, verify
-it, then install it with `sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.2-1_all.deb`.
+it, then install it with `sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.1-1_all.deb`.
 For **other GNU/Linux distributions or portable use**, use the versioned ZIP or
 a Git checkout. The managed yt-dlp and Deno runtimes currently support Linux
 `x86_64` and `aarch64`.
@@ -128,6 +130,9 @@ activated atomically. Network operations and lock waits are bounded; if an
 update check fails, the last verified runtime remains active. yt-dlp's official
 Linux executable carries its compatible bundled Python dependencies, including
 `curl_cffi` and the bundled EJS support used by current YouTube extraction.
+The runtime manager returns one versioned attestation containing the validated
+paths and versions, so the engine does not repeat executable discovery and
+capability probes during the same launch.
 
 Set `YTDLP_ARIA2_YTDLP_CHANNEL=nightly` to opt in to yt-dlp nightly builds.
 Set `YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE=0` for a **strict zero-network mode**:
@@ -166,8 +171,8 @@ both build provenance and immutable-release identity:
 
 ```bash
 gh attestation verify ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.3.2 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.3.2 ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.3.1 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.3.1 ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 `SHA256SUMS` remains useful for offline/local integrity checks; the GitHub
@@ -262,7 +267,7 @@ Download:
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.3.2-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.3.1-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -275,7 +280,7 @@ sha256sum --ignore-missing --check SHA256SUMS
 Then run:
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.2-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.1-1.fc44.noarch.rpm
 ```
 
 The bootstrap refuses an unsigned release RPM. It validates that
@@ -285,12 +290,17 @@ The bootstrap refuses an unsigned release RPM. It validates that
 into a private temporary RPM 6 filesystem (`fs`) keyring and requires
 `rpmkeys --checksig` to validate the package inside that isolated trust domain.
 RPM display strings such as `OPENPGP:pgpsig` are diagnostic only and are not
-used as authorization primitives. Only after those checks succeed is the
-certificate imported into the system RPM database so DNF can independently
-repeat package verification with `localpkg_gpgcheck=True`. A different key
-already trusted by the host RPM database therefore cannot authorize this
-project RPM. The `--allow-unsigned-dev` option exists only for explicit local/CI
-development builds and is not used for releases.
+used as authorization primitives. Before any system key import or package
+transaction, the bootstrap copies the certificate and RPM through `sudo` into a
+private root-owned staging directory. It repeats the exact package identity,
+certificate fingerprints, and isolated signature verification against those
+copies; the system key import and DNF then consume only the same protected
+root-owned paths. Replacing the original user-owned files after staging cannot
+change the authorized transaction. DNF independently repeats package
+verification with `localpkg_gpgcheck=True`. A different key already trusted by
+the host RPM database therefore cannot authorize this project RPM. The
+`--allow-unsigned-dev` option exists only for explicit local/CI development
+builds and is not used for releases.
 
 On a fresh Fedora 44 system, the RPM Fusion bootstrap is held to the same
 fail-closed model before DNF runs it as root. The installer downloads the key
@@ -298,7 +308,9 @@ and release RPM over constrained TLS, requires the exact RPM Fusion fingerprint
 `E9A491A3DE247814E7E067EAE06F8ECDD651FF2E`, verifies the signature in an
 isolated keyring, and requires the reviewed NEVRA
 `rpmfusion-free-release-44-3.noarch`. Fedora releases without an explicit pin
-are rejected until they have been qualified.
+are rejected until they have been qualified. The RPM Fusion certificate and
+bootstrap RPM cross the same root-owned staging boundary and are revalidated
+there before privileged import or installation.
 
 The bootstrap performs these checks and actions:
 
@@ -320,11 +332,11 @@ verified before activation.
 
 ### Debian and Ubuntu
 
-Release 2.3.2 publishes an architecture-independent DEB aligned with the same
-managed-runtime model as Fedora. Download:
+The latest published release, 2.3.1, provides an architecture-independent DEB
+aligned with the same managed-runtime model as Fedora. Download:
 
 ```text
-yt-dlp-aria2-downloader-gui_2.3.2-1_all.deb
+yt-dlp-aria2-downloader-gui_2.3.1-1_all.deb
 SHA256SUMS
 ```
 
@@ -332,7 +344,7 @@ Verify and install it:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.2-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.1-1_all.deb
 ```
 
 The DEB explicitly depends on `aria2`, Python 3.10+, FFmpeg/FFprobe,
@@ -418,7 +430,7 @@ desktop installation from the current user's home directory.
 Download these release assets:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.3.2.zip
+yt-dlp-aria2-downloader-gui-2.3.1.zip
 SHA256SUMS
 ```
 
@@ -426,8 +438,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.3.2.zip
-cd yt-dlp-aria2-downloader-gui-2.3.2
+unzip yt-dlp-aria2-downloader-gui-2.3.1.zip
+cd yt-dlp-aria2-downloader-gui-2.3.1
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install

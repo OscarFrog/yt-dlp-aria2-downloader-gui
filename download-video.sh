@@ -26,6 +26,9 @@ ARIA2_HTTPS_DIRECT_SAFE=true
 FINAL_MEDIA_VALIDATION_REASON=''
 MEDIA_TAIL_VALIDATION_REASON=''
 JS_RUNTIME_AVAILABLE=false
+MANAGED_RUNTIME_ATTESTED=false
+MANAGED_YTDLP_VERSION=''
+MANAGED_DENO_VERSION=''
 RESULT_FILE_TMP=''
 INTERNAL_PATH_FILE_TMP=''
 HLS_REMUX_TMP=''
@@ -246,14 +249,9 @@ compare_versions() {
     fi
 }
 
-check_ytdlp_runtime() {
-    local yt_dlp_version
+check_ytdlp_version() {
+    local yt_dlp_version=$1
 
-    if ! yt_dlp_version=$(LC_ALL=C "${YTDLP_BIN}" --version 2>/dev/null); then
-        error 'unable to determine the yt-dlp version.'
-        return 1
-    fi
-    yt_dlp_version=${yt_dlp_version%%$'\n'*}
     compare_versions "${yt_dlp_version}" "${MIN_YT_DLP_VERSION}"
     if [[ ${VERSION_PARSE_VALID} != true ]]; then
         error "unable to parse the yt-dlp version: ${yt_dlp_version:-unknown}."
@@ -265,27 +263,46 @@ check_ytdlp_runtime() {
     fi
 }
 
-check_deno_runtime() {
-    local deno_name=''
-    local deno_version=''
-    local deno_output=''
-    local _=''
+check_deno_version() {
+    local deno_version=$1
 
     JS_RUNTIME_AVAILABLE=false
-    if [[ -n ${DENO_BIN:-} && -x ${DENO_BIN} ]] \
-        && deno_output=$(LC_ALL=C "${DENO_BIN}" --version 2>/dev/null); then
-        IFS=' ' read -r deno_name deno_version _ <<<"${deno_output%%$'\n'*}"
-        if [[ ${deno_name} == deno && -n ${deno_version} ]]; then
-            compare_versions "${deno_version}" "${MIN_DENO_VERSION}"
-            if [[ ${VERSION_PARSE_VALID} == true && ${VERSION_AT_LEAST} == true ]]; then
-                JS_RUNTIME_AVAILABLE=true
-            fi
+    if [[ -n ${deno_version} ]]; then
+        compare_versions "${deno_version}" "${MIN_DENO_VERSION}"
+        if [[ ${VERSION_PARSE_VALID} == true && ${VERSION_AT_LEAST} == true ]]; then
+            JS_RUNTIME_AVAILABLE=true
         fi
     fi
     if [[ ${IS_YOUTUBE_URL} == true && ${JS_RUNTIME_AVAILABLE} != true ]]; then
         error "Deno ${MIN_DENO_VERSION} or later is required for YouTube extraction."
         return 1
     fi
+}
+
+check_ytdlp_runtime() {
+    local yt_dlp_version=''
+
+    if ! yt_dlp_version=$(LC_ALL=C "${YTDLP_BIN}" --version 2>/dev/null); then
+        error 'unable to determine the yt-dlp version.'
+        return 1
+    fi
+    check_ytdlp_version "${yt_dlp_version%%$'\n'*}"
+}
+
+check_deno_runtime() {
+    local deno_name=''
+    local deno_version=''
+    local deno_output=''
+    local _=''
+
+    if [[ -n ${DENO_BIN:-} && -x ${DENO_BIN} ]] \
+        && deno_output=$(LC_ALL=C "${DENO_BIN}" --version 2>/dev/null); then
+        IFS=' ' read -r deno_name deno_version _ <<<"${deno_output%%$'\n'*}"
+        if [[ ${deno_name} != deno ]]; then
+            deno_version=''
+        fi
+    fi
+    check_deno_version "${deno_version}"
 }
 
 check_ytdlp_capabilities() {
@@ -430,12 +447,47 @@ check_setsid_capabilities() {
 }
 
 check_runtime_compatibility() {
-    check_ytdlp_runtime
-    check_deno_runtime
-    check_ytdlp_capabilities
+    if [[ ${MANAGED_RUNTIME_ATTESTED} == true ]]; then
+        check_ytdlp_version "${MANAGED_YTDLP_VERSION}"
+        check_deno_version "${MANAGED_DENO_VERSION}"
+    else
+        check_ytdlp_runtime
+        check_deno_runtime
+        check_ytdlp_capabilities
+    fi
     check_aria2_runtime
     check_aria2_capabilities
     check_setsid_capabilities
+}
+
+# Parse the line-safe, versioned contract emitted by the adjacent runtime
+# manager. Reject extra or reordered fields so diagnostics can never be
+# mistaken for executable paths.
+parse_managed_runtime_attestation() {
+    local attestation=$1
+    local -a fields=()
+
+    mapfile -t fields <<<"${attestation}"
+    if ((${#fields[@]} != 5)) \
+        || [[ ${fields[0]} != 'runtime-contract=1' ]] \
+        || [[ ${fields[1]} != yt-dlp-path=* ]] \
+        || [[ ${fields[2]} != yt-dlp-version=* ]] \
+        || [[ ${fields[3]} != deno-path=* ]] \
+        || [[ ${fields[4]} != deno-version=* ]]; then
+        error 'the managed runtime attestation is malformed or unsupported.'
+        return 1
+    fi
+
+    YTDLP_BIN=${fields[1]#yt-dlp-path=}
+    MANAGED_YTDLP_VERSION=${fields[2]#yt-dlp-version=}
+    DENO_BIN=${fields[3]#deno-path=}
+    MANAGED_DENO_VERSION=${fields[4]#deno-version=}
+    if [[ -z ${YTDLP_BIN} || -z ${MANAGED_YTDLP_VERSION} ||
+        -z ${DENO_BIN} || -z ${MANAGED_DENO_VERSION} ]]; then
+        error 'the managed runtime attestation contains an empty value.'
+        return 1
+    fi
+    MANAGED_RUNTIME_ATTESTED=true
 }
 
 require_value() {
@@ -955,35 +1007,79 @@ cleanup_stale_temporary_files() {
     fi
 }
 
-probe_stream() {
-    local output_variable=$1
-    local final_path=$2
-    local stream_selector=$3
-    local probe_output=''
-    local detected_present=false
+probe_media_summary() {
+    local media_path=$1
 
-    # Initialize the caller-visible result before probing so an ffprobe
-    # failure cannot leave a stale result from a previous stream selector.
-    printf -v "${output_variable}" '%s' false
-    if ! probe_output=$(
-        timeout --signal=TERM --kill-after=2s 15s \
-            ffprobe -v error \
-            -select_streams "${stream_selector}" \
-            -show_entries stream=index \
-            -of csv=p=0 \
-            "${final_path}" 2>/dev/null
-    ); then
-        return 1
-    fi
-    if grep -Eq '^[0-9]+$' <<<"${probe_output}"; then
-        detected_present=true
-    fi
+    LC_ALL=C timeout --signal=TERM --kill-after=2s 15s \
+        ffprobe -v error \
+        -show_entries 'format=start_time,duration:stream=codec_type:stream_disposition=attached_pic' \
+        -of json \
+        "${media_path}" 2>/dev/null \
+        | python3 -c '
+import json
+import sys
+from decimal import Decimal, InvalidOperation
 
-    # Bash variables are dynamically scoped. The callee must not declare a
-    # local variable with the caller-provided output name, otherwise printf -v
-    # updates the callee's shadowing variable instead of the caller's result.
-    printf -v "${output_variable}" '%s' "${detected_present}"
-    return 0
+try:
+    payload = json.load(sys.stdin)
+except (TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(2)
+
+streams = payload.get("streams", [])
+if not isinstance(streams, list):
+    raise SystemExit(2)
+
+audio_present = False
+video_present = False
+for stream in streams:
+    if not isinstance(stream, dict):
+        continue
+    codec_type = stream.get("codec_type")
+    disposition = stream.get("disposition")
+    if not isinstance(disposition, dict):
+        disposition = {}
+    if codec_type == "audio":
+        audio_present = True
+    elif (
+        codec_type == "video"
+        and disposition.get("attached_pic", 0) != 1
+    ):
+        video_present = True
+
+format_info = payload.get("format") or {}
+if not isinstance(format_info, dict):
+    format_info = {}
+
+limit = Decimal("9000000000000")
+scale = Decimal(1000000)
+
+def parse_microseconds(raw_value, *, require_positive):
+    try:
+        value = Decimal(str(raw_value))
+    except (InvalidOperation, ValueError):
+        return "-"
+    if not value.is_finite() or abs(value) > limit:
+        return "-"
+    if require_positive and value <= 0:
+        return "-"
+    return str(int(value * scale))
+
+start_microseconds = parse_microseconds(
+    format_info.get("start_time"),
+    require_positive=False,
+)
+duration_microseconds = parse_microseconds(
+    format_info.get("duration"),
+    require_positive=True,
+)
+
+print(
+    "true" if video_present else "false",
+    "true" if audio_present else "false",
+    start_microseconds,
+    duration_microseconds,
+)
+'
 }
 
 probe_duration_microseconds() {
@@ -1096,63 +1192,20 @@ raise SystemExit(1)
 validate_media_tail_consistency() {
     local media_path=$1
     local mode=$2
-    local timeline=''
-    local start_microseconds=''
-    local duration_microseconds=''
+    local start_microseconds=$3
+    local duration_microseconds=$4
     local tolerance_microseconds=0
     local target_microseconds=0
     local seek_microseconds=0
     local max_positive_start=0
     local target_seconds=''
     local seek_seconds=''
-    local timeline_status=0
     local tail_probe_status=0
 
     MEDIA_TAIL_VALIDATION_REASON=''
 
-    timeline=$(
-        timeout --signal=TERM --kill-after=2s 15s \
-            ffprobe -v error \
-            -show_entries format=start_time,duration \
-            -of json \
-            "${media_path}" 2>/dev/null \
-            | python3 -c '
-import json
-import sys
-from decimal import Decimal, InvalidOperation
-
-try:
-    payload = json.load(sys.stdin)
-    format_info = payload.get("format") or {}
-    start = Decimal(str(format_info["start_time"]))
-    duration = Decimal(str(format_info["duration"]))
-except (KeyError, TypeError, ValueError, InvalidOperation, json.JSONDecodeError):
-    raise SystemExit(0)
-
-limit = Decimal("9000000000000")
-if (
-    not start.is_finite()
-    or not duration.is_finite()
-    or duration <= 0
-    or abs(start) > limit
-    or duration > limit
-):
-    raise SystemExit(0)
-
-scale = Decimal(1000000)
-print(int(start * scale), int(duration * scale))
-'
-    )
-    timeline_status=$?
-    if ((timeline_status != 0)); then
-        MEDIA_TAIL_VALIDATION_REASON='probe-timeline-error'
-        return 1
-    fi
-
-    [[ -n ${timeline} ]] || return 0
-    read -r start_microseconds duration_microseconds <<<"${timeline}"
     [[ ${start_microseconds} =~ ^-?[0-9]+$ ]] || return 0
-    [[ ${duration_microseconds} =~ ^[0-9]+$ ]] || return 0
+    [[ ${duration_microseconds} =~ ^[1-9][0-9]*$ ]] || return 0
 
     tolerance_microseconds=$((duration_microseconds / 50))
     if ((tolerance_microseconds < 1000000)); then
@@ -1237,8 +1290,12 @@ print(int(start * scale), int(duration * scale))
 validate_final_media_file() {
     local final_path=$1
     local mode=$2
-    local stream_present=false
-    local probe_status=0
+    local media_summary=''
+    local video_present=false
+    local audio_present=false
+    local start_microseconds='-'
+    local duration_microseconds='-'
+    local unexpected_summary_field=''
     local tail_status=0
 
     FINAL_MEDIA_VALIDATION_REASON='unknown'
@@ -1247,47 +1304,41 @@ validate_final_media_file() {
         return 1
     fi
 
+    # probe_media_summary is a status-returning pipeline whose failure is
+    # deliberately converted into a stable validation reason.
+    # shellcheck disable=SC2310
+    if ! media_summary=$(probe_media_summary "${final_path}"); then
+        FINAL_MEDIA_VALIDATION_REASON='probe-error'
+        return 1
+    fi
+    read -r \
+        video_present audio_present \
+        start_microseconds duration_microseconds unexpected_summary_field \
+        <<<"${media_summary}"
+    if [[ ${video_present} != true && ${video_present} != false ]] \
+        || [[ ${audio_present} != true && ${audio_present} != false ]] \
+        || [[ -n ${unexpected_summary_field} ]]; then
+        FINAL_MEDIA_VALIDATION_REASON='probe-error'
+        return 1
+    fi
+
     case ${mode} in
         video)
-            probe_stream stream_present "${final_path}" 'V:0'
-            probe_status=$?
-            if ((probe_status != 0)); then
-                FINAL_MEDIA_VALIDATION_REASON='probe-error'
-                return 1
-            fi
-            if [[ ${stream_present} != true ]]; then
+            if [[ ${video_present} != true ]]; then
                 FINAL_MEDIA_VALIDATION_REASON='missing-content-video'
                 return 1
             fi
-            probe_stream stream_present "${final_path}" 'a:0'
-            probe_status=$?
-            if ((probe_status != 0)); then
-                FINAL_MEDIA_VALIDATION_REASON='probe-error'
-                return 1
-            fi
-            if [[ ${stream_present} != true ]]; then
+            if [[ ${audio_present} != true ]]; then
                 FINAL_MEDIA_VALIDATION_REASON='missing-audio'
                 return 1
             fi
             ;;
         audio)
-            probe_stream stream_present "${final_path}" 'a:0'
-            probe_status=$?
-            if ((probe_status != 0)); then
-                FINAL_MEDIA_VALIDATION_REASON='probe-error'
-                return 1
-            fi
-            if [[ ${stream_present} != true ]]; then
+            if [[ ${audio_present} != true ]]; then
                 FINAL_MEDIA_VALIDATION_REASON='missing-audio'
                 return 1
             fi
-            probe_stream stream_present "${final_path}" 'V:0'
-            probe_status=$?
-            if ((probe_status != 0)); then
-                FINAL_MEDIA_VALIDATION_REASON='probe-error'
-                return 1
-            fi
-            if [[ ${stream_present} != false ]]; then
+            if [[ ${video_present} != false ]]; then
                 FINAL_MEDIA_VALIDATION_REASON='unexpected-content-video'
                 return 1
             fi
@@ -1298,7 +1349,9 @@ validate_final_media_file() {
             ;;
     esac
 
-    validate_media_tail_consistency "${final_path}" "${mode}"
+    validate_media_tail_consistency \
+        "${final_path}" "${mode}" \
+        "${start_microseconds}" "${duration_microseconds}"
     tail_status=$?
     if ((tail_status != 0)); then
         FINAL_MEDIA_VALIDATION_REASON=${MEDIA_TAIL_VALIDATION_REASON:-tail-inconsistent}
@@ -1546,6 +1599,7 @@ initialize_runtime_dependencies() {
     local script_dir
     local runtime_manager
     local runtime_action
+    local runtime_attestation=''
 
     for command_name in aria2c ffmpeg ffprobe python3 sed stdbuf tr realpath grep mktemp mv rm rmdir chmod flock mkdir sha256sum stat setsid sleep timeout find; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
@@ -1587,20 +1641,20 @@ initialize_runtime_dependencies() {
                 exit 64
                 ;;
         esac
-        if ! "${runtime_manager}" "${runtime_action}"; then
+        if ! runtime_attestation=$(
+            "${runtime_manager}" prepare "${runtime_action}"
+        ); then
             error 'unable to initialize the managed yt-dlp and Deno runtimes.'
             exit 69
         fi
-        YTDLP_BIN=$("${runtime_manager}" path yt-dlp) || {
-            error 'unable to resolve the managed yt-dlp runtime.'
+        # shellcheck disable=SC2310 # The parser checks every assignment and reports bounded diagnostics.
+        if ! parse_managed_runtime_attestation "${runtime_attestation}"; then
+            error 'unable to resolve the attested managed runtimes.'
             exit 69
-        }
-        DENO_BIN=$("${runtime_manager}" path deno) || {
-            error 'unable to resolve the managed Deno runtime.'
-            exit 69
-        }
+        fi
     fi
-    readonly YTDLP_BIN DENO_BIN
+    readonly YTDLP_BIN DENO_BIN MANAGED_RUNTIME_ATTESTED
+    readonly MANAGED_YTDLP_VERSION MANAGED_DENO_VERSION
 
     if [[ ! -x ${YTDLP_BIN} ]]; then
         error 'the selected yt-dlp runtime is not executable.'

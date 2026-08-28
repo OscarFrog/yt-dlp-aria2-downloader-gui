@@ -78,12 +78,10 @@ jobs:
       - name: Run direct, audio, HLS and DASH boundary qualification (3x)
         shell: bash
         run: |
-          set -Eeuo pipefail
-          for iteration in 1 2 3; do
-            printf '=== real-tool routing iteration %d/3 ===\n' "${iteration}"
+          bash ./tests/repeat-qualification.sh \
+            --label 'real-tool routing iteration' --runs 3 --jobs 3 -- \
             timeout --signal=TERM --kill-after=10s 8m \
-              bash ./tests/real-tools-integration.sh
-          done
+            bash ./tests/real-tools-integration.sh
       - name: Run aria2 direct-transfer behavior qualification
         env:
           ARIA2_BEHAVIOR_BASIC_RUNS: 3
@@ -98,12 +96,10 @@ jobs:
       - name: Run HLS post-remux duration validation (3x)
         shell: bash
         run: |
-          set -Eeuo pipefail
-          for iteration in 1 2 3; do
-            printf '=== HLS duration guard iteration %d/3 ===\n' "${iteration}"
+          bash ./tests/repeat-qualification.sh \
+            --label 'HLS duration guard iteration' --runs 3 --jobs 3 -- \
             timeout --signal=TERM --kill-after=10s 5m \
-              bash ./tests/hls-remux-duration-integration.sh
-          done
+            bash ./tests/hls-remux-duration-integration.sh
 
   current-stable-local-media:
     if: github.event_name == 'schedule'
@@ -136,12 +132,10 @@ jobs:
       - name: Run current-stable routing qualification (3x)
         shell: bash
         run: |
-          set -Eeuo pipefail
-          for iteration in 1 2 3; do
-            printf '=== current stable routing iteration %d/3 ===\n' "${iteration}"
+          bash ./tests/repeat-qualification.sh \
+            --label 'current stable routing iteration' --runs 3 --jobs 3 -- \
             timeout --signal=TERM --kill-after=10s 8m \
-              bash ./tests/real-tools-integration.sh
-          done
+            bash ./tests/real-tools-integration.sh
       - name: Run current-stable aria2 direct-transfer behavior qualification
         env:
           ARIA2_BEHAVIOR_BASIC_RUNS: 3
@@ -156,9 +150,7 @@ jobs:
       - name: Run current-stable HLS duration validation (3x)
         shell: bash
         run: |
-          set -Eeuo pipefail
-          for iteration in 1 2 3; do
-            printf '=== current stable HLS guard iteration %d/3 ===\n' "${iteration}"
+          bash ./tests/repeat-qualification.sh \
+            --label 'current stable HLS guard iteration' --runs 3 --jobs 3 -- \
             timeout --signal=TERM --kill-after=10s 5m \
-              bash ./tests/hls-remux-duration-integration.sh
-          done
+            bash ./tests/hls-remux-duration-integration.sh

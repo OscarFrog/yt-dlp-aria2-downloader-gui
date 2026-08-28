@@ -93,7 +93,7 @@ mock_group_enabled() {
 parse_mock_arguments "$@"
 
 for required_command in \
-    awk bash cat chmod date dirname env grep ln mkdir mktemp mv readlink \
+    awk bash cat chmod date dirname env grep install ln mkdir mktemp mv readlink \
     realpath rm setsid sleep stat timeout touch tr flock sha256sum wc python3 find ps; do
     require_test_command "${required_command}"
 done
@@ -118,6 +118,9 @@ readonly RUNTIME_DIR="${TEST_ROOT}/runtime"
 readonly PROGRESS_CAPTURE="${TEST_ROOT}/gui-progress-aria.txt"
 readonly YTDLP_PROGRESS_CAPTURE="${TEST_ROOT}/gui-progress-ytdlp.txt"
 readonly LIST_ARGS_LOG="${TEST_ROOT}/zenity-list-args.bin"
+readonly MANAGED_ENGINE_DIR="${TEST_ROOT}/managed-engine"
+readonly MANAGED_ENGINE_UNDER_TEST="${MANAGED_ENGINE_DIR}/download-video.sh"
+readonly MOCK_RUNTIME_MANAGER_LOG="${TEST_ROOT}/runtime-manager-args.bin"
 GUI_SCENARIO_TIMEOUT_SECONDS=${MOCK_GUI_SCENARIO_TIMEOUT_SECONDS:-30}
 [[ ${GUI_SCENARIO_TIMEOUT_SECONDS} =~ ^[0-9]{1,3}$ ]] || test_error 'MOCK_GUI_SCENARIO_TIMEOUT_SECONDS must be an integer between 1 and 120.'
 GUI_SCENARIO_TIMEOUT_SECONDS=$((10#${GUI_SCENARIO_TIMEOUT_SECONDS}))
@@ -126,8 +129,35 @@ readonly GUI_SCENARIO_TIMEOUT_SECONDS
 readonly GUI_UNDER_TEST="${MOCK_BIN}/download-video-gui-under-test"
 export MOCK_GUI_REAL="${PROJECT_DIR}/download-video-gui.sh"
 export MOCK_GUI_SCENARIO_TIMEOUT_SECONDS=${GUI_SCENARIO_TIMEOUT_SECONDS}
-mkdir -p -- "${MOCK_BIN}" "${OUTPUT_DIR}" "${HOME_DIR}" "${RUNTIME_DIR}"
+mkdir -p -- \
+    "${MOCK_BIN}" "${OUTPUT_DIR}" "${HOME_DIR}" "${RUNTIME_DIR}" \
+    "${MANAGED_ENGINE_DIR}"
 chmod 700 -- "${RUNTIME_DIR}"
+
+install -m 0755 -- "${PROJECT_DIR}/download-video.sh" "${MANAGED_ENGINE_UNDER_TEST}"
+install -m 0644 -- \
+    "${PROJECT_DIR}/private-aria2-plan.py" \
+    "${MANAGED_ENGINE_DIR}/private-aria2-plan.py"
+cat >"${MANAGED_ENGINE_DIR}/runtime-manager.sh" <<'EOF_RUNTIME_MANAGER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${MOCK_RUNTIME_MANAGER_LOG:?}"
+printf '%s\0' "$@" >"${MOCK_RUNTIME_MANAGER_LOG}"
+if [[ ${MOCK_RUNTIME_ATTESTATION_MALFORMED:-0} == 1 ]]; then
+    printf '%s\n' 'runtime-contract=unsupported'
+    exit 0
+fi
+if (($# != 2)) || [[ $1 != prepare || ($2 != update && $2 != require) ]]; then
+    exit 64
+fi
+printf 'runtime-contract=1\n'
+printf 'yt-dlp-path=%s\n' "${MOCK_MANAGED_YTDLP_PATH:?}"
+printf 'yt-dlp-version=%s\n' "${MOCK_MANAGED_YTDLP_VERSION:-2026.06.09}"
+printf 'deno-path=%s\n' "${MOCK_MANAGED_DENO_PATH:?}"
+printf 'deno-version=%s\n' "${MOCK_MANAGED_DENO_VERSION:-2.3.0}"
+EOF_RUNTIME_MANAGER
+chmod 0755 -- "${MANAGED_ENGINE_DIR}/runtime-manager.sh"
 
 cat >"${GUI_UNDER_TEST}" <<'EOF_GUI_TIMEOUT'
 #!/usr/bin/env bash
@@ -163,11 +193,17 @@ if [[ ${YTDLP_NO_PLUGINS:-} != 1 ]]; then
 fi
 
 if (($# == 1)) && [[ $1 == '--version' ]]; then
+    if [[ -n ${MOCK_YTDLP_CONTROL_LOG:-} ]]; then
+        printf '%s\n' --version >>"${MOCK_YTDLP_CONTROL_LOG}"
+    fi
     [[ ${LC_ALL:-} == C ]] || { printf 'localized yt-dlp version output\n'; exit 65; }
     printf '%s\n' "${MOCK_YTDLP_VERSION:-2026.06.09}"
     exit 0
 fi
 if (($# == 1)) && [[ $1 == '--help' ]]; then
+    if [[ -n ${MOCK_YTDLP_CONTROL_LOG:-} ]]; then
+        printf '%s\n' --help >>"${MOCK_YTDLP_CONTROL_LOG}"
+    fi
     [[ ${LC_ALL:-} == C ]] || { printf 'localized yt-dlp help output\n'; exit 65; }
     printf '%s\n' \
         '--js-runtimes' \
@@ -375,7 +411,10 @@ fi
 
 if [[ ${load_info_json} != true ]]; then
     if [[ -z ${progress_ready_marker} ]]; then
-        sleep 0.8
+        # Scenarios that must observe intermediate progress synchronize through
+        # explicit marker files. Other scenarios need only a minimal scheduling
+        # window; a production-sized polling delay adds no coverage here.
+        sleep 0.05
     fi
 
     if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
@@ -396,9 +435,9 @@ fi
 
 if [[ ${MOCK_LATE_PROGRESS:-0} == 1 ]]; then
     printf 'YTDLP_PROGRESS|downloading| 12.0%%|512.00KiB/s|00:09\n'
-    sleep 0.8
+    sleep 0.05
 elif [[ -z ${postprocess_ready_marker} ]]; then
-    sleep 0.2
+    sleep 0.05
 fi
 
 if [[ ${youtube_hls_mode} == true ]]; then
@@ -595,6 +634,9 @@ chmod +x "${MOCK_BIN}/aria2c"
 cat >"${MOCK_BIN}/deno" <<'EOF_DENO'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -n ${MOCK_DENO_CONTROL_LOG:-} ]]; then
+    printf '%s\n' --version >>"${MOCK_DENO_CONTROL_LOG}"
+fi
 if [[ ${MOCK_DENO_UNAVAILABLE:-0} == 1 ]]; then
     exit 127
 fi
@@ -662,6 +704,7 @@ esac
 selector=''
 duration_probe=false
 timeline_probe=false
+summary_probe=false
 tail_probe=false
 show_packets=false
 media_path=''
@@ -675,6 +718,9 @@ for argument in "$@"; do
             ;;
         format=start_time,duration)
             timeline_probe=true
+            ;;
+        format=start_time,duration:stream=codec_type:stream_disposition=attached_pic)
+            summary_probe=true
             ;;
         packet=pts_time,dts_time,duration_time)
             tail_probe=true
@@ -720,6 +766,41 @@ fi
 if [[ ${MOCK_FFPROBE_EXIT_STATUS:-0} != 0 ]]; then
     printf 'Simulated FFprobe validation failure.\n' >&2
     exit "${MOCK_FFPROBE_EXIT_STATUS}"
+fi
+if [[ ${summary_probe} == true ]]; then
+    ffprobe_audio_mode=false
+    stream_json=''
+
+    if [[ -f ${MOCK_ARG_LOG:-} ]]; then
+        while IFS= read -r -d '' ffprobe_mode_argument; do
+            if [[ ${ffprobe_mode_argument} == '--extract-audio' ]]; then
+                ffprobe_audio_mode=true
+                break
+            fi
+        done <"${MOCK_ARG_LOG}"
+    fi
+
+    if [[ ${MOCK_FFPROBE_EMPTY:-0} != 1 ]]; then
+        if [[ ${MOCK_FFPROBE_COVER_ART_ONLY:-0} == 1 ]]; then
+            stream_json='{"codec_type":"video","disposition":{"attached_pic":1}}'
+        elif [[ ${ffprobe_audio_mode} != true ||
+            ${MOCK_FFPROBE_CONTENT_VIDEO:-0} == 1 ]]; then
+            stream_json='{"codec_type":"video","disposition":{"attached_pic":0}}'
+        fi
+
+        if [[ ${MOCK_FFPROBE_MISSING_AUDIO:-0} != 1 ]]; then
+            if [[ -n ${stream_json} ]]; then
+                stream_json+=','
+            fi
+            stream_json+='{"codec_type":"audio","disposition":{"attached_pic":0}}'
+        fi
+    fi
+
+    printf '{"streams":[%s],"format":{"start_time":"%s","duration":"%s"}}\n' \
+        "${stream_json}" \
+        "${MOCK_FFPROBE_START_TIME:-0.000000}" \
+        "${MOCK_FFPROBE_TIMELINE_DURATION:-120.000000}"
+    exit 0
 fi
 if [[ ${timeline_probe} == true ]]; then
     printf '{"format":{"start_time":"%s","duration":"%s"}}\n' \
@@ -1249,6 +1330,9 @@ initialize_mock_integration() {
     export XDG_RUNTIME_DIR="${RUNTIME_DIR}"
     export MOCK_OUTPUT_DIR="${OUTPUT_DIR}"
     export MOCK_LIST_ARGS_LOG="${LIST_ARGS_LOG}"
+    export MOCK_RUNTIME_MANAGER_LOG
+    export MOCK_MANAGED_YTDLP_PATH="${MOCK_BIN}/yt-dlp"
+    export MOCK_MANAGED_DENO_PATH="${MOCK_BIN}/deno"
     export PATH="${MOCK_BIN}:/usr/bin:/bin"
     export YTDLP_ARIA2_SKIP_RUNTIME_UPDATE=1
     export YTDLP_ARIA2_YTDLP_BIN="${MOCK_BIN}/yt-dlp"
@@ -1351,8 +1435,9 @@ test_mock_engine_audio_downloads() {
     # shellcheck disable=SC2034 # Read indirectly through nameref assertion helpers.
     ffprobe_arguments=()
     read_arguments "${ffprobe_argument_log}" ffprobe_arguments
-    assert_option_value ffprobe_arguments '-select_streams' 'V:0' \
-        'audio result FFprobe content-video validation'
+    assert_option_value ffprobe_arguments '-show_entries' \
+        'format=start_time,duration:stream=codec_type:stream_disposition=attached_pic' \
+        'audio result uses the combined FFprobe media summary'
     [[ ! -e ${injection_marker} ]] || fail 'The URL was interpreted as shell code.'
 
     plan_call_count=$(wc -l <"${MOCK_PLAN_CALL_LOG}")
@@ -2785,6 +2870,62 @@ run_mock_signal_group() {
     test_mock_signal_zenity_status
 }
 
+test_mock_managed_runtime_attestation() {
+    local deno_control_log="${TEST_ROOT}/managed-deno-control.log"
+    local ytdlp_control_log="${TEST_ROOT}/managed-ytdlp-control.log"
+    local -a runtime_manager_arguments=()
+
+    # A managed launch consumes one runtime-manager attestation and must not
+    # repeat the yt-dlp/Deno discovery commands already covered by that proof.
+    prepare_argument_log 'managed-runtime-attestation'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    : >"${MOCK_RUNTIME_MANAGER_LOG}"
+    : >"${ytdlp_control_log}"
+    : >"${deno_control_log}"
+    assert_status 0 'managed runtime attestation initializes the engine' \
+        env -u YTDLP_ARIA2_SKIP_RUNTIME_UPDATE \
+        -u YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE \
+        MOCK_YTDLP_CONTROL_LOG="${ytdlp_control_log}" \
+        MOCK_DENO_CONTROL_LOG="${deno_control_log}" \
+        "${MANAGED_ENGINE_UNDER_TEST}" \
+        --output-dir "${OUTPUT_DIR}" \
+        -- 'https://example.com/watch?v=managed-attestation'
+    read_arguments "${MOCK_RUNTIME_MANAGER_LOG}" runtime_manager_arguments
+    assert_equals '2' "${#runtime_manager_arguments[@]}" \
+        'managed runtime preparation argument count'
+    assert_equals 'prepare' "${runtime_manager_arguments[0]}" \
+        'managed runtime preparation command'
+    assert_equals 'update' "${runtime_manager_arguments[1]}" \
+        'managed runtime preparation action'
+    [[ ! -s ${ytdlp_control_log} ]] \
+        || fail 'managed engine repeated yt-dlp version/help discovery after attestation'
+    [[ ! -s ${deno_control_log} ]] \
+        || fail 'managed engine repeated Deno version discovery after attestation'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    prepare_argument_log 'managed-runtime-old-version'
+    assert_status 1 'managed attestation cannot bypass the engine minimum version' \
+        env -u YTDLP_ARIA2_SKIP_RUNTIME_UPDATE \
+        YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE=0 \
+        MOCK_MANAGED_YTDLP_VERSION=2026.06.08 \
+        "${MANAGED_ENGINE_UNDER_TEST}" \
+        -- 'https://example.com/watch?v=managed-old-version'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'yt-dlp 2026.06.09 or later is required' \
+        'managed runtime minimum-version diagnostic'
+
+    prepare_argument_log 'managed-runtime-malformed-attestation'
+    assert_status 69 'malformed managed runtime attestation is rejected' \
+        env -u YTDLP_ARIA2_SKIP_RUNTIME_UPDATE \
+        YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE=0 \
+        MOCK_RUNTIME_ATTESTATION_MALFORMED=1 \
+        "${MANAGED_ENGINE_UNDER_TEST}" \
+        -- 'https://example.com/watch?v=managed-malformed-attestation'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'managed runtime attestation is malformed or unsupported' \
+        'malformed managed runtime attestation diagnostic'
+}
+
 test_mock_runtime_version_formats() {
     local compatible_ytdlp_version
 
@@ -3090,6 +3231,7 @@ test_mock_runtime_missing_zenity() {
 }
 
 run_mock_runtime_compat_group() {
+    test_mock_managed_runtime_attestation
     test_mock_runtime_version_formats
     test_mock_runtime_version_overflow
     test_mock_runtime_dependencies
@@ -3103,6 +3245,7 @@ run_mock_runtime_validation_group() {
 }
 
 run_mock_runtime_group() {
+    test_mock_managed_runtime_attestation
     test_mock_runtime_version_formats
     test_mock_runtime_worker_failure
     test_mock_runtime_version_overflow

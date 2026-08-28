@@ -21,6 +21,10 @@ readonly RPM_FUSION_RELEASE_NEVRA='rpmfusion-free-release-44-3.noarch'
 readonly RPM_FUSION_KEY_URL='https://download1.rpmfusion.org/free/fedora/RPM-GPG-KEY-rpmfusion-free-fedora-2020'
 readonly RPM_FUSION_RELEASE_URL='https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm'
 
+ROOT_APPLICATION_STAGE=''
+STAGED_APPLICATION_RPM=''
+STAGED_APPLICATION_KEY=''
+
 error() {
     printf 'Error: %s\n' "$*" >&2
 }
@@ -48,6 +52,94 @@ run_root() {
     fi
 }
 
+root_stage_path_is_safe() {
+    local stage_path=${1:-}
+
+    [[ ${stage_path} =~ ^/tmp/yt-dlp-aria2-downloader-(application|rpmfusion)\.[[:alnum:]]{8}$ ]]
+}
+
+create_root_stage() {
+    local stage_label=$1
+    local output_variable=$2
+    local resolved_stage_path=''
+
+    case ${stage_label} in
+        application | rpmfusion) ;;
+        *) return 2 ;;
+    esac
+
+    # shellcheck disable=SC2310 # Failure is converted to a staging diagnostic.
+    resolved_stage_path=$(run_root mktemp -d --tmpdir=/tmp \
+        "yt-dlp-aria2-downloader-${stage_label}.XXXXXXXX") || {
+        error "unable to create the root-owned ${stage_label} staging directory."
+        exit 70
+    }
+    # shellcheck disable=SC2310 # This helper is a predicate.
+    if ! root_stage_path_is_safe "${resolved_stage_path}"; then
+        error "root-owned ${stage_label} staging returned an unsafe path."
+        exit 70
+    fi
+    # Publish the validated path before later setup so every subsequent failure
+    # is covered by the caller's EXIT cleanup.
+    printf -v "${output_variable}" '%s' "${resolved_stage_path}"
+    # shellcheck disable=SC2310 # Failure is converted to a staging diagnostic.
+    run_root chmod 700 -- "${resolved_stage_path}" || {
+        error "unable to secure the root-owned ${stage_label} staging directory."
+        exit 70
+    }
+}
+
+remove_root_stage() {
+    local stage_path=$1
+
+    # shellcheck disable=SC2310 # This helper is a predicate.
+    root_stage_path_is_safe "${stage_path}" || {
+        error 'refusing to remove an unsafe root-owned staging path.'
+        return 70
+    }
+    run_root rm -rf -- "${stage_path}"
+}
+
+stage_root_file() {
+    local source_path=$1
+    local stage_path=$2
+    local destination_name=$3
+    local output_variable=$4
+    local resolved_staged_path=''
+
+    # shellcheck disable=SC2310 # This helper is a predicate.
+    root_stage_path_is_safe "${stage_path}" || return 70
+    case ${destination_name} in
+        application.rpm | signing-key.asc | rpmfusion-release.rpm | rpmfusion-key.asc) ;;
+        *) return 2 ;;
+    esac
+
+    resolved_staged_path="${stage_path}/${destination_name}"
+    # shellcheck disable=SC2310 # Failure is converted to a staging diagnostic.
+    run_root install -m 0600 -- "${source_path}" "${resolved_staged_path}" || {
+        error "unable to copy ${destination_name} into root-owned staging."
+        exit 70
+    }
+    printf -v "${output_variable}" '%s' "${resolved_staged_path}"
+}
+
+cleanup() {
+    local cleanup_status=$?
+
+    trap - EXIT HUP INT TERM
+    if [[ -n ${ROOT_APPLICATION_STAGE} ]]; then
+        # shellcheck disable=SC2310 # Cleanup is explicitly best-effort on exit.
+        if ! remove_root_stage "${ROOT_APPLICATION_STAGE}"; then
+            printf 'Warning: unable to remove root-owned application staging: %s\n' \
+                "${ROOT_APPLICATION_STAGE}" >&2
+        fi
+        ROOT_APPLICATION_STAGE=''
+        STAGED_APPLICATION_RPM=''
+        STAGED_APPLICATION_KEY=''
+    fi
+    exit "${cleanup_status}"
+}
+
 parse_fedora_arguments() {
     local allow_output_variable=$1
     local rpm_output_variable=$2
@@ -72,7 +164,7 @@ parse_fedora_arguments() {
 require_fedora_installer_commands() {
     local command_name=''
 
-    for command_name in awk chmod dnf head mkdir mktemp rm rpm rpmkeys realpath; do
+    for command_name in awk chmod dnf head install mkdir mktemp rm rpm rpmkeys realpath; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             error "required installer command is absent: ${command_name}"
             exit 127
@@ -108,7 +200,9 @@ validate_rpm_identity() {
     local rpm_identity_output=''
     local -a rpm_identity=()
 
-    if ! rpm_identity_output=$(rpm -qp --qf '%{NAME}\n%{VERSION}\n%{ARCH}\n' -- "${rpm_path}"); then
+    # shellcheck disable=SC2310 # Failure is converted to an identity diagnostic.
+    if ! rpm_identity_output=$(LC_ALL=C run_root \
+        rpm -qp --qf '%{NAME}\n%{VERSION}\n%{ARCH}\n' -- "${rpm_path}"); then
         error 'unable to inspect the RPM metadata.'
         exit 65
     fi
@@ -126,9 +220,19 @@ inspect_rpm_signature() {
     local rpm_path=$1
     local allow_unsigned_dev=$2
     local output_variable=$3
+    local execution_context=${4:-user}
+    local emit_warning=${5:-true}
     local detected_state=''
+    local -a command_prefix=()
 
-    detected_state=$(LC_ALL=C rpm -qp --qf '%|OPENPGP?{signed}:{unsigned}|\n' -- "${rpm_path}") || {
+    case ${execution_context} in
+        user) ;;
+        root) command_prefix=(run_root) ;;
+        *) return 2 ;;
+    esac
+
+    detected_state=$(LC_ALL=C "${command_prefix[@]}" \
+        rpm -qp --qf '%|OPENPGP?{signed}:{unsigned}|\n' -- "${rpm_path}") || {
         error 'unable to inspect RPM OpenPGP signature metadata.'
         exit 65
     }
@@ -141,7 +245,9 @@ inspect_rpm_signature() {
                 error 'Use only an official signed release RPM, or pass --allow-unsigned-dev explicitly for a local development build.'
                 exit 65
             fi
-            printf '%s\n' 'Warning: installing an explicitly allowed unsigned development RPM; OpenPGP verification is disabled for this transaction.' >&2
+            if [[ ${emit_warning} == true ]]; then
+                printf '%s\n' 'Warning: installing an explicitly allowed unsigned development RPM; OpenPGP verification is disabled for this transaction.' >&2
+            fi
             ;;
         *)
             error "unexpected RPM signature state: ${detected_state}"
@@ -202,19 +308,22 @@ ensure_rpm_verification_gpg() {
 inspect_rpm_signing_certificate() {
     local key_path=$1
     local gpg_home=$2
-    local gpg_output=$3
+    local output_variable=$3
+    local certificate_output=''
 
-    if ! LC_ALL=C gpg \
+    # shellcheck disable=SC2310 # Failure is converted to a certificate diagnostic.
+    if ! certificate_output=$(LC_ALL=C run_root gpg \
         --homedir "${gpg_home}" \
         --batch \
         --no-options \
         --with-colons \
         --show-keys \
         --fingerprint \
-        "${key_path}" >"${gpg_output}"; then
+        "${key_path}"); then
         error 'unable to inspect the RPM signing public certificate.'
         exit 65
     fi
+    printf -v "${output_variable}" '%s' "${certificate_output}"
 }
 
 validate_rpm_signing_certificate() {
@@ -224,7 +333,7 @@ validate_rpm_signing_certificate() {
 
     primary_count=$(
         awk -F: '$1 == "pub" { count++ } END { print count + 0 }' \
-            "${gpg_output}"
+            <<<"${gpg_output}"
     )
     primary_fingerprint=$(
         awk -F: \
@@ -233,13 +342,13 @@ validate_rpm_signing_certificate() {
                  value=toupper($10); found=1
              }
              END { if (found) print value }' \
-            "${gpg_output}"
+            <<<"${gpg_output}"
     )
     primary_validity=$(
-        awk -F: '$1 == "pub" { print $2; exit }' "${gpg_output}"
+        awk -F: '$1 == "pub" { print $2; exit }' <<<"${gpg_output}"
     )
     primary_capabilities=$(
-        awk -F: '$1 == "pub" { print $12; exit }' "${gpg_output}"
+        awk -F: '$1 == "pub" { print $12; exit }' <<<"${gpg_output}"
     )
     signing_subkey_count=$(
         awk -F: \
@@ -250,7 +359,7 @@ validate_rpm_signing_certificate() {
                  count++
              }
              END { print count + 0 }' \
-            "${gpg_output}"
+            <<<"${gpg_output}"
     )
     signing_subkey_fingerprint=$(
         awk -F: -v expected="${RPM_SIGNING_SUBKEY_FINGERPRINT}" \
@@ -266,7 +375,7 @@ validate_rpm_signing_certificate() {
                  }
                  want=0
              }' \
-            "${gpg_output}"
+            <<<"${gpg_output}"
     )
 
     if [[ ${primary_count} != 1 ]]; then
@@ -306,7 +415,8 @@ verify_rpm_with_pinned_keyring() {
 
     # Both the key store and RPM transaction lock are private to this invocation,
     # so pre-existing host RPM keys cannot authorize this package.
-    rpmkeys \
+    # shellcheck disable=SC2310 # Failure is converted to a keyring diagnostic.
+    run_root rpmkeys \
         --define "_keyring fs" \
         --define "_keyringpath ${rpm_verify_keyring}" \
         --define "_keyring_lockpath ${rpm_verify_keyring}/.keyring.lock" \
@@ -315,7 +425,8 @@ verify_rpm_with_pinned_keyring() {
         error 'unable to import the pinned certificate into the isolated RPM keyring.'
         exit 65
     }
-    if ! rpmkeys \
+    # shellcheck disable=SC2310 # Failure is converted to a signature diagnostic.
+    if ! run_root rpmkeys \
         --define "_keyring fs" \
         --define "_keyringpath ${rpm_verify_keyring}" \
         --define "_keyring_lockpath ${rpm_verify_keyring}/.keyring.lock" \
@@ -329,44 +440,83 @@ verify_rpm_with_pinned_keyring() {
 verify_signed_rpm() {
     local rpm_path=$1
     local key_path=$2
+    local root_stage=$3
+    local gpg_home="${root_stage}/application-gnupg"
+    local rpm_verify_keyring="${root_stage}/application-rpm-keyring"
+    local gpg_output=''
 
-    (
-        local verify_root gpg_home rpm_verify_keyring gpg_output
+    # shellcheck disable=SC2310 # This helper is a predicate.
+    root_stage_path_is_safe "${root_stage}" || return 70
+    ensure_rpm_verification_gpg
+    run_root mkdir -p -- "${gpg_home}" "${rpm_verify_keyring}"
+    run_root chmod 700 -- "${gpg_home}" "${rpm_verify_keyring}"
 
-        ensure_rpm_verification_gpg
-        verify_root=$(mktemp -d) || {
-            error 'unable to create the isolated RPM verification directory.'
-            exit 70
-        }
-        chmod 700 -- "${verify_root}" || {
-            rm -rf -- "${verify_root}"
-            error 'unable to secure the isolated RPM verification directory.'
-            exit 70
-        }
-        gpg_home="${verify_root}/gnupg"
-        rpm_verify_keyring="${verify_root}/rpm-keyring"
-        gpg_output="${verify_root}/key.colons"
-        mkdir -p -- "${gpg_home}" "${rpm_verify_keyring}"
-        chmod 700 -- "${gpg_home}" "${rpm_verify_keyring}"
-        trap 'rm -rf -- "${verify_root:-}"' EXIT
-
-        inspect_rpm_signing_certificate "${key_path}" "${gpg_home}" "${gpg_output}"
-        validate_rpm_signing_certificate "${gpg_output}"
-        verify_rpm_with_pinned_keyring "${rpm_path}" "${key_path}" "${rpm_verify_keyring}"
-    )
+    inspect_rpm_signing_certificate \
+        "${key_path}" "${gpg_home}" gpg_output
+    validate_rpm_signing_certificate "${gpg_output}"
+    verify_rpm_with_pinned_keyring \
+        "${rpm_path}" "${key_path}" "${rpm_verify_keyring}"
 }
 
 authenticate_signed_rpm() {
     local rpm_path=$1
     local key_path=$2
+    local root_stage=$3
 
-    verify_signed_rpm "${rpm_path}" "${key_path}"
+    verify_signed_rpm "${rpm_path}" "${key_path}" "${root_stage}"
 
     # DNF performs a second verification during the privileged transaction.
     # Import only after the isolated pinned-certificate verification succeeded.
     printf 'Importing pinned OscarFrog RPM signing key: %s\n' \
         "${RPM_SIGNING_FINGERPRINT}"
     run_root rpmkeys --import "${key_path}"
+}
+
+prepare_application_rpm() {
+    local rpm_path=$1
+    local key_path=$2
+    local expected_signature_state=$3
+    local allow_unsigned_dev=$4
+    local staged_signature_state=''
+
+    create_root_stage application ROOT_APPLICATION_STAGE
+    stage_root_file \
+        "${rpm_path}" "${ROOT_APPLICATION_STAGE}" application.rpm \
+        STAGED_APPLICATION_RPM
+    if [[ ${expected_signature_state} == signed ]]; then
+        stage_root_file \
+            "${key_path}" "${ROOT_APPLICATION_STAGE}" signing-key.asc \
+            STAGED_APPLICATION_KEY
+    fi
+
+    # Every authorization decision is repeated against the protected root-owned
+    # copies. The original user paths are never reopened by rpmkeys or DNF.
+    validate_rpm_identity "${STAGED_APPLICATION_RPM}"
+    inspect_rpm_signature \
+        "${STAGED_APPLICATION_RPM}" "${allow_unsigned_dev}" \
+        staged_signature_state root true
+    if [[ ${staged_signature_state} != "${expected_signature_state}" ]]; then
+        error 'RPM signature state changed while entering root-owned staging.'
+        exit 65
+    fi
+    if [[ ${staged_signature_state} == signed ]]; then
+        authenticate_signed_rpm \
+            "${STAGED_APPLICATION_RPM}" \
+            "${STAGED_APPLICATION_KEY}" \
+            "${ROOT_APPLICATION_STAGE}"
+    fi
+}
+
+release_application_stage() {
+    [[ -n ${ROOT_APPLICATION_STAGE} ]] || return 0
+    # shellcheck disable=SC2310 # Failure becomes a fatal cleanup diagnostic.
+    remove_root_stage "${ROOT_APPLICATION_STAGE}" || {
+        error 'unable to remove root-owned application staging.'
+        exit 70
+    }
+    ROOT_APPLICATION_STAGE=''
+    STAGED_APPLICATION_RPM=''
+    STAGED_APPLICATION_KEY=''
 }
 
 ensure_rpm_fusion_bootstrap_tools() {
@@ -395,7 +545,7 @@ validate_rpm_fusion_certificate() {
 
     primary_count=$(
         awk -F: '$1 == "pub" { count++ } END { print count + 0 }' \
-            "${gpg_output}"
+            <<<"${gpg_output}"
     )
     primary_fingerprint=$(
         awk -F: \
@@ -404,10 +554,10 @@ validate_rpm_fusion_certificate() {
                  print toupper($10)
                  exit
              }' \
-            "${gpg_output}"
+            <<<"${gpg_output}"
     )
     primary_validity=$(
-        awk -F: '$1 == "pub" { print $2; exit }' "${gpg_output}"
+        awk -F: '$1 == "pub" { print $2; exit }' <<<"${gpg_output}"
     )
 
     if [[ ${primary_count} != 1 ||
@@ -422,7 +572,9 @@ validate_rpm_fusion_release_identity() {
     local rpm_path=$1
     local resolved_nevra=''
 
-    resolved_nevra=$(rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' \
+    # shellcheck disable=SC2310 # Failure is converted to an identity diagnostic.
+    resolved_nevra=$(LC_ALL=C run_root \
+        rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' \
         -- "${rpm_path}") || {
         error 'unable to inspect the RPM Fusion bootstrap package.'
         exit 65
@@ -454,10 +606,13 @@ enable_rpm_fusion() {
     ensure_rpm_fusion_bootstrap_tools
     (
         local bootstrap_root=''
-        local gpg_home=''
         local gpg_output=''
         local key_path=''
         local release_rpm=''
+        local root_stage=''
+        local staged_key=''
+        local staged_rpm=''
+        local gpg_home=''
         local rpm_verify_keyring=''
 
         bootstrap_root=$(mktemp -d) || {
@@ -465,18 +620,13 @@ enable_rpm_fusion() {
             exit 70
         }
         chmod 700 -- "${bootstrap_root}"
-        trap 'rm -rf -- "${bootstrap_root:-}"' EXIT
+        trap 'if [[ -n ${root_stage:-} ]]; then remove_root_stage "${root_stage}" || true; fi; rm -rf -- "${bootstrap_root:-}"' EXIT
         trap 'exit 129' HUP
         trap 'exit 130' INT
         trap 'exit 143' TERM
 
-        gpg_home="${bootstrap_root}/gnupg"
-        gpg_output="${bootstrap_root}/key.colons"
         key_path="${bootstrap_root}/RPM-GPG-KEY-rpmfusion-free-fedora-2020"
         release_rpm="${bootstrap_root}/rpmfusion-free-release-44.noarch.rpm"
-        rpm_verify_keyring="${bootstrap_root}/rpm-keyring"
-        mkdir -p -- "${gpg_home}" "${rpm_verify_keyring}"
-        chmod 700 -- "${gpg_home}" "${rpm_verify_keyring}"
 
         printf 'Downloading authenticated RPM Fusion metadata...\n'
         curl --fail --location --proto '=https' --tlsv1.2 \
@@ -494,19 +644,31 @@ enable_rpm_fusion() {
             exit 69
         }
 
+        create_root_stage rpmfusion root_stage
+        stage_root_file \
+            "${key_path}" "${root_stage}" rpmfusion-key.asc staged_key
+        stage_root_file \
+            "${release_rpm}" "${root_stage}" rpmfusion-release.rpm staged_rpm
+        gpg_home="${root_stage}/rpmfusion-gnupg"
+        rpm_verify_keyring="${root_stage}/rpmfusion-rpm-keyring"
+        run_root mkdir -p -- "${gpg_home}" "${rpm_verify_keyring}"
+        run_root chmod 700 -- "${gpg_home}" "${rpm_verify_keyring}"
+
         inspect_rpm_signing_certificate \
-            "${key_path}" "${gpg_home}" "${gpg_output}"
+            "${staged_key}" "${gpg_home}" gpg_output
         validate_rpm_fusion_certificate "${gpg_output}"
         verify_rpm_with_pinned_keyring \
-            "${release_rpm}" "${key_path}" "${rpm_verify_keyring}"
-        validate_rpm_fusion_release_identity "${release_rpm}"
+            "${staged_rpm}" "${staged_key}" "${rpm_verify_keyring}"
+        validate_rpm_fusion_release_identity "${staged_rpm}"
 
         printf 'Importing authenticated RPM Fusion certificate: %s\n' \
             "${RPM_FUSION_SIGNING_FINGERPRINT}"
-        run_root rpmkeys --import "${key_path}"
+        run_root rpmkeys --import "${staged_key}"
         printf 'Enabling authenticated RPM Fusion Free...\n'
         run_root dnf install --assumeyes \
-            --setopt=localpkg_gpgcheck=True "${release_rpm}"
+            --setopt=localpkg_gpgcheck=True "${staged_rpm}"
+        remove_root_stage "${root_stage}"
+        root_stage=''
     )
 }
 
@@ -639,19 +801,24 @@ main() {
     local ytdlp_bin=''
     local deno_bin=''
 
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
     parse_fedora_arguments allow_unsigned_dev rpm_argument "$@"
     require_fedora_installer_commands
     initialize_fedora_paths "${rpm_argument}" rpm_path
-    validate_rpm_identity "${rpm_path}"
-    inspect_rpm_signature "${rpm_path}" "${allow_unsigned_dev}" signature_state
+    inspect_rpm_signature \
+        "${rpm_path}" "${allow_unsigned_dev}" signature_state user false
     resolve_rpm_signing_key "${signature_state}" key_path
     detect_supported_fedora fedora_version
-    if [[ ${signature_state} == signed ]]; then
-        authenticate_signed_rpm "${rpm_path}" "${key_path}"
-    fi
+    prepare_application_rpm \
+        "${rpm_path}" "${key_path}" "${signature_state}" "${allow_unsigned_dev}"
     enable_rpm_fusion "${fedora_version}"
     install_media_dependencies
-    install_application_rpm "${rpm_path}" "${signature_state}"
+    install_application_rpm "${STAGED_APPLICATION_RPM}" "${signature_state}"
+    release_application_stage
     validate_installed_system ffmpeg_vendor
     update_managed_runtimes ytdlp_bin deno_bin
     report_fedora_installation "${ffmpeg_vendor}" "${ytdlp_bin}" "${deno_bin}"

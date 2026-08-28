@@ -17,8 +17,11 @@ readonly APP_ID='yt-dlp-aria2-downloader'
 readonly RUNTIME_OWNER_SENTINEL='.package-runtime-owner-v1'
 readonly DENO_RELEASE_REPOSITORY='denoland/deno'
 readonly DEFAULT_YTDLP_CHANNEL='stable'
+readonly ENGINE_RUNTIME_CONTRACT_VERSION='1'
 
 LOCK_FD=''
+VALIDATED_YTDLP_VERSION=''
+VALIDATED_DENO_VERSION=''
 
 error() {
     printf 'Error: %s\n' "$*" >&2
@@ -457,6 +460,8 @@ validate_ytdlp() {
     local option
     local version_output=''
 
+    VALIDATED_YTDLP_VERSION=''
+
     if [[ ! -x ${candidate} ]]; then
         error "yt-dlp runtime validation failed: candidate is not executable: ${candidate}"
         return 1
@@ -478,12 +483,38 @@ validate_ytdlp() {
         return 1
     fi
 
+    # This is the complete option contract used by download-video.sh. Managed
+    # runtimes are attested only after this profile succeeds, so the engine does
+    # not need to start the same executable a second time merely to inspect it.
     for option in \
+        --batch-file \
         --break-match-filters \
+        --cookies \
+        --cookies-from-browser \
+        --dump-single-json \
+        --extractor-args \
+        --extractor-retries \
+        --fixup \
+        --fragment-retries \
         --js-runtimes \
         --list-impersonate-targets \
-        --no-update; do
-        if ! grep -Fq -- "${option}" <<<"${help}"; then
+        --load-info-json \
+        --no-clean-info-json \
+        --no-overwrites \
+        --no-post-overwrites \
+        --no-update \
+        --parse-metadata \
+        --print \
+        --print-to-file \
+        --progress-delta \
+        --progress-template \
+        --retries \
+        --retry-sleep \
+        --skip-download \
+        --socket-timeout; do
+        if ! grep -Eq -- \
+            "^[[:space:]]*(-[^,[:space:]]+,[[:space:]]+)?${option}([=[:space:]]|$)" \
+            <<<"${help}"; then
             error "yt-dlp runtime validation failed: required option is absent: ${option}"
             return 1
         fi
@@ -504,6 +535,7 @@ validate_ytdlp() {
         return 1
     fi
 
+    VALIDATED_YTDLP_VERSION=${version_output}
     return 0
 }
 
@@ -532,6 +564,9 @@ validate_deno() {
     local version=''
     local major=''
     local minor=''
+    local supported=false
+
+    VALIDATED_DENO_VERSION=''
 
     if ! parse_deno_version "${candidate}" version; then
         return 1
@@ -552,25 +587,29 @@ validate_deno() {
     # without Bash arithmetic so arbitrarily long version components cannot
     # overflow fixed-width shell integers.
     if ((${#major} > 1)); then
-        return 0
+        supported=true
+    else
+        case ${major} in
+            [3-9])
+                supported=true
+                ;;
+            2)
+                if ((${#minor} > 1)); then
+                    supported=true
+                else
+                    case ${minor} in
+                        [3-9]) supported=true ;;
+                        *) ;;
+                    esac
+                fi
+                ;;
+            *) ;;
+        esac
     fi
-    case ${major} in
-        [3-9])
-            return 0
-            ;;
-        2)
-            if ((${#minor} > 1)); then
-                return 0
-            fi
-            case ${minor} in
-                [3-9]) return 0 ;;
-                *) return 1 ;;
-            esac
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+
+    [[ ${supported} == true ]] || return 1
+    VALIDATED_DENO_VERSION=${version}
+    return 0
 }
 
 install_ytdlp_candidate() {
@@ -581,10 +620,7 @@ install_ytdlp_candidate() {
     local staged=''
 
     validate_ytdlp "${candidate}" || return 1
-    version=$(LC_ALL=C run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" \
-        "${candidate}" --version) || return 1
-    version=${version%%$'\n'*}
-    is_valid_ytdlp_version "${version}" || return 1
+    version=${VALIDATED_YTDLP_VERSION}
     if [[ ${version} != "${expected_version}" ]]; then
         error "yt-dlp candidate version ${version} does not match resolved release ${expected_version}."
         return 1
@@ -622,7 +658,7 @@ install_deno_candidate() {
     local staged=''
 
     validate_deno "${candidate}" || return 1
-    parse_deno_version "${candidate}" version || return 1
+    version=${VALIDATED_DENO_VERSION}
 
     version_dir="${DENO_ROOT}/${version}"
     if [[ -L ${version_dir} || (-e ${version_dir} && ! -d ${version_dir}) ]]; then
@@ -1172,25 +1208,44 @@ prepare_runtime_storage() {
 }
 
 print_runtime_versions() {
+    require_runtime || return $?
+    printf 'yt-dlp %s (%s)\n' "${VALIDATED_YTDLP_VERSION}" "${YTDLP_CHANNEL}"
+    printf 'Deno %s\n' "${VALIDATED_DENO_VERSION}"
+}
+
+# Prepare both managed runtimes and emit the exact validation result consumed
+# by download-video.sh. Values are line-safe because runtime layout validation
+# rejects line breaks before any managed path is constructed.
+print_engine_runtime_attestation() {
+    local action=$1
     local ytdlp=''
     local deno=''
-    local ytdlp_version=''
-    local deno_version=''
 
-    require_runtime || return $?
+    case ${action} in
+        require)
+            require_runtime || return $?
+            ;;
+        update)
+            update_runtime || return $?
+            ;;
+        *)
+            error 'prepare requires an action: update or require.'
+            return 2
+            ;;
+    esac
+
     ytdlp=$(component_path yt-dlp) || return 69
     deno=$(component_path deno) || return 69
-    ytdlp_version=$(LC_ALL=C run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" \
-        "${ytdlp}" --version) || {
-        error 'unable to read the managed yt-dlp version.'
+    if [[ -z ${VALIDATED_YTDLP_VERSION} || -z ${VALIDATED_DENO_VERSION} ]]; then
+        error 'managed runtime validation did not produce a complete engine attestation.'
         return 69
-    }
-    parse_deno_version "${deno}" deno_version || {
-        error 'unable to read the managed Deno version.'
-        return 69
-    }
-    printf 'yt-dlp %s (%s)\n' "${ytdlp_version%%$'\n'*}" "${YTDLP_CHANNEL}"
-    printf 'Deno %s\n' "${deno_version}"
+    fi
+
+    printf 'runtime-contract=%s\n' "${ENGINE_RUNTIME_CONTRACT_VERSION}"
+    printf 'yt-dlp-path=%s\n' "${ytdlp}"
+    printf 'yt-dlp-version=%s\n' "${VALIDATED_YTDLP_VERSION}"
+    printf 'deno-path=%s\n' "${deno}"
+    printf 'deno-version=%s\n' "${VALIDATED_DENO_VERSION}"
 }
 
 dispatch_runtime_command() {
@@ -1205,6 +1260,13 @@ dispatch_runtime_command() {
             ;;
         update)
             update_runtime
+            ;;
+        prepare)
+            (($# == 2)) || {
+                error 'prepare requires exactly one action: update or require.'
+                exit 2
+            }
+            print_engine_runtime_attestation "$2"
             ;;
         path)
             (($# == 2)) || {
@@ -1228,7 +1290,7 @@ dispatch_runtime_command() {
             print_runtime_versions
             ;;
         *)
-            printf 'Usage: %s {require|ensure|update|path yt-dlp|path deno|rollback yt-dlp|rollback deno|versions}\n' \
+            printf 'Usage: %s {require|ensure|update|prepare update|prepare require|path yt-dlp|path deno|rollback yt-dlp|rollback deno|versions}\n' \
                 "${0##*/}" >&2
             exit 2
             ;;

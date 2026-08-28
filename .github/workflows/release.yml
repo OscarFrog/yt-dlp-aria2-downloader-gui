@@ -492,12 +492,10 @@ jobs:
       - name: Run hermetic routing integration (3x)
         shell: bash
         run: |
-          set -Eeuo pipefail
-          for iteration in 1 2 3; do
-            printf '=== release routing iteration %d/3 ===\n' "${iteration}"
+          bash ./tests/repeat-qualification.sh \
+            --label 'release routing iteration' --runs 3 --jobs 3 -- \
             timeout --signal=TERM --kill-after=10s 8m \
-              bash ./tests/real-tools-integration.sh
-          done
+            bash ./tests/real-tools-integration.sh
       - name: Run aria2 direct-transfer behavior qualification
         env:
           ARIA2_BEHAVIOR_BASIC_RUNS: 3
@@ -512,12 +510,10 @@ jobs:
       - name: Run HLS post-remux duration validation (3x)
         shell: bash
         run: |
-          set -Eeuo pipefail
-          for iteration in 1 2 3; do
-            printf '=== release HLS duration guard iteration %d/3 ===\n' "${iteration}"
+          bash ./tests/repeat-qualification.sh \
+            --label 'release HLS duration guard iteration' --runs 3 --jobs 3 -- \
             timeout --signal=TERM --kill-after=10s 5m \
-              bash ./tests/hls-remux-duration-integration.sh
-          done
+            bash ./tests/hls-remux-duration-integration.sh
 
   zip:
     needs: [validate, real-tools]
@@ -579,11 +575,11 @@ jobs:
           shopt -u nullglob
           ((${#packages[@]} == 1))
 
-          for iteration in {1..3}; do
-            printf '=== release RPM v4/v6 qualification iteration %d/3 ===\n' "${iteration}"
+          bash ./tests/repeat-qualification.sh \
+            --label 'release RPM v4/v6 qualification iteration' \
+            --runs 3 --jobs 3 -- \
             timeout --signal=TERM --kill-after=10s 4m \
-              bash ./tests/rpm6-multisig-integration.sh "${packages[0]}"
-          done
+            bash ./tests/rpm6-multisig-integration.sh "${packages[0]}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: unsigned-rpm

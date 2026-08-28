@@ -188,6 +188,10 @@ for name, sig, expected in (
             "PATH": f"{mock_bin}:/usr/bin:/bin",
             "REAL_BASH": real_bash,
             "REAL_SLEEP": real_sleep,
+            # The production runner retains its five-second grace period. This
+            # integration needs only enough time to observe signal delivery;
+            # one second still exercises the deliberate KILL escalation.
+            "YTDLP_ARIA2_TEST_RUNNER_TERMINATION_POLL_ATTEMPTS": "10",
             "MOCK_IMMEDIATE_MARKER": str(immediate_marker),
             "MOCK_DESCENDANT_MARKER": str(descendant_marker),
         }
@@ -246,6 +250,7 @@ env.update(
         "PATH": f"{mock_bin}:/usr/bin:/bin",
         "REAL_BASH": real_bash,
         "REAL_SLEEP": real_sleep,
+        "YTDLP_ARIA2_TEST_RUNNER_TERMINATION_POLL_ATTEMPTS": "10",
         "MOCK_IMMEDIATE_MARKER": str(immediate_marker),
         "MOCK_DESCENDANT_MARKER": str(descendant_marker),
         "MOCK_IGNORE_SIGNALS": "1",

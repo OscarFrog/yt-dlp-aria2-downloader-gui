@@ -47,15 +47,17 @@ parallel:
 ./tests/run-all.sh --full --jobs 4
 ```
 
-Every static step and integration suite reports its elapsed time. The four
-independent ShellCheck inventories share the requested job limit, while shfmt
-and static behavioral validation remain ordered prerequisites. Parallel output
-is buffered separately and printed in canonical manifest order, so completion
-races do not produce interleaved logs. The integration scheduler immediately
-reuses a slot when any suite finishes; a short suite therefore cannot leave a
-worker idle while an unrelated long suite is still running. Interruption still
-terminates every supervised validation process group. A descendant that
-deliberately creates a new session is outside that process-group contract.
+Every static step and integration suite reports its elapsed time. The read-only
+shfmt check, static behavioral validation, and four ShellCheck inventories
+share the requested job limit. Parallel output is buffered separately and
+printed in canonical manifest order, so completion races do not produce
+interleaved logs. The integration manifest staggers CPU-heavy mocks with
+wait-heavy monitor and signal suites, and the scheduler immediately reuses a
+slot when any suite finishes; a short suite therefore cannot leave a worker
+idle while an unrelated long suite is still running.
+Interruption still terminates every supervised validation process group. A
+descendant that deliberately creates a new session is outside that
+process-group contract.
 
 The complete mock contract is divided into eight isolated scheduler suites
 (`engine-core`, `engine-hls`, `engine-staging`, `gui-progress`, `gui-state`,
@@ -83,6 +85,21 @@ validation:
 `YTDLP_ARIA2_TEST_JOBS` supplies the default concurrency when `--jobs` is not
 provided. Values are restricted to `1..32`. The fast profile is a developer
 convenience, not a substitute for the complete suite before review or release.
+
+Independent stability repetitions use the same bounded process supervision:
+
+```bash
+./tests/repeat-qualification.sh \
+  --label 'HLS duration iteration' --runs 3 --jobs 3 -- \
+  bash ./tests/hls-remux-duration-integration.sh
+```
+
+Each repetition receives an isolated log and its output is replayed in numeric
+order. The first child failure is preserved after every active child has been
+reaped. `YTDLP_ARIA2_REPEAT_JOBS` can lower the default concurrency on a small
+machine. Use this helper only when repetitions own separate temporary state;
+tests that intentionally share one server, lock, or accounting log remain
+sequential internally.
 
 ## Shell formatting
 
@@ -145,7 +162,10 @@ The automated suite checks, among other things:
   rationale, use durable `Scenario`, `Mutation test`, `Regression guard`,
   `Negative control`, and `Positive controls` labels in tests, and reject
   permanent `PATCH`/`AUD` labels;
-- project-version coherence across active scripts, documentation and release workflow surfaces, while keeping historical CHANGELOG entries exempt;
+- development-version coherence across active scripts, documentation and
+  release-workflow surfaces, plus a separate documentation pin for the exact
+  RPM, DEB and ZIP names of the latest published release, while keeping
+  historical CHANGELOG entries exempt;
 - standardized Bash headers on every canonical shell script, including the canonical interpreter line, an SPDX MIT tag, project name, repository-relative file name and purpose;
 - argument validation, terminal `--`, and exactly one URL per run;
 - preservation of URLs containing shell metacharacters;
@@ -209,6 +229,10 @@ The automated suite checks, among other things:
 - a package-CI negative test that imports a different ephemeral signer into
   the host RPM database, signs the unsigned PR RPM with that key, and proves
   the production bootstrap still rejects it before merge;
+- root-owned Fedora staging mutation tests that replace the original
+  application and RPM Fusion key/package inputs immediately after copying, then
+  prove that isolated verification, system key import, and DNF all consume only
+  the unchanged staged bytes;
 - an independent release-CI negative test that repeats the wrong-signer attack
   against a copy of the actual signed release RPM before publication;
 - real build, APT installation, removal, and ownership validation of the DEB on
@@ -229,8 +253,9 @@ The automated suite checks, among other things:
   diagnostics kept under the runtime temporary directory;
 - complete-video rejection when either the video or audio stream is absent,
   plus audio-mode rejection when a content-video stream remains in the final file;
-- real MP3/ID3 attached-cover qualification proving `v:0` sees cover art while
-  `V:0` does not, with a temporary `V:0` -> `v:0` validator mutant that must be killed;
+- real MP3/ID3 attached-cover qualification proving the combined JSON summary
+  sees the attached stream but excludes it from content video, with a temporary
+  validator mutant that ignores `attached_pic` and must be killed;
 - managed Deno requirements for YouTube extraction and use of the EJS
   components bundled with the managed official yt-dlp runtime, without asking
   the downloader for `--remote-components ejs:npm`;
@@ -254,7 +279,9 @@ The automated suite checks, among other things:
 - managed-runtime operation with Deno outside PATH, bounded lock/network waits,
   strict zero-network `require` mode, exact-tag stable/nightly/stable switching,
   exact executable-version binding to the resolved yt-dlp release tag,
-  single-member Deno archive extraction, explicit invalid-`path` diagnostics,
+  single-member Deno archive extraction, a versioned engine attestation that
+  avoids duplicate path/version/capability discovery, explicit invalid-`path`
+  and invalid-`prepare` diagnostics,
   lock-descriptor isolation, repeated contention/double-rollback coverage
   (three cycles in ordinary validation and ten per dedicated stress run),
   interrupted-activation journal recovery, explicit/automatic rollback, and
@@ -294,17 +321,19 @@ The automated suite checks, among other things:
 container duration while its content-video packet count fell from 288 to 229;
 the pre-fix engine still returned success and published the result-file.
 
-Final publication still checks the expected streams and retains the HLS-specific
-duration guard. In addition, when FFprobe exposes finite `start_time` and
-`duration` metadata, the engine seeks near the declared end and requires the
-final required A/V timeline to reach within 2% of that timeline, with a
-one-second floor. Audio mode requires `a:0` to reach that boundary. Video mode
-already requires both `V:0` and `a:0` structurally and accepts the tail when
-either required stream reaches it, so a legitimate longer audio tail does not
-turn a valid video into a false truncation. The probe reads packets from a
-near-tail interval to EOF and is bounded by the same 15-second FFprobe deadline;
-it does not decode the complete media. If finite timeline metadata is
-unavailable, the existing structural validation remains the fallback.
+Final publication still checks the expected content-video/audio streams and
+retains the HLS-specific duration guard. One bounded FFprobe JSON summary now
+supplies stream types, attached-picture dispositions, `start_time` and
+`duration`; attached cover art therefore remains distinct from content video.
+When finite timeline metadata is available, a second probe seeks near the
+declared end and requires the final required A/V timeline to reach within 2% of
+that timeline, with a one-second floor. Audio mode requires audio to reach that
+boundary. Video mode requires content video and audio structurally and accepts
+the tail when either required stream reaches it, so a legitimate longer audio
+tail does not turn a valid video into a false truncation. The tail probe reads
+packets from a near-tail interval to EOF and is bounded by the same 15-second
+deadline; it does not decode the complete media. If finite timeline metadata is
+unavailable, the structural validation remains the fallback.
 
 The permanent real-tool regression injects a metadata-parseable physical
 truncation immediately before final validation and requires exit 65 with no
@@ -336,8 +365,9 @@ recheck their transferred SHA-256 digests before installation.
 Pull-request CI builds one unsigned noarch RPM and proves that the production
 bootstrap rejects it unless `--allow-unsigned-dev` is explicitly selected.
 Release CI builds the RPM once, explicitly requires RPM package format v4,
-qualifies RPM-v4/v6 signature semantics three times, then signs those exact
-bytes once in the isolated `rpm-signing` GitHub Environment. The signer has no
+qualifies RPM-v4/v6 signature semantics three times concurrently against the
+same read-only unsigned artifact, then signs those exact bytes once in the
+isolated `rpm-signing` GitHub Environment. The signer has no
 repository checkout, uses the same private RPM 6 `fs` keyring model as the
 consumer bootstrap, removes materialized signing secrets as soon as they are no
 longer needed, and explicitly terminates its temporary `gpg-agent`. The
@@ -357,7 +387,8 @@ HTTP, AAC/M4A, Opus/WebM, combined-audio, HLS and DASH fixtures locally, serves
 them over loopback, proves the aria2c/native downloader boundary, exercises real
 FFmpeg progress, and checks HLS post-remux duration consistency without
 contacting a public media service. Audio/routing and HLS-duration scenarios are
-repeated three times. The controlled aria2 behavior suite repeats
+repeated three times concurrently with ordered per-run logs. The controlled
+aria2 behavior suite repeats
 Range/no-Range/redirect/error three times, the silent-active quiescence
 negative control ten times, and interrupted resume ten times. A separate weekly
 scheduled job resolves and logs the current stable yt-dlp
@@ -529,4 +560,10 @@ requests and pushes to `main`:
 - the runtime-manager hardening integration suite ten times with ten internal
   lock-contention and double-rollback cycles per run, repeatedly exercising
   fresh bootstrap, strict zero-network behavior, exact-tag resolution,
-  activation-journal recovery, lock contention, and rollback transactions.
+  activation-journal recovery, lock contention, and rollback transactions;
+- the package-cleanup safety suite ten times, covering forged metadata,
+  symlinks, custom XDG locations, and allowlisted removal boundaries.
+
+The runtime-manager and package-cleanup repetitions run with at most four
+workers and ordered logs. Their individual test workspaces are independent;
+the mock jitter matrix remains sharded at the workflow level.
