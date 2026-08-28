@@ -161,14 +161,14 @@ verify_release_tag() {
     local release_tag=$1
     local output_variable=$2
     local head_commit=''
-    local tag_commit=''
+    local resolved_tag_commit=''
     local tag_verification=''
     local tag_primary_fingerprint=''
 
     head_commit=$(git rev-parse HEAD)
-    tag_commit=$(git rev-parse "${release_tag}^{commit}") \
+    resolved_tag_commit=$(git rev-parse "${release_tag}^{commit}") \
         || fail "unable to resolve local tag: ${release_tag}"
-    [[ ${tag_commit} == "${head_commit}" ]] \
+    [[ ${resolved_tag_commit} == "${head_commit}" ]] \
         || fail "release tag ${release_tag} does not resolve to current HEAD."
 
     if ! tag_verification=$(git verify-tag --raw "${release_tag}" 2>&1 >/dev/null); then
@@ -185,7 +185,7 @@ verify_release_tag() {
     [[ -n ${tag_primary_fingerprint} &&
         ${tag_primary_fingerprint} != *$'\n'* ]] || fail "unable to determine the unique signer fingerprint for tag: ${release_tag}"
     [[ ${tag_primary_fingerprint} == "${RELEASE_TAG_SIGNING_FINGERPRINT}" ]] || fail "release tag signer is not authorized: ${tag_primary_fingerprint}"
-    printf -v "${output_variable}" '%s' "${tag_commit}"
+    printf -v "${output_variable}" '%s' "${resolved_tag_commit}"
 }
 
 verify_release_tree_and_version() {

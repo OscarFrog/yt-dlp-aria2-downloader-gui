@@ -1331,6 +1331,9 @@ test_static_release_contracts() {
             "${preflight_phase}() {" \
             "release preflight phase ${preflight_phase}"
     done
+    assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        "local resolved_tag_commit=''" \
+        'release preflight tag commit does not shadow its caller output variable'
     assert_status 0 'release evidence qualification exposes help' \
         "${SCRIPT_DIR}/scripts/release-evidence-qualification.sh" --help
     assert_status 65 'release evidence qualification rejects an invalid tag' \
