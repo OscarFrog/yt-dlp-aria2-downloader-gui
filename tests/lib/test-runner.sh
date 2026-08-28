@@ -8,12 +8,15 @@
 
 # This sourced library deliberately leaves shell options and traps to its
 # caller. Child commands run in dedicated sessions so a failing test, runner
-# interruption, or timeout can terminate the complete descendant tree.
+# interruption, or timeout can terminate the supervised process group.
 
 TEST_RUNNER_LOG_DIR=''
 TEST_RUNNER_CHILD_PIDS=()
 TEST_RUNNER_CHILD_PGIDS=()
 TEST_RUNNER_CHILD_COMPLETIONS=()
+TEST_RUNNER_STARTING_CHILD=false
+TEST_RUNNER_DEFERRED_SIGNAL=''
+TEST_RUNNER_DEFERRED_STATUS=''
 
 # Return a monotonic timestamp in milliseconds.
 test_runner_now_ms() {
@@ -27,12 +30,12 @@ PY_NOW
 # Format a non-negative millisecond duration into the named caller variable.
 test_runner_format_duration() {
     (($# == 2)) || return 2
-    local duration_ms=$1
-    local output_name=$2
+    local runner_duration_ms=$1
+    local runner_output_name=$2
 
-    [[ ${duration_ms} =~ ^[0-9]+$ ]] || return 2
-    printf -v "${output_name}" '%d.%03ds' \
-        "$((duration_ms / 1000))" "$((duration_ms % 1000))"
+    [[ ${runner_duration_ms} =~ ^[0-9]+$ ]] || return 2
+    printf -v "${runner_output_name}" '%d.%03ds' \
+        "$((runner_duration_ms / 1000))" "$((runner_duration_ms % 1000))"
 }
 
 # Create the private directory used for deterministic parallel-suite logs.
@@ -41,6 +44,9 @@ test_runner_initialize() {
     ((${#TEST_RUNNER_CHILD_PGIDS[@]} == 0)) || return 70
     ((${#TEST_RUNNER_CHILD_COMPLETIONS[@]} == 0)) || return 70
     [[ -z ${TEST_RUNNER_LOG_DIR} ]] || return 70
+    [[ ${TEST_RUNNER_STARTING_CHILD} == false ]] || return 70
+    [[ -z ${TEST_RUNNER_DEFERRED_SIGNAL} ]] || return 70
+    [[ -z ${TEST_RUNNER_DEFERRED_STATUS} ]] || return 70
 
     TEST_RUNNER_LOG_DIR=$(mktemp -d) || return 70
 }
@@ -57,7 +63,7 @@ import time
 
 # Bash starts asynchronous commands with SIGINT/SIGQUIT ignored when job
 # control is disabled. Restore inherited dispositions before the new session.
-for signal_name in ("SIGINT", "SIGQUIT", "SIGPIPE", "SIGXFSZ", "SIGXFZ"):
+for signal_name in ("SIGINT", "SIGQUIT", "SIGPIPE", "SIGXFSZ"):
     signal_number = getattr(signal, signal_name, None)
     if signal_number is not None:
         signal.signal(signal_number, signal.SIG_DFL)
@@ -111,6 +117,9 @@ _test_runner_start_child() {
     local slot=$1
     local log_file=$2
     local completion_file=$3
+    local child_pid=''
+    local deferred_signal=''
+    local deferred_status=''
     shift 3
 
     [[ ${slot} =~ ^[0-9]+$ ]] || return 2
@@ -120,7 +129,15 @@ _test_runner_start_child() {
         (-e ${completion_file} || -L ${completion_file}) ]]; then
         return 70
     fi
+    [[ ${TEST_RUNNER_STARTING_CHILD} == false ]] || return 70
+    [[ -z ${TEST_RUNNER_DEFERRED_SIGNAL} ]] || return 70
+    [[ -z ${TEST_RUNNER_DEFERRED_STATUS} ]] || return 70
 
+    # Bash may dispatch a trapped signal after the asynchronous command has
+    # started but before the following array assignments. Mark that narrow
+    # region explicitly: the trap records the first signal, this function
+    # registers the child, and only then is normal termination replayed.
+    TEST_RUNNER_STARTING_CHILD=true
     if [[ -n ${log_file} ]]; then
         _test_runner_exec_child "${completion_file}" "$@" \
             >"${log_file}" 2>&1 &
@@ -128,9 +145,37 @@ _test_runner_start_child() {
         _test_runner_exec_child "${completion_file}" "$@" &
     fi
 
-    TEST_RUNNER_CHILD_PIDS[slot]=$!
-    TEST_RUNNER_CHILD_PGIDS[slot]=$!
+    child_pid=$!
+    TEST_RUNNER_CHILD_PIDS[slot]=${child_pid}
+    TEST_RUNNER_CHILD_PGIDS[slot]=${child_pid}
     TEST_RUNNER_CHILD_COMPLETIONS[slot]=${completion_file}
+
+    if [[ -n ${TEST_RUNNER_DEFERRED_SIGNAL} ]]; then
+        deferred_signal=${TEST_RUNNER_DEFERRED_SIGNAL}
+        deferred_status=${TEST_RUNNER_DEFERRED_STATUS}
+        # Close the final registration-to-replay window before exposing the
+        # completed child arrays. A later fatal signal must never supersede the
+        # first signal merely because the runner was descheduled here.
+        trap '' HUP INT TERM
+        TEST_RUNNER_STARTING_CHILD=false
+        TEST_RUNNER_DEFERRED_SIGNAL=''
+        TEST_RUNNER_DEFERRED_STATUS=''
+        test_runner_handle_signal "${deferred_signal}" "${deferred_status}"
+    else
+        TEST_RUNNER_STARTING_CHILD=false
+        # A trap may have run after the condition above was evaluated but
+        # before STARTING_CHILD became false. Recheck after the transition: a
+        # later signal observes false and enters the normal handler directly,
+        # while a signal from that final narrow window is replayed here.
+        if [[ -n ${TEST_RUNNER_DEFERRED_SIGNAL} ]]; then
+            deferred_signal=${TEST_RUNNER_DEFERRED_SIGNAL}
+            deferred_status=${TEST_RUNNER_DEFERRED_STATUS}
+            trap '' HUP INT TERM
+            TEST_RUNNER_DEFERRED_SIGNAL=''
+            TEST_RUNNER_DEFERRED_STATUS=''
+            test_runner_handle_signal "${deferred_signal}" "${deferred_status}"
+        fi
+    fi
 }
 
 # Start one command in a dedicated session and record it in the requested slot.
@@ -303,6 +348,9 @@ test_runner_cleanup() {
         rm -rf -- "${TEST_RUNNER_LOG_DIR}" || true
     fi
     TEST_RUNNER_LOG_DIR=''
+    TEST_RUNNER_STARTING_CHILD=false
+    TEST_RUNNER_DEFERRED_SIGNAL=''
+    TEST_RUNNER_DEFERRED_STATUS=''
 }
 
 # Complete non-reentrant child cleanup and preserve the conventional signal
@@ -311,6 +359,19 @@ test_runner_handle_signal() {
     (($# == 2)) || return 2
     local signal_name=$1
     local exit_status=$2
+
+    # Once a signal has been deferred, it remains authoritative even if child
+    # registration has just transitioned to its completed state. This also
+    # protects the few commands needed to install the non-reentrant trap guard
+    # before replay.
+    if [[ -n ${TEST_RUNNER_DEFERRED_SIGNAL} ]]; then
+        return 0
+    fi
+    if [[ ${TEST_RUNNER_STARTING_CHILD} == true ]]; then
+        TEST_RUNNER_DEFERRED_SIGNAL=${signal_name}
+        TEST_RUNNER_DEFERRED_STATUS=${exit_status}
+        return 0
+    fi
 
     trap '' HUP INT TERM
     test_runner_terminate_children "${signal_name}" || true

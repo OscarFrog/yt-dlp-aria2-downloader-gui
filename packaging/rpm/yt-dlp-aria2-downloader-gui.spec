@@ -75,6 +75,10 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Fri Aug 28 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.1-1
+- Authenticate RPM Fusion bootstrap and harden release-tag authorization.
+- Close test-runner startup races and improve media validation diagnostics.
+
 * Fri Aug 28 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.0-1
 - Unify shell architecture, runtime checks, packaging, and release validation.
 - Parallelize profiled validation while retaining dedicated stress coverage.

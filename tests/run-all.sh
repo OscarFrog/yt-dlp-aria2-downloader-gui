@@ -55,6 +55,7 @@ readonly -a FULL_SUITE_IDS=(
     progress-monitor
     ffmpeg-progress
     installer
+    install-fedora-auth
     packaging
     package-user-cleanup
     test-runner
@@ -68,6 +69,7 @@ readonly -a FAST_SUITE_IDS=(
     progress-monitor
     ffmpeg-progress
     installer
+    install-fedora-auth
     packaging
     package-user-cleanup
     test-runner
@@ -90,6 +92,7 @@ declare -Ar SUITE_LABELS=(
     ['progress-monitor']='Progress monitor integration'
     ['ffmpeg-progress']='Measured FFmpeg progress integration'
     ['installer']='Installer integration'
+    ['install-fedora-auth']='Fedora bootstrap authentication integration'
     ['packaging']='Packaging integration'
     ['package-user-cleanup']='Package user cleanup integration'
     ['test-runner']='Test-runner integration'
@@ -112,6 +115,7 @@ declare -Ar SUITE_PATHS=(
     ['progress-monitor']='./tests/progress-monitor-integration.sh'
     ['ffmpeg-progress']='./tests/ffmpeg-progress-integration.sh'
     ['installer']='./tests/installer-integration.sh'
+    ['install-fedora-auth']='./tests/install-fedora-authentication-integration.sh'
     ['packaging']='./tests/packaging-integration.sh'
     ['package-user-cleanup']='./tests/package-user-cleanup-integration.sh'
     ['test-runner']='./tests/test-runner-integration.sh'

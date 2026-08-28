@@ -25,9 +25,11 @@ Run from the repository root:
 ./tests/run-all.sh
 ```
 
-The default is intentionally the complete `full` profile with one integration
-suite at a time. This preserves the release-equivalent local contract and the
-most readable live output.
+The default is intentionally the complete hermetic `full` profile with one
+integration suite at a time. It is the complete local contract and gives the
+most readable live output. A release additionally requires the real-tools,
+distribution packaging, external-version and interactive qualification jobs
+documented below; `--full` alone does not claim those environments.
 
 ## Fast feedback, timing and concurrency
 
@@ -52,7 +54,8 @@ is buffered separately and printed in canonical manifest order, so completion
 races do not produce interleaved logs. The integration scheduler immediately
 reuses a slot when any suite finishes; a short suite therefore cannot leave a
 worker idle while an unrelated long suite is still running. Interruption still
-terminates every supervised validation process group and its descendants.
+terminates every supervised validation process group. A descendant that
+deliberately creates a new session is outside that process-group contract.
 
 The complete mock contract is divided into eight isolated scheduler suites
 (`engine-core`, `engine-hls`, `engine-staging`, `gui-progress`, `gui-state`,
@@ -408,20 +411,19 @@ The preferred preflight is the repository helper:
 
 ```bash
 bash ./scripts/release-preflight.sh \
-  --confirm-admin-bypass-disabled \
-  --confirm-tag-policy \
   --confirm-single-maintainer-self-review \
   vX.Y.Z
 ```
 
-The three confirmation flags require the operator to have checked that
-administrator bypass is disabled, that the selected `v*` deployment policy is a
-**tag** policy, and that single-maintainer self-approval is intentional. The
-script additionally verifies Immutable Releases, exactly one required reviewer,
-that the reviewer matches the authenticated GitHub account, that self-review is
-allowed for this single-maintainer mode, secret scope, the pinned public
-certificate, the dedicated signing subkey, signed-tag/HEAD/version identity,
-and warns when the signing subkey is within 90 days of expiry.
+The single confirmation records that single-maintainer self-approval is an
+intentional operating choice. The script verifies through the GitHub API that
+administrator bypass is disabled and the sole selected `v*` deployment policy
+is a **tag** policy. It also verifies Immutable Releases, exactly one required
+reviewer, that the reviewer matches the authenticated GitHub account, that
+self-review remains allowed for this single-maintainer mode, secret scope, the
+pinned public certificate, the dedicated signing subkey,
+signed-tag/HEAD/version identity, and warns when the signing subkey is within
+90 days of expiry.
 
 For manual workflow recovery, invoke the workflow from the exact same tag:
 

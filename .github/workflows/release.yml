@@ -81,6 +81,45 @@ jobs:
         run: |
           sudo apt-get -o Acquire::Retries=3 update
           sudo apt-get -o Acquire::Retries=3 install --yes aria2 curl desktop-file-utils gnupg shellcheck unzip
+      - name: Verify the exact authorized release-tag signer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG_SIGNING_FINGERPRINT: 43E5361414863738F0324F2B047B26057E612CDC
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          tag_gpg_home=$(mktemp -d)
+          tag_keys=$(mktemp)
+          trap 'rm -rf -- "${tag_gpg_home}"; rm -f -- "${tag_keys}"' EXIT
+          chmod 700 -- "${tag_gpg_home}"
+
+          gh api users/OscarFrog/gpg_keys --jq '.[].raw_key' >"${tag_keys}"
+          [[ -s ${tag_keys} ]]
+          GNUPGHOME="${tag_gpg_home}" gpg --batch --no-options \
+            --import "${tag_keys}"
+
+          verification=''
+          if ! verification=$(GNUPGHOME="${tag_gpg_home}" \
+            git verify-tag --raw "${RELEASE_TAG}" 2>&1 >/dev/null); then
+            printf 'Error: local release-tag signature verification failed.\n' >&2
+            exit 65
+          fi
+          signer_fingerprint=$(
+            awk '
+              $1 == "[GNUPG:]" && $2 == "VALIDSIG" {
+                fingerprint = (NF >= 12 && $12 != "") ? $12 : $3
+                print toupper(fingerprint)
+              }
+            ' <<<"${verification}"
+          )
+          if [[ -z ${signer_fingerprint} ||
+              ${signer_fingerprint} == *$'\n'* ||
+              ${signer_fingerprint} != "${RELEASE_TAG_SIGNING_FINGERPRINT}" ]]; then
+            printf 'Error: release tag signer is not the authorized fingerprint.\n' >&2
+            exit 65
+          fi
       - name: Validate pinned RPM public signing certificate
         env:
           RPM_SIGNING_FINGERPRINT: 7B54065FE061E78ED2C96252E3BE996196ABEA7F

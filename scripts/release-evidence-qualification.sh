@@ -51,21 +51,45 @@ cleanup() {
     fi
 }
 
-select_successful_run_for_sha() {
-    set -e
-    local runs_json=$1
-    local expected_sha=$2
+# Retry read-only GitHub operations with a small total budget. Captured commands
+# publish stdout only from a successful attempt so partial JSON can never be
+# mistaken for evidence.
+retry_qualification_capture() {
+    local description=$1
+    shift
+    local attempt=0
+    local output=''
 
-    jq -c --arg sha "${expected_sha}" '
-        [
-            .[]
-            | select(
-                .headSha == $sha and
-                .status == "completed" and
-                .conclusion == "success"
-            )
-        ][0] // empty
-    ' <<<"${runs_json}"
+    for attempt in 1 2 3; do
+        if output=$("$@"); then
+            printf '%s' "${output}"
+            return 0
+        fi
+        if ((attempt < 3)); then
+            printf 'Warning: %s; retrying (%d/3).\n' \
+                "${description}" "$((attempt + 1))" >&2
+            sleep "${attempt}"
+        fi
+    done
+    fail_qualification "${description} after three attempts."
+}
+
+retry_qualification_command() {
+    local description=$1
+    shift
+    local attempt=0
+
+    for attempt in 1 2 3; do
+        if "$@"; then
+            return 0
+        fi
+        if ((attempt < 3)); then
+            printf 'Warning: %s; retrying (%d/3).\n' \
+                "${description}" "$((attempt + 1))" >&2
+            sleep "${attempt}"
+        fi
+    done
+    fail_qualification "${description} after three attempts."
 }
 
 select_latest_successful_schedule() {
@@ -89,21 +113,51 @@ successful_workflow_run_for_sha() {
     local repo=$1
     local workflow=$2
     local expected_sha=$3
-    local runs_json
-    local run_json
+    local page=1
+    local page_count=0
+    local page_json=''
+    local run_json=''
 
-    runs_json=$(gh run list -R "${repo}" \
-        --workflow "${workflow}" \
-        --limit 100 \
-        --json databaseId,workflowName,event,status,conclusion,headSha,createdAt,url)
-    run_json=$(select_successful_run_for_sha "${runs_json}" "${expected_sha}")
-    if [[ -z ${run_json} ]]; then
-        printf 'FAIL: no successful %s run found for source SHA %s.\n' \
-            "${workflow}" "${expected_sha}" >&2
-        return 65
-    fi
+    while ((page < 1000)); do
+        page_json=$(retry_qualification_capture \
+            "unable to list ${workflow} runs page ${page}" \
+            gh api \
+            "repos/${repo}/actions/workflows/${workflow}/runs?per_page=100&page=${page}")
+        run_json=$(jq -c --arg sha "${expected_sha}" '
+            [
+                .workflow_runs[]
+                | select(
+                    .head_sha == $sha and
+                    .status == "completed" and
+                    .conclusion == "success"
+                )
+                | {
+                    databaseId: .id,
+                    workflowName: .name,
+                    event: .event,
+                    status: .status,
+                    conclusion: .conclusion,
+                    headSha: .head_sha,
+                    createdAt: .created_at,
+                    url: .html_url
+                }
+            ][0] // empty
+        ' <<<"${page_json}")
+        if [[ -n ${run_json} ]]; then
+            printf '%s\n' "${run_json}"
+            return 0
+        fi
 
-    printf '%s\n' "${run_json}"
+        page_count=$(jq '.workflow_runs | length' <<<"${page_json}")
+        [[ ${page_count} =~ ^[0-9]+$ ]] \
+            || fail_qualification "invalid ${workflow} run-page size."
+        ((page_count == 100)) || break
+        page=$((page + 1))
+    done
+
+    printf 'FAIL: no successful %s run found for source SHA %s.\n' \
+        "${workflow}" "${expected_sha}" >&2
+    return 65
 }
 
 assert_schedule_fresh() {
@@ -203,7 +257,7 @@ parse_qualification_arguments() {
 require_qualification_commands() {
     local command_name=''
 
-    for command_name in cat cmp date diff dirname find gh git grep jq mkdir mktemp rm sha256sum sort wc; do
+    for command_name in cat cmp date diff dirname find gh git grep jq mkdir mktemp rm sha256sum sleep sort wc; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             fail_qualification "required command is absent: ${command_name}."
         fi
@@ -242,7 +296,9 @@ resolve_release_identity() {
     local resolved_repo=''
     local tag_sha=''
 
-    resolved_repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+    resolved_repo=$(retry_qualification_capture \
+        'unable to query the GitHub repository identity' \
+        gh repo view --json nameWithOwner --jq '.nameWithOwner')
     if [[ ! ${resolved_repo} =~ ^[^/]+/[^/]+$ ]]; then
         fail_qualification 'unable to resolve GitHub repository nameWithOwner.'
     fi
@@ -275,7 +331,9 @@ download_and_verify_release_assets() {
     local asset_name=''
     local signer_workflow=''
 
-    release_json=$(gh release view "${tag}" -R "${repo}" \
+    release_json=$(retry_qualification_capture \
+        'unable to query the public release' \
+        gh release view "${tag}" -R "${repo}" \
         --json tagName,isImmutable,assets,url,publishedAt)
     release_tag=$(jq -r '.tagName' <<<"${release_json}")
     resolved_release_immutable=$(jq -r '.isImmutable' <<<"${release_json}")
@@ -294,7 +352,10 @@ download_and_verify_release_assets() {
     fi
     assert_asset_inventory "${inventory_file}"
 
-    gh release download "${tag}" -R "${repo}" --dir "${public_dir}"
+    retry_qualification_command \
+        'unable to download the public release assets' \
+        gh release download "${tag}" -R "${repo}" \
+        --dir "${public_dir}" --clobber
     find "${public_dir}" -maxdepth 1 -type f -printf '%f\n' \
         | LC_ALL=C sort >"${actual_inventory_file}"
     if ! cmp -s -- "${inventory_file}" "${actual_inventory_file}"; then
@@ -310,8 +371,13 @@ download_and_verify_release_assets() {
     signer_workflow="${repo}/.github/workflows/release.yml"
     while IFS= read -r asset_name; do
         [[ -n ${asset_name} ]] || continue
-        gh release verify-asset "${tag}" "${public_dir}/${asset_name}" -R "${repo}"
-        gh attestation verify "${public_dir}/${asset_name}" \
+        retry_qualification_command \
+            "unable to verify public asset ${asset_name}" \
+            gh release verify-asset "${tag}" \
+            "${public_dir}/${asset_name}" -R "${repo}"
+        retry_qualification_command \
+            "unable to verify attestation for ${asset_name}" \
+            gh attestation verify "${public_dir}/${asset_name}" \
             --repo "${repo}" \
             --signer-workflow "${signer_workflow}" \
             --source-digest "${expected_sha}"
@@ -367,7 +433,9 @@ collect_scheduled_runs() {
     local shfmt_runs_json=''
     local shfmt_result=''
 
-    real_tools_runs_json=$(gh run list -R "${repo}" \
+    real_tools_runs_json=$(retry_qualification_capture \
+        'unable to list scheduled real-tools runs' \
+        gh run list -R "${repo}" \
         --workflow real-tools.yml \
         --event schedule \
         --limit 20 \
@@ -375,7 +443,9 @@ collect_scheduled_runs() {
     real_tools_result=$(select_latest_successful_schedule "${real_tools_runs_json}")
     assert_schedule_fresh "${real_tools_result}" real-tools.yml "${max_schedule_age_days}"
 
-    shfmt_runs_json=$(gh run list -R "${repo}" \
+    shfmt_runs_json=$(retry_qualification_capture \
+        'unable to list scheduled shfmt runs' \
+        gh run list -R "${repo}" \
         --workflow shfmt-update.yml \
         --event schedule \
         --limit 20 \

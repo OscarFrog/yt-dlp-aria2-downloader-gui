@@ -187,7 +187,7 @@ def resolve_destination(
     return resolved_parent / candidate.name
 
 
-def validate_url(value: object) -> tuple[str, bool]:
+def validate_url(value: object) -> tuple[str, str, bool]:
     if not isinstance(value, str) or not value:
         raise PlanError("requested format has no URL")
 
@@ -202,7 +202,7 @@ def validate_url(value: object) -> tuple[str, bool]:
         raise PlanError("only absolute HTTP(S) format URLs are accepted")
 
     has_userinfo = parsed.username is not None or parsed.password is not None
-    return value, has_userinfo
+    return value, parsed.scheme, has_userinfo
 
 
 def validate_headers(value: object) -> dict[str, str]:
@@ -380,9 +380,11 @@ def build_plan(args: argparse.Namespace) -> int:
     for index, (transfer, destination) in enumerate(
         zip(transfers, destinations, strict=True)
     ):
-        url, has_userinfo = validate_url(transfer.get("url"))
+        url, url_scheme, has_userinfo = validate_url(transfer.get("url"))
         if has_userinfo:
             raise PlanError("URL user information requires native yt-dlp transport")
+        if url_scheme == "https" and not args.allow_https_direct:
+            raise PlanError("HTTPS requires native yt-dlp transport on this aria2 build")
 
         protocol = transfer.get("protocol")
         if protocol not in {"http", "https"}:
@@ -501,8 +503,12 @@ def classify_plan(args: argparse.Namespace) -> int:
             print(f"transfer_count={len(transfers)}")
             return 0
 
-        _url, has_userinfo = validate_url(transfer.get("url"))
+        _url, url_scheme, has_userinfo = validate_url(transfer.get("url"))
         if has_userinfo:
+            print("transport=native")
+            print(f"transfer_count={len(transfers)}")
+            return 0
+        if url_scheme == "https" and not args.allow_https_direct:
             print("transport=native")
             print(f"transfer_count={len(transfers)}")
             return 0
@@ -737,6 +743,7 @@ def create_parser() -> argparse.ArgumentParser:
         help="classify the selected yt-dlp transport as direct or native",
     )
     classify.add_argument("--plan", required=True)
+    classify.add_argument("--allow-https-direct", action="store_true")
     classify.set_defaults(handler=classify_plan)
 
     build = subparsers.add_parser(
@@ -748,6 +755,7 @@ def create_parser() -> argparse.ArgumentParser:
     build.add_argument("--staging-dir", required=True)
     build.add_argument("--aria2-input", required=True)
     build.add_argument("--manifest", required=True)
+    build.add_argument("--allow-https-direct", action="store_true")
     build.set_defaults(handler=build_plan)
 
     commit = subparsers.add_parser(

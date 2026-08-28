@@ -138,6 +138,35 @@ def wait_gone(pid: int) -> bool:
     return not running(pid)
 
 
+def wait_signal_guard(runner: subprocess.Popen[bytes]) -> None:
+    """Wait until run-all has made its fatal-signal cleanup non-reentrant."""
+    required_mask = sum(
+        1 << (signal_number - 1)
+        for signal_number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+    )
+    status_path = pathlib.Path(f"/proc/{runner.pid}/status")
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        if runner.poll() is not None:
+            raise AssertionError(
+                f"run-all exited before arming its signal guard: {runner.returncode}"
+            )
+        try:
+            status_lines = status_path.read_text(encoding="ascii").splitlines()
+        except FileNotFoundError:
+            time.sleep(0.01)
+            continue
+        ignored_line = next(
+            (line for line in status_lines if line.startswith("SigIgn:")), ""
+        )
+        if ignored_line:
+            ignored_mask = int(ignored_line.split()[1], 16)
+            if ignored_mask & required_mask == required_mask:
+                return
+        time.sleep(0.01)
+    raise AssertionError("run-all did not arm its fatal-signal guard in time")
+
+
 def terminate_if_needed(pid: int) -> None:
     if not running(pid):
         return
@@ -236,11 +265,10 @@ try:
     immediate_pid = wait_marker(immediate_marker, runner)
     descendant_pid = wait_marker(descendant_marker, runner)
     os.kill(runner.pid, signal.SIGINT)
-    time.sleep(0.25)
-    if runner.poll() is not None:
-        raise AssertionError(
-            f"run-all exited before the second signal: {runner.returncode}"
-        )
+    # Signal emission order is not proof of Bash trap-dispatch order under
+    # load. Observe the non-reentrant guard installed by the first handler,
+    # then deliver the second signal during the bounded cleanup grace period.
+    wait_signal_guard(runner)
     os.kill(runner.pid, signal.SIGTERM)
     try:
         return_code = runner.wait(timeout=10)

@@ -22,9 +22,34 @@ if ((${#ALL_SHELL_FILES[@]} == 0)); then
 fi
 # Contract: every canonical shell file uses the standard Bash header.
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
-readonly EXPECTED_VERSION='2.3.0'
+readonly EXPECTED_VERSION='2.3.1'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SHELL_INVENTORY_FILE=''
+
+assert_forbidden_source_name_absent() {
+    local forbidden_name=''
+    local matched_path=''
+    local project_path=''
+
+    forbidden_name=$(printf '\170\150\141\155\163\164\145\162')
+    while IFS= read -r -d '' project_path; do
+        if LC_ALL=C grep -I -i -q -- "${forbidden_name}" "${project_path}"; then
+            matched_path=${project_path#"${SCRIPT_DIR}/"}
+            break
+        fi
+    done < <(
+        # The process substitution is consumed completely by the loop.
+        # shellcheck disable=SC2312
+        find "${SCRIPT_DIR}" \
+            -path "${SCRIPT_DIR}/.git" -prune -o \
+            -type f -print0
+    )
+    [[ -z ${matched_path} ]] || {
+        printf 'FAIL: forbidden source name is present in %s.\n' \
+            "${matched_path}" >&2
+        return 65
+    }
+}
 
 assert_standard_shell_header() {
     local relative_path=$1
@@ -1303,6 +1328,17 @@ test_static_release_contracts() {
         'Fresh-download public release verification' \
         'release performs independent fresh-download verification'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
+        'RELEASE_TAG_SIGNING_FINGERPRINT: 43E5361414863738F0324F2B047B26057E612CDC' \
+        'release workflow pins the authorized tag signer'
+    # shellcheck disable=SC2016 # Literal workflow source.
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
+        'git verify-tag --raw "${RELEASE_TAG}"' \
+        'release workflow performs isolated local tag verification'
+    # shellcheck disable=SC2016 # Literal workflow source.
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
+        '${signer_fingerprint} != "${RELEASE_TAG_SIGNING_FINGERPRINT}"' \
+        'release workflow rejects any other valid tag signer'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'public asset differs byte-for-byte from tested artifact' \
         'public release assets are compared byte-for-byte with tested artifacts'
 
@@ -1340,6 +1376,8 @@ test_static_release_contracts() {
         "${SCRIPT_DIR}/scripts/release-evidence-qualification.sh" \
         invalid-tag 0000000000000000000000000000000000000000
     for evidence_phase in \
+        retry_qualification_capture \
+        retry_qualification_command \
         parse_qualification_arguments \
         require_qualification_commands \
         initialize_qualification_workspace \
@@ -1355,6 +1393,15 @@ test_static_release_contracts() {
             "${evidence_phase}() {" \
             "release evidence phase ${evidence_phase}"
     done
+    # shellcheck disable=SC2016 # Literal pagination source.
+    assert_file_contains \
+        "${SCRIPT_DIR}/scripts/release-evidence-qualification.sh" \
+        'runs?per_page=100&page=${page}' \
+        'release evidence paginates exact-SHA lookup until a match or final page'
+    assert_file_not_contains \
+        "${SCRIPT_DIR}/scripts/release-evidence-qualification.sh" \
+        '--limit 100 ' \
+        'release evidence no longer stops exact-SHA lookup at 100 runs'
     for evidence_output_local in \
         workspace_public_dir \
         workspace_inventory_file \
@@ -1371,6 +1418,18 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
         '--confirm-single-maintainer-self-review' \
         'release preflight requires explicit single-maintainer self-review acknowledgement'
+    assert_file_not_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        '--confirm-admin-bypass-disabled' \
+        'release preflight no longer substitutes an operator claim for API state'
+    assert_file_not_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        '--confirm-tag-policy' \
+        'release preflight obtains deployment policy type from the API'
+    assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        '.can_admins_bypass' \
+        'release preflight reads administrator bypass state'
+    assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        'deployment_policy_type} == tag' \
+        'release preflight requires an exact tag deployment policy'
     assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
         'single-maintainer rpm-signing must allow self-review.' \
         'release preflight verifies self-review remains enabled for the sole maintainer'
@@ -1586,6 +1645,9 @@ test_static_packaging_signing_contracts() {
         verify_rpm_with_pinned_keyring \
         verify_signed_rpm \
         authenticate_signed_rpm \
+        ensure_rpm_fusion_bootstrap_tools \
+        validate_rpm_fusion_certificate \
+        validate_rpm_fusion_release_identity \
         enable_rpm_fusion \
         install_media_dependencies \
         install_application_rpm \
@@ -1607,6 +1669,18 @@ test_static_packaging_signing_contracts() {
     assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
         "readonly RPM_SIGNING_SUBKEY_FINGERPRINT='1F5B769CE48A08AAC0A7D9DDECC9894B41830245'" \
         'Fedora bootstrap pins the dedicated RPM signing subkey'
+    assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
+        "readonly RPM_FUSION_SIGNING_FINGERPRINT='E9A491A3DE247814E7E067EAE06F8ECDD651FF2E'" \
+        'Fedora bootstrap pins the RPM Fusion signing fingerprint'
+    assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
+        "readonly RPM_FUSION_RELEASE_NEVRA='rpmfusion-free-release-44-3.noarch'" \
+        'Fedora bootstrap pins the reviewed RPM Fusion NEVRA'
+    assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
+        '--proto '\''=https'\''' \
+        'Fedora bootstrap constrains RPM Fusion transport to HTTPS'
+    assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
+        '--connect-timeout 15 --max-time 120' \
+        'Fedora bootstrap downloads have bounded connection and transfer timeouts'
     assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
         '--define "_keyring fs"' \
         'Fedora bootstrap uses RPM 6 filesystem keyring isolation'
@@ -1666,6 +1740,9 @@ test_static_packaging_signing_contracts() {
     assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
         '--setopt=localpkg_gpgcheck=True' \
         'Fedora bootstrap enables local-package OpenPGP verification'
+    assert_file_not_contains "${SCRIPT_DIR}/install-fedora.sh" \
+        'dnf install --assumeyes "https://' \
+        'Fedora bootstrap never gives an unauthenticated URL to privileged DNF'
     assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
         '--allow-unsigned-dev' \
         'unsigned RPM installation requires an explicit development opt-in'
@@ -1766,6 +1843,34 @@ test_static_application_contracts() {
         'umask 077' \
         'engine restrictive umask'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        'ARIA2_HTTPS_DIRECT_SAFE=false' \
+        'affected aria2 GnuTLS HTTPS is forced to native transport'
+    assert_file_contains "${SCRIPT_DIR}/private-aria2-plan.py" \
+        'if url_scheme == "https" and not args.allow_https_direct:' \
+        'private plan helper fails closed without HTTPS direct opt-in'
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        'the URL file must not be accessible by group or other users.' \
+        'private URL-file permissions are enforced'
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        'Media validation reason: %s' \
+        'final media failure exposes a bounded diagnostic reason'
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        'run_supervised_ytdlp() {' \
+        'yt-dlp diagnostics pass through the source-label redactor'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        '[REDACTED_SOURCE]' \
+        'retained GUI logs apply defense-in-depth source-label redaction'
+    assert_file_contains "${SCRIPT_DIR}/tests/lib/test-runner.sh" \
+        'TEST_RUNNER_STARTING_CHILD=true' \
+        'test runner marks the launch/registration critical section'
+    # shellcheck disable=SC2016 # Literal library source.
+    assert_file_contains "${SCRIPT_DIR}/tests/lib/test-runner.sh" \
+        'TEST_RUNNER_DEFERRED_SIGNAL=${signal_name}' \
+        'test runner preserves a signal delivered before registration'
+    assert_file_contains "${SCRIPT_DIR}/tests/test-runner-integration.sh" \
+        'for iteration in range(30):' \
+        'test runner repeats startup-signal registration stress'
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'readonly YTDLP_NO_PLUGINS=1' \
         'yt-dlp plugins disabled by default'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
@@ -1795,8 +1900,8 @@ test_static_application_contracts() {
         'generic long-running command supervisor'
     # shellcheck disable=SC2016 # Literal shell-source assertion.
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        'run_supervised_command "${YTDLP_BIN}"' \
-        'yt-dlp uses the generic supervisor'
+        'run_supervised_ytdlp "${YTDLP_BIN}"' \
+        'yt-dlp uses its redacting supervisor'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'ARIA2_SUPPORTS_NO_NETRC=false' \
         'aria2 netrc support is detected as an optional capability'
@@ -2678,6 +2783,7 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
+    assert_forbidden_source_name_absent
     test_static_tooling_contracts
     test_static_shell_interface_contracts
     test_static_release_contracts

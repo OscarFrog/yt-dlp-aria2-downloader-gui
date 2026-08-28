@@ -29,17 +29,13 @@ usage() {
     cat >&2 <<'USAGE'
 Usage:
   scripts/release-preflight.sh \
-    --confirm-admin-bypass-disabled \
-    --confirm-tag-policy \
     --confirm-single-maintainer-self-review \
     vX.Y.Z
 
-The explicit confirmations cover GitHub Environment settings and operating
-choices that must be acknowledged by the maintainer:
-- administrator deployment-protection bypass is disabled;
-- the selected deployment policy named v* is configured as a TAG policy;
-- this repository is intentionally operated by one maintainer, so the sole
-  required reviewer may approve the deployment they initiated.
+The GitHub API verifies administrator bypass and the selected v* tag policy.
+The explicit confirmation records the remaining human operating choice: this
+repository is intentionally operated by one maintainer, so the sole required
+reviewer may approve the deployment they initiated.
 USAGE
 }
 
@@ -71,20 +67,12 @@ cleanup() {
 
 parse_preflight_arguments() {
     local output_variable=$1
-    local confirm_admin_bypass=false
-    local confirm_tag_policy=false
     local confirm_single_maintainer_self_review=false
     local parsed_release_tag=''
     shift
 
     while (($# > 1)); do
         case $1 in
-            --confirm-admin-bypass-disabled)
-                confirm_admin_bypass=true
-                ;;
-            --confirm-tag-policy)
-                confirm_tag_policy=true
-                ;;
             --confirm-single-maintainer-self-review)
                 confirm_single_maintainer_self_review=true
                 ;;
@@ -104,18 +92,6 @@ parse_preflight_arguments() {
     parsed_release_tag=$1
     [[ ${parsed_release_tag} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
         || fail "invalid semantic release tag: ${parsed_release_tag}"
-    [[ ${confirm_admin_bypass} == true ]] || {
-        printf '%s\n' \
-            'Error: confirm in GitHub Settings > Environments > rpm-signing that administrator bypass is disabled.' >&2
-        usage
-        exit 77
-    }
-    [[ ${confirm_tag_policy} == true ]] || {
-        printf '%s\n' \
-            'Error: confirm in GitHub Settings > Environments > rpm-signing that v* is configured as a TAG deployment policy.' >&2
-        usage
-        exit 77
-    }
     [[ ${confirm_single_maintainer_self_review} == true ]] || {
         printf '%s\n' \
             'Error: explicitly confirm that this single-maintainer repository intentionally allows the sole reviewer to self-approve rpm-signing.' >&2
@@ -235,9 +211,11 @@ verify_signing_environment() {
     local reviewer_login=''
     local authenticated_login=''
     local prevent_self_review=''
+    local can_admins_bypass=''
     local custom_policies=''
     local deployment_policy_output=''
-    local -a deployment_policies=()
+    local deployment_policy_name=''
+    local deployment_policy_type=''
 
     required_reviewer_rules=$(
         api_capture \
@@ -284,6 +262,15 @@ verify_signing_environment() {
     [[ ${prevent_self_review} == false ]] \
         || fail 'single-maintainer rpm-signing must allow self-review.'
 
+    can_admins_bypass=$(
+        api_capture \
+            'unable to query rpm-signing administrator bypass policy.' \
+            "${environment_endpoint}" \
+            --jq '.can_admins_bypass'
+    )
+    [[ ${can_admins_bypass} == false ]] \
+        || fail 'rpm-signing must disable administrator protection-rule bypass.'
+
     custom_policies=$(
         api_capture \
             'unable to query rpm-signing deployment policy.' \
@@ -298,16 +285,19 @@ verify_signing_environment() {
             'unable to list rpm-signing deployment policies.' \
             "${environment_endpoint}/deployment-branch-policies" \
             --paginate \
-            --jq '.branch_policies[]?.name'
+            --jq '.branch_policies[]? | [.name,.type] | @tsv'
     )
     [[ -n ${deployment_policy_output} ]] \
         || fail 'rpm-signing has no selected deployment branch/tag policy.'
 
-    mapfile -t deployment_policies <<<"${deployment_policy_output}"
-    ((${#deployment_policies[@]} == 1)) \
-        || fail "rpm-signing must have exactly one deployment policy; found ${#deployment_policies[@]}."
-    [[ ${deployment_policies[0]} == 'v*' ]] \
-        || fail "rpm-signing deployment policy must be exactly v*; found ${deployment_policies[0]}."
+    [[ ${deployment_policy_output} != *$'\n'* ]] \
+        || fail 'rpm-signing must have exactly one deployment policy.'
+    IFS=$'\t' read -r deployment_policy_name deployment_policy_type \
+        <<<"${deployment_policy_output}"
+    [[ ${deployment_policy_name} == 'v*' ]] \
+        || fail "rpm-signing deployment policy must be exactly v*; found ${deployment_policy_name:-missing}."
+    [[ ${deployment_policy_type} == tag ]] \
+        || fail "rpm-signing v* deployment policy must be a tag policy; found ${deployment_policy_type:-missing}."
 }
 
 verify_signing_secret_scope() {
@@ -481,9 +471,9 @@ report_release_preflight() {
     printf '%s\n' \
         'rpm-signing: sole authenticated reviewer, intentional self-review allowance, v* deployment policy, and environment-secret scope verified.'
     printf '%s\n' \
-        'Administrator bypass: operator explicitly confirmed disabled.'
+        'Administrator bypass: disabled and verified through the GitHub API.'
     printf '%s\n' \
-        'Deployment policy type: operator explicitly confirmed v* is a TAG policy.'
+        'Deployment policy: exact v* tag policy verified through the GitHub API.'
     printf '%s\n' \
         'Single-maintainer self-review: operator explicitly confirmed intentional.'
 }

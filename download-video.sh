@@ -9,7 +9,7 @@
 set -euo pipefail
 umask 077
 
-readonly VERSION="2.3.0"
+readonly VERSION="2.3.1"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -22,6 +22,9 @@ readonly PRIVATE_ARIA2_STAGING_MARKER_VALUE='yt-dlp-aria2-private-staging-v1'
 VERSION_AT_LEAST=false
 VERSION_PARSE_VALID=false
 ARIA2_SUPPORTS_NO_NETRC=false
+ARIA2_HTTPS_DIRECT_SAFE=true
+FINAL_MEDIA_VALIDATION_REASON=''
+MEDIA_TAIL_VALIDATION_REASON=''
 JS_RUNTIME_AVAILABLE=false
 RESULT_FILE_TMP=''
 INTERNAL_PATH_FILE_TMP=''
@@ -155,35 +158,35 @@ emit_machine_postprocess() {
 }
 
 normalize_decimal_component() {
-    local output_variable=$1
-    local value=$2
+    local decimal_output_variable=$1
+    local decimal_value=$2
 
     # Strip all leading zeroes without converting the external decimal string.
     # Bash arithmetic uses fixed-width integers, so conversion must happen only
     # after a caller has proved that the value is representable.
-    value=${value#"${value%%[!0]*}"}
-    [[ -n ${value} ]] || value=0
-    printf -v "${output_variable}" '%s' "${value}"
+    decimal_value=${decimal_value#"${decimal_value%%[!0]*}"}
+    [[ -n ${decimal_value} ]] || decimal_value=0
+    printf -v "${decimal_output_variable}" '%s' "${decimal_value}"
 }
 
 compare_decimal_components() {
-    local output_variable=$1
-    local left=$2
-    local right=$3
-    local result=0
+    local decimal_output_variable=$1
+    local decimal_left=$2
+    local decimal_right=$3
+    local decimal_result=0
     local LC_ALL=C
 
-    if ((${#left} > ${#right})); then
-        result=1
-    elif ((${#left} < ${#right})); then
-        result=-1
-    elif [[ ${left} > ${right} ]]; then
-        result=1
-    elif [[ ${left} < ${right} ]]; then
-        result=-1
+    if ((${#decimal_left} > ${#decimal_right})); then
+        decimal_result=1
+    elif ((${#decimal_left} < ${#decimal_right})); then
+        decimal_result=-1
+    elif [[ ${decimal_left} > ${decimal_right} ]]; then
+        decimal_result=1
+    elif [[ ${decimal_left} < ${decimal_right} ]]; then
+        decimal_result=-1
     fi
 
-    printf -v "${output_variable}" '%d' "${result}"
+    printf -v "${decimal_output_variable}" '%d' "${decimal_result}"
 }
 
 compare_versions() {
@@ -336,11 +339,13 @@ check_ytdlp_capabilities() {
 check_aria2_runtime() {
     local aria2_version
     local aria2_version_line
+    local aria2_version_output
 
-    if ! aria2_version_line=$(LC_ALL=C aria2c --version 2>/dev/null); then
+    if ! aria2_version_output=$(LC_ALL=C aria2c --version 2>/dev/null); then
         error 'unable to determine the aria2c version.'
         return 1
     fi
+    aria2_version_line=${aria2_version_output}
     aria2_version_line=${aria2_version_line%%$'\n'*}
     if [[ ! ${aria2_version_line} =~ ^aria2[[:space:]]+version[[:space:]]+([^[:space:]]+) ]]; then
         error "unable to parse the aria2c version: ${aria2_version_line:-unknown}."
@@ -355,6 +360,16 @@ check_aria2_runtime() {
     if [[ ${VERSION_AT_LEAST} != true ]]; then
         error "aria2c ${MIN_ARIA2_VERSION} or later is required; found ${aria2_version}."
         return 1
+    fi
+
+    # aria2 1.37.x with GnuTLS predates upstream Extended Key Usage
+    # certificate validation hardening. Keep the application functional by
+    # routing HTTPS through yt-dlp's native transport on affected builds.
+    ARIA2_HTTPS_DIRECT_SAFE=true
+    compare_versions "${aria2_version}" '1.38.0'
+    if [[ ${VERSION_PARSE_VALID} == true && ${VERSION_AT_LEAST} != true ]] \
+        && grep -Fq 'GnuTLS/' <<<"${aria2_version_output}"; then
+        ARIA2_HTTPS_DIRECT_SAFE=false
     fi
 }
 
@@ -768,6 +783,34 @@ run_supervised_command() {
     return 0
 }
 
+# Preserve yt-dlp stdout byte-for-byte for JSON/progress consumers while
+# filtering a forbidden external source label from stderr before it can reach
+# a terminal or GUI diagnostic log.
+run_supervised_ytdlp() {
+    (($# > 0)) || return 2
+
+    # The quoted program is intentionally evaluated by the supervised shell.
+    # shellcheck disable=SC2016
+    run_supervised_command bash -c '
+        set -o pipefail
+        forbidden_source_name=$(printf "\170\150\141\155\163\164\145\162")
+        exec 3>&1
+        {
+            "$@" 2>&1 1>&3 3>&-
+        } | (
+            # The complete process group receives cancellation. Keep the
+            # redactor alive until the producer closes its pipe so the producer
+            # cannot lose its TERM handler to a concurrent SIGPIPE.
+            trap "" HUP INT TERM
+            exec sed -u -E \
+                "s/${forbidden_source_name}/[REDACTED_SOURCE]/gI"
+        ) >&2
+        pipeline_status=$?
+        exec 3>&-
+        exit "${pipeline_status}"
+    ' bash "$@"
+}
+
 private_aria2_staging_candidate_is_safe() {
     local candidate=$1
     local require_marker=$2
@@ -944,37 +987,38 @@ probe_stream() {
 }
 
 probe_duration_microseconds() {
-    local output_variable=$1
+    local probe_duration_output_variable=$1
     local media_path=$2
-    local duration=''
-    local seconds=''
-    local fraction=''
-    local duration_microseconds=''
+    local probe_duration=''
+    local probe_seconds=''
+    local probe_fraction=''
+    local probe_duration_microseconds=''
     local seconds_bound_comparison=1
 
-    if duration=$(
+    if probe_duration=$(
         timeout --signal=TERM --kill-after=2s 15s \
             ffprobe -v error -show_entries format=duration \
             -of default=noprint_wrappers=1:nokey=1 \
             "${media_path}" 2>/dev/null
     ); then
-        duration=${duration%%$'\n'*}
-        if [[ ${duration} =~ ^([0-9]+)(\.([0-9]+))?$ ]]; then
-            seconds=${BASH_REMATCH[1]}
-            fraction=${BASH_REMATCH[3]:-0}
-            fraction="${fraction}000000"
-            fraction=${fraction:0:6}
-            normalize_decimal_component seconds "${seconds}"
+        probe_duration=${probe_duration%%$'\n'*}
+        if [[ ${probe_duration} =~ ^([0-9]+)(\.([0-9]+))?$ ]]; then
+            probe_seconds=${BASH_REMATCH[1]}
+            probe_fraction=${BASH_REMATCH[3]:-0}
+            probe_fraction="${probe_fraction}000000"
+            probe_fraction=${probe_fraction:0:6}
+            normalize_decimal_component probe_seconds "${probe_seconds}"
             compare_decimal_components \
-                seconds_bound_comparison "${seconds}" '9000000000000'
+                seconds_bound_comparison "${probe_seconds}" '9000000000000'
             if ((seconds_bound_comparison <= 0)); then
-                duration_microseconds=$((\
-                    10#${seconds} * 1000000 + 10#${fraction}))
+                probe_duration_microseconds=$((\
+                    10#${probe_seconds} * 1000000 + 10#${probe_fraction}))
             fi
         fi
     fi
 
-    printf -v "${output_variable}" '%s' "${duration_microseconds}"
+    printf -v "${probe_duration_output_variable}" '%s' \
+        "${probe_duration_microseconds}"
     return 0
 }
 
@@ -1064,6 +1108,8 @@ validate_media_tail_consistency() {
     local timeline_status=0
     local tail_probe_status=0
 
+    MEDIA_TAIL_VALIDATION_REASON=''
+
     timeline=$(
         timeout --signal=TERM --kill-after=2s 15s \
             ffprobe -v error \
@@ -1098,7 +1144,10 @@ print(int(start * scale), int(duration * scale))
 '
     )
     timeline_status=$?
-    ((timeline_status == 0)) || return 1
+    if ((timeline_status != 0)); then
+        MEDIA_TAIL_VALIDATION_REASON='probe-timeline-error'
+        return 1
+    fi
 
     [[ -n ${timeline} ]] || return 0
     read -r start_microseconds duration_microseconds <<<"${timeline}"
@@ -1146,20 +1195,37 @@ print(int(start * scale), int(duration * scale))
             case ${tail_probe_status} in
                 0) return 0 ;;
                 1) ;;
-                *) return 1 ;;
+                *)
+                    MEDIA_TAIL_VALIDATION_REASON='probe-tail-error'
+                    return 1
+                    ;;
             esac
 
             validate_stream_tail_reaches_target \
                 "${media_path}" 'a:0' "${seek_seconds}" "${target_seconds}"
             tail_probe_status=$?
-            ((tail_probe_status == 0)) || return 1
+            if ((tail_probe_status != 0)); then
+                if ((tail_probe_status == 1)); then
+                    MEDIA_TAIL_VALIDATION_REASON='tail-inconsistent'
+                else
+                    MEDIA_TAIL_VALIDATION_REASON='probe-tail-error'
+                fi
+                return 1
+            fi
             return 0
             ;;
         audio)
             validate_stream_tail_reaches_target \
                 "${media_path}" 'a:0' "${seek_seconds}" "${target_seconds}"
             tail_probe_status=$?
-            ((tail_probe_status == 0)) || return 1
+            if ((tail_probe_status != 0)); then
+                if ((tail_probe_status == 1)); then
+                    MEDIA_TAIL_VALIDATION_REASON='tail-inconsistent'
+                else
+                    MEDIA_TAIL_VALIDATION_REASON='probe-tail-error'
+                fi
+                return 1
+            fi
             return 0
             ;;
         *)
@@ -1175,37 +1241,70 @@ validate_final_media_file() {
     local probe_status=0
     local tail_status=0
 
-    [[ -f ${final_path} && -s ${final_path} ]] || return 1
+    FINAL_MEDIA_VALIDATION_REASON='unknown'
+    if [[ ! -f ${final_path} || ! -s ${final_path} ]]; then
+        FINAL_MEDIA_VALIDATION_REASON='missing-or-empty-file'
+        return 1
+    fi
 
     case ${mode} in
         video)
             probe_stream stream_present "${final_path}" 'V:0'
             probe_status=$?
-            ((probe_status == 0)) || return 1
-            [[ ${stream_present} == true ]] || return 1
+            if ((probe_status != 0)); then
+                FINAL_MEDIA_VALIDATION_REASON='probe-error'
+                return 1
+            fi
+            if [[ ${stream_present} != true ]]; then
+                FINAL_MEDIA_VALIDATION_REASON='missing-content-video'
+                return 1
+            fi
             probe_stream stream_present "${final_path}" 'a:0'
             probe_status=$?
-            ((probe_status == 0)) || return 1
-            [[ ${stream_present} == true ]] || return 1
+            if ((probe_status != 0)); then
+                FINAL_MEDIA_VALIDATION_REASON='probe-error'
+                return 1
+            fi
+            if [[ ${stream_present} != true ]]; then
+                FINAL_MEDIA_VALIDATION_REASON='missing-audio'
+                return 1
+            fi
             ;;
         audio)
             probe_stream stream_present "${final_path}" 'a:0'
             probe_status=$?
-            ((probe_status == 0)) || return 1
-            [[ ${stream_present} == true ]] || return 1
+            if ((probe_status != 0)); then
+                FINAL_MEDIA_VALIDATION_REASON='probe-error'
+                return 1
+            fi
+            if [[ ${stream_present} != true ]]; then
+                FINAL_MEDIA_VALIDATION_REASON='missing-audio'
+                return 1
+            fi
             probe_stream stream_present "${final_path}" 'V:0'
             probe_status=$?
-            ((probe_status == 0)) || return 1
-            [[ ${stream_present} == false ]] || return 1
+            if ((probe_status != 0)); then
+                FINAL_MEDIA_VALIDATION_REASON='probe-error'
+                return 1
+            fi
+            if [[ ${stream_present} != false ]]; then
+                FINAL_MEDIA_VALIDATION_REASON='unexpected-content-video'
+                return 1
+            fi
             ;;
         *)
+            FINAL_MEDIA_VALIDATION_REASON='invalid-mode'
             return 2
             ;;
     esac
 
     validate_media_tail_consistency "${final_path}" "${mode}"
     tail_status=$?
-    ((tail_status == 0)) || return 1
+    if ((tail_status != 0)); then
+        FINAL_MEDIA_VALIDATION_REASON=${MEDIA_TAIL_VALIDATION_REASON:-tail-inconsistent}
+        return 1
+    fi
+    FINAL_MEDIA_VALIDATION_REASON='ok'
     return 0
 }
 
@@ -1326,6 +1425,7 @@ parse_arguments() {
 
 # Resolve the single URL from argv or its private file and classify its host.
 resolve_requested_url() {
+    local url_file_mode=''
     local url_file_owner=''
     local url_line=''
     local url_line_count=0
@@ -1347,6 +1447,15 @@ resolve_requested_url() {
         fi
         if [[ ${url_file_owner} != "${EUID}" ]]; then
             error 'the URL file must be owned by the current user.'
+            exit 2
+        fi
+        if ! url_file_mode=$(stat -c '%a' -- "${URL_FILE}" 2>/dev/null) \
+            || [[ ! ${url_file_mode} =~ ^[0-7]{3,4}$ ]]; then
+            error 'unable to determine the URL file permissions.'
+            exit 2
+        fi
+        if ((8#${url_file_mode} & 077)); then
+            error 'the URL file must not be accessible by group or other users.'
             exit 2
         fi
         URL=''
@@ -1502,6 +1611,7 @@ initialize_runtime_dependencies() {
     # errexit inside the function body under Bash's documented rules.
     check_runtime_compatibility
     readonly ARIA2_SUPPORTS_NO_NETRC
+    readonly ARIA2_HTTPS_DIRECT_SAFE
 }
 
 # Canonicalize and lock the destination before creating any transfer state.
@@ -1728,6 +1838,7 @@ plan_selected_transport() {
     local plan_status
     local classification_output=''
     local classification_line
+    local -a classifier_security_options=()
     local -a plan_options=(
         "${YT_DLP_OPTIONS[@]}"
         --skip-download
@@ -1735,7 +1846,7 @@ plan_selected_transport() {
         --dump-single-json
     )
 
-    run_supervised_command \
+    run_supervised_ytdlp \
         "${YTDLP_BIN}" \
         "${plan_options[@]}" \
         --batch-file "${YTDLP_BATCH_FILE_TMP}" \
@@ -1748,8 +1859,12 @@ plan_selected_transport() {
         exit "${plan_status}"
     fi
 
+    if [[ ${ARIA2_HTTPS_DIRECT_SAFE} == true ]]; then
+        classifier_security_options+=(--allow-https-direct)
+    fi
     if ! classification_output=$(python3 \
         "${PRIVATE_ARIA2_HELPER}" classify \
+        "${classifier_security_options[@]}" \
         --plan "${PRIVATE_ARIA2_PLAN}"); then
         error 'unable to classify the selected download transport.'
         exit 65
@@ -1837,12 +1952,17 @@ configure_download_reporting() {
 execute_selected_transport() {
     local aria2_status
     local commit_status
+    local -a builder_security_options=()
 
     if [[ ${PRIVATE_TRANSPORT} == direct ]]; then
         if [[ ${MACHINE_PROGRESS} == true ]]; then
             printf 'ARIA2_PLAN|%s\n' "${PRIVATE_TRANSFER_COUNT}"
         fi
+        if [[ ${ARIA2_HTTPS_DIRECT_SAFE} == true ]]; then
+            builder_security_options+=(--allow-https-direct)
+        fi
         if ! python3 "${PRIVATE_ARIA2_HELPER}" build \
+            "${builder_security_options[@]}" \
             --plan "${PRIVATE_ARIA2_PLAN}" \
             --output-dir "${OUTPUT_DIR}" \
             --staging-dir "${PRIVATE_ARIA2_STAGING}" \
@@ -1889,14 +2009,14 @@ execute_selected_transport() {
                 exit 65
             fi
 
-            run_supervised_command "${YTDLP_BIN}" \
+            run_supervised_ytdlp "${YTDLP_BIN}" \
                 "${YT_DLP_OPTIONS[@]}" \
                 --load-info-json "${PRIVATE_ARIA2_PLAN}"
         else
             DOWNLOAD_STATUS=${aria2_status}
         fi
     else
-        run_supervised_command \
+        run_supervised_ytdlp \
             "${YTDLP_BIN}" \
             "${YT_DLP_OPTIONS[@]}" \
             --batch-file "${YTDLP_BATCH_FILE_TMP}"
@@ -2107,6 +2227,8 @@ validate_and_publish_result() {
     if ((validation_status != 0)); then
         emit_machine_postprocess error MediaValidation
         error "the final media file failed FFprobe validation: ${final_media_path}"
+        printf 'Media validation reason: %s\n' \
+            "${FINAL_MEDIA_VALIDATION_REASON:-unknown}" >&2
         printf '%s\n' \
             'The media file was retained for diagnosis and was not published as a successful result.' >&2
         if [[ -n ${HLS_SOURCE_TO_CLEAN} ]]; then

@@ -255,6 +255,11 @@ done
 
 if [[ ${dump_single_json} == true ]]; then
     if [[ ${MOCK_PLAN_EXIT_STATUS:-0} != 0 ]]; then
+        if [[ ${MOCK_FORBIDDEN_EXTERNAL_ERROR:-0} == 1 ]]; then
+            forbidden_source_name=$(printf '\170\150\141\155\163\164\145\162')
+            printf 'Simulated %s extractor failure.\n' \
+                "${forbidden_source_name}" >&2
+        fi
         printf 'Simulated yt-dlp planning failure.\n' >&2
         exit "${MOCK_PLAN_EXIT_STATUS}"
     fi
@@ -448,6 +453,9 @@ case ${1:-} in
 --version)
     [[ ${LC_ALL:-} == C ]] || { printf 'aria2 versión localizada\n'; exit 65; }
     printf 'aria2 version %s\n' "${MOCK_ARIA2_VERSION:-1.37.0}"
+    if [[ -n ${MOCK_ARIA2_TLS_LIBRARY:-} ]]; then
+        printf 'Libraries: %s\n' "${MOCK_ARIA2_TLS_LIBRARY}"
+    fi
     ;;
 --help=#all)
     [[ ${LC_ALL:-} == C ]] || { printf 'ayuda aria2 localizada\n'; exit 65; }
@@ -824,6 +832,25 @@ cat >"${MOCK_BIN}/zenity" <<'EOF_ZENITY'
 #!/usr/bin/env bash
 set -euo pipefail
 
+wait_for_mock_worker_start() {
+    local attempt=0
+    local worker_start_marker=${MOCK_STARTED_MARKER:-}
+
+    [[ ${MOCK_ZENITY_WAIT_FOR_WORKER_START:-0} == 1 ]] || return 0
+    if [[ -z ${worker_start_marker} ]]; then
+        printf '%s\n' \
+            'MOCK_ZENITY_WAIT_FOR_WORKER_START requires MOCK_STARTED_MARKER.' >&2
+        exit 64
+    fi
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        [[ -f ${worker_start_marker} ]] && return 0
+        sleep 0.1
+    done
+    printf 'Timed out waiting for mock worker startup: %s\n' \
+        "${worker_start_marker}" >&2
+    exit 66
+}
+
 case " $* " in
     *' --entry '*)
         if [[ -n ${MOCK_ZENITY_ENTRY_STATUS:-} ]]; then
@@ -883,29 +910,7 @@ case " $* " in
             # fail before the long-running worker has installed its TERM trap.
             # This turns the termination marker into a deterministic assertion
             # instead of an assertion on process-scheduling order.
-            if [[ ${MOCK_ZENITY_WAIT_FOR_WORKER_START:-0} == 1 ]]; then
-                worker_start_marker=${MOCK_STARTED_MARKER:-}
-                if [[ -z ${worker_start_marker} ]]; then
-                    printf '%s\n' \
-                        'MOCK_ZENITY_WAIT_FOR_WORKER_START requires MOCK_STARTED_MARKER.' >&2
-                    exit 64
-                fi
-
-                worker_started=false
-                for ((attempt = 0; attempt < 100; attempt++)); do
-                    if [[ -f ${worker_start_marker} ]]; then
-                        worker_started=true
-                        break
-                    fi
-                    sleep 0.1
-                done
-
-                if [[ ${worker_started} != true ]]; then
-                    printf 'Timed out waiting for mock worker startup: %s\n' \
-                        "${worker_start_marker}" >&2
-                    exit 66
-                fi
-            fi
+            wait_for_mock_worker_start
 
             exit "${MOCK_ZENITY_PROGRESS_STATUS}"
         fi
@@ -916,6 +921,7 @@ case " $* " in
         fi
         if [[ ${MOCK_CANCEL:-0} == 1 ]]; then
             IFS= read -r _ || true
+            wait_for_mock_worker_start
             sleep "${MOCK_CANCEL_JITTER_SECONDS:-0}"
             exit 1
         fi
@@ -1317,7 +1323,7 @@ test_mock_engine_audio_downloads() {
     local expected_output_template ffprobe_argument_log forbidden_audio_format
     local injection_marker malicious_url missing_target_result normalized_result
     local normalized_result_file plan_call_count post_call_count result_file
-    local runtime_lock_dir runtime_lock_file url_seen_log
+    local runtime_lock_dir runtime_lock_file url_file url_seen_log
     local -a arguments aria2_arguments aria_without_netrc_arguments
     local -a aria_without_netrc_direct_arguments ffprobe_arguments plan_arguments
     local -a runtime_lock_files
@@ -1454,6 +1460,9 @@ test_mock_engine_audio_downloads() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'the final media file failed FFprobe validation:' \
         'audio content-video rejection diagnostic'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'Media validation reason: unexpected-content-video' \
+        'audio content-video bounded reason'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     # A distro build may omit the optional netrc feature entirely. Such a build
@@ -1539,6 +1548,24 @@ test_mock_engine_audio_downloads() {
         'https://example.com/a' -- 'https://example.com/b'
     assert_text_contains "${ASSERT_OUTPUT}" 'exactly one video URL is required.' \
         'duplicate URL after -- diagnostic'
+
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    url_file="${TEST_ROOT}/private-url-input.txt"
+    printf '%s\n' 'https://example.com/watch?v=private-url-mode' >"${url_file}"
+    chmod 0644 -- "${url_file}"
+    assert_status 2 'URL file rejects group/other access' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio --url-file "${url_file}"
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'URL file must not be accessible by group or other users.' \
+        'URL file permission diagnostic'
+
+    chmod 0600 -- "${url_file}"
+    prepare_argument_log 'private-url-file-mode'
+    assert_status 0 'private owner-only URL file is accepted' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio --url-file "${url_file}"
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 }
 
 test_mock_engine_video_downloads() {
@@ -1589,6 +1616,9 @@ test_mock_engine_video_downloads() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'final media file failed FFprobe validation' \
         'missing-audio validation diagnostic'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'Media validation reason: missing-audio' \
+        'missing-audio bounded reason'
 
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     prepare_argument_log 'video-cover-art-only-validation'
@@ -1890,7 +1920,8 @@ test_mock_engine_private_staging() {
     local invalid_mode legacy_exact other_output owned_staging_leftover
     local replacement_log replacement_original replacement_pid
     local replacement_result replacement_staging replacement_started
-    local replacement_status staging_symlink_target symlink_candidate test_pgid
+    local replacement_status replacement_termination_marker
+    local staging_symlink_target symlink_candidate test_pgid
 
     # Regression guard: active private staging cleanup must not follow a
     # pathname that has been replaced by a different filesystem object.
@@ -1898,11 +1929,13 @@ test_mock_engine_private_staging() {
     replacement_result="${TEST_ROOT}/private-staging-replacement-result.txt"
     replacement_log="${TEST_ROOT}/private-staging-replacement.log"
     replacement_original="${TEST_ROOT}/private-staging-original"
+    replacement_termination_marker="${TEST_ROOT}/private-staging-replacement-terminated"
 
     rm -f -- \
         "${replacement_started}" \
         "${replacement_result}" \
-        "${replacement_log}"
+        "${replacement_log}" \
+        "${replacement_termination_marker}"
     rm -rf -- "${replacement_original}"
 
     prepare_argument_log 'private-staging-active-replacement'
@@ -1910,6 +1943,7 @@ test_mock_engine_private_staging() {
     env MOCK_PLAN_PROTOCOL='m3u8_native' \
         MOCK_LONG_DOWNLOAD=1 \
         MOCK_STARTED_MARKER="${replacement_started}" \
+        MOCK_TERMINATION_MARKER="${replacement_termination_marker}" \
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${OUTPUT_DIR}" \
         --mode audio \
@@ -1962,6 +1996,8 @@ test_mock_engine_private_staging() {
 
     assert_equals '143' "${replacement_status}" \
         'private staging replacement TERM exit status'
+    wait_for_file "${replacement_termination_marker}" 10 \
+        'private staging replacement worker receives TERM'
     assert_no_test_processes \
         'private staging replacement left worker processes'
 
@@ -1981,6 +2017,7 @@ test_mock_engine_private_staging() {
         "${replacement_started}" \
         "${replacement_result}" \
         "${replacement_log}" \
+        "${replacement_termination_marker}" \
         "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     # The conservative replacement protection must not turn ordinary owned
@@ -2657,15 +2694,19 @@ test_mock_signal_gui_session() {
 }
 
 test_mock_signal_gui_cancellation() {
-    local pgid_delay_marker termination_marker
+    local pgid_delay_marker termination_marker worker_start_marker
 
     # Scenario: user cancellation terminates the complete process group.
     termination_marker="${TEST_ROOT}/terminated"
+    worker_start_marker="${TEST_ROOT}/cancel-worker-started"
+    rm -f -- "${termination_marker}" "${worker_start_marker}"
     prepare_argument_log 'cancel-process-group'
     assert_status_split 130 'cancellation terminates the process group' \
         timeout --signal=TERM --kill-after=2s 15s \
         env MOCK_PLAN_PROTOCOL='m3u8_native' \
         MOCK_LONG_DOWNLOAD=1 MOCK_CANCEL=1 \
+        MOCK_ZENITY_WAIT_FOR_WORKER_START=1 \
+        MOCK_STARTED_MARKER="${worker_start_marker}" \
         MOCK_TERMINATION_MARKER="${termination_marker}" \
         "${GUI_UNDER_TEST}"
     wait_for_file "${termination_marker}" 10 'worker group receives TERM'
@@ -2771,7 +2812,20 @@ test_mock_runtime_version_formats() {
 }
 
 test_mock_runtime_worker_failure() {
+    local forbidden_source_name=''
     local invalid_probe_result
+
+    forbidden_source_name=$(printf '\170\150\141\155\163\164\145\162')
+    prepare_argument_log 'forbidden-external-diagnostic-redaction'
+    assert_status 1 'forbidden external diagnostic is redacted' \
+        env MOCK_PLAN_EXIT_STATUS=1 MOCK_FORBIDDEN_EXTERNAL_ERROR=1 \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=redacted-external-diagnostic'
+    assert_text_not_contains "${ASSERT_OUTPUT}" "${forbidden_source_name}" \
+        'forbidden external source label is absent from engine diagnostics'
+    assert_text_contains "${ASSERT_OUTPUT}" '[REDACTED_SOURCE]' \
+        'forbidden external source label is replaced deterministically'
 
     prepare_argument_log 'immediate-worker-failure'
     assert_status 23 'an immediate yt-dlp failure preserves its real status' \
@@ -2797,6 +2851,9 @@ test_mock_runtime_worker_failure() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'final media file failed FFprobe validation' \
         'FFprobe failure diagnostic'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'Media validation reason: probe-error' \
+        'FFprobe failure bounded reason'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 }
 
@@ -2875,12 +2932,41 @@ test_mock_runtime_media_validation() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'final media file failed FFprobe validation' \
         'tail-truncation validation diagnostic'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'Media validation reason: tail-inconsistent' \
+        'tail-truncation bounded reason'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 }
 
 test_mock_runtime_dependencies() {
     local managed_deno_args managed_deno_output
-    local -a managed_deno_arguments
+    local -a managed_deno_arguments tls_transport_arguments
+
+    prepare_argument_log 'aria2-gnutls-https-native-fallback'
+    assert_status 0 'affected aria2 GnuTLS HTTPS uses native transport' \
+        env MOCK_ARIA2_TLS_LIBRARY='GnuTLS/3.8.11' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=gnutls-native-fallback'
+    [[ ! -s ${MOCK_ARIA2_ARG_LOG} ]] \
+        || fail 'Affected aria2 GnuTLS build received a direct HTTPS transfer.'
+    # shellcheck disable=SC2034 # Read through nameref assertion helpers.
+    tls_transport_arguments=()
+    read_arguments "${MOCK_ARG_LOG}" tls_transport_arguments
+    assert_array_contains tls_transport_arguments '--batch-file' \
+        'affected aria2 GnuTLS build retains native yt-dlp URL transport'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    prepare_argument_log 'aria2-fixed-gnutls-https-direct'
+    assert_status 0 'fixed-generation aria2 GnuTLS permits direct HTTPS' \
+        env MOCK_ARIA2_VERSION='1.38.0' \
+        MOCK_ARIA2_TLS_LIBRARY='GnuTLS/3.8.11' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=gnutls-direct-fixed'
+    [[ -s ${MOCK_ARIA2_ARG_LOG} ]] \
+        || fail 'Fixed-generation aria2 GnuTLS build did not use direct HTTPS.'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     assert_status 1 'old yt-dlp version is rejected' \
         env MOCK_YTDLP_VERSION=2026.06.08 \
