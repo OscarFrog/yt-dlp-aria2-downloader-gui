@@ -38,27 +38,30 @@ source "${PROJECT_FILES}"
 # shellcheck source=lib/test-runner.sh
 source "${TEST_RUNNER_LIBRARY}"
 
+# Stagger CPU-heavy shell/mocking suites with wait-heavy monitor and signal
+# suites. This keeps four-core runners busy without making every long scenario
+# compete for the same resource at startup.
 readonly -a FULL_SUITE_IDS=(
-    runtime-manager
-    run-all-signal
     runtime-manager-hardening
     mock-engine-core
+    progress-monitor
+    run-all-signal
+    runtime-manager
     mock-engine-hls
     mock-engine-staging
-    mock-gui-progress
     mock-gui-state
-    mock-signals
+    mock-gui-progress
     mock-runtime-compat
+    mock-signals
     mock-runtime-validation
     private-aria2-plan
     aria2-auth-headers
-    progress-monitor
+    install-fedora-auth
+    test-runner
     ffmpeg-progress
     installer
-    install-fedora-auth
-    packaging
     package-user-cleanup
-    test-runner
+    packaging
 )
 
 # The fast profile is an explicit developer feedback loop. The default full
@@ -132,6 +135,22 @@ declare -Ar SUITE_GROUP_ARGUMENTS=(
     ['mock-runtime-validation']='runtime-validation'
 )
 
+readonly -a STATIC_VALIDATION_LABELS=(
+    'shfmt validation'
+    'Static validation'
+    'Production ShellCheck'
+    'Packaging ShellCheck'
+    'Test-suite ShellCheck'
+    'Development tooling ShellCheck'
+)
+
+readonly -a STATIC_SHELLCHECK_ARRAY_NAMES=(
+    PRODUCTION_SHELL_FILES
+    PACKAGING_SHELL_FILES
+    TEST_SHELL_FILES
+    DEVELOPMENT_SHELL_FILES
+)
+
 PROFILE='full'
 PROFILE_WAS_EXPLICIT=false
 JOBS=${YTDLP_ARIA2_TEST_JOBS:-1}
@@ -144,6 +163,12 @@ INTEGRATION_SUITE_STARTS=()
 INTEGRATION_SUITE_ENDS=()
 INTEGRATION_SUITE_STATUSES=()
 INTEGRATION_SLOT_SUITE_INDEX=()
+STATIC_VALIDATION_LOGS=()
+STATIC_VALIDATION_COMPLETIONS=()
+STATIC_VALIDATION_STARTS=()
+STATIC_VALIDATION_ENDS=()
+STATIC_VALIDATION_STATUSES=()
+STATIC_VALIDATION_SLOT_INDEX=()
 
 usage() {
     cat <<'EOF_USAGE'
@@ -341,113 +366,141 @@ validate_suite_manifest() {
     done
 }
 
-run_timed_step() {
-    (($# >= 2)) || return 2
-    local label=$1
-    shift
-    local start_ms
-    local end_ms
-    local duration
-    local status=0
-
-    start_ms=$(test_runner_now_ms)
-    printf '\n=== %s ===\n' "${label}"
-    # A nonzero child status is measured and reported before it is returned.
-    # shellcheck disable=SC2310
-    test_runner_run_child "$@" || status=$?
-    end_ms=$(test_runner_now_ms)
-    test_runner_format_duration "$((end_ms - start_ms))" duration
-
-    if ((status == 0)); then
-        printf '%s: PASS (%s)\n' "${label}" "${duration}"
-    else
-        printf '%s: FAIL (status %d, %s)\n' \
-            "${label}" "${status}" "${duration}" >&2
-    fi
-    return "${status}"
+initialize_static_validation_schedule() {
+    STATIC_VALIDATION_LOGS=()
+    STATIC_VALIDATION_COMPLETIONS=()
+    STATIC_VALIDATION_STARTS=()
+    STATIC_VALIDATION_ENDS=()
+    STATIC_VALIDATION_STATUSES=()
+    STATIC_VALIDATION_SLOT_INDEX=()
 }
 
-run_shellcheck_validations() {
-    local -a labels=(
-        'Production ShellCheck'
-        'Packaging ShellCheck'
-        'Test-suite ShellCheck'
-        'Development tooling ShellCheck'
-    )
-    local -a array_names=(
-        PRODUCTION_SHELL_FILES
-        PACKAGING_SHELL_FILES
-        TEST_SHELL_FILES
-        DEVELOPMENT_SHELL_FILES
-    )
-    local -a logs=() completions=() starts=() ends=() statuses=()
-    local static_jobs=${JOBS}
-    local batch_start batch_size slot index status end_ms duration
+start_static_validation() {
+    (($# == 2)) || return 2
+    local validation_index=$1
+    local slot=$2
+    local label=${STATIC_VALIDATION_LABELS[${validation_index}]}
+    local log_file="${TEST_RUNNER_LOG_DIR}/static-${validation_index}.log"
+    local completion_file="${TEST_RUNNER_LOG_DIR}/static-${validation_index}.completed"
+    local shellcheck_index
+    local -a validation_command=()
+
+    case ${validation_index} in
+        0)
+            validation_command=(bash -- ./scripts/check-shell-format.sh)
+            ;;
+        1)
+            validation_command=(bash -- ./test-static.sh)
+            ;;
+        *)
+            shellcheck_index=$((validation_index - 2))
+            ((shellcheck_index < ${#STATIC_SHELLCHECK_ARRAY_NAMES[@]})) \
+                || return 70
+            declare -n static_shell_files_ref="${STATIC_SHELLCHECK_ARRAY_NAMES[${shellcheck_index}]}"
+            validation_command=(
+                shellcheck -x -o all -- "${static_shell_files_ref[@]}"
+            )
+            unset -n static_shell_files_ref
+            ;;
+    esac
+
+    STATIC_VALIDATION_STARTS[validation_index]=$(test_runner_now_ms)
+    STATIC_VALIDATION_LOGS[validation_index]=${log_file}
+    STATIC_VALIDATION_COMPLETIONS[validation_index]=${completion_file}
+    STATIC_VALIDATION_SLOT_INDEX[slot]=${validation_index}
+
+    printf 'Starting: %s\n' "${label}"
+    test_runner_start_timed_child \
+        "${slot}" "${log_file}" "${completion_file}" \
+        "${validation_command[@]}"
+}
+
+collect_completed_static_validation() {
+    local completed_slot=''
+    local validation_index=''
+    local end_ms=''
+    local status=0
+
+    # Preserve every category result while continuing to collect independent
+    # read-only validators.
+    # shellcheck disable=SC2310
+    test_runner_wait_any completed_slot || status=$?
+    validation_index=${STATIC_VALIDATION_SLOT_INDEX[${completed_slot}]}
+    # Missing completion metadata falls back to the conservative reap time.
+    # shellcheck disable=SC2310
+    if ! test_runner_read_completion \
+        "${STATIC_VALIDATION_COMPLETIONS[${validation_index}]}" end_ms; then
+        end_ms=$(test_runner_now_ms)
+    fi
+    STATIC_VALIDATION_ENDS[validation_index]=${end_ms}
+    STATIC_VALIDATION_STATUSES[validation_index]=${status}
+    unset 'STATIC_VALIDATION_SLOT_INDEX[completed_slot]'
+}
+
+report_static_validations() {
+    local validation_index
+    local label
+    local duration
+    local status=0
     local first_failure=0
 
-    ((static_jobs <= ${#labels[@]})) || static_jobs=${#labels[@]}
-    printf '\nStarting ShellCheck validations (jobs: %d)\n' "${static_jobs}"
-
-    for ((batch_start = 0; batch_start < ${#labels[@]}; batch_start += static_jobs)); do
-        batch_size=$((static_jobs))
-        if ((batch_start + batch_size > ${#labels[@]})); then
-            batch_size=$((${#labels[@]} - batch_start))
-        fi
-
-        for ((slot = 0; slot < batch_size; slot++)); do
-            index=$((batch_start + slot))
-            logs[index]="${TEST_RUNNER_LOG_DIR}/shellcheck-${index}.log"
-            completions[index]="${TEST_RUNNER_LOG_DIR}/shellcheck-${index}.completed"
-            starts[index]=$(test_runner_now_ms)
-            declare -n shell_files_ref="${array_names[${index}]}"
-            test_runner_start_timed_child \
-                "${slot}" "${logs[${index}]}" "${completions[${index}]}" \
-                shellcheck -x -o all -- "${shell_files_ref[@]}"
-            unset -n shell_files_ref
-        done
-
-        for ((slot = 0; slot < batch_size; slot++)); do
-            index=$((batch_start + slot))
-            status=0
-            # Nonzero ShellCheck statuses are buffered and reported in category order.
-            # shellcheck disable=SC2310
-            test_runner_wait_child "${slot}" || status=$?
-            statuses[index]=${status}
-            # Missing completion metadata falls back to the observed reap time.
-            # shellcheck disable=SC2310
-            if ! test_runner_read_completion "${completions[${index}]}" end_ms; then
-                end_ms=$(test_runner_now_ms)
-            fi
-            ends[index]=${end_ms}
-        done
-    done
-
-    for index in "${!labels[@]}"; do
-        status=${statuses[${index}]}
-        test_runner_format_duration "$((ends[index] - starts[index]))" duration
-        printf '\n=== %s ===\n' "${labels[${index}]}"
-        cat -- "${logs[${index}]}"
+    for validation_index in "${!STATIC_VALIDATION_LABELS[@]}"; do
+        label=${STATIC_VALIDATION_LABELS[${validation_index}]}
+        status=${STATIC_VALIDATION_STATUSES[${validation_index}]}
+        test_runner_format_duration \
+            "$((STATIC_VALIDATION_ENDS[validation_index] - STATIC_VALIDATION_STARTS[validation_index]))" \
+            duration
+        printf '\n=== %s ===\n' "${label}"
+        cat -- "${STATIC_VALIDATION_LOGS[${validation_index}]}"
         if ((status == 0)); then
-            printf '%s: PASS (%s)\n' "${labels[${index}]}" "${duration}"
+            printf '%s: PASS (%s)\n' "${label}" "${duration}"
         else
             printf '%s: FAIL (status %d, %s)\n' \
-                "${labels[${index}]}" "${status}" "${duration}" >&2
+                "${label}" "${status}" "${duration}" >&2
             ((first_failure != 0)) || first_failure=${status}
         fi
-        rm -f -- "${logs[${index}]}" "${completions[${index}]}"
+        rm -f -- \
+            "${STATIC_VALIDATION_LOGS[${validation_index}]}" \
+            "${STATIC_VALIDATION_COMPLETIONS[${validation_index}]}"
     done
 
     ((first_failure == 0)) || return "${first_failure}"
 }
 
+run_static_validations() {
+    local static_jobs=${JOBS}
+    local next_index=0
+    local active_count=0
+    local slot=0
+
+    ((static_jobs <= ${#STATIC_VALIDATION_LABELS[@]})) \
+        || static_jobs=${#STATIC_VALIDATION_LABELS[@]}
+    initialize_static_validation_schedule
+    printf '\nStarting static validations (jobs: %d)\n' "${static_jobs}"
+
+    while ((next_index < ${#STATIC_VALIDATION_LABELS[@]} || active_count > 0)); do
+        for ((slot = 0; slot < static_jobs; slot++)); do
+            ((next_index < ${#STATIC_VALIDATION_LABELS[@]})) || break
+            [[ -z ${STATIC_VALIDATION_SLOT_INDEX[${slot}]+x} ]] || continue
+
+            start_static_validation "${next_index}" "${slot}"
+            next_index=$((next_index + 1))
+            active_count=$((active_count + 1))
+        done
+
+        if ((active_count > 0)); then
+            collect_completed_static_validation
+            active_count=$((active_count - 1))
+        fi
+    done
+
+    report_static_validations
+}
+
 run_static_validation() {
     printf '=== ShellCheck version ===\n'
     shellcheck --version
-
-    run_timed_step 'shfmt validation' \
-        bash -- ./scripts/check-shell-format.sh
-    run_timed_step 'Static validation' bash -- ./test-static.sh
-    run_shellcheck_validations
+    run_static_validations
 }
 
 initialize_integration_schedule() {

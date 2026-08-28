@@ -9,40 +9,21 @@
 set -euo pipefail
 umask 077
 
-if [[ -z ${HOME:-} ]]; then
-    printf 'Error: the HOME environment variable is not defined.\n' >&2
-    exit 1
-fi
-if [[ ${HOME} != /* ]]; then
-    printf 'Error: the HOME environment variable must be an absolute path.\n' >&2
-    exit 1
-fi
-
 readonly APP_NAME='yt-dlp aria2 downloader'
-APP_DIALOG_TITLE=${APP_NAME}
 readonly PROFILE_LABEL_VIDEO='Complete video (MKV)'
 readonly PROFILE_LABEL_YOUTUBE_HLS='YouTube video - Firefox cookies (HLS/MKV)'
 readonly PROFILE_LABEL_AUDIO='Audio track (native format)'
 readonly PROGRESS_DIALOG_WIDTH=700
-
-config_home=${XDG_CONFIG_HOME:-${HOME}/.config}
-state_home=${XDG_STATE_HOME:-${HOME}/.local/state}
-if [[ ${config_home} != /* ]]; then
-    config_home="${HOME}/.config"
-fi
-if [[ ${state_home} != /* ]]; then
-    state_home="${HOME}/.local/state"
-fi
-readonly CONFIG_DIR="${config_home}/yt-dlp-aria2-downloader"
-readonly STATE_DIR="${state_home}/yt-dlp-aria2-downloader"
-readonly CONFIG_FILE="${CONFIG_DIR}/gui.conf"
-unset config_home state_home
 readonly LOG_RETENTION_DAYS=15
 readonly LOG_MAX_BYTES=8388608
 readonly PGID_WAIT_ATTEMPTS=50
 readonly WORKER_TERM_ATTEMPTS=30
 readonly WORKER_KILL_ATTEMPTS=20
 
+APP_DIALOG_TITLE=${APP_NAME}
+CONFIG_DIR=''
+STATE_DIR=''
+CONFIG_FILE=''
 WORKER_PID=''
 WORKER_PGID=''
 TEMP_DIR=''
@@ -55,6 +36,34 @@ WORKER_STATUS=''
 LOG_FILE=''
 LOG_RETAINED=false
 LOG_TIMESTAMP=''
+
+initialize_gui_paths() {
+    local config_home=''
+    local state_home=''
+
+    if [[ -z ${HOME:-} ]]; then
+        printf 'Error: the HOME environment variable is not defined.\n' >&2
+        exit 1
+    fi
+    if [[ ${HOME} != /* ]]; then
+        printf 'Error: the HOME environment variable must be an absolute path.\n' >&2
+        exit 1
+    fi
+
+    config_home=${XDG_CONFIG_HOME:-${HOME}/.config}
+    state_home=${XDG_STATE_HOME:-${HOME}/.local/state}
+    if [[ ${config_home} != /* ]]; then
+        config_home="${HOME}/.config"
+    fi
+    if [[ ${state_home} != /* ]]; then
+        state_home="${HOME}/.local/state"
+    fi
+
+    CONFIG_DIR="${config_home}/yt-dlp-aria2-downloader"
+    STATE_DIR="${state_home}/yt-dlp-aria2-downloader"
+    CONFIG_FILE="${CONFIG_DIR}/gui.conf"
+    readonly CONFIG_DIR STATE_DIR CONFIG_FILE
+}
 
 resolve_runtime_tmpdir() {
     local output_variable=$1
@@ -749,6 +758,8 @@ initialize_gui_environment() {
     local resolve_status
     local version_output=''
     local version_value=''
+
+    initialize_gui_paths
 
     for command_name in bash chmod date dirname grep mkdir mktemp mv realpath rm sed setsid sleep stat tail zenity; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then

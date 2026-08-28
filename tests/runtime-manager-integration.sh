@@ -43,7 +43,32 @@ case \${1:-} in
     printf '%s\\n' '${version}'
     ;;
 --help)
-    printf '%s\\n' --break-match-filters --js-runtimes --list-impersonate-targets --no-update
+    printf '%s\\n' \\
+        '--batch-file FILE' \\
+        '--break-match-filters FILTER' \\
+        '--cookies FILE' \\
+        '--cookies-from-browser BROWSER' \\
+        '--dump-single-json' \\
+        '--extractor-args KEY:ARGS' \\
+        '--extractor-retries RETRIES' \\
+        '--fixup POLICY' \\
+        '--fragment-retries RETRIES' \\
+        '--js-runtimes RUNTIME' \\
+        '--list-impersonate-targets' \\
+        '--load-info-json FILE' \\
+        '--no-clean-info-json' \\
+        '--no-overwrites' \\
+        '--no-post-overwrites' \\
+        '--no-update' \\
+        '--parse-metadata FROM:TO' \\
+        '--print TEMPLATE' \\
+        '--print-to-file TEMPLATE FILE' \\
+        '--progress-delta SECONDS' \\
+        '--progress-template TEMPLATE' \\
+        '--retries RETRIES' \\
+        '--retry-sleep EXPR' \\
+        '--skip-download' \\
+        '--socket-timeout SECONDS'
     ;;
 --list-impersonate-targets)
     printf '%s\\n' 'Chrome-140 Linux curl_cffi'
@@ -145,14 +170,23 @@ EOF_CURL
 }
 
 test_runtime_paths_and_locking() {
-    local actual_deno actual_ytdlp expected_ytdlp lock_holder_pid
-    local lock_holder_ready
+    local actual_deno actual_ytdlp expected_attestation expected_ytdlp
+    local fallback_attestation lock_holder_pid lock_holder_ready
 
     expected_ytdlp="${ytdlp_root}/current/yt-dlp_linux"
     actual_ytdlp=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" path yt-dlp)
     [[ ${actual_ytdlp} == "${expected_ytdlp}" ]] || fail 'managed yt-dlp path is incorrect'
     actual_deno=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" path deno)
     [[ ${actual_deno} == "${deno_root}/current/deno" ]] || fail 'managed Deno path is incorrect'
+
+    expected_attestation=$(printf \
+        'runtime-contract=1\nyt-dlp-path=%s\nyt-dlp-version=2026.07.04\ndeno-path=%s\ndeno-version=2.9.5' \
+        "${expected_ytdlp}" "${deno_root}/current/deno")
+    : >"${CURL_LOG}"
+    actual_ytdlp=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" prepare require)
+    assert_equals "${expected_attestation}" "${actual_ytdlp}" \
+        'strict runtime preparation attestation'
+    [[ ! -s ${CURL_LOG} ]] || fail 'prepare require invoked the network'
 
     # Read-only lookups must not wait behind an updater because current is an
     # atomically published symlink.
@@ -176,8 +210,12 @@ test_runtime_paths_and_locking() {
 
     # update has a bounded lock wait. With valid active runtimes it must fall back
     # to those verified runtimes instead of failing the application launch.
-    "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null 2>"${TEST_ROOT}/lock-fallback.err" \
-        || fail 'update did not fall back to active runtimes during lock contention'
+    fallback_attestation=$(
+        "${runtime_env[@]}" "${RUNTIME_MANAGER}" prepare update \
+            2>"${TEST_ROOT}/lock-fallback.err"
+    ) || fail 'prepare update did not fall back to active runtimes during lock contention'
+    assert_equals "${expected_attestation}" "${fallback_attestation}" \
+        'lock-contention runtime preparation attestation'
     grep -Fq -- 'another runtime update is in progress' "${TEST_ROOT}/lock-fallback.err" \
         || fail 'lock-contention fallback diagnostic is missing'
     kill -TERM -- "${lock_holder_pid}" 2>/dev/null || true

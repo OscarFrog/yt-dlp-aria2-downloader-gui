@@ -55,7 +55,7 @@ create_real_ffmpeg_fixture() {
     ffmpeg -hide_banner -loglevel error -nostdin \
         -f lavfi -i 'testsrc2=size=160x90:rate=10' \
         -f lavfi -i 'sine=frequency=1000:sample_rate=44100' \
-        -t 2 -shortest -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+        -t 0.75 -shortest -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
         -c:a aac "${input}"
 }
 
@@ -217,8 +217,9 @@ assert_real_progress_history() {
 
 test_real_ffmpeg_progress_run() {
     local run=$1
+    local input=$2
+    local duration_us=$3
     local run_dir="${TEST_ROOT}/run-${run}"
-    local input="${run_dir}/input.mp4"
     local output="${run_dir}/output.mkv"
     local log_file="${run_dir}/download.log"
     local result_file="${run_dir}/result.txt"
@@ -226,13 +227,10 @@ test_real_ffmpeg_progress_run() {
     local error_file="${run_dir}/ffmpeg.err"
     local ready_file="${run_dir}/ready-to-publish"
     local allow_file="${run_dir}/allow-publish"
-    local duration_us
 
     mkdir -p -- "${run_dir}"
     : >"${log_file}"
     : >"${capture_file}"
-    create_real_ffmpeg_fixture "${input}"
-    duration_us=$(probe_duration_us "${input}")
 
     run_real_ffmpeg_worker \
         "${run}" "${input}" "${output}" "${log_file}" "${error_file}" \
@@ -256,6 +254,8 @@ test_real_ffmpeg_progress_run() {
 }
 
 main() {
+    local input="${TEST_ROOT}/input.mp4"
+    local duration_us
     local run
 
     trap cleanup EXIT
@@ -263,8 +263,13 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
+    # The three stability runs consume the same immutable input. Building and
+    # probing that fixture once preserves three independent FFmpeg/monitor
+    # executions without repeating unrelated setup work.
+    create_real_ffmpeg_fixture "${input}"
+    duration_us=$(probe_duration_us "${input}")
     for run in 1 2 3; do
-        test_real_ffmpeg_progress_run "${run}"
+        test_real_ffmpeg_progress_run "${run}" "${input}" "${duration_us}"
     done
 
     printf 'Real FFmpeg progress integration passed (3/3).\n'

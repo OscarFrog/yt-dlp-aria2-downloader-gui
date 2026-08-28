@@ -118,16 +118,14 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          for iteration in {1..10}; do
-            printf '=== runtime hardening stress iteration %d/10 ===\n' \
-              "${iteration}"
-
+          bash ./tests/repeat-qualification.sh \
+            --label 'runtime hardening stress iteration' \
+            --runs 10 --jobs 4 -- \
             timeout \
               --signal=TERM \
               --kill-after=10s \
               2m \
-              bash ./tests/runtime-manager-hardening-integration.sh
-          done
+            bash ./tests/runtime-manager-hardening-integration.sh
 
   package-cleanup-stress:
     name: Package cleanup hardening stress (10x)
@@ -143,9 +141,8 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          for iteration in {1..10}; do
-            printf '=== package cleanup stress iteration %d/10 ===\n' \
-              "${iteration}"
+          bash ./tests/repeat-qualification.sh \
+            --label 'package cleanup stress iteration' \
+            --runs 10 --jobs 4 -- \
             timeout --signal=TERM --kill-after=10s 1m \
-              bash ./tests/package-user-cleanup-integration.sh
-          done
+            bash ./tests/package-user-cleanup-integration.sh

@@ -78,7 +78,32 @@ for fd_path in /proc/\$\$/fd/*; do
 done
 case \${1:-} in
 --version) printf '%s\\n' '${version}' ;;
---help) printf '%s\\n' --break-match-filters --js-runtimes --list-impersonate-targets --no-update ;;
+--help) printf '%s\\n' \\
+    '--batch-file FILE' \\
+    '--break-match-filters FILTER' \\
+    '--cookies FILE' \\
+    '--cookies-from-browser BROWSER' \\
+    '--dump-single-json' \\
+    '--extractor-args KEY:ARGS' \\
+    '--extractor-retries RETRIES' \\
+    '--fixup POLICY' \\
+    '--fragment-retries RETRIES' \\
+    '--js-runtimes RUNTIME' \\
+    '--list-impersonate-targets' \\
+    '--load-info-json FILE' \\
+    '--no-clean-info-json' \\
+    '--no-overwrites' \\
+    '--no-post-overwrites' \\
+    '--no-update' \\
+    '--parse-metadata FROM:TO' \\
+    '--print TEMPLATE' \\
+    '--print-to-file TEMPLATE FILE' \\
+    '--progress-delta SECONDS' \\
+    '--progress-template TEMPLATE' \\
+    '--retries RETRIES' \\
+    '--retry-sleep EXPR' \\
+    '--skip-download' \\
+    '--socket-timeout SECONDS' ;;
 --list-impersonate-targets) printf '%s\\n' 'Chrome-140 Linux curl_cffi' ;;
 *) exit 64 ;;
 esac
@@ -269,7 +294,32 @@ for fd_path in /proc/\$\$/fd/*; do
 done
 case \${1:-} in
 --version) printf '%s\\n' '${candidate_version}' ;;
---help) printf '%s\\n' --break-match-filters --js-runtimes --list-impersonate-targets --no-update ;;
+--help) printf '%s\\n' \\
+    '--batch-file FILE' \\
+    '--break-match-filters FILTER' \\
+    '--cookies FILE' \\
+    '--cookies-from-browser BROWSER' \\
+    '--dump-single-json' \\
+    '--extractor-args KEY:ARGS' \\
+    '--extractor-retries RETRIES' \\
+    '--fixup POLICY' \\
+    '--fragment-retries RETRIES' \\
+    '--js-runtimes RUNTIME' \\
+    '--list-impersonate-targets' \\
+    '--load-info-json FILE' \\
+    '--no-clean-info-json' \\
+    '--no-overwrites' \\
+    '--no-post-overwrites' \\
+    '--no-update' \\
+    '--parse-metadata FROM:TO' \\
+    '--print TEMPLATE' \\
+    '--print-to-file TEMPLATE FILE' \\
+    '--progress-delta SECONDS' \\
+    '--progress-template TEMPLATE' \\
+    '--retries RETRIES' \\
+    '--retry-sleep EXPR' \\
+    '--skip-download' \\
+    '--socket-timeout SECONDS' ;;
 --list-impersonate-targets) printf '%s\\n' 'Chrome-140 Linux curl_cffi' ;;
 *) exit 64 ;;
 esac
@@ -403,6 +453,8 @@ test_oversized_deno_versions() {
 test_invalid_runtime_path() {
     local path_status=0
     local path_error=''
+    local prepare_status=0
+    local prepare_error=''
 
     # Invalid path requests must fail with a precise usage diagnostic.
     path_error=$(
@@ -412,6 +464,14 @@ test_invalid_runtime_path() {
         || fail "invalid path component returned ${path_status}, expected 2"
     grep -Fq 'unknown runtime component for path:' <<<"${path_error}" \
         || fail 'invalid path component diagnostic is missing'
+
+    prepare_error=$(
+        "${runtime_env[@]}" "${RUNTIME_MANAGER}" prepare invalid-action 2>&1
+    ) || prepare_status=$?
+    [[ ${prepare_status} == 2 ]] \
+        || fail "invalid prepare action returned ${prepare_status}, expected 2"
+    grep -Fq 'prepare requires an action: update or require.' <<<"${prepare_error}" \
+        || fail 'invalid prepare action diagnostic is missing'
 }
 
 test_mismatched_ytdlp_candidate() {

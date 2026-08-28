@@ -22,7 +22,10 @@ if ((${#ALL_SHELL_FILES[@]} == 0)); then
 fi
 # Contract: every canonical shell file uses the standard Bash header.
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
+# The development tree can lead the latest installable GitHub release. Keep the
+# two contracts explicit so README package names never advertise absent assets.
 readonly EXPECTED_VERSION='2.3.2'
+readonly EXPECTED_PUBLISHED_VERSION='2.3.1'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SHELL_INVENTORY_FILE=''
 
@@ -162,7 +165,7 @@ assert_main_entry_structure() {
 assert_no_historical_comment_labels() {
     local relative_path=$1
     local absolute_path="${SCRIPT_DIR}/${relative_path}"
-    local historical_regex='^[[:space:]]*#[[:space:]]*((P[A]TCH|A[U]D)-[0-9]+)'
+    local historical_regex='^[[:space:]]*#[[:space:]]*(((P[A]TCH|A[U]D)-[0-9]+)|(Regression[[:space:]]+[0-9]+\.[0-9]+(\.[0-9]+)?)|.*[Aa][Uu][Dd][Ii][Tt]([[:space:].,:;]|$))'
     local matches=''
     local status=0
 
@@ -905,8 +908,22 @@ test_static_tooling_contracts() {
     assert_file_contains "${SCRIPT_DIR}/tests/lib/test-runner.sh" \
         'test_runner_wait_any() {' \
         'test runner exposes completion-driven child collection'
+    # shellcheck disable=SC2016 # Literal library default assertion.
+    assert_file_contains "${SCRIPT_DIR}/tests/lib/test-runner.sh" \
+        'YTDLP_ARIA2_TEST_RUNNER_TERMINATION_POLL_ATTEMPTS:-50' \
+        'test runner retains a five-second production termination grace period'
+    assert_file_contains "${SCRIPT_DIR}/tests/run-all-signal-integration.sh" \
+        '"YTDLP_ARIA2_TEST_RUNNER_TERMINATION_POLL_ATTEMPTS": "10"' \
+        'signal integration bounds its deliberate escalation wait'
+    assert_file_contains "${SCRIPT_DIR}/tests/lib/project-files.sh" \
+        'tests/repeat-qualification.sh' \
+        'parallel repeat runner belongs to the canonical shell inventory'
     for scheduler_phase in \
-        run_shellcheck_validations \
+        initialize_static_validation_schedule \
+        start_static_validation \
+        collect_completed_static_validation \
+        report_static_validations \
+        run_static_validations \
         initialize_integration_schedule \
         start_integration_suite \
         collect_completed_integration_suite \
@@ -919,6 +936,12 @@ test_static_tooling_contracts() {
     assert_file_not_contains "${SCRIPT_DIR}/tests/run-all.sh" \
         'run_suite_batch() {' \
         'integration scheduler has no fixed-batch barrier'
+    for repeat_workflow in real-tools release packages stress; do
+        assert_file_contains \
+            "${SCRIPT_DIR}/.github/workflows/${repeat_workflow}.yml" \
+            'bash ./tests/repeat-qualification.sh' \
+            "${repeat_workflow} workflow parallelizes independent repetitions"
+    done
     assert_file_contains "${SCRIPT_DIR}/tests/test-runner-integration.sh" \
         "assert_equals '23' \"\${status}\"" \
         'wait-any qualification preserves failed child status'
@@ -1097,7 +1120,7 @@ test_static_shell_interface_contracts() {
 }
 
 test_static_release_contracts() {
-    local engine_reported_version evidence_phase preflight_phase
+    local engine_reported_version evidence_phase preflight_phase readme_path
 
     # Current-version coherence is intentionally checked only on authoritative
     # carriers. Historical versions used by regression/upgrade fixtures are valid
@@ -1115,29 +1138,56 @@ test_static_release_contracts() {
         "readonly APP_VERSION='${EXPECTED_VERSION}'" \
         'Fedora bootstrap application version'
     assert_file_contains "${SCRIPT_DIR}/README.md" \
-        "is **${EXPECTED_VERSION}**." \
-        'English README version'
+        "development version is **${EXPECTED_VERSION}**." \
+        'English README development version'
     assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
-        "version actuelle est la **${EXPECTED_VERSION}**." \
-        'French README version'
+        "développement actuelle est la **${EXPECTED_VERSION}**." \
+        'French README development version'
     assert_file_contains "${SCRIPT_DIR}/README.md" \
-        "Release ${EXPECTED_VERSION} publishes an architecture-independent DEB" \
-        'English README current DEB release prose'
+        "latest published package release is **${EXPECTED_PUBLISHED_VERSION}**." \
+        'English README published version'
     assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
-        "La release ${EXPECTED_VERSION} publie un DEB indépendant de l'architecture" \
-        'French README current DEB release prose'
+        "dernière release de paquets publiée est la **${EXPECTED_PUBLISHED_VERSION}**." \
+        'French README published version'
     assert_file_contains "${SCRIPT_DIR}/README.md" \
-        "cd yt-dlp-aria2-downloader-gui-${EXPECTED_VERSION}" \
-        'English README portable archive directory'
+        "yt-dlp-aria2-downloader-gui-${EXPECTED_PUBLISHED_VERSION}-1.fc44.noarch.rpm" \
+        'English README published RPM asset'
     assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
-        "cd yt-dlp-aria2-downloader-gui-${EXPECTED_VERSION}" \
-        'French README portable archive directory'
+        "yt-dlp-aria2-downloader-gui-${EXPECTED_PUBLISHED_VERSION}-1.fc44.noarch.rpm" \
+        'French README published RPM asset'
     assert_file_contains "${SCRIPT_DIR}/README.md" \
-        "gh release verify v${EXPECTED_VERSION} -R OscarFrog/yt-dlp-aria2-downloader-gui" \
-        'English README current release verification tag'
+        "yt-dlp-aria2-downloader-gui_${EXPECTED_PUBLISHED_VERSION}-1_all.deb" \
+        'English README published DEB asset'
     assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
-        "gh release verify v${EXPECTED_VERSION} -R OscarFrog/yt-dlp-aria2-downloader-gui" \
-        'French README current release verification tag'
+        "yt-dlp-aria2-downloader-gui_${EXPECTED_PUBLISHED_VERSION}-1_all.deb" \
+        'French README published DEB asset'
+    assert_file_contains "${SCRIPT_DIR}/README.md" \
+        "cd yt-dlp-aria2-downloader-gui-${EXPECTED_PUBLISHED_VERSION}" \
+        'English README published portable archive directory'
+    assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
+        "cd yt-dlp-aria2-downloader-gui-${EXPECTED_PUBLISHED_VERSION}" \
+        'French README published portable archive directory'
+    if [[ ${EXPECTED_PUBLISHED_VERSION} != "${EXPECTED_VERSION}" ]]; then
+        for readme_path in \
+            "${SCRIPT_DIR}/README.md" \
+            "${SCRIPT_DIR}/README.fr.md"; do
+            assert_file_not_contains "${readme_path}" \
+                "yt-dlp-aria2-downloader-gui-${EXPECTED_VERSION}-1.fc44.noarch.rpm" \
+                'README does not advertise an unpublished RPM asset'
+            assert_file_not_contains "${readme_path}" \
+                "yt-dlp-aria2-downloader-gui_${EXPECTED_VERSION}-1_all.deb" \
+                'README does not advertise an unpublished DEB asset'
+            assert_file_not_contains "${readme_path}" \
+                "yt-dlp-aria2-downloader-gui-${EXPECTED_VERSION}.zip" \
+                'README does not advertise an unpublished ZIP asset'
+        done
+    fi
+    assert_file_contains "${SCRIPT_DIR}/README.md" \
+        "gh release verify v${EXPECTED_PUBLISHED_VERSION} -R OscarFrog/yt-dlp-aria2-downloader-gui" \
+        'English README published release verification tag'
+    assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
+        "gh release verify v${EXPECTED_PUBLISHED_VERSION} -R OscarFrog/yt-dlp-aria2-downloader-gui" \
+        'French README published release verification tag'
     assert_file_contains "${SCRIPT_DIR}/README.md" \
         "-f tag=v${EXPECTED_VERSION}" \
         'English README manual release tag input'
@@ -1626,6 +1676,11 @@ test_static_packaging_signing_contracts() {
     assert_status 2 'Fedora bootstrap requires one RPM argument' \
         "${SCRIPT_DIR}/install-fedora.sh"
     for fedora_phase in \
+        root_stage_path_is_safe \
+        create_root_stage \
+        remove_root_stage \
+        stage_root_file \
+        cleanup \
         parse_fedora_arguments \
         require_fedora_installer_commands \
         initialize_fedora_paths \
@@ -1639,6 +1694,8 @@ test_static_packaging_signing_contracts() {
         verify_rpm_with_pinned_keyring \
         verify_signed_rpm \
         authenticate_signed_rpm \
+        prepare_application_rpm \
+        release_application_stage \
         ensure_rpm_fusion_bootstrap_tools \
         validate_rpm_fusion_certificate \
         validate_rpm_fusion_release_identity \
@@ -1791,10 +1848,11 @@ test_static_packaging_signing_contracts() {
         'release signing parser separately validates the dedicated signing subkey'
 
     # shellcheck disable=SC2016
-    # The Fedora bootstrap follows the same complete-output-before-parsing model.
+    # The Fedora bootstrap captures complete GPG output from the privileged,
+    # protected staging area before parsing primary and subkey records.
     assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
-        '"${key_path}" >"${gpg_output}"' \
-        'Fedora installer materializes the complete public-key listing before parsing'
+        'certificate_output=$(LC_ALL=C run_root gpg' \
+        'Fedora installer captures the complete public-key listing before parsing'
     # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
         'signing_subkey_fingerprint=$(' \
@@ -1806,6 +1864,25 @@ test_static_packaging_signing_contracts() {
     assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
         '--no-options' \
         'Fedora installer ignores personal GnuPG configuration during key inspection'
+    # shellcheck disable=SC2016
+    assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
+        'resolved_stage_path=$(run_root mktemp -d --tmpdir=/tmp' \
+        'Fedora installer creates staging through the privileged boundary'
+    assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
+        'run_root install -m 0600' \
+        'Fedora installer copies authorization inputs into root-owned staging'
+    # shellcheck disable=SC2016
+    assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
+        'validate_rpm_identity "${STAGED_APPLICATION_RPM}"' \
+        'Fedora installer revalidates application identity inside root staging'
+    # shellcheck disable=SC2016
+    assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
+        'install_application_rpm "${STAGED_APPLICATION_RPM}"' \
+        'Fedora installer gives DNF only the staged application RPM'
+    assert_file_contains \
+        "${SCRIPT_DIR}/tests/install-fedora-authentication-integration.sh" \
+        'root staging remains bound to verified bytes after source mutation' \
+        'Fedora root-staging TOCTOU has a mutation regression test'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'name: release-rpm' \
         'signed RPM is the release artifact consumed by downstream tests'
@@ -1864,6 +1941,9 @@ test_static_application_contracts() {
     assert_file_contains "${SCRIPT_DIR}/tests/test-runner-integration.sh" \
         'for iteration in range(30):' \
         'test runner repeats startup-signal registration stress'
+    assert_file_contains "${SCRIPT_DIR}/tests/test-runner-integration.sh" \
+        'YTDLP_ARIA2_TEST_CHILD_TOKEN' \
+        'test runner stress binds PID checks to fixture identity'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'readonly YTDLP_NO_PLUGINS=1' \
         'yt-dlp plugins disabled by default'
@@ -1934,10 +2014,12 @@ test_static_application_contracts() {
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'validate_final_media_file() {' \
         'final media FFprobe validation'
-    # shellcheck disable=SC2016 # Literal shell-source assertion.
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        '-select_streams "${stream_selector}"' \
-        'mode-specific FFprobe stream validation'
+        'probe_media_summary() {' \
+        'combined FFprobe media summary'
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        'stream_disposition=attached_pic' \
+        'combined FFprobe summary distinguishes attached cover art'
     # shellcheck disable=SC2016 # Literal shell-source assertion.
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'mv -nT -- "${HLS_REMUX_TMP}" "${final_path}"' \
@@ -1946,6 +2028,7 @@ test_static_application_contracts() {
         'YTDLP_ARIA2_SUPERVISED_SESSION=true' \
         'GUI requests reuse of its single process session without a public option'
     for gui_phase in \
+        initialize_gui_paths \
         initialize_gui_environment \
         collect_download_request \
         prepare_gui_session \
@@ -2267,9 +2350,9 @@ test_static_runtime_regression_contracts() {
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         'live-download-log.' 'live log remains in the private runtime directory'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        "probe_stream stream_present \"\${final_path}\" 'V:0'" 'complete-video content-video stream validation'
+        "if [[ \${video_present} != true ]]; then" 'complete-video content-video stream validation'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        "probe_stream stream_present \"\${final_path}\" 'a:0'" 'complete-video audio stream validation'
+        "if [[ \${audio_present} != true ]]; then" 'complete-video audio stream validation'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         '-nostdin' 'FFmpeg standard-input isolation'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
@@ -2342,6 +2425,7 @@ test_static_runtime_regression_contracts() {
         initialize_runtime_platform \
         prepare_runtime_storage \
         print_runtime_versions \
+        print_engine_runtime_attestation \
         dispatch_runtime_command; do
         assert_file_contains "${SCRIPT_DIR}/runtime-manager.sh" \
             "${runtime_phase}() {" \
@@ -2419,6 +2503,13 @@ test_static_runtime_regression_contracts() {
     assert_file_contains "${SCRIPT_DIR}/runtime-manager.sh" \
         '--list-impersonate-targets' \
         'runtime manager owns yt-dlp impersonation validation'
+    # shellcheck disable=SC2016 # Literal managed-runtime contract assertion.
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        '"${runtime_manager}" prepare "${runtime_action}"' \
+        'engine consumes one attested managed-runtime preparation'
+    assert_file_contains "${SCRIPT_DIR}/runtime-manager.sh" \
+        "readonly ENGINE_RUNTIME_CONTRACT_VERSION='1'" \
+        'managed-runtime attestation contract is explicitly versioned'
 
     # shellcheck disable=SC2016
     # Workflow-level concurrency may use github/inputs/vars, but not matrix.

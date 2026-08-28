@@ -17,6 +17,24 @@ TEST_RUNNER_CHILD_COMPLETIONS=()
 TEST_RUNNER_STARTING_CHILD=false
 TEST_RUNNER_DEFERRED_SIGNAL=''
 TEST_RUNNER_DEFERRED_STATUS=''
+TEST_RUNNER_TERMINATION_POLL_ATTEMPTS=${YTDLP_ARIA2_TEST_RUNNER_TERMINATION_POLL_ATTEMPTS:-50}
+
+# Validate the bounded grace-period override used by the runner's own signal
+# integration test. Ordinary callers retain fifty 100 ms polls (five seconds).
+test_runner_validate_termination_poll_attempts() {
+    if [[ ! ${TEST_RUNNER_TERMINATION_POLL_ATTEMPTS} =~ ^[0-9]{1,3}$ ]]; then
+        printf '%s\n' \
+            'Error: test-runner termination poll attempts must be an integer from 1 through 600.' >&2
+        return 64
+    fi
+    TEST_RUNNER_TERMINATION_POLL_ATTEMPTS=$((10#${TEST_RUNNER_TERMINATION_POLL_ATTEMPTS}))
+    if ((TEST_RUNNER_TERMINATION_POLL_ATTEMPTS < 1 || \
+        TEST_RUNNER_TERMINATION_POLL_ATTEMPTS > 600)); then
+        printf '%s\n' \
+            'Error: test-runner termination poll attempts must be an integer from 1 through 600.' >&2
+        return 64
+    fi
+}
 
 # Return a monotonic timestamp in milliseconds.
 test_runner_now_ms() {
@@ -48,6 +66,7 @@ test_runner_initialize() {
     [[ -z ${TEST_RUNNER_DEFERRED_SIGNAL} ]] || return 70
     [[ -z ${TEST_RUNNER_DEFERRED_STATUS} ]] || return 70
 
+    test_runner_validate_termination_poll_attempts || return
     TEST_RUNNER_LOG_DIR=$(mktemp -d) || return 70
 }
 
@@ -284,6 +303,7 @@ test_runner_terminate_children() {
     local slot
     local pid
     local pgid
+    local poll_attempt
     local any_alive=false
 
     for slot in "${!TEST_RUNNER_CHILD_PIDS[@]}"; do
@@ -307,7 +327,7 @@ test_runner_terminate_children() {
         fi
     done
 
-    for _ in {1..50}; do
+    for ((poll_attempt = 0; poll_attempt < TEST_RUNNER_TERMINATION_POLL_ATTEMPTS; poll_attempt++)); do
         any_alive=false
         for slot in "${!TEST_RUNNER_CHILD_PIDS[@]}"; do
             pid=${TEST_RUNNER_CHILD_PIDS[${slot}]}

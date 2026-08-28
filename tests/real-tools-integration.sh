@@ -602,9 +602,9 @@ PY_VAL001_MUTATE
     printf '%s\n' \
         'Expected regression detected: metadata-parseable clean truncation was rejected.'
 
-    # Mutation test: change only the final audio validator's V:0 selector to v:0
-    # in a temporary engine copy. The valid attached-cover fixture must then be
-    # rejected, proving this test kills that regression.
+    # Mutation test: make the combined summary treat attached pictures as content
+    # video. The valid attached-cover fixture must then be rejected, proving this
+    # test protects the content-video distinction.
     mutated_cover_engine="${TEST_ROOT}/download-video-cover-mutated.sh"
     cp -- "${PROJECT_DIR}/download-video.sh" "${mutated_cover_engine}"
     python3 - "${mutated_cover_engine}" <<'PY_COVER_MUTATION'
@@ -613,74 +613,15 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
-lines = text.splitlines(keepends=True)
-
-function_start = next(
-    (
-        index
-        for index, line in enumerate(lines)
-        if line.rstrip("\n") == "validate_final_media_file() {"
-    ),
-    None,
-)
-if function_start is None:
-    raise SystemExit("validate_final_media_file function is absent")
-
-function_end = next(
-    (
-        index
-        for index in range(function_start + 1, len(lines))
-        if lines[index].rstrip("\n") == "}"
-    ),
-    None,
-)
-if function_end is None:
-    raise SystemExit("validate_final_media_file function end is absent")
-
-audio_start = next(
-    (
-        index
-        for index in range(function_start + 1, function_end)
-        if lines[index].strip() == "audio)"
-    ),
-    None,
-)
-if audio_start is None:
-    raise SystemExit("audio validation branch is absent")
-
-audio_end = next(
-    (
-        index
-        for index in range(audio_start + 1, function_end)
-        if lines[index].strip() == ";;"
-    ),
-    None,
-)
-if audio_end is None:
-    raise SystemExit("audio validation branch end is absent")
-
-old_selector = 'probe_stream stream_present "${final_path}" \'V:0\''
-new_selector = 'probe_stream stream_present "${final_path}" \'v:0\''
-
-matches = [
-    index
-    for index in range(audio_start, audio_end + 1)
-    if old_selector in lines[index]
-]
-if len(matches) != 1:
+old_guard = '        and disposition.get("attached_pic", 0) != 1\n'
+new_guard = '        and disposition.get("attached_pic", 0) >= 0\n'
+if text.count(old_guard) != 1:
     raise SystemExit(
-        "expected exactly one V:0 validator inside the audio branch; "
-        f"found {len(matches)}"
+        "expected exactly one attached-picture summary guard; "
+        f"found {text.count(old_guard)}"
     )
 
-selector_index = matches[0]
-lines[selector_index] = lines[selector_index].replace(
-    old_selector,
-    new_selector,
-    1,
-)
-
-path.write_text("".join(lines), encoding="utf-8")
+path.write_text(text.replace(old_guard, new_guard, 1), encoding="utf-8")
 PY_COVER_MUTATION
     mutated_cover_dir="${TEST_ROOT}/output/audio-cover-mutated"
     mutated_cover_result="${TEST_ROOT}/audio-cover-mutated.result"
@@ -696,15 +637,15 @@ PY_COVER_MUTATION
     mutated_cover_status=$?
     set -e
     if ((mutated_cover_status != 65)); then
-        printf 'FAIL: V:0 -> v:0 cover mutation returned %d instead of 65.\n' \
+        printf 'FAIL: attached-cover summary mutation returned %d instead of 65.\n' \
             "${mutated_cover_status}" >&2
         exit 65
     fi
     [[ ! -e ${mutated_cover_result} ]] || {
-        printf 'FAIL: V:0 -> v:0 cover mutation published a result-file.\n' >&2
+        printf 'FAIL: attached-cover summary mutation published a result-file.\n' >&2
         exit 65
     }
-    printf 'Expected mutation detected: v:0 rejected attached cover art.\n'
+    printf 'Expected mutation detected: attached cover art was treated as content video.\n'
 
     # Mutation test: remove --extract-audio from a temporary engine copy. The
     # combined A/V source then remains A/V, and final validation must reject it

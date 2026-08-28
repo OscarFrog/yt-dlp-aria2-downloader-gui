@@ -11,6 +11,7 @@ umask 077
 
 PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly PROJECT_DIR
+readonly REPEAT_QUALIFICATION="${PROJECT_DIR}/tests/repeat-qualification.sh"
 
 fail_test() {
     printf 'FAIL: %s\n' "$1" >&2
@@ -20,7 +21,7 @@ fail_test() {
 main() {
     local expected=${EXPECTED_FFMPEG_VERSION:-}
     local expected_ytdlp=${EXPECTED_YTDLP_VERSION:-}
-    local iteration
+    local qualification_jobs=${FFMPEG_QUALIFICATION_JOBS:-3}
     local resolved_ffmpeg
     local resolved_ffprobe
     local ffmpeg_line
@@ -72,21 +73,21 @@ main() {
     printf 'yt-dlp: %s\n' "${ytdlp_version}"
     printf '%s\n' "${aria2_line}"
 
-    for iteration in 1 2 3; do
-        printf '\n=== real-tool routing iteration %d/3 ===\n' "${iteration}"
+    bash "${REPEAT_QUALIFICATION}" \
+        --label 'real-tool routing iteration' --runs 3 \
+        --jobs "${qualification_jobs}" -- \
         timeout --signal=TERM --kill-after=10s 8m \
-            bash "${PROJECT_DIR}/tests/real-tools-integration.sh"
-    done
+        bash "${PROJECT_DIR}/tests/real-tools-integration.sh"
 
     printf '\n=== FFmpeg progress qualification ===\n'
     timeout --signal=TERM --kill-after=10s 8m \
         bash "${PROJECT_DIR}/tests/ffmpeg-real-progress-integration.sh"
 
-    for iteration in 1 2 3; do
-        printf '\n=== HLS duration iteration %d/3 ===\n' "${iteration}"
+    bash "${REPEAT_QUALIFICATION}" \
+        --label 'HLS duration iteration' --runs 3 \
+        --jobs "${qualification_jobs}" -- \
         timeout --signal=TERM --kill-after=10s 5m \
-            bash "${PROJECT_DIR}/tests/hls-remux-duration-integration.sh"
-    done
+        bash "${PROJECT_DIR}/tests/hls-remux-duration-integration.sh"
 
     printf '\n=== Generation-sensitive compatibility fixtures ===\n'
     EXPECTED_FFMPEG_VERSION=${expected} \

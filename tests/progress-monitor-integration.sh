@@ -428,7 +428,7 @@ test_monitor_planning_progress() {
     local metadata_capture_lines metadata_download_max metadata_preprocess_max
     local private_first_max
 
-    # Regression 2.2.0: --parse-metadata creates a MetadataParser postprocessor
+    # Regression guard: --parse-metadata creates a MetadataParser postprocessor
     # at yt-dlp's pre_process stage. The generic postprocess progress hook fires
     # before before_dl/YTDLP_PLAN. It must not move the global Zenity bar into
     # the 92..98 final post-processing phase.
@@ -462,7 +462,7 @@ test_monitor_planning_progress() {
         "${CAPTURE_FILE}" 'MetadataParser pre_process regression'
     finish_success '/tmp/metadata-preprocess-before-download.mkv'
 
-    # Regression 2.2.0: the private direct PLAN pass knows the transfer count,
+    # Regression guard: the private direct PLAN pass knows the transfer count,
     # but that count was not forwarded to the monitor. With two direct items,
     # the first completed aria2 item could therefore look like 100% of all
     # known bytes and jump the global bar to 90% before item 2 appeared.

@@ -43,8 +43,6 @@ runner_pid=$BASHPID
 _test_runner_exec_child() {
     printf '%s\n' "$BASHPID" >"${marker}"
     kill -INT -- "${runner_pid}"
-    sleep 0.005
-    kill -TERM -- "${runner_pid}" 2>/dev/null || true
     exec sleep 30
 }
 
@@ -80,21 +78,35 @@ exit 99
 '''
 
 
-def running(pid: int) -> bool:
+def running(pid: int, token: pathlib.Path) -> bool:
     stat_path = pathlib.Path(f"/proc/{pid}/stat")
     try:
         fields = stat_path.read_text(encoding="ascii").split()
-    except FileNotFoundError:
+    except OSError:
         return False
-    return len(fields) < 3 or fields[2] != "Z"
+    if len(fields) >= 3 and fields[2] == "Z":
+        return False
+
+    # A busy parallel suite can recycle a released PID before this controller
+    # observes it. Match an inherited identity token so cleanup never mistakes
+    # an unrelated replacement process for the supervised fixture.
+    expected = f"YTDLP_ARIA2_TEST_CHILD_TOKEN={token}".encode()
+    try:
+        environment = pathlib.Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return False
+    return expected in environment.split(b"\0")
 
 
 with tempfile.TemporaryDirectory(prefix="runner-startup-stress-") as temp_dir:
     root = pathlib.Path(temp_dir)
     for iteration in range(30):
         marker = root / f"child-{iteration}.pid"
+        fixture_env = os.environ.copy()
+        fixture_env["YTDLP_ARIA2_TEST_CHILD_TOKEN"] = str(marker)
         result = subprocess.run(
             ["bash", "-c", fixture, "bash", str(library), str(marker)],
+            env=fixture_env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             timeout=5,
@@ -114,12 +126,12 @@ with tempfile.TemporaryDirectory(prefix="runner-startup-stress-") as temp_dir:
                 raise AssertionError(
                     f"startup signal iteration {iteration} published no child PID"
                 )
-            if running(child_pid):
+            if running(child_pid, marker):
                 raise AssertionError(
                     f"startup signal iteration {iteration} left child {child_pid}"
                 )
         finally:
-            if child_pid and running(child_pid):
+            if child_pid and running(child_pid, marker):
                 try:
                     os.kill(child_pid, signal.SIGKILL)
                 except ProcessLookupError:
@@ -187,19 +199,30 @@ exit 99
 '''
 
 
-def running(pid: int) -> bool:
+def running(pid: int, token: pathlib.Path) -> bool:
     stat_path = pathlib.Path(f"/proc/{pid}/stat")
     try:
         fields = stat_path.read_text(encoding="ascii").split()
-    except FileNotFoundError:
+    except OSError:
         return False
-    return len(fields) < 3 or fields[2] != "Z"
+    if len(fields) >= 3 and fields[2] == "Z":
+        return False
+
+    expected = f"YTDLP_ARIA2_TEST_CHILD_TOKEN={token}".encode()
+    try:
+        environment = pathlib.Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return False
+    return expected in environment.split(b"\0")
 
 
 with tempfile.TemporaryDirectory(prefix="runner-final-transition-") as temp_dir:
     marker = pathlib.Path(temp_dir) / "child.pid"
+    fixture_env = os.environ.copy()
+    fixture_env["YTDLP_ARIA2_TEST_CHILD_TOKEN"] = str(marker)
     result = subprocess.run(
         ["bash", "-c", fixture, "bash", str(library), str(marker)],
+        env=fixture_env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         timeout=5,
@@ -213,17 +236,64 @@ with tempfile.TemporaryDirectory(prefix="runner-final-transition-") as temp_dir:
                 f"{result.returncode}, expected 143: "
                 f"{result.stderr.decode(errors='replace')}"
             )
-        if running(child_pid):
+        if running(child_pid, marker):
             raise AssertionError(
                 f"final-transition signal left child {child_pid}"
             )
     finally:
-        if running(child_pid):
+        if running(child_pid, marker):
             try:
                 os.kill(child_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
 PY_FINAL_TRANSITION
+}
+
+test_parallel_repeat_runner() {
+    local barrier_root="${TEST_RUNNER_LOG_DIR}/repeat-barrier"
+
+    assert_status 64 'repeat runner rejects an invalid termination grace override' \
+        env YTDLP_ARIA2_TEST_RUNNER_TERMINATION_POLL_ATTEMPTS=0 \
+        bash "${SCRIPT_DIR}/repeat-qualification.sh" \
+        --runs 1 --jobs 1 -- bash -c 'exit 0'
+
+    mkdir -p -- "${barrier_root}"
+    # The nested Bash child, not this test shell, expands the repeat metadata.
+    # shellcheck disable=SC2016
+    assert_status_split 17 'parallel repeat runner preserves ordered failures' \
+        timeout --signal=TERM --kill-after=1s 5s \
+        bash "${SCRIPT_DIR}/repeat-qualification.sh" \
+        --label 'Synthetic repeat' --runs 3 --jobs 3 -- \
+        bash -c '
+            set -euo pipefail
+            root=$1
+            iteration=${YTDLP_ARIA2_REPEAT_ITERATION:?}
+            total=${YTDLP_ARIA2_REPEAT_TOTAL:?}
+            : >"${root}/started-${iteration}"
+            for _ in {1..200}; do
+                if [[ -e ${root}/started-1 &&
+                    -e ${root}/started-2 &&
+                    -e ${root}/started-3 ]]; then
+                    break
+                fi
+                sleep 0.01
+            done
+            [[ -e ${root}/started-1 &&
+                -e ${root}/started-2 &&
+                -e ${root}/started-3 ]]
+            printf "child=%s/%s\n" "${iteration}" "${total}"
+            [[ ${iteration} != 2 ]] || exit 17
+        ' bash "${barrier_root}"
+
+    assert_text_contains "${ASSERT_STDOUT}" 'child=1/3' \
+        'repeat runner reports first child output'
+    assert_text_contains "${ASSERT_STDOUT}" 'child=2/3' \
+        'repeat runner reports failing child output'
+    assert_text_contains "${ASSERT_STDOUT}" 'child=3/3' \
+        'repeat runner reports last child output'
+    assert_text_contains "${ASSERT_STDERR}" \
+        'Synthetic repeat 2/3: FAIL (status 17,' \
+        'repeat runner reports the exact child failure'
 }
 
 main() {
@@ -239,7 +309,7 @@ main() {
     local failure_completion
     local status=0
 
-    for command_name in bash mktemp python3 rm sleep; do
+    for command_name in bash env mkdir mktemp python3 rm sleep timeout; do
         require_test_command "${command_name}"
     done
 
@@ -329,6 +399,7 @@ main() {
 
     test_startup_signal_registration_stress
     test_startup_signal_final_transition
+    test_parallel_repeat_runner
 
     printf 'Test-runner integration passed.\n'
 }

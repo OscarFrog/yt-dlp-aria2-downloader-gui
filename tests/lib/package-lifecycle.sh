@@ -9,6 +9,7 @@
 readonly PACKAGE_DESKTOP_FILE='/usr/share/applications/yt-dlp-aria2-downloader.desktop'
 readonly PACKAGE_ICON_FILE='/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg'
 
+# Require the installed command to report the expected package version.
 assert_package_cli_version() {
     local package_kind=$1
     local expected_version=$2
@@ -28,6 +29,7 @@ assert_package_cli_version() {
     return 0
 }
 
+# Require the shared launcher, desktop, icon, and dependency payload.
 assert_common_package_payload() {
     local package_kind=$1
     local runtime_command=''
@@ -59,6 +61,7 @@ assert_common_package_payload() {
     return 0
 }
 
+# Require every caller-provided package path to be absent.
 assert_package_paths_absent() {
     local package_kind=$1
     local stage=$2

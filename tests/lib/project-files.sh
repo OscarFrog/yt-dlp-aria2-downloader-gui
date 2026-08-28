@@ -37,6 +37,7 @@ TEST_SHELL_FILES=(
     test-static.sh
     tests/run-all.sh
     tests/run-all-signal-integration.sh
+    tests/repeat-qualification.sh
     tests/test-runner-integration.sh
     tests/lib/assert.sh
     tests/lib/package-lifecycle.sh

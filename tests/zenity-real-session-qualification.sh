@@ -303,7 +303,7 @@ main() {
     fi
 
     # /etc/os-release is OS-controlled metadata and is used only to scope this
-    # release-gate protocol to the two distributions named by the audit.
+    # release gate to the two distributions covered by this qualification.
     # shellcheck disable=SC1091
     source /etc/os-release
     case ${ID:-}:${VERSION_ID:-} in

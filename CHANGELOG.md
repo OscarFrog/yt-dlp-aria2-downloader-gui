@@ -1,11 +1,58 @@
 ## 2.3.2 - 2026-08-28
 
+### Security
+
+- Close the Fedora bootstrap verification-to-install race by copying
+  application and RPM Fusion authorization inputs into private root-owned
+  staging, then repeating identity, fingerprint and isolated-signature checks
+  against the exact copies consumed by system key import and DNF.
+- Add mutation regressions that replace every original key/RPM immediately
+  after staging and prove privileged consumers remain bound to the verified
+  bytes.
+
 ### Repository maintenance
 
 - Remove the superseded v2.3.0 audit report and historical v2.2.0
   qualification plan from the current source tree.
 - Remove the static assertions that required the historical qualification
   document after its release evidence had already been preserved in Git.
+- Keep the English and French installation examples aligned with the exact RPM,
+  DEB and ZIP names from the latest published GitHub release, independently of
+  the development version carried by `main`.
+
+### Validation performance
+
+- Build and probe the immutable real-FFmpeg input fixture once, shorten its
+  bounded media duration, and retain three independent progress/publication
+  executions.
+- Replace arbitrary mock downloader waits with short scheduling windows where
+  explicit marker synchronization already carries the timing contract, and
+  bound the deliberate signal-escalation fixture without changing the
+  production runner's five-second grace period.
+- Schedule read-only shfmt, static and ShellCheck validation through one bounded
+  completion-driven pool, and stagger CPU-heavy integration suites with
+  wait-heavy validations to reduce contention and the parallel tail.
+- Add a supervised repeat runner with deterministic log replay, then use it for
+  independent real-tool, HLS, RPM-v6, runtime-hardening and package-cleanup
+  qualification repetitions in local release checks and GitHub Actions.
+- Bind signal-stress PID liveness checks to an inherited fixture token so rapid
+  PID reuse cannot report or terminate an unrelated parallel test process.
+
+### Production efficiency and consistency
+
+- Replace separate content-video, audio and timeline FFprobe launches with one
+  bounded JSON summary that still excludes attached cover art; ordinary final
+  validation now uses two FFprobe processes instead of four, and HLS final
+  validation uses four instead of six.
+- Add a versioned managed-runtime attestation so the engine consumes validated
+  yt-dlp/Deno paths and versions from one runtime-manager invocation instead of
+  repeating two path lookups plus yt-dlp/Deno version and capability discovery.
+- Reuse versions already obtained during runtime validation when reporting
+  versions and installing candidates, without removing any executable,
+  signature, capability, rollback or minimum-version check.
+- Align the GUI initialization phases, callable test-library documentation and
+  durable regression comments with `SHELL_STYLE.md`, and extend static policy
+  checks to reject versioned/audit-history comments in canonical shell files.
 
 ## 2.3.1 - 2026-08-28
 
