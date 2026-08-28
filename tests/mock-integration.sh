@@ -824,6 +824,36 @@ cat >"${MOCK_BIN}/zenity" <<'EOF_ZENITY'
 #!/usr/bin/env bash
 set -euo pipefail
 
+wait_for_mock_worker_start() {
+    local attempt worker_start_marker worker_started
+
+    if [[ ${MOCK_ZENITY_WAIT_FOR_WORKER_START:-0} != 1 ]]; then
+        return 0
+    fi
+
+    worker_start_marker=${MOCK_STARTED_MARKER:-}
+    if [[ -z ${worker_start_marker} ]]; then
+        printf '%s\n' \
+            'MOCK_ZENITY_WAIT_FOR_WORKER_START requires MOCK_STARTED_MARKER.' >&2
+        exit 64
+    fi
+
+    worker_started=false
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        if [[ -f ${worker_start_marker} ]]; then
+            worker_started=true
+            break
+        fi
+        sleep 0.1
+    done
+
+    if [[ ${worker_started} != true ]]; then
+        printf 'Timed out waiting for mock worker startup: %s\n' \
+            "${worker_start_marker}" >&2
+        exit 66
+    fi
+}
+
 case " $* " in
     *' --entry '*)
         if [[ -n ${MOCK_ZENITY_ENTRY_STATUS:-} ]]; then
@@ -883,29 +913,7 @@ case " $* " in
             # fail before the long-running worker has installed its TERM trap.
             # This turns the termination marker into a deterministic assertion
             # instead of an assertion on process-scheduling order.
-            if [[ ${MOCK_ZENITY_WAIT_FOR_WORKER_START:-0} == 1 ]]; then
-                worker_start_marker=${MOCK_STARTED_MARKER:-}
-                if [[ -z ${worker_start_marker} ]]; then
-                    printf '%s\n' \
-                        'MOCK_ZENITY_WAIT_FOR_WORKER_START requires MOCK_STARTED_MARKER.' >&2
-                    exit 64
-                fi
-
-                worker_started=false
-                for ((attempt = 0; attempt < 100; attempt++)); do
-                    if [[ -f ${worker_start_marker} ]]; then
-                        worker_started=true
-                        break
-                    fi
-                    sleep 0.1
-                done
-
-                if [[ ${worker_started} != true ]]; then
-                    printf 'Timed out waiting for mock worker startup: %s\n' \
-                        "${worker_start_marker}" >&2
-                    exit 66
-                fi
-            fi
+            wait_for_mock_worker_start
 
             exit "${MOCK_ZENITY_PROGRESS_STATUS}"
         fi
@@ -916,6 +924,7 @@ case " $* " in
         fi
         if [[ ${MOCK_CANCEL:-0} == 1 ]]; then
             IFS= read -r _ || true
+            wait_for_mock_worker_start
             sleep "${MOCK_CANCEL_JITTER_SECONDS:-0}"
             exit 1
         fi
@@ -2657,17 +2666,22 @@ test_mock_signal_gui_session() {
 }
 
 test_mock_signal_gui_cancellation() {
-    local pgid_delay_marker termination_marker
+    local cancellation_started_marker pgid_delay_marker termination_marker
 
     # Scenario: user cancellation terminates the complete process group.
+    cancellation_started_marker="${TEST_ROOT}/cancel-worker-started"
     termination_marker="${TEST_ROOT}/terminated"
     prepare_argument_log 'cancel-process-group'
     assert_status_split 130 'cancellation terminates the process group' \
         timeout --signal=TERM --kill-after=2s 15s \
         env MOCK_PLAN_PROTOCOL='m3u8_native' \
         MOCK_LONG_DOWNLOAD=1 MOCK_CANCEL=1 \
+        MOCK_ZENITY_WAIT_FOR_WORKER_START=1 \
+        MOCK_STARTED_MARKER="${cancellation_started_marker}" \
         MOCK_TERMINATION_MARKER="${termination_marker}" \
         "${GUI_UNDER_TEST}"
+    wait_for_file "${cancellation_started_marker}" 10 \
+        'worker started before cancellation'
     wait_for_file "${termination_marker}" 10 'worker group receives TERM'
     assert_no_test_processes 'ordinary cancellation left worker processes'
 
