@@ -19,6 +19,9 @@
 - Keep the English and French installation examples aligned with the exact RPM,
   DEB and ZIP names from the latest published GitHub release, independently of
   the development version carried by `main`.
+- Keep the release workflow's English and French development-version checks
+  aligned with the README wording, with a static regression that fails before
+  a release tag is created if either contract drifts again.
 
 ### Validation performance
 

@@ -1216,6 +1216,14 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'grep -Fqx "readonly APP_VERSION='\''${version}'\''" install-fedora.sh' \
         'release validates Fedora bootstrap version constant'
+    # shellcheck disable=SC2016
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
+        'grep -Fq "development version is **${version}**." README.md' \
+        'release validates English README development version'
+    # shellcheck disable=SC2016
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
+        'grep -Fq "développement actuelle est la **${version}**." README.fr.md' \
+        'release validates French README development version'
     # Header metadata is intentionally version-agnostic; release coherence is
     # verified through authoritative version carriers.
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \

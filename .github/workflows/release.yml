@@ -225,8 +225,8 @@ jobs:
           fi
           grep -Fqx "readonly VERSION=\"${version}\"" download-video.sh
           grep -Fqx "readonly APP_VERSION='${version}'" install-fedora.sh
-          grep -Fq "is **${version}**." README.md
-          grep -Fq "version actuelle est la **${version}**" README.fr.md
+          grep -Fq "development version is **${version}**." README.md
+          grep -Fq "développement actuelle est la **${version}**." README.fr.md
           grep -Fq "## ${version} - " CHANGELOG.md
       - run: bash ./tests/run-all.sh --jobs 4
 
