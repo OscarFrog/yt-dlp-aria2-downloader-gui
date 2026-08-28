@@ -22,7 +22,7 @@ if ((${#ALL_SHELL_FILES[@]} == 0)); then
 fi
 # Contract: every canonical shell file uses the standard Bash header.
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
-readonly EXPECTED_VERSION='2.3.1'
+readonly EXPECTED_VERSION='2.3.2'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SHELL_INVENTORY_FILE=''
 

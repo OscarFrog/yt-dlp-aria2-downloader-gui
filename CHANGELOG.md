@@ -1,3 +1,12 @@
+## 2.3.2 - 2026-08-28
+
+### Repository maintenance
+
+- Remove the superseded v2.3.0 audit report and historical v2.2.0
+  qualification plan from the current source tree.
+- Remove the static assertions that required the historical qualification
+  document after its release evidence had already been preserved in Git.
+
 ## 2.3.1 - 2026-08-28
 
 ### Security and supply chain
