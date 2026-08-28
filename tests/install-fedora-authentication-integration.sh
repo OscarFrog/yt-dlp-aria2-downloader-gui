@@ -223,6 +223,17 @@ fi
 exec "$@"
 EOF_SUDO
 
+    cat >"${mock_bin}/mktemp" <<'EOF_MKTEMP'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n ${MOCK_ROOT_MKTEMP_LOG:-} ]]; then
+    printf 'mktemp ' >>"${MOCK_ROOT_MKTEMP_LOG}"
+    printf '%q ' "$@" >>"${MOCK_ROOT_MKTEMP_LOG}"
+    printf '\n' >>"${MOCK_ROOT_MKTEMP_LOG}"
+fi
+exec /usr/bin/mktemp "$@"
+EOF_MKTEMP
+
     chmod 0755 -- "${mock_bin}"/*
 }
 
@@ -287,6 +298,7 @@ run_application_stage_mutation() {
         MOCK_ORIGINAL_RPM="${source_rpm}" \
         MOCK_ORIGINAL_KEY="${source_key}" \
         MOCK_ROOT_COMMAND_LOG="${TEST_ROOT}/root-commands.log" \
+        MOCK_ROOT_MKTEMP_LOG="${TEST_ROOT}/root-mktemp.log" \
         MOCK_STAGE_LOG="${TEST_ROOT}/stage.log" \
         bash -s -- "${library_copy}" "${source_rpm}" "${source_key}" <<'EOF_APPLICATION_STAGE'
 source "$1"
@@ -430,6 +442,7 @@ main() {
     printf '%s\n' verified-rpm >"${source_rpm}"
     printf '%s\n' verified-key >"${source_key}"
     : >"${TEST_ROOT}/root-commands.log"
+    : >"${TEST_ROOT}/root-mktemp.log"
     : >"${TEST_ROOT}/stage.log"
     assert_status 0 'root staging remains bound to verified bytes after source mutation' \
         run_application_stage_mutation \
@@ -462,7 +475,7 @@ main() {
         || fail 'DNF did not use root staging.'
     [[ ! -e ${staged_rpm_path%/*} ]] \
         || fail 'root-owned application staging survived successful installation.'
-    assert_file_contains "${TEST_ROOT}/root-commands.log" \
+    assert_file_contains "${TEST_ROOT}/root-mktemp.log" \
         'mktemp -d --tmpdir=/tmp yt-dlp-aria2-downloader-application.XXXXXXXX' \
         'application staging directory is created through the privileged boundary'
 
