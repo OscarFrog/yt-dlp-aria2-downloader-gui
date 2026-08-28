@@ -19,6 +19,7 @@ readonly HELPER="${PROJECT_DIR}/private-aria2-plan.py"
 TEST_ROOT=''
 SERVER_PID=''
 ORIGIN_PORT=''
+LEAK_FILE=''
 
 cleanup() {
     trap - EXIT HUP INT TERM
@@ -128,14 +129,8 @@ run_aria2() {
         --timeout=5 >"${log_file}" 2>&1
 }
 
-main() {
-    local plan_file
-    local output_dir
-    local staging_dir
-    local classification
-    local unsafe_mode
-    local mutant
-    local leak_file
+prepare_aria2_header_servers() {
+    local command_name
     local server_log
     local server_line
 
@@ -144,7 +139,7 @@ main() {
     done
 
     TEST_ROOT=$(mktemp -d)
-    leak_file="${TEST_ROOT}/cross-origin-leak.txt"
+    LEAK_FILE="${TEST_ROOT}/cross-origin-leak.txt"
     trap cleanup EXIT
     trap 'return 129' HUP
     trap 'return 130' INT
@@ -259,7 +254,7 @@ PY_SERVER
 
     server_log="${TEST_ROOT}/server.log"
     python3 "${TEST_ROOT}/server.py" \
-        "${TEST_ROOT}/ports" "${leak_file}" \
+        "${TEST_ROOT}/ports" "${LEAK_FILE}" \
         >"${server_log}" 2>&1 &
     SERVER_PID=$!
     for _ in {1..100}; do
@@ -280,6 +275,10 @@ PY_SERVER
     fi
     read -r ORIGIN_PORT _ <"${TEST_ROOT}/ports"
     readonly ORIGIN_PORT
+}
+
+test_replay_safe_aria2_headers() {
+    local classification output_dir path plan_file staging_dir
 
     for path in safe redirect-safe; do
         output_dir="${TEST_ROOT}/${path}/output"
@@ -298,6 +297,10 @@ PY_SERVER
         assert_status 0 "${path} real aria2 transfer" \
             run_aria2 "${staging_dir}" "${TEST_ROOT}/${path}.aria2.log"
     done
+}
+
+test_unsafe_aria2_header_policy() {
+    local classification mutant output_dir plan_file staging_dir unsafe_mode
 
     for unsafe_mode in \
         authorization cookie referer custom proxy-authorization; do
@@ -333,7 +336,7 @@ PY_SERVER
         build_plan "${HELPER}" "${plan_file}" "${output_dir}" "${staging_dir}"
     [[ ! -e ${staging_dir}/aria2.input && ! -e ${staging_dir}/manifest.json ]] \
         || fail 'cross-origin rejection left private aria2 artifacts'
-    [[ ! -e ${leak_file} ]] \
+    [[ ! -e ${LEAK_FILE} ]] \
         || fail 'cross-origin sink received a secret on the safe path'
 
     mutant="${TEST_ROOT}/private-aria2-plan-unsafe-mutant.py"
@@ -358,13 +361,18 @@ PY_MUTANT
         build_plan "${mutant}" "${plan_file}" "${output_dir}" "${staging_dir}"
     assert_status 0 'unsafe mutant demonstrates real aria2 cross-origin replay' \
         run_aria2 "${staging_dir}" "${TEST_ROOT}/cross-origin-mutant.log"
-    assert_file_contains "${leak_file}" \
+    assert_file_contains "${LEAK_FILE}" \
         'Bearer qualification-auth-7a91' \
         'cross-origin Authorization replay fixture'
-    assert_file_contains "${leak_file}" \
+    assert_file_contains "${LEAK_FILE}" \
         'session=qualification-cookie-3d42' \
         'cross-origin Cookie replay fixture'
+}
 
+main() {
+    prepare_aria2_header_servers
+    test_replay_safe_aria2_headers
+    test_unsafe_aria2_header_policy
     printf '%s\n' 'Private aria2 authentication/header integration tests passed.'
 }
 

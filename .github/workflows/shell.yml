@@ -30,7 +30,7 @@ jobs:
             aria2 coreutils curl desktop-file-utils diffutils findutils git gnupg \
             grep procps python3 sed shellcheck unzip util-linux
       - name: Run validation
-        run: timeout --signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh
+        run: timeout --signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --jobs 4
   validate-fedora:
     name: Fedora 44
     runs-on: ubuntu-24.04
@@ -49,4 +49,4 @@ jobs:
         with:
           persist-credentials: false
       - name: Run validation
-        run: timeout --signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh
+        run: timeout --signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --jobs 4

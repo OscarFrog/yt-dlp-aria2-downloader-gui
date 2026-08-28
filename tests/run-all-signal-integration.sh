@@ -165,7 +165,7 @@ for name, sig, expected in (
     )
 
     runner = subprocess.Popen(
-        [real_bash, str(project_dir / "tests/run-all.sh")],
+        [real_bash, str(project_dir / "tests/run-all.sh"), "--jobs", "4"],
         cwd=project_dir,
         env=env,
         stdout=subprocess.DEVNULL,
@@ -224,7 +224,7 @@ env.update(
 )
 
 runner = subprocess.Popen(
-    [real_bash, str(project_dir / "tests/run-all.sh")],
+    [real_bash, str(project_dir / "tests/run-all.sh"), "--jobs", "4"],
     cwd=project_dir,
     env=env,
     stdout=subprocess.DEVNULL,

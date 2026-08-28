@@ -961,24 +961,48 @@ recover_invalid_active_runtime() {
     return 0
 }
 
-update_runtime() {
+recover_invalid_active_runtimes() {
+    recover_invalid_active_runtime yt-dlp || {
+        error 'the active yt-dlp runtime is invalid and rollback failed.'
+        return 1
+    }
+    recover_invalid_active_runtime deno || {
+        error 'the active Deno runtime is invalid and rollback failed.'
+        return 1
+    }
+}
+
+acquire_runtime_lock_or_use_active() {
+    local output_variable=$1
+    local acquisition_error=$2
     local lock_status=0
 
+    printf -v "${output_variable}" '%s' false
     if acquire_runtime_lock; then
-        lock_status=0
+        printf -v "${output_variable}" '%s' true
+        return 0
     else
         lock_status=$?
-        if ((lock_status == 75)) && validate_active_runtimes; then
-            warning 'another runtime update is in progress; using the active verified runtimes.'
-            return 0
-        fi
-        if ((lock_status == 75)); then
-            error 'runtime update lock timed out and no valid active runtimes are available.'
-        else
-            error 'unable to acquire the runtime update lock safely.'
-        fi
-        return "${lock_status}"
     fi
+
+    if ((lock_status == 75)) && validate_active_runtimes; then
+        warning 'another runtime update is in progress; using the active verified runtimes.'
+        return 0
+    fi
+    if ((lock_status == 75)); then
+        error 'runtime update lock timed out and no valid active runtimes are available.'
+    else
+        error "${acquisition_error}"
+    fi
+    return "${lock_status}"
+}
+
+update_runtime() {
+    local lock_acquired=false
+
+    acquire_runtime_lock_or_use_active lock_acquired \
+        'unable to acquire the runtime update lock safely.' || return $?
+    [[ ${lock_acquired} == true ]] || return 0
 
     recover_all_activation_transactions || {
         error 'unable to recover an interrupted runtime activation.'
@@ -993,48 +1017,20 @@ update_runtime() {
         warning 'Deno update check failed; keeping the last verified runtime.'
     fi
 
-    recover_invalid_active_runtime yt-dlp || {
-        error 'the active yt-dlp runtime is invalid and rollback failed.'
-        return 1
-    }
-    recover_invalid_active_runtime deno || {
-        error 'the active Deno runtime is invalid and rollback failed.'
-        return 1
-    }
-    return 0
+    recover_invalid_active_runtimes
 }
 
 ensure_runtime_locked() {
-    local lock_status=0
+    local lock_acquired=false
 
-    if acquire_runtime_lock; then
-        lock_status=0
-    else
-        lock_status=$?
-        if ((lock_status == 75)) && validate_active_runtimes; then
-            warning 'another runtime update is in progress; using the active verified runtimes.'
-            return 0
-        fi
-        if ((lock_status == 75)); then
-            error 'runtime update lock timed out and no valid active runtimes are available.'
-        else
-            error 'unable to acquire the runtime update lock.'
-        fi
-        return "${lock_status}"
-    fi
+    acquire_runtime_lock_or_use_active lock_acquired \
+        'unable to acquire the runtime update lock.' || return $?
+    [[ ${lock_acquired} == true ]] || return 0
 
     recover_all_activation_transactions || return 1
     ensure_runtime || return 1
 
-    recover_invalid_active_runtime yt-dlp || {
-        error 'the active yt-dlp runtime is invalid and rollback failed.'
-        return 1
-    }
-    recover_invalid_active_runtime deno || {
-        error 'the active Deno runtime is invalid and rollback failed.'
-        return 1
-    }
-    return 0
+    recover_invalid_active_runtimes
 }
 
 rollback_runtime_locked() {
@@ -1051,25 +1047,14 @@ rollback_runtime_locked() {
     rollback_component "${component}"
 }
 
-main() {
+initialize_runtime_layout() {
+    local output_variable=$1
     local data_home=''
-    local script_path=''
-    local machine_arch=''
-    local setting=''
-    local setting_name=''
-    local setting_value=''
-    local setting_min=''
-    local setting_max=''
-    local command_name=''
-    local ytdlp=''
-    local deno=''
-    local ytdlp_version=''
-    local deno_version=''
 
     if [[ -z ${HOME:-} || ${HOME} != /* || ${HOME} == / ||
         ${HOME} == *$'\n'* || ${HOME} == *$'\r'* ]]; then
         error 'HOME must be a safe absolute non-root path.'
-        exit 64
+        return 64
     fi
 
     data_home=${XDG_DATA_HOME:-${HOME}/.local/share}
@@ -1081,6 +1066,15 @@ main() {
     readonly YTDLP_ROOT="${RUNTIME_ROOT}/yt-dlp"
     readonly DENO_ROOT="${RUNTIME_ROOT}/deno"
     readonly LOCK_FILE="${RUNTIME_ROOT}/update.lock"
+    printf -v "${output_variable}" '%s' "${data_home}"
+}
+
+initialize_runtime_policy() {
+    local setting=''
+    local setting_name=''
+    local setting_value=''
+    local setting_min=''
+    local setting_max=''
 
     YTDLP_CHANNEL=${YTDLP_ARIA2_YTDLP_CHANNEL:-${DEFAULT_YTDLP_CHANNEL}}
     case ${YTDLP_CHANNEL} in
@@ -1094,7 +1088,7 @@ main() {
             ;;
         *)
             error "unsupported yt-dlp channel: ${YTDLP_CHANNEL}; expected stable or nightly."
-            exit 64
+            return 64
             ;;
     esac
     readonly YTDLP_CHANNEL YTDLP_RELEASE_REPOSITORY YTDLP_CHANNEL_VERSION_PATTERN
@@ -1112,15 +1106,21 @@ main() {
         "RUNTIME_VALIDATE_TIMEOUT_SECONDS:${RUNTIME_VALIDATE_TIMEOUT_SECONDS}:5:120"; do
         IFS=: read -r setting_name setting_value setting_min setting_max <<<"${setting}"
         validate_bounded_uint "${setting_name}" "${setting_value}" \
-            "${setting_min}" "${setting_max}" "${setting_name}" || exit 64
+            "${setting_min}" "${setting_max}" "${setting_name}" || return 64
     done
     readonly RUNTIME_LOCK_WAIT_SECONDS CURL_CONNECT_TIMEOUT_SECONDS
     readonly CURL_MAX_TIME_SECONDS CURL_RETRY_MAX_TIME_SECONDS
     readonly RUNTIME_VALIDATE_TIMEOUT_SECONDS
+}
+
+initialize_runtime_platform() {
+    local script_path=''
+    local machine_arch=''
+    local command_name=''
 
     script_path=$(realpath -e -- "${BASH_SOURCE[0]}") || {
         error 'unable to resolve runtime manager path.'
-        exit 66
+        return 66
     }
     readonly SCRIPT_DIR=${script_path%/*}
 
@@ -1130,7 +1130,7 @@ main() {
         YTDLP_PUBLIC_KEY=${SCRIPT_DIR}/packaging/keys/yt-dlp-public.key
     else
         error 'yt-dlp signing key is missing.'
-        exit 66
+        return 66
     fi
     readonly YTDLP_PUBLIC_KEY
 
@@ -1146,7 +1146,7 @@ main() {
             ;;
         *)
             error "unsupported architecture: ${machine_arch}"
-            exit 69
+            return 69
             ;;
     esac
     readonly DENO_ASSET="deno-${DENO_TARGET}.zip"
@@ -1156,17 +1156,47 @@ main() {
         sha256sum stat timeout uname unzip; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             error "required runtime-manager command is absent: ${command_name}"
-            exit 127
+            return 127
         }
     done
+}
 
-    ensure_private_directory "${RUNTIME_ROOT}" || exit $?
-    ensure_private_directory "${YTDLP_ROOT}" || exit $?
-    ensure_private_directory "${DENO_ROOT}" || exit $?
+prepare_runtime_storage() {
+    local data_home=$1
+
+    ensure_private_directory "${RUNTIME_ROOT}" || return $?
+    ensure_private_directory "${YTDLP_ROOT}" || return $?
+    ensure_private_directory "${DENO_ROOT}" || return $?
     record_runtime_data_home "${data_home}"
     trap release_runtime_lock EXIT
+}
 
-    case ${1:-} in
+print_runtime_versions() {
+    local ytdlp=''
+    local deno=''
+    local ytdlp_version=''
+    local deno_version=''
+
+    require_runtime || return $?
+    ytdlp=$(component_path yt-dlp) || return 69
+    deno=$(component_path deno) || return 69
+    ytdlp_version=$(LC_ALL=C run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" \
+        "${ytdlp}" --version) || {
+        error 'unable to read the managed yt-dlp version.'
+        return 69
+    }
+    parse_deno_version "${deno}" deno_version || {
+        error 'unable to read the managed Deno version.'
+        return 69
+    }
+    printf 'yt-dlp %s (%s)\n' "${ytdlp_version%%$'\n'*}" "${YTDLP_CHANNEL}"
+    printf 'Deno %s\n' "${deno_version}"
+}
+
+dispatch_runtime_command() {
+    local command=${1:-}
+
+    case ${command} in
         require)
             require_runtime
             ;;
@@ -1195,24 +1225,7 @@ main() {
             rollback_runtime_locked "${2:-}"
             ;;
         versions)
-            require_runtime || exit $?
-            ytdlp=''
-            deno=''
-            ytdlp_version=''
-            deno_version=''
-            ytdlp=$(component_path yt-dlp) || exit 69
-            deno=$(component_path deno) || exit 69
-            ytdlp_version=$(LC_ALL=C run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" \
-                "${ytdlp}" --version) || {
-                error 'unable to read the managed yt-dlp version.'
-                exit 69
-            }
-            parse_deno_version "${deno}" deno_version || {
-                error 'unable to read the managed Deno version.'
-                exit 69
-            }
-            printf 'yt-dlp %s (%s)\n' "${ytdlp_version%%$'\n'*}" "${YTDLP_CHANNEL}"
-            printf 'Deno %s\n' "${deno_version}"
+            print_runtime_versions
             ;;
         *)
             printf 'Usage: %s {require|ensure|update|path yt-dlp|path deno|rollback yt-dlp|rollback deno|versions}\n' \
@@ -1220,7 +1233,16 @@ main() {
             exit 2
             ;;
     esac
+}
 
+main() {
+    local runtime_data_home=''
+
+    initialize_runtime_layout runtime_data_home || exit $?
+    initialize_runtime_policy || exit $?
+    initialize_runtime_platform || exit $?
+    prepare_runtime_storage "${runtime_data_home}" || exit $?
+    dispatch_runtime_command "$@"
 }
 
 main "$@"

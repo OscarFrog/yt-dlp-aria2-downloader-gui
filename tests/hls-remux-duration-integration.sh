@@ -49,6 +49,7 @@ run_case() {
     local expected_failure_mkv=${4:-false}
     local output_dir="${TEST_ROOT}/output-${label}"
     local result_file="${TEST_ROOT}/${label}.result"
+    local final_file matching_mkv matching_mp4 status
     mkdir -p -- "${output_dir}"
     rm -f -- "${result_file}"
     export MOCK_OUTPUT_DIR="${output_dir}"
@@ -151,11 +152,8 @@ run_case() {
     fi
 }
 
-main() {
-    trap cleanup EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+prepare_hls_media_fixtures() {
+    local source_duration source_size
 
     ffmpeg -hide_banner -loglevel error -nostdin \
         -f lavfi -i 'testsrc2=size=160x90:rate=25' \
@@ -195,7 +193,9 @@ main() {
         printf 'FAIL: truncated fixture no longer reproduces FFprobe duration retention.\n' >&2
         exit 65
     }
+}
 
+prepare_hls_runtime_mocks() {
     cat >"${MOCK_BIN}/yt-dlp" <<'EOF_YTDLP'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -320,7 +320,9 @@ EOF_ARIA2
     export YTDLP_ARIA2_YTDLP_BIN="${MOCK_BIN}/yt-dlp"
     export YTDLP_ARIA2_DENO_BIN="${MOCK_BIN}/deno"
     export YTDLP_DISABLE_REMOTE_EJS=1
+}
 
+test_hls_remux_duration_cases() {
     # Positive controls: normal, very short, and non-zero-timestamp inputs ensure
     # the duration guard does not reject benign remux differences.
     run_case valid "${TEST_ROOT}/source/full.mp4" 0
@@ -336,9 +338,18 @@ EOF_ARIA2
     # must survive this late failure; only a globally successful run may remove it.
     run_case video-only-validation-failure \
         "${TEST_ROOT}/source/video-only.mp4" 65 true
+}
 
+main() {
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    prepare_hls_media_fixtures
+    prepare_hls_runtime_mocks
+    test_hls_remux_duration_cases
     printf 'HLS remux duration validation passed.\n'
-
 }
 
 main "$@"

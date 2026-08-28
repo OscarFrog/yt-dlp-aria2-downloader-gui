@@ -67,6 +67,13 @@ readonly TEST_ROOT
 SERVER_PID=''
 REAL_ARIA2=$(command -v aria2c)
 readonly REAL_ARIA2
+MEDIA_SIZE=0
+SERVER_LOG=''
+SERVER_STATE=''
+PORT=''
+ARIA2_INVOCATION_LOG=''
+RUN_FINAL_FILE=''
+RUN_STATUS=0
 
 cleanup() {
     trap - EXIT HUP INT TERM
@@ -325,7 +332,9 @@ run_engine_with_monitor() {
     return 0
 }
 
-main() {
+prepare_aria2_behavior_fixtures() {
+    local server_ready_deadline
+
     mkdir -p -- \
         "${TEST_ROOT}/web" \
         "${TEST_ROOT}/output" \
@@ -634,9 +643,12 @@ EOF_ARIA2_SHIM
     YTDLP_ARIA2_YTDLP_BIN=$(command -v yt-dlp)
     export YTDLP_ARIA2_YTDLP_BIN
     export YTDLP_DISABLE_REMOTE_EJS=1
+}
 
-    RUN_FINAL_FILE=''
-    RUN_STATUS=0
+test_aria2_server_quiescence() {
+    local activity_deadline activity_seen activity_status control_pid
+    local control_status iteration log_size_after log_size_before
+    local quiescence_status
 
     # Negative control for quiescence: keep a response active while SERVER_LOG
     # remains byte-for-byte unchanged. The historical log-size stability heuristic
@@ -712,6 +724,10 @@ PY_QUIESCENCE_CLIENT
             exit 65
         fi
     done
+}
+
+test_aria2_transport_behavior() {
+    local iteration start_line
 
     # Scenario group: Range, no-Range, redirection, and error behavior repeat independently.
     for ((iteration = 1; iteration <= BASIC_RUNS; iteration += 1)); do
@@ -805,6 +821,11 @@ PY_QUIESCENCE_CLIENT
             exit 65
         }
     done
+}
+
+test_aria2_cancel_clean_restart() {
+    local cancellation_leftovers iteration marker post_restart_bytes
+    local quiescence_status result_file scenario scenario_dir
 
     # Scenario: cancel after a substantial partial 206 response, prove that the
     # private aria2 state is removed, then prove a clean restart downloads the
@@ -935,9 +956,14 @@ PY_QUIESCENCE_CLIENT
             exit 65
         }
     done
+}
 
+main() {
+    prepare_aria2_behavior_fixtures
+    test_aria2_server_quiescence
+    test_aria2_transport_behavior
+    test_aria2_cancel_clean_restart
     printf 'Real aria2 Range/no-Range/cancel-clean-restart and native Referer-fallback integration passed.\n'
-
 }
 
 main "$@"

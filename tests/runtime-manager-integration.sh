@@ -13,24 +13,19 @@ PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly PROJECT_DIR
 RUNTIME_MANAGER=${RUNTIME_MANAGER_UNDER_TEST:-${PROJECT_DIR}/runtime-manager.sh}
 readonly RUNTIME_MANAGER
+# shellcheck disable=SC1090 # Resolve the shared library from the repository root.
+source "${PROJECT_DIR}/tests/lib/assert.sh"
 
-fail() {
-    printf 'FAIL: %s\n' "$*" >&2
-    exit 1
-}
-
-assert_link_target() {
-    local link_path=$1
-    local expected_target=$2
-    local message=$3
-    local actual_target=''
-
-    if ! actual_target=$(readlink -- "${link_path}"); then
-        fail "${message}: unable to read ${link_path}"
-    fi
-    [[ ${actual_target} == "${expected_target}" ]] \
-        || fail "${message}: expected ${expected_target}, found ${actual_target}"
-}
+TEST_ROOT=''
+HOME_DIR=''
+DATA_HOME=''
+MOCK_BIN=''
+CURL_LOG=''
+LOCK_LEAK_MARKER=''
+runtime_root=''
+ytdlp_root=''
+deno_root=''
+runtime_env=()
 
 cleanup() {
     rm -rf -- "${TEST_ROOT}" || true
@@ -84,7 +79,9 @@ EOF_DENO
     chmod 0755 -- "${path}"
 }
 
-main() {
+prepare_runtime_manager_fixture() {
+    local command_name
+
     for command_name in bash chmod env flock grep ln mkdir mktemp readlink rm timeout; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             printf 'Error: required test command is absent: %s\n' "${command_name}" >&2
@@ -95,10 +92,6 @@ main() {
 
     TEST_ROOT=$(mktemp -d)
     readonly TEST_ROOT
-    trap cleanup EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
 
     readonly HOME_DIR="${TEST_ROOT}/home"
     readonly DATA_HOME="${TEST_ROOT}/data"
@@ -149,6 +142,11 @@ EOF_CURL
         YTDLP_ARIA2_DENO_CHECK_TIMEOUT_SECONDS=5
         YTDLP_ARIA2_DENO_UPDATE_TIMEOUT_SECONDS=10
     )
+}
+
+test_runtime_paths_and_locking() {
+    local actual_deno actual_ytdlp expected_ytdlp lock_holder_pid
+    local lock_holder_ready
 
     expected_ytdlp="${ytdlp_root}/current/yt-dlp_linux"
     actual_ytdlp=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" path yt-dlp)
@@ -191,6 +189,10 @@ EOF_CURL
     ); then
         fail 'runtime update lock remained held after the lock holder stopped'
     fi
+}
+
+test_runtime_offline_and_rollback() {
+    local required_curl_option
 
     # Network failure after bootstrap must preserve the verified active runtimes.
     : >"${CURL_LOG}"
@@ -230,6 +232,10 @@ EOF_CURL
         || fail 'invalid active yt-dlp runtime was not recovered from previous'
     assert_link_target "${ytdlp_root}/current" '2026.06.09' \
         'automatic yt-dlp rollback selected the wrong runtime'
+}
+
+test_runtime_bootstrap_and_architecture() {
+    local aarch_bin aarch_data aarch_path empty_data
 
     # First bootstrap without a network and without existing runtimes must fail
     # rather than creating or activating an unverified placeholder.
@@ -272,8 +278,19 @@ EOF_UNAME
     [[ ${aarch_path} == */current/yt-dlp_linux_aarch64 ]] \
         || fail 'aarch64 yt-dlp asset mapping is incorrect'
 
-    printf 'Runtime-manager integration passed.\n'
+}
 
+main() {
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    prepare_runtime_manager_fixture
+    test_runtime_paths_and_locking
+    test_runtime_offline_and_rollback
+    test_runtime_bootstrap_and_architecture
+    printf 'Runtime-manager integration passed.\n'
 }
 
 main "$@"

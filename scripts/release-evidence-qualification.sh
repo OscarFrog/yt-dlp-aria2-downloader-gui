@@ -162,80 +162,61 @@ assert_asset_inventory() {
     fi
 }
 
-main() {
-    local tag=${1:-}
-    local expected_sha=${2:-}
-    local report_file=${3:-}
-    local max_schedule_age_days=${MAX_SCHEDULE_AGE_DAYS:-${DEFAULT_MAX_SCHEDULE_AGE_DAYS}}
-    local require_extended=${REQUIRE_EXTENDED_QUALIFICATION:-false}
-    local command_name
-    local repo
-    local tag_sha
-    local release_json
-    local release_tag
-    local release_immutable
-    local release_url
-    local release_published_at
-    local public_dir
-    local inventory_file
-    local actual_inventory_file
-    local asset_name
-    local signer_workflow
-    local release_run
-    local shell_run
-    local packages_run
-    local real_tools_exact_run
-    local stress_run
-    local qualification_run=''
-    local real_tools_runs_json
-    local real_tools_run
-    local shfmt_runs_json
-    local shfmt_run
-    local report_dir
-    local verification_date
-    local release_run_id
-    local release_run_url
-    local shell_run_id
-    local shell_run_url
-    local packages_run_id
-    local packages_run_url
-    local real_tools_exact_run_id
-    local real_tools_exact_run_url
-    local stress_run_id
-    local stress_run_url
-    local qualification_run_id=''
-    local qualification_run_url=''
-    local scheduled_real_tools_id
-    local scheduled_real_tools_created
-    local scheduled_real_tools_url
-    local scheduled_shfmt_id
-    local scheduled_shfmt_created
-    local scheduled_shfmt_url
+parse_qualification_arguments() {
+    local tag_output_variable=$1
+    local sha_output_variable=$2
+    local report_output_variable=$3
+    local age_output_variable=$4
+    local extended_output_variable=$5
+    local parsed_tag=${6:-}
+    local parsed_sha=${7:-}
+    local parsed_report=${8:-}
+    local parsed_age=${MAX_SCHEDULE_AGE_DAYS:-${DEFAULT_MAX_SCHEDULE_AGE_DAYS}}
+    local parsed_extended=${REQUIRE_EXTENDED_QUALIFICATION:-false}
 
-    if [[ ${tag} == -h || ${tag} == --help ]]; then
+    if [[ ${parsed_tag} == -h || ${parsed_tag} == --help ]]; then
         usage
-        return 0
+        exit 0
     fi
-    if [[ ! ${tag} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if [[ ! ${parsed_tag} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         usage >&2
         fail_qualification 'TAG must be an exact semantic-version tag such as v2.1.35.'
     fi
-    if [[ ! ${expected_sha} =~ ^[0-9a-f]{40}$ ]]; then
+    if [[ ! ${parsed_sha} =~ ^[0-9a-f]{40}$ ]]; then
         fail_qualification 'EXPECTED_SHA must be a lowercase 40-character Git SHA.'
     fi
-    if [[ ! ${max_schedule_age_days} =~ ^[1-9][0-9]*$ ]]; then
+    if [[ ! ${parsed_age} =~ ^[1-9][0-9]*$ ]]; then
         fail_qualification 'MAX_SCHEDULE_AGE_DAYS must be a positive integer.'
     fi
-    case ${require_extended} in
+    case ${parsed_extended} in
         true | false) ;;
         *) fail_qualification 'REQUIRE_EXTENDED_QUALIFICATION must be true or false.' ;;
     esac
+
+    printf -v "${tag_output_variable}" '%s' "${parsed_tag}"
+    printf -v "${sha_output_variable}" '%s' "${parsed_sha}"
+    printf -v "${report_output_variable}" '%s' "${parsed_report}"
+    printf -v "${age_output_variable}" '%s' "${parsed_age}"
+    printf -v "${extended_output_variable}" '%s' "${parsed_extended}"
+}
+
+require_qualification_commands() {
+    local command_name=''
 
     for command_name in cat cmp date diff dirname find gh git grep jq mkdir mktemp rm sha256sum sort wc; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             fail_qualification "required command is absent: ${command_name}."
         fi
     done
+}
+
+initialize_qualification_workspace() {
+    local public_output_variable=$1
+    local inventory_output_variable=$2
+    local actual_inventory_output_variable=$3
+    local workspace_public_dir=''
+    local workspace_inventory_file=''
+    local workspace_actual_inventory_file=''
 
     trap cleanup EXIT
     trap 'exit 129' HUP
@@ -244,13 +225,25 @@ main() {
 
     cd -- "${PROJECT_DIR}"
     WORK_DIR=$(mktemp -d)
-    public_dir="${WORK_DIR}/public"
-    inventory_file="${WORK_DIR}/expected-inventory.txt"
-    actual_inventory_file="${WORK_DIR}/downloaded-inventory.txt"
-    mkdir -p -- "${public_dir}"
+    workspace_public_dir="${WORK_DIR}/public"
+    workspace_inventory_file="${WORK_DIR}/expected-inventory.txt"
+    workspace_actual_inventory_file="${WORK_DIR}/downloaded-inventory.txt"
+    mkdir -p -- "${workspace_public_dir}"
 
-    repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
-    if [[ ! ${repo} =~ ^[^/]+/[^/]+$ ]]; then
+    printf -v "${public_output_variable}" '%s' "${workspace_public_dir}"
+    printf -v "${inventory_output_variable}" '%s' "${workspace_inventory_file}"
+    printf -v "${actual_inventory_output_variable}" '%s' "${workspace_actual_inventory_file}"
+}
+
+resolve_release_identity() {
+    local tag=$1
+    local expected_sha=$2
+    local output_variable=$3
+    local resolved_repo=''
+    local tag_sha=''
+
+    resolved_repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+    if [[ ! ${resolved_repo} =~ ^[^/]+/[^/]+$ ]]; then
         fail_qualification 'unable to resolve GitHub repository nameWithOwner.'
     fi
 
@@ -261,17 +254,37 @@ main() {
         fail_qualification \
             "tag ${tag} resolves to ${tag_sha}, expected ${expected_sha}."
     fi
+    printf -v "${output_variable}" '%s' "${resolved_repo}"
+}
+
+download_and_verify_release_assets() {
+    local tag=$1
+    local expected_sha=$2
+    local repo=$3
+    local public_dir=$4
+    local inventory_file=$5
+    local actual_inventory_file=$6
+    local url_output_variable=$7
+    local immutable_output_variable=$8
+    local published_output_variable=$9
+    local release_json=''
+    local release_tag=''
+    local resolved_release_immutable=''
+    local resolved_release_url=''
+    local resolved_release_published_at=''
+    local asset_name=''
+    local signer_workflow=''
 
     release_json=$(gh release view "${tag}" -R "${repo}" \
         --json tagName,isImmutable,assets,url,publishedAt)
     release_tag=$(jq -r '.tagName' <<<"${release_json}")
-    release_immutable=$(jq -r '.isImmutable' <<<"${release_json}")
-    release_url=$(jq -r '.url' <<<"${release_json}")
-    release_published_at=$(jq -r '.publishedAt' <<<"${release_json}")
+    resolved_release_immutable=$(jq -r '.isImmutable' <<<"${release_json}")
+    resolved_release_url=$(jq -r '.url' <<<"${release_json}")
+    resolved_release_published_at=$(jq -r '.publishedAt' <<<"${release_json}")
     if [[ ${release_tag} != "${tag}" ]]; then
         fail_qualification 'GitHub release tag does not match the requested tag.'
     fi
-    if [[ ${release_immutable} != true ]]; then
+    if [[ ${resolved_release_immutable} != true ]]; then
         fail_qualification 'GitHub release is not immutable.'
     fi
 
@@ -304,61 +317,136 @@ main() {
             --source-digest "${expected_sha}"
     done <"${inventory_file}"
 
-    release_run=$(successful_workflow_run_for_sha "${repo}" release.yml "${expected_sha}")
-    shell_run=$(successful_workflow_run_for_sha "${repo}" shell.yml "${expected_sha}")
-    packages_run=$(successful_workflow_run_for_sha "${repo}" packages.yml "${expected_sha}")
-    real_tools_exact_run=$(successful_workflow_run_for_sha "${repo}" real-tools.yml "${expected_sha}")
-    stress_run=$(successful_workflow_run_for_sha "${repo}" stress.yml "${expected_sha}")
+    printf -v "${url_output_variable}" '%s' "${resolved_release_url}"
+    printf -v "${immutable_output_variable}" '%s' "${resolved_release_immutable}"
+    printf -v "${published_output_variable}" '%s' "${resolved_release_published_at}"
+}
+
+collect_exact_sha_runs() {
+    local repo=$1
+    local expected_sha=$2
+    local require_extended=$3
+    local release_output_variable=$4
+    local shell_output_variable=$5
+    local packages_output_variable=$6
+    local real_tools_output_variable=$7
+    local stress_output_variable=$8
+    local qualification_output_variable=$9
+    local release_result=''
+    local shell_result=''
+    local packages_result=''
+    local real_tools_result=''
+    local stress_result=''
+    local qualification_result=''
+
+    release_result=$(successful_workflow_run_for_sha "${repo}" release.yml "${expected_sha}")
+    shell_result=$(successful_workflow_run_for_sha "${repo}" shell.yml "${expected_sha}")
+    packages_result=$(successful_workflow_run_for_sha "${repo}" packages.yml "${expected_sha}")
+    real_tools_result=$(successful_workflow_run_for_sha "${repo}" real-tools.yml "${expected_sha}")
+    stress_result=$(successful_workflow_run_for_sha "${repo}" stress.yml "${expected_sha}")
     if [[ ${require_extended} == true ]]; then
-        qualification_run=$(successful_workflow_run_for_sha \
+        qualification_result=$(successful_workflow_run_for_sha \
             "${repo}" qualification.yml "${expected_sha}")
     fi
+
+    printf -v "${release_output_variable}" '%s' "${release_result}"
+    printf -v "${shell_output_variable}" '%s' "${shell_result}"
+    printf -v "${packages_output_variable}" '%s' "${packages_result}"
+    printf -v "${real_tools_output_variable}" '%s' "${real_tools_result}"
+    printf -v "${stress_output_variable}" '%s' "${stress_result}"
+    printf -v "${qualification_output_variable}" '%s' "${qualification_result}"
+}
+
+collect_scheduled_runs() {
+    local repo=$1
+    local max_schedule_age_days=$2
+    local real_tools_output_variable=$3
+    local shfmt_output_variable=$4
+    local real_tools_runs_json=''
+    local real_tools_result=''
+    local shfmt_runs_json=''
+    local shfmt_result=''
 
     real_tools_runs_json=$(gh run list -R "${repo}" \
         --workflow real-tools.yml \
         --event schedule \
         --limit 20 \
         --json databaseId,workflowName,event,status,conclusion,headSha,createdAt,url)
-    real_tools_run=$(select_latest_successful_schedule "${real_tools_runs_json}")
-    assert_schedule_fresh "${real_tools_run}" real-tools.yml "${max_schedule_age_days}"
+    real_tools_result=$(select_latest_successful_schedule "${real_tools_runs_json}")
+    assert_schedule_fresh "${real_tools_result}" real-tools.yml "${max_schedule_age_days}"
 
     shfmt_runs_json=$(gh run list -R "${repo}" \
         --workflow shfmt-update.yml \
         --event schedule \
         --limit 20 \
         --json databaseId,workflowName,event,status,conclusion,headSha,createdAt,url)
-    shfmt_run=$(select_latest_successful_schedule "${shfmt_runs_json}")
-    assert_schedule_fresh "${shfmt_run}" shfmt-update.yml "${max_schedule_age_days}"
+    shfmt_result=$(select_latest_successful_schedule "${shfmt_runs_json}")
+    assert_schedule_fresh "${shfmt_result}" shfmt-update.yml "${max_schedule_age_days}"
 
-    if [[ -z ${report_file} ]]; then
-        report_file="${PROJECT_DIR}/qualification-evidence/release-${tag}.md"
-    elif [[ ${report_file} != /* ]]; then
-        report_file="${PROJECT_DIR}/${report_file}"
+    printf -v "${real_tools_output_variable}" '%s' "${real_tools_result}"
+    printf -v "${shfmt_output_variable}" '%s' "${shfmt_result}"
+}
+
+resolve_qualification_report() {
+    local requested_report=$1
+    local tag=$2
+    local output_variable=$3
+    local resolved_report=${requested_report}
+    local report_dir=''
+
+    if [[ -z ${resolved_report} ]]; then
+        resolved_report="${PROJECT_DIR}/qualification-evidence/release-${tag}.md"
+    elif [[ ${resolved_report} != /* ]]; then
+        resolved_report="${PROJECT_DIR}/${resolved_report}"
     fi
-    report_dir=$(dirname -- "${report_file}")
+    report_dir=$(dirname -- "${resolved_report}")
     mkdir -p -- "${report_dir}"
-    verification_date=$(date --iso-8601=seconds)
+    printf -v "${output_variable}" '%s' "${resolved_report}"
+}
 
-    release_run_id=$(jq -r '.databaseId' <<<"${release_run}")
-    release_run_url=$(jq -r '.url' <<<"${release_run}")
-    shell_run_id=$(jq -r '.databaseId' <<<"${shell_run}")
-    shell_run_url=$(jq -r '.url' <<<"${shell_run}")
-    packages_run_id=$(jq -r '.databaseId' <<<"${packages_run}")
-    packages_run_url=$(jq -r '.url' <<<"${packages_run}")
-    real_tools_exact_run_id=$(jq -r '.databaseId' <<<"${real_tools_exact_run}")
-    real_tools_exact_run_url=$(jq -r '.url' <<<"${real_tools_exact_run}")
-    stress_run_id=$(jq -r '.databaseId' <<<"${stress_run}")
-    stress_run_url=$(jq -r '.url' <<<"${stress_run}")
-    if [[ -n ${qualification_run} ]]; then
-        qualification_run_id=$(jq -r '.databaseId' <<<"${qualification_run}")
-        qualification_run_url=$(jq -r '.url' <<<"${qualification_run}")
-    fi
-    scheduled_real_tools_id=$(jq -r '.databaseId' <<<"${real_tools_run}")
-    scheduled_real_tools_created=$(jq -r '.createdAt' <<<"${real_tools_run}")
-    scheduled_real_tools_url=$(jq -r '.url' <<<"${real_tools_run}")
-    scheduled_shfmt_id=$(jq -r '.databaseId' <<<"${shfmt_run}")
-    scheduled_shfmt_created=$(jq -r '.createdAt' <<<"${shfmt_run}")
-    scheduled_shfmt_url=$(jq -r '.url' <<<"${shfmt_run}")
+write_exact_sha_run_line() {
+    local label=$1
+    local run=$2
+    local run_id run_url
+
+    run_id=$(jq -r '.databaseId' <<<"${run}")
+    run_url=$(jq -r '.url' <<<"${run}")
+    printf -- "- %s: \`%s\` — %s\n" "${label}" "${run_id}" "${run_url}"
+}
+
+write_scheduled_run_line() {
+    local label=$1
+    local run=$2
+    local run_id run_created run_url
+
+    run_id=$(jq -r '.databaseId' <<<"${run}")
+    run_created=$(jq -r '.createdAt' <<<"${run}")
+    run_url=$(jq -r '.url' <<<"${run}")
+    printf -- "- %s: \`%s\` — \`%s\` — %s\n" \
+        "${label}" "${run_id}" "${run_created}" "${run_url}"
+}
+
+write_qualification_report() {
+    local tag=$1
+    local expected_sha=$2
+    local repo=$3
+    local release_url=$4
+    local release_immutable=$5
+    local release_published_at=$6
+    local inventory_file=$7
+    local public_dir=$8
+    local report_file=$9
+    local release_run=${10}
+    local shell_run=${11}
+    local packages_run=${12}
+    local real_tools_exact_run=${13}
+    local stress_run=${14}
+    local qualification_run=${15}
+    local real_tools_run=${16}
+    local shfmt_run=${17}
+    local verification_date=''
+
+    verification_date=$(date --iso-8601=seconds)
 
     {
         printf '# Release qualification evidence — %s\n\n' "${tag}"
@@ -369,29 +457,18 @@ main() {
         printf -- "- Immutable: \`%s\`\n" "${release_immutable}"
         printf -- "- Published at: \`%s\`\n\n" "${release_published_at}"
         printf '## Exact-SHA workflow runs\n\n'
-        printf -- "- release.yml: \`%s\` — %s\n" \
-            "${release_run_id}" "${release_run_url}"
-        printf -- "- shell.yml: \`%s\` — %s\n" \
-            "${shell_run_id}" "${shell_run_url}"
-        printf -- "- packages.yml: \`%s\` — %s\n" \
-            "${packages_run_id}" "${packages_run_url}"
-        printf -- "- real-tools.yml: \`%s\` — %s\n" \
-            "${real_tools_exact_run_id}" "${real_tools_exact_run_url}"
-        printf -- "- stress.yml: \`%s\` — %s\n" \
-            "${stress_run_id}" "${stress_run_url}"
+        write_exact_sha_run_line release.yml "${release_run}"
+        write_exact_sha_run_line shell.yml "${shell_run}"
+        write_exact_sha_run_line packages.yml "${packages_run}"
+        write_exact_sha_run_line real-tools.yml "${real_tools_exact_run}"
+        write_exact_sha_run_line stress.yml "${stress_run}"
         if [[ -n ${qualification_run} ]]; then
-            printf -- "- qualification.yml: \`%s\` — %s\n" \
-                "${qualification_run_id}" "${qualification_run_url}"
+            write_exact_sha_run_line qualification.yml "${qualification_run}"
         fi
         printf '\n## Scheduled runs\n\n'
-        printf -- "- Current-stable real-tools: \`%s\` — \`%s\` — %s\n" \
-            "${scheduled_real_tools_id}" \
-            "${scheduled_real_tools_created}" \
-            "${scheduled_real_tools_url}"
-        printf -- "- shfmt updater: \`%s\` — \`%s\` — %s\n\n" \
-            "${scheduled_shfmt_id}" \
-            "${scheduled_shfmt_created}" \
-            "${scheduled_shfmt_url}"
+        write_scheduled_run_line 'Current-stable real-tools' "${real_tools_run}"
+        write_scheduled_run_line 'shfmt updater' "${shfmt_run}"
+        printf '\n'
         printf "## Asset inventory\n\n\`\`\`text\n"
         cat -- "${inventory_file}"
         printf "\`\`\`\n\n## SHA256SUMS\n\n\`\`\`text\n"
@@ -404,6 +481,40 @@ main() {
     } >"${report_file}"
 
     printf 'Release evidence qualification passed: %s\n' "${report_file}"
+}
+
+main() {
+    local tag='' expected_sha='' report_file=''
+    local max_schedule_age_days='' require_extended=''
+    local public_dir='' inventory_file='' actual_inventory_file=''
+    local repo='' release_url='' release_immutable='' release_published_at=''
+    local release_run='' shell_run='' packages_run=''
+    local real_tools_exact_run='' stress_run='' qualification_run=''
+    local real_tools_run='' shfmt_run=''
+
+    parse_qualification_arguments \
+        tag expected_sha report_file max_schedule_age_days require_extended "$@"
+    require_qualification_commands
+    initialize_qualification_workspace \
+        public_dir inventory_file actual_inventory_file
+    resolve_release_identity "${tag}" "${expected_sha}" repo
+    download_and_verify_release_assets \
+        "${tag}" "${expected_sha}" "${repo}" \
+        "${public_dir}" "${inventory_file}" "${actual_inventory_file}" \
+        release_url release_immutable release_published_at
+    collect_exact_sha_runs \
+        "${repo}" "${expected_sha}" "${require_extended}" \
+        release_run shell_run packages_run real_tools_exact_run stress_run qualification_run
+    collect_scheduled_runs \
+        "${repo}" "${max_schedule_age_days}" real_tools_run shfmt_run
+    resolve_qualification_report "${report_file}" "${tag}" report_file
+    write_qualification_report \
+        "${tag}" "${expected_sha}" "${repo}" \
+        "${release_url}" "${release_immutable}" "${release_published_at}" \
+        "${inventory_file}" "${public_dir}" "${report_file}" \
+        "${release_run}" "${shell_run}" "${packages_run}" \
+        "${real_tools_exact_run}" "${stress_run}" "${qualification_run}" \
+        "${real_tools_run}" "${shfmt_run}"
 }
 
 main "$@"

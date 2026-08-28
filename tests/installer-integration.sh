@@ -68,7 +68,9 @@ write_fake_gui() {
     chmod +x -- "${path}"
 }
 
-main() {
+test_installer_initial_installation() {
+    local actual_exec expected_exec gio_deadline gio_timeout
+
     [[ -x ${PROJECT_DIR}/install-gui.sh ]] \
         || fail 'install-gui.sh is not executable in the source tree.'
 
@@ -88,10 +90,9 @@ main() {
 
     [[ -f ${DESKTOP_FILE} ]] || fail 'The desktop launcher was not created.'
     [[ -L ${LAUNCHER_LINK} ]] || fail 'The stable launcher link was not created.'
-    launcher_target=$(readlink -- "${LAUNCHER_LINK}")
-    assert_equals \
+    assert_link_target \
+        "${LAUNCHER_LINK}" \
         "${COPIED_PROJECT}/download-video-gui.sh" \
-        "${launcher_target}" \
         'stable launcher link target'
 
     expected_exec='Exec="'
@@ -125,16 +126,15 @@ main() {
         'dedicated per-user desktop icon name'
     [[ -f ${ICON_FILE} && ! -L ${ICON_FILE} ]] \
         || fail 'The dedicated per-user application icon was not installed.'
-    icon_mode=$(stat -c '%a' -- "${ICON_FILE}")
-    assert_equals '644' "${icon_mode}" 'per-user application icon permissions'
+    assert_path_mode "${ICON_FILE}" 644 \
+        'per-user application icon permissions'
 
     assert_status 0 'installed launcher passes desktop-file-validate' \
         desktop-file-validate --no-hints "${DESKTOP_FILE}"
 
-    launcher_mode=$(stat -c '%a' -- "${DESKTOP_FILE}")
-    assert_equals '644' "${launcher_mode}" 'installed launcher permissions'
-    launcher_dir_mode=$(stat -c '%a' -- "${LAUNCHER_DIR}")
-    assert_equals '700' "${launcher_dir_mode}" 'private launcher-directory permissions'
+    assert_path_mode "${DESKTOP_FILE}" 644 'installed launcher permissions'
+    assert_path_mode "${LAUNCHER_DIR}" 700 \
+        'private launcher-directory permissions'
     assert_no_install_temporary_files 'temporary cleanup after installation'
 
     if command -v gio >/dev/null 2>&1; then
@@ -157,6 +157,12 @@ main() {
             "$(<"${EXEC_MARKER}")" \
             'GLib launches the exact stable path'
     fi
+}
+
+test_installer_reinstallation() {
+    local VALIDATION_MOCK_BIN
+    local launcher_snapshot launcher_target_after_failed_validation
+    local launcher_target_before
 
     # A normal reinstall must remain deterministic and leave no temporary files.
     launcher_snapshot="${TEST_ROOT}/launcher-before-reinstall.desktop"
@@ -199,6 +205,12 @@ EOF_VALIDATE
         "${launcher_target_after_failed_validation}" \
         'failed validation preserves the stable launcher link'
     assert_no_install_temporary_files 'temporary cleanup after failed validation'
+}
+
+test_installer_failure_modes() {
+    local MISSING_PROJECT
+    local conflict_data_home conflict_launcher_link no_validator_bin
+    local no_validator_data required_command required_command_path
 
     # Scenario group: explicit installation failures.
     readonly MISSING_PROJECT="${TEST_ROOT}/missing-gui-project"
@@ -264,7 +276,9 @@ EOF_VALIDATE
         bash "${COPIED_PROJECT}/install-gui.sh" install
     assert_text_contains "${ASSERT_OUTPUT}" 'validation was skipped' \
         'missing validator note'
+}
 
+test_installer_uninstall_lifecycle() {
     assert_status 0 'uninstall existing launcher' \
         env XDG_DATA_HOME="${DATA_HOME}" \
         bash "${COPIED_PROJECT}/install-gui.sh" uninstall
@@ -292,9 +306,14 @@ EOF_VALIDATE
         bash "${COPIED_PROJECT}/install-gui.sh" uninstall
     assert_text_contains "${ASSERT_OUTPUT}" 'No launcher is installed at:' \
         'idempotent uninstall message'
+}
 
+main() {
+    test_installer_initial_installation
+    test_installer_reinstallation
+    test_installer_failure_modes
+    test_installer_uninstall_lifecycle
     printf 'Installer integration tests passed.\n'
-
 }
 
 main "$@"

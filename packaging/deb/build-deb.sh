@@ -9,67 +9,8 @@
 set -Eeuo pipefail
 umask 022
 
-if (($# < 1 || $# > 2)); then
-    printf 'Usage: %s VERSION [OUTPUT_DIR]\n' "${0##*/}" >&2
-    exit 2
-fi
-
-readonly VERSION=$1
-readonly OUTPUT_DIR=${2:-dist}
 readonly PACKAGE_NAME='yt-dlp-aria2-downloader-gui'
 readonly PACKAGE_REVISION='1'
-
-[[ ${VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-    printf 'Error: invalid package version: %s\n' "${VERSION}" >&2
-    exit 2
-}
-
-for command_name in \
-    awk bash cat chmod date desktop-file-validate dirname dpkg-deb du find git \
-    gzip install md5sum mkdir mktemp realpath rm sort stat; do
-    command -v "${command_name}" >/dev/null 2>&1 || {
-        printf 'Error: required command is absent: %s\n' \
-            "${command_name}" >&2
-        exit 127
-    }
-done
-
-script_parent=$(dirname -- "${BASH_SOURCE[0]}")
-SCRIPT_DIR=$(cd -- "${script_parent}" && pwd -P)
-readonly SCRIPT_DIR
-PROJECT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)
-readonly PROJECT_DIR
-
-source_status=''
-if ! source_status=$(
-    git -C "${PROJECT_DIR}" status --porcelain=v1 --untracked-files=normal
-); then
-    printf 'Error: unable to inspect the package source worktree.\n' >&2
-    exit 65
-fi
-if [[ -n ${source_status} ]]; then
-    printf '%s\n' \
-        'Error: package sources contain uncommitted changes.' >&2
-    printf '%s\n' \
-        'Commit the intended release changes before building a package.' >&2
-    exit 65
-fi
-
-source_version_output=''
-if ! source_version_output=$("${PROJECT_DIR}/download-video.sh" --version); then
-    printf 'Error: unable to read the source-tree version.\n' >&2
-    exit 65
-fi
-if [[ ${source_version_output} != "download-video.sh version ${VERSION}" ]]; then
-    printf 'Error: source version does not match requested package version.\n' >&2
-    printf 'Source:    %s\n' "${source_version_output}" >&2
-    printf 'Requested: %s\n' "${VERSION}" >&2
-    exit 65
-fi
-
-mkdir -p -- "${OUTPUT_DIR}"
-RESOLVED_OUTPUT_DIR=$(realpath -m -- "${OUTPUT_DIR}")
-readonly RESOLVED_OUTPUT_DIR
 
 work_dir=''
 cleanup() {
@@ -77,54 +18,137 @@ cleanup() {
         rm -rf -- "${work_dir}"
     fi
 }
-trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
-work_dir=$(mktemp -d)
-readonly work_dir
+parse_deb_build_arguments() {
+    if (($# < 1 || $# > 2)); then
+        printf 'Usage: %s VERSION [OUTPUT_DIR]\n' "${0##*/}" >&2
+        exit 2
+    fi
 
-main() {
-    local root=''
-    local installed_size=''
-    local package_path=''
-    local source_date_epoch=''
-    local changelog_date=''
-    local extracted=''
-    local packaged_version=''
-    local engine_mode=''
-    local manpage=''
-    local payload_file=''
+    readonly VERSION=$1
+    readonly OUTPUT_DIR=${2:-dist}
+    [[ ${VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+        printf 'Error: invalid package version: %s\n' "${VERSION}" >&2
+        exit 2
+    }
+}
 
-    source_date_epoch=${SOURCE_DATE_EPOCH:-}
-    if [[ -z ${source_date_epoch} ]]; then
-        if ! source_date_epoch=$(git -C "${PROJECT_DIR}" show -s --format=%ct HEAD); then
+require_deb_build_commands() {
+    local command_name=''
+
+    for command_name in \
+        awk bash cat chmod date desktop-file-validate dirname dpkg-deb du find git \
+        gzip install md5sum mkdir mktemp realpath rm sort stat; do
+        command -v "${command_name}" >/dev/null 2>&1 || {
+            printf 'Error: required command is absent: %s\n' \
+                "${command_name}" >&2
+            exit 127
+        }
+    done
+}
+
+initialize_deb_build_paths() {
+    local script_parent=''
+
+    script_parent=$(dirname -- "${BASH_SOURCE[0]}")
+    SCRIPT_DIR=$(cd -- "${script_parent}" && pwd -P)
+    readonly SCRIPT_DIR
+    PROJECT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)
+    readonly PROJECT_DIR
+}
+
+validate_deb_source_tree() {
+    local source_status=''
+    local source_version_output=''
+
+    if ! source_status=$(
+        git -C "${PROJECT_DIR}" status --porcelain=v1 --untracked-files=normal
+    ); then
+        printf 'Error: unable to inspect the package source worktree.\n' >&2
+        exit 65
+    fi
+    if [[ -n ${source_status} ]]; then
+        printf '%s\n' \
+            'Error: package sources contain uncommitted changes.' >&2
+        printf '%s\n' \
+            'Commit the intended release changes before building a package.' >&2
+        exit 65
+    fi
+
+    if ! source_version_output=$("${PROJECT_DIR}/download-video.sh" --version); then
+        printf 'Error: unable to read the source-tree version.\n' >&2
+        exit 65
+    fi
+    if [[ ${source_version_output} != "download-video.sh version ${VERSION}" ]]; then
+        printf 'Error: source version does not match requested package version.\n' >&2
+        printf 'Source:    %s\n' "${source_version_output}" >&2
+        printf 'Requested: %s\n' "${VERSION}" >&2
+        exit 65
+    fi
+}
+
+initialize_deb_output_directory() {
+    mkdir -p -- "${OUTPUT_DIR}"
+    RESOLVED_OUTPUT_DIR=$(realpath -m -- "${OUTPUT_DIR}")
+    readonly RESOLVED_OUTPUT_DIR
+}
+
+initialize_deb_workspace() {
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    work_dir=$(mktemp -d)
+    readonly work_dir
+}
+
+resolve_deb_build_timestamp() {
+    local epoch_output_variable=$1
+    local date_output_variable=$2
+    local resolved_epoch=${SOURCE_DATE_EPOCH:-}
+    local resolved_date=''
+
+    if [[ -z ${resolved_epoch} ]]; then
+        if ! resolved_epoch=$(git -C "${PROJECT_DIR}" show -s --format=%ct HEAD); then
             printf 'Error: unable to derive SOURCE_DATE_EPOCH from Git.\n' >&2
             exit 65
         fi
     fi
-    [[ ${source_date_epoch} =~ ^[0-9]+$ ]] || {
+    [[ ${resolved_epoch} =~ ^[0-9]+$ ]] || {
         printf 'Error: invalid SOURCE_DATE_EPOCH: %s\n' \
-            "${source_date_epoch}" >&2
+            "${resolved_epoch}" >&2
         exit 65
     }
-    if ! changelog_date=$(LC_ALL=C date -u -d "@${source_date_epoch}" -R); then
+    if ! resolved_date=$(LC_ALL=C date -u -d "@${resolved_epoch}" -R); then
         printf 'Error: unable to format Debian changelog date.\n' >&2
         exit 65
     fi
+    printf -v "${epoch_output_variable}" '%s' "${resolved_epoch}"
+    printf -v "${date_output_variable}" '%s' "${resolved_date}"
+}
 
-    root="${work_dir}/root"
-    mkdir -p -- "${root}/DEBIAN"
+stage_deb_payload() {
+    local output_variable=$1
+    local staged_root="${work_dir}/root"
+
+    mkdir -p -- "${staged_root}/DEBIAN"
     bash "${PROJECT_DIR}/packaging/install-tree.sh" \
-        "${root}" "${VERSION}" '/usr/lib/yt-dlp-aria2-downloader'
+        "${staged_root}" "${VERSION}" '/usr/lib/yt-dlp-aria2-downloader'
 
     # The all-user cleanup helper is required by the RPM erase scriptlet only.
     # Debian removal and purge deliberately preserve per-user runtime/config data.
-    rm -f -- "${root}/usr/lib/yt-dlp-aria2-downloader/package-user-cleanup.sh"
+    rm -f -- "${staged_root}/usr/lib/yt-dlp-aria2-downloader/package-user-cleanup.sh"
 
     install -m 0644 -- "${PROJECT_DIR}/packaging/deb/copyright" \
-        "${root}/usr/share/doc/${PACKAGE_NAME}/copyright"
+        "${staged_root}/usr/share/doc/${PACKAGE_NAME}/copyright"
+    printf -v "${output_variable}" '%s' "${staged_root}"
+}
+
+write_deb_documentation() {
+    local root=$1
+    local changelog_date=$2
+    local manpage=''
 
     cat >"${work_dir}/changelog.Debian" <<EOF_CHANGELOG
 ${PACKAGE_NAME} (${VERSION}-${PACKAGE_REVISION}) unstable; urgency=medium
@@ -142,6 +166,11 @@ EOF_CHANGELOG
         "${root}/usr/share/man/man1/yt-dlp-aria2-downloader-gui.1"; do
         gzip -9n -- "${manpage}"
     done
+}
+
+write_deb_control_metadata() {
+    local root=$1
+    local installed_size=''
 
     installed_size=$(du -sk -- "${root}/usr" | awk '{print $1}')
     [[ ${installed_size} =~ ^[0-9]+$ ]] || {
@@ -166,6 +195,11 @@ Description: Zenity interface and Bash engine for yt-dlp and aria2
  verified yt-dlp and Deno runtimes, aria2c, FFmpeg, and Zenity on GNU/Linux.
 EOF_CONTROL
     chmod 0644 -- "${root}/DEBIAN/control"
+}
+
+write_deb_checksums() {
+    local root=$1
+    local payload_file=''
 
     (
         local md5_file_list="${work_dir}/md5-file-list"
@@ -183,17 +217,31 @@ EOF_CONTROL
         done <"${md5_file_list}"
     ) >"${root}/DEBIAN/md5sums"
     chmod 0644 -- "${root}/DEBIAN/md5sums"
+}
 
-    package_path="${RESOLVED_OUTPUT_DIR}/${PACKAGE_NAME}_${VERSION}-${PACKAGE_REVISION}_all.deb"
-    rm -f -- "${package_path}"
+build_deb_package() {
+    local root=$1
+    local source_date_epoch=$2
+    local output_variable=$3
+    local built_package_path="${RESOLVED_OUTPUT_DIR}/${PACKAGE_NAME}_${VERSION}-${PACKAGE_REVISION}_all.deb"
+
+    rm -f -- "${built_package_path}"
 
     SOURCE_DATE_EPOCH=${source_date_epoch} \
-        dpkg-deb --root-owner-group --build "${root}" "${package_path}"
+        dpkg-deb --root-owner-group --build "${root}" "${built_package_path}"
 
-    dpkg-deb --info "${package_path}"
-    dpkg-deb --contents "${package_path}"
+    dpkg-deb --info "${built_package_path}"
+    dpkg-deb --contents "${built_package_path}"
+    printf -v "${output_variable}" '%s' "${built_package_path}"
+}
 
-    extracted="${work_dir}/extracted"
+validate_deb_package() {
+    local package_path=$1
+    local extracted="${work_dir}/extracted"
+    local packaged_version=''
+    local engine_mode=''
+    local manpage=''
+
     dpkg-deb --extract "${package_path}" "${extracted}"
     packaged_version=$(
         "${extracted}/usr/bin/yt-dlp-aria2-downloader" --version
@@ -242,6 +290,27 @@ EOF_CONTROL
     }
 
     printf 'DEB package created: %s\n' "${package_path}"
+}
+
+main() {
+    local source_date_epoch=''
+    local changelog_date=''
+    local root=''
+    local package_path=''
+
+    parse_deb_build_arguments "$@"
+    require_deb_build_commands
+    initialize_deb_build_paths
+    validate_deb_source_tree
+    initialize_deb_output_directory
+    initialize_deb_workspace
+    resolve_deb_build_timestamp source_date_epoch changelog_date
+    stage_deb_payload root
+    write_deb_documentation "${root}" "${changelog_date}"
+    write_deb_control_metadata "${root}"
+    write_deb_checksums "${root}"
+    build_deb_package "${root}" "${source_date_epoch}" package_path
+    validate_deb_package "${package_path}"
 }
 
 main "$@"

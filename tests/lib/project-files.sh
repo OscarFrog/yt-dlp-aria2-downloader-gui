@@ -37,9 +37,12 @@ TEST_SHELL_FILES=(
     test-static.sh
     tests/run-all.sh
     tests/run-all-signal-integration.sh
+    tests/test-runner-integration.sh
     tests/lib/assert.sh
+    tests/lib/package-lifecycle.sh
     tests/lib/package-runtime-preservation.sh
     tests/lib/project-files.sh
+    tests/lib/test-runner.sh
     tests/mock-integration.sh
     tests/private-aria2-plan-integration.sh
     tests/aria2-auth-headers-integration.sh
@@ -73,11 +76,11 @@ DEVELOPMENT_SHELL_FILES=(
 # sourced libraries and tiny linear Bash executables.
 # shellcheck disable=SC2034 # Array is read by test-static.sh.
 MAIN_EXEMPT_SHELL_FILES=(
-    packaging/install-tree.sh
-    tests/run-all.sh
     tests/lib/assert.sh
+    tests/lib/package-lifecycle.sh
     tests/lib/package-runtime-preservation.sh
     tests/lib/project-files.sh
+    tests/lib/test-runner.sh
 )
 
 # shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
