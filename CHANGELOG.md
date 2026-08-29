@@ -1,5 +1,17 @@
 ## 2.3.5 - 2026-08-29
 
+### GUI process reliability
+
+- Run every captured Zenity dialog as a registered child and connect the
+  progress monitor and progress dialog through a private mode-`0600` FIFO, so
+  their independent statuses can be waited and preserved explicitly.
+- Handle HUP, INT, and TERM immediately while a dialog or progress session is
+  blocked; close, bound, signal, and reap all GUI children and the worker group
+  without leaving temporary Zenity captures or changing 129/130/143 statuses.
+- Accept at most 64 KiB from captured Zenity stdout, ingest at most the final
+  64 KiB of stderr diagnostics, and preserve the first signal received during
+  asynchronous child registration.
+
 ### Documentation
 
 - Align every English and French installation example with the immutable

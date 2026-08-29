@@ -37,6 +37,8 @@ SCENARIO is one of:
   cancel-success-race
   new-download
   open-folder
+  signal-entry
+  signal-progress
 
 This is deliberately a controlled real-GUI protocol, not a Zenity mock. The
 operator performs the visible interactions while the harness records versions,
@@ -178,6 +180,19 @@ print_scenario_instructions() {
                 'Complete one valid download and use Open folder from the success dialog.' \
                 'Confirm that the selected destination folder opens.'
             ;;
+        signal-entry)
+            printf '%s\n' \
+                'Leave the initial URL entry dialog open without entering a URL.' \
+                'Return to this terminal and type SIGNAL when prompted.' \
+                'Confirm that the entry dialog closes immediately with no residual window.'
+            ;;
+        signal-progress)
+            printf '%s\n' \
+                'Use a valid source large enough to keep the transfer active.' \
+                'Wait until the progress dialog is visibly updating.' \
+                'Return to this terminal and type SIGNAL when prompted.' \
+                'Confirm that the progress dialog closes immediately with no residual window.'
+            ;;
         *)
             printf 'FAIL: unsupported Zenity qualification scenario: %s\n' \
                 "${scenario}" >&2
@@ -277,7 +292,7 @@ main() {
     local command_name
 
     case ${scenario} in
-        success | error | cancel-transfer | cancel-ffmpeg | cancel-success-race | new-download | open-folder)
+        success | error | cancel-transfer | cancel-ffmpeg | cancel-success-race | new-download | open-folder | signal-entry | signal-progress)
             ;;
         -h | --help | '')
             usage
@@ -406,6 +421,22 @@ main() {
         "${uid}" "${GUI_PID}" "${GUI_SID}" "${topology_file}" "${leak_file}" &
     WATCHER_PID=$!
 
+    case ${scenario} in
+        signal-entry | signal-progress)
+            printf '\nType SIGNAL only when the requested Zenity dialog is visibly active: '
+            if ! IFS= read -r answer; then
+                fail_test 'operator input ended before external signal confirmation.'
+            fi
+            [[ ${answer} == SIGNAL ]] \
+                || fail_test 'operator did not confirm the external signal point.'
+            printf 'external_gui_signal=TERM\n' \
+                >>"${evidence_dir}/scenario.txt"
+            kill -TERM -- "${GUI_SID}" \
+                || fail_test 'unable to send TERM to the GUI PID.'
+            ;;
+        *) ;;
+    esac
+
     HARNESS_PHASE='waiting-gui'
     set +e
     wait "${GUI_PID}"
@@ -420,6 +451,15 @@ main() {
     WATCHER_PID=''
 
     printf 'gui_exit_status=%d\n' "${gui_status}" >>"${evidence_dir}/scenario.txt"
+
+    case ${scenario} in
+        signal-entry | signal-progress)
+            ((gui_status == 143)) \
+                || fail_test \
+                    "externally signaled GUI exited with status ${gui_status}, expected 143."
+            ;;
+        *) ;;
+    esac
 
     assert_no_residual_processes "${uid}" "${GUI_SID}" "${evidence_dir}"
 

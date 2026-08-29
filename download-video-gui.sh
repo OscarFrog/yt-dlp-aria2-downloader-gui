@@ -16,6 +16,9 @@ readonly PROFILE_LABEL_AUDIO='Audio track (native format)'
 readonly PROGRESS_DIALOG_WIDTH=700
 readonly LOG_RETENTION_DAYS=15
 readonly LOG_MAX_BYTES=8388608
+readonly ZENITY_CAPTURE_MAX_BYTES=65536
+readonly GUI_CHILD_TERM_ATTEMPTS=10
+readonly GUI_CHILD_KILL_ATTEMPTS=10
 readonly PGID_WAIT_ATTEMPTS=50
 readonly WORKER_TERM_ATTEMPTS=30
 readonly WORKER_KILL_ATTEMPTS=20
@@ -28,8 +31,14 @@ WORKER_PID=''
 WORKER_PGID=''
 TEMP_DIR=''
 CLEANUP_DONE=false
+DEFERRED_SIGNAL_STATUS=''
+SIGNAL_REGISTRATION_ACTIVE=false
 ZENITY_STATUS=0
 ZENITY_ERROR=''
+ZENITY_PID=''
+ZENITY_CAPTURE_DIR=''
+PROGRESS_MONITOR_PID=''
+PROGRESS_PIPE=''
 RUNTIME_TMPDIR=''
 WAITED_WORKER_STATUS=''
 WORKER_STATUS=''
@@ -80,14 +89,41 @@ resolve_runtime_tmpdir() {
     return 0
 }
 
+handle_gui_signal() {
+    local status=$1
+
+    if [[ ${SIGNAL_REGISTRATION_ACTIVE} == true ||
+        -n ${DEFERRED_SIGNAL_STATUS} ]]; then
+        if [[ -z ${DEFERRED_SIGNAL_STATUS} ]]; then
+            DEFERRED_SIGNAL_STATUS=${status}
+        fi
+        return 0
+    fi
+
+    exit "${status}"
+}
+
+begin_signal_registration() {
+    SIGNAL_REGISTRATION_ACTIVE=true
+}
+
+finish_signal_registration() {
+    SIGNAL_REGISTRATION_ACTIVE=false
+    if [[ -n ${DEFERRED_SIGNAL_STATUS} ]]; then
+        exit "${DEFERRED_SIGNAL_STATUS}"
+    fi
+}
+
 show_error() {
+    local ignored_output=''
     local message=$1
 
-    if ! zenity --error \
+    run_zenity_capture ignored_output --error \
         --title="${APP_DIALOG_TITLE}" \
         --text="${message}" \
         --no-markup \
-        --width=520; then
+        --width=520
+    if ((ZENITY_STATUS != 0)); then
         printf 'Error: %s\n' "${message}" >&2
     fi
 
@@ -97,29 +133,65 @@ show_error() {
 run_zenity_capture() {
     local output_variable=$1
     shift
+    local capture_size=''
+    local error_file=''
+    local output_file=''
     local output=''
-    local status
-    local error_file
+    local restore_errexit=false
+    local status=0
 
     ZENITY_ERROR=''
 
-    error_file=$(mktemp --tmpdir="${RUNTIME_TMPDIR}" zenity-error.XXXXXXXX) || {
+    ZENITY_CAPTURE_DIR=$(mktemp -d \
+        --tmpdir="${RUNTIME_TMPDIR}" zenity-capture.XXXXXXXX) || {
         ZENITY_STATUS=70
-        ZENITY_ERROR='Unable to create the temporary Zenity diagnostic file.'
+        ZENITY_ERROR='Unable to create the temporary Zenity capture directory.'
         printf -v "${output_variable}" '%s' ''
         return 0
     }
-
-    if output=$(zenity "$@" 2>"${error_file}"); then
-        status=0
-    else
-        status=$?
+    output_file="${ZENITY_CAPTURE_DIR}/stdout"
+    error_file="${ZENITY_CAPTURE_DIR}/stderr"
+    if ! : >"${output_file}" || ! : >"${error_file}"; then
+        rm -rf -- "${ZENITY_CAPTURE_DIR}" || true
+        ZENITY_CAPTURE_DIR=''
+        ZENITY_STATUS=70
+        ZENITY_ERROR='Unable to create the temporary Zenity capture files.'
+        printf -v "${output_variable}" '%s' ''
+        return 0
     fi
+
+    begin_signal_registration
+    zenity "$@" >"${output_file}" 2>"${error_file}" &
+    ZENITY_PID=$!
+    finish_signal_registration
+
+    if [[ $- == *e* ]]; then
+        restore_errexit=true
+    fi
+    set +e
+    wait "${ZENITY_PID}"
+    status=$?
+    if [[ ${restore_errexit} == true ]]; then
+        set -e
+    fi
+    ZENITY_PID=''
 
     if [[ -s ${error_file} ]]; then
-        ZENITY_ERROR=$(<"${error_file}")
+        ZENITY_ERROR=$(tail -c "${ZENITY_CAPTURE_MAX_BYTES}" \
+            -- "${error_file}" 2>/dev/null || true)
     fi
-    rm -f -- "${error_file}"
+    if ! capture_size=$(stat -c '%s' -- "${output_file}" 2>/dev/null) \
+        || [[ ! ${capture_size} =~ ^[0-9]+$ ]]; then
+        status=70
+        ZENITY_ERROR='Unable to inspect Zenity output.'
+    elif ((capture_size > ZENITY_CAPTURE_MAX_BYTES)); then
+        status=70
+        ZENITY_ERROR='Zenity output exceeded the 64 KiB capture limit.'
+    else
+        output=$(<"${output_file}")
+    fi
+    rm -rf -- "${ZENITY_CAPTURE_DIR}" || true
+    ZENITY_CAPTURE_DIR=''
 
     case ${status} in
         0 | 1 | 5)
@@ -202,6 +274,93 @@ process_is_running() {
     fi
 
     return 0
+}
+
+gui_child_is_running() {
+    local pid=$1
+    local process_fields=''
+    local process_parent=''
+    local process_stat=''
+    local process_state=''
+
+    [[ ${pid} =~ ^[1-9][0-9]*$ ]] || return 1
+    if [[ ! -r /proc/${pid}/stat ]]; then
+        return 1
+    fi
+    if ! { IFS= read -r process_stat <"/proc/${pid}/stat"; } 2>/dev/null; then
+        return 1
+    fi
+    process_fields=${process_stat##*) }
+    read -r process_state process_parent _ <<<"${process_fields}"
+    [[ ${process_parent} == "${BASHPID}" &&
+        ${process_state} != Z && ${process_state} != X ]]
+}
+
+signal_gui_children() {
+    local signal_name=$1
+    local child_pid=''
+
+    for child_pid in "${ZENITY_PID}" "${PROGRESS_MONITOR_PID}"; do
+        [[ -n ${child_pid} ]] || continue
+        # Only signal a still-running direct child. An exited/reaped PID must
+        # never be allowed to target an unrelated process after PID reuse.
+        # shellcheck disable=SC2310 # Predicate used to guard signal delivery.
+        if gui_child_is_running "${child_pid}"; then
+            kill "-${signal_name}" -- "${child_pid}" 2>/dev/null || true
+        fi
+    done
+}
+
+gui_children_are_running() {
+    # shellcheck disable=SC2310 # Both predicates intentionally probe liveness.
+    if [[ -n ${ZENITY_PID} ]] && gui_child_is_running "${ZENITY_PID}"; then
+        return 0
+    fi
+    # shellcheck disable=SC2310 # Both predicates intentionally probe liveness.
+    if [[ -n ${PROGRESS_MONITOR_PID} ]] \
+        && gui_child_is_running "${PROGRESS_MONITOR_PID}"; then
+        return 0
+    fi
+    return 1
+}
+
+reap_gui_children() {
+    local child_pid=''
+
+    for child_pid in "${ZENITY_PID}" "${PROGRESS_MONITOR_PID}"; do
+        [[ -n ${child_pid} ]] || continue
+        set +e
+        wait "${child_pid}" 2>/dev/null
+        set -e
+    done
+    ZENITY_PID=''
+    PROGRESS_MONITOR_PID=''
+}
+
+stop_gui_children() {
+    local attempt
+
+    signal_gui_children TERM
+    for ((attempt = 0; attempt < GUI_CHILD_TERM_ATTEMPTS; attempt++)); do
+        # shellcheck disable=SC2310 # This is the bounded shutdown predicate.
+        if ! gui_children_are_running; then
+            reap_gui_children
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    signal_gui_children KILL
+    for ((attempt = 0; attempt < GUI_CHILD_KILL_ATTEMPTS; attempt++)); do
+        # shellcheck disable=SC2310 # This is the bounded shutdown predicate.
+        if ! gui_children_are_running; then
+            reap_gui_children
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    return 1
 }
 
 worker_tree_alive() {
@@ -398,6 +557,10 @@ cleanup() {
     fi
     CLEANUP_DONE=true
 
+    # Close every registered dialog and progress producer first so no GUI child
+    # can delay worker cancellation or keep a private capture file open.
+    signal_gui_children TERM
+
     if [[ -n ${WORKER_PID} || -n ${WORKER_PGID} ]]; then
         # stop_worker reaps the supervisor and retains control of a surviving
         # process group until every descendant has exited.
@@ -409,7 +572,19 @@ cleanup() {
         fi
     fi
 
+    if [[ -n ${ZENITY_PID} || -n ${PROGRESS_MONITOR_PID} ]]; then
+        # shellcheck disable=SC2310 # Failure is reported after bounded KILL.
+        if ! stop_gui_children; then
+            printf 'Warning: a GUI child did not terminate after SIGKILL.\n' >&2
+        fi
+    fi
+
     retain_sanitized_log
+
+    if [[ -n ${ZENITY_CAPTURE_DIR} && -d ${ZENITY_CAPTURE_DIR} ]]; then
+        rm -rf -- "${ZENITY_CAPTURE_DIR}" || true
+    fi
+    ZENITY_CAPTURE_DIR=''
 
     if [[ -n ${TEMP_DIR} && -d ${TEMP_DIR} ]]; then
         rm -rf -- "${TEMP_DIR}" || true
@@ -700,18 +875,6 @@ trim_field() {
     printf '%s' "${value}"
 }
 
-monitor_progress() {
-    local log_file=$1
-    local worker_pid=$2
-    local result_file=$3
-    local profile=$4
-    local output_dir=$5
-
-    bash "${PROGRESS_MONITOR}" \
-        "${log_file}" "${worker_pid}" "${result_file}" "${profile}" \
-        "${output_dir}"
-}
-
 wait_for_worker_pgid() {
     local pgid_file=$1
     local worker_pid=$2
@@ -761,7 +924,7 @@ initialize_gui_environment() {
 
     initialize_gui_paths
 
-    for command_name in bash chmod date dirname grep mkdir mktemp mv realpath rm sed setsid sleep stat tail zenity; do
+    for command_name in bash chmod date dirname grep mkdir mkfifo mktemp mv realpath rm sed setsid sleep stat tail zenity; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             printf 'Error: required command "%s" was not found.\n' \
                 "${command_name}" >&2
@@ -949,6 +1112,12 @@ Path: ${STATE_DIR}"
     fi
     readonly RESULT_FILE="${TEMP_DIR}/result.txt"
     readonly PGID_FILE="${TEMP_DIR}/pgid"
+    PROGRESS_PIPE="${TEMP_DIR}/progress.pipe"
+    readonly PROGRESS_PIPE
+    if ! mkfifo -m 600 -- "${PROGRESS_PIPE}"; then
+        show_error 'Unable to create the private progress pipe.'
+        exit 1
+    fi
     if ! chmod 600 -- "${LOG_FILE}"; then
         show_error 'Unable to secure the private live diagnostic log.'
         exit 1
@@ -1025,27 +1194,39 @@ start_download_worker() {
 
 # Run the progress pipeline, map dialog outcomes, and reap the engine worker.
 run_progress_dialog() {
-    local -a pipeline_status=()
-    local monitor_status
-    local zenity_status
+    local ignored_output=''
+    local monitor_status=0
+    local zenity_status=0
     local worker_status=''
 
-    set +e
-    monitor_progress \
-        "${LOG_FILE}" "${WORKER_PID}" "${RESULT_FILE}" \
-        "${PROGRESS_PROFILE}" "${OUTPUT_DIR}" | zenity --progress \
+    begin_signal_registration
+    zenity --progress \
         --title="${APP_DIALOG_TITLE}" \
         --text='Initializing...' \
         --percentage=0 \
         --auto-close \
         --cancel-label='Cancel' \
-        --width="${PROGRESS_DIALOG_WIDTH}"
-    pipeline_status=("${PIPESTATUS[@]}")
+        --width="${PROGRESS_DIALOG_WIDTH}" <"${PROGRESS_PIPE}" &
+    ZENITY_PID=$!
+    bash "${PROGRESS_MONITOR}" \
+        "${LOG_FILE}" "${WORKER_PID}" "${RESULT_FILE}" \
+        "${PROGRESS_PROFILE}" "${OUTPUT_DIR}" >"${PROGRESS_PIPE}" &
+    PROGRESS_MONITOR_PID=$!
+    finish_signal_registration
+
+    set +e
+    wait "${ZENITY_PID}"
+    zenity_status=$?
     set -e
+    ZENITY_PID=''
+
+    set +e
+    wait "${PROGRESS_MONITOR_PID}"
+    monitor_status=$?
+    set -e
+    PROGRESS_MONITOR_PID=''
 
     # Zenity closing its input is normal; other monitor failures are technical.
-    monitor_status=${pipeline_status[0]:-1}
-    zenity_status=${pipeline_status[1]:-1}
     if ((monitor_status != 0)); then
         # shellcheck disable=SC2310
         if ! stop_worker; then
@@ -1071,11 +1252,11 @@ run_progress_dialog() {
         if ((zenity_status == 1 && worker_status == 0)); then
             zenity_status=0
         elif ((zenity_status == 1)); then
-            zenity --info \
+            run_zenity_capture ignored_output --info \
                 --title="${APP_DIALOG_TITLE}" \
                 --text='The download was canceled.' \
                 --no-markup \
-                --width=420 || true
+                --width=420
             exit 130
         elif ((zenity_status == 5)); then
             show_error 'The progress dialog timed out; the download was stopped.'
@@ -1196,6 +1377,10 @@ ${ZENITY_ERROR}"
 # Convert the worker status into a confirmed success dialog or retained failure.
 handle_worker_result() {
     local confirmed_path=''
+    # shellcheck disable=SC2034 # Assigned indirectly by run_zenity_capture.
+    local ignored_output=''
+    # shellcheck disable=SC2034 # Assigned indirectly by run_zenity_capture.
+    local question_output=''
 
     if ((WORKER_STATUS == 0)); then
         # shellcheck disable=SC2310 # Failure produces a user-facing diagnostic.
@@ -1209,7 +1394,7 @@ handle_worker_result() {
     fi
 
     retain_sanitized_log
-    if zenity --question \
+    run_zenity_capture question_output --question \
         --title='Download failed' \
         --text="The download failed with status ${WORKER_STATUS}.
 
@@ -1217,21 +1402,22 @@ View the log?" \
         --no-markup \
         --ok-label='View log' \
         --cancel-label='Close' \
-        --width=540; then
-        zenity --text-info \
+        --width=540
+    if ((ZENITY_STATUS == 0)); then
+        run_zenity_capture ignored_output --text-info \
             --title="Sanitized diagnostic log - ${APP_NAME}" \
             --filename="${LOG_FILE}" \
             --width=950 \
-            --height=650 || true
+            --height=650
     fi
     exit "${WORKER_STATUS}"
 }
 
 main() {
     trap cleanup EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    trap 'handle_gui_signal 129' HUP
+    trap 'handle_gui_signal 130' INT
+    trap 'handle_gui_signal 143' TERM
 
     initialize_gui_environment
     collect_download_request

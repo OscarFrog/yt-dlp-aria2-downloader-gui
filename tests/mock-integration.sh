@@ -93,7 +93,7 @@ mock_group_enabled() {
 parse_mock_arguments "$@"
 
 for required_command in \
-    awk bash cat chmod date dirname env grep install ln mkdir mktemp mv readlink \
+    awk bash cat chmod date dirname env grep install ln mkdir mkfifo mktemp mv readlink \
     realpath rm setsid sleep stat timeout touch tr flock sha256sum wc python3 find ps; do
     require_test_command "${required_command}"
 done
@@ -127,6 +127,7 @@ GUI_SCENARIO_TIMEOUT_SECONDS=$((10#${GUI_SCENARIO_TIMEOUT_SECONDS}))
 ((GUI_SCENARIO_TIMEOUT_SECONDS >= 1 && GUI_SCENARIO_TIMEOUT_SECONDS <= 120)) || test_error 'MOCK_GUI_SCENARIO_TIMEOUT_SECONDS must be between 1 and 120.'
 readonly GUI_SCENARIO_TIMEOUT_SECONDS
 readonly GUI_UNDER_TEST="${MOCK_BIN}/download-video-gui-under-test"
+readonly GUI_SIGNAL_UNDER_TEST="${MOCK_BIN}/download-video-gui-signal-under-test"
 export MOCK_GUI_REAL="${PROJECT_DIR}/download-video-gui.sh"
 export MOCK_GUI_SCENARIO_TIMEOUT_SECONDS=${GUI_SCENARIO_TIMEOUT_SECONDS}
 mkdir -p -- \
@@ -182,6 +183,34 @@ esac
 exit "${status}"
 EOF_GUI_TIMEOUT
 chmod 0755 -- "${GUI_UNDER_TEST}"
+
+cat >"${GUI_SIGNAL_UNDER_TEST}" <<'EOF_GUI_SIGNAL'
+#!/usr/bin/env python3
+import os
+import signal
+import sys
+
+gui_path = os.environ["MOCK_GUI_REAL"]
+pid_file = os.environ["MOCK_GUI_SIGNAL_PID_FILE"]
+pid_temporary = f"{pid_file}.tmp"
+
+# A command backgrounded by a non-interactive Bash inherits SIGINT ignored.
+# Reset the production-facing signals before exec so the GUI can install the
+# same traps it receives from a desktop launcher or foreground terminal.
+for signal_number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(signal_number, signal.SIG_DFL)
+
+descriptor = os.open(
+    pid_temporary,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+    0o600,
+)
+with os.fdopen(descriptor, "w", encoding="ascii") as pid_stream:
+    pid_stream.write(f"{os.getpid()}\n")
+os.replace(pid_temporary, pid_file)
+os.execvpe("bash", ["bash", gui_path, *sys.argv[1:]], os.environ)
+EOF_GUI_SIGNAL
+chmod 0755 -- "${GUI_SIGNAL_UNDER_TEST}"
 
 cat >"${MOCK_BIN}/yt-dlp" <<'EOF_YTDLP'
 #!/usr/bin/env bash
@@ -932,10 +961,34 @@ wait_for_mock_worker_start() {
     exit 66
 }
 
+block_for_signal() {
+    local mode=$1
+
+    [[ ${MOCK_ZENITY_BLOCK_MODE:-} == "${mode}" ]] || return 0
+    : "${MOCK_ZENITY_STARTED_MARKER:?}"
+    : "${MOCK_ZENITY_TERMINATION_MARKER:?}"
+
+    wait_for_mock_worker_start
+    trap 'printf HUP >"${MOCK_ZENITY_TERMINATION_MARKER}"; exit 129' HUP
+    trap 'printf INT >"${MOCK_ZENITY_TERMINATION_MARKER}"; exit 130' INT
+    trap 'printf TERM >"${MOCK_ZENITY_TERMINATION_MARKER}"; exit 143' TERM
+    printf '%s\n' "${BASHPID}" >"${MOCK_ZENITY_STARTED_MARKER}"
+    while true; do
+        sleep 0.1
+    done
+}
+
 case " $* " in
     *' --entry '*)
+        block_for_signal entry
         if [[ -n ${MOCK_ZENITY_ENTRY_STATUS:-} ]]; then
             exit "${MOCK_ZENITY_ENTRY_STATUS}"
+        fi
+        if [[ -n ${MOCK_ZENITY_ENTRY_OUTPUT_BYTES:-} ]]; then
+            printf -v entry_output '%*s' \
+                "${MOCK_ZENITY_ENTRY_OUTPUT_BYTES}" ''
+            printf '%s' "${entry_output// /X}"
+            exit 0
         fi
         printf '%s\n' \
             "${MOCK_ZENITY_ENTRY_VALUE:-https://example.com/watch?v=abc123}"
@@ -984,6 +1037,7 @@ case " $* " in
         printf '%s\n' "${MOCK_OUTPUT_DIR}"
         ;;
     *' --progress '*)
+        block_for_signal progress
         if [[ -n ${MOCK_ZENITY_PROGRESS_STATUS:-} ]]; then
             IFS= read -r _ || true
 
@@ -1181,6 +1235,17 @@ wait_for_file() {
     done
 
     fail "${label}: file did not appear within ${timeout}s: ${path}"
+}
+
+assert_directory_empty() {
+    local directory=$1
+    local label=$2
+    local unexpected_path=''
+
+    unexpected_path=$(find "${directory}" -mindepth 1 -maxdepth 1 \
+        -print -quit)
+    [[ -z ${unexpected_path} ]] \
+        || fail "${label}: unexpected path remains: ${unexpected_path}"
 }
 
 proc_children_fallback_is_observable() {
@@ -2778,6 +2843,126 @@ test_mock_signal_gui_session() {
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 }
 
+test_mock_signal_gui_blocked_entry() {
+    local controller_pid elapsed_seconds gui_pid gui_status signal_started_at
+    local signal_log signal_pid_file signal_tmpdir zenity_started_marker
+    local zenity_termination_marker
+
+    # Regression guard: a signal sent only to the GUI while the entry dialog is
+    # blocked must interrupt Bash's explicit wait and reap Zenity immediately.
+    signal_tmpdir="${TEST_ROOT}/entry-signal-tmp"
+    signal_pid_file="${TEST_ROOT}/entry-signal-gui.pid"
+    signal_log="${TEST_ROOT}/entry-signal.log"
+    zenity_started_marker="${TEST_ROOT}/entry-zenity-started"
+    zenity_termination_marker="${TEST_ROOT}/entry-zenity-terminated"
+    mkdir -p -- "${signal_tmpdir}"
+    rm -f -- "${signal_pid_file}" "${signal_log}" \
+        "${zenity_started_marker}" "${zenity_termination_marker}"
+    prepare_argument_log 'gui-signal-blocked-entry'
+
+    timeout --preserve-status --signal=TERM --kill-after=2s 8s \
+        env TMPDIR="${signal_tmpdir}" \
+        MOCK_GUI_SIGNAL_PID_FILE="${signal_pid_file}" \
+        MOCK_ZENITY_BLOCK_MODE=entry \
+        MOCK_ZENITY_STARTED_MARKER="${zenity_started_marker}" \
+        MOCK_ZENITY_TERMINATION_MARKER="${zenity_termination_marker}" \
+        "${GUI_SIGNAL_UNDER_TEST}" >"${signal_log}" 2>&1 &
+    controller_pid=$!
+    wait_for_file "${signal_pid_file}" 5 'blocked-entry GUI PID publication'
+    wait_for_file "${zenity_started_marker}" 5 'blocked-entry Zenity startup'
+    IFS= read -r gui_pid <"${signal_pid_file}"
+    [[ ${gui_pid} =~ ^[1-9][0-9]*$ ]] \
+        || fail "Invalid blocked-entry GUI PID: ${gui_pid}"
+
+    signal_started_at=${SECONDS}
+    kill -TERM -- "${gui_pid}"
+    gui_status=0
+    wait "${controller_pid}" || gui_status=$?
+    elapsed_seconds=$((SECONDS - signal_started_at))
+    assert_equals '143' "${gui_status}" 'blocked-entry GUI TERM status'
+    ((elapsed_seconds < 5)) \
+        || fail "Blocked-entry TERM handling took ${elapsed_seconds}s."
+    wait_for_file "${zenity_termination_marker}" 5 \
+        'blocked-entry Zenity receives TERM'
+    assert_file_contains "${zenity_termination_marker}" TERM \
+        'blocked-entry Zenity termination signal'
+    assert_directory_empty "${signal_tmpdir}" \
+        'blocked-entry cleanup left private temporary state'
+    assert_no_test_processes 'blocked-entry TERM left GUI descendants'
+}
+
+test_mock_signal_gui_blocked_progress() {
+    local controller_pid elapsed_seconds expected_status gui_pid gui_status
+    local index signal_log signal_name signal_pid_file signal_started_at
+    local signal_tmpdir worker_started_marker worker_termination_marker
+    local zenity_started_marker zenity_termination_marker
+    local -a expected_statuses=(129 130 143)
+    local -a signal_names=(HUP INT TERM)
+
+    # Regression guard: HUP, INT, and TERM sent only to the GUI during progress
+    # must stop Zenity, the monitor, and the complete worker process group.
+    for index in "${!signal_names[@]}"; do
+        signal_name=${signal_names[index]}
+        expected_status=${expected_statuses[index]}
+        signal_tmpdir="${TEST_ROOT}/progress-signal-${signal_name}"
+        signal_pid_file="${TEST_ROOT}/progress-signal-${signal_name}.pid"
+        signal_log="${TEST_ROOT}/progress-signal-${signal_name}.log"
+        worker_started_marker="${TEST_ROOT}/progress-worker-${signal_name}-started"
+        worker_termination_marker="${TEST_ROOT}/progress-worker-${signal_name}-terminated"
+        zenity_started_marker="${TEST_ROOT}/progress-zenity-${signal_name}-started"
+        zenity_termination_marker="${TEST_ROOT}/progress-zenity-${signal_name}-terminated"
+        mkdir -p -- "${signal_tmpdir}"
+        rm -f -- "${signal_pid_file}" "${signal_log}" \
+            "${worker_started_marker}" "${worker_termination_marker}" \
+            "${zenity_started_marker}" "${zenity_termination_marker}" \
+            "${OUTPUT_DIR}/Mock media [abc123].webm"
+        prepare_argument_log "gui-signal-blocked-progress-${signal_name}"
+
+        timeout --preserve-status --signal=TERM --kill-after=2s 8s \
+            env TMPDIR="${signal_tmpdir}" \
+            MOCK_GUI_SIGNAL_PID_FILE="${signal_pid_file}" \
+            MOCK_PLAN_PROTOCOL='m3u8_native' \
+            MOCK_LONG_DOWNLOAD=1 \
+            MOCK_STARTED_MARKER="${worker_started_marker}" \
+            MOCK_TERMINATION_MARKER="${worker_termination_marker}" \
+            MOCK_ZENITY_BLOCK_MODE=progress \
+            MOCK_ZENITY_WAIT_FOR_WORKER_START=1 \
+            MOCK_ZENITY_STARTED_MARKER="${zenity_started_marker}" \
+            MOCK_ZENITY_TERMINATION_MARKER="${zenity_termination_marker}" \
+            "${GUI_SIGNAL_UNDER_TEST}" >"${signal_log}" 2>&1 &
+        controller_pid=$!
+        wait_for_file "${signal_pid_file}" 5 \
+            "blocked-progress ${signal_name} GUI PID publication"
+        wait_for_file "${worker_started_marker}" 10 \
+            "blocked-progress ${signal_name} worker startup"
+        wait_for_file "${zenity_started_marker}" 5 \
+            "blocked-progress ${signal_name} Zenity startup"
+        IFS= read -r gui_pid <"${signal_pid_file}"
+        [[ ${gui_pid} =~ ^[1-9][0-9]*$ ]] \
+            || fail "Invalid blocked-progress GUI PID: ${gui_pid}"
+
+        signal_started_at=${SECONDS}
+        kill "-${signal_name}" -- "${gui_pid}"
+        gui_status=0
+        wait "${controller_pid}" || gui_status=$?
+        elapsed_seconds=$((SECONDS - signal_started_at))
+        assert_equals "${expected_status}" "${gui_status}" \
+            "blocked-progress GUI ${signal_name} status"
+        ((elapsed_seconds < 5)) \
+            || fail "Blocked-progress ${signal_name} handling took ${elapsed_seconds}s."
+        wait_for_file "${worker_termination_marker}" 5 \
+            "blocked-progress ${signal_name} worker receives TERM"
+        wait_for_file "${zenity_termination_marker}" 5 \
+            "blocked-progress ${signal_name} Zenity receives TERM"
+        assert_file_contains "${zenity_termination_marker}" TERM \
+            "blocked-progress ${signal_name} Zenity termination signal"
+        assert_directory_empty "${signal_tmpdir}" \
+            "blocked-progress ${signal_name} cleanup left temporary state"
+        assert_no_test_processes \
+            "blocked-progress ${signal_name} left GUI descendants"
+    done
+}
+
 test_mock_signal_gui_cancellation() {
     local pgid_delay_marker termination_marker worker_start_marker
 
@@ -2859,12 +3044,22 @@ test_mock_signal_zenity_status() {
         "${GUI_UNDER_TEST}"
     assert_file_contains "${error_capture}" 'Zenity could not display' \
         'Zenity entry error dialog'
+
+    : >"${error_capture}"
+    assert_status 1 'oversized Zenity entry output is rejected' \
+        env MOCK_ZENITY_ENTRY_OUTPUT_BYTES=65537 \
+        MOCK_ERROR_CAPTURE="${error_capture}" \
+        "${GUI_UNDER_TEST}"
+    assert_file_contains "${error_capture}" 'Zenity could not display' \
+        'oversized Zenity entry output dialog'
 }
 
 run_mock_signal_group() {
     test_mock_signal_cli_download
     test_mock_signal_cli_ffmpeg
     test_mock_signal_gui_session
+    test_mock_signal_gui_blocked_entry
+    test_mock_signal_gui_blocked_progress
     test_mock_signal_gui_cancellation
     test_mock_signal_gui_startup_error
     test_mock_signal_zenity_status
@@ -3216,7 +3411,7 @@ test_mock_runtime_missing_zenity() {
     no_zenity_bin="${TEST_ROOT}/no-zenity-bin"
     mkdir -p -- "${no_zenity_bin}"
     for required_command in \
-        bash chmod date dirname grep mkdir mktemp mv realpath rm sed setsid sleep \
+        bash chmod date dirname grep mkdir mkfifo mktemp mv realpath rm sed setsid sleep \
         stat tail timeout flock sha256sum; do
         required_command_path=$(command -v "${required_command}") \
             || fail "Required host command was not found: ${required_command}"

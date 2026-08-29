@@ -1921,6 +1921,18 @@ test_static_release_contracts() {
         'readonly PROGRESS_DIALOG_WIDTH=700' \
         'progress dialog width'
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'readonly ZENITY_CAPTURE_MAX_BYTES=65536' \
+        'captured Zenity output memory bound'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        "zenity \"\$@\" >\"\${output_file}\" 2>\"\${error_file}\" &" \
+        'captured Zenity dialogs run as supervised children'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        "mkfifo -m 600 -- \"\${PROGRESS_PIPE}\"" \
+        'GUI progress uses a private owner-only pipe'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        "trap 'handle_gui_signal 130' INT" \
+        'GUI INT handling uses the supervised signal path'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         'process_is_running() {' \
         'zombie-aware worker liveness check'
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
@@ -1974,9 +1986,13 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'the final MKV already exists; refusing to overwrite it:' \
         'existing HLS MKV files are protected'
+    # shellcheck disable=SC2016 # The static assertion searches literal source.
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
-        "monitor_status=\${pipeline_status[0]:-1}" \
-        'technical progress-monitor status is checked'
+        'wait "${PROGRESS_MONITOR_PID}"' \
+        'the supervised progress monitor is explicitly waited'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'monitor_status=$?' \
+        'technical progress-monitor status is preserved'
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         'final media file could not be confirmed inside the selected destination folder' \
         'GUI result path is constrained to the selected destination'
