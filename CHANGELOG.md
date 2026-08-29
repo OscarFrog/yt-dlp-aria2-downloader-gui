@@ -1,5 +1,14 @@
 ## 2.3.5 - 2026-08-29
 
+### Security
+
+- Isolate every yt-dlp runtime probe from personal configuration, plugins and
+  self-updates, and disable curl configuration before managed downloads.
+- Bind Deno candidates to the exact resolved release, return immutable
+  versioned runtime paths to the engine, preserve those bytes across later
+  activation changes, and reject a symlinked managed XDG application root
+  before creating runtime state.
+
 ### Documentation
 
 - Align every English and French installation example with the immutable
