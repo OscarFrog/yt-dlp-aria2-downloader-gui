@@ -127,7 +127,9 @@ before execution.
 The scheduled `.github/workflows/shfmt-update.yml` workflow detects a newer
 stable upstream release, updates the pin/checksums, reformats all canonical
 shell files, runs the complete validation suite, and opens or refreshes a
-dedicated update pull request.
+dedicated update pull request. Candidate execution has no network or repository
+write authority, verification starts from a fresh read-only checkout, and only
+the final data-only publisher receives repository write permission.
 
 See `SHELL_STYLE.md` for the complete permanent shell-style contract.
 
@@ -142,12 +144,26 @@ for file in "${ALL_SHELL_FILES[@]}"; do
 done
 ```
 
+`SOURCED_SHELL_FILES` and `NO_ERREXIT_SHELL_FILES` make the permitted startup
+option models explicit. `test-static.sh` verifies that those classifications
+remain inside the canonical inventory and that every executable begins with an
+approved top-level `set` declaration. Installed production and cleanup helpers
+target GNU Bash 4.4 or newer; exact minimum-version semantic compatibility also
+remains a review requirement because the supported distro CI environments may
+provide later Bash versions.
+
 ## ShellCheck
 
 ```bash
 source ./tests/lib/project-files.sh
-shellcheck -x -o all "${ALL_SHELL_FILES[@]}"
+shellcheck -x -o all -- "${ALL_SHELL_FILES[@]}"
 ```
+
+ShellCheck is intentionally taken from the supported Ubuntu and Fedora
+environments rather than pinned by the repository. The `-o all` contract means
+new optional diagnostics become enforced when those environments update; fix
+the construct or review an explicit policy change instead of silently retaining
+an older warning set.
 
 The mechanically testable parts of the comment contract are enforced by
 `test-static.sh` (canonical headers and rejection of historical patch/audit

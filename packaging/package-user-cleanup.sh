@@ -15,6 +15,8 @@
 # - symlinked parent components below an authorized XDG root are never crossed;
 # - cleanup failure must not break RPM package removal.
 
+# Do not use errexit here: every cleanup failure is handled explicitly so this
+# best-effort helper cannot abort package removal.
 set -u -o pipefail
 umask 077
 
