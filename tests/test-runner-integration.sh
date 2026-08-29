@@ -3,7 +3,7 @@
 # ==============================================================================
 # Project     : yt-dlp-aria2-downloader-gui
 # File        : tests/test-runner-integration.sh
-# Purpose     : Verify test-runner timing, logging, concurrency, and statuses.
+# Purpose     : Verify test-runner diagnosis, timing, concurrency, and statuses.
 # ==============================================================================
 
 set -euo pipefail
@@ -331,6 +331,95 @@ test_parallel_repeat_runner() {
         'repeat runner reports the exact child failure'
 }
 
+test_run_all_doctor_contract() {
+    local doctor_mock_bin="${TEST_RUNNER_LOG_DIR}/doctor-bin"
+    local doctor_output=''
+    local real_python=''
+    local run_all="${SCRIPT_DIR}/run-all.sh"
+
+    real_python=$(command -v -- python3) \
+        || fail 'doctor test could not resolve the real python3 interpreter'
+    mkdir -p -- "${doctor_mock_bin}"
+    cat >"${doctor_mock_bin}/curl" <<'EOF_MOCK_CURL'
+#!/usr/bin/env bash
+exit "${DOCTOR_MOCK_CURL_STATUS:-0}"
+EOF_MOCK_CURL
+    cat >"${doctor_mock_bin}/python3" <<'EOF_MOCK_PYTHON'
+#!/usr/bin/env bash
+if [[ $* == *'platform.python_version()'* ]]; then
+    printf '3.10.0\n'
+    exit "${DOCTOR_MOCK_PYTHON_VERSION_STATUS:-0}"
+fi
+if [[ $* == *'import socket;'* ]]; then
+    exit "${DOCTOR_MOCK_LOOPBACK_STATUS:-0}"
+fi
+exec "${DOCTOR_REAL_PYTHON:?}" "$@"
+EOF_MOCK_PYTHON
+    chmod 0755 -- "${doctor_mock_bin}/curl" "${doctor_mock_bin}/python3"
+
+    assert_status 0 'doctor emits a ready JSON report' \
+        env \
+        DOCTOR_REAL_PYTHON="${real_python}" \
+        PATH="${doctor_mock_bin}:${PATH}" \
+        "${run_all}" --doctor --json
+    doctor_output=${ASSERT_OUTPUT}
+    if ! python3 - "${doctor_output}" <<'PY_READY_DOCTOR'; then
+import json
+import sys
+
+report = json.loads(sys.argv[1])
+checks = {item["id"]: item for item in report["checks"]}
+assert report["schema_version"] == 1
+assert report["ready"] is True
+assert report["required"]["failed"] == 0
+assert checks["python-version"]["status"] == "pass"
+assert checks["loopback-bind"]["status"] == "pass"
+assert checks["external-https"]["status"] == "pass"
+PY_READY_DOCTOR
+        fail 'doctor ready report is invalid or incomplete'
+    fi
+
+    assert_status 0 'doctor keeps external HTTPS optional' \
+        env \
+        DOCTOR_MOCK_CURL_STATUS=1 \
+        DOCTOR_REAL_PYTHON="${real_python}" \
+        PATH="${doctor_mock_bin}:${PATH}" \
+        "${run_all}" --doctor --json
+    doctor_output=${ASSERT_OUTPUT}
+    if ! python3 - "${doctor_output}" <<'PY_OFFLINE_DOCTOR'; then
+import json
+import sys
+
+report = json.loads(sys.argv[1])
+checks = {item["id"]: item for item in report["checks"]}
+assert report["ready"] is True
+assert report["optional"]["missing"] == 1
+assert checks["external-https"]["status"] == "missing"
+PY_OFFLINE_DOCTOR
+        fail 'doctor optional-network report is invalid'
+    fi
+
+    assert_status 69 'doctor fails closed when loopback binding is blocked' \
+        env \
+        DOCTOR_MOCK_LOOPBACK_STATUS=1 \
+        DOCTOR_REAL_PYTHON="${real_python}" \
+        PATH="${doctor_mock_bin}:${PATH}" \
+        "${run_all}" --doctor --json
+    doctor_output=${ASSERT_OUTPUT}
+    if ! python3 - "${doctor_output}" <<'PY_BLOCKED_DOCTOR'; then
+import json
+import sys
+
+report = json.loads(sys.argv[1])
+checks = {item["id"]: item for item in report["checks"]}
+assert report["ready"] is False
+assert report["required"]["failed"] == 1
+assert checks["loopback-bind"]["status"] == "fail"
+PY_BLOCKED_DOCTOR
+        fail 'doctor blocked-loopback report is invalid'
+    fi
+}
+
 main() {
     local duration=''
     local first_log
@@ -344,7 +433,7 @@ main() {
     local failure_completion
     local status=0
 
-    for command_name in bash env mkdir mktemp python3 rm sleep timeout; do
+    for command_name in bash cat chmod env mkdir mktemp python3 rm sleep timeout; do
         require_test_command "${command_name}"
     done
 
@@ -435,6 +524,7 @@ main() {
     test_startup_signal_registration_stress
     test_startup_signal_final_transition
     test_parallel_repeat_runner
+    test_run_all_doctor_contract
 
     printf 'Test-runner integration passed.\n'
 }

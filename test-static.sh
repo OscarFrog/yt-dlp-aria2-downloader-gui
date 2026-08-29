@@ -463,6 +463,90 @@ assert_repository_skills_are_discoverable() {
     done
 }
 
+assert_codex_rules_are_conservative() {
+    local rules_file="${SCRIPT_DIR}/.codex/rules/default.rules"
+    local first_line=''
+    local required_fragment=''
+    local -a required_fragments=(
+        'decision = "prompt"'
+        'decision = "forbidden"'
+        'pattern = ["git", "push"]'
+        'pattern = ["gh", "pr", "merge"]'
+        'pattern = ["gh", "release",'
+        'pattern = ["gh", "workflow", "run"]'
+        'Never force-push main'
+        'match = ['
+        'not_match = ['
+    )
+
+    if [[ ! -f ${rules_file} || -L ${rules_file} || ! -r ${rules_file} ]]; then
+        printf 'FAIL: Codex execution policy is absent or unsafe.\n' >&2
+        return 65
+    fi
+    if ! IFS= read -r first_line <"${rules_file}"; then
+        printf 'FAIL: unable to read the Codex execution policy.\n' >&2
+        return 65
+    fi
+    if [[ ${first_line} != '# SPDX-License-Identifier: MIT' ]]; then
+        printf 'FAIL: Codex execution policy lacks its SPDX header.\n' >&2
+        return 65
+    fi
+
+    assert_file_not_contains "${rules_file}" \
+        'decision = "allow"' \
+        'project Codex policy never grants unconditional execution'
+    for required_fragment in "${required_fragments[@]}"; do
+        assert_file_contains "${rules_file}" \
+            "${required_fragment}" \
+            "Codex execution policy contains ${required_fragment}"
+    done
+}
+
+assert_contribution_templates_are_structured() {
+    local issue_template="${SCRIPT_DIR}/.github/ISSUE_TEMPLATE/codex-task.yml"
+    local pull_request_template="${SCRIPT_DIR}/.github/pull_request_template.md"
+    local required_fragment=''
+    local template_file=''
+    local -a issue_fragments=(
+        'name: Codex task'
+        'id: objective'
+        'id: acceptance_criteria'
+        'id: invariants'
+        'id: out_of_scope'
+        'id: validation'
+        'id: external_authority'
+        'Do not include secrets'
+    )
+    local -a pull_request_fragments=(
+        '## Summary'
+        '## Contract and risk'
+        '## Validation'
+        '## Repository coherence'
+        './tests/run-all.sh --full --jobs 4'
+        'REPOSITORY_FILES.md'
+        'No external mutation'
+    )
+
+    for template_file in "${issue_template}" "${pull_request_template}"; do
+        if [[ ! -f ${template_file} || -L ${template_file} ||
+            ! -r ${template_file} ]]; then
+            printf 'FAIL: contribution template is absent or unsafe: %s.\n' \
+                "${template_file#"${SCRIPT_DIR}/"}" >&2
+            return 65
+        fi
+    done
+    for required_fragment in "${issue_fragments[@]}"; do
+        assert_file_contains "${issue_template}" \
+            "${required_fragment}" \
+            "Codex issue form contains ${required_fragment}"
+    done
+    for required_fragment in "${pull_request_fragments[@]}"; do
+        assert_file_contains "${pull_request_template}" \
+            "${required_fragment}" \
+            "pull-request template contains ${required_fragment}"
+    done
+}
+
 cleanup_static_test() {
     local scratch_file=''
 
@@ -1135,7 +1219,7 @@ assert_shfmt_update_workflow_policy() {
 }
 
 test_static_tooling_contracts() {
-    local engine_phase gui_phase mock_engine_group mock_engine_suite
+    local doctor_phase engine_phase gui_phase mock_engine_group mock_engine_suite
     local mock_gui_group mock_gui_suite mock_phase
     local mock_runtime_group mock_runtime_suite
     local runtime_phase scheduler_phase shfmt_phase signal_phase static_phase
@@ -1144,6 +1228,8 @@ test_static_tooling_contracts() {
     assert_source_inventory_is_canonical
     assert_repository_file_inventory_is_canonical
     assert_repository_skills_are_discoverable
+    assert_codex_rules_are_conservative
+    assert_contribution_templates_are_structured
     assert_shell_policy_lists_are_canonical
     assert_unique_source_file_list PYTHON_FILES "${PYTHON_FILES[@]}"
     assert_workflow_dependencies_are_hardened
@@ -1216,6 +1302,24 @@ test_static_tooling_contracts() {
     assert_file_contains "${SCRIPT_DIR}/tests/run-all.sh" \
         'bash -- ./scripts/check-shell-format.sh' \
         'run-all enforces shfmt before behavioral validation'
+    for doctor_phase in \
+        record_doctor_check \
+        doctor_check_language_versions \
+        doctor_check_shfmt_contract \
+        doctor_probe_private_temp \
+        doctor_probe_loopback \
+        doctor_probe_procfs \
+        doctor_probe_network \
+        doctor_report_repository_state \
+        print_doctor_json \
+        run_doctor; do
+        assert_file_contains "${SCRIPT_DIR}/tests/run-all.sh" \
+            "${doctor_phase}() {" \
+            "doctor diagnostic phase ${doctor_phase}"
+    done
+    assert_file_contains "${SCRIPT_DIR}/tests/run-all.sh" \
+        '"schema_version": 1' \
+        'doctor JSON exposes a versioned schema'
     # shellcheck disable=SC2016 # Literal validation command, not local expansion.
     assert_file_contains "${SCRIPT_DIR}/tests/run-all.sh" \
         'shellcheck -x -o all -- "${static_shell_files_ref[@]}"' \
@@ -1252,6 +1356,10 @@ test_static_tooling_contracts() {
     done
     assert_status 2 'run-all rejects conflicting validation profiles' \
         "${SCRIPT_DIR}/tests/run-all.sh" --fast --full
+    assert_status 2 'run-all rejects JSON outside doctor mode' \
+        "${SCRIPT_DIR}/tests/run-all.sh" --json
+    assert_status 2 'run-all rejects doctor/list mode mixing' \
+        "${SCRIPT_DIR}/tests/run-all.sh" --doctor --list
     assert_status 2 'run-all rejects zero integration concurrency' \
         "${SCRIPT_DIR}/tests/run-all.sh" --jobs 0 --list
     assert_status 0 'mock integration lists its parallel-safe groups' \
