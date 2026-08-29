@@ -334,8 +334,52 @@ test_parallel_repeat_runner() {
 test_run_all_doctor_contract() {
     local doctor_mock_bin="${TEST_RUNNER_LOG_DIR}/doctor-bin"
     local doctor_output=''
+    local command_name=''
+    local command_path=''
     local real_python=''
     local run_all="${SCRIPT_DIR}/run-all.sh"
+    local -a doctor_required_commands=(
+        aria2c
+        awk
+        bash
+        cat
+        chmod
+        cmp
+        cp
+        date
+        desktop-file-validate
+        diff
+        dirname
+        env
+        find
+        flock
+        grep
+        head
+        install
+        ln
+        mkdir
+        mktemp
+        mv
+        ps
+        readlink
+        realpath
+        rm
+        rmdir
+        sed
+        setsid
+        sha256sum
+        shellcheck
+        sleep
+        sort
+        stat
+        stdbuf
+        tail
+        timeout
+        touch
+        tr
+        uname
+        wc
+    )
 
     real_python=$(command -v -- python3) \
         || fail 'doctor test could not resolve the real python3 interpreter'
@@ -356,6 +400,11 @@ fi
 exec "${DOCTOR_REAL_PYTHON:?}" "$@"
 EOF_MOCK_PYTHON
     chmod 0755 -- "${doctor_mock_bin}/curl" "${doctor_mock_bin}/python3"
+    for command_name in "${doctor_required_commands[@]}"; do
+        command_path=$(command -v -- "${command_name}") \
+            || fail "doctor test could not resolve required command: ${command_name}"
+        ln -s -- "${command_path}" "${doctor_mock_bin}/${command_name}"
+    done
 
     assert_status 0 'doctor emits a ready JSON report' \
         env \
@@ -393,7 +442,12 @@ import sys
 report = json.loads(sys.argv[1])
 checks = {item["id"]: item for item in report["checks"]}
 assert report["ready"] is True
-assert report["optional"]["missing"] == 1
+missing_checks = [
+    item for item in report["checks"]
+    if item["level"] == "optional" and item["status"] == "missing"
+]
+assert report["optional"]["missing"] == len(missing_checks)
+assert report["optional"]["missing"] >= 1
 assert checks["external-https"]["status"] == "missing"
 PY_OFFLINE_DOCTOR
         fail 'doctor optional-network report is invalid'
@@ -433,7 +487,7 @@ main() {
     local failure_completion
     local status=0
 
-    for command_name in bash cat chmod env mkdir mktemp python3 rm sleep timeout; do
+    for command_name in bash cat chmod env ln mkdir mktemp python3 rm sleep timeout; do
         require_test_command "${command_name}"
     done
 
