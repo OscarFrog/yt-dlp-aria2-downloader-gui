@@ -245,9 +245,11 @@ if [[ ${MOCK_GUI_SIGNAL_BEFORE_WORKER_REGISTRATION:-0} == 1 ]]; then
         trap - DEBUG
         printf '%s\n' "${launched_pid}" \
             >"${MOCK_WORKER_PRE_REGISTRATION_MARKER}"
-        while [[ ${DEFERRED_SIGNAL_STATUS:-} != 143 ]]; do
-            sleep 0.01 || true
-        done
+        # Stop after publishing the child PID so the controller can queue TERM
+        # at this exact point. Unlike waiting for DEFERRED_SIGNAL_STATUS here,
+        # SIGSTOP does not require Bash to run a signal trap recursively from
+        # inside this DEBUG trap (which Bash 5.2 deliberately postpones).
+        kill -STOP -- "${BASHPID}"
     }
 
     set -T
@@ -1279,6 +1281,28 @@ wait_for_file() {
     done
 
     fail "${label}: file did not appear within ${timeout}s: ${path}"
+}
+
+wait_for_stopped_process() {
+    local pid=$1
+    local timeout=$2
+    local label=$3
+    local deadline=$((SECONDS + timeout))
+    local process_state=''
+    local stat_record=''
+
+    while ((SECONDS < deadline)); do
+        if IFS= read -r stat_record <"/proc/${pid}/stat"; then
+            # /proc/PID/stat encloses the command name in parentheses. Strip
+            # through its final ") " before reading the one-letter state.
+            stat_record=${stat_record##*) }
+            process_state=${stat_record%% *}
+            [[ ${process_state} == T || ${process_state} == t ]] && return 0
+        fi
+        sleep 0.01
+    done
+
+    fail "${label}: process ${pid} did not stop within ${timeout}s"
 }
 
 assert_directory_empty() {
@@ -2977,9 +3001,12 @@ test_mock_signal_gui_worker_registration() {
     IFS= read -r gui_pid <"${gui_pid_file}"
     [[ ${gui_pid} =~ ^[1-9][0-9]*$ ]] \
         || fail "Invalid worker pre-registration GUI PID: ${gui_pid}"
+    wait_for_stopped_process "${gui_pid}" 5 \
+        'worker pre-registration signal injection point'
 
     signal_started_at=$(date +%s%3N)
     kill -TERM -- "${gui_pid}"
+    kill -CONT -- "${gui_pid}"
     gui_status=0
     wait "${controller_pid}" || gui_status=$?
     signal_finished_at=$(date +%s%3N)
