@@ -325,6 +325,26 @@ assert_main_entry_structure() {
     return 0
 }
 
+assert_file_fragments_ordered() {
+    (($# >= 3)) || return 2
+    local source_file=$1
+    local assertion_label=$2
+    local fragment=''
+    local remaining_source=''
+    shift 2
+
+    remaining_source=$(<"${source_file}")
+    for fragment in "$@"; do
+        if [[ ${remaining_source} != *"${fragment}"* ]]; then
+            printf 'FAIL: ordered source contract is absent (%s): %s\n' \
+                "${assertion_label}" "${fragment}" >&2
+            return 65
+        fi
+        remaining_source=${remaining_source#*"${fragment}"}
+    done
+    return 0
+}
+
 # Permanent shell comments use durable terminology.
 assert_no_historical_comment_labels() {
     local relative_path=$1
@@ -1925,6 +1945,18 @@ test_static_release_contracts() {
         'readonly PROGRESS_DIALOG_WIDTH=700' \
         'progress dialog width'
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'readonly ZENITY_CAPTURE_MAX_BYTES=65536' \
+        'captured Zenity output memory bound'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        "zenity \"\$@\" >\"\${output_file}\" 2>\"\${error_file}\" &" \
+        'captured Zenity dialogs run as supervised children'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        "mkfifo -m 600 -- \"\${PROGRESS_PIPE}\"" \
+        'GUI progress uses a private owner-only pipe'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        "trap 'handle_gui_signal 130' INT" \
+        'GUI INT handling uses the supervised signal path'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         'process_is_running() {' \
         'zombie-aware worker liveness check'
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
@@ -1978,9 +2010,13 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'the final MKV already exists; refusing to overwrite it:' \
         'existing HLS MKV files are protected'
+    # shellcheck disable=SC2016 # The static assertion searches literal source.
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
-        "monitor_status=\${pipeline_status[0]:-1}" \
-        'technical progress-monitor status is checked'
+        'wait "${PROGRESS_MONITOR_PID}"' \
+        'the supervised progress monitor is explicitly waited'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'monitor_status=$?' \
+        'technical progress-monitor status is preserved'
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         'final media file could not be confirmed inside the selected destination folder' \
         'GUI result path is constrained to the selected destination'
@@ -2638,6 +2674,9 @@ test_static_application_contracts() {
     assert_file_contains "${SCRIPT_DIR}/tests/test-runner-integration.sh" \
         'YTDLP_ARIA2_TEST_CHILD_TOKEN' \
         'test runner stress binds PID checks to fixture identity'
+    assert_file_not_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+        'timeout --preserve-status' \
+        'GUI signal watchdog expiry remains distinguishable as status 124'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'readonly YTDLP_NO_PLUGINS=1' \
         'yt-dlp plugins disabled by default'
@@ -2721,6 +2760,17 @@ test_static_application_contracts() {
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         'YTDLP_ARIA2_SUPERVISED_SESSION=true' \
         'GUI requests reuse of its single process session without a public option'
+    # A worker must be protected before it is forked and remain protected until
+    # its direct-child PID is registered. Reordering either boundary reopens a
+    # signal window even if the individual calls remain present.
+    assert_file_fragments_ordered \
+        "${SCRIPT_DIR}/download-video-gui.sh" \
+        'GUI worker signal-registration boundaries' \
+        'start_download_worker() {' \
+        '    begin_signal_registration' \
+        '    YTDLP_ARIA2_SUPERVISED_SESSION=true LC_ALL=C setsid' \
+        '    WORKER_PID=$!' \
+        '    finish_signal_registration'
     for gui_phase in \
         initialize_gui_paths \
         initialize_gui_environment \

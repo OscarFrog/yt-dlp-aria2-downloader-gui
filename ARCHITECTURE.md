@@ -71,10 +71,13 @@ public command.
 4. Start `download-video.sh` in a dedicated session with
    `setsid --fork --wait`. The URL is passed through `--url-file`, not through
    the engine argument vector.
-5. Feed the private live log to `progress-monitor.sh`, which emits Zenity's
-   numeric/text protocol without learning or displaying the media URL.
-6. On cancellation or failure, signal and reap the complete worker process
-   group, escalating within bounded waits when necessary.
+5. Feed the private live log to a separately supervised
+   `progress-monitor.sh`, which emits Zenity's numeric/text protocol through a
+   private mode-`0600` FIFO without learning or displaying the media URL.
+6. Run captured Zenity dialogs as registered children with 64 KiB in-memory
+   ingestion bounds. On cancellation, HUP, INT, TERM, or failure, signal and
+   reap Zenity, the monitor, and the complete worker process group, escalating
+   within bounded waits when necessary.
 7. Accept success only when the worker succeeded and the private result record
    names a valid final path. Retain a sanitized diagnostic log only when useful;
    when its source exceeds 8 MiB, discard the first potentially partial tail

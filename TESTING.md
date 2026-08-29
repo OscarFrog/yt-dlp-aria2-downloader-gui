@@ -237,6 +237,15 @@ The automated suite checks, among other things:
 - atomic process-group publication, bounded cancellation tests, explicit
   progress-pipe closure, termination, and verification that no worker process
   remains after GUI scenarios;
+- direct HUP, INT, and TERM delivery to the sole GUI PID while either the URL
+  entry or progress dialog is blocked, with exact 129/130/143 statuses, bounded
+  Zenity/monitor/worker reaping, and no private temporary path left behind;
+- deterministic TERM injection after the worker fork but immediately before
+  `WORKER_PID` registration, proving that the launched supervisor is still
+  registered, terminated, and reaped without leaving private temporary state;
+- independent progress-monitor and Zenity statuses across the private
+  owner-only FIFO, plus 64 KiB accepted-stdout and in-memory stderr bounds for
+  captured dialogs;
 - process-group recovery when PGID-file publication is delayed;
 - atomic publication and failure cleanup of the result-path file;
 - rejection of a second writer targeting the same canonical output directory;
@@ -397,10 +406,19 @@ truncation immediately before final validation and requires exit 65 with no
 published result-file. The mock suite separately qualifies the tail threshold.
 
 Race-sensitive qualification continues to repeat process-group cancellation,
-PGID publication, quiescence, and clean-restart scenarios. A theoretical signal
-window between asynchronous process creation and Bash's `$!` assignment is kept
-under stress observation; production supervision is not made more complex until
-a surviving descendant is reproduced.
+PGID publication, quiescence, and clean-restart scenarios. Every asynchronous
+GUI-child launch uses a short signal-registration critical section: the first
+HUP, INT, or TERM received before the relevant PIDs are recorded is deferred,
+then replayed immediately after registration so cleanup never loses a child.
+The mock signal group exercises the worker boundary with the production
+registration and cleanup functions in the exact launch-handler-PID-replay
+order. A static ordered-source assertion binds that composed regression to
+`start_download_worker`; adjacent blocked-entry and blocked-progress scenarios
+independently deliver real HUP, INT, and TERM signals. Their outer watchdogs
+retain timeout status 124, so a watchdog-delivered TERM cannot impersonate the
+original signal. This separation avoids the version-specific semantics of
+delivering a signal from inside Bash's `DEBUG` trap while retaining both
+behavioral guarantees.
 
 ## GitHub Actions
 
@@ -506,10 +524,15 @@ Run one documented scenario at a time:
 ```bash
 bash ./tests/zenity-real-session-qualification.sh success
 bash ./tests/zenity-real-session-qualification.sh cancel-transfer
+bash ./tests/zenity-real-session-qualification.sh signal-entry
+bash ./tests/zenity-real-session-qualification.sh signal-progress
 ```
 
 The accepted scenarios are `success`, `error`, `cancel-transfer`,
-`cancel-ffmpeg`, `cancel-success-race`, `new-download`, and `open-folder`.
+`cancel-ffmpeg`, `cancel-success-race`, `new-download`, `open-folder`,
+`signal-entry`, and `signal-progress`. The signal scenarios send TERM only to
+the GUI PID after the operator confirms that the requested real Zenity window
+is active; they require status 143 and no residual process or visible window.
 The harness prints the exact operator steps and records environment versions,
 process topology, exit state, potential URL exposure in process arguments, and
 residual descendants. Its default output is under

@@ -15,6 +15,21 @@
   inputs without blocking or partially applying them; accept at most 64 KiB
   and 128 lines before atomically publishing loaded settings.
 
+### GUI process reliability
+
+- Run every captured Zenity dialog as a registered child and connect the
+  progress monitor and progress dialog through a private mode-`0600` FIFO, so
+  their independent statuses can be waited and preserved explicitly.
+- Handle HUP, INT, and TERM immediately while a dialog or progress session is
+  blocked; close, bound, signal, and reap all GUI children and the worker group
+  without leaving temporary Zenity captures or changing 129/130/143 statuses.
+- Accept at most 64 KiB from captured Zenity stdout, ingest at most the final
+  64 KiB of stderr diagnostics, and preserve the first signal received while
+  registering the worker supervisor, a captured dialog, or the progress pair.
+- Return explicit worker-liveness statuses so Bash 5.2 cleanup entered through
+  the negated EXIT-trap condition cannot mistake a live pre-PGID supervisor for
+  a terminated worker and block while waiting without first signaling it.
+
 ### Documentation
 
 - Align every English and French installation example with the immutable
