@@ -1,5 +1,20 @@
 ## 2.3.5 - 2026-08-29
 
+### Security and state robustness
+
+- Isolate every yt-dlp runtime probe from personal configuration, plugins and
+  self-updates, and disable curl configuration before managed downloads.
+- Bind Deno candidates to the exact resolved release, return immutable
+  versioned runtime paths to the engine, preserve those bytes across later
+  activation changes, and reject a symlinked managed XDG application root
+  before creating runtime state.
+- Prevent retained-log truncation from exposing a secret-bearing URL suffix by
+  discarding the single potentially partial line at the 8 MiB boundary before
+  redaction, then enforcing the final size limit again after sanitization.
+- Ignore non-regular, symbolic-link, oversized, or overlong GUI configuration
+  inputs without blocking or partially applying them; accept at most 64 KiB
+  and 128 lines before atomically publishing loaded settings.
+
 ### GUI process reliability
 
 - Run every captured Zenity dialog as a registered child and connect the
@@ -20,6 +35,12 @@
 - Align every English and French installation example with the immutable
   v2.3.4 RPM, DEB and ZIP, while opening the next development version so its
   package identity cannot collide with the published release tag.
+
+### Test reliability
+
+- Synchronize the startup-signal stress test with the sender acknowledgement,
+  allowing Bash 5.2 to dispatch a pending trap after the `DEBUG` hook returns
+  while still proving that the signal preceded complete child registration.
 
 ### Repository maintenance
 

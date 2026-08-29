@@ -308,8 +308,12 @@ The automated suite checks, among other things:
 - an unsafe helper mutation proving the cross-origin credential-replay risk when
   that native-fallback guard is removed, while protected runs keep secrets out
   of aria2 argv and captured output;
-- retained-log URL redaction, an 8 MiB retained-size limit, and private live
+- retained-log URL redaction even when the 8 MiB boundary crosses a
+  secret-bearing URL, a strict final retained-size limit, and private live
   diagnostics kept under the runtime temporary directory;
+- GUI configuration acceptance at the exact 64 KiB and 128-line limits,
+  atomic fallback above either limit, and non-blocking replacement of FIFO or
+  symbolic-link configuration paths;
 - complete-video rejection when either the video or audio stream is absent,
   plus audio-mode rejection when a content-video stream remains in the final file;
 - real MP3/ID3 attached-cover qualification proving the combined JSON summary
@@ -337,10 +341,13 @@ The automated suite checks, among other things:
   yt-dlp `.part` resumption remains available when supported upstream;
 - managed-runtime operation with Deno outside PATH, bounded lock/network waits,
   strict zero-network `require` mode, exact-tag stable/nightly/stable switching,
-  exact executable-version binding to the resolved yt-dlp release tag,
-  single-member Deno archive extraction, a versioned engine attestation that
-  avoids duplicate path/version/capability discovery, explicit invalid-`path`
-  and invalid-`prepare` diagnostics,
+  isolation from personal curl/yt-dlp configuration and yt-dlp plugins, exact
+  executable-version binding to the resolved yt-dlp and Deno release tags,
+  single-member Deno archive extraction, immutable attested paths that survive
+  later activation changes, rejection of a symlinked managed XDG application
+  root, and a versioned engine attestation that avoids duplicate
+  path/version/capability discovery, explicit invalid-`path` and
+  invalid-`prepare` diagnostics,
   lock-descriptor isolation, repeated contention/double-rollback coverage
   (three cycles in ordinary validation and ten per dedicated stress run),
   interrupted-activation journal recovery, explicit/automatic rollback, and

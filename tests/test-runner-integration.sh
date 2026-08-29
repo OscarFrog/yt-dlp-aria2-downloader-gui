@@ -39,6 +39,8 @@ set -T
 source "$1"
 marker=$2
 registration_gate=$3
+signal_sent_gate=$4
+unregistered_signal_gate=$5
 runner_pid=$BASHPID
 
 _test_runner_exec_child() {
@@ -50,7 +52,8 @@ _test_runner_exec_child() {
         sleep 0.001
     done
     [[ -e ${registration_gate} ]] || exit 70
-    kill -INT -- "${runner_pid}"
+    kill -INT -- "${runner_pid}" || exit 71
+    : >"${signal_sent_gate}"
     exec sleep 30
 }
 
@@ -77,15 +80,28 @@ startup_debug_gate() {
     if [[ ${BASH_COMMAND} == 'child_pid=$!' ]]; then
         : >"${registration_gate}"
         for ((attempt = 0; attempt < 2000; attempt++)); do
-            [[ -n ${TEST_RUNNER_DEFERRED_SIGNAL} ]] && return 0
+            # Bash 5.2 may retain the pending INT until this DEBUG trap
+            # returns. Wait for the sender's acknowledgement instead of
+            # requiring the nested signal trap to have run already.
+            [[ -e ${signal_sent_gate} ]] && return 0
             sleep 0.001 || true
         done
         return 70
     fi
 }
 
+startup_signal_handler() {
+    # Prove that INT was observed while the child arrays were still incomplete;
+    # a later, ordinary signal would not exercise startup deferral.
+    if [[ ${TEST_RUNNER_STARTING_CHILD} == true &&
+        -z ${TEST_RUNNER_CHILD_PIDS[0]:-} ]]; then
+        : >"${unregistered_signal_gate}"
+    fi
+    test_runner_handle_signal INT 130
+}
+
 trap startup_debug_gate DEBUG
-trap 'test_runner_handle_signal INT 130' INT
+trap startup_signal_handler INT
 trap 'test_runner_handle_signal TERM 143' TERM
 test_runner_initialize
 test_runner_start_child 0 '' bash -c 'exit 0'
@@ -118,6 +134,8 @@ with tempfile.TemporaryDirectory(prefix="runner-startup-stress-") as temp_dir:
     for iteration in range(30):
         marker = root / f"child-{iteration}.pid"
         registration_gate = root / f"registration-{iteration}.ready"
+        signal_sent_gate = root / f"signal-sent-{iteration}.ready"
+        unregistered_signal_gate = root / f"signal-unregistered-{iteration}.ready"
         fixture_env = os.environ.copy()
         fixture_env["YTDLP_ARIA2_TEST_CHILD_TOKEN"] = str(marker)
         process = subprocess.Popen(
@@ -129,6 +147,8 @@ with tempfile.TemporaryDirectory(prefix="runner-startup-stress-") as temp_dir:
                 str(library),
                 str(marker),
                 str(registration_gate),
+                str(signal_sent_gate),
+                str(unregistered_signal_gate),
             ],
             env=fixture_env,
             stdout=subprocess.DEVNULL,
@@ -160,6 +180,11 @@ with tempfile.TemporaryDirectory(prefix="runner-startup-stress-") as temp_dir:
             if not child_pid:
                 raise AssertionError(
                     f"startup signal iteration {iteration} published no child PID"
+                )
+            if not unregistered_signal_gate.exists():
+                raise AssertionError(
+                    f"startup signal iteration {iteration} was not observed "
+                    "before child-array registration"
                 )
             if running(child_pid, marker):
                 raise AssertionError(

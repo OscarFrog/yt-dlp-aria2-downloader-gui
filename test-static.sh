@@ -1650,7 +1650,7 @@ test_static_python_interface_contracts() {
 
 test_static_shell_interface_contracts() {
     local file installer_phase installer_test_phase required_probe
-    local -a engine_locale_probes
+    local -a engine_probe_contracts
 
     for file in "${ALL_SHELL_FILES[@]}"; do
         assert_standard_shell_header "${file}"
@@ -1747,20 +1747,24 @@ test_static_shell_interface_contracts() {
         'GUI worker locale stabilization'
 
     # shellcheck disable=SC2016 # Literal source probes; do not expand variables here.
-    engine_locale_probes=(
-        'LC_ALL=C "${YTDLP_BIN}" --version'
-        'LC_ALL=C "${YTDLP_BIN}" --help'
+    engine_probe_contracts=(
+        '--ignore-config --no-plugin-dirs --no-update --version'
+        '--ignore-config --no-plugin-dirs --no-update --help'
         'LC_ALL=C "${DENO_BIN}" --version'
         'LC_ALL=C aria2c --version'
         'LC_ALL=C aria2c --help=#all'
     )
 
-    for required_probe in "${engine_locale_probes[@]}"; do
+    for required_probe in "${engine_probe_contracts[@]}"; do
         assert_file_contains \
             "${SCRIPT_DIR}/download-video.sh" \
             "${required_probe}" \
-            "locale-stabilized probe ${required_probe}"
+            "engine probe contract ${required_probe}"
     done
+    # shellcheck disable=SC2016 # Literal source probe.
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        'LC_ALL=C "${YTDLP_BIN}"' \
+        'yt-dlp probes use a stable locale before parsing output'
 
     assert_file_contains \
         "${SCRIPT_DIR}/download-video-gui.sh" \
@@ -3289,6 +3293,8 @@ test_static_runtime_regression_contracts() {
         test_oversized_deno_versions \
         test_invalid_runtime_path \
         test_mismatched_ytdlp_candidate \
+        test_mismatched_deno_candidate \
+        test_symlinked_managed_data_root \
         test_signature_failure_bootstrap \
         test_fresh_runtime_bootstrap \
         test_no_network_require \

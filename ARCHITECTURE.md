@@ -62,8 +62,10 @@ public command.
 
 1. Resolve safe XDG configuration and state paths and validate required host
    commands, adjacent engine files, and `setsid` capabilities.
-2. Collect the URL, profile, and destination with Zenity. Persist only the
-   destination and selected profile in `gui.conf`; never persist the URL.
+2. Load `gui.conf` only when it is a regular non-symbolic-link file within the
+   64 KiB and 128-line limits. Collect the URL, profile, and destination with
+   Zenity, then persist only the destination and selected profile; never
+   persist the URL.
 3. Create a private temporary session containing a mode-`0600` URL file, live
    log, result record, and process-group record.
 4. Start `download-video.sh` in a dedicated session with
@@ -77,7 +79,9 @@ public command.
    reap Zenity, the monitor, and the complete worker process group, escalating
    within bounded waits when necessary.
 7. Accept success only when the worker succeeded and the private result record
-   names a valid final path. Retain a sanitized diagnostic log only when useful.
+   names a valid final path. Retain a sanitized diagnostic log only when useful;
+   when its source exceeds 8 MiB, discard the first potentially partial tail
+   line before URL redaction and enforce the size bound again afterward.
 
 The GUI recognizes legacy audio-profile values solely to migrate old settings
 to the current single native-audio profile.
@@ -161,8 +165,11 @@ Each component has immutable version directories and a `current` activation
 link. Updates are serialized with a lock, candidates are downloaded into
 private work areas, authenticated or checksum-verified according to the
 component contract, and validated for exact version and required capabilities
-before activation. Activation uses a journal so interrupted link changes can be
-recovered; a validated previous version remains available for rollback.
+before activation. Personal curl and yt-dlp configuration and yt-dlp plugins
+cannot alter these probes or downloads. Engine attestations name the validated
+immutable version paths rather than the mutable activation links. Activation
+uses a journal so interrupted link changes can be recovered; a validated
+previous version remains available for rollback.
 
 The manager records an ownership sentinel for custom XDG data roots. Package
 cleanup uses that evidence to avoid deleting unrelated user data.

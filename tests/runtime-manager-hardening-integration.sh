@@ -76,7 +76,29 @@ for fd_path in /proc/\$\$/fd/*; do
     target=\$(readlink -- "\${fd_path}" 2>/dev/null || true)
     [[ \${target} != */yt-dlp-aria2-downloader/runtime/update.lock ]] || : >"\${MOCK_FD_LEAK_MARKER:?}"
 done
-case \${1:-} in
+operation=''
+seen_ignore_config=false
+seen_no_plugin_dirs=false
+seen_no_update=false
+for argument in "\$@"; do
+    case \${argument} in
+    --ignore-config) seen_ignore_config=true ;;
+    --no-plugin-dirs) seen_no_plugin_dirs=true ;;
+    --no-update) seen_no_update=true ;;
+    --version | --help | --list-impersonate-targets) operation=\${argument} ;;
+    *) exit 64 ;;
+    esac
+done
+if [[ -f \${HOME}/.config/yt-dlp/config &&
+    \${seen_ignore_config} != true ]]; then
+    : >"\${MOCK_YTDLP_NETWORK_MARKER:?}"
+    exit 98
+fi
+if [[ \${MOCK_REQUIRE_YTDLP_ISOLATION:-0} == 1 ]]; then
+    [[ \${seen_ignore_config} == true && \${seen_no_plugin_dirs} == true &&
+        \${seen_no_update} == true && \${YTDLP_NO_PLUGINS:-} == 1 ]] || exit 68
+fi
+case \${operation} in
 --version) printf '%s\\n' '${version}' ;;
 --help) printf '%s\\n' \\
     '--batch-file FILE' \\
@@ -88,11 +110,13 @@ case \${1:-} in
     '--extractor-retries RETRIES' \\
     '--fixup POLICY' \\
     '--fragment-retries RETRIES' \\
+    '--ignore-config' \\
     '--js-runtimes RUNTIME' \\
     '--list-impersonate-targets' \\
     '--load-info-json FILE' \\
     '--no-clean-info-json' \\
     '--no-overwrites' \\
+    '--no-plugin-dirs' \\
     '--no-post-overwrites' \\
     '--no-update' \\
     '--parse-metadata FROM:TO' \\
@@ -211,7 +235,7 @@ for arg in "$@"; do
     [[ ${arg} == deno ]] && requested_deno=true
 done
 [[ -n ${archive} && ${requested_deno} == true ]]
-version=$(sed -n 's/^deno-archive=//p' "${archive}")
+version=${MOCK_DENO_ASSET_VERSION_OVERRIDE:-$(sed -n 's/^deno-archive=//p' "${archive}")}
 [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 cat >deno <<EOF_DENO
 #!/usr/bin/env bash
@@ -229,6 +253,7 @@ EOF_UNZIP
     cat >"${MOCK_BIN}/curl" <<'EOF_CURL'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ ${1:-} == --disable ]] || exit 95
 for fd_path in /proc/$$/fd/*; do
     target=$(readlink -- "${fd_path}" 2>/dev/null || true)
     [[ ${target} != */yt-dlp-aria2-downloader/runtime/update.lock ]] || : >"${MOCK_FD_LEAK_MARKER:?}"
@@ -292,7 +317,29 @@ for fd_path in /proc/\$\$/fd/*; do
     target=\$(readlink -- "\${fd_path}" 2>/dev/null || true)
     [[ \${target} != */yt-dlp-aria2-downloader/runtime/update.lock ]] || : >"\${MOCK_FD_LEAK_MARKER:?}"
 done
-case \${1:-} in
+operation=''
+seen_ignore_config=false
+seen_no_plugin_dirs=false
+seen_no_update=false
+for argument in "\$@"; do
+    case \${argument} in
+    --ignore-config) seen_ignore_config=true ;;
+    --no-plugin-dirs) seen_no_plugin_dirs=true ;;
+    --no-update) seen_no_update=true ;;
+    --version | --help | --list-impersonate-targets) operation=\${argument} ;;
+    *) exit 64 ;;
+    esac
+done
+if [[ -f \${HOME}/.config/yt-dlp/config &&
+    \${seen_ignore_config} != true ]]; then
+    : >"\${MOCK_YTDLP_NETWORK_MARKER:?}"
+    exit 98
+fi
+if [[ \${MOCK_REQUIRE_YTDLP_ISOLATION:-0} == 1 ]]; then
+    [[ \${seen_ignore_config} == true && \${seen_no_plugin_dirs} == true &&
+        \${seen_no_update} == true && \${YTDLP_NO_PLUGINS:-} == 1 ]] || exit 68
+fi
+case \${operation} in
 --version) printf '%s\\n' '${candidate_version}' ;;
 --help) printf '%s\\n' \\
     '--batch-file FILE' \\
@@ -304,11 +351,13 @@ case \${1:-} in
     '--extractor-retries RETRIES' \\
     '--fixup POLICY' \\
     '--fragment-retries RETRIES' \\
+    '--ignore-config' \\
     '--js-runtimes RUNTIME' \\
     '--list-impersonate-targets' \\
     '--load-info-json FILE' \\
     '--no-clean-info-json' \\
     '--no-overwrites' \\
+    '--no-plugin-dirs' \\
     '--no-post-overwrites' \\
     '--no-update' \\
     '--parse-metadata FROM:TO' \\
@@ -370,7 +419,8 @@ initialize_runtime_hardening_fixtures() {
         MOCK_URL_LOG="${URL_LOG}" MOCK_FD_LEAK_MARKER="${FD_LEAK_MARKER}"
         MOCK_NETWORK_MARKER="${NETWORK_MARKER}" MOCK_YTDLP_NETWORK_MARKER="${YTDLP_NETWORK_MARKER}"
         MOCK_GPGCONF_LOG="${GPGCONF_LOG}" MOCK_YTDLP_EXEC_PATH_LOG="${YTDLP_EXEC_PATH_LOG}"
-        MOCK_REQUIRE_NO_PROGRESS=1 MOCK_YTDLP_ASSET="${YTDLP_ASSET}"
+        MOCK_REQUIRE_NO_PROGRESS=1 MOCK_REQUIRE_YTDLP_ISOLATION=1
+        MOCK_YTDLP_ASSET="${YTDLP_ASSET}"
         MOCK_YTDLP_STABLE_VERSION=2026.07.04 MOCK_YTDLP_NIGHTLY_VERSION=2026.08.20.123456
         MOCK_DENO_LATEST_VERSION=2.9.5 YTDLP_ARIA2_RUNTIME_LOCK_WAIT_SECONDS=1
         YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS=2 YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS=10
@@ -497,6 +547,56 @@ test_mismatched_ytdlp_candidate() {
         || fail 'mismatched yt-dlp candidate was activated'
 }
 
+test_mismatched_deno_candidate() {
+    local mismatch_data_home="${TEST_ROOT}/deno-version-mismatch-data"
+    local mismatch_deno_root="${mismatch_data_home}/yt-dlp-aria2-downloader/runtime/deno"
+    local mismatch_status=0
+    local mismatch_error=''
+
+    # A checksum-valid archive remains bound to the exact release tag used to
+    # obtain it. The executable inside may not silently select another version.
+    rm -rf -- "${mismatch_data_home}"
+    mismatch_error=$(
+        "${runtime_env[@]}" \
+            XDG_DATA_HOME="${mismatch_data_home}" \
+            MOCK_DENO_ASSET_VERSION_OVERRIDE=2.8.0 \
+            "${RUNTIME_MANAGER}" ensure 2>&1
+    ) || mismatch_status=$?
+    [[ ${mismatch_status} == 1 ]] \
+        || fail "mismatched Deno candidate returned ${mismatch_status}, expected 1"
+    grep -Fq 'does not match resolved release' <<<"${mismatch_error}" \
+        || fail 'mismatched Deno candidate diagnostic is missing'
+    [[ ! -L ${mismatch_deno_root}/current ]] \
+        || fail 'mismatched Deno candidate was activated'
+}
+
+test_symlinked_managed_data_root() {
+    local symlink_data_home="${TEST_ROOT}/symlink-data"
+    local sentinel_root="${TEST_ROOT}/symlink-sentinel"
+    local sentinel_mode=''
+    local status=0
+
+    # The application root must be rejected before mkdir -p can follow it and
+    # create or chmod runtime paths in an unrelated target tree.
+    mkdir -p -- "${symlink_data_home}" "${sentinel_root}"
+    chmod 0750 -- "${sentinel_root}"
+    printf 'unchanged\n' >"${sentinel_root}/sentinel"
+    ln -s -- "${sentinel_root}" \
+        "${symlink_data_home}/yt-dlp-aria2-downloader"
+
+    "${runtime_env[@]}" XDG_DATA_HOME="${symlink_data_home}" \
+        "${RUNTIME_MANAGER}" versions >/dev/null 2>&1 || status=$?
+    [[ ${status} == 73 ]] \
+        || fail "symlinked managed data root returned ${status}, expected 73"
+    [[ ! -e ${sentinel_root}/runtime ]] \
+        || fail 'symlinked managed data root created runtime state in its target'
+    assert_file_contains "${sentinel_root}/sentinel" unchanged \
+        'symlink target sentinel content'
+    sentinel_mode=$(stat -c '%a' -- "${sentinel_root}")
+    [[ ${sentinel_mode} == 750 ]] \
+        || fail 'symlinked managed data root changed target permissions'
+}
+
 test_signature_failure_bootstrap() {
     local verify_fail_data_home="${TEST_ROOT}/verify-fail-data"
     local verify_fail_runtime_root="${verify_fail_data_home}/yt-dlp-aria2-downloader/runtime"
@@ -589,10 +689,15 @@ test_no_network_require() {
     local status=0
 
     # Strict no-network require mode: both success and missing-runtime failure must
-    # happen without invoking curl.
-    rm -f -- "${NETWORK_MARKER}" "${URL_LOG}"
+    # happen without invoking curl or an updater requested by personal yt-dlp
+    # configuration.
+    mkdir -p -- "${HOME_DIR}/.config/yt-dlp"
+    printf '%s\n' '--update' >"${HOME_DIR}/.config/yt-dlp/config"
+    rm -f -- "${NETWORK_MARKER}" "${YTDLP_NETWORK_MARKER}" "${URL_LOG}"
     MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" require
     [[ ! -e ${NETWORK_MARKER} ]] || fail 'require mode invoked the network'
+    [[ ! -e ${YTDLP_NETWORK_MARKER} ]] \
+        || fail 'require mode honored personal yt-dlp update configuration'
     rm -f -- "${deno_root}/current"
     status=0
     MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" require >/dev/null 2>&1 || status=$?
@@ -637,12 +742,20 @@ test_invalid_active_runtime_recovery() {
 }
 
 test_runtime_updates() {
+    local deno_inode_after=''
+    local deno_inode_before=''
+    local stable_inode_after=''
+    local stable_inode_before=''
+
     # Scenario group: exact-tag stable update, Deno update, nightly opt-in, then stable.
     : >"${URL_LOG}"
     rm -f -- "${FD_LEAK_MARKER}"
     "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null
     assert_link_target "${ytdlp_root}/current" 2026.07.04 'stable update failed'
     assert_link_target "${deno_root}/current" 2.9.5 'Deno update failed'
+    stable_inode_before=$(stat -c '%d:%i' -- \
+        "${ytdlp_root}/2026.07.04/${YTDLP_ASSET}")
+    deno_inode_before=$(stat -c '%d:%i' -- "${deno_root}/2.9.5/deno")
     grep -Fq '/releases/download/2026.07.04/' "${URL_LOG}" || fail 'yt-dlp exact tag URL missing'
     grep -Fq '/releases/download/v2.9.5/' "${URL_LOG}" || fail 'Deno exact tag URL missing'
     ! grep -Fq '/releases/latest/download/' "${URL_LOG}" || fail 'latest/download TOCTOU path remains'
@@ -653,6 +766,22 @@ test_runtime_updates() {
     "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null
     assert_link_target "${ytdlp_root}/current" 2026.07.04 'nightly -> stable failed'
     assert_link_target "${ytdlp_root}/previous" 2026.08.20.123456 'nightly rollback target missing'
+    stable_inode_after=$(stat -c '%d:%i' -- \
+        "${ytdlp_root}/2026.07.04/${YTDLP_ASSET}") \
+        || fail 'unable to inspect reactivated yt-dlp identity'
+    assert_equals "${stable_inode_before}" "${stable_inode_after}" \
+        'reactivating stable yt-dlp replaced immutable runtime bytes'
+
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback deno >/dev/null
+    assert_link_target "${deno_root}/current" 2.8.0 \
+        'Deno rollback did not select the prior runtime'
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null
+    assert_link_target "${deno_root}/current" 2.9.5 \
+        'Deno update did not reactivate the current release'
+    deno_inode_after=$(stat -c '%d:%i' -- "${deno_root}/2.9.5/deno") \
+        || fail 'unable to inspect reactivated Deno identity'
+    assert_equals "${deno_inode_before}" "${deno_inode_after}" \
+        'reactivating Deno replaced immutable runtime bytes'
 }
 
 test_repeated_rollbacks() {
@@ -786,6 +915,8 @@ main() {
     test_oversized_deno_versions
     test_invalid_runtime_path
     test_mismatched_ytdlp_candidate
+    test_mismatched_deno_candidate
+    test_symlinked_managed_data_root
     test_signature_failure_bootstrap
     test_fresh_runtime_bootstrap
     test_no_network_require
