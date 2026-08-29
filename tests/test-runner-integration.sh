@@ -335,6 +335,7 @@ test_run_all_doctor_contract() {
     local doctor_mock_bin="${TEST_RUNNER_LOG_DIR}/doctor-bin"
     local offline_shfmt_root="${TEST_RUNNER_LOG_DIR}/offline-shfmt-cache"
     local doctor_output=''
+    local project_has_git_metadata=false
     local aria2_probe_mode=''
     local command_name=''
     local command_path=''
@@ -392,8 +393,11 @@ test_run_all_doctor_contract() {
         || fail 'doctor test could not resolve the real python3 interpreter'
     real_aria2=$(command -v -- aria2c) \
         || fail 'doctor test could not resolve the real aria2c executable'
-    real_git=$(command -v -- git) \
-        || fail 'doctor test could not resolve the real git executable'
+    if [[ -e ${SCRIPT_DIR}/../.git || -L ${SCRIPT_DIR}/../.git ]]; then
+        project_has_git_metadata=true
+        real_git=$(command -v -- git) \
+            || fail 'doctor test could not resolve the real git executable'
+    fi
     managed_shfmt=$(bash -- \
         "${SCRIPT_DIR}/../scripts/dev-tools/ensure-shfmt.sh") \
         || fail 'doctor test could not resolve the managed shfmt executable'
@@ -589,17 +593,18 @@ PY_OFFLINE_SHFMT_DOCTOR
     [[ ! -e ${offline_shfmt_root} ]] \
         || fail 'doctor populated the managed shfmt cache during diagnosis'
 
-    assert_status 69 'doctor requires usable Git inside a Git checkout' \
-        env \
-        DOCTOR_MOCK_GIT_STATUS=127 \
-        DOCTOR_REAL_ARIA2="${real_aria2}" \
-        DOCTOR_REAL_GIT="${real_git}" \
-        DOCTOR_REAL_PYTHON="${real_python}" \
-        PATH="${doctor_mock_bin}:${PATH}" \
-        SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
-        "${run_all}" --doctor --json
-    doctor_output=${ASSERT_OUTPUT}
-    if ! python3 - "${doctor_output}" <<'PY_UNUSABLE_GIT_DOCTOR'; then
+    if [[ ${project_has_git_metadata} == true ]]; then
+        assert_status 69 'doctor requires usable Git inside a Git checkout' \
+            env \
+            DOCTOR_MOCK_GIT_STATUS=127 \
+            DOCTOR_REAL_ARIA2="${real_aria2}" \
+            DOCTOR_REAL_GIT="${real_git}" \
+            DOCTOR_REAL_PYTHON="${real_python}" \
+            PATH="${doctor_mock_bin}:${PATH}" \
+            SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
+            "${run_all}" --doctor --json
+        doctor_output=${ASSERT_OUTPUT}
+        if ! python3 - "${doctor_output}" <<'PY_UNUSABLE_GIT_DOCTOR'; then
 import json
 import sys
 
@@ -609,7 +614,32 @@ assert report["ready"] is False
 assert checks["repository-state"]["level"] == "required"
 assert checks["repository-state"]["status"] == "fail"
 PY_UNUSABLE_GIT_DOCTOR
-        fail 'doctor unusable-Git report is invalid'
+            fail 'doctor unusable-Git report is invalid'
+        fi
+    else
+        assert_status 0 'doctor does not require Git in a source archive' \
+            env \
+            DOCTOR_MOCK_GIT_STATUS=127 \
+            DOCTOR_REAL_ARIA2="${real_aria2}" \
+            DOCTOR_REAL_GIT="${real_git}" \
+            DOCTOR_REAL_PYTHON="${real_python}" \
+            PATH="${doctor_mock_bin}:${PATH}" \
+            SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
+            "${run_all}" --doctor --json
+        doctor_output=${ASSERT_OUTPUT}
+        if ! python3 - "${doctor_output}" <<'PY_ARCHIVE_GIT_DOCTOR'; then
+import json
+import sys
+
+report = json.loads(sys.argv[1])
+checks = {item["id"]: item for item in report["checks"]}
+assert report["ready"] is True
+assert checks["repository-state"]["level"] == "info"
+assert checks["repository-state"]["status"] == "pass"
+assert "source-archive" in checks["repository-state"]["detail"]
+PY_ARCHIVE_GIT_DOCTOR
+            fail 'doctor source-archive Git report is invalid'
+        fi
     fi
 
     assert_status 0 'doctor JSON escapes non-standard C0 control characters' \
