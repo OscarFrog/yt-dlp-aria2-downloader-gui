@@ -133,6 +133,112 @@ is_main_exempt_shell_file() {
     return 1
 }
 
+assert_unique_shell_file_list() {
+    local label=$1
+    shift
+    local shell_file=''
+    local -A seen=()
+
+    for shell_file in "$@"; do
+        [[ -n ${shell_file} && ${shell_file} != -* ]] \
+            || fail "${label} contains an invalid entry: ${shell_file}"
+        [[ -z ${seen[${shell_file}]+present} ]] \
+            || fail "${label} contains a duplicate entry: ${shell_file}"
+        seen[${shell_file}]=true
+    done
+}
+
+assert_shell_policy_lists_are_canonical() {
+    local canonical_file=''
+    local classified_file=''
+    local listed=false
+    local sourced_file=''
+
+    ((${#SOURCED_SHELL_FILES[@]} > 0)) \
+        || fail 'SOURCED_SHELL_FILES is empty.'
+    ((${#NO_ERREXIT_SHELL_FILES[@]} > 0)) \
+        || fail 'NO_ERREXIT_SHELL_FILES is empty.'
+    assert_unique_shell_file_list \
+        SOURCED_SHELL_FILES "${SOURCED_SHELL_FILES[@]}"
+    assert_unique_shell_file_list \
+        NO_ERREXIT_SHELL_FILES "${NO_ERREXIT_SHELL_FILES[@]}"
+
+    for classified_file in \
+        "${SOURCED_SHELL_FILES[@]}" \
+        "${NO_ERREXIT_SHELL_FILES[@]}"; do
+        listed=false
+        for canonical_file in "${ALL_SHELL_FILES[@]}"; do
+            if [[ ${classified_file} == "${canonical_file}" ]]; then
+                listed=true
+                break
+            fi
+        done
+        [[ ${listed} == true ]] \
+            || fail "shell policy classification is outside ALL_SHELL_FILES: ${classified_file}"
+    done
+
+    for sourced_file in "${SOURCED_SHELL_FILES[@]}"; do
+        listed=false
+        for classified_file in "${MAIN_EXEMPT_SHELL_FILES[@]}"; do
+            if [[ ${sourced_file} == "${classified_file}" ]]; then
+                listed=true
+                break
+            fi
+        done
+        [[ ${listed} == true ]] \
+            || fail "sourced shell file is not exempt from main(): ${sourced_file}"
+
+        for classified_file in "${NO_ERREXIT_SHELL_FILES[@]}"; do
+            [[ ${sourced_file} != "${classified_file}" ]] \
+                || fail "sourced shell file is also classified as executable: ${sourced_file}"
+        done
+    done
+}
+
+assert_shell_option_contract() {
+    local relative_path=$1
+    local absolute_path="${SCRIPT_DIR}/${relative_path}"
+    local classified_file=''
+    local is_no_errexit=false
+    local is_sourced=false
+    local option_line=''
+    local option_line_count=''
+
+    for classified_file in "${SOURCED_SHELL_FILES[@]}"; do
+        if [[ ${relative_path} == "${classified_file}" ]]; then
+            is_sourced=true
+            break
+        fi
+    done
+    for classified_file in "${NO_ERREXIT_SHELL_FILES[@]}"; do
+        if [[ ${relative_path} == "${classified_file}" ]]; then
+            is_no_errexit=true
+            break
+        fi
+    done
+
+    option_line_count=$(grep -Ec '^set[[:space:]]' "${absolute_path}" || true)
+    option_line=$(grep -Em1 '^set[[:space:]]' "${absolute_path}" || true)
+
+    if [[ ${is_sourced} == true ]]; then
+        [[ ${option_line_count} == 0 ]] \
+            || fail "sourced shell file changes top-level options: ${relative_path}"
+        return 0
+    fi
+
+    [[ -n ${option_line} ]] \
+        || fail "executable shell file has no top-level option model: ${relative_path}"
+    if [[ ${is_no_errexit} == true ]]; then
+        [[ ${option_line} == 'set -uo pipefail' ||
+            ${option_line} == 'set -u -o pipefail' ]] \
+            || fail "no-errexit shell file has an unexpected option model: ${relative_path}"
+    else
+        [[ ${option_line} == 'set -euo pipefail' ||
+            ${option_line} == 'set -Eeuo pipefail' ]] \
+            || fail "shell file does not enable the standard option model: ${relative_path}"
+    fi
+}
+
 assert_main_entry_structure() {
     local relative_path=$1
     local absolute_path="${SCRIPT_DIR}/${relative_path}"
@@ -273,6 +379,74 @@ assert_shell_inventory_is_canonical() {
 
     cleanup_static_test
     return "${inventory_status}"
+}
+
+assert_workflow_dependencies_are_hardened() {
+    local action_reference=''
+    local checkout_has_disabled_credentials=false
+    local checkout_indent=0
+    local checkout_line=0
+    local checkout_pending=false
+    local content_indent=0
+    local line=''
+    local line_number=0
+    local relative_workflow=''
+    local workflow=''
+    local -a workflow_files=(
+        "${SCRIPT_DIR}"/.github/workflows/*.yml
+        "${SCRIPT_DIR}"/.github/workflows/*.yaml
+    )
+
+    for workflow in "${workflow_files[@]}"; do
+        [[ -f ${workflow} ]] || continue
+        relative_workflow=${workflow#"${SCRIPT_DIR}/"}
+        checkout_has_disabled_credentials=false
+        checkout_indent=0
+        checkout_line=0
+        checkout_pending=false
+        line_number=0
+        while IFS= read -r line || [[ -n ${line} ]]; do
+            line_number=$((line_number + 1))
+
+            if [[ ${line} =~ ^([[:space:]]*)([^#[:space:]].*)$ ]]; then
+                content_indent=${#BASH_REMATCH[1]}
+                if [[ ${checkout_pending} == true &&
+                    ${line_number} != "${checkout_line}" &&
+                    ${content_indent} -le ${checkout_indent} ]]; then
+                    [[ ${checkout_has_disabled_credentials} == true ]] \
+                        || fail "checkout step retains credentials: ${relative_workflow}:${checkout_line}"
+                    checkout_pending=false
+                fi
+            fi
+
+            if [[ ${checkout_pending} == true &&
+                ${line} =~ ^[[:space:]]+persist-credentials:[[:space:]]+false[[:space:]]*$ ]]; then
+                checkout_has_disabled_credentials=true
+            fi
+
+            if [[ ! ${line} =~ ^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+([^[:space:]]+) ]]; then
+                continue
+            fi
+            action_reference=${BASH_REMATCH[2]}
+            [[ ${action_reference} != ./* ]] || continue
+            [[ ${line} =~ ^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+[^[:space:]@]+@[0-9a-f]{40}[[:space:]]+#[[:space:]]+v[0-9][^[:space:]]*[[:space:]]*$ ]] \
+                || fail "workflow dependency is not commit-pinned with a version comment: ${relative_workflow}:${line_number}"
+
+            if [[ ${action_reference} == actions/checkout@* ]]; then
+                [[ ${line} =~ ^([[:space:]]*)-[[:space:]]+uses: ]] \
+                    || fail "checkout dependency is not a workflow step: ${relative_workflow}:${line_number}"
+                checkout_pending=true
+                checkout_has_disabled_credentials=false
+                checkout_indent=${#BASH_REMATCH[1]}
+                checkout_line=${line_number}
+            fi
+        done <"${workflow}"
+
+        if [[ ${checkout_pending} == true ]]; then
+            [[ ${checkout_has_disabled_credentials} == true ]] \
+                || fail "checkout step retains credentials: ${relative_workflow}:${checkout_line}"
+        fi
+    done
 }
 
 workflow_job_block() {
@@ -724,7 +898,19 @@ test_static_tooling_contracts() {
     local workflow_file
 
     assert_shell_inventory_is_canonical
+    assert_shell_policy_lists_are_canonical
+    assert_workflow_dependencies_are_hardened
     assert_shfmt_update_workflow_policy
+    assert_file_contains "${SCRIPT_DIR}/AGENTS.md" \
+        'persist-credentials: false' \
+        'agent policy preserves disabled checkout credentials'
+    # shellcheck disable=SC2016 # Literal Markdown token, not shell expansion.
+    assert_file_contains "${SCRIPT_DIR}/SHELL_STYLE.md" \
+        '`NO_ERREXIT_SHELL_FILES`' \
+        'shell policy documents the no-errexit inventory'
+    assert_file_contains "${SCRIPT_DIR}/SHELL_STYLE.md" \
+        'GNU Bash 4.4 or' \
+        'shell policy documents the supported Bash baseline'
     assert_file_contains "${SCRIPT_DIR}/tests/lib/assert.sh" \
         'assert_path_mode() {' \
         'shared permission-mode assertion'
@@ -776,6 +962,10 @@ test_static_tooling_contracts() {
     assert_file_contains "${SCRIPT_DIR}/tests/run-all.sh" \
         'bash -- ./scripts/check-shell-format.sh' \
         'run-all enforces shfmt before behavioral validation'
+    # shellcheck disable=SC2016 # Literal validation command, not local expansion.
+    assert_file_contains "${SCRIPT_DIR}/tests/run-all.sh" \
+        'shellcheck -x -o all -- "${static_shell_files_ref[@]}"' \
+        'run-all enables every ShellCheck optional diagnostic'
     for workflow_file in \
         .github/workflows/shell.yml \
         .github/workflows/packages.yml \
@@ -969,6 +1159,7 @@ test_static_shell_interface_contracts() {
 
     for file in "${ALL_SHELL_FILES[@]}"; do
         assert_standard_shell_header "${file}"
+        assert_shell_option_contract "${file}"
         assert_main_entry_structure "${file}"
     done
 

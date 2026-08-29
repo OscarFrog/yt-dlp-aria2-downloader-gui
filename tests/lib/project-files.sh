@@ -74,15 +74,29 @@ DEVELOPMENT_SHELL_FILES=(
     scripts/release-evidence-qualification.sh
 )
 
-# Shell files intentionally exempt from the explicit main() entry-point rule:
-# sourced libraries and tiny linear Bash executables.
+# Shell files sourced by other scripts. These libraries must not change their
+# caller's shell-option state and are exempt from the executable main() rule.
 # shellcheck disable=SC2034 # Array is read by test-static.sh.
-MAIN_EXEMPT_SHELL_FILES=(
+SOURCED_SHELL_FILES=(
     tests/lib/assert.sh
     tests/lib/package-lifecycle.sh
     tests/lib/package-runtime-preservation.sh
     tests/lib/project-files.sh
     tests/lib/test-runner.sh
+)
+
+# Executables that intentionally handle every fallible operation explicitly
+# instead of relying on errexit. Each file carries its durable local rationale.
+# shellcheck disable=SC2034 # Array is read by test-static.sh.
+NO_ERREXIT_SHELL_FILES=(
+    runtime-manager.sh
+    packaging/package-user-cleanup.sh
+)
+
+# Shell files intentionally exempt from the explicit main() entry-point rule.
+# shellcheck disable=SC2034 # Array is read by test-static.sh.
+MAIN_EXEMPT_SHELL_FILES=(
+    "${SOURCED_SHELL_FILES[@]}"
 )
 
 # shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
