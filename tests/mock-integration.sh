@@ -2919,7 +2919,7 @@ test_mock_signal_gui_blocked_entry() {
 test_mock_signal_gui_worker_registration() {
     local elapsed_milliseconds gui_pid_file launched_worker_pid
     local signal_finished_at signal_started_at signal_tmpdir
-    local worker_registration_marker
+    local worker_registration_marker worker_termination_marker
 
     # Inject TERM from a DEBUG trap immediately before WORKER_PID receives $!.
     # The launch critical section must defer it until cleanup can supervise and
@@ -2927,8 +2927,10 @@ test_mock_signal_gui_worker_registration() {
     signal_tmpdir="${TEST_ROOT}/worker-registration-signal-tmp"
     gui_pid_file="${TEST_ROOT}/worker-registration-signal-gui.pid"
     worker_registration_marker="${TEST_ROOT}/worker-pre-registration.pid"
+    worker_termination_marker="${TEST_ROOT}/worker-pre-registration-terminated"
     mkdir -p -- "${signal_tmpdir}"
-    rm -f -- "${gui_pid_file}" "${worker_registration_marker}"
+    rm -f -- "${gui_pid_file}" "${worker_registration_marker}" \
+        "${worker_termination_marker}"
     prepare_argument_log 'gui-signal-worker-registration'
 
     signal_started_at=$(date +%s%3N)
@@ -2939,7 +2941,8 @@ test_mock_signal_gui_worker_registration() {
         MOCK_GUI_SIGNAL_PID_FILE="${gui_pid_file}" \
         MOCK_GUI_SIGNAL_BEFORE_WORKER_REGISTRATION=1 \
         MOCK_WORKER_PRE_REGISTRATION_MARKER="${worker_registration_marker}" \
-        MOCK_SETSID_START_JITTER_SECONDS=6 \
+        MOCK_LONG_DOWNLOAD=1 \
+        MOCK_TERMINATION_MARKER="${worker_termination_marker}" \
         "${GUI_SIGNAL_UNDER_TEST}"
     signal_finished_at=$(date +%s%3N)
     elapsed_milliseconds=$((signal_finished_at - signal_started_at))
