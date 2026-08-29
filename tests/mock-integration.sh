@@ -129,6 +129,7 @@ readonly GUI_SCENARIO_TIMEOUT_SECONDS
 readonly GUI_UNDER_TEST="${MOCK_BIN}/download-video-gui-under-test"
 readonly GUI_SIGNAL_UNDER_TEST="${MOCK_BIN}/download-video-gui-signal-under-test"
 readonly GUI_SIGNAL_REGISTRATION_UNDER_TEST="${MOCK_BIN}/gui-signal-registration-under-test"
+readonly CLI_SIGNAL_REGISTRATION_UNDER_TEST="${MOCK_BIN}/cli-signal-registration-under-test"
 export MOCK_GUI_REAL="${PROJECT_DIR}/download-video-gui.sh"
 export MOCK_GUI_SCENARIO_TIMEOUT_SECONDS=${GUI_SCENARIO_TIMEOUT_SECONDS}
 mkdir -p -- \
@@ -146,6 +147,15 @@ set -euo pipefail
 
 : "${MOCK_RUNTIME_MANAGER_LOG:?}"
 printf '%s\0' "$@" >"${MOCK_RUNTIME_MANAGER_LOG}"
+if [[ ${MOCK_RUNTIME_MANAGER_BLOCK:-0} == 1 ]]; then
+    : "${MOCK_RUNTIME_STARTED_MARKER:?}"
+    : "${MOCK_RUNTIME_TERMINATION_MARKER:?}"
+    trap 'printf "%s\n" TERM >"${MOCK_RUNTIME_TERMINATION_MARKER}"; exit 143' TERM
+    printf '%s\n' started >"${MOCK_RUNTIME_STARTED_MARKER}"
+    while :; do
+        sleep 1
+    done
+fi
 if [[ ${MOCK_RUNTIME_ATTESTATION_MALFORMED:-0} == 1 ]]; then
     printf '%s\n' 'runtime-contract=unsupported'
     exit 0
@@ -242,6 +252,37 @@ finish_signal_registration
 exit 70
 EOF_GUI_SIGNAL_REGISTRATION
 chmod 0755 -- "${GUI_SIGNAL_REGISTRATION_UNDER_TEST}"
+
+cat >"${CLI_SIGNAL_REGISTRATION_UNDER_TEST}" <<'EOF_CLI_SIGNAL_REGISTRATION'
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${MOCK_CLI_SOURCE_COPY:?}"
+: "${MOCK_WORKER_DEFERRED_STATUS_MARKER:?}"
+: "${MOCK_WORKER_IDENTITY:?}"
+: "${MOCK_WORKER_LAUNCH_STATE_MARKER:?}"
+: "${MOCK_WORKER_PRE_REGISTRATION_MARKER:?}"
+
+# Load the production engine functions without entering main.
+# shellcheck disable=SC1090
+source "${MOCK_CLI_SOURCE_COPY}"
+trap cleanup EXIT
+
+begin_signal_registration
+bash -c 'exec -a "$1" sleep 30' bash "${MOCK_WORKER_IDENTITY}" &
+printf '%s\n' "${SIGNAL_REGISTRATION_ACTIVE}" \
+    >"${MOCK_WORKER_LAUNCH_STATE_MARKER}"
+request_shutdown TERM 143
+DOWNLOAD_WORKER_PID=$!
+printf '%s\n' "${DOWNLOAD_WORKER_PID}" \
+    >"${MOCK_WORKER_PRE_REGISTRATION_MARKER}"
+printf '%s\n' "${DEFERRED_SIGNAL_STATUS}" \
+    >"${MOCK_WORKER_DEFERRED_STATUS_MARKER}"
+finish_signal_registration
+stop_download_worker || true
+exit "${REQUESTED_EXIT_STATUS:-70}"
+EOF_CLI_SIGNAL_REGISTRATION
+chmod 0755 -- "${CLI_SIGNAL_REGISTRATION_UNDER_TEST}"
 
 cat >"${MOCK_BIN}/yt-dlp" <<'EOF_YTDLP'
 #!/usr/bin/env bash
@@ -2991,6 +3032,129 @@ test_mock_signal_cli_download() {
     assert_no_test_processes 'CLI signal forwarding left worker processes'
 }
 
+test_mock_signal_cli_worker_registration() {
+    local cli_source_copy cli_status elapsed_milliseconds launched_worker_pid
+    local signal_finished_at signal_log signal_started_at worker_identity
+    local worker_deferred_status_marker worker_launch_state_marker
+    local worker_registration_marker
+
+    # Exercise the production critical-section helpers in the vulnerable
+    # source order: launch, receive TERM, publish $!, then finish registration.
+    signal_log="${TEST_ROOT}/cli-worker-registration-signal.log"
+    cli_source_copy="${TEST_ROOT}/download-video-source-only.sh"
+    worker_launch_state_marker="${TEST_ROOT}/cli-worker-launch-state"
+    worker_deferred_status_marker="${TEST_ROOT}/cli-worker-deferred-status"
+    worker_identity="${TEST_ROOT}/cli-worker-pre-registration-child"
+    worker_registration_marker="${TEST_ROOT}/cli-worker-pre-registration.pid"
+    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${cli_source_copy}"
+    chmod 0600 -- "${cli_source_copy}"
+    printf '%s\n' 'Mock scenario: cli-signal-worker-registration'
+
+    signal_started_at=$(date +%s%3N)
+    cli_status=0
+    timeout --signal=TERM --kill-after=2s 8s \
+        env MOCK_CLI_SOURCE_COPY="${cli_source_copy}" \
+        MOCK_WORKER_DEFERRED_STATUS_MARKER="${worker_deferred_status_marker}" \
+        MOCK_WORKER_IDENTITY="${worker_identity}" \
+        MOCK_WORKER_LAUNCH_STATE_MARKER="${worker_launch_state_marker}" \
+        MOCK_WORKER_PRE_REGISTRATION_MARKER="${worker_registration_marker}" \
+        "${CLI_SIGNAL_REGISTRATION_UNDER_TEST}" >"${signal_log}" 2>&1 \
+        || cli_status=$?
+    signal_finished_at=$(date +%s%3N)
+    elapsed_milliseconds=$((signal_finished_at - signal_started_at))
+    assert_equals 143 "${cli_status}" \
+        'CLI worker pre-registration TERM is deferred and reaped'
+    ((elapsed_milliseconds < 5000)) \
+        || fail "CLI pre-registration TERM handling took ${elapsed_milliseconds}ms."
+    assert_file_has_line "${worker_launch_state_marker}" true \
+        'CLI worker launch occurs inside signal-registration critical section'
+    assert_file_has_line "${worker_deferred_status_marker}" 143 \
+        'CLI worker pre-registration handler defers TERM'
+    IFS= read -r launched_worker_pid <"${worker_registration_marker}"
+    [[ ${launched_worker_pid} =~ ^[1-9][0-9]*$ ]] \
+        || fail "Invalid CLI pre-registration worker PID: ${launched_worker_pid}"
+    assert_no_test_processes \
+        'CLI worker pre-registration TERM left descendants'
+}
+
+test_mock_signal_cli_runtime_preparation() {
+    local cli_engine_pid cli_engine_status runtime_signal_log
+    local runtime_started_marker runtime_termination_marker
+
+    # Managed runtime preparation is part of launch and must obey the same
+    # signal-forwarding and bounded-reaping contract as the media worker.
+    runtime_started_marker="${TEST_ROOT}/runtime-prepare-started"
+    runtime_termination_marker="${TEST_ROOT}/runtime-prepare-terminated"
+    runtime_signal_log="${TEST_ROOT}/runtime-prepare-signal.log"
+    : >"${MOCK_RUNTIME_MANAGER_LOG}"
+    env -u YTDLP_ARIA2_SKIP_RUNTIME_UPDATE \
+        MOCK_RUNTIME_MANAGER_BLOCK=1 \
+        MOCK_RUNTIME_STARTED_MARKER="${runtime_started_marker}" \
+        MOCK_RUNTIME_TERMINATION_MARKER="${runtime_termination_marker}" \
+        "${MANAGED_ENGINE_UNDER_TEST}" \
+        --output-dir "${OUTPUT_DIR}" \
+        -- 'https://example.com/watch?v=runtime-prepare-signal' \
+        >"${runtime_signal_log}" 2>&1 &
+    cli_engine_pid=$!
+    wait_for_file "${runtime_started_marker}" 10 'runtime preparation startup'
+    kill -TERM -- "${cli_engine_pid}"
+    cli_engine_status=0
+    wait "${cli_engine_pid}" || cli_engine_status=$?
+    assert_equals 143 "${cli_engine_status}" \
+        'CLI runtime preparation TERM exit status'
+    wait_for_file "${runtime_termination_marker}" 10 \
+        'runtime manager receives TERM'
+    assert_no_test_processes \
+        'CLI runtime preparation TERM left descendants'
+}
+
+test_mock_signal_cli_pgid_discovery_race() {
+    local cli_source_copy="${TEST_ROOT}/download-video-pgid-race-source-only.sh"
+    local race_identity="${TEST_ROOT}/cli-pgid-discovery-race-child"
+    local race_log="${TEST_ROOT}/cli-pgid-discovery-race.log"
+    local race_status=0
+
+    # Force TERM after the child has published its PGID but before the caller
+    # accepts it. util-linux setsid then reports raw status 15; the engine must
+    # retain the conventional requested status 143.
+    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${cli_source_copy}"
+    chmod 0600 -- "${cli_source_copy}"
+    printf '%s\n' 'Mock scenario: cli-signal-pgid-discovery-race'
+    # shellcheck disable=SC2016 # Variables belong to the intentionally nested shell.
+    timeout --signal=TERM --kill-after=2s 8s \
+        env MOCK_CLI_SOURCE_COPY="${cli_source_copy}" \
+        MOCK_WORKER_IDENTITY="${race_identity}" \
+        bash -c '
+            set -euo pipefail
+            source "${MOCK_CLI_SOURCE_COPY}"
+            trap cleanup EXIT
+            resolve_lock_root
+            wait_for_download_pgid() {
+                local attempt
+                for ((attempt = 0; attempt < 100; attempt++)); do
+                    if recover_download_pgid; then
+                        request_shutdown TERM 143
+                        while process_is_running "${DOWNLOAD_WORKER_PID}"; do
+                            sleep 0.01
+                        done
+                        return 1
+                    fi
+                    sleep 0.01
+                done
+                return 1
+            }
+            # shellcheck disable=SC2016
+            run_supervised_command \
+                bash -c '\''exec -a "$1" sleep 30'\'' bash \
+                "${MOCK_WORKER_IDENTITY}"
+            exit "${DOWNLOAD_STATUS}"
+        ' >"${race_log}" 2>&1 || race_status=$?
+    assert_equals 143 "${race_status}" \
+        'CLI PGID-discovery TERM preserves requested status'
+    assert_no_test_processes \
+        'CLI PGID-discovery TERM left descendants'
+}
+
 test_mock_signal_cli_ffmpeg() {
     local ffmpeg_engine_pid ffmpeg_engine_status ffmpeg_signal_log
     local ffmpeg_started_marker ffmpeg_termination_marker
@@ -3305,6 +3469,9 @@ test_mock_signal_zenity_status() {
 
 run_mock_signal_group() {
     test_mock_signal_cli_download
+    test_mock_signal_cli_worker_registration
+    test_mock_signal_cli_runtime_preparation
+    test_mock_signal_cli_pgid_discovery_race
     test_mock_signal_cli_ffmpeg
     test_mock_signal_gui_session
     test_mock_signal_gui_blocked_entry

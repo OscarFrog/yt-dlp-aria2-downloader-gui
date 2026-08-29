@@ -48,6 +48,10 @@ DOWNLOAD_PGID_FILE=''
 DOWNLOAD_STATUS=125
 REQUESTED_EXIT_STATUS=''
 SHUTDOWN_REQUESTED=false
+DEFERRED_SIGNAL_NAME=''
+DEFERRED_SIGNAL_STATUS=''
+SIGNAL_REGISTRATION_ACTIVE=false
+RUNTIME_ATTESTATION_TMP=''
 REUSE_CURRENT_SESSION=${YTDLP_ARIA2_SUPERVISED_SESSION:-false}
 case ${REUSE_CURRENT_SESSION} in
     true | false) ;;
@@ -68,6 +72,9 @@ cleanup() {
     fi
     if [[ -n ${DOWNLOAD_PGID_FILE} ]]; then
         rm -f -- "${DOWNLOAD_PGID_FILE}" "${DOWNLOAD_PGID_FILE}.tmp" || true
+    fi
+    if [[ -n ${RUNTIME_ATTESTATION_TMP} ]]; then
+        rm -f -- "${RUNTIME_ATTESTATION_TMP}" || true
     fi
     if [[ -n ${RESULT_FILE_TMP} ]]; then
         rm -f -- "${RESULT_FILE_TMP}" || true
@@ -101,6 +108,14 @@ request_shutdown() {
     local signal_name=$1
     local exit_status=$2
 
+    if [[ ${SIGNAL_REGISTRATION_ACTIVE} == true ]]; then
+        if [[ -z ${DEFERRED_SIGNAL_STATUS} ]]; then
+            DEFERRED_SIGNAL_NAME=${signal_name}
+            DEFERRED_SIGNAL_STATUS=${exit_status}
+        fi
+        return 0
+    fi
+
     if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
         if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]] \
             && declare -F signal_download_worker >/dev/null 2>&1; then
@@ -118,6 +133,22 @@ request_shutdown() {
     fi
 
     exit "${exit_status}"
+}
+
+begin_signal_registration() {
+    SIGNAL_REGISTRATION_ACTIVE=true
+}
+
+finish_signal_registration() {
+    local deferred_name=${DEFERRED_SIGNAL_NAME}
+    local deferred_status=${DEFERRED_SIGNAL_STATUS}
+
+    SIGNAL_REGISTRATION_ACTIVE=false
+    DEFERRED_SIGNAL_NAME=''
+    DEFERRED_SIGNAL_STATUS=''
+    if [[ -n ${deferred_status} ]]; then
+        request_shutdown "${deferred_name}" "${deferred_status}"
+    fi
 }
 
 usage() {
@@ -754,8 +785,10 @@ run_supervised_command() {
         # The GUI has already placed this engine and every descendant in one
         # dedicated session. Do not create a nested session that the GUI could
         # lose after an emergency SIGKILL of this wrapper.
+        begin_signal_registration
         LC_ALL=C "${worker_command[@]}" &
         DOWNLOAD_WORKER_PID=$!
+        finish_signal_registration
     else
         if ! DOWNLOAD_PGID_FILE=$(mktemp \
             --tmpdir="${OUTPUT_LOCK_ROOT}" \
@@ -766,7 +799,8 @@ run_supervised_command() {
 
         # Standalone CLI mode needs its own session so signals sent only to the
         # wrapper PID can be relayed to the complete command tree.
-        # shellcheck disable=SC2016
+        begin_signal_registration
+        # shellcheck disable=SC2016 # Expanded by the intentionally nested shell.
         LC_ALL=C setsid --fork --wait bash -c '
             set -euo pipefail
             pgid_file=$1
@@ -777,6 +811,7 @@ run_supervised_command() {
             exec "$@"
         ' bash "${DOWNLOAD_PGID_FILE}" "${worker_command[@]}" &
         DOWNLOAD_WORKER_PID=$!
+        finish_signal_registration
 
         # A command may fail before the PGID probe observes its group. Preserve
         # the real command status instead of converting a legitimate fast
@@ -789,7 +824,11 @@ run_supervised_command() {
                 wait "${DOWNLOAD_WORKER_PID}" 2>/dev/null || worker_status=$?
                 DOWNLOAD_WORKER_PID=''
                 DOWNLOAD_WORKER_PGID=''
-                DOWNLOAD_STATUS=${worker_status}
+                if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
+                    DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS:-143}
+                else
+                    DOWNLOAD_STATUS=${worker_status}
+                fi
                 rm -f -- \
                     "${DOWNLOAD_PGID_FILE}" \
                     "${DOWNLOAD_PGID_FILE}.tmp" || true
@@ -813,9 +852,6 @@ run_supervised_command() {
         fi
     fi
 
-    worker_status=0
-    wait "${DOWNLOAD_WORKER_PID}" || worker_status=$?
-
     if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
         # shellcheck disable=SC2310
         if ! wait_for_download_exit 100; then
@@ -825,9 +861,23 @@ run_supervised_command() {
         fi
         DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS:-143}
     else
-        DOWNLOAD_WORKER_PID=''
-        DOWNLOAD_WORKER_PGID=''
-        DOWNLOAD_STATUS=${worker_status}
+        worker_status=0
+        wait "${DOWNLOAD_WORKER_PID}" || worker_status=$?
+        if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
+            # A signal interrupted wait. Bound shutdown and reap any group
+            # member that deliberately ignored the first graceful signal.
+            # shellcheck disable=SC2310
+            if ! wait_for_download_exit 100; then
+                signal_download_worker KILL
+                # shellcheck disable=SC2310
+                wait_for_download_exit 30 || true
+            fi
+            DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS:-143}
+        else
+            DOWNLOAD_WORKER_PID=''
+            DOWNLOAD_WORKER_PGID=''
+            DOWNLOAD_STATUS=${worker_status}
+        fi
     fi
 
     if [[ -n ${DOWNLOAD_PGID_FILE} ]]; then
@@ -1604,6 +1654,7 @@ initialize_runtime_dependencies() {
     local runtime_manager
     local runtime_action
     local runtime_attestation=''
+    local runtime_status=0
 
     for command_name in aria2c ffmpeg ffprobe python3 sed stdbuf tr realpath grep mktemp mv rm rmdir chmod flock mkdir sha256sum stat setsid sleep timeout find; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
@@ -1645,12 +1696,31 @@ initialize_runtime_dependencies() {
                 exit 64
                 ;;
         esac
-        if ! runtime_attestation=$(
-            "${runtime_manager}" prepare "${runtime_action}"
-        ); then
+        resolve_lock_root
+        RUNTIME_ATTESTATION_TMP=$(mktemp \
+            --tmpdir="${OUTPUT_LOCK_ROOT}" \
+            '.runtime-attestation.XXXXXXXX') || {
+            error 'unable to create the private runtime attestation file.'
+            exit 70
+        }
+        if ! chmod 600 -- "${RUNTIME_ATTESTATION_TMP}"; then
+            error 'unable to secure the private runtime attestation file.'
+            exit 70
+        fi
+        run_supervised_command \
+            "${runtime_manager}" prepare "${runtime_action}" \
+            >"${RUNTIME_ATTESTATION_TMP}"
+        runtime_status=${DOWNLOAD_STATUS}
+        if ((runtime_status != 0)); then
+            if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
+                exit "${REQUESTED_EXIT_STATUS:-143}"
+            fi
             error 'unable to initialize the managed yt-dlp and Deno runtimes.'
             exit 69
         fi
+        runtime_attestation=$(<"${RUNTIME_ATTESTATION_TMP}")
+        rm -f -- "${RUNTIME_ATTESTATION_TMP}"
+        RUNTIME_ATTESTATION_TMP=''
         # shellcheck disable=SC2310 # The parser checks every assignment and reports bounded diagnostics.
         if ! parse_managed_runtime_attestation "${runtime_attestation}"; then
             error 'unable to resolve the attested managed runtimes.'

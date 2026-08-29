@@ -1,3 +1,5 @@
+# Changelog
+
 ## 2.3.5 - 2026-08-29
 
 ### Security and state robustness
@@ -14,6 +16,8 @@
 - Ignore non-regular, symbolic-link, oversized, or overlong GUI configuration
   inputs without blocking or partially applying them; accept at most 64 KiB
   and 128 lines before atomically publishing loaded settings.
+- Refuse portable-launcher removal through symbolic-link XDG directories and
+  reject overflowing NSS UID/GID values before any Bash arithmetic or cleanup.
 
 ### GUI process reliability
 
@@ -29,12 +33,23 @@
 - Return explicit worker-liveness statuses so Bash 5.2 cleanup entered through
   the negated EXIT-trap condition cannot mistake a live pre-PGID supervisor for
   a terminated worker and block while waiting without first signaling it.
+- Supervise managed-runtime preparation and protect every CLI child-registration
+  window, so HUP/INT/TERM is relayed and reaped without leaking descendants or
+  replacing the requested 129/130/143 status with a raw `setsid` signal number.
+
+### Runtime performance
+
+- Reuse the immutable paths and versions captured by the final managed-runtime
+  validation when emitting the engine attestation, removing four redundant
+  executable probes from every managed launch.
 
 ### Documentation
 
 - Align every English and French installation example with the immutable
   v2.3.4 RPM, DEB and ZIP, while opening the next development version so its
   package identity cannot collide with the published release tag.
+- Declare the DEB's verified-TLS CA-certificate dependency, keep installed
+  README links usable, and qualify portable source-tree uninstall instructions.
 
 ### Test reliability
 
@@ -696,8 +711,6 @@
   retaining aria2c multi-connection acceleration for direct transfers.
 - Use the official yt-dlp executable's bundled EJS support instead of allowing
   runtime EJS downloads.
-
-# Changelog
 
 ## 2.1.22 - 2026-08-20
 

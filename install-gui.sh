@@ -119,6 +119,20 @@ reject_symlink_directory() {
     return 0
 }
 
+validate_managed_directory_chain() {
+    local directory=''
+
+    for directory in \
+        "${APPLICATION_DIR}" \
+        "${LAUNCHER_DIR}" \
+        "${DATA_HOME}/icons" \
+        "${DATA_HOME}/icons/hicolor" \
+        "${DATA_HOME}/icons/hicolor/scalable" \
+        "${ICON_DIR}"; do
+        reject_symlink_directory "${directory}"
+    done
+}
+
 validate_install_environment() {
     if [[ -z ${HOME:-} && -z ${XDG_DATA_HOME:-} ]]; then
         printf 'Error: HOME or XDG_DATA_HOME must be defined.\n' >&2
@@ -197,9 +211,7 @@ validate_launcher_target() {
 }
 
 prepare_install_directories() {
-    reject_symlink_directory "${APPLICATION_DIR}"
-    reject_symlink_directory "${LAUNCHER_DIR}"
-    reject_symlink_directory "${ICON_DIR}"
+    validate_managed_directory_chain
     mkdir -p -- "${APPLICATION_DIR}" "${LAUNCHER_DIR}" "${ICON_DIR}"
     chmod 700 -- "${LAUNCHER_DIR}"
     remove_stale_install_artifacts
@@ -319,6 +331,10 @@ install_launcher() {
 
 uninstall_launcher() {
     local launcher_removed=false
+
+    # The same traversal boundary applies to removal: stale-artifact globs and
+    # known leaf paths must never cross a symbolic-link directory.
+    validate_managed_directory_chain
 
     if [[ -e ${DESKTOP_FILE} || -L ${DESKTOP_FILE} ]]; then
         rm -f -- "${DESKTOP_FILE}"

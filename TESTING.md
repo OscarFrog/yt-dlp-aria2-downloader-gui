@@ -253,6 +253,10 @@ The automated suite checks, among other things:
   preserving interrupted-download resume behavior;
 - disabling of inherited yt-dlp plugins and personal configuration;
 - forwarding of HUP, INT, and TERM sent only to the CLI wrapper PID;
+- signal-safe CLI child registration before `$!` is published, plus bounded
+  cancellation of managed-runtime preparation with exact 129/130/143 status;
+- requested-signal status preservation when a supervised child exits during
+  process-group discovery;
 - forwarding of termination signals during the wrapper-managed HLS FFmpeg remux;
 - preservation of immediate command failure statuses before PGID observation;
 - one shared process session for GUI, engine, yt-dlp, aria2c, FFmpeg, and Deno;
@@ -271,7 +275,8 @@ The automated suite checks, among other things:
   optional netrc capability;
 - `.desktop` launcher installation through a stable private link, exact Exec
   escaping, restrictive-path handling, validation, permissions, reinstall, and
-  removal;
+  removal, including refusal to uninstall through terminal or intermediate
+  symbolic-link XDG directories;
 - package install-tree layout, stable command symlinks, system desktop entry,
   dedicated hicolor icon, documentation permissions, and exclusion of tests
   and obsolete images;
@@ -364,7 +369,8 @@ The automated suite checks, among other things:
   preservation of a portable ZIP/Git launcher;
 - adversarial cleanup coverage for forged, multi-line, and oversized
   custom-XDG metadata, symlinked ownership sentinels, missing homes, terminal
-  runtime symlinks, and refusal of direct root cleanup for a non-root HOME;
+  runtime symlinks, overflowing UID/GID text, and refusal of direct root cleanup
+  for a non-root HOME;
 - refusal to traverse symlinked intermediate cleanup components beneath
   authorized XDG roots, with that cleanup safety suite repeated ten times in
   stress CI;

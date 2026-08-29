@@ -278,6 +278,69 @@ test_installer_failure_modes() {
         'missing validator note'
 }
 
+test_installer_uninstall_symlink_boundaries() {
+    local applications_data="${TEST_ROOT}/uninstall-applications-link"
+    local applications_victim="${TEST_ROOT}/uninstall-applications-victim"
+    local icons_data="${TEST_ROOT}/uninstall-icons-link"
+    local icons_victim="${TEST_ROOT}/uninstall-icons-victim"
+    local launcher_data="${TEST_ROOT}/uninstall-launcher-link"
+    local launcher_victim="${TEST_ROOT}/uninstall-launcher-victim"
+    local scalable_data="${TEST_ROOT}/uninstall-scalable-link"
+    local scalable_victim="${TEST_ROOT}/uninstall-scalable-victim"
+
+    mkdir -p -- "${applications_data}" "${applications_victim}"
+    touch -- \
+        "${applications_victim}/yt-dlp-aria2-downloader.desktop" \
+        "${applications_victim}/keep"
+    ln -s -- "${applications_victim}" "${applications_data}/applications"
+    assert_status 1 'uninstall rejects a symlinked applications directory' \
+        env XDG_DATA_HOME="${applications_data}" \
+        bash "${COPIED_PROJECT}/install-gui.sh" uninstall
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'refusing a symbolic-link installation directory' \
+        'symlinked applications uninstall diagnostic'
+    [[ -f ${applications_victim}/yt-dlp-aria2-downloader.desktop &&
+        -f ${applications_victim}/keep ]] \
+        || fail 'Uninstall modified a symlinked applications target.'
+
+    mkdir -p -- "${launcher_data}" "${launcher_victim}/.install.stale"
+    touch -- "${launcher_victim}/launch" "${launcher_victim}/keep"
+    ln -s -- "${launcher_victim}" \
+        "${launcher_data}/yt-dlp-aria2-downloader"
+    assert_status 1 'uninstall rejects a symlinked launcher directory' \
+        env XDG_DATA_HOME="${launcher_data}" \
+        bash "${COPIED_PROJECT}/install-gui.sh" uninstall
+    [[ -f ${launcher_victim}/launch && -d ${launcher_victim}/.install.stale &&
+        -f ${launcher_victim}/keep ]] \
+        || fail 'Uninstall modified a symlinked launcher target.'
+
+    mkdir -p -- \
+        "${scalable_data}/icons/hicolor/scalable" "${scalable_victim}"
+    touch -- \
+        "${scalable_victim}/yt-dlp-aria2-downloader.svg" \
+        "${scalable_victim}/keep"
+    ln -s -- "${scalable_victim}" \
+        "${scalable_data}/icons/hicolor/scalable/apps"
+    assert_status 1 'uninstall rejects a symlinked icon leaf directory' \
+        env XDG_DATA_HOME="${scalable_data}" \
+        bash "${COPIED_PROJECT}/install-gui.sh" uninstall
+    [[ -f ${scalable_victim}/yt-dlp-aria2-downloader.svg &&
+        -f ${scalable_victim}/keep ]] \
+        || fail 'Uninstall modified a symlinked icon leaf target.'
+
+    mkdir -p -- "${icons_data}" "${icons_victim}/hicolor/scalable/apps"
+    touch -- \
+        "${icons_victim}/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg" \
+        "${icons_victim}/keep"
+    ln -s -- "${icons_victim}" "${icons_data}/icons"
+    assert_status 1 'uninstall rejects a symlinked intermediate icon directory' \
+        env XDG_DATA_HOME="${icons_data}" \
+        bash "${COPIED_PROJECT}/install-gui.sh" uninstall
+    [[ -f ${icons_victim}/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg &&
+        -f ${icons_victim}/keep ]] \
+        || fail 'Uninstall modified a symlinked intermediate icon target.'
+}
+
 test_installer_uninstall_lifecycle() {
     assert_status 0 'uninstall existing launcher' \
         env XDG_DATA_HOME="${DATA_HOME}" \
@@ -312,6 +375,7 @@ main() {
     test_installer_initial_installation
     test_installer_reinstallation
     test_installer_failure_modes
+    test_installer_uninstall_symlink_boundaries
     test_installer_uninstall_lifecycle
     printf 'Installer integration tests passed.\n'
 }

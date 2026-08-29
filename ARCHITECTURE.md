@@ -92,14 +92,16 @@ to the current single native-audio profile.
 
 1. Parse one URL from a direct argument, stdin, or a private URL file; reject
    line breaks, non-HTTP(S) schemes, and URL user information.
-2. Resolve the destination canonically, acquire a same-user destination lock,
-   recover abandoned owned staging directories, and remove only allowlisted
-   stale temporary files.
-3. Ask `runtime-manager.sh prepare update` for an attested yt-dlp/Deno pair, or
-   `prepare require` when automatic managed-runtime updates are disabled.
-4. Validate the yt-dlp, Deno, aria2c, and `setsid` versions or capabilities used
+2. Ask `runtime-manager.sh prepare update` for an attested yt-dlp/Deno pair, or
+   `prepare require` when automatic managed-runtime updates are disabled. This
+   command is supervised as a signal-aware child and writes its output through
+   a private mode-`0600` capture file.
+3. Validate the yt-dlp, Deno, aria2c, and `setsid` versions or capabilities used
    by the current option contract, and require FFmpeg, FFprobe, and the other
    host commands used later in the pipeline.
+4. Resolve the destination canonically, acquire a same-user destination lock,
+   recover abandoned owned staging directories, and remove only allowlisted
+   stale temporary files.
 5. Create private URL, cookie, plan, manifest, staging, and result-path state.
 6. Run a metadata-only yt-dlp planning pass and ask
    `private-aria2-plan.py classify` whether the selected formats may use the
@@ -113,8 +115,10 @@ to the current single native-audio profile.
    is normalized, contained in the selected destination, and validated.
 
 Nested long-running commands use dedicated process groups even when the engine
-itself was launched without the GUI. HUP, INT, and TERM are relayed to those
-groups, and cleanup removes only state owned by the current invocation.
+itself was launched without the GUI. Child registration is signal-atomic;
+HUP, INT, and TERM are relayed to those groups during runtime preparation,
+transfer, and post-processing, and cleanup removes only state owned by the
+current invocation.
 
 ## Transport boundary and Python helper
 
@@ -166,10 +170,11 @@ link. Updates are serialized with a lock, candidates are downloaded into
 private work areas, authenticated or checksum-verified according to the
 component contract, and validated for exact version and required capabilities
 before activation. Personal curl and yt-dlp configuration and yt-dlp plugins
-cannot alter these probes or downloads. Engine attestations name the validated
-immutable version paths rather than the mutable activation links. Activation
-uses a journal so interrupted link changes can be recovered; a validated
-previous version remains available for rollback.
+cannot alter these probes or downloads. The final validation captures both
+immutable paths and versions; engine attestations reuse that exact result
+instead of probing the executables again or resolving the mutable activation
+links a second time. Activation uses a journal so interrupted link changes can
+be recovered; a validated previous version remains available for rollback.
 
 The manager records an ownership sentinel for custom XDG data roots. Package
 cleanup uses that evidence to avoid deleting unrelated user data.

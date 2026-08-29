@@ -1810,6 +1810,7 @@ test_static_shell_interface_contracts() {
 }
 
 test_static_release_contracts() {
+    local changelog_first_line changelog_h1_count
     local engine_reported_version evidence_phase preflight_phase readme_path
     local release_workflow
 
@@ -1888,6 +1889,12 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/CHANGELOG.md" \
         "## ${EXPECTED_VERSION} - " \
         'changelog current-version heading'
+    IFS= read -r changelog_first_line <"${SCRIPT_DIR}/CHANGELOG.md"
+    assert_equals '# Changelog' "${changelog_first_line}" \
+        'changelog native document title'
+    changelog_h1_count=$(grep -c '^# ' "${SCRIPT_DIR}/CHANGELOG.md")
+    assert_equals 1 "${changelog_h1_count}" \
+        'changelog has one document title'
 
     # The release workflow must derive the release version from the tag and compare
     # it with executable/constants-based project version carriers, never comments.
@@ -3106,7 +3113,7 @@ test_static_runtime_regression_contracts() {
     assert_file_contains "${SCRIPT_DIR}/progress-monitor.sh" \
         'MAX_SAFE_COUNTER=9000000000000000' 'bounded progress arithmetic'
     assert_file_contains "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
-        'aria2 (>= 1.37.0), python3 (>= 3.10), ffmpeg, gnupg, unzip, zenity' \
+        'ca-certificates, curl, aria2 (>= 1.37.0), python3 (>= 3.10), ffmpeg, gnupg, unzip, zenity' \
         'DEB managed-runtime system dependencies'
     assert_file_not_contains "${SCRIPT_DIR}/download-video.sh" \
         '--downloader-args' \
