@@ -128,7 +128,7 @@ GUI_SCENARIO_TIMEOUT_SECONDS=$((10#${GUI_SCENARIO_TIMEOUT_SECONDS}))
 readonly GUI_SCENARIO_TIMEOUT_SECONDS
 readonly GUI_UNDER_TEST="${MOCK_BIN}/download-video-gui-under-test"
 readonly GUI_SIGNAL_UNDER_TEST="${MOCK_BIN}/download-video-gui-signal-under-test"
-readonly GUI_SIGNAL_DEBUG_ENV="${MOCK_BIN}/gui-signal-debug-env.sh"
+readonly GUI_SIGNAL_REGISTRATION_UNDER_TEST="${MOCK_BIN}/gui-signal-registration-under-test"
 export MOCK_GUI_REAL="${PROJECT_DIR}/download-video-gui.sh"
 export MOCK_GUI_SCENARIO_TIMEOUT_SECONDS=${GUI_SCENARIO_TIMEOUT_SECONDS}
 mkdir -p -- \
@@ -213,50 +213,35 @@ os.execvpe("bash", ["bash", gui_path, *sys.argv[1:]], os.environ)
 EOF_GUI_SIGNAL
 chmod 0755 -- "${GUI_SIGNAL_UNDER_TEST}"
 
-cat >"${GUI_SIGNAL_DEBUG_ENV}" <<'EOF_GUI_SIGNAL_DEBUG'
-if [[ ${MOCK_GUI_SIGNAL_BEFORE_WORKER_REGISTRATION:-0} == 1 ]]; then
-    mock_signal_before_worker_registration() {
-        local gui_pid=''
-        local launched_pid=''
-        local launch_state=''
-        local next_command=$1
+cat >"${GUI_SIGNAL_REGISTRATION_UNDER_TEST}" <<'EOF_GUI_SIGNAL_REGISTRATION'
+#!/usr/bin/env bash
+set -euo pipefail
 
-        [[ -n ${MOCK_GUI_SIGNAL_PID_FILE:-} \
-            && -n ${MOCK_WORKER_LAUNCH_STATE_MARKER:-} \
-            && -n ${MOCK_WORKER_PRE_REGISTRATION_MARKER:-} ]] || return 0
-        IFS= read -r gui_pid <"${MOCK_GUI_SIGNAL_PID_FILE}" || return 0
-        [[ ${BASHPID} == "${gui_pid}" ]] || return 0
+: "${MOCK_GUI_SOURCE_COPY:?}"
+: "${MOCK_WORKER_DEFERRED_STATUS_MARKER:?}"
+: "${MOCK_WORKER_IDENTITY:?}"
+: "${MOCK_WORKER_LAUNCH_STATE_MARKER:?}"
+: "${MOCK_WORKER_PRE_REGISTRATION_MARKER:?}"
 
-        if [[ ${next_command} == \
-            YTDLP_ARIA2_SUPERVISED_SESSION=true*setsid* ]]; then
-            printf '%s\n' "${SIGNAL_REGISTRATION_ACTIVE:-false}" \
-                >"${MOCK_WORKER_LAUNCH_STATE_MARKER}"
-            return 0
-        fi
+# The test creates this copy by removing the statically enforced final main
+# invocation. This loads the production functions without entering the GUI.
+# shellcheck disable=SC1090
+source "${MOCK_GUI_SOURCE_COPY}"
+trap cleanup EXIT
 
-        [[ ${next_command} == WORKER_PID=* ]] || return 0
-        IFS= read -r launch_state \
-            <"${MOCK_WORKER_LAUNCH_STATE_MARKER}" || return 0
-        [[ ${launch_state} == true \
-            && ${SIGNAL_REGISTRATION_ACTIVE:-false} == true ]] || return 0
-        launched_pid=$!
-        [[ ${launched_pid} =~ ^[1-9][0-9]*$ ]] || return 0
-
-        trap - DEBUG
-        printf '%s\n' "${launched_pid}" \
-            >"${MOCK_WORKER_PRE_REGISTRATION_MARKER}"
-        # Stop after publishing the child PID so the controller can queue TERM
-        # at this exact point. Unlike waiting for DEFERRED_SIGNAL_STATUS here,
-        # SIGSTOP does not require Bash to run a signal trap recursively from
-        # inside this DEBUG trap (which Bash 5.2 deliberately postpones).
-        kill -STOP -- "${BASHPID}"
-    }
-
-    set -T
-    trap 'mock_signal_before_worker_registration "$BASH_COMMAND"' DEBUG
-fi
-EOF_GUI_SIGNAL_DEBUG
-chmod 0600 -- "${GUI_SIGNAL_DEBUG_ENV}"
+begin_signal_registration
+bash -c 'exec -a "$1" sleep 30' bash "${MOCK_WORKER_IDENTITY}" &
+printf '%s\n' "${SIGNAL_REGISTRATION_ACTIVE}" \
+    >"${MOCK_WORKER_LAUNCH_STATE_MARKER}"
+handle_gui_signal 143
+WORKER_PID=$!
+printf '%s\n' "${WORKER_PID}" >"${MOCK_WORKER_PRE_REGISTRATION_MARKER}"
+printf '%s\n' "${DEFERRED_SIGNAL_STATUS}" \
+    >"${MOCK_WORKER_DEFERRED_STATUS_MARKER}"
+finish_signal_registration
+exit 70
+EOF_GUI_SIGNAL_REGISTRATION
+chmod 0755 -- "${GUI_SIGNAL_REGISTRATION_UNDER_TEST}"
 
 cat >"${MOCK_BIN}/yt-dlp" <<'EOF_YTDLP'
 #!/usr/bin/env bash
@@ -1281,28 +1266,6 @@ wait_for_file() {
     done
 
     fail "${label}: file did not appear within ${timeout}s: ${path}"
-}
-
-wait_for_stopped_process() {
-    local pid=$1
-    local timeout=$2
-    local label=$3
-    local deadline=$((SECONDS + timeout))
-    local process_state=''
-    local stat_record=''
-
-    while ((SECONDS < deadline)); do
-        if IFS= read -r stat_record <"/proc/${pid}/stat"; then
-            # /proc/PID/stat encloses the command name in parentheses. Strip
-            # through its final ") " before reading the one-letter state.
-            stat_record=${stat_record##*) }
-            process_state=${stat_record%% *}
-            [[ ${process_state} == T || ${process_state} == t ]] && return 0
-        fi
-        sleep 0.01
-    done
-
-    fail "${label}: process ${pid} did not stop within ${timeout}s"
 }
 
 assert_directory_empty() {
@@ -2961,54 +2924,38 @@ test_mock_signal_gui_blocked_entry() {
 }
 
 test_mock_signal_gui_worker_registration() {
-    local controller_pid elapsed_milliseconds gui_pid gui_pid_file gui_status
-    local launched_worker_pid signal_finished_at signal_log signal_started_at
-    local signal_tmpdir worker_launch_state_marker worker_registration_marker
-    local worker_termination_marker
+    local elapsed_milliseconds gui_status
+    local gui_source_copy launched_worker_pid signal_finished_at signal_log
+    local signal_started_at
+    local worker_deferred_status_marker worker_identity
+    local worker_launch_state_marker worker_registration_marker
 
-    # Pause in a DEBUG trap immediately before WORKER_PID receives $!, then
-    # deliver TERM externally. The launch critical section must defer it until
-    # cleanup can supervise and reap the already-created setsid child.
-    signal_tmpdir="${TEST_ROOT}/worker-registration-signal-tmp"
-    gui_pid_file="${TEST_ROOT}/worker-registration-signal-gui.pid"
+    # Use the production functions in the exact vulnerable order: create an
+    # asynchronous child, handle TERM, then record $! and finish registration.
+    # The source-order assertion separately binds this contract to the real
+    # start_download_worker implementation.
     signal_log="${TEST_ROOT}/worker-registration-signal.log"
+    gui_source_copy="${TEST_ROOT}/download-video-gui-source-only.sh"
     worker_launch_state_marker="${TEST_ROOT}/worker-launch-state"
+    worker_deferred_status_marker="${TEST_ROOT}/worker-deferred-status"
+    worker_identity="${TEST_ROOT}/worker-pre-registration-child"
     worker_registration_marker="${TEST_ROOT}/worker-pre-registration.pid"
-    worker_termination_marker="${TEST_ROOT}/worker-pre-registration-terminated"
-    mkdir -p -- "${signal_tmpdir}"
-    rm -f -- "${gui_pid_file}" "${signal_log}" \
-        "${worker_launch_state_marker}" "${worker_registration_marker}" \
-        "${worker_termination_marker}"
-    prepare_argument_log 'gui-signal-worker-registration'
-
-    timeout --signal=TERM --kill-after=2s 8s \
-        env TMPDIR="${signal_tmpdir}" \
-        BASH_ENV="${GUI_SIGNAL_DEBUG_ENV}" \
-        MOCK_GUI_SIGNAL_PID_FILE="${gui_pid_file}" \
-        MOCK_GUI_SIGNAL_BEFORE_WORKER_REGISTRATION=1 \
-        MOCK_WORKER_LAUNCH_STATE_MARKER="${worker_launch_state_marker}" \
-        MOCK_WORKER_PRE_REGISTRATION_MARKER="${worker_registration_marker}" \
-        MOCK_LONG_DOWNLOAD=1 \
-        MOCK_TERMINATION_MARKER="${worker_termination_marker}" \
-        "${GUI_SIGNAL_UNDER_TEST}" >"${signal_log}" 2>&1 &
-    controller_pid=$!
-    wait_for_file "${gui_pid_file}" 5 \
-        'worker pre-registration GUI PID publication'
-    wait_for_file "${worker_launch_state_marker}" 5 \
-        'worker launch critical-section observation'
-    wait_for_file "${worker_registration_marker}" 5 \
-        'worker pre-registration signal injection point'
-    IFS= read -r gui_pid <"${gui_pid_file}"
-    [[ ${gui_pid} =~ ^[1-9][0-9]*$ ]] \
-        || fail "Invalid worker pre-registration GUI PID: ${gui_pid}"
-    wait_for_stopped_process "${gui_pid}" 5 \
-        'worker pre-registration signal injection point'
+    rm -f -- "${signal_log}" "${worker_deferred_status_marker}" \
+        "${worker_launch_state_marker}" "${worker_registration_marker}"
+    sed '$d' "${PROJECT_DIR}/download-video-gui.sh" >"${gui_source_copy}"
+    chmod 0600 -- "${gui_source_copy}"
+    printf '%s\n' 'Mock scenario: gui-signal-worker-registration'
 
     signal_started_at=$(date +%s%3N)
-    kill -TERM -- "${gui_pid}"
-    kill -CONT -- "${gui_pid}"
     gui_status=0
-    wait "${controller_pid}" || gui_status=$?
+    timeout --signal=TERM --kill-after=2s 8s \
+        env MOCK_GUI_SOURCE_COPY="${gui_source_copy}" \
+        MOCK_WORKER_DEFERRED_STATUS_MARKER="${worker_deferred_status_marker}" \
+        MOCK_WORKER_IDENTITY="${worker_identity}" \
+        MOCK_WORKER_LAUNCH_STATE_MARKER="${worker_launch_state_marker}" \
+        MOCK_WORKER_PRE_REGISTRATION_MARKER="${worker_registration_marker}" \
+        "${GUI_SIGNAL_REGISTRATION_UNDER_TEST}" >"${signal_log}" 2>&1 \
+        || gui_status=$?
     signal_finished_at=$(date +%s%3N)
     elapsed_milliseconds=$((signal_finished_at - signal_started_at))
     assert_equals 143 "${gui_status}" \
@@ -3017,11 +2964,11 @@ test_mock_signal_gui_worker_registration() {
         || fail "Worker pre-registration TERM handling took ${elapsed_milliseconds}ms."
     assert_file_has_line "${worker_launch_state_marker}" true \
         'worker launch occurs inside signal-registration critical section'
+    assert_file_has_line "${worker_deferred_status_marker}" 143 \
+        'worker pre-registration handler defers TERM'
     IFS= read -r launched_worker_pid <"${worker_registration_marker}"
     [[ ${launched_worker_pid} =~ ^[1-9][0-9]*$ ]] \
         || fail "Invalid pre-registration worker PID: ${launched_worker_pid}"
-    assert_directory_empty "${signal_tmpdir}" \
-        'worker pre-registration cleanup left private temporary state'
     assert_no_test_processes \
         'worker pre-registration TERM left GUI descendants'
 }

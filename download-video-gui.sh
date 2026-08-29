@@ -269,8 +269,10 @@ process_is_running() {
         fi
         process_state=${process_stat##*) }
         process_state=${process_state%% *}
-        [[ ${process_state} != Z && ${process_state} != X ]]
-        return
+        if [[ ${process_state} != Z && ${process_state} != X ]]; then
+            return 0
+        fi
+        return 1
     fi
 
     return 0
@@ -369,8 +371,11 @@ worker_tree_alive() {
         return 0
     fi
     if [[ -n ${WORKER_PID} ]]; then
-        process_is_running "${WORKER_PID}"
-        return
+        # shellcheck disable=SC2310 # Expected failure means the worker exited.
+        if process_is_running "${WORKER_PID}"; then
+            return 0
+        fi
+        return 1
     fi
     return 1
 }

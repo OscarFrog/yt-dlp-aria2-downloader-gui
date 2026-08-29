@@ -11,6 +11,9 @@
 - Accept at most 64 KiB from captured Zenity stdout, ingest at most the final
   64 KiB of stderr diagnostics, and preserve the first signal received while
   registering the worker supervisor, a captured dialog, or the progress pair.
+- Return explicit worker-liveness statuses so Bash 5.2 cleanup entered through
+  the negated EXIT-trap condition cannot mistake a live pre-PGID supervisor for
+  a terminated worker and block while waiting without first signaling it.
 
 ### Documentation
 
