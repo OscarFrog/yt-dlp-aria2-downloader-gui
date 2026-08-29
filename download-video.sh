@@ -930,6 +930,7 @@ run_supervised_command() {
         # shellcheck disable=SC2310
         if wait_for_download_ready; then
             registration_ready=true
+            cleanup_download_registration_files
         fi
         finish_signal_registration
     else
@@ -972,6 +973,7 @@ run_supervised_command() {
         # shellcheck disable=SC2310
         if wait_for_download_pgid; then
             registration_ready=true
+            cleanup_download_registration_files
         fi
         finish_signal_registration
     fi

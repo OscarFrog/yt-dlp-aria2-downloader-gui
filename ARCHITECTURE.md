@@ -181,7 +181,10 @@ section remains active until that readiness marker or PGID is published, so the
 first signal cannot disappear in the fork/exec window; a repeated signal still
 escalates immediately to KILL while retaining the first requested status.
 Signals are relayed during runtime preparation, transfer, and post-processing,
-and cleanup removes only state owned by the current invocation.
+and cleanup removes only state owned by the current invocation. Once readiness
+has been consumed into the in-memory PID or PGID state, its private record is
+unlinked before the registration critical section ends so a later SIGKILL
+cannot strand it.
 
 ## Transport boundary and Python helper
 

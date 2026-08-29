@@ -252,6 +252,8 @@ The automated suite checks, among other things:
   owner-only FIFO, plus 64 KiB accepted-stdout and in-memory stderr bounds for
   captured dialogs;
 - process-group recovery when PGID-file publication is delayed;
+- immediate readiness-record unlinking in standalone-PGID and shared-session
+  PID paths, including before an uncatchable worker crash;
 - atomic publication and failure cleanup of the result-path file;
 - rejection of a second writer targeting the same canonical output directory;
 - explicit refusal to overwrite completed or post-processed media files while

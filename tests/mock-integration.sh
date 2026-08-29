@@ -1404,6 +1404,27 @@ wait_for_file() {
     fail "${label}: file did not appear within ${timeout}s: ${path}"
 }
 
+wait_for_worker_registration_cleanup() {
+    local timeout=$1
+    local label=$2
+    local deadline=$((SECONDS + timeout))
+    local registration_path=''
+
+    while ((SECONDS < deadline)); do
+        if ! registration_path=$(find \
+            "${RUNTIME_DIR}/yt-dlp-aria2-downloader" \
+            -mindepth 1 -maxdepth 1 \
+            \( -name '.worker-pgid.*' -o -name '.worker-ready.*' \) \
+            -print -quit); then
+            fail "${label}: unable to inspect worker registration paths"
+        fi
+        [[ -z ${registration_path} ]] && return 0
+        sleep 0.01
+    done
+
+    fail "${label}: registration path remains: ${registration_path}"
+}
+
 assert_directory_empty() {
     local directory=$1
     local label=$2
@@ -2402,6 +2423,9 @@ test_mock_engine_private_staging() {
     [[ -f ${crash_staging}/.yt-dlp-aria2-owner-v1 ]] \
         || fail 'Crash staging ownership marker is missing.'
 
+    wait_for_worker_registration_cleanup 5 \
+        'Crash worker readiness cleanup'
+
     # Do not derive the process group immediately after `setsid ... &`.
     # Before util-linux setsid(1) has created the new session, the asynchronous
     # launcher can still temporarily belong to this test shell's process group.
@@ -3083,6 +3107,8 @@ test_mock_signal_cli_download() {
         >"${cli_signal_log}" 2>&1 &
     cli_engine_pid=$!
     wait_for_file "${cli_started_marker}" 10 'CLI worker startup'
+    wait_for_worker_registration_cleanup 5 \
+        'CLI worker readiness cleanup'
     kill -TERM -- "${cli_engine_pid}"
     cli_engine_status=0
     wait "${cli_engine_pid}" || cli_engine_status=$?
@@ -3246,6 +3272,17 @@ test_mock_signal_cli_pre_env_registration() {
             || fail "Pre-env ${mode} SIGINT handling took ${elapsed_milliseconds}ms."
         assert_no_test_processes \
             "pre-env ${mode} SIGINT left descendants"
+        shopt -s nullglob
+        registration_leftovers=(
+            "${RUNTIME_DIR}/yt-dlp-aria2-downloader"/.worker-pgid.*
+            "${RUNTIME_DIR}/yt-dlp-aria2-downloader"/.worker-ready.*
+        )
+        shopt -u nullglob
+        if ((${#registration_leftovers[@]} != 0)); then
+            printf 'Registration file left after pre-env %s SIGINT: %s\n' \
+                "${mode}" "${registration_leftovers[@]}" >&2
+            fail "Pre-env ${mode} SIGINT left registration files."
+        fi
     done
 
     # A repeated signal retains the first conventional status but escalates
@@ -3291,8 +3328,11 @@ test_mock_signal_cli_pre_env_registration() {
             "${RUNTIME_DIR}/yt-dlp-aria2-downloader"/.worker-ready.*
         )
         shopt -u nullglob
-        ((${#registration_leftovers[@]} == 0)) \
-            || fail "Pre-env escalation ${mode} left registration files."
+        if ((${#registration_leftovers[@]} != 0)); then
+            printf 'Registration file left after pre-env escalation %s: %s\n' \
+                "${mode}" "${registration_leftovers[@]}" >&2
+            fail "Pre-env escalation ${mode} left registration files."
+        fi
         assert_no_test_processes \
             "pre-env escalation ${mode} left descendants"
     done
