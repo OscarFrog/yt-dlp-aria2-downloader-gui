@@ -2891,7 +2891,7 @@ test_mock_signal_gui_blocked_entry() {
         "${zenity_started_marker}" "${zenity_termination_marker}"
     prepare_argument_log 'gui-signal-blocked-entry'
 
-    timeout --preserve-status --signal=TERM --kill-after=2s 8s \
+    timeout --signal=TERM --kill-after=2s 8s \
         env TMPDIR="${signal_tmpdir}" \
         MOCK_GUI_SIGNAL_PID_FILE="${signal_pid_file}" \
         MOCK_ZENITY_BLOCK_MODE=entry \
@@ -2976,6 +2976,7 @@ test_mock_signal_gui_worker_registration() {
 test_mock_signal_gui_blocked_progress() {
     local controller_pid elapsed_milliseconds expected_status gui_pid gui_status
     local index signal_finished_at signal_log signal_name signal_pid_file
+    local shutdown_budget_milliseconds=6000
     local signal_started_at signal_tmpdir worker_started_marker
     local worker_termination_marker
     local zenity_started_marker zenity_termination_marker
@@ -3001,7 +3002,7 @@ test_mock_signal_gui_blocked_progress() {
             "${OUTPUT_DIR}/Mock media [abc123].webm"
         prepare_argument_log "gui-signal-blocked-progress-${signal_name}"
 
-        timeout --preserve-status --signal=TERM --kill-after=2s 8s \
+        timeout --signal=TERM --kill-after=2s 8s \
             env TMPDIR="${signal_tmpdir}" \
             MOCK_GUI_SIGNAL_PID_FILE="${signal_pid_file}" \
             MOCK_PLAN_PROTOCOL='m3u8_native' \
@@ -3032,7 +3033,10 @@ test_mock_signal_gui_blocked_progress() {
         elapsed_milliseconds=$((signal_finished_at - signal_started_at))
         assert_equals "${expected_status}" "${gui_status}" \
             "blocked-progress GUI ${signal_name} status"
-        ((elapsed_milliseconds < 5000)) \
+        # Worker TERM/KILL polling can consume five seconds. Leave bounded CI
+        # scheduling headroom while the independent eight-second watchdog
+        # continues to distinguish a stalled cleanup path.
+        ((elapsed_milliseconds < shutdown_budget_milliseconds)) \
             || fail "Blocked-progress ${signal_name} handling took ${elapsed_milliseconds}ms."
         wait_for_file "${worker_termination_marker}" 5 \
             "blocked-progress ${signal_name} worker receives TERM"

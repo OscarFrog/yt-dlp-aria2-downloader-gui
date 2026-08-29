@@ -2670,6 +2670,9 @@ test_static_application_contracts() {
     assert_file_contains "${SCRIPT_DIR}/tests/test-runner-integration.sh" \
         'YTDLP_ARIA2_TEST_CHILD_TOKEN' \
         'test runner stress binds PID checks to fixture identity'
+    assert_file_not_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+        'timeout --preserve-status' \
+        'GUI signal watchdog expiry remains distinguishable as status 124'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'readonly YTDLP_NO_PLUGINS=1' \
         'yt-dlp plugins disabled by default'
