@@ -1,5 +1,14 @@
 ## 2.3.5 - 2026-08-29
 
+### Security and state robustness
+
+- Prevent retained-log truncation from exposing a secret-bearing URL suffix by
+  discarding the single potentially partial line at the 8 MiB boundary before
+  redaction, then enforcing the final size limit again after sanitization.
+- Ignore non-regular, symbolic-link, oversized, or overlong GUI configuration
+  inputs without blocking or partially applying them; accept at most 64 KiB
+  and 128 lines before atomically publishing loaded settings.
+
 ### Documentation
 
 - Align every English and French installation example with the immutable
