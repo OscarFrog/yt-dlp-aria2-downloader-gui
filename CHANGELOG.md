@@ -21,6 +21,12 @@
   v2.3.4 RPM, DEB and ZIP, while opening the next development version so its
   package identity cannot collide with the published release tag.
 
+### Test reliability
+
+- Synchronize the startup-signal stress test with the sender acknowledgement,
+  allowing Bash 5.2 to dispatch a pending trap after the `DEBUG` hook returns
+  while still proving that the signal preceded complete child registration.
+
 ### Repository maintenance
 
 - Add a statically enforced tracked-file utility inventory and document the
