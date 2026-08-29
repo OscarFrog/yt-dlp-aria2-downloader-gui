@@ -13,6 +13,9 @@
 - Define a language-appropriate Python identity contract instead of copying the
   Bash-only header, and document the manual real-Zenity and post-release
   qualification helpers.
+- Add a stable architecture map, recast `AGENTS.md` as the repository policy
+  router with explicit code-review blockers, and provide progressively loaded
+  skills for shell, supply-chain, packaging, and release work.
 
 ## 2.3.4 - 2026-08-28
 
