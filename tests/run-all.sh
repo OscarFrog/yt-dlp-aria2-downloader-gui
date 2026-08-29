@@ -714,7 +714,8 @@ doctor_report_repository_state() {
         return 0
     fi
     if ! command -v -- git >/dev/null 2>&1 \
-        || ! repository_root=$(GIT_OPTIONAL_LOCKS=0 git -C "${PROJECT_DIR}" \
+        || ! repository_root=$(GIT_OPTIONAL_LOCKS=0 git \
+            -c "safe.directory=${PROJECT_DIR}" -C "${PROJECT_DIR}" \
             rev-parse --show-toplevel 2>/dev/null) \
         || [[ ${repository_root} != "${PROJECT_DIR}" ]]; then
         record_doctor_check required repository-state fail \
@@ -722,9 +723,11 @@ doctor_report_repository_state() {
         return 0
     fi
 
-    branch=$(GIT_OPTIONAL_LOCKS=0 git -C "${PROJECT_DIR}" \
+    branch=$(GIT_OPTIONAL_LOCKS=0 git \
+        -c "safe.directory=${PROJECT_DIR}" -C "${PROJECT_DIR}" \
         symbolic-ref --quiet --short HEAD 2>/dev/null) || branch='detached HEAD'
-    if ! status_output=$(GIT_OPTIONAL_LOCKS=0 git -C "${PROJECT_DIR}" \
+    if ! status_output=$(GIT_OPTIONAL_LOCKS=0 git \
+        -c "safe.directory=${PROJECT_DIR}" -C "${PROJECT_DIR}" \
         status --porcelain 2>/dev/null); then
         record_doctor_check required repository-state fail \
             "branch=${branch}; worktree state unavailable"

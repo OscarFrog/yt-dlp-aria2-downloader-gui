@@ -334,6 +334,7 @@ test_parallel_repeat_runner() {
 test_run_all_doctor_contract() {
     local doctor_mock_bin="${TEST_RUNNER_LOG_DIR}/doctor-bin"
     local offline_shfmt_root="${TEST_RUNNER_LOG_DIR}/offline-shfmt-cache"
+    local project_dir=${SCRIPT_DIR%/*}
     local doctor_output=''
     local project_has_git_metadata=false
     local aria2_probe_mode=''
@@ -440,6 +441,16 @@ EOF_MOCK_CURL
 if [[ ${DOCTOR_MOCK_GIT_STATUS:-0} != 0 ]]; then
     exit "${DOCTOR_MOCK_GIT_STATUS}"
 fi
+if [[ -n ${DOCTOR_EXPECTED_SAFE_DIRECTORY:-} ]]; then
+    safe_directory_found=false
+    for argument in "$@"; do
+        if [[ ${argument} == "safe.directory=${DOCTOR_EXPECTED_SAFE_DIRECTORY}" ]]; then
+            safe_directory_found=true
+            break
+        fi
+    done
+    [[ ${safe_directory_found} == true ]] || exit 78
+fi
 exec "${DOCTOR_REAL_GIT:?}" "$@"
 EOF_MOCK_GIT
     cat >"${doctor_mock_bin}/python3" <<'EOF_MOCK_PYTHON'
@@ -467,6 +478,7 @@ EOF_MOCK_PYTHON
 
     assert_status 0 'doctor emits a ready JSON report' \
         env \
+        DOCTOR_EXPECTED_SAFE_DIRECTORY="${project_dir}" \
         DOCTOR_REAL_ARIA2="${real_aria2}" \
         DOCTOR_REAL_GIT="${real_git}" \
         DOCTOR_REAL_PYTHON="${real_python}" \
