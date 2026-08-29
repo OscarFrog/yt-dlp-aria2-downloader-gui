@@ -4,13 +4,18 @@ Ce document est l’inventaire technique courant du dépôt. Il ne vise aucune
 ancienne version applicative comme état de référence. La passe initiale a été
 réalisée le 29 août 2026 depuis la base Git
 `85d394cfccce96e9c509a8ce530bf5b249f3962c`, puis les corrections décrites
-ci-dessous ont été intégrées à l’inventaire final.
+ci-dessous ont été intégrées. Le snapshot courant ajoute une carte
+d’architecture et trois skills Codex spécialisées sans modifier les composants
+exécutables.
 
 ## Inventaire exact
 
-L’état final audité contient exactement les 75 chemins tracked suivants :
+L’état courant audité contient exactement les 79 chemins tracked suivants :
 
 ```text
+.agents/skills/packaging-release/SKILL.md
+.agents/skills/shell-change/SKILL.md
+.agents/skills/workflow-supply-chain/SKILL.md
 .editorconfig
 .github/workflows/packages.yml
 .github/workflows/qualification.yml
@@ -21,6 +26,7 @@ L’état final audité contient exactement les 75 chemins tracked suivants :
 .github/workflows/stress.yml
 .gitignore
 AGENTS.md
+ARCHITECTURE.md
 CHANGELOG.md
 LICENSE
 README.fr.md
@@ -145,6 +151,9 @@ nettoyage de données. Les autres anciennes versions restent confinées au
 
 | Fichier | Type | Rôle | Utilisé par | Nécessaire ? | Contenu correct ? | Historique ? | Redondant ? | Action |
 | ------- | ---- | ---- | ----------- | ------------ | ----------------- | ------------ | ----------- | ------ |
+| `.agents/skills/packaging-release/SKILL.md` | Skill Codex | Route les travaux RPM, DEB, installation, cleanup, version et release vers les contrats et validations adaptés | Codex lors des tâches packaging/release | Oui — procédure contributive à chargement progressif, présente dans le ZIP source mais non installée par les paquets | Oui — n’accorde aucune autorité implicite de signature ou publication | Non | Non, orchestre sans recopier `TESTING.md` | KEEP |
+| `.agents/skills/shell-change/SKILL.md` | Skill Codex | Route toute modification ou revue Shell vers le style, l’architecture, les inventaires et les validations canoniques | Codex lors des tâches Bash ou blocs Shell de workflows | Oui — procédure contributive à chargement progressif, présente dans le ZIP source mais non installée par les paquets | Oui — `SHELL_STYLE.md` reste l’unique politique détaillée | Non | Non, ne duplique pas les règles Shell | KEEP |
+| `.agents/skills/workflow-supply-chain/SKILL.md` | Skill Codex | Route les changements GitHub Actions, pins, provenance et frontières privilégiées | Codex lors des tâches CI/supply chain | Oui — procédure contributive à chargement progressif, présente dans le ZIP source mais non installée par les paquets | Oui — distingue édition, qualification et mutation externe autorisée | Non | Non, complète le routeur racine | KEEP |
 | `.editorconfig` | Configuration éditeur | Fixe UTF-8/LF et les paramètres shfmt/Python | Éditeurs, shfmt, `test-static.sh` | Oui — cohérence de contribution | Oui — sections Shell et Python alignées | Non | Non, complète les validateurs | KEEP |
 | `.github/workflows/packages.yml` | GitHub Actions | Construit et qualifie RPM/DEB, cycle de vie et upgrade | GitHub Actions, release policy | Oui — packaging/CI | Oui — actions épinglées, permissions minimales, release précédente authentifiée | Compatibilité d’upgrade volontaire | Non, distinct de la publication | KEEP |
 | `.github/workflows/qualification.yml` | GitHub Actions | Qualifie plusieurs générations FFmpeg/FFprobe | GitHub Actions, helper de preuve étendue | Oui — qualification étendue | Oui — matrices 6.1.1/8.1.2/9.0.1 intentionnelles | Compatibilité générationnelle actuelle | Non | KEEP |
@@ -154,7 +163,8 @@ nettoyage de données. Les autres anciennes versions restent confinées au
 | `.github/workflows/shfmt-update.yml` | GitHub Actions | Prépare, vérifie et publie une mise à jour du pin shfmt | Planification, dispatch, pin shfmt | Oui — maintenance formatter/supply chain | Oui — candidat isolé et publisher data-only | Non | Non | KEEP |
 | `.github/workflows/stress.yml` | GitHub Actions | Répète les scénarios sensibles aux races et au cleanup | Pull requests, pushes `main` | Oui — stress CI | Oui — répétitions bornées et indépendantes | Non | Non, complète la suite fonctionnelle | KEEP |
 | `.gitignore` | Configuration Git | Exclut médias, temporaires, caches, preuves locales et artefacts | Git | Oui — hygiène et confidentialité locale | Oui — inclut caches Python et `qualification-evidence/` | Non | Non | KEEP |
-| `AGENTS.md` | Politique technique | Donne les instructions persistantes aux agents | Agents, `test-static.sh` | Oui — gouvernance des changements | Oui — inventaires et identités par format explicités | Non | Non, orchestre les politiques spécialisées | KEEP |
+| `AGENTS.md` | Politique technique | Route les agents vers les sources de vérité et fixe invariants, règles de revue, validation et limites de livraison | Agents, revue Codex, `test-static.sh`, skills du dépôt | Oui — gouvernance des changements | Oui — plus concis, sans recopier les procédures spécialisées | Non | Non, route vers les politiques spécialisées | KEEP |
+| `ARCHITECTURE.md` | Documentation technique | Cartographie les composants, flux, processus, données privées, packaging, CI et frontières de confiance | `AGENTS.md`, skills, mainteneurs et agents | Oui — compréhension technique courante, présente dans le ZIP source mais non installée par RPM/DEB | Oui — dérivée des implémentations, tests et workflows actuels | Non | Non, complète l’inventaire par une vue relationnelle | KEEP |
 | `CHANGELOG.md` | Documentation historique | Journal chronologique des releases et décisions | Utilisateurs, packaging, release, audit de versions | Oui — documentation/release | Oui — 2.3.5 courant et entrées anciennes figées | Oui — valeur historique explicite | Non, ne remplace pas les docs courantes | KEEP — HISTORIQUE |
 | `LICENSE` | Licence | Texte MIT du projet | Utilisateurs, README, RPM | Oui — juridique | Oui — texte MIT complet | Non | Non | KEEP |
 | `README.fr.md` | Documentation utilisateur | Guide utilisateur français complet | Utilisateurs, packages, ZIP, release | Oui — documentation installée | Oui — parité fonctionnelle et versions 2.3.5/2.3.4 | Compatibilité cleanup documentée et justifiée | Non, traduction maintenue | KEEP |
@@ -191,7 +201,7 @@ nettoyage de données. Les autres anciennes versions restent confinées au
 | `scripts/format-shell.sh` | Bash développement | Reformate tous les Shell canoniques | Mainteneurs, workflow de préparation | Oui — maintenance | Oui — inventaire et options canoniques | Non | Non, action mutante distincte du check | KEEP |
 | `scripts/release-evidence-qualification.sh` | Bash qualification | Vérifie après publication release, assets, attestations et runs | Mainteneurs, `TESTING.md`, tests statiques | Oui — preuve post-release manuelle | Oui — exemple générique et sortie locale documentée | Non | Non, complète le preflight et la CI | KEEP |
 | `scripts/release-preflight.sh` | Bash release | Vérifie tag, versions, règles GitHub et matériel de signature avant push | Mainteneurs, `TESTING.md`, tests statiques | Oui — garde release | Oui — contrôles API et fingerprints cohérents | Non | Non, intervient avant publication | KEEP |
-| `test-static.sh` | Bash test | Valide inventaires, en-têtes, workflows, versions, packaging et contrats source | `run-all.sh`, workflows, mainteneurs | Oui — CI statique | Oui — couvre désormais Python et inventaire de tous les fichiers | Non | Non | KEEP |
+| `test-static.sh` | Bash test | Valide inventaires, en-têtes, skills Codex, workflows, versions, packaging et contrats source | `run-all.sh`, workflows, mainteneurs | Oui — CI statique | Oui — couvre Python, découvrabilité des skills et inventaire de tous les fichiers | Non | Non | KEEP |
 | `tests/aria2-auth-headers-integration.sh` | Bash test | Prouve allowlist de headers et isolation cross-origin | `run-all.sh`, tests statiques | Oui — sécurité transport | Oui — contrôle positif et mutant dangereux | Non | Non | KEEP |
 | `tests/aria2-real-behavior-integration.sh` | Bash test réel | Qualifie Range, redirect, erreur, cancel, reprise et quiescence aria2 | Workflows real-tools/release | Oui — comportement réel | Oui — serveur local et répétitions bornées | Reprise native volontaire | Non | KEEP |
 | `tests/ffmpeg-generation-compatibility.sh` | Bash test | Vérifie les invariants média sensibles aux générations FFmpeg | Qualification multi-génération | Oui — compatibilité FFmpeg | Oui — fixtures ciblées | Compatibilité générationnelle nécessaire | Non | KEEP |
@@ -284,9 +294,9 @@ ouverte.
 
 # AUDIT DE L’UTILITÉ DE TOUS LES FICHIERS
 
-- Nombre total de fichiers tracked : **75**.
-- Nombre de fichiers examinés : **75**.
-- Nombre de fichiers à conserver : **75**, dont les catégories historique et
+- Nombre total de fichiers tracked : **79**.
+- Nombre de fichiers examinés : **79**.
+- Nombre de fichiers à conserver : **79**, dont les catégories historique et
   compatibilité ci-dessous.
 - Nombre de fichiers historiques : **1** (`CHANGELOG.md`).
 - Nombre de fichiers à corriger : **0** après remédiation (**9** corrigés

@@ -1,232 +1,189 @@
 # Repository agent instructions
 
-This file defines persistent instructions for coding agents working in this
-repository.
+This file is the repository-wide router and invariant set for coding agents.
+Detailed shell, testing, architecture, and tracked-file policy lives in the
+authoritative documents linked below.
 
-## Scope and instruction discovery
+## Scope and precedence
 
-This file applies to the entire repository tree, including source code, tests,
+These instructions apply to the complete repository: production code, tests,
 documentation, packaging, configuration, and workflows.
 
-Before modifying any repository file, inspect the relevant project
-documentation, implementation, tests, and validation surface. Do not silently
-replace established project conventions with generic best practices.
+Before changing a file, inspect the relevant implementation, documentation,
+tests, and mechanical validation. Do not replace established project contracts
+with generic conventions.
 
-If a more deeply nested `AGENTS.md` is added later, it may refine instructions
-for that subtree. It must not silently weaken repository-wide safety, privacy,
-supply-chain, release, or validation invariants.
+If a nested `AGENTS.md` is added later, it may refine instructions for that
+subtree. It must not weaken repository-wide safety, privacy, supply-chain,
+release, or validation invariants.
 
-## Repository policy
-
-Repository-specific policy is authoritative over generic style recommendations.
-
-When requirements conflict, use this precedence:
+When requirements conflict, use this order:
 
 1. explicit task requirements;
 2. applicable `AGENTS.md` instructions;
-3. repository-specific policy documents such as `SHELL_STYLE.md`;
-4. mechanically enforced repository validation and tests;
+3. authoritative repository documents;
+4. mechanically enforced validation and tests;
 5. external style guides and generic recommendations.
 
-If an explicit task appears to require weakening a security, integrity,
-packaging, release, or validation invariant, identify the conflict before
-changing the invariant.
-
 A mismatch between documented policy and mechanical validation is a repository
-defect. Resolve the policy and validation together; do not choose one silently
-or ignore a failing canonical check.
+defect. Resolve both surfaces together.
 
-## Required reading by change type
+## Project map and sources of truth
 
-`TESTING.md` is the authoritative guide to validation profiles, targeted
-qualifications, CI coverage, and release-only procedures.
+| Document | Authoritative scope |
+| --- | --- |
+| `ARCHITECTURE.md` | Component interactions, data flow, process supervision, trust boundaries, packaging, CI, and release topology |
+| `SHELL_STYLE.md` | Bash structure, headers, idioms, comments, shfmt, ShellCheck, and shell inventories |
+| `TESTING.md` | Local profiles, targeted suites, CI coverage, qualifications, and release-only procedures |
+| `REPOSITORY_FILES.md` | Exact tracked-file inventory, each file's consumer, packaging status, and retention reason |
+| `README.md` and `README.fr.md` | Current English and French user-facing behavior, requirements, installation, and usage |
+| `CHANGELOG.md` | Chronological release history, not current operating policy |
 
-- For shell source, shell libraries, generated shell fixtures, or shell-bearing
-  workflow blocks, read `SHELL_STYLE.md` in full.
+Use `AGENTS.md` to decide what to read, not as a substitute for those documents.
+
+## Route work by change type
+
+- For runtime, GUI, progress, cancellation, transfer, or helper changes, read
+  the matching sections of `ARCHITECTURE.md` and inspect the relevant focused
+  integration tests before editing.
+- For any shell source, shell library, generated shell fixture, or shell-bearing
+  workflow block, read `SHELL_STYLE.md` in full and apply it as binding policy.
 - For packaging, installation, cleanup, workflow, supply-chain, or release
-  changes, read the relevant sections of `TESTING.md` and inspect the matching
-  integration tests and static contracts before editing.
+  changes, read the relevant `ARCHITECTURE.md` and `TESTING.md` sections and
+  inspect matching integration tests and static contracts.
 - For user-facing behavior or documentation, inspect both `README.md` and
-  `README.fr.md` and keep equivalent English and French guidance aligned.
-- For a tracked-file addition, removal, move, or rename, inspect and update
-  `REPOSITORY_FILES.md` so every retained path keeps an explicit current role
-  and consumer.
-- For version or release metadata, inspect the version-coherence assertions in
-  `test-static.sh`, the current `CHANGELOG.md` entry, packaging metadata, and
-  release workflows before changing any version surface.
+  `README.fr.md` and keep equivalent guidance aligned.
+- For a tracked-file addition, removal, move, or rename, update
+  `REPOSITORY_FILES.md` so every retained path has an explicit role and
+  consumer.
+- For a version or release-metadata change, inspect `test-static.sh`, the
+  current `CHANGELOG.md` entry, packaging metadata, both READMEs, and release
+  workflows before editing any version surface.
 
-## Shell policy
+Repository skills under `.agents/skills/` provide task-specific reading and
+validation routes. They do not replace the policies named above.
 
-`SHELL_STYLE.md` is the authoritative shell style and formatting policy for
-this repository.
+## File identity and inventories
 
-Before creating, modifying, reviewing, refactoring, or formatting any shell
-file, read `SHELL_STYLE.md` in full and apply it as a binding project
-requirement.
-
-Do not infer an alternative shell style from generic conventions, upstream
-style guides, formatter defaults, or nearby code when `SHELL_STYLE.md` defines
-an explicit project rule or exception.
-
-For every shell file touched:
-
-- preserve the canonical project structure and naming conventions defined in
-  `SHELL_STYLE.md`;
-- preserve documented project exceptions;
-- keep the canonical shell inventory in `tests/lib/project-files.sh` accurate;
-- use the repository-pinned `shfmt` configuration;
-- do not use `shfmt --simplify` / `shfmt -s`;
-- keep ShellCheck suppressions narrow, adjacent, and justified;
-- do not add chronological audit, patch, release, or finding history to
-  permanent source comments;
-- do not make an unrelated formatting sweep unless the task explicitly calls
-  for it.
-
-Before considering shell-related work complete, run:
-
-```bash
-./scripts/check-shell-format.sh
-./tests/run-all.sh
-```
-
-Fix failures caused by the change before finishing. If a validation step cannot
-be run in the current environment, report exactly which step was not run and
-why; do not imply that it passed.
-
-Do not manually rewrite formatting in a way that conflicts with canonical
-`shfmt` output.
-
-## File identity and repository inventory
-
-Use language- and format-appropriate identity instead of copying the Bash
-banner into every file type.
+Use language- and format-appropriate identity rather than copying the Bash
+banner into every format.
 
 - Canonical Bash files follow the exact header contract in `SHELL_STYLE.md`.
 - Python source starts with the MIT SPDX identifier. Its first Python statement
-  is a module docstring that names the project, gives the repository-relative
-  module path, and describes its durable role. A deliberately non-executable
-  Python helper has no shebang and is invoked explicitly with `python3`.
+  is a module docstring naming the project, repository-relative module path, and
+  durable role. A deliberately non-executable Python helper has no shebang and
+  is invoked explicitly with `python3`.
 - Markdown titles, workflow `name` fields, desktop-entry keys, RPM and Debian
   metadata, manpage `NAME` sections, and OpenPGP packet identity are the native
-  identification mechanisms for those formats. Do not prepend a synthetic
-  comment when the format has no suitable comment syntax or when doing so would
-  alter signed or machine-consumed data.
-- Repository-level licensing remains defined by `LICENSE` and packaging
-  copyright metadata. Source-file SPDX tags make that license machine-readable
-  where the project defines a source header contract.
+  identifiers for those formats.
+- `LICENSE` and packaging copyright metadata define repository-level licensing;
+  source SPDX tags make it machine-readable where a source contract exists.
 
-`REPOSITORY_FILES.md` is the current tracked-file utility inventory. Keep its
-table synchronized with Git and update a row whenever a file's role, consumer,
-installation status, compatibility purpose, or retention decision changes.
-Static validation checks exact path coverage; semantic accuracy remains a
-review responsibility.
+Keep the shell and Python inventories in `tests/lib/project-files.sh` accurate.
+Keep the tracked-file table in `REPOSITORY_FILES.md` synchronized with Git and
+update a row when a file's role, consumer, installation status, compatibility
+purpose, or retention decision changes.
 
-## Project invariants
+## Repository invariants
 
 Treat established safety, privacy, trust-boundary, packaging, release,
 installation, runtime-preservation, and cleanup behavior as intentional unless
 the task explicitly changes it.
 
 Prefer the smallest coherent change that satisfies the task and preserves
-existing behavior outside the requested scope.
+behavior outside its scope.
 
-Do not delete or weaken regression tests merely to make a change pass. Update a
-test only when the intended project contract has genuinely changed, and update
-the corresponding documentation or policy in the same change when applicable.
+Do not delete or weaken a regression test merely to make a change pass. Change
+a test only when the intended contract changes, and update the corresponding
+documentation or policy in the same change when applicable.
+
+Permanent comments explain durable intent, constraints, fallbacks, or caller
+contracts. Keep chronological findings in commits, pull requests, issues,
+`CHANGELOG.md`, or qualification reports.
+
+## Code Review Rules
+
+Treat the following as blocking findings unless the task explicitly and safely
+changes the underlying contract:
+
+- a GitHub Actions permission increase without demonstrated need, checkout
+  credentials no longer disabled with `persist-credentials: false`, or a
+  third-party Action not pinned to a full commit SHA with a readable version
+  comment;
+- a media URL, HTTP header, credential, token, cookie, or signing secret exposed
+  through process arguments, logs, artifacts, or an untrusted execution path;
+- candidate code or binaries executed inside a privileged publication job, or
+  data crossing a trust boundary without the required digest, path, identity,
+  or immutable-source revalidation;
+- weakened signature, provenance, checksum, exact-version, release
+  immutability, destination containment, symlink, or user-data-preservation
+  checks;
+- cancellation, process-group supervision, private temporary-file permissions,
+  crash recovery, no-overwrite publication, or cleanup containment weakened;
+- a regression test removed or relaxed without an explicit contract change and
+  corresponding documentation;
+- a shell file diverging from `SHELL_STYLE.md`, its canonical header, pinned
+  formatting, or the canonical shell inventory;
+- shared user-facing behavior changed in only one of the English or French
+  READMEs;
+- a tracked path added, removed, moved, or repurposed without an exact
+  `REPOSITORY_FILES.md` update.
 
 ## Validation discipline
 
-Use the repository's own validation entry points rather than substituting ad hoc
-checks when canonical checks exist.
+Use repository entry points instead of substituting ad hoc checks when a
+canonical check exists.
 
-During development, targeted tests and `./tests/run-all.sh --fast --jobs 4` may
-provide quicker feedback. They are not substitutes for the complete validation
-required before review.
+During development, run focused tests and, when useful:
 
-For shell changes, `./tests/run-all.sh` is the final project validation entry
-point unless the task specifies an additional qualification procedure.
+```bash
+./tests/run-all.sh --fast --jobs 4
+```
 
-For workflow, packaging, installation, cleanup, or release-related changes, run
-the applicable targeted qualifications documented in `TESTING.md` in addition
-to the complete local suite. Release-only or privileged procedures must not be
-claimed when they were not actually run.
+Before review, run the complete local contract for repository changes:
 
-For every change, run `git diff --check` and review both staged and unstaged
-diffs before delivery.
+```bash
+./tests/run-all.sh --full --jobs 4
+```
 
-A successful formatter run is not a substitute for syntax, ShellCheck,
-integration, packaging, or behavioral validation.
+For shell changes, also run `./scripts/check-shell-format.sh`. For workflow,
+packaging, installation, cleanup, runtime, or release work, run the applicable
+targeted qualifications documented in `TESTING.md`. Release-only, privileged,
+interactive, or external-network procedures must not be claimed when they were
+not actually run.
 
-Diagnose a failing test or CI job before rerunning it. If evidence shows an
-environmental or timing failure, report that evidence and the successful rerun;
-do not hide flaky or unexplained failures.
+For every change, run `git diff --check` and inspect both staged and unstaged
+diffs. A formatter result does not replace syntax, ShellCheck, integration,
+packaging, or behavioral validation.
 
-## Workflow and supply-chain discipline
+Diagnose a failure before rerunning it. If evidence proves an environmental or
+timing failure, report that evidence and the successful rerun; do not hide an
+unexplained failure.
 
-Preserve the repository's least-privilege and data-only trust boundaries.
+## Delivery and release boundary
 
-- Pin third-party GitHub Actions and reusable workflows to a full 40-character
-  commit SHA and retain a human-readable version comment.
-- Keep checkout credentials disabled with `persist-credentials: false` unless a
-  narrowly documented job boundary explicitly requires otherwise.
-- Grant each workflow and job only the permissions it needs. Untrusted
-  candidates and validation jobs must not receive repository write permissions
-  or secrets.
-- Do not execute candidate binaries or modified repository code inside a
-  privileged publication job. Transfer reviewed data between trust zones and
-  revalidate its digest, path allowlist, and immutable base where the workflow
-  contract requires it.
-- Preserve existing signature, provenance, checksum, exact-version, and
-  immutable-release verification. A digest computed from newly discovered bytes
-  is not an independent authentication root.
-
-## Change delivery and release boundary
-
-The protected `main` branch is updated through pull requests and required status
-checks. Do not bypass branch protection, required checks, or review gates, and do
-not force-push `main`.
+The protected `main` branch is updated through pull requests and required
+checks. Do not bypass branch protection or force-push `main`.
 
 Do not create or push release tags, publish releases or packages, alter
-repository rules/secrets/environments, or initiate a version bump unless the
-task explicitly requests that external or release action.
+repository rules, secrets, or environments, or initiate a version bump unless
+the task explicitly requests that external or release action.
 
 When a version change is explicitly requested, update every mechanically linked
 version and documentation surface in one coherent change and run the release
-preflight procedures required by `TESTING.md`.
+preflight required by `TESTING.md`.
 
-## Documentation discipline
-
-Permanent source comments explain durable intent: invariants, trust boundaries,
-fallbacks, non-obvious constraints, caller contracts, and reasons for unusual
-behavior.
-
-Keep chronological development history in commits, pull requests, issues,
-`CHANGELOG.md`, audit reports, or qualification reports rather than in source
-comments.
-
-Keep `README.md` and `README.fr.md` aligned when shared user-facing behavior,
-requirements, installation steps, or release guidance changes.
-
-When changing a documented project policy, update the authoritative policy and
-its mechanical validation together whenever practical.
-
-## Scope and review
+## Completion checklist
 
 Before finishing:
 
-- review the diff for unrelated edits;
-- verify that new shell files are added to the canonical inventory;
-- verify that new Python files are added to the canonical inventory and carry
-  the project Python identity contract;
-- verify that the tracked-file table in `REPOSITORY_FILES.md` remains exact;
-- verify that renamed shell files have matching canonical headers and inventory
-  entries;
-- verify that new exceptions are explicit, narrowly scoped, and documented;
-- verify that workflow actions remain commit-pinned and permissions remain
-  minimal;
-- verify that user-facing English and French documentation remain aligned when
-  applicable;
-- summarize the files changed and the validation actually performed.
+- review the diff for unrelated changes;
+- verify source and tracked-file inventories;
+- verify headers and native file identity for new or renamed files;
+- verify workflow pins, permissions, credentials, and trust boundaries;
+- verify English/French user documentation alignment when applicable;
+- run and report the required validation honestly;
+- summarize changed files and any qualification that could not be run.
 
-Do not claim tests, checks, builds, releases, or runtime behavior were verified
-unless they were actually executed or directly inspected.
+Never claim that a test, build, release, or runtime behavior was verified unless
+it was actually executed or directly inspected.

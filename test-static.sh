@@ -351,6 +351,118 @@ assert_no_historical_comment_labels() {
     esac
 }
 
+assert_repository_skills_are_discoverable() {
+    local skill_root="${SCRIPT_DIR}/.agents/skills"
+    local skill_dir=''
+    local skill_file=''
+    local relative_path=''
+    local expected_name=''
+    local skill_name=''
+    local skill_description=''
+    local skill_line=''
+    local frontmatter_end=-1
+    local body_has_content=false
+    local line_index=0
+    local -a skill_dirs=()
+    local -a skill_lines=()
+
+    if [[ ! -d ${skill_root} || -L ${skill_root} ]]; then
+        printf 'FAIL: repository skill root is absent or unsafe.\n' >&2
+        return 65
+    fi
+
+    # Skill validation is order-independent, and mapfile consumes the complete
+    # process substitution before the entries are inspected.
+    # shellcheck disable=SC2312
+    mapfile -d '' -t skill_dirs < <(
+        find "${skill_root}" -mindepth 1 -maxdepth 1 -print0
+    )
+    if ((${#skill_dirs[@]} == 0)); then
+        printf 'FAIL: repository skill inventory is empty.\n' >&2
+        return 65
+    fi
+
+    for skill_dir in "${skill_dirs[@]}"; do
+        if [[ ! -d ${skill_dir} || -L ${skill_dir} ]]; then
+            printf 'FAIL: repository skill entry is not a regular directory: %s.\n' \
+                "${skill_dir#"${SCRIPT_DIR}/"}" >&2
+            return 65
+        fi
+
+        skill_file="${skill_dir}/SKILL.md"
+        relative_path=${skill_file#"${SCRIPT_DIR}/"}
+        if [[ ! -f ${skill_file} || -L ${skill_file} ]]; then
+            printf 'FAIL: repository skill entrypoint is absent or unsafe: %s.\n' \
+                "${relative_path}" >&2
+            return 65
+        fi
+        if ! mapfile -t skill_lines <"${skill_file}"; then
+            printf 'FAIL: unable to read repository skill: %s.\n' \
+                "${relative_path}" >&2
+            return 65
+        fi
+        if ((${#skill_lines[@]} < 5)) || [[ ${skill_lines[0]} != '---' ]]; then
+            printf 'FAIL: repository skill has no complete YAML frontmatter: %s.\n' \
+                "${relative_path}" >&2
+            return 65
+        fi
+
+        skill_name=''
+        skill_description=''
+        frontmatter_end=-1
+        body_has_content=false
+        for ((line_index = 1; line_index < ${#skill_lines[@]}; line_index++)); do
+            skill_line=${skill_lines[line_index]}
+            if [[ ${skill_line} == '---' ]]; then
+                frontmatter_end=${line_index}
+                break
+            fi
+            case ${skill_line} in
+                'name: '*)
+                    [[ -z ${skill_name} ]] || {
+                        printf 'FAIL: duplicate repository skill name: %s.\n' \
+                            "${relative_path}" >&2
+                        return 65
+                    }
+                    skill_name=${skill_line#'name: '}
+                    ;;
+                'description: '*)
+                    [[ -z ${skill_description} ]] || {
+                        printf 'FAIL: duplicate repository skill description: %s.\n' \
+                            "${relative_path}" >&2
+                        return 65
+                    }
+                    skill_description=${skill_line#'description: '}
+                    ;;
+                *) ;;
+            esac
+        done
+
+        expected_name=${skill_dir##*/}
+        if ((frontmatter_end < 0)) \
+            || [[ ! ${skill_name} =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] \
+            || ((${#skill_name} > 63)) \
+            || [[ ${skill_name} != "${expected_name}" ]] \
+            || [[ -z ${skill_description} ]]; then
+            printf 'FAIL: invalid repository skill identity: %s.\n' \
+                "${relative_path}" >&2
+            return 65
+        fi
+
+        for ((line_index = frontmatter_end + 1; line_index < ${#skill_lines[@]}; line_index++)); do
+            if [[ ${skill_lines[line_index]} == *[![:space:]]* ]]; then
+                body_has_content=true
+                break
+            fi
+        done
+        if [[ ${body_has_content} != true ]]; then
+            printf 'FAIL: repository skill body is empty: %s.\n' \
+                "${relative_path}" >&2
+            return 65
+        fi
+    done
+}
+
 cleanup_static_test() {
     local scratch_file=''
 
@@ -1031,6 +1143,7 @@ test_static_tooling_contracts() {
 
     assert_source_inventory_is_canonical
     assert_repository_file_inventory_is_canonical
+    assert_repository_skills_are_discoverable
     assert_shell_policy_lists_are_canonical
     assert_unique_source_file_list PYTHON_FILES "${PYTHON_FILES[@]}"
     assert_workflow_dependencies_are_hardened
