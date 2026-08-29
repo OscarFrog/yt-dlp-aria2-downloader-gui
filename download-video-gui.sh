@@ -1164,6 +1164,7 @@ Path: ${STATE_DIR}"
 start_download_worker() {
     local pgid_status
 
+    begin_signal_registration
     # shellcheck disable=SC2016 # Expanded by the intentionally nested shell.
     YTDLP_ARIA2_SUPERVISED_SESSION=true LC_ALL=C setsid --fork --wait bash -c '
         pgid_file=$1
@@ -1174,6 +1175,7 @@ start_download_worker() {
         exec "$@"
     ' bash "${PGID_FILE}" "${COMMAND[@]}" >"${LOG_FILE}" 2>&1 &
     WORKER_PID=$!
+    finish_signal_registration
 
     set +e
     wait_for_worker_pgid "${PGID_FILE}" "${WORKER_PID}"

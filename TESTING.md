@@ -240,6 +240,9 @@ The automated suite checks, among other things:
 - direct HUP, INT, and TERM delivery to the sole GUI PID while either the URL
   entry or progress dialog is blocked, with exact 129/130/143 statuses, bounded
   Zenity/monitor/worker reaping, and no private temporary path left behind;
+- deterministic TERM injection after the worker fork but immediately before
+  `WORKER_PID` registration, proving that the launched supervisor is still
+  registered, terminated, and reaped without leaving private temporary state;
 - independent progress-monitor and Zenity statuses across the private
   owner-only FIFO, plus 64 KiB accepted-stdout and in-memory stderr bounds for
   captured dialogs;
@@ -396,10 +399,10 @@ truncation immediately before final validation and requires exit 65 with no
 published result-file. The mock suite separately qualifies the tail threshold.
 
 Race-sensitive qualification continues to repeat process-group cancellation,
-PGID publication, quiescence, and clean-restart scenarios. GUI child launch now
-uses a short signal-registration critical section: the first HUP, INT, or TERM
-received before both asynchronous PIDs are recorded is deferred, then replayed
-immediately after registration so cleanup never loses a child.
+PGID publication, quiescence, and clean-restart scenarios. Every asynchronous
+GUI-child launch uses a short signal-registration critical section: the first
+HUP, INT, or TERM received before the relevant PIDs are recorded is deferred,
+then replayed immediately after registration so cleanup never loses a child.
 
 ## GitHub Actions
 

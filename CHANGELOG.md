@@ -9,8 +9,8 @@
   blocked; close, bound, signal, and reap all GUI children and the worker group
   without leaving temporary Zenity captures or changing 129/130/143 statuses.
 - Accept at most 64 KiB from captured Zenity stdout, ingest at most the final
-  64 KiB of stderr diagnostics, and preserve the first signal received during
-  asynchronous child registration.
+  64 KiB of stderr diagnostics, and preserve the first signal received while
+  registering the worker supervisor, a captured dialog, or the progress pair.
 
 ### Documentation
 
