@@ -740,7 +740,8 @@ update_managed_runtimes() {
     managed_ytdlp=$("${runtime_manager}" path yt-dlp)
     managed_deno=$("${runtime_manager}" path deno)
 
-    "${managed_ytdlp}" --version
+    YTDLP_NO_PLUGINS=1 "${managed_ytdlp}" \
+        --ignore-config --no-plugin-dirs --no-update --version
     "${managed_deno}" --version | head -n 1
     printf -v "${ytdlp_output_variable}" '%s' "${managed_ytdlp}"
     printf -v "${deno_output_variable}" '%s' "${managed_deno}"

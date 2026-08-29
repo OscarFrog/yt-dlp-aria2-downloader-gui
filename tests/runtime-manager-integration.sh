@@ -38,7 +38,22 @@ make_ytdlp() {
     cat >"${path}" <<EOF_YTDLP
 #!/usr/bin/env bash
 set -euo pipefail
-case \${1:-} in
+operation=''
+seen_ignore_config=false
+seen_no_plugin_dirs=false
+seen_no_update=false
+for argument in "\$@"; do
+    case \${argument} in
+    --ignore-config) seen_ignore_config=true ;;
+    --no-plugin-dirs) seen_no_plugin_dirs=true ;;
+    --no-update) seen_no_update=true ;;
+    --version | --help | --list-impersonate-targets) operation=\${argument} ;;
+    *) exit 64 ;;
+    esac
+done
+[[ \${seen_ignore_config} == true && \${seen_no_plugin_dirs} == true &&
+    \${seen_no_update} == true && \${YTDLP_NO_PLUGINS:-} == 1 ]] || exit 68
+case \${operation} in
 --version)
     printf '%s\\n' '${version}'
     ;;
@@ -53,11 +68,13 @@ case \${1:-} in
         '--extractor-retries RETRIES' \\
         '--fixup POLICY' \\
         '--fragment-retries RETRIES' \\
+        '--ignore-config' \\
         '--js-runtimes RUNTIME' \\
         '--list-impersonate-targets' \\
         '--load-info-json FILE' \\
         '--no-clean-info-json' \\
         '--no-overwrites' \\
+        '--no-plugin-dirs' \\
         '--no-post-overwrites' \\
         '--no-update' \\
         '--parse-metadata FROM:TO' \\
@@ -170,23 +187,35 @@ EOF_CURL
 }
 
 test_runtime_paths_and_locking() {
+    local attested_version=''
     local actual_deno actual_ytdlp expected_attestation expected_ytdlp
     local fallback_attestation lock_holder_pid lock_holder_ready
 
-    expected_ytdlp="${ytdlp_root}/current/yt-dlp_linux"
+    expected_ytdlp="${ytdlp_root}/2026.07.04/yt-dlp_linux"
     actual_ytdlp=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" path yt-dlp)
     [[ ${actual_ytdlp} == "${expected_ytdlp}" ]] || fail 'managed yt-dlp path is incorrect'
     actual_deno=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" path deno)
-    [[ ${actual_deno} == "${deno_root}/current/deno" ]] || fail 'managed Deno path is incorrect'
+    [[ ${actual_deno} == "${deno_root}/2.9.5/deno" ]] || fail 'managed Deno path is incorrect'
 
     expected_attestation=$(printf \
         'runtime-contract=1\nyt-dlp-path=%s\nyt-dlp-version=2026.07.04\ndeno-path=%s\ndeno-version=2.9.5' \
-        "${expected_ytdlp}" "${deno_root}/current/deno")
+        "${expected_ytdlp}" "${deno_root}/2.9.5/deno")
     : >"${CURL_LOG}"
     actual_ytdlp=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" prepare require)
     assert_equals "${expected_attestation}" "${actual_ytdlp}" \
         'strict runtime preparation attestation'
     [[ ! -s ${CURL_LOG} ]] || fail 'prepare require invoked the network'
+
+    # An attested path names the validated immutable version, not the mutable
+    # activation link. A later rollback must not change what an existing engine
+    # process will execute.
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null
+    attested_version=$(YTDLP_NO_PLUGINS=1 "${expected_ytdlp}" \
+        --ignore-config --no-plugin-dirs --no-update --version) \
+        || fail 'attested yt-dlp path could not execute after rollback'
+    assert_equals '2026.07.04' "${attested_version}" \
+        'attested yt-dlp path changed after rollback'
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null
 
     # Read-only lookups must not wait behind an updater because current is an
     # atomically published symlink.
@@ -230,6 +259,7 @@ test_runtime_paths_and_locking() {
 }
 
 test_runtime_offline_and_rollback() {
+    local curl_first_argument=''
     local required_curl_option
 
     # Network failure after bootstrap must preserve the verified active runtimes.
@@ -247,6 +277,10 @@ test_runtime_offline_and_rollback() {
         grep -Fqx -- "${required_curl_option}" "${CURL_LOG}" \
             || fail "curl runtime bound is missing: ${required_curl_option}"
     done
+    IFS= read -r curl_first_argument <"${CURL_LOG}" \
+        || fail 'curl invocation log is empty'
+    [[ ${curl_first_argument} == --disable ]] \
+        || fail 'curl did not disable personal configuration before every other option'
 
     # previous is a real rollback target. Rollback swaps current/previous only after
     # validating the target runtime.
@@ -313,7 +347,7 @@ EOF_UNAME
         PATH="${aarch_bin}:${MOCK_BIN}:${PATH}" MOCK_CURL_LOG="${CURL_LOG}" \
         MOCK_LOCK_LEAK_MARKER="${LOCK_LEAK_MARKER}" \
         "${RUNTIME_MANAGER}" path yt-dlp)
-    [[ ${aarch_path} == */current/yt-dlp_linux_aarch64 ]] \
+    [[ ${aarch_path} == */2026.07.04/yt-dlp_linux_aarch64 ]] \
         || fail 'aarch64 yt-dlp asset mapping is incorrect'
 
 }

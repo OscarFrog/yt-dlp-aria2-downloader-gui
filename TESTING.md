@@ -328,10 +328,13 @@ The automated suite checks, among other things:
   yt-dlp `.part` resumption remains available when supported upstream;
 - managed-runtime operation with Deno outside PATH, bounded lock/network waits,
   strict zero-network `require` mode, exact-tag stable/nightly/stable switching,
-  exact executable-version binding to the resolved yt-dlp release tag,
-  single-member Deno archive extraction, a versioned engine attestation that
-  avoids duplicate path/version/capability discovery, explicit invalid-`path`
-  and invalid-`prepare` diagnostics,
+  isolation from personal curl/yt-dlp configuration and yt-dlp plugins, exact
+  executable-version binding to the resolved yt-dlp and Deno release tags,
+  single-member Deno archive extraction, immutable attested paths that survive
+  later activation changes, rejection of a symlinked managed XDG application
+  root, and a versioned engine attestation that avoids duplicate
+  path/version/capability discovery, explicit invalid-`path` and
+  invalid-`prepare` diagnostics,
   lock-descriptor isolation, repeated contention/double-rollback coverage
   (three cycles in ordinary validation and ten per dedicated stress run),
   interrupted-activation journal recovery, explicit/automatic rollback, and

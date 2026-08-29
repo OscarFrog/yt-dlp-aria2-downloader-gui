@@ -282,7 +282,8 @@ check_deno_version() {
 check_ytdlp_runtime() {
     local yt_dlp_version=''
 
-    if ! yt_dlp_version=$(LC_ALL=C "${YTDLP_BIN}" --version 2>/dev/null); then
+    if ! yt_dlp_version=$(LC_ALL=C "${YTDLP_BIN}" \
+        --ignore-config --no-plugin-dirs --no-update --version 2>/dev/null); then
         error 'unable to determine the yt-dlp version.'
         return 1
     fi
@@ -309,7 +310,8 @@ check_ytdlp_capabilities() {
     local required_option
     local yt_dlp_help
 
-    if ! yt_dlp_help=$(LC_ALL=C "${YTDLP_BIN}" --help 2>&1); then
+    if ! yt_dlp_help=$(LC_ALL=C "${YTDLP_BIN}" \
+        --ignore-config --no-plugin-dirs --no-update --help 2>&1); then
         error 'unable to inspect yt-dlp capabilities.'
         return 1
     fi
@@ -331,6 +333,8 @@ check_ytdlp_capabilities() {
         --socket-timeout \
         --retries \
         --fragment-retries \
+        --ignore-config \
+        --no-plugin-dirs \
         --extractor-retries \
         --retry-sleep \
         --no-overwrites \
@@ -1830,6 +1834,7 @@ configure_download_options() {
 
     YT_DLP_OPTIONS=(
         --ignore-config
+        --no-plugin-dirs
         --no-update
         --no-playlist
         --break-match-filters '!playlist_index'
