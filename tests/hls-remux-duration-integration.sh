@@ -199,38 +199,48 @@ prepare_hls_runtime_mocks() {
     cat >"${MOCK_BIN}/yt-dlp" <<'EOF_YTDLP'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-if (($# == 1)) && [[ $1 == '--version' ]]; then
-    printf '2026.8.19\n'
-    exit 0
-fi
-if (($# == 1)) && [[ $1 == '--help' ]]; then
-    printf '%s\n' \
-        '--js-runtimes' \
-        '--cookies FILE' \
-        '--cookies-from-browser BROWSER[:PROFILE]' \
-        '--extractor-args KEY:ARGS' \
-        '-O, --print [WHEN:]TEMPLATE' \
-        '--progress-template TEMPLATE' \
-        '--progress-delta SECONDS' \
-        '--print-to-file TEMPLATE FILE' \
-        '--parse-metadata [WHEN:]FROM:TO' \
-        '--fixup POLICY' \
-        '--downloader-args NAME:ARGS' \
-        '--batch-file FILE' \
-        '--socket-timeout SECONDS' \
-        '--retries RETRIES' \
-        '--fragment-retries RETRIES' \
-        '--extractor-retries RETRIES' \
-        '--retry-sleep EXPR' \
-        '--no-overwrites' \
-        '--no-post-overwrites' \
-        '--break-match-filters FILTER' \
-        '--no-update' \
-        '--skip-download' \
-        '--no-clean-info-json' \
-        '--dump-single-json' \
-        '--load-info-json FILE'
-    exit 0
+if (($# == 4)) \
+    && [[ $1 == '--ignore-config' \
+        && $2 == '--no-plugin-dirs' \
+        && $3 == '--no-update' \
+        && ${YTDLP_NO_PLUGINS:-} == 1 ]]; then
+    case $4 in
+    --version)
+        printf '2026.8.19\n'
+        exit 0
+        ;;
+    --help)
+        printf '%s\n' \
+            '--js-runtimes' \
+            '--cookies FILE' \
+            '--cookies-from-browser BROWSER[:PROFILE]' \
+            '--extractor-args KEY:ARGS' \
+            '-O, --print [WHEN:]TEMPLATE' \
+            '--progress-template TEMPLATE' \
+            '--progress-delta SECONDS' \
+            '--print-to-file TEMPLATE FILE' \
+            '--parse-metadata [WHEN:]FROM:TO' \
+            '--fixup POLICY' \
+            '--downloader-args NAME:ARGS' \
+            '--batch-file FILE' \
+            '--socket-timeout SECONDS' \
+            '--retries RETRIES' \
+            '--fragment-retries RETRIES' \
+            '--extractor-retries RETRIES' \
+            '--retry-sleep EXPR' \
+            '--no-overwrites' \
+            '--no-post-overwrites' \
+            '--break-match-filters FILTER' \
+            '--ignore-config' \
+            '--no-plugin-dirs' \
+            '--no-update' \
+            '--skip-download' \
+            '--no-clean-info-json' \
+            '--dump-single-json' \
+            '--load-info-json FILE'
+        exit 0
+        ;;
+    esac
 fi
 
 dump_single_json=false
