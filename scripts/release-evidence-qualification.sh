@@ -26,9 +26,9 @@ Usage: scripts/release-evidence-qualification.sh TAG EXPECTED_SHA [REPORT_FILE]
 
 Example:
   scripts/release-evidence-qualification.sh \
-    v2.1.35 \
-    4d94f95a3ab170cc25b27885f90325b70ba3bd40 \
-    qualification-evidence/release-v2.1.35.md
+    v1.2.3 \
+    0000000000000000000000000000000000000000 \
+    qualification-evidence/release-v1.2.3.md
 
 The script verifies the public release assets, SHA256SUMS, GitHub artifact
 attestations, source digest, signer workflow, exact-SHA validation workflow
@@ -234,7 +234,7 @@ parse_qualification_arguments() {
     fi
     if [[ ! ${parsed_tag} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         usage >&2
-        fail_qualification 'TAG must be an exact semantic-version tag such as v2.1.35.'
+        fail_qualification 'TAG must be an exact semantic-version tag such as v1.2.3.'
     fi
     if [[ ! ${parsed_sha} =~ ^[0-9a-f]{40}$ ]]; then
         fail_qualification 'EXPECTED_SHA must be a lowercase 40-character Git SHA.'

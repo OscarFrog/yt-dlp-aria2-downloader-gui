@@ -20,6 +20,10 @@ if ((${#ALL_SHELL_FILES[@]} == 0)); then
     printf 'Error: ALL_SHELL_FILES is empty.\n' >&2
     exit 65
 fi
+if ((${#PYTHON_FILES[@]} == 0)); then
+    printf 'Error: PYTHON_FILES is empty.\n' >&2
+    exit 65
+fi
 # Contract: every canonical shell file uses the standard Bash header.
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 # The development tree can lead the latest installable GitHub release. Keep the
@@ -27,7 +31,9 @@ readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 readonly EXPECTED_VERSION='2.3.5'
 readonly EXPECTED_PUBLISHED_VERSION='2.3.4'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
-SHELL_INVENTORY_FILE=''
+SOURCE_INVENTORY_FILE=''
+REPOSITORY_INVENTORY_FILE=''
+DOCUMENTED_INVENTORY_FILE=''
 
 assert_forbidden_source_name_absent() {
     local forbidden_name=''
@@ -121,6 +127,57 @@ assert_standard_shell_header() {
     return 0
 }
 
+assert_standard_python_header() {
+    local relative_path=$1
+    local absolute_path="${SCRIPT_DIR}/${relative_path}"
+    local first_line=''
+
+    if [[ ! -f ${absolute_path} || -L ${absolute_path} ]]; then
+        printf 'FAIL: canonical Python module is not a regular file: %s.\n' \
+            "${relative_path}" >&2
+        return 65
+    fi
+    IFS= read -r first_line <"${absolute_path}" || true
+    if [[ ${first_line} != '# SPDX-License-Identifier: MIT' ]]; then
+        printf 'FAIL: non-standard Python SPDX header in %s.\n' \
+            "${relative_path}" >&2
+        return 65
+    fi
+
+    if ! python3 - "${absolute_path}" "${STANDARD_HEADER_PROJECT}" \
+        "${relative_path}" <<'PYTHON_HEADER_VALIDATION'; then
+import ast
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+project = sys.argv[2]
+relative_path = sys.argv[3]
+
+try:
+    source = path.read_text(encoding="utf-8")
+    module = ast.parse(source, filename=relative_path)
+except (OSError, SyntaxError, UnicodeError) as error:
+    print(f"invalid Python source {relative_path}: {error}", file=sys.stderr)
+    raise SystemExit(65) from error
+
+docstring = ast.get_docstring(module, clean=False)
+if not docstring:
+    print(f"missing module docstring in {relative_path}", file=sys.stderr)
+    raise SystemExit(65)
+if project not in docstring:
+    print(f"module docstring does not identify project in {relative_path}", file=sys.stderr)
+    raise SystemExit(65)
+if relative_path not in docstring:
+    print(f"module docstring does not identify repository path in {relative_path}", file=sys.stderr)
+    raise SystemExit(65)
+PYTHON_HEADER_VALIDATION
+        printf 'FAIL: non-standard Python module identity in %s.\n' \
+            "${relative_path}" >&2
+        return 65
+    fi
+}
+
 is_main_exempt_shell_file() {
     local relative_path=$1
     local exempt_file
@@ -133,7 +190,7 @@ is_main_exempt_shell_file() {
     return 1
 }
 
-assert_unique_shell_file_list() {
+assert_unique_source_file_list() {
     local label=$1
     shift
     local shell_file=''
@@ -158,9 +215,9 @@ assert_shell_policy_lists_are_canonical() {
         || fail 'SOURCED_SHELL_FILES is empty.'
     ((${#NO_ERREXIT_SHELL_FILES[@]} > 0)) \
         || fail 'NO_ERREXIT_SHELL_FILES is empty.'
-    assert_unique_shell_file_list \
+    assert_unique_source_file_list \
         SOURCED_SHELL_FILES "${SOURCED_SHELL_FILES[@]}"
-    assert_unique_shell_file_list \
+    assert_unique_source_file_list \
         NO_ERREXIT_SHELL_FILES "${NO_ERREXIT_SHELL_FILES[@]}"
 
     for classified_file in \
@@ -295,23 +352,33 @@ assert_no_historical_comment_labels() {
 }
 
 cleanup_static_test() {
-    if [[ -n ${SHELL_INVENTORY_FILE} ]]; then
-        rm -f -- "${SHELL_INVENTORY_FILE}" || true
-        SHELL_INVENTORY_FILE=''
-    fi
+    local scratch_file=''
+
+    for scratch_file in \
+        "${SOURCE_INVENTORY_FILE}" \
+        "${REPOSITORY_INVENTORY_FILE}" \
+        "${DOCUMENTED_INVENTORY_FILE}"; do
+        if [[ -n ${scratch_file} ]]; then
+            rm -f -- "${scratch_file}" || true
+        fi
+    done
+    SOURCE_INVENTORY_FILE=''
+    REPOSITORY_INVENTORY_FILE=''
+    DOCUMENTED_INVENTORY_FILE=''
 }
 
-assert_shell_inventory_is_canonical() {
+assert_source_inventory_is_canonical() {
     local candidate=''
     local first_line=''
     local canonical=''
     local matched=false
+    local is_python_candidate=false
     local is_shell_candidate=false
     local inventory_status=0
     local inventory_is_absolute=false
 
-    if ! SHELL_INVENTORY_FILE=$(mktemp); then
-        printf 'FAIL: unable to create the shell-inventory scratch file.\n' >&2
+    if ! SOURCE_INVENTORY_FILE=$(mktemp); then
+        printf 'FAIL: unable to create the source-inventory scratch file.\n' >&2
         return 70
     fi
 
@@ -323,14 +390,14 @@ assert_shell_inventory_is_canonical() {
             return 65
         fi
         if ! git -c "safe.directory=${SCRIPT_DIR}" -C "${SCRIPT_DIR}" \
-            ls-files -co --exclude-standard -z >"${SHELL_INVENTORY_FILE}"; then
+            ls-files -co --exclude-standard -z >"${SOURCE_INVENTORY_FILE}"; then
             cleanup_static_test
             printf 'FAIL: unable to enumerate tracked/non-ignored project files.\n' >&2
             return 65
         fi
     else
         inventory_is_absolute=true
-        if ! find "${SCRIPT_DIR}" -type f -print0 >"${SHELL_INVENTORY_FILE}"; then
+        if ! find "${SCRIPT_DIR}" -type f -print0 >"${SOURCE_INVENTORY_FILE}"; then
             cleanup_static_test
             printf 'FAIL: unable to enumerate Git-free source-archive files.\n' >&2
             return 65
@@ -351,6 +418,7 @@ assert_shell_inventory_is_canonical() {
 
         first_line=''
         IFS= read -r first_line <"${SCRIPT_DIR}/${candidate}" || true
+        is_python_candidate=false
         is_shell_candidate=false
 
         if [[ ${candidate} == *.sh ]]; then
@@ -360,25 +428,89 @@ assert_shell_inventory_is_canonical() {
             is_shell_candidate=true
         fi
 
-        [[ ${is_shell_candidate} == true ]] || continue
-
-        matched=false
-        for canonical in "${ALL_SHELL_FILES[@]}"; do
-            if [[ ${candidate} == "${canonical}" ]]; then
-                matched=true
-                break
-            fi
-        done
-
-        if [[ ${matched} != true ]]; then
-            printf 'FAIL: shell file is not in the canonical inventory: %s\n' \
-                "${candidate}" >&2
-            inventory_status=65
+        if [[ ${candidate} == *.py ]]; then
+            is_python_candidate=true
         fi
-    done <"${SHELL_INVENTORY_FILE}"
+
+        if [[ ${is_shell_candidate} == true ]]; then
+            matched=false
+            for canonical in "${ALL_SHELL_FILES[@]}"; do
+                if [[ ${candidate} == "${canonical}" ]]; then
+                    matched=true
+                    break
+                fi
+            done
+
+            if [[ ${matched} != true ]]; then
+                printf 'FAIL: shell file is not in the canonical inventory: %s\n' \
+                    "${candidate}" >&2
+                inventory_status=65
+            fi
+        fi
+
+        if [[ ${is_python_candidate} == true ]]; then
+            matched=false
+            for canonical in "${PYTHON_FILES[@]}"; do
+                if [[ ${candidate} == "${canonical}" ]]; then
+                    matched=true
+                    break
+                fi
+            done
+
+            if [[ ${matched} != true ]]; then
+                printf 'FAIL: Python file is not in the canonical inventory: %s\n' \
+                    "${candidate}" >&2
+                inventory_status=65
+            fi
+        fi
+    done <"${SOURCE_INVENTORY_FILE}"
 
     cleanup_static_test
     return "${inventory_status}"
+}
+
+assert_repository_file_inventory_is_canonical() {
+    local inventory_document="${SCRIPT_DIR}/REPOSITORY_FILES.md"
+    local inventory_status=0
+
+    if [[ ! -f ${inventory_document} || -L ${inventory_document} ]]; then
+        printf 'FAIL: tracked-file utility inventory is absent or invalid.\n' >&2
+        return 65
+    fi
+    if ! REPOSITORY_INVENTORY_FILE=$(mktemp) \
+        || ! DOCUMENTED_INVENTORY_FILE=$(mktemp); then
+        cleanup_static_test
+        printf 'FAIL: unable to create repository-inventory scratch files.\n' >&2
+        return 70
+    fi
+
+    if [[ -e ${SCRIPT_DIR}/.git || -L ${SCRIPT_DIR}/.git ]]; then
+        if ! git -c "safe.directory=${SCRIPT_DIR}" -C "${SCRIPT_DIR}" \
+            ls-files | LC_ALL=C sort >"${REPOSITORY_INVENTORY_FILE}"; then
+            inventory_status=65
+        fi
+    elif ! find "${SCRIPT_DIR}" -type f -printf '%P\n' \
+        | LC_ALL=C sort >"${REPOSITORY_INVENTORY_FILE}"; then
+        inventory_status=65
+    fi
+
+    # shellcheck disable=SC2016 # Backticks are literal Markdown delimiters in the sed expression.
+    if ! sed -n 's/^| `\([^`]*\)` |.*/\1/p' "${inventory_document}" \
+        | LC_ALL=C sort >"${DOCUMENTED_INVENTORY_FILE}"; then
+        inventory_status=65
+    fi
+
+    if ((inventory_status != 0)) \
+        || ! cmp -s -- "${REPOSITORY_INVENTORY_FILE}" \
+            "${DOCUMENTED_INVENTORY_FILE}"; then
+        printf 'FAIL: REPOSITORY_FILES.md does not match the tracked-file inventory.\n' >&2
+        diff -u -- "${REPOSITORY_INVENTORY_FILE}" \
+            "${DOCUMENTED_INVENTORY_FILE}" >&2 || true
+        cleanup_static_test
+        return 65
+    fi
+
+    cleanup_static_test
 }
 
 assert_workflow_dependencies_are_hardened() {
@@ -897,8 +1029,10 @@ test_static_tooling_contracts() {
     local runtime_phase scheduler_phase shfmt_phase signal_phase static_phase
     local workflow_file
 
-    assert_shell_inventory_is_canonical
+    assert_source_inventory_is_canonical
+    assert_repository_file_inventory_is_canonical
     assert_shell_policy_lists_are_canonical
+    assert_unique_source_file_list PYTHON_FILES "${PYTHON_FILES[@]}"
     assert_workflow_dependencies_are_hardened
     assert_shfmt_update_workflow_policy
     assert_file_contains "${SCRIPT_DIR}/AGENTS.md" \
@@ -917,6 +1051,7 @@ test_static_tooling_contracts() {
     for static_phase in \
         test_static_tooling_contracts \
         test_static_shell_interface_contracts \
+        test_static_python_interface_contracts \
         test_static_release_contracts \
         test_static_cleanup_and_qualification_contracts \
         test_static_packaging_signing_contracts \
@@ -959,6 +1094,12 @@ test_static_tooling_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.editorconfig" \
         'simplify = false' \
         'EditorConfig disables shfmt simplification'
+    assert_file_contains "${SCRIPT_DIR}/.editorconfig" \
+        '[*.py]' \
+        'EditorConfig defines Python source formatting'
+    assert_file_contains "${SCRIPT_DIR}/.gitignore" \
+        'qualification-evidence/' \
+        'local generated qualification evidence is ignored'
     assert_file_contains "${SCRIPT_DIR}/tests/run-all.sh" \
         'bash -- ./scripts/check-shell-format.sh' \
         'run-all enforces shfmt before behavioral validation'
@@ -1151,6 +1292,14 @@ test_static_tooling_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
         'Validate verified formatter and project' \
         'automation validates the formatter update only after fresh verification'
+}
+
+test_static_python_interface_contracts() {
+    local file=''
+
+    for file in "${PYTHON_FILES[@]}"; do
+        assert_standard_python_header "${file}"
+    done
 }
 
 test_static_shell_interface_contracts() {
@@ -3086,6 +3235,7 @@ main() {
     assert_forbidden_source_name_absent
     test_static_tooling_contracts
     test_static_shell_interface_contracts
+    test_static_python_interface_contracts
     test_static_release_contracts
     test_static_cleanup_and_qualification_contracts
     test_static_packaging_signing_contracts

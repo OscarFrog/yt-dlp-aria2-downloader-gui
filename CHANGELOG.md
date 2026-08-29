@@ -6,6 +6,14 @@
   v2.3.4 RPM, DEB and ZIP, while opening the next development version so its
   package identity cannot collide with the published release tag.
 
+### Repository maintenance
+
+- Add a statically enforced tracked-file utility inventory and document the
+  active, historical, and compatibility reason for retaining every path.
+- Define a language-appropriate Python identity contract instead of copying the
+  Bash-only header, and document the manual real-Zenity and post-release
+  qualification helpers.
+
 ## 2.3.4 - 2026-08-28
 
 ### Test reliability

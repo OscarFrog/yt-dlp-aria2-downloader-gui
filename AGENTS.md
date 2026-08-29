@@ -48,6 +48,9 @@ qualifications, CI coverage, and release-only procedures.
   integration tests and static contracts before editing.
 - For user-facing behavior or documentation, inspect both `README.md` and
   `README.fr.md` and keep equivalent English and French guidance aligned.
+- For a tracked-file addition, removal, move, or rename, inspect and update
+  `REPOSITORY_FILES.md` so every retained path keeps an explicit current role
+  and consumer.
 - For version or release metadata, inspect the version-coherence assertions in
   `test-static.sh`, the current `CHANGELOG.md` entry, packaging metadata, and
   release workflows before changing any version surface.
@@ -92,6 +95,31 @@ why; do not imply that it passed.
 
 Do not manually rewrite formatting in a way that conflicts with canonical
 `shfmt` output.
+
+## File identity and repository inventory
+
+Use language- and format-appropriate identity instead of copying the Bash
+banner into every file type.
+
+- Canonical Bash files follow the exact header contract in `SHELL_STYLE.md`.
+- Python source starts with the MIT SPDX identifier. Its first Python statement
+  is a module docstring that names the project, gives the repository-relative
+  module path, and describes its durable role. A deliberately non-executable
+  Python helper has no shebang and is invoked explicitly with `python3`.
+- Markdown titles, workflow `name` fields, desktop-entry keys, RPM and Debian
+  metadata, manpage `NAME` sections, and OpenPGP packet identity are the native
+  identification mechanisms for those formats. Do not prepend a synthetic
+  comment when the format has no suitable comment syntax or when doing so would
+  alter signed or machine-consumed data.
+- Repository-level licensing remains defined by `LICENSE` and packaging
+  copyright metadata. Source-file SPDX tags make that license machine-readable
+  where the project defines a source header contract.
+
+`REPOSITORY_FILES.md` is the current tracked-file utility inventory. Keep its
+table synchronized with Git and update a row whenever a file's role, consumer,
+installation status, compatibility purpose, or retention decision changes.
+Static validation checks exact path coverage; semantic accuracy remains a
+review responsibility.
 
 ## Project invariants
 
@@ -188,6 +216,9 @@ Before finishing:
 
 - review the diff for unrelated edits;
 - verify that new shell files are added to the canonical inventory;
+- verify that new Python files are added to the canonical inventory and carry
+  the project Python identity contract;
+- verify that the tracked-file table in `REPOSITORY_FILES.md` remains exact;
 - verify that renamed shell files have matching canonical headers and inventory
   entries;
 - verify that new exceptions are explicit, narrowly scoped, and documented;

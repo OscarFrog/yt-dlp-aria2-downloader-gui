@@ -3,7 +3,7 @@
 # ==============================================================================
 # Project     : yt-dlp-aria2-downloader-gui
 # File        : tests/lib/project-files.sh
-# Purpose     : Define the canonical shell-file lists used by validation.
+# Purpose     : Define the canonical source-file lists used by validation.
 # ==============================================================================
 
 # Canonical project shell-file lists shared by syntax and ShellCheck validation.
@@ -105,4 +105,11 @@ ALL_SHELL_FILES=(
     "${PACKAGING_SHELL_FILES[@]}"
     "${TEST_SHELL_FILES[@]}"
     "${DEVELOPMENT_SHELL_FILES[@]}"
+)
+
+# Python modules use the project-wide identity contract in AGENTS.md rather
+# than the Bash-only header contract in SHELL_STYLE.md.
+# shellcheck disable=SC2034 # Array is read by test-static.sh.
+PYTHON_FILES=(
+    private-aria2-plan.py
 )
