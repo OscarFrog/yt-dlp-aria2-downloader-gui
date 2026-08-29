@@ -192,7 +192,30 @@ if [[ ${YTDLP_NO_PLUGINS:-} != 1 ]]; then
     exit 67
 fi
 
-if (($# == 1)) && [[ $1 == '--version' ]]; then
+probe_operation=''
+probe_ignore_config=false
+probe_no_plugin_dirs=false
+probe_no_update=false
+for argument in "$@"; do
+    case ${argument} in
+        --ignore-config) probe_ignore_config=true ;;
+        --no-plugin-dirs) probe_no_plugin_dirs=true ;;
+        --no-update) probe_no_update=true ;;
+        --version | --help) probe_operation=${argument} ;;
+        *) ;;
+    esac
+done
+
+if [[ -n ${probe_operation} ]]; then
+    [[ ${probe_ignore_config} == true &&
+        ${probe_no_plugin_dirs} == true &&
+        ${probe_no_update} == true ]] || {
+        printf 'yt-dlp probe isolation options are incomplete.\n' >&2
+        exit 68
+    }
+fi
+
+if [[ ${probe_operation} == '--version' ]]; then
     if [[ -n ${MOCK_YTDLP_CONTROL_LOG:-} ]]; then
         printf '%s\n' --version >>"${MOCK_YTDLP_CONTROL_LOG}"
     fi
@@ -200,7 +223,7 @@ if (($# == 1)) && [[ $1 == '--version' ]]; then
     printf '%s\n' "${MOCK_YTDLP_VERSION:-2026.06.09}"
     exit 0
 fi
-if (($# == 1)) && [[ $1 == '--help' ]]; then
+if [[ ${probe_operation} == '--help' ]]; then
     if [[ -n ${MOCK_YTDLP_CONTROL_LOG:-} ]]; then
         printf '%s\n' --help >>"${MOCK_YTDLP_CONTROL_LOG}"
     fi
@@ -230,6 +253,8 @@ if (($# == 1)) && [[ $1 == '--help' ]]; then
         '--socket-timeout SECONDS' \
         '--retries RETRIES' \
         '--fragment-retries RETRIES' \
+        '--ignore-config' \
+        '--no-plugin-dirs' \
         '--extractor-retries RETRIES' \
         '--retry-sleep [TYPE:]EXPR'
     exit 0
@@ -1464,6 +1489,8 @@ test_mock_engine_audio_downloads() {
     assert_text_not_contains "${arguments_text}" 'https://' \
         'yt-dlp POST argv contains no HTTPS URL'
     assert_array_contains arguments '--ignore-config' 'yt-dlp ignores user configuration'
+    assert_array_contains arguments '--no-plugin-dirs' 'yt-dlp clears plugin directories'
+    assert_array_contains arguments '--no-update' 'yt-dlp cannot self-update'
     assert_array_contains arguments '--no-playlist' 'yt-dlp disables playlists'
     assert_array_contains arguments '--no-overwrites' 'yt-dlp final-file overwrite protection'
     assert_array_contains arguments '--no-post-overwrites' 'yt-dlp post-processing overwrite protection'

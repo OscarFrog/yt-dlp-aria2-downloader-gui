@@ -231,6 +231,7 @@ run_timed_in_dir() (
 
 run_curl() {
     run_child curl \
+        --disable \
         --fail --location --proto '=https' --tlsv1.2 \
         --connect-timeout "${CURL_CONNECT_TIMEOUT_SECONDS}" \
         --max-time "${CURL_MAX_TIME_SECONDS}" \
@@ -246,17 +247,44 @@ run_timed() {
     run_child timeout --signal=TERM --kill-after=5s "${seconds}s" "$@"
 }
 
+run_ytdlp_probe() {
+    local candidate=$1
+    shift
+
+    LC_ALL=C YTDLP_NO_PLUGINS=1 \
+        run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" \
+        "${candidate}" \
+        --ignore-config \
+        --no-plugin-dirs \
+        --no-update \
+        "$@"
+}
+
 component_path() {
     local component=$1
+    local asset=''
     local path=''
+    local root=''
+    local current_target=''
 
     case ${component} in
-        yt-dlp) path="${YTDLP_ROOT}/current/${YTDLP_ASSET}" ;;
-        deno) path="${DENO_ROOT}/current/deno" ;;
+        yt-dlp)
+            root=${YTDLP_ROOT}
+            asset=${YTDLP_ASSET}
+            ;;
+        deno)
+            root=${DENO_ROOT}
+            asset='deno'
+            ;;
         *) return 2 ;;
     esac
 
-    [[ -x ${path} ]] || return 1
+    read_runtime_link "${root}" current current_target || return 1
+    [[ -n ${current_target} ]] || return 1
+    [[ -d ${root}/${current_target} && ! -L ${root}/${current_target} ]] \
+        || return 1
+    path="${root}/${current_target}/${asset}"
+    [[ -f ${path} && ! -L ${path} && -x ${path} ]] || return 1
     printf '%s\n' "${path}"
 }
 
@@ -467,7 +495,7 @@ validate_ytdlp() {
         return 1
     fi
 
-    if ! version_output=$(LC_ALL=C run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" "${candidate}" --version 2>&1); then
+    if ! version_output=$(run_ytdlp_probe "${candidate}" --version 2>&1); then
         error 'yt-dlp runtime validation failed: --version could not run.'
         printf '%s\n' "${version_output}" >&2
         return 1
@@ -478,7 +506,7 @@ validate_ytdlp() {
         return 1
     fi
 
-    if ! help=$(LC_ALL=C run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" "${candidate}" --help 2>&1); then
+    if ! help=$(run_ytdlp_probe "${candidate}" --help 2>&1); then
         error 'yt-dlp runtime validation failed: --help could not run.'
         return 1
     fi
@@ -496,11 +524,13 @@ validate_ytdlp() {
         --extractor-retries \
         --fixup \
         --fragment-retries \
+        --ignore-config \
         --js-runtimes \
         --list-impersonate-targets \
         --load-info-json \
         --no-clean-info-json \
         --no-overwrites \
+        --no-plugin-dirs \
         --no-post-overwrites \
         --no-update \
         --parse-metadata \
@@ -520,7 +550,7 @@ validate_ytdlp() {
         fi
     done
 
-    if ! impersonation=$(LC_ALL=C run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" "${candidate}" --list-impersonate-targets 2>&1); then
+    if ! impersonation=$(run_ytdlp_probe "${candidate}" --list-impersonate-targets 2>&1); then
         error 'yt-dlp runtime validation failed: unable to enumerate impersonation targets.'
         printf '%s\n' "${impersonation}" >&2
         return 1
@@ -643,22 +673,36 @@ install_ytdlp_candidate() {
         rm -f -- "${staged}" || true
         return 1
     }
+    if [[ ${VALIDATED_YTDLP_VERSION} != "${expected_version}" ]]; then
+        rm -f -- "${staged}" || true
+        error 'staged yt-dlp runtime changed version during installation.'
+        return 1
+    fi
     mv -Tf -- "${staged}" "${version_dir}/${YTDLP_ASSET}" || {
         rm -f -- "${staged}" || true
         return 1
     }
     validate_ytdlp "${version_dir}/${YTDLP_ASSET}" || return 1
+    if [[ ${VALIDATED_YTDLP_VERSION} != "${expected_version}" ]]; then
+        error 'installed yt-dlp runtime does not match its immutable version directory.'
+        return 1
+    fi
     activate_version "${YTDLP_ROOT}" "${version}"
 }
 
 install_deno_candidate() {
     local candidate=$1
+    local expected_version=$2
     local version=''
     local version_dir=''
     local staged=''
 
     validate_deno "${candidate}" || return 1
     version=${VALIDATED_DENO_VERSION}
+    if [[ ${version} != "${expected_version}" ]]; then
+        error "Deno candidate version ${version} does not match resolved release ${expected_version}."
+        return 1
+    fi
 
     version_dir="${DENO_ROOT}/${version}"
     if [[ -L ${version_dir} || (-e ${version_dir} && ! -d ${version_dir}) ]]; then
@@ -673,11 +717,44 @@ install_deno_candidate() {
         rm -f -- "${staged}" || true
         return 1
     }
+    if [[ ${VALIDATED_DENO_VERSION} != "${expected_version}" ]]; then
+        rm -f -- "${staged}" || true
+        error 'staged Deno runtime changed version during installation.'
+        return 1
+    fi
     mv -Tf -- "${staged}" "${version_dir}/deno" || {
         rm -f -- "${staged}" || true
         return 1
     }
     validate_deno "${version_dir}/deno" || return 1
+    if [[ ${VALIDATED_DENO_VERSION} != "${expected_version}" ]]; then
+        error 'installed Deno runtime does not match its immutable version directory.'
+        return 1
+    fi
+    activate_version "${DENO_ROOT}" "${version}"
+}
+
+reuse_installed_ytdlp_version() {
+    local version=$1
+    local candidate="${YTDLP_ROOT}/${version}/${YTDLP_ASSET}"
+
+    [[ -d ${YTDLP_ROOT}/${version} && ! -L ${YTDLP_ROOT}/${version} ]] \
+        || return 1
+    [[ -f ${candidate} && ! -L ${candidate} && -x ${candidate} ]] || return 1
+    validate_ytdlp "${candidate}" >/dev/null 2>&1 || return 1
+    [[ ${VALIDATED_YTDLP_VERSION} == "${version}" ]] || return 1
+    activate_version "${YTDLP_ROOT}" "${version}"
+}
+
+reuse_installed_deno_version() {
+    local version=$1
+    local candidate="${DENO_ROOT}/${version}/deno"
+
+    [[ -d ${DENO_ROOT}/${version} && ! -L ${DENO_ROOT}/${version} ]] \
+        || return 1
+    [[ -f ${candidate} && ! -L ${candidate} && -x ${candidate} ]] || return 1
+    validate_deno "${candidate}" >/dev/null 2>&1 || return 1
+    [[ ${VALIDATED_DENO_VERSION} == "${version}" ]] || return 1
     activate_version "${DENO_ROOT}" "${version}"
 }
 
@@ -740,6 +817,11 @@ bootstrap_ytdlp_version() {
     local base_url=''
 
     [[ ${version} =~ ${YTDLP_CHANNEL_VERSION_PATTERN} ]] || return 1
+    # Version directories are immutable once validated. Reactivating a prior
+    # stable/nightly runtime must not replace bytes used by an existing engine.
+    if reuse_installed_ytdlp_version "${version}"; then
+        return 0
+    fi
     base_url="https://github.com/${YTDLP_RELEASE_REPOSITORY}/releases/download/${version}"
     work=$(mktemp -d --tmpdir="${RUNTIME_ROOT}" '.yt-dlp-bootstrap.XXXXXXXX') || return 1
     gpg_home=$(mktemp -d --tmpdir=/tmp '.yt-dlp-gpg.XXXXXXXX') || {
@@ -820,6 +902,9 @@ bootstrap_deno_version() {
     local base_url=''
 
     [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    if reuse_installed_deno_version "${version}"; then
+        return 0
+    fi
     base_url="https://github.com/${DENO_RELEASE_REPOSITORY}/releases/download/v${version}"
     work=$(mktemp -d --tmpdir="${RUNTIME_ROOT}" '.deno-bootstrap.XXXXXXXX') || return 1
     checksum_file="${DENO_ASSET}.sha256sum"
@@ -853,7 +938,7 @@ bootstrap_deno_version() {
         rm -rf -- "${work}" || true
         return 1
     }
-    if ! install_deno_candidate "${work}/deno"; then
+    if ! install_deno_candidate "${work}/deno" "${version}"; then
         error 'Deno bootstrap failed: downloaded runtime failed validation or activation.'
         rm -rf -- "${work}" || true
         return 1
@@ -874,8 +959,8 @@ update_ytdlp() {
     local latest_version=''
 
     current=$(component_path yt-dlp) || return 1
-    current_version=$(LC_ALL=C run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" \
-        "${current}" --version 2>/dev/null) || return 1
+    current_version=$(run_ytdlp_probe "${current}" --version 2>/dev/null) \
+        || return 1
     current_version=${current_version%%$'\n'*}
     is_valid_ytdlp_version "${current_version}" || return 1
     latest_ytdlp_version latest_version || return 1
@@ -1199,7 +1284,9 @@ initialize_runtime_platform() {
 
 prepare_runtime_storage() {
     local data_home=$1
+    local managed_data_root="${data_home}/${APP_ID}"
 
+    ensure_private_directory "${managed_data_root}" || return $?
     ensure_private_directory "${RUNTIME_ROOT}" || return $?
     ensure_private_directory "${YTDLP_ROOT}" || return $?
     ensure_private_directory "${DENO_ROOT}" || return $?
@@ -1219,7 +1306,9 @@ print_runtime_versions() {
 print_engine_runtime_attestation() {
     local action=$1
     local ytdlp=''
+    local ytdlp_version=''
     local deno=''
+    local deno_version=''
 
     case ${action} in
         require)
@@ -1236,16 +1325,22 @@ print_engine_runtime_attestation() {
 
     ytdlp=$(component_path yt-dlp) || return 69
     deno=$(component_path deno) || return 69
-    if [[ -z ${VALIDATED_YTDLP_VERSION} || -z ${VALIDATED_DENO_VERSION} ]]; then
+    validate_ytdlp "${ytdlp}" || return 69
+    ytdlp_version=${VALIDATED_YTDLP_VERSION}
+    validate_deno "${deno}" || return 69
+    deno_version=${VALIDATED_DENO_VERSION}
+    if [[ -z ${ytdlp_version} || -z ${deno_version} ]] \
+        || [[ ${ytdlp} != "${YTDLP_ROOT}/${ytdlp_version}/${YTDLP_ASSET}" ]] \
+        || [[ ${deno} != "${DENO_ROOT}/${deno_version}/deno" ]]; then
         error 'managed runtime validation did not produce a complete engine attestation.'
         return 69
     fi
 
     printf 'runtime-contract=%s\n' "${ENGINE_RUNTIME_CONTRACT_VERSION}"
     printf 'yt-dlp-path=%s\n' "${ytdlp}"
-    printf 'yt-dlp-version=%s\n' "${VALIDATED_YTDLP_VERSION}"
+    printf 'yt-dlp-version=%s\n' "${ytdlp_version}"
     printf 'deno-path=%s\n' "${deno}"
-    printf 'deno-version=%s\n' "${VALIDATED_DENO_VERSION}"
+    printf 'deno-version=%s\n' "${deno_version}"
 }
 
 dispatch_runtime_command() {
