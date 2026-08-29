@@ -4,19 +4,22 @@ Ce document est l’inventaire technique courant du dépôt. Il ne vise aucune
 ancienne version applicative comme état de référence. La passe initiale a été
 réalisée le 29 août 2026 depuis la base Git
 `85d394cfccce96e9c509a8ce530bf5b249f3962c`, puis les corrections décrites
-ci-dessous ont été intégrées. Le snapshot courant ajoute une carte
-d’architecture et trois skills Codex spécialisées sans modifier les composants
-exécutables.
+ci-dessous ont été intégrées. Le snapshot courant comprend une carte
+d’architecture, trois skills Codex spécialisées, un diagnostic d’environnement,
+des garde-fous d’exécution et des modèles de contribution structurés.
 
 ## Inventaire exact
 
-L’état courant audité contient exactement les 79 chemins tracked suivants :
+L’état courant audité contient exactement les 82 chemins tracked suivants :
 
 ```text
 .agents/skills/packaging-release/SKILL.md
 .agents/skills/shell-change/SKILL.md
 .agents/skills/workflow-supply-chain/SKILL.md
+.codex/rules/default.rules
 .editorconfig
+.github/ISSUE_TEMPLATE/codex-task.yml
+.github/pull_request_template.md
 .github/workflows/packages.yml
 .github/workflows/qualification.yml
 .github/workflows/real-tools.yml
@@ -154,7 +157,10 @@ nettoyage de données. Les autres anciennes versions restent confinées au
 | `.agents/skills/packaging-release/SKILL.md` | Skill Codex | Route les travaux RPM, DEB, installation, cleanup, version et release vers les contrats et validations adaptés | Codex lors des tâches packaging/release | Oui — procédure contributive à chargement progressif, présente dans le ZIP source mais non installée par les paquets | Oui — n’accorde aucune autorité implicite de signature ou publication | Non | Non, orchestre sans recopier `TESTING.md` | KEEP |
 | `.agents/skills/shell-change/SKILL.md` | Skill Codex | Route toute modification ou revue Shell vers le style, l’architecture, les inventaires et les validations canoniques | Codex lors des tâches Bash ou blocs Shell de workflows | Oui — procédure contributive à chargement progressif, présente dans le ZIP source mais non installée par les paquets | Oui — `SHELL_STYLE.md` reste l’unique politique détaillée | Non | Non, ne duplique pas les règles Shell | KEEP |
 | `.agents/skills/workflow-supply-chain/SKILL.md` | Skill Codex | Route les changements GitHub Actions, pins, provenance et frontières privilégiées | Codex lors des tâches CI/supply chain | Oui — procédure contributive à chargement progressif, présente dans le ZIP source mais non installée par les paquets | Oui — distingue édition, qualification et mutation externe autorisée | Non | Non, complète le routeur racine | KEEP |
+| `.codex/rules/default.rules` | Politique Codex mécanique | Demande confirmation pour Git, GitHub CLI et wrappers d’environnement hors sandbox, et interdit les formes usuelles de force-push vers `main` | Codex dans un projet approuvé, `test-static.sh`, mainteneurs | Oui — garde-fou contributif présent dans le ZIP source mais non installé par RPM/DEB | Oui — chaque règle porte une décision explicite, des exemples validés et les refspecs `main` courantes sont couvertes | Non | Non, rend mécaniques certaines limites d’`AGENTS.md` sans accorder d’autorité | KEEP |
 | `.editorconfig` | Configuration éditeur | Fixe UTF-8/LF et les paramètres shfmt/Python | Éditeurs, shfmt, `test-static.sh` | Oui — cohérence de contribution | Oui — sections Shell et Python alignées | Non | Non, complète les validateurs | KEEP |
+| `.github/ISSUE_TEMPLATE/codex-task.yml` | Formulaire GitHub | Cadre objectif, preuves, critères, périmètre, invariants, validation et autorité externe d’une tâche agent | Contributeurs, Codex, GitHub Issues, `test-static.sh` | Oui — qualité des demandes, présent dans le ZIP source mais non installé par RPM/DEB | Oui — champs structurés et avertissement explicite contre les secrets | Non | Non, structure l’entrée de travail plutôt que la politique du dépôt | KEEP |
+| `.github/pull_request_template.md` | Modèle GitHub | Exige résumé, risques, validations réelles, autorité/mutations externes et contrôles de cohérence avant revue | Contributeurs, GitHub Pull Requests, `test-static.sh` | Oui — revue et livraison, présent dans le ZIP source mais non installé par RPM/DEB | Oui — possède une section explicite pour l’autorité accordée et les mutations réellement exécutées | Non | Non, transforme la Definition of Done en preuve par PR | KEEP |
 | `.github/workflows/packages.yml` | GitHub Actions | Construit et qualifie RPM/DEB, cycle de vie et upgrade | GitHub Actions, release policy | Oui — packaging/CI | Oui — actions épinglées, permissions minimales, release précédente authentifiée | Compatibilité d’upgrade volontaire | Non, distinct de la publication | KEEP |
 | `.github/workflows/qualification.yml` | GitHub Actions | Qualifie plusieurs générations FFmpeg/FFprobe | GitHub Actions, helper de preuve étendue | Oui — qualification étendue | Oui — matrices 6.1.1/8.1.2/9.0.1 intentionnelles | Compatibilité générationnelle actuelle | Non | KEEP |
 | `.github/workflows/real-tools.yml` | GitHub Actions | Exécute les scénarios avec vrais outils et le stable hebdomadaire | GitHub Actions, preuve post-release | Oui — intégration réelle | Oui — pins reproductibles et stable planifié distingués | Pins anciens conservés comme bornes de qualification | Non | KEEP |
@@ -201,7 +207,7 @@ nettoyage de données. Les autres anciennes versions restent confinées au
 | `scripts/format-shell.sh` | Bash développement | Reformate tous les Shell canoniques | Mainteneurs, workflow de préparation | Oui — maintenance | Oui — inventaire et options canoniques | Non | Non, action mutante distincte du check | KEEP |
 | `scripts/release-evidence-qualification.sh` | Bash qualification | Vérifie après publication release, assets, attestations et runs | Mainteneurs, `TESTING.md`, tests statiques | Oui — preuve post-release manuelle | Oui — exemple générique et sortie locale documentée | Non | Non, complète le preflight et la CI | KEEP |
 | `scripts/release-preflight.sh` | Bash release | Vérifie tag, versions, règles GitHub et matériel de signature avant push | Mainteneurs, `TESTING.md`, tests statiques | Oui — garde release | Oui — contrôles API et fingerprints cohérents | Non | Non, intervient avant publication | KEEP |
-| `test-static.sh` | Bash test | Valide inventaires, en-têtes, skills Codex, workflows, versions, packaging et contrats source | `run-all.sh`, workflows, mainteneurs | Oui — CI statique | Oui — couvre Python, découvrabilité des skills et inventaire de tous les fichiers | Non | Non | KEEP |
+| `test-static.sh` | Bash test | Valide inventaires, en-têtes, skills/règles/modèles Codex, workflows, versions, packaging et contrats source | `run-all.sh`, workflows, mainteneurs | Oui — CI statique | Oui — impose notamment une décision sûre explicite dans chaque règle Codex et teste le rejet d’une décision implicite | Non | Non | KEEP |
 | `tests/aria2-auth-headers-integration.sh` | Bash test | Prouve allowlist de headers et isolation cross-origin | `run-all.sh`, tests statiques | Oui — sécurité transport | Oui — contrôle positif et mutant dangereux | Non | Non | KEEP |
 | `tests/aria2-real-behavior-integration.sh` | Bash test réel | Qualifie Range, redirect, erreur, cancel, reprise et quiescence aria2 | Workflows real-tools/release | Oui — comportement réel | Oui — serveur local et répétitions bornées | Reprise native volontaire | Non | KEEP |
 | `tests/ffmpeg-generation-compatibility.sh` | Bash test | Vérifie les invariants média sensibles aux générations FFmpeg | Qualification multi-génération | Oui — compatibilité FFmpeg | Oui — fixtures ciblées | Compatibilité générationnelle nécessaire | Non | KEEP |
@@ -225,10 +231,10 @@ nettoyage de données. Les autres anciennes versions restent confinées au
 | `tests/repeat-qualification.sh` | Bash orchestrateur test | Répète en parallèle des qualifications indépendantes et ordonne les logs | Quatre workflows, qualification FFmpeg | Oui — détection de races | Oui — limites et isolation documentées | Non | Non | KEEP |
 | `tests/rpm6-multisig-integration.sh` | Bash test packaging | Prouve les sémantiques signatures RPM v4/v6 et corruption | Packages/release CI | Oui — décision de format/signature | Oui — v4 production et v6 qualification séparés | Oui — compatibilité v4/v6 nécessaire | Non | KEEP — COMPATIBILITÉ |
 | `tests/run-all-signal-integration.sh` | Bash test | Vérifie qu’une interruption de run-all tue les groupes enfants | `run-all.sh`, tests statiques | Oui — sûreté du runner | Oui — descendant et délai bornés | Non | Non | KEEP |
-| `tests/run-all.sh` | Bash orchestrateur test | Lance format, static, ShellCheck et suites profilées/parallèles | Développeurs, quatre workflows | Oui — entrée canonique de validation | Oui — manifestes full/fast et ordonnancement exacts | Non | Non | KEEP |
+| `tests/run-all.sh` | Bash orchestrateur test | Diagnostique l’environnement ou lance format, static, ShellCheck et suites profilées/parallèles | Développeurs, agents, quatre workflows | Oui — entrée canonique de diagnostic et validation | Oui — doctor non provisionnant avec sondes bornées, readiness Git/shfmt fail-closed, JSON versionné et manifestes full/fast | Non | Non | KEEP |
 | `tests/runtime-manager-hardening-integration.sh` | Bash test | Stresse locks, réseau nul, bootstrap, journal, rollback et bornes | `run-all.sh`, stress CI | Oui — supply chain/runtime | Oui — mutations et répétitions | Récupération/compatibilité volontaire | Non | KEEP |
 | `tests/runtime-manager-integration.sh` | Bash test | Vérifie installation normale, chemins, offline et rollback runtime | `run-all.sh`, signal test | Oui — runtime | Oui — x86_64/aarch64 et états courants/précédents | Compatibilité rollback nécessaire | Non | KEEP |
-| `tests/test-runner-integration.sh` | Bash test | Teste concurrence, timing, transitions finales et terminaison du runner | `run-all.sh`, tests statiques | Oui — infrastructure tests | Oui — stress de signaux inclus | Non | Non | KEEP |
+| `tests/test-runner-integration.sh` | Bash test | Teste doctor JSON, concurrence, timing, transitions finales et terminaison du runner | `run-all.sh`, tests statiques | Oui — infrastructure tests | Oui — couvre cache shfmt, Git, JSON C0, sondes bornées et stress de signaux avec mocks hermétiques | Non | Non | KEEP |
 | `tests/zenity-real-session-qualification.sh` | Bash qualification manuelle | Enregistre une session GUI réelle contrôlée avec preuve de confidentialité/processus | Mainteneurs via `TESTING.md`; inventaire Shell | Oui — validation UI non simulable | Oui — scénarios, plateformes et preuves documentés | Non | Non, ne peut être remplacé par le mock headless | KEEP |
 
 ## Vérification des candidats historiques et temporaires
@@ -294,9 +300,9 @@ ouverte.
 
 # AUDIT DE L’UTILITÉ DE TOUS LES FICHIERS
 
-- Nombre total de fichiers tracked : **79**.
-- Nombre de fichiers examinés : **79**.
-- Nombre de fichiers à conserver : **79**, dont les catégories historique et
+- Nombre total de fichiers tracked : **82**.
+- Nombre de fichiers examinés : **82**.
+- Nombre de fichiers à conserver : **82**, dont les catégories historique et
   compatibilité ci-dessous.
 - Nombre de fichiers historiques : **1** (`CHANGELOG.md`).
 - Nombre de fichiers à corriger : **0** après remédiation (**9** corrigés

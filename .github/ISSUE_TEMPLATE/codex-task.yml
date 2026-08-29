@@ -1,0 +1,83 @@
+name: Codex task
+description: Define a repository task with explicit scope, invariants, and proof.
+title: "[Task] "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Provide the contract Codex should satisfy. Do not include secrets,
+        credentials, private media URLs, cookies, or headers.
+
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: State the concrete outcome, not only the implementation idea.
+      placeholder: Describe what should be true when the task is complete.
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed_behavior
+    attributes:
+      label: Observed behavior and evidence
+      description: Include reproducible symptoms, logs with secrets removed, or relevant context.
+      placeholder: What happens now, and how can it be reproduced?
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+      description: List observable conditions that prove the requested outcome.
+      placeholder: |
+        - The expected behavior is ...
+        - The regression test proves ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and likely components
+      description: Name relevant paths, commands, workflows, package formats, or architectural boundaries.
+      placeholder: Files or components likely in scope.
+
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Invariants to preserve
+      description: Identify privacy, cleanup, process, compatibility, packaging, or release guarantees that must not change.
+      placeholder: Contracts that remain binding throughout the task.
+
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: State adjacent behavior or external actions that this task does not authorize.
+      placeholder: Version bumps, releases, repository settings, unrelated refactors, and so on.
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Expected validation
+      description: List focused tests, full-suite expectations, and any manual or privileged qualification.
+      placeholder: |
+        ./tests/run-all.sh --fast --jobs 4
+        ./tests/run-all.sh --full --jobs 4
+    validations:
+      required: true
+
+  - type: dropdown
+    id: external_authority
+    attributes:
+      label: External mutation authority
+      description: Select the highest level explicitly authorized by this issue.
+      options:
+        - No external mutation; prepare local changes only
+        - Push a branch and open or update a pull request
+        - Merge an approved pull request and delete its branch
+        - Release or repository administration is explicitly authorized in the task text
+    validations:
+      required: true

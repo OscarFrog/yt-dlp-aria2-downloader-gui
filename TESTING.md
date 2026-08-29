@@ -5,6 +5,7 @@ project. It is intentionally independent of a particular release date.
 
 ## Contents
 
+- [Environment diagnosis](#environment-diagnosis)
 - [Complete local test suite](#complete-local-test-suite)
 - [Fast feedback, timing and concurrency](#fast-feedback-timing-and-concurrency)
 - [Shell formatting](#shell-formatting)
@@ -18,6 +19,37 @@ project. It is intentionally independent of a particular release date.
 - [Real-world checks on Fedora 44](#real-world-checks-on-fedora-44)
 - [Locale-stabilized probes](#locale-stabilized-probes)
 - [Stress validation](#stress-validation)
+
+## Environment diagnosis
+
+Inspect whether a new workstation, container, or restricted agent environment
+can run the hermetic local contract before choosing a validation profile:
+
+```bash
+./tests/run-all.sh --doctor
+```
+
+This diagnostic does not run a validation suite, install a dependency, populate
+the managed shfmt cache, or modify the repository. It checks required commands,
+the Bash 4.4 and Python 3.10 baselines, the pinned shfmt/bootstrap contract,
+private temporary-directory semantics, IPv4 loopback binding, and readable
+Linux `/proc` process metadata. It also reports optional qualification tools,
+selected tool versions through time/output-bounded probes, Git/source-archive
+state, and a bounded HTTPS probe to GitHub. Git is required when `.git`
+metadata is present. External HTTPS remains optional when an exact verified
+shfmt binary is already cached; otherwise both a provisionable cache target
+and successful HTTPS probe are required for formatter readiness. Any failed
+required capability makes the command exit with status `69`.
+
+For automation, request the versioned JSON schema:
+
+```bash
+./tests/run-all.sh --doctor --json
+```
+
+The `ready` field is true exactly when no required check failed. Doctor mode is
+exclusive: it cannot be combined with `--fast`, `--full`, `--jobs`, or `--list`.
+Passing `--json` without `--doctor` is rejected.
 
 ## Complete local test suite
 

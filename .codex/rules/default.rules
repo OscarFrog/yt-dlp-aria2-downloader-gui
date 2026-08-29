@@ -1,0 +1,273 @@
+# SPDX-License-Identifier: MIT
+# Repository-local Codex guardrails. These rules supplement task authority and
+# AGENTS.md; they do not grant permission for an external mutation.
+
+# Rules compare exact argv prefixes. Prompting for direct Git/GitHub CLI
+# executables keeps global option placement from bypassing mutation guards.
+prefix_rule(
+    pattern = [["git", "/usr/bin/git", "/bin/git"]],
+    decision = "prompt",
+    justification = "Git commands requested outside the sandbox require confirmation; mutations still require explicit task authority.",
+    match = [
+        "git status",
+        "git -C . push origin feature-branch",
+        "/usr/bin/git tag v9.9.9",
+    ],
+    not_match = [
+        "gh pr view 56",
+        "env git status",
+    ],
+)
+
+prefix_rule(
+    pattern = [["gh", "/usr/bin/gh", "/bin/gh"]],
+    decision = "prompt",
+    justification = "GitHub CLI commands requested outside the sandbox require confirmation; remote mutations still require explicit task authority.",
+    match = [
+        "gh pr view 56",
+        "gh --repo owner/repository pr merge 56",
+        "/usr/bin/gh -R owner/repository release create v9.9.9",
+    ],
+    not_match = [
+        "git status",
+        "env gh pr view 56",
+    ],
+)
+
+# Environment wrappers obscure the executable position from exact-prefix rules.
+# Prompting for them outside the sandbox keeps common Git/GitHub wrappers from
+# silently weakening the direct-command policy.
+prefix_rule(
+    pattern = [["env", "/usr/bin/env"]],
+    decision = "prompt",
+    justification = "Environment-wrapped commands requested outside the sandbox require confirmation because the wrapped executable is not at argv[0].",
+    match = [
+        "env git push origin feature-branch",
+        "env GH_HOST=github.com gh pr merge 56",
+    ],
+    not_match = [
+        "git status",
+        "gh pr view 56",
+    ],
+)
+
+prefix_rule(
+    pattern = ["git", "push"],
+    decision = "prompt",
+    justification = "Pushing mutates the remote repository and requires explicit task authority.",
+    match = [
+        "git push",
+        "git push origin feature-branch",
+        "git push --set-upstream origin feature-branch",
+    ],
+    not_match = [
+        "git status",
+        "git fetch origin",
+    ],
+)
+
+# Prompt for every direct tag invocation because option-free and configurable
+# forms can create or replace tags as well as list them.
+prefix_rule(
+    pattern = ["git", "tag"],
+    decision = "prompt",
+    justification = "Tag commands can mutate release identity and require confirmation outside the sandbox.",
+    match = [
+        "git tag v9.9.9",
+        "git tag -s v9.9.9",
+        "git tag --delete local-test-tag",
+    ],
+    not_match = [
+        "git show v9.9.9",
+        "git describe --tags",
+    ],
+)
+
+prefix_rule(
+    pattern = ["git", "merge"],
+    decision = "prompt",
+    justification = "Merging changes delivery state and requires confirmation.",
+    match = [
+        "git merge --ff-only feature-branch",
+        "git merge --abort",
+    ],
+    not_match = [
+        "git merge-base main feature-branch",
+        "git status",
+    ],
+)
+
+prefix_rule(
+    pattern = ["gh", "pr", "merge"],
+    decision = "prompt",
+    justification = "Merging a pull request changes the protected delivery state and requires confirmation.",
+    match = [
+        "gh pr merge 56 --squash --delete-branch",
+    ],
+    not_match = [
+        "gh pr view 56",
+        "gh pr checks 56",
+    ],
+)
+
+prefix_rule(
+    pattern = ["gh", "release", ["create", "delete", "edit", "upload"]],
+    decision = "prompt",
+    justification = "Changing release assets or metadata requires explicit release authority.",
+    match = [
+        "gh release create v9.9.9",
+        "gh release upload v9.9.9 package.rpm",
+    ],
+    not_match = [
+        "gh release view v9.9.9",
+        "gh release verify v9.9.9",
+    ],
+)
+
+prefix_rule(
+    pattern = ["gh", "workflow", "run"],
+    decision = "prompt",
+    justification = "Dispatching a workflow changes remote CI or release state and requires confirmation.",
+    match = [
+        "gh workflow run qualification.yml",
+    ],
+    not_match = [
+        "gh workflow view qualification.yml",
+        "gh run view 123456",
+    ],
+)
+
+prefix_rule(
+    pattern = ["gh", "run", ["rerun", "cancel", "delete"]],
+    decision = "prompt",
+    justification = "Changing an existing workflow run requires explicit task authority.",
+    match = [
+        "gh run rerun 123456",
+        "gh run cancel 123456",
+    ],
+    not_match = [
+        "gh run view 123456",
+        "gh run watch 123456",
+    ],
+)
+
+# Forbid common direct force-push spellings that name main or an equivalent
+# destination ref. The general Git rule still prompts for non-canonical
+# wrappers, remotes, and option arrangements before they may leave the sandbox.
+prefix_rule(
+    pattern = [
+        ["git", "/usr/bin/git", "/bin/git"],
+        "push",
+        ["--force", "-f", "--force-with-lease", "--force-with-lease=main", "--force-with-lease=refs/heads/main"],
+        "origin",
+        ["main", "HEAD:main", "HEAD:refs/heads/main", "main:main", "refs/heads/main"],
+    ],
+    decision = "forbidden",
+    justification = "Never force-push main; deliver through a reviewed pull request.",
+    match = [
+        "git push --force origin main",
+        "git push --force origin HEAD:main",
+        "/usr/bin/git push --force-with-lease origin HEAD:refs/heads/main",
+    ],
+    not_match = [
+        "git push --force origin feature-branch",
+        "git push origin main",
+    ],
+)
+
+prefix_rule(
+    pattern = [
+        ["git", "/usr/bin/git", "/bin/git"],
+        "push",
+        "origin",
+        ["--force", "-f", "--force-with-lease", "--force-with-lease=main", "--force-with-lease=refs/heads/main"],
+        ["main", "HEAD:main", "HEAD:refs/heads/main", "main:main", "refs/heads/main"],
+    ],
+    decision = "forbidden",
+    justification = "Never force-push main; deliver through a reviewed pull request.",
+    match = [
+        "git push origin -f main",
+        "git push origin --force HEAD:main",
+    ],
+    not_match = [
+        "git push origin --force feature-branch",
+        "git push origin main",
+    ],
+)
+
+prefix_rule(
+    pattern = [
+        ["git", "/usr/bin/git", "/bin/git"],
+        "push",
+        "origin",
+        ["main", "HEAD:main", "HEAD:refs/heads/main", "main:main", "refs/heads/main"],
+        ["--force", "-f", "--force-with-lease", "--force-with-lease=main", "--force-with-lease=refs/heads/main"],
+    ],
+    decision = "forbidden",
+    justification = "Never force-push main; deliver through a reviewed pull request.",
+    match = [
+        "git push origin main --force",
+        "git push origin HEAD:main --force",
+        "git push origin main:main --force-with-lease",
+    ],
+    not_match = [
+        "git push origin feature-branch --force",
+        "git push origin main",
+    ],
+)
+
+prefix_rule(
+    pattern = [
+        ["git", "/usr/bin/git", "/bin/git"],
+        "push",
+        ["--force-with-lease=main", "--force-with-lease=refs/heads/main"],
+    ],
+    decision = "forbidden",
+    justification = "Never force-push main; deliver through a reviewed pull request.",
+    match = [
+        "git push --force-with-lease=main origin",
+        "git push --force-with-lease=refs/heads/main origin",
+    ],
+    not_match = [
+        "git push --force-with-lease=feature-branch origin feature-branch",
+        "git push --force-with-lease origin feature-branch",
+    ],
+)
+
+prefix_rule(
+    pattern = [
+        ["git", "/usr/bin/git", "/bin/git"],
+        "push",
+        "origin",
+        ["--force-with-lease=main", "--force-with-lease=refs/heads/main"],
+    ],
+    decision = "forbidden",
+    justification = "Never force-push main; deliver through a reviewed pull request.",
+    match = [
+        "git push origin --force-with-lease=main",
+        "git push origin --force-with-lease=refs/heads/main",
+    ],
+    not_match = [
+        "git push origin --force-with-lease=feature-branch feature-branch",
+        "git push origin --force-with-lease feature-branch",
+    ],
+)
+
+prefix_rule(
+    pattern = [
+        ["git", "/usr/bin/git", "/bin/git"],
+        "push",
+        "origin",
+        ["+main", "+HEAD:main", "+HEAD:refs/heads/main", "+main:main"],
+    ],
+    decision = "forbidden",
+    justification = "Never force-push main with a force refspec; deliver through a reviewed pull request.",
+    match = [
+        "git push origin +main",
+        "git push origin +HEAD:main",
+    ],
+    not_match = [
+        "git push origin +feature-branch",
+        "git push origin main",
+    ],
+)

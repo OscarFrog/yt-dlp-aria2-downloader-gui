@@ -227,9 +227,19 @@ exact agreement between Git and the tracked-file table in
 
 `tests/run-all.sh` schedules static validation and isolated integration suites.
 The `fast` profile is a development loop; the default `full` profile is the
-complete hermetic local contract. Real tools, privileged package lifecycle,
-interactive Zenity, release evidence, upstream generations, and stress runs are
-separate qualifications documented in `TESTING.md`.
+complete hermetic local contract. Its separate `doctor` mode diagnoses command,
+filesystem, loopback, formatter-bootstrap, network, and repository capabilities
+without running tests or provisioning tools. Real tools, privileged package
+lifecycle, interactive Zenity, release evidence, upstream generations, and
+stress runs are separate qualifications documented in `TESTING.md`.
+
+Contributor control is layered around that runner. Repository skills route a
+task to the relevant policy; issue and pull-request templates make scope,
+invariants, validation evidence, and external authority explicit; conservative
+Codex execution rules prompt for Git, GitHub CLI, and common environment
+wrappers requested outside the sandbox, and forbid common force-push-to-`main`
+forms. These controls improve task execution but do not grant release, merge,
+or repository-administration authority.
 
 Tests use private temporary homes, mock binaries, fixtures, and bounded process
 supervision. They are part of the architecture: changing a trust, cleanup,

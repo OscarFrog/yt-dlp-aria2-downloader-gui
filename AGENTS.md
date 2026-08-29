@@ -38,6 +38,7 @@ defect. Resolve both surfaces together.
 | `REPOSITORY_FILES.md` | Exact tracked-file inventory, each file's consumer, packaging status, and retention reason |
 | `README.md` and `README.fr.md` | Current English and French user-facing behavior, requirements, installation, and usage |
 | `CHANGELOG.md` | Chronological release history, not current operating policy |
+| `.codex/rules/default.rules` | Mechanical prompts and prohibitions for remote or destructive Codex command prefixes |
 
 Use `AGENTS.md` to decide what to read, not as a substitute for those documents.
 
@@ -62,6 +63,11 @@ Use `AGENTS.md` to decide what to read, not as a substitute for those documents.
 
 Repository skills under `.agents/skills/` provide task-specific reading and
 validation routes. They do not replace the policies named above.
+
+When opening a task or pull request, use the repository templates to record the
+objective, acceptance criteria, preserved invariants, actual validation, and
+the exact level of external mutation authority. A selected template option
+does not override the task text or grant authority by itself.
 
 ## File identity and inventories
 
@@ -134,6 +140,15 @@ changes the underlying contract:
 Use repository entry points instead of substituting ad hoc checks when a
 canonical check exists.
 
+Before selecting a validation profile on a new or restricted environment,
+diagnose its capabilities without running the suite:
+
+```bash
+./tests/run-all.sh --doctor
+```
+
+Use `--doctor --json` when a machine-readable, versioned result is needed.
+
 During development, run focused tests and, when useful:
 
 ```bash
@@ -164,6 +179,13 @@ unexplained failure.
 
 The protected `main` branch is updated through pull requests and required
 checks. Do not bypass branch protection or force-push `main`.
+
+Repository-local Codex rules prompt before direct Git, GitHub CLI, and common
+environment-wrapped commands requested outside the sandbox. More-specific
+rules document mutation intent and forbid common force-push-to-`main` forms,
+including destination refspecs. These exact-argv checks supplement task
+authority; they never create it and must not be bypassed with a non-canonical
+wrapper or spelling.
 
 Do not create or push release tags, publish releases or packages, alter
 repository rules, secrets, or environments, or initiate a version bump unless
