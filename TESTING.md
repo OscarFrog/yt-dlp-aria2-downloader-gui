@@ -12,7 +12,9 @@ project. It is intentionally independent of a particular release date.
 - [ShellCheck](#shellcheck)
 - [Covered behavior](#covered-behavior)
 - [GitHub Actions](#github-actions)
+- [Controlled real Zenity qualification](#controlled-real-zenity-qualification)
 - [Release maintainer preflight](#release-maintainer-preflight)
+- [Post-release evidence qualification](#post-release-evidence-qualification)
 - [Real-world checks on Fedora 44](#real-world-checks-on-fedora-44)
 - [Locale-stabilized probes](#locale-stabilized-probes)
 - [Stress validation](#stress-validation)
@@ -452,6 +454,30 @@ to delete it and verifies that cleanup succeeded. Failure or unconfirmed cleanup
 causes publication to fail explicitly. Only the final job receives
 `contents: write`.
 
+## Controlled real Zenity qualification
+
+`tests/zenity-real-session-qualification.sh` is the interactive end-to-end
+protocol for behavior that a headless mock cannot prove. It deliberately does
+not run in `tests/run-all.sh` or GitHub Actions because an operator must perform
+and confirm visible desktop interactions in a real Fedora 44 or Ubuntu 24.04
+graphical session.
+
+Run one documented scenario at a time:
+
+```bash
+bash ./tests/zenity-real-session-qualification.sh success
+bash ./tests/zenity-real-session-qualification.sh cancel-transfer
+```
+
+The accepted scenarios are `success`, `error`, `cancel-transfer`,
+`cancel-ffmpeg`, `cancel-success-race`, `new-download`, and `open-folder`.
+The harness prints the exact operator steps and records environment versions,
+process topology, exit state, potential URL exposure in process arguments, and
+residual descendants. Its default output is under
+`qualification-evidence/zenity/`, which is ignored because it is local,
+generated evidence rather than permanent source documentation. Pass an
+explicit second path when another evidence store owns the result.
+
 ## Release maintainer preflight
 
 The preferred preflight is the repository helper:
@@ -539,6 +565,23 @@ A specific release is considered qualified only after its final `publish` job
 has completed successfully. The presence of immutable-release, attestation, or
 asset-verification commands in the workflow alone is not evidence that a
 particular release actually passed those checks.
+
+## Post-release evidence qualification
+
+After publication, `scripts/release-evidence-qualification.sh` independently
+binds the immutable public release, its assets, checksums and attestations to an
+expected tag commit. It also requires successful exact-SHA validation runs and
+fresh scheduled `real-tools.yml` and `shfmt-update.yml` evidence:
+
+```bash
+release_sha=$(git rev-parse 'vX.Y.Z^{}')
+bash ./scripts/release-evidence-qualification.sh vX.Y.Z "${release_sha}"
+```
+
+Set `REQUIRE_EXTENDED_QUALIFICATION=true` when the exact release SHA must also
+have a successful `qualification.yml` run. By default, the generated Markdown
+report is written below `qualification-evidence/`, an ignored local output.
+Supply a third path to place it in a separately managed evidence archive.
 
 ## Real-world checks on Fedora 44
 

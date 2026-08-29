@@ -16,3 +16,7 @@ space_redirects = false
 keep_padding = false
 function_next_line = false
 minify = false
+
+[*.py]
+indent_style = space
+indent_size = 4

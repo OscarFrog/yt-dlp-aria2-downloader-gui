@@ -2,6 +2,9 @@
 """
 Build and publish private aria2 direct-transfer plans.
 
+Project: yt-dlp-aria2-downloader-gui
+Repository path: private-aria2-plan.py
+
 The helper deliberately keeps media URLs and HTTP headers out of process
 arguments. It accepts only direct HTTP(S) formats selected by yt-dlp, writes an
 aria2 input file with mode 0600, and later publishes successfully downloaded
@@ -43,9 +46,9 @@ STAGING_NAME_RE = re.compile(r"^item-[0-9]{3}\.download$")
 class PlanError(Exception):
     """Expected validation failure."""
 
+
 class DestinationExistsError(PlanError):
     """A final destination already exists and must not be overwritten."""
-
 
 
 def reject_controls(value: str, label: str, *, reject_whitespace: bool) -> None:
