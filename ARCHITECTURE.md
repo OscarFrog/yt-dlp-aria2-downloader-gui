@@ -62,8 +62,10 @@ public command.
 
 1. Resolve safe XDG configuration and state paths and validate required host
    commands, adjacent engine files, and `setsid` capabilities.
-2. Collect the URL, profile, and destination with Zenity. Persist only the
-   destination and selected profile in `gui.conf`; never persist the URL.
+2. Load `gui.conf` only when it is a regular non-symbolic-link file within the
+   64 KiB and 128-line limits. Collect the URL, profile, and destination with
+   Zenity, then persist only the destination and selected profile; never
+   persist the URL.
 3. Create a private temporary session containing a mode-`0600` URL file, live
    log, result record, and process-group record.
 4. Start `download-video.sh` in a dedicated session with
@@ -74,7 +76,9 @@ public command.
 6. On cancellation or failure, signal and reap the complete worker process
    group, escalating within bounded waits when necessary.
 7. Accept success only when the worker succeeded and the private result record
-   names a valid final path. Retain a sanitized diagnostic log only when useful.
+   names a valid final path. Retain a sanitized diagnostic log only when useful;
+   when its source exceeds 8 MiB, discard the first potentially partial tail
+   line before URL redaction and enforce the size bound again afterward.
 
 The GUI recognizes legacy audio-profile values solely to migrate old settings
 to the current single native-audio profile.

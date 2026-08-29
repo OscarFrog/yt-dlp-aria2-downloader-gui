@@ -16,6 +16,8 @@ readonly PROFILE_LABEL_AUDIO='Audio track (native format)'
 readonly PROGRESS_DIALOG_WIDTH=700
 readonly LOG_RETENTION_DAYS=15
 readonly LOG_MAX_BYTES=8388608
+readonly CONFIG_MAX_BYTES=65536
+readonly CONFIG_MAX_LINES=128
 readonly PGID_WAIT_ATTEMPTS=50
 readonly WORKER_TERM_ATTEMPTS=30
 readonly WORKER_KILL_ATTEMPTS=20
@@ -351,7 +353,11 @@ stop_worker() {
 
 retain_sanitized_log() {
     local forbidden_source_name=''
+    local log_snapshot=''
     local retained_file=''
+    local sanitization_input=''
+    local snapshot_size=''
+    local truncated_snapshot=''
 
     [[ ${LOG_RETAINED} == false ]] || return 0
     [[ -n ${LOG_FILE} && -f ${LOG_FILE} && ! -L ${LOG_FILE} ]] || return 0
@@ -364,16 +370,58 @@ retain_sanitized_log() {
         printf 'Warning: unable to create a sanitized diagnostic log.\n' >&2
         return 0
     }
-    forbidden_source_name=$(printf '\170\150\141\155\163\164\145\162')
-    if ! tail -c "${LOG_MAX_BYTES}" -- "${LOG_FILE}" 2>/dev/null \
-        | sed -E \
-            -e 's#https?://[^[:space:]]+#[REDACTED_URL]#g' \
-            -e "s/${forbidden_source_name}/[REDACTED_SOURCE]/gI" \
-            >"${retained_file}"; then
+    log_snapshot=$(mktemp --tmpdir="${TEMP_DIR}" log-snapshot.XXXXXX) || {
         rm -f -- "${retained_file}" || true
+        printf 'Warning: unable to create a private diagnostic snapshot.\n' >&2
+        return 0
+    }
+    truncated_snapshot=$(mktemp --tmpdir="${TEMP_DIR}" log-truncated.XXXXXX) || {
+        rm -f -- "${retained_file}" "${log_snapshot}" || true
+        printf 'Warning: unable to create a private diagnostic snapshot.\n' >&2
+        return 0
+    }
+    if ! tail -c "$((LOG_MAX_BYTES + 1))" -- "${LOG_FILE}" \
+        >"${log_snapshot}" 2>/dev/null; then
+        rm -f -- "${retained_file}" "${log_snapshot}" \
+            "${truncated_snapshot}" || true
+        printf 'Warning: unable to snapshot the diagnostic log.\n' >&2
+        return 0
+    fi
+    if ! snapshot_size=$(stat -c '%s' -- "${log_snapshot}" 2>/dev/null) \
+        || [[ ! ${snapshot_size} =~ ^[0-9]+$ ]]; then
+        rm -f -- "${retained_file}" "${log_snapshot}" \
+            "${truncated_snapshot}" || true
+        printf 'Warning: unable to inspect the diagnostic snapshot.\n' >&2
+        return 0
+    fi
+
+    sanitization_input=${log_snapshot}
+    if ((snapshot_size > LOG_MAX_BYTES)); then
+        # The retained window may begin inside a secret-bearing URL. Discard
+        # its first potentially partial line before redaction so no orphaned
+        # URL suffix can evade a matcher that starts at the URL scheme.
+        if ! tail -c "${LOG_MAX_BYTES}" -- "${log_snapshot}" \
+            | sed '1d' >"${truncated_snapshot}"; then
+            rm -f -- "${retained_file}" "${log_snapshot}" \
+                "${truncated_snapshot}" || true
+            printf 'Warning: unable to bound the diagnostic snapshot.\n' >&2
+            return 0
+        fi
+        sanitization_input=${truncated_snapshot}
+    fi
+
+    forbidden_source_name=$(printf '\170\150\141\155\163\164\145\162')
+    if ! LC_ALL=C sed -E \
+        -e 's#https?://[^[:space:]]+#[REDACTED_URL]#g' \
+        -e "s/${forbidden_source_name}/[REDACTED_SOURCE]/gI" \
+        -- "${sanitization_input}" \
+        | tail -c "${LOG_MAX_BYTES}" >"${retained_file}"; then
+        rm -f -- "${retained_file}" "${log_snapshot}" \
+            "${truncated_snapshot}" || true
         printf 'Warning: unable to sanitize the diagnostic log.\n' >&2
         return 0
     fi
+    rm -f -- "${log_snapshot}" "${truncated_snapshot}" || true
     if ! chmod 600 -- "${retained_file}"; then
         rm -f -- "${retained_file}" || true
         printf 'Warning: unable to secure the sanitized diagnostic log.\n' >&2
@@ -419,41 +467,58 @@ cleanup() {
 }
 
 load_settings() {
-    local key
-    local value
+    local candidate_output_dir=''
+    local candidate_profile='video'
+    local config_size=''
+    local key=''
+    local line_count=0
+    local value=''
 
     LAST_OUTPUT_DIR=''
     LAST_PROFILE='video'
 
-    if [[ ! -r ${CONFIG_FILE} ]]; then
+    if [[ -L ${CONFIG_DIR} || -L ${CONFIG_FILE} ||
+        ! -f ${CONFIG_FILE} || ! -r ${CONFIG_FILE} ]]; then
+        return 0
+    fi
+    if ! config_size=$(stat -c '%s' -- "${CONFIG_FILE}" 2>/dev/null) \
+        || [[ ! ${config_size} =~ ^[0-9]+$ ]] \
+        || ((config_size > CONFIG_MAX_BYTES)); then
         return 0
     fi
 
     while IFS='=' read -r key value || [[ -n ${key}${value} ]]; do
+        ((line_count += 1))
+        if ((line_count > CONFIG_MAX_LINES)); then
+            return 0
+        fi
         key=${key%$'\r'}
         value=${value%$'\r'}
 
         case ${key} in
             output_dir)
-                LAST_OUTPUT_DIR=${value}
+                candidate_output_dir=${value}
                 ;;
             profile)
                 case ${value} in
                     video | youtube-hls | audio)
-                        LAST_PROFILE=${value}
+                        candidate_profile=${value}
                         ;;
                     audio-mp3 | audio-m4a | audio-opus)
                         # Migrate settings written by versions 2.0.x.
-                        LAST_PROFILE='audio'
+                        candidate_profile='audio'
                         ;;
                     *)
-                        LAST_PROFILE='video'
+                        candidate_profile='video'
                         ;;
                 esac
                 ;;
             *) ;; # Ignore settings added by future versions.
         esac
     done <"${CONFIG_FILE}"
+
+    LAST_OUTPUT_DIR=${candidate_output_dir}
+    LAST_PROFILE=${candidate_profile}
 }
 
 save_settings() {

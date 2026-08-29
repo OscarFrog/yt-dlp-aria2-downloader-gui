@@ -93,7 +93,7 @@ mock_group_enabled() {
 parse_mock_arguments "$@"
 
 for required_command in \
-    awk bash cat chmod date dirname env grep install ln mkdir mktemp mv readlink \
+    awk bash cat chmod date dirname env grep head install ln mkdir mkfifo mktemp mv readlink \
     realpath rm setsid sleep stat timeout touch tr flock sha256sum wc python3 find ps; do
     require_test_command "${required_command}"
 done
@@ -477,6 +477,17 @@ fi
 if [[ ${MOCK_YTDLP_EXIT_STATUS:-0} != 0 ]]; then
     if [[ ${MOCK_WRITE_RESULT_BEFORE_FAILURE:-0} == 1 && -n ${result_file} ]]; then
         printf '%s\n' "${output_path}" >> "${result_file}"
+    fi
+    if [[ ${MOCK_BOUNDARY_LOG:-0} == 1 ]]; then
+        boundary_padding=$(head -c 65536 -- /dev/zero | tr '\0' X)
+        boundary_line="https://example.invalid/private?padding=${boundary_padding}BOUNDARY_SECRET"$'\n'
+        trailer=$'https://example.invalid/private?token=COMPLETE_SECRET\nFINAL_MARKER\n'
+        failure_line=$'Simulated yt-dlp failure.\n'
+        filler_size=$((8388608 + 16384 \
+            - ${#boundary_line} - ${#trailer} - ${#failure_line}))
+        printf '%s' "${boundary_line}"
+        head -c "${filler_size}" -- /dev/zero | tr '\0' Y
+        printf '%s' "${trailer}"
     fi
     printf 'Simulated yt-dlp failure.\n' >&2
     exit "${MOCK_YTDLP_EXIT_STATUS}"
@@ -2528,7 +2539,9 @@ test_mock_gui_progress_completion() {
 }
 
 test_mock_gui_config_recovery() {
-    local config_file relative_config_dir relative_state_dir
+    local config_file config_line_count config_padding_bytes config_prefix_bytes
+    local config_profile_suffix=$'\nprofile=audio\n'
+    local config_size line_number relative_config_dir relative_state_dir
 
     # Scenario group: legacy and malformed configuration recovery.
     config_file="${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf"
@@ -2567,6 +2580,92 @@ EOF_BAD_CONFIG
     MOCK_USE_DEFAULT_PROFILE=1 "${GUI_UNDER_TEST}"
     assert_file_has_line "${config_file}" 'profile=audio' \
         'CRLF configuration values are normalized when loaded'
+
+    rm -f -- "${config_file}" "${OUTPUT_DIR}/Mock media [abc123].webm"
+    mkfifo -- "${config_file}"
+    prepare_argument_log 'config-fifo-fallback'
+    assert_status 0 'configuration FIFO is ignored without blocking the GUI' \
+        env MOCK_GUI_SCENARIO_TIMEOUT_SECONDS=3 \
+        MOCK_USE_DEFAULT_PROFILE=1 \
+        "${GUI_UNDER_TEST}"
+    [[ -f ${config_file} && ! -L ${config_file} ]] \
+        || fail 'The saved GUI configuration did not replace the FIFO safely.'
+    assert_file_has_line "${config_file}" 'profile=video' \
+        'configuration FIFO falls back to the default profile'
+
+    rm -f -- "${config_file}" "${OUTPUT_DIR}/Mock media [abc123].webm"
+    ln -s -- /dev/zero "${config_file}"
+    prepare_argument_log 'config-device-symlink-fallback'
+    assert_status 0 'configuration device symlink is ignored without blocking the GUI' \
+        env MOCK_GUI_SCENARIO_TIMEOUT_SECONDS=3 \
+        MOCK_USE_DEFAULT_PROFILE=1 \
+        "${GUI_UNDER_TEST}"
+    [[ -f ${config_file} && ! -L ${config_file} ]] \
+        || fail 'The saved GUI configuration did not replace the device symlink safely.'
+    assert_file_has_line "${config_file}" 'profile=video' \
+        'configuration device symlink falls back to the default profile'
+
+    printf 'output_dir=%s\npadding=' "${OUTPUT_DIR}" >"${config_file}"
+    config_prefix_bytes=$(stat -c '%s' -- "${config_file}")
+    config_padding_bytes=$((65536 - config_prefix_bytes - \
+        ${#config_profile_suffix}))
+    head -c "${config_padding_bytes}" -- /dev/zero | tr '\0' X \
+        >>"${config_file}"
+    printf '%s' "${config_profile_suffix}" >>"${config_file}"
+    config_size=$(stat -c '%s' -- "${config_file}")
+    assert_equals '65536' "${config_size}" \
+        'configuration byte-limit fixture size'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    prepare_argument_log 'config-byte-limit'
+    MOCK_USE_DEFAULT_PROFILE=1 "${GUI_UNDER_TEST}"
+    assert_file_has_line "${config_file}" 'profile=audio' \
+        'configuration at the byte limit is loaded'
+
+    printf 'output_dir=%s\nprofile=audio\npadding=' \
+        "${OUTPUT_DIR}" >"${config_file}"
+    config_prefix_bytes=$(stat -c '%s' -- "${config_file}")
+    config_padding_bytes=$((65537 - config_prefix_bytes))
+    head -c "${config_padding_bytes}" -- /dev/zero | tr '\0' X \
+        >>"${config_file}"
+    config_size=$(stat -c '%s' -- "${config_file}")
+    assert_equals '65537' "${config_size}" \
+        'oversized configuration fixture size'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    prepare_argument_log 'config-oversized-fallback'
+    MOCK_USE_DEFAULT_PROFILE=1 "${GUI_UNDER_TEST}"
+    assert_file_has_line "${config_file}" 'profile=video' \
+        'oversized configuration falls back atomically'
+
+    {
+        printf 'output_dir=%s\n' "${OUTPUT_DIR}"
+        for ((line_number = 1; line_number <= 126; line_number++)); do
+            printf 'future_%03d=value\n' "${line_number}"
+        done
+        printf 'profile=audio\n'
+    } >"${config_file}"
+    config_line_count=$(wc -l <"${config_file}")
+    assert_equals '128' "${config_line_count}" \
+        'configuration line-limit fixture count'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    prepare_argument_log 'config-line-limit'
+    MOCK_USE_DEFAULT_PROFILE=1 "${GUI_UNDER_TEST}"
+    assert_file_has_line "${config_file}" 'profile=audio' \
+        'configuration at the line limit is loaded'
+
+    {
+        printf 'output_dir=%s\nprofile=audio\n' "${OUTPUT_DIR}"
+        for ((line_number = 1; line_number <= 127; line_number++)); do
+            printf 'future_%03d=value\n' "${line_number}"
+        done
+    } >"${config_file}"
+    config_line_count=$(wc -l <"${config_file}")
+    assert_equals '129' "${config_line_count}" \
+        'overlong configuration fixture count'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    prepare_argument_log 'config-overlong-fallback'
+    MOCK_USE_DEFAULT_PROFILE=1 "${GUI_UNDER_TEST}"
+    assert_file_has_line "${config_file}" 'profile=video' \
+        'overlong configuration falls back atomically'
 
     # Relative XDG configuration/state paths are invalid and must fall back to HOME.
     relative_config_dir="${PROJECT_DIR}/relative-config-home"
@@ -2622,8 +2721,9 @@ test_mock_gui_file_selection() {
 }
 
 test_mock_gui_diagnostic_logs() {
-    local failure_record_found log_dir log_record_found logs_after logs_before
-    local outside_result_path retained_log
+    local boundary_log_found failure_record_found log_dir log_mode
+    local log_record_found log_size logs_after logs_before outside_result_path
+    local retained_log
     local -a failed_logs inconsistent_logs
 
     # Scenario group: diagnostic log retention and cleanup.
@@ -2686,6 +2786,40 @@ test_mock_gui_diagnostic_logs() {
     done
     [[ ${failure_record_found} == true ]] \
         || fail 'No retained log contains the simulated failure.'
+
+    logs_before=$(count_logs)
+    prepare_argument_log 'retained-log-boundary-redaction'
+    assert_status 7 'boundary-crossing failed GUI download status is propagated' \
+        env MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_BOUNDARY_LOG=1 \
+        MOCK_YTDLP_EXIT_STATUS=7 \
+        "${GUI_UNDER_TEST}"
+    logs_after=$(count_logs)
+    assert_equals "$((logs_before + 1))" "${logs_after}" \
+        'a boundary-crossing failure retains one new log'
+    shopt -s nullglob
+    failed_logs=("${log_dir}"/download-*.log)
+    shopt -u nullglob
+    boundary_log_found=false
+    for retained_log in "${failed_logs[@]}"; do
+        if ! grep -Fq -- 'FINAL_MARKER' "${retained_log}"; then
+            continue
+        fi
+        boundary_log_found=true
+        assert_file_not_contains "${retained_log}" 'BOUNDARY_SECRET' \
+            'partial URL at the retained boundary is discarded'
+        assert_file_not_contains "${retained_log}" 'COMPLETE_SECRET' \
+            'complete URL in retained diagnostics is redacted'
+        assert_file_contains "${retained_log}" '[REDACTED_URL]' \
+            'retained boundary fixture contains a URL redaction marker'
+        log_size=$(stat -c '%s' -- "${retained_log}")
+        ((log_size <= 8388608)) \
+            || fail "Retained log exceeds 8 MiB: ${log_size} bytes."
+        log_mode=$(stat -c '%a' -- "${retained_log}")
+        assert_equals '600' "${log_mode}" 'retained boundary log mode'
+    done
+    [[ ${boundary_log_found} == true ]] \
+        || fail 'No retained boundary-redaction log contains the final marker.'
 }
 
 test_mock_gui_state_initialization() {

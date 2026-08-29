@@ -299,8 +299,12 @@ The automated suite checks, among other things:
 - an unsafe helper mutation proving the cross-origin credential-replay risk when
   that native-fallback guard is removed, while protected runs keep secrets out
   of aria2 argv and captured output;
-- retained-log URL redaction, an 8 MiB retained-size limit, and private live
+- retained-log URL redaction even when the 8 MiB boundary crosses a
+  secret-bearing URL, a strict final retained-size limit, and private live
   diagnostics kept under the runtime temporary directory;
+- GUI configuration acceptance at the exact 64 KiB and 128-line limits,
+  atomic fallback above either limit, and non-blocking replacement of FIFO or
+  symbolic-link configuration paths;
 - complete-video rejection when either the video or audio stream is absent,
   plus audio-mode rejection when a content-video stream remains in the final file;
 - real MP3/ID3 attached-cover qualification proving the combined JSON summary
