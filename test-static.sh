@@ -325,6 +325,26 @@ assert_main_entry_structure() {
     return 0
 }
 
+assert_file_fragments_ordered() {
+    (($# >= 3)) || return 2
+    local source_file=$1
+    local assertion_label=$2
+    local fragment=''
+    local remaining_source=''
+    shift 2
+
+    remaining_source=$(<"${source_file}")
+    for fragment in "$@"; do
+        if [[ ${remaining_source} != *"${fragment}"* ]]; then
+            printf 'FAIL: ordered source contract is absent (%s): %s\n' \
+                "${assertion_label}" "${fragment}" >&2
+            return 65
+        fi
+        remaining_source=${remaining_source#*"${fragment}"}
+    done
+    return 0
+}
+
 # Permanent shell comments use durable terminology.
 assert_no_historical_comment_labels() {
     local relative_path=$1
@@ -2733,6 +2753,17 @@ test_static_application_contracts() {
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         'YTDLP_ARIA2_SUPERVISED_SESSION=true' \
         'GUI requests reuse of its single process session without a public option'
+    # A worker must be protected before it is forked and remain protected until
+    # its direct-child PID is registered. Reordering either boundary reopens a
+    # signal window even if the individual calls remain present.
+    assert_file_fragments_ordered \
+        "${SCRIPT_DIR}/download-video-gui.sh" \
+        'GUI worker signal-registration boundaries' \
+        'start_download_worker() {' \
+        '    begin_signal_registration' \
+        '    YTDLP_ARIA2_SUPERVISED_SESSION=true LC_ALL=C setsid' \
+        '    WORKER_PID=$!' \
+        '    finish_signal_registration'
     for gui_phase in \
         initialize_gui_paths \
         initialize_gui_environment \
