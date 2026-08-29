@@ -23,6 +23,17 @@ Checks not run, with the reason:
 
 - None.
 
+## External mutation authority
+
+Authority granted by the task:
+
+- None.
+
+External mutations actually performed (pushes, merges, tags, releases,
+publications, workflow dispatches, repository settings, or secrets):
+
+- None.
+
 ## Repository coherence
 
 - [ ] The diff contains no unrelated changes.
@@ -32,4 +43,4 @@ Checks not run, with the reason:
 - [ ] User-facing English and French documentation remain aligned, when applicable.
 - [ ] Tracked-file additions, removals, moves, and role changes are reflected in `REPOSITORY_FILES.md`.
 - [ ] Workflow permissions, action pins, checkout credentials, and trust boundaries remain valid, when applicable.
-- [ ] No external mutation exceeded the task's explicit authority; all pushes, merges, tags, releases, publications, repository-setting changes, and secret changes are reported above.
+- [ ] No external mutation exceeded the task's explicit authority; every mutation is reported in `External mutation authority`.

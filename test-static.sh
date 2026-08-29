@@ -34,6 +34,7 @@ readonly STANDARD_HEADER_SEPARATOR='# ==========================================
 SOURCE_INVENTORY_FILE=''
 REPOSITORY_INVENTORY_FILE=''
 DOCUMENTED_INVENTORY_FILE=''
+CODEX_RULE_MUTATION_FILE=''
 
 assert_forbidden_source_name_absent() {
     local forbidden_name=''
@@ -463,6 +464,80 @@ assert_repository_skills_are_discoverable() {
     done
 }
 
+assert_codex_rules_have_explicit_decisions() {
+    (($# == 1)) || return 2
+    local rules_file=$1
+    local line=''
+    local decision=''
+    local in_rule=false
+    local rule_count=0
+    local decision_count=0
+    local pattern_count=0
+    local justification_count=0
+    local match_count=0
+    local not_match_count=0
+
+    while IFS= read -r line || [[ -n ${line} ]]; do
+        if [[ ${line} == 'prefix_rule(' ]]; then
+            if [[ ${in_rule} == true ]]; then
+                printf 'FAIL: nested prefix_rule block in %s.\n' \
+                    "${rules_file}" >&2
+                return 65
+            fi
+            in_rule=true
+            rule_count=$((rule_count + 1))
+            decision_count=0
+            pattern_count=0
+            justification_count=0
+            match_count=0
+            not_match_count=0
+            continue
+        fi
+        [[ ${in_rule} == true ]] || continue
+
+        case ${line} in
+            '    pattern = '*) pattern_count=$((pattern_count + 1)) ;;
+            '    justification = '*)
+                justification_count=$((justification_count + 1))
+                ;;
+            '    match = '*) match_count=$((match_count + 1)) ;;
+            '    not_match = '*) not_match_count=$((not_match_count + 1)) ;;
+            '    decision = '*)
+                decision_count=$((decision_count + 1))
+                if [[ ${line} =~ ^[[:space:]]*decision[[:space:]]*=[[:space:]]*\"([^\"]+)\",[[:space:]]*$ ]]; then
+                    decision=${BASH_REMATCH[1]}
+                else
+                    decision='invalid'
+                fi
+                if [[ ${decision} != prompt && ${decision} != forbidden ]]; then
+                    printf 'FAIL: unsafe Codex decision in rule %d: %s.\n' \
+                        "${rule_count}" "${decision}" >&2
+                    return 65
+                fi
+                ;;
+            ')')
+                if ((decision_count != 1 || \
+                    pattern_count != 1 || \
+                    justification_count != 1 || \
+                    match_count != 1 || \
+                    not_match_count != 1)); then
+                    printf 'FAIL: Codex rule %d must contain one explicit safe decision, pattern, justification, match, and not_match.\n' \
+                        "${rule_count}" >&2
+                    return 65
+                fi
+                in_rule=false
+                ;;
+            *) ;;
+        esac
+    done <"${rules_file}"
+
+    if [[ ${in_rule} == true || ${rule_count} == 0 ]]; then
+        printf 'FAIL: unterminated or empty Codex execution policy: %s.\n' \
+            "${rules_file}" >&2
+        return 65
+    fi
+}
+
 assert_codex_rules_are_conservative() {
     local rules_file="${SCRIPT_DIR}/.codex/rules/default.rules"
     local first_line=''
@@ -471,6 +546,8 @@ assert_codex_rules_are_conservative() {
         'decision = "prompt"'
         'decision = "forbidden"'
         'pattern = ["git", "push"]'
+        'pattern = ["git", "tag"]'
+        'pattern = ["git", "merge"]'
         'pattern = ["gh", "pr", "merge"]'
         'pattern = ["gh", "release",'
         'pattern = ["gh", "workflow", "run"]'
@@ -495,11 +572,34 @@ assert_codex_rules_are_conservative() {
     assert_file_not_contains "${rules_file}" \
         'decision = "allow"' \
         'project Codex policy never grants unconditional execution'
+    assert_codex_rules_have_explicit_decisions "${rules_file}"
     for required_fragment in "${required_fragments[@]}"; do
         assert_file_contains "${rules_file}" \
             "${required_fragment}" \
             "Codex execution policy contains ${required_fragment}"
     done
+
+    if ! CODEX_RULE_MUTATION_FILE=$(mktemp); then
+        printf 'FAIL: unable to create Codex policy mutation fixture.\n' >&2
+        return 73
+    fi
+    if ! awk '
+        !removed && /^[[:space:]]*decision = "prompt",[[:space:]]*$/ {
+            removed = 1
+            next
+        }
+        { print }
+        END { if (!removed) exit 65 }
+    ' "${rules_file}" >"${CODEX_RULE_MUTATION_FILE}"; then
+        printf 'FAIL: unable to remove one decision from the Codex policy fixture.\n' >&2
+        return 65
+    fi
+    assert_status 65 \
+        'Codex policy validation rejects an implicit allow decision' \
+        assert_codex_rules_have_explicit_decisions \
+        "${CODEX_RULE_MUTATION_FILE}"
+    rm -f -- "${CODEX_RULE_MUTATION_FILE}"
+    CODEX_RULE_MUTATION_FILE=''
 }
 
 assert_contribution_templates_are_structured() {
@@ -521,7 +621,10 @@ assert_contribution_templates_are_structured() {
         '## Summary'
         '## Contract and risk'
         '## Validation'
+        '## External mutation authority'
         '## Repository coherence'
+        'Authority granted by the task:'
+        'External mutations actually performed'
         './tests/run-all.sh --full --jobs 4'
         'REPOSITORY_FILES.md'
         'No external mutation'
@@ -553,7 +656,8 @@ cleanup_static_test() {
     for scratch_file in \
         "${SOURCE_INVENTORY_FILE}" \
         "${REPOSITORY_INVENTORY_FILE}" \
-        "${DOCUMENTED_INVENTORY_FILE}"; do
+        "${DOCUMENTED_INVENTORY_FILE}" \
+        "${CODEX_RULE_MUTATION_FILE}"; do
         if [[ -n ${scratch_file} ]]; then
             rm -f -- "${scratch_file}" || true
         fi
@@ -561,6 +665,7 @@ cleanup_static_test() {
     SOURCE_INVENTORY_FILE=''
     REPOSITORY_INVENTORY_FILE=''
     DOCUMENTED_INVENTORY_FILE=''
+    CODEX_RULE_MUTATION_FILE=''
 }
 
 assert_source_inventory_is_canonical() {

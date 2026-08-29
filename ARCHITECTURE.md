@@ -236,9 +236,10 @@ stress runs are separate qualifications documented in `TESTING.md`.
 Contributor control is layered around that runner. Repository skills route a
 task to the relevant policy; issue and pull-request templates make scope,
 invariants, validation evidence, and external authority explicit; conservative
-Codex execution rules prompt for remote mutations and forbid common
-force-push-to-`main` forms. These controls improve task execution but do not
-grant release, merge, or repository-administration authority.
+Codex execution rules prompt for Git, GitHub CLI, and common environment
+wrappers requested outside the sandbox, and forbid common force-push-to-`main`
+forms. These controls improve task execution but do not grant release, merge,
+or repository-administration authority.
 
 Tests use private temporary homes, mock binaries, fixtures, and bounded process
 supervision. They are part of the architecture: changing a trust, cleanup,

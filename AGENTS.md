@@ -180,10 +180,12 @@ unexplained failure.
 The protected `main` branch is updated through pull requests and required
 checks. Do not bypass branch protection or force-push `main`.
 
-Repository-local Codex rules prompt before ordinary pushes, merges, workflow
-dispatches, tag mutations, and release mutations, and forbid common
-force-push-to-`main` forms. These mechanical checks supplement task authority;
-they never create it and do not replace this policy.
+Repository-local Codex rules prompt before direct Git, GitHub CLI, and common
+environment-wrapped commands requested outside the sandbox. More-specific
+rules document mutation intent and forbid common force-push-to-`main` forms,
+including destination refspecs. These exact-argv checks supplement task
+authority; they never create it and must not be bypassed with a non-canonical
+wrapper or spelling.
 
 Do not create or push release tags, publish releases or packages, alter
 repository rules, secrets, or environments, or initiate a version bump unless

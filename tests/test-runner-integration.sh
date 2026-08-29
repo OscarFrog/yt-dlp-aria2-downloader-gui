@@ -333,9 +333,16 @@ test_parallel_repeat_runner() {
 
 test_run_all_doctor_contract() {
     local doctor_mock_bin="${TEST_RUNNER_LOG_DIR}/doctor-bin"
+    local offline_shfmt_root="${TEST_RUNNER_LOG_DIR}/offline-shfmt-cache"
     local doctor_output=''
+    local aria2_probe_mode=''
     local command_name=''
     local command_path=''
+    local managed_shfmt=''
+    local managed_shfmt_version_dir=''
+    local managed_shfmt_root=''
+    local real_aria2=''
+    local real_git=''
     local real_python=''
     local run_all="${SCRIPT_DIR}/run-all.sh"
     local -a doctor_required_commands=(
@@ -383,11 +390,54 @@ test_run_all_doctor_contract() {
 
     real_python=$(command -v -- python3) \
         || fail 'doctor test could not resolve the real python3 interpreter'
+    real_aria2=$(command -v -- aria2c) \
+        || fail 'doctor test could not resolve the real aria2c executable'
+    real_git=$(command -v -- git) \
+        || fail 'doctor test could not resolve the real git executable'
+    managed_shfmt=$(bash -- \
+        "${SCRIPT_DIR}/../scripts/dev-tools/ensure-shfmt.sh") \
+        || fail 'doctor test could not resolve the managed shfmt executable'
+    managed_shfmt_version_dir=${managed_shfmt%/*}
+    managed_shfmt_root=${managed_shfmt_version_dir%/*}
+    [[ ${managed_shfmt_root} == /* ]] \
+        || fail 'doctor test resolved a non-absolute shfmt cache root'
+
     mkdir -p -- "${doctor_mock_bin}"
+    cat >"${doctor_mock_bin}/aria2c" <<'EOF_MOCK_ARIA2'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case ${DOCTOR_MOCK_ARIA2_MODE:-normal} in
+    control)
+        printf 'aria2 version \001control\n'
+        ;;
+    flood)
+        while :; do
+            printf '%4096s' ''
+        done
+        ;;
+    stall)
+        sleep 30
+        ;;
+    normal)
+        exec "${DOCTOR_REAL_ARIA2:?}" "$@"
+        ;;
+    *)
+        exit 64
+        ;;
+esac
+EOF_MOCK_ARIA2
     cat >"${doctor_mock_bin}/curl" <<'EOF_MOCK_CURL'
 #!/usr/bin/env bash
 exit "${DOCTOR_MOCK_CURL_STATUS:-0}"
 EOF_MOCK_CURL
+    cat >"${doctor_mock_bin}/git" <<'EOF_MOCK_GIT'
+#!/usr/bin/env bash
+if [[ ${DOCTOR_MOCK_GIT_STATUS:-0} != 0 ]]; then
+    exit "${DOCTOR_MOCK_GIT_STATUS}"
+fi
+exec "${DOCTOR_REAL_GIT:?}" "$@"
+EOF_MOCK_GIT
     cat >"${doctor_mock_bin}/python3" <<'EOF_MOCK_PYTHON'
 #!/usr/bin/env bash
 if [[ $* == *'platform.python_version()'* ]]; then
@@ -399,8 +449,13 @@ if [[ $* == *'import socket;'* ]]; then
 fi
 exec "${DOCTOR_REAL_PYTHON:?}" "$@"
 EOF_MOCK_PYTHON
-    chmod 0755 -- "${doctor_mock_bin}/curl" "${doctor_mock_bin}/python3"
+    chmod 0755 -- \
+        "${doctor_mock_bin}/aria2c" \
+        "${doctor_mock_bin}/curl" \
+        "${doctor_mock_bin}/git" \
+        "${doctor_mock_bin}/python3"
     for command_name in "${doctor_required_commands[@]}"; do
+        [[ ! -e ${doctor_mock_bin}/${command_name} ]] || continue
         command_path=$(command -v -- "${command_name}") \
             || fail "doctor test could not resolve required command: ${command_name}"
         ln -s -- "${command_path}" "${doctor_mock_bin}/${command_name}"
@@ -408,8 +463,11 @@ EOF_MOCK_PYTHON
 
     assert_status 0 'doctor emits a ready JSON report' \
         env \
+        DOCTOR_REAL_ARIA2="${real_aria2}" \
+        DOCTOR_REAL_GIT="${real_git}" \
         DOCTOR_REAL_PYTHON="${real_python}" \
         PATH="${doctor_mock_bin}:${PATH}" \
+        SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
         "${run_all}" --doctor --json
     doctor_output=${ASSERT_OUTPUT}
     if ! python3 - "${doctor_output}" <<'PY_READY_DOCTOR'; then
@@ -424,6 +482,9 @@ assert report["required"]["failed"] == 0
 assert checks["python-version"]["status"] == "pass"
 assert checks["loopback-bind"]["status"] == "pass"
 assert checks["external-https"]["status"] == "pass"
+assert checks["shfmt-cache"]["status"] == "pass"
+assert checks["shfmt-ready"]["status"] == "pass"
+assert checks["repository-state"]["status"] == "pass"
 PY_READY_DOCTOR
         fail 'doctor ready report is invalid or incomplete'
     fi
@@ -431,8 +492,11 @@ PY_READY_DOCTOR
     assert_status 0 'doctor keeps external HTTPS optional' \
         env \
         DOCTOR_MOCK_CURL_STATUS=1 \
+        DOCTOR_REAL_ARIA2="${real_aria2}" \
+        DOCTOR_REAL_GIT="${real_git}" \
         DOCTOR_REAL_PYTHON="${real_python}" \
         PATH="${doctor_mock_bin}:${PATH}" \
+        SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
         "${run_all}" --doctor --json
     doctor_output=${ASSERT_OUTPUT}
     if ! python3 - "${doctor_output}" <<'PY_OFFLINE_DOCTOR'; then
@@ -456,8 +520,11 @@ PY_OFFLINE_DOCTOR
     assert_status 69 'doctor fails closed when loopback binding is blocked' \
         env \
         DOCTOR_MOCK_LOOPBACK_STATUS=1 \
+        DOCTOR_REAL_ARIA2="${real_aria2}" \
+        DOCTOR_REAL_GIT="${real_git}" \
         DOCTOR_REAL_PYTHON="${real_python}" \
         PATH="${doctor_mock_bin}:${PATH}" \
+        SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
         "${run_all}" --doctor --json
     doctor_output=${ASSERT_OUTPUT}
     if ! python3 - "${doctor_output}" <<'PY_BLOCKED_DOCTOR'; then
@@ -472,6 +539,124 @@ assert checks["loopback-bind"]["status"] == "fail"
 PY_BLOCKED_DOCTOR
         fail 'doctor blocked-loopback report is invalid'
     fi
+
+    assert_status 69 'doctor rejects an unusable shfmt cache target' \
+        env \
+        DOCTOR_REAL_ARIA2="${real_aria2}" \
+        DOCTOR_REAL_GIT="${real_git}" \
+        DOCTOR_REAL_PYTHON="${real_python}" \
+        PATH="${doctor_mock_bin}:${PATH}" \
+        SHFMT_TOOL_ROOT=/dev/null \
+        "${run_all}" --doctor --json
+    doctor_output=${ASSERT_OUTPUT}
+    if ! python3 - "${doctor_output}" <<'PY_UNUSABLE_SHFMT_DOCTOR'; then
+import json
+import sys
+
+report = json.loads(sys.argv[1])
+checks = {item["id"]: item for item in report["checks"]}
+assert report["ready"] is False
+assert checks["shfmt-cache"]["status"] == "unavailable"
+assert checks["shfmt-ready"]["status"] == "fail"
+PY_UNUSABLE_SHFMT_DOCTOR
+        fail 'doctor unusable-shfmt report is invalid'
+    fi
+
+    [[ ! -e ${offline_shfmt_root} ]] \
+        || fail 'doctor offline shfmt fixture unexpectedly exists before diagnosis'
+    assert_status 69 'doctor requires HTTPS when verified shfmt is absent' \
+        env \
+        DOCTOR_MOCK_CURL_STATUS=1 \
+        DOCTOR_REAL_ARIA2="${real_aria2}" \
+        DOCTOR_REAL_GIT="${real_git}" \
+        DOCTOR_REAL_PYTHON="${real_python}" \
+        PATH="${doctor_mock_bin}:${PATH}" \
+        SHFMT_TOOL_ROOT="${offline_shfmt_root}" \
+        "${run_all}" --doctor --json
+    doctor_output=${ASSERT_OUTPUT}
+    if ! python3 - "${doctor_output}" <<'PY_OFFLINE_SHFMT_DOCTOR'; then
+import json
+import sys
+
+report = json.loads(sys.argv[1])
+checks = {item["id"]: item for item in report["checks"]}
+assert report["ready"] is False
+assert checks["external-https"]["status"] == "missing"
+assert checks["shfmt-ready"]["status"] == "fail"
+PY_OFFLINE_SHFMT_DOCTOR
+        fail 'doctor offline-shfmt report is invalid'
+    fi
+    [[ ! -e ${offline_shfmt_root} ]] \
+        || fail 'doctor populated the managed shfmt cache during diagnosis'
+
+    assert_status 69 'doctor requires usable Git inside a Git checkout' \
+        env \
+        DOCTOR_MOCK_GIT_STATUS=127 \
+        DOCTOR_REAL_ARIA2="${real_aria2}" \
+        DOCTOR_REAL_GIT="${real_git}" \
+        DOCTOR_REAL_PYTHON="${real_python}" \
+        PATH="${doctor_mock_bin}:${PATH}" \
+        SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
+        "${run_all}" --doctor --json
+    doctor_output=${ASSERT_OUTPUT}
+    if ! python3 - "${doctor_output}" <<'PY_UNUSABLE_GIT_DOCTOR'; then
+import json
+import sys
+
+report = json.loads(sys.argv[1])
+checks = {item["id"]: item for item in report["checks"]}
+assert report["ready"] is False
+assert checks["repository-state"]["level"] == "required"
+assert checks["repository-state"]["status"] == "fail"
+PY_UNUSABLE_GIT_DOCTOR
+        fail 'doctor unusable-Git report is invalid'
+    fi
+
+    assert_status 0 'doctor JSON escapes non-standard C0 control characters' \
+        env \
+        DOCTOR_MOCK_ARIA2_MODE=control \
+        DOCTOR_REAL_ARIA2="${real_aria2}" \
+        DOCTOR_REAL_GIT="${real_git}" \
+        DOCTOR_REAL_PYTHON="${real_python}" \
+        PATH="${doctor_mock_bin}:${PATH}" \
+        SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
+        "${run_all}" --doctor --json
+    doctor_output=${ASSERT_OUTPUT}
+    if ! python3 - "${doctor_output}" <<'PY_CONTROL_JSON_DOCTOR'; then
+import json
+import sys
+
+report = json.loads(sys.argv[1])
+checks = {item["id"]: item for item in report["checks"]}
+assert checks["version:aria2c"]["detail"] == "aria2 version \x01control"
+PY_CONTROL_JSON_DOCTOR
+        fail 'doctor C0-control JSON report is invalid'
+    fi
+
+    for aria2_probe_mode in flood stall; do
+        assert_status 0 "doctor bounds ${aria2_probe_mode} version output" \
+            timeout --signal=TERM --kill-after=1s 8s \
+            env \
+            DOCTOR_MOCK_ARIA2_MODE="${aria2_probe_mode}" \
+            DOCTOR_REAL_ARIA2="${real_aria2}" \
+            DOCTOR_REAL_GIT="${real_git}" \
+            DOCTOR_REAL_PYTHON="${real_python}" \
+            PATH="${doctor_mock_bin}:${PATH}" \
+            SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
+            "${run_all}" --doctor --json
+        doctor_output=${ASSERT_OUTPUT}
+        if ! python3 - "${doctor_output}" <<'PY_BOUNDED_VERSION_DOCTOR'; then
+import json
+import sys
+
+report = json.loads(sys.argv[1])
+checks = {item["id"]: item for item in report["checks"]}
+assert report["ready"] is True
+assert checks["version:aria2c"]["status"] == "unavailable"
+PY_BOUNDED_VERSION_DOCTOR
+            fail "doctor ${aria2_probe_mode} version report is invalid"
+        fi
+    done
 }
 
 main() {

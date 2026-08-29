@@ -16,9 +16,10 @@
 - Add a stable architecture map, recast `AGENTS.md` as the repository policy
   router with explicit code-review blockers, and provide progressively loaded
   skills for shell, supply-chain, packaging, and release work.
-- Add a non-provisioning validation doctor with versioned JSON output,
-  conservative repository-local Codex execution rules, and structured issue
-  and pull-request templates for scope, authority, and validation evidence.
+- Add a non-provisioning validation doctor with bounded probes, fail-closed
+  Git/shfmt readiness and versioned JSON output; add conservative
+  repository-local Codex execution rules and structured issue/pull-request
+  templates for scope, authority, and validation evidence.
 
 ## 2.3.4 - 2026-08-28
 

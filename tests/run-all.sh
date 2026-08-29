@@ -3,7 +3,7 @@
 # ==============================================================================
 # Project     : yt-dlp-aria2-downloader-gui
 # File        : tests/run-all.sh
-# Purpose     : Run profiled, timed, and optionally parallel local validation.
+# Purpose     : Diagnose capabilities or run profiled and parallel validation.
 # ==============================================================================
 
 set -euo pipefail
@@ -20,6 +20,10 @@ readonly PROJECT_DIR
 PROJECT_FILES="${PROJECT_DIR}/tests/lib/project-files.sh"
 TEST_RUNNER_LIBRARY="${PROJECT_DIR}/tests/lib/test-runner.sh"
 readonly PROJECT_FILES TEST_RUNNER_LIBRARY
+
+readonly DOCTOR_PROBE_TIMEOUT='2s'
+readonly DOCTOR_PROBE_KILL_GRACE='1s'
+readonly DOCTOR_PROBE_MAX_BYTES=4096
 
 for required_library in "${PROJECT_FILES}" "${TEST_RUNNER_LIBRARY}"; do
     if [[ ! -f ${required_library} || -L ${required_library} ||
@@ -167,6 +171,9 @@ DOCTOR_CHECK_IDS=()
 DOCTOR_CHECK_LEVELS=()
 DOCTOR_CHECK_STATUSES=()
 DOCTOR_CHECK_DETAILS=()
+DOCTOR_SHFMT_CACHE_READY=false
+DOCTOR_SHFMT_BOOTSTRAP_READY=false
+DOCTOR_EXTERNAL_HTTPS_AVAILABLE=false
 
 INTEGRATION_SUITE_IDS=()
 INTEGRATION_SUITE_LOGS=()
@@ -352,6 +359,29 @@ doctor_check_command() {
         "${level}" "command:${command_name}" "${missing_status}" 'not found in PATH'
 }
 
+doctor_capture_bounded_output() {
+    (($# >= 2)) || return 2
+    local output_variable=$1
+    local probe_output=''
+    local probe_status=0
+    shift
+
+    if ! command -v -- timeout >/dev/null 2>&1 \
+        || ! command -v -- head >/dev/null 2>&1; then
+        printf -v "${output_variable}" '%s' ''
+        return 127
+    fi
+
+    probe_output=$(timeout \
+        --signal=TERM \
+        --kill-after="${DOCTOR_PROBE_KILL_GRACE}" \
+        "${DOCTOR_PROBE_TIMEOUT}" \
+        "$@" 2>&1 | head -c "${DOCTOR_PROBE_MAX_BYTES}") \
+        || probe_status=$?
+    printf -v "${output_variable}" '%s' "${probe_output}"
+    ((probe_status == 0))
+}
+
 doctor_capture_version() {
     (($# >= 3)) || return 2
     local check_id=$1
@@ -360,13 +390,17 @@ doctor_capture_version() {
     shift 2
 
     command -v -- "${command_name}" >/dev/null 2>&1 || return 0
-    if version_output=$(LC_ALL=C "${command_name}" "$@" 2>&1); then
+    # The bounded probe handles every command and pipeline failure explicitly.
+    # shellcheck disable=SC2310
+    if doctor_capture_bounded_output \
+        version_output env LC_ALL=C "${command_name}" "$@"; then
         version_output=${version_output%%$'\n'*}
         [[ -n ${version_output} ]] || version_output='<empty version output>'
         record_doctor_check info "version:${check_id}" pass "${version_output}"
     else
         record_doctor_check \
-            info "version:${check_id}" unavailable 'version probe failed'
+            info "version:${check_id}" unavailable \
+            'version probe failed or exceeded its time/output bound'
     fi
 }
 
@@ -375,7 +409,10 @@ doctor_capture_shellcheck_version() {
     local version_line=''
 
     command -v -- shellcheck >/dev/null 2>&1 || return 0
-    if version_output=$(LC_ALL=C shellcheck --version 2>&1); then
+    # The bounded probe handles every command and pipeline failure explicitly.
+    # shellcheck disable=SC2310
+    if doctor_capture_bounded_output \
+        version_output env LC_ALL=C shellcheck --version; then
         while IFS= read -r version_line; do
             if [[ ${version_line} == 'version: '* ]]; then
                 record_doctor_check \
@@ -405,9 +442,11 @@ doctor_check_language_versions() {
             'probe skipped because python3 is unavailable'
         return 0
     fi
-    if python_version=$(python3 -c \
+    # The bounded probe handles every command and pipeline failure explicitly.
+    # shellcheck disable=SC2310
+    if doctor_capture_bounded_output python_version python3 -c \
         'import platform, sys; print(platform.python_version()); raise SystemExit(sys.version_info < (3, 10))' \
-        2>/dev/null); then
+        2>/dev/null; then
         record_doctor_check required python-version pass \
             "Python ${python_version} satisfies the 3.10 minimum"
     else
@@ -417,15 +456,42 @@ doctor_check_language_versions() {
     fi
 }
 
+doctor_shfmt_target_is_provisionable() {
+    (($# == 2)) || return 2
+    local version_dir=$1
+    local cached_binary=$2
+    local existing_ancestor=${version_dir}
+
+    [[ ! -L ${cached_binary} && ! -d ${cached_binary} ]] || return 1
+    while [[ ! -e ${existing_ancestor} ]]; do
+        [[ ${existing_ancestor} != / ]] || break
+        existing_ancestor=${existing_ancestor%/*}
+        [[ -n ${existing_ancestor} ]] || existing_ancestor=/
+    done
+
+    [[ -d ${existing_ancestor} &&
+        -w ${existing_ancestor} &&
+        -x ${existing_ancestor} ]]
+}
+
 doctor_check_shfmt_contract() {
     local pin_file="${PROJECT_DIR}/scripts/dev-tools/shfmt-pin.env"
     local bootstrap="${PROJECT_DIR}/scripts/dev-tools/ensure-shfmt.sh"
     local cache_root=''
     local cached_binary=''
+    local cached_version=''
+    local expected_sha=''
+    local actual_sha=''
     local key=''
     local value=''
     local pinned_version=''
+    local pinned_amd64_sha=''
+    local pinned_arm64_sha=''
+    local machine=''
+    local version_dir=''
     local version_count=0
+    local amd64_count=0
+    local arm64_count=0
 
     if [[ ! -f ${pin_file} || -L ${pin_file} || ! -r ${pin_file} ||
         ! -f ${bootstrap} || -L ${bootstrap} || ! -x ${bootstrap} ]]; then
@@ -435,17 +501,51 @@ doctor_check_shfmt_contract() {
     fi
 
     while IFS='=' read -r key value || [[ -n ${key} ]]; do
-        if [[ ${key} == SHFMT_VERSION ]]; then
-            pinned_version=${value}
-            version_count=$((version_count + 1))
-        fi
+        case ${key} in
+            '' | \#*) ;;
+            SHFMT_VERSION)
+                pinned_version=${value}
+                version_count=$((version_count + 1))
+                ;;
+            SHFMT_LINUX_AMD64_SHA256)
+                pinned_amd64_sha=${value}
+                amd64_count=$((amd64_count + 1))
+                ;;
+            SHFMT_LINUX_ARM64_SHA256)
+                pinned_arm64_sha=${value}
+                arm64_count=$((arm64_count + 1))
+                ;;
+            *)
+                record_doctor_check required shfmt-contract fail \
+                    "unknown key in shfmt pin: ${key}"
+                return 0
+                ;;
+        esac
     done <"${pin_file}"
-    if ((version_count != 1)) \
-        || [[ ! ${pinned_version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if ((version_count != 1 || amd64_count != 1 || arm64_count != 1)) \
+        || [[ ! ${pinned_version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ||
+            ! ${pinned_amd64_sha} =~ ^[0-9a-f]{64}$ ||
+            ! ${pinned_arm64_sha} =~ ^[0-9a-f]{64}$ ]]; then
         record_doctor_check required shfmt-contract fail \
-            'SHFMT_VERSION is absent, duplicated, or invalid'
+            'shfmt version or platform digest is absent, duplicated, or invalid'
         return 0
     fi
+
+    if ! command -v -- uname >/dev/null 2>&1 \
+        || ! machine=$(uname -m 2>/dev/null); then
+        record_doctor_check required shfmt-contract fail \
+            'the host architecture cannot be resolved'
+        return 0
+    fi
+    case ${machine} in
+        x86_64 | amd64) expected_sha=${pinned_amd64_sha} ;;
+        aarch64 | arm64) expected_sha=${pinned_arm64_sha} ;;
+        *)
+            record_doctor_check required shfmt-contract fail \
+                "unsupported shfmt host architecture: ${machine}"
+            return 0
+            ;;
+    esac
 
     if [[ -n ${SHFMT_TOOL_ROOT:-} ]]; then
         cache_root=${SHFMT_TOOL_ROOT}
@@ -465,12 +565,43 @@ doctor_check_shfmt_contract() {
     record_doctor_check required shfmt-contract pass \
         "pinned v${pinned_version}; bootstrap verifies SHA-256 before use"
     cached_binary="${cache_root}/v${pinned_version}/shfmt"
-    if [[ -f ${cached_binary} && ! -L ${cached_binary} && -x ${cached_binary} ]]; then
+    version_dir=${cached_binary%/*}
+    # Each cache predicate handles its own failure and returns only suitability.
+    # shellcheck disable=SC2310
+    if [[ -f ${cached_binary} && ! -L ${cached_binary} && -x ${cached_binary} ]] \
+        && actual_sha=$(sha256sum -- "${cached_binary}" 2>/dev/null) \
+        && [[ ${actual_sha%% *} == "${expected_sha}" ]] \
+        && doctor_capture_bounded_output \
+            cached_version "${cached_binary}" --version \
+        && [[ ${cached_version%%$'\n'*} == "v${pinned_version}" ]]; then
+        DOCTOR_SHFMT_CACHE_READY=true
         record_doctor_check info shfmt-cache pass \
-            "candidate cached at ${cached_binary}; canonical bootstrap revalidates it"
+            "verified pinned binary cached at ${cached_binary}"
     else
+        # This path predicate performs no fallible mutation or external command.
+        # shellcheck disable=SC2310
+        if doctor_shfmt_target_is_provisionable \
+            "${version_dir}" "${cached_binary}"; then
+            DOCTOR_SHFMT_BOOTSTRAP_READY=true
+        fi
         record_doctor_check info shfmt-cache unavailable \
-            "not cached at ${cached_binary}; canonical bootstrap will fetch it on demand"
+            "no verified pinned binary cached at ${cached_binary}"
+    fi
+}
+
+doctor_finalize_shfmt_readiness() {
+    if [[ ${DOCTOR_SHFMT_CACHE_READY} == true ]]; then
+        record_doctor_check required shfmt-ready pass \
+            'verified cached shfmt can run without provisioning or network access'
+    elif [[ ${DOCTOR_SHFMT_BOOTSTRAP_READY} != true ]]; then
+        record_doctor_check required shfmt-ready fail \
+            'managed shfmt cache target cannot be provisioned safely'
+    elif [[ ${DOCTOR_EXTERNAL_HTTPS_AVAILABLE} == true ]]; then
+        record_doctor_check required shfmt-ready pass \
+            'cache is provisionable and HTTPS is available for verified bootstrap'
+    else
+        record_doctor_check required shfmt-ready fail \
+            'verified shfmt is absent and HTTPS bootstrap is unavailable'
     fi
 }
 
@@ -562,6 +693,7 @@ doctor_probe_network() {
         --proto '=https' \
         --tlsv1.2 \
         https://github.com/; then
+        DOCTOR_EXTERNAL_HTTPS_AVAILABLE=true
         record_doctor_check optional external-https pass \
             'bounded HTTPS probe to github.com succeeded'
     else
@@ -576,7 +708,7 @@ doctor_report_repository_state() {
     local repository_root=''
     local status_output=''
 
-    if [[ ! -e ${PROJECT_DIR}/.git ]]; then
+    if [[ ! -e ${PROJECT_DIR}/.git && ! -L ${PROJECT_DIR}/.git ]]; then
         record_doctor_check info repository-state pass \
             'Git metadata absent; source-archive validation mode applies'
         return 0
@@ -585,7 +717,7 @@ doctor_report_repository_state() {
         || ! repository_root=$(GIT_OPTIONAL_LOCKS=0 git -C "${PROJECT_DIR}" \
             rev-parse --show-toplevel 2>/dev/null) \
         || [[ ${repository_root} != "${PROJECT_DIR}" ]]; then
-        record_doctor_check info repository-state unavailable \
+        record_doctor_check required repository-state fail \
             'Git metadata exists but the repository root cannot be resolved'
         return 0
     fi
@@ -594,7 +726,7 @@ doctor_report_repository_state() {
         symbolic-ref --quiet --short HEAD 2>/dev/null) || branch='detached HEAD'
     if ! status_output=$(GIT_OPTIONAL_LOCKS=0 git -C "${PROJECT_DIR}" \
         status --porcelain 2>/dev/null); then
-        record_doctor_check info repository-state unavailable \
+        record_doctor_check required repository-state fail \
             "branch=${branch}; worktree state unavailable"
         return 0
     fi
@@ -608,14 +740,19 @@ doctor_report_repository_state() {
 doctor_json_string() {
     (($# == 1)) || return 2
     local value=$1
+    local control_character=''
+    local escape_sequence=''
+    local octal_code=''
+    local control_code=0
 
     value=${value//\\/\\\\}
     value=${value//\"/\\\"}
-    value=${value//$'\b'/\\b}
-    value=${value//$'\f'/\\f}
-    value=${value//$'\n'/\\n}
-    value=${value//$'\r'/\\r}
-    value=${value//$'\t'/\\t}
+    for ((control_code = 1; control_code < 32; control_code++)); do
+        printf -v octal_code '%03o' "${control_code}"
+        printf -v control_character '%b' "\\${octal_code}"
+        printf -v escape_sequence '\\u%04x' "${control_code}"
+        value=${value//"${control_character}"/${escape_sequence}}
+    done
     printf '"%s"' "${value}"
 }
 
@@ -755,6 +892,9 @@ run_doctor() {
     DOCTOR_CHECK_LEVELS=()
     DOCTOR_CHECK_STATUSES=()
     DOCTOR_CHECK_DETAILS=()
+    DOCTOR_SHFMT_CACHE_READY=false
+    DOCTOR_SHFMT_BOOTSTRAP_READY=false
+    DOCTOR_EXTERNAL_HTTPS_AVAILABLE=false
 
     for command_name in "${required_commands[@]}"; do
         doctor_check_command required "${command_name}"
@@ -773,6 +913,7 @@ run_doctor() {
     doctor_probe_loopback
     doctor_probe_procfs
     doctor_probe_network
+    doctor_finalize_shfmt_readiness
     doctor_report_repository_state
 
     if [[ ${DOCTOR_JSON} == true ]]; then

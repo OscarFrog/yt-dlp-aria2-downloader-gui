@@ -34,9 +34,12 @@ the managed shfmt cache, or modify the repository. It checks required commands,
 the Bash 4.4 and Python 3.10 baselines, the pinned shfmt/bootstrap contract,
 private temporary-directory semantics, IPv4 loopback binding, and readable
 Linux `/proc` process metadata. It also reports optional qualification tools,
-selected tool versions, Git/source-archive state, and a bounded HTTPS probe to
-GitHub. Unavailable optional tools or external HTTPS produce warnings; any
-failed required capability makes the command exit with status `69`.
+selected tool versions through time/output-bounded probes, Git/source-archive
+state, and a bounded HTTPS probe to GitHub. Git is required when `.git`
+metadata is present. External HTTPS remains optional when an exact verified
+shfmt binary is already cached; otherwise both a provisionable cache target
+and successful HTTPS probe are required for formatter readiness. Any failed
+required capability makes the command exit with status `69`.
 
 For automation, request the versioned JSON schema:
 
