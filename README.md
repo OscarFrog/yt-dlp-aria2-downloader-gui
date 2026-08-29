@@ -478,6 +478,18 @@ The desktop entry calls a stable per-user launcher link stored under:
 
 That private link targets the repository's absolute GUI-script path. After
 moving the project directory, run `./install-gui.sh install` again.
+For containment, the portable installer requires a current-user-owned
+`XDG_DATA_HOME` that is not writable by group or other users, and refuses a
+root or parent component that is a symbolic link. The data path must be valid
+UTF-8 and safely representable in a desktop `Exec` key. It keeps no-follow
+directory descriptors open for the complete transaction, so a concurrent
+pathname replacement cannot redirect installation, removal, or stale-file
+cleanup.
+Concurrent portable install/remove requests are serialized. After a failed
+multi-file update, the helper attempts to restore the preceding launcher state
+before reporting the primary error and any rollback failure. The executable GUI
+target is revalidated before success. HUP, INT, and TERM also trigger this
+transaction cleanup before the command returns status 129, 130, or 143.
 
 ## Graphical usage
 

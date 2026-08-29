@@ -112,4 +112,5 @@ ALL_SHELL_FILES=(
 # shellcheck disable=SC2034 # Array is read by test-static.sh.
 PYTHON_FILES=(
     private-aria2-plan.py
+    private-launcher-manager.py
 )

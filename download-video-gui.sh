@@ -7,6 +7,9 @@
 # ==============================================================================
 
 set -euo pipefail
+# Keep asynchronous children in this shell's process group until an explicit
+# setsid call. This guarantees that the isolated worker launch does not fork.
+set +m
 umask 077
 
 readonly APP_NAME='yt-dlp aria2 downloader'
@@ -238,6 +241,13 @@ recover_worker_pgid() {
     local candidate
     local -a child_pids=()
 
+    # With monitor mode disabled, the direct worker becomes the new session
+    # leader without an intermediate setsid supervisor.
+    if kill -0 -- "-${worker_pid}" 2>/dev/null; then
+        WORKER_PGID=${worker_pid}
+        return 0
+    fi
+
     [[ -r ${children_file} ]] || return 1
     if ! { IFS= read -r children <"${children_file}" || [[ -n ${children} ]]; } 2>/dev/null; then
         return 1
@@ -397,8 +407,8 @@ signal_worker_tree() {
         recover_worker_pgid "${WORKER_PID}" || true
     fi
 
-    # Snapshot direct children before signaling anything. If the setsid
-    # supervisor exits during shutdown, its /proc children entry disappears.
+    # Snapshot direct children before signaling anything. If the session leader
+    # exits during shutdown, its /proc children entry disappears.
     if [[ -n ${WORKER_PID} ]]; then
         children_file="/proc/${WORKER_PID}/task/${WORKER_PID}/children"
         if [[ -r ${children_file} ]]; then
@@ -437,9 +447,9 @@ signal_worker_tree() {
         fi
     done
 
-    # For TERM, keep setsid --wait alive when a child was reached so it can reap
-    # the child and propagate its status. For KILL, stop the supervisor as the
-    # final bounded fallback so the caller's wait cannot block indefinitely.
+    # Avoid a redundant direct TERM after a group member was reached. For KILL,
+    # stop the registered leader as the final bounded fallback so the caller's
+    # wait cannot block indefinitely.
     if [[ ${signal_name} == KILL || ${signaled_target} == false ]] \
         && [[ -n ${WORKER_PID} ]]; then
         kill "-${signal_name}" -- "${WORKER_PID}" 2>/dev/null || true
@@ -450,19 +460,19 @@ wait_for_worker_exit() {
     local attempts=$1
     local attempt
     local status=0
-    local supervisor_alive=false
+    local worker_alive=false
     local group_alive=false
 
     for ((attempt = 0; attempt < attempts; attempt++)); do
-        supervisor_alive=false
+        worker_alive=false
         group_alive=false
 
         if [[ -n ${WORKER_PID} ]]; then
             # process_is_running returns false for a terminated zombie, at
-            # which point wait can reap the direct supervisor without blocking.
+            # which point wait can reap the direct worker without blocking.
             # shellcheck disable=SC2310
             if process_is_running "${WORKER_PID}"; then
-                supervisor_alive=true
+                worker_alive=true
             else
                 set +e
                 wait "${WORKER_PID}" 2>/dev/null
@@ -475,9 +485,9 @@ wait_for_worker_exit() {
             fi
         fi
 
-        # The setsid supervisor can disappear before a grandchild. Retain the
-        # PGID until the complete process group is gone so TERM/KILL can still
-        # reach surviving yt-dlp, aria2c, FFmpeg, or Deno descendants.
+        # The session leader can disappear before a descendant. Retain the PGID
+        # until the complete process group is gone so TERM/KILL can still reach
+        # surviving yt-dlp, aria2c, FFmpeg, or Deno descendants.
         if [[ -n ${WORKER_PGID} ]]; then
             if kill -0 -- "-${WORKER_PGID}" 2>/dev/null; then
                 group_alive=true
@@ -486,7 +496,7 @@ wait_for_worker_exit() {
             fi
         fi
 
-        if [[ ${supervisor_alive} == false && ${group_alive} == false ]]; then
+        if [[ ${worker_alive} == false && ${group_alive} == false ]]; then
             return 0
         fi
         sleep 0.1
@@ -615,8 +625,8 @@ cleanup() {
     signal_gui_children TERM
 
     if [[ -n ${WORKER_PID} || -n ${WORKER_PGID} ]]; then
-        # stop_worker reaps the supervisor and retains control of a surviving
-        # process group until every descendant has exited.
+        # stop_worker reaps the session leader and retains control of a
+        # surviving process group until every descendant has exited.
         # shellcheck disable=SC2310
         if ! stop_worker; then
             printf 'Warning: the worker group did not terminate after SIGKILL; cleanup will continue.\n' >&2
@@ -962,9 +972,9 @@ wait_for_worker_pgid() {
             fi
         fi
 
-        # Linux exposes the direct child created by setsid --fork. This fallback
-        # prevents a delayed or failed PGID-file publication from making the GUI
-        # lose control of the download process group.
+        # Linux exposes either the no-fork session leader or, for compatibility,
+        # a direct child created by an older setsid topology. This fallback keeps
+        # a delayed PGID publication from hiding the download process group.
         # A failed probe is normal until the setsid child becomes visible.
         # shellcheck disable=SC2310
         if recover_worker_pgid "${worker_pid}"; then
@@ -986,7 +996,6 @@ wait_for_worker_pgid() {
 # Validate host capabilities and resolve the adjacent production scripts.
 initialize_gui_environment() {
     local command_name
-    local required_option
     local setsid_help
     local resolve_status
     local version_output=''
@@ -1006,15 +1015,12 @@ initialize_gui_environment() {
         printf 'Error: unable to inspect setsid capabilities.\n' >&2
         exit 127
     }
-    for required_option in --fork --wait; do
-        if ! grep -Eq -- \
-            "^[[:space:]]*(-[^[:space:]]+,[[:space:]]+)?${required_option}([=[:space:]]|$)" \
-            <<<"${setsid_help}"; then
-            printf 'Error: this version of setsid does not support %s.\n' \
-                "${required_option}" >&2
-            exit 127
-        fi
-    done
+    if ! grep -Eq -- \
+        '^[[:space:]]*(-[^[:space:]]+,[[:space:]]+)?--wait([=[:space:]]|$)' \
+        <<<"${setsid_help}"; then
+        printf 'Error: this version of setsid does not support --wait.\n' >&2
+        exit 127
+    fi
 
     # shellcheck disable=SC2310 # Both preferred and fallback paths are checked.
     if ! resolve_runtime_tmpdir RUNTIME_TMPDIR; then
@@ -1236,7 +1242,7 @@ start_download_worker() {
 
     begin_signal_registration
     # shellcheck disable=SC2016 # Expanded by the intentionally nested shell.
-    YTDLP_ARIA2_SUPERVISED_SESSION=true LC_ALL=C setsid --fork --wait bash -c '
+    YTDLP_ARIA2_SUPERVISED_SESSION=true LC_ALL=C setsid --wait bash -c '
         pgid_file=$1
         shift
         pgid_temporary="${pgid_file}.tmp"

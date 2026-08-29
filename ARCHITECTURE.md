@@ -9,13 +9,15 @@ for user-facing behavior.
 ## System overview
 
 The project is a GNU/Linux desktop application with a Bash CLI engine, a Zenity
-front end, a private Python transfer helper, managed per-user runtimes, native
+front end, private Python helpers, managed per-user runtimes, native
 RPM/DEB packages, and GitHub Actions release automation.
 
 ```mermaid
 flowchart TD
     desktop[Desktop entry or packaged GUI command] --> gui[download-video-gui.sh]
     portable[Portable GUI invocation] --> gui
+    launcher[install-gui.sh] --> launcher_helper[private-launcher-manager.py]
+    launcher_helper --> xdg[Anchored per-user XDG launcher files]
     cli[CLI or packaged CLI command] --> engine[download-video.sh]
     gui --> engine
     gui --> monitor[progress-monitor.sh]
@@ -47,14 +49,66 @@ does not implement a second download pipeline.
 | --- | --- | --- | --- |
 | Graphical | `download-video-gui.sh` | `/usr/bin/yt-dlp-aria2-downloader-gui` symlink | Collect one request, supervise it, render progress, and report the result |
 | Command line | `download-video.sh` | `/usr/bin/yt-dlp-aria2-downloader` symlink | Validate inputs and runtimes, select transport, download, validate, and publish one result |
-| Portable launcher management | `install-gui.sh` | Run from a Git checkout or ZIP | Install or remove the current user's desktop launcher and embedded assets |
+| Portable launcher management | `install-gui.sh` plus `private-launcher-manager.py` | Run from a Git checkout or ZIP | Validate the request, then install or remove the current user's desktop launcher through anchored filesystem operations |
 | Fedora bootstrap | `install-fedora.sh` | Published beside release packages | Authenticate a release RPM, install dependencies and the package, then prepare managed runtimes |
 
 Native packages keep implementation files under a private libexec directory.
 `packaging/install-tree.sh` creates the shared RPM/DEB payload, public symlinks,
-desktop entry, icon, manpages, and user documentation. The Python helper remains
-mode `0644` and is invoked explicitly by the engine with `python3`; it is not a
-public command.
+desktop entry, icon, manpages, and user documentation. Python helpers remain
+mode `0644` and are invoked explicitly with `python3`; they are not public
+commands. Only the aria2 helper belongs to the native package payload, because
+the launcher helper is specific to ZIP and Git installations.
+
+The portable launcher manager requires the data root and managed directories to
+be owned by the current user and not writable by group or others, rejects the
+filesystem root, rejects data paths that are not valid UTF-8 desktop-entry
+input, and opens every `XDG_DATA_HOME` component with
+`O_DIRECTORY|O_NOFOLLOW`. It holds the data root and each managed directory
+open for the complete transaction. Install and uninstall take one exclusive
+advisory lock on that anchored data-root inode before opening managed
+directories, serializing cooperating transactions without a removable
+lockfile; lock acquisition is bounded. The helper also opens and retains the
+regular executable GUI target,
+then revalidates its identity and executable mode before success. Python
+`dir_fd` operations perform staging, validation, publication, and known-file
+removal. Desktop validation has bounded time and captured output. Private hard
+link backups in each destination directory allow every already-attempted leaf
+publication or removal to roll back in reverse order when a later step fails.
+The Bash entrypoint supervises the Python helper and keeps ordinary helper
+failures normalized to status 1. HUP, INT, and TERM retain their public
+129/130/143 statuses. Before forwarding TERM or retrying an interrupted wait,
+the wrapper proves that its retained PID is still a direct child, so PID reuse
+cannot redirect cancellation. The Python handler records the first request without
+raising at an arbitrary bytecode; explicit checkpoints convert it into a
+transaction exception only after the affected resource is registered. Later
+catchable requests leave that first flag unchanged and return without mutating
+signal dispositions until bounded validator termination, rollback,
+temporary-artifact cleanup, and descriptor cleanup complete, so interruption
+cannot publish only a subset of the three managed leaves. Validator cleanup
+sends KILL only while `Popen` still proves that its child is unreaped. Once all mutation,
+cleanup, and diagnostic work is finished, the helper atomically enables
+immediate delivery and its process entrypoint covers the final function-return
+window.
+An absent optional branch remains represented by `None` only at orchestration
+boundaries; backup and rollback helpers explicitly reject or skip it so Python
+can never reinterpret it as the process working directory.
+Stale cleanup recognizes only the current and legacy private token formats.
+File-shaped artifacts are never treated as directories. A launcher stage's
+contents are inspected and removed non-recursively only when its mount identity
+matches the parent and they contain at most the single expected `launch`
+symlink. When mount identity is unavailable, content is preserved and only an
+already-empty stage may be removed with `rmdir`; unknown contents are always
+preserved. Renaming the validated root and replacing its pathname during an
+operation therefore cannot redirect mutations into the replacement tree; root
+identity is checked both around managed-directory validation and last, and a
+rejected install restores its prior managed leaves.
+
+The advisory lock coordinates invocations of this helper; it is not a security
+boundary against an unrelated process running as the same UID, which retains
+normal authority to mutate its own files after the helper's final checks. The
+closing validation sequence checks target, managed paths, target again, and the
+visible data root last to cover mutations during the transaction without
+claiming post-return immutability.
 
 ## Graphical session lifecycle
 
@@ -68,9 +122,11 @@ public command.
    persist the URL.
 3. Create a private temporary session containing a mode-`0600` URL file, live
    log, result record, and process-group record.
-4. Start `download-video.sh` in a dedicated session with
-   `setsid --fork --wait`. The URL is passed through `--url-file`, not through
-   the engine argument vector.
+4. With shell job control explicitly disabled, start `download-video.sh` as the
+   directly supervised leader of a dedicated session using no-fork
+   `setsid --wait`; the registered PID, PGID, and SID are therefore identical.
+   The URL is passed through `--url-file`, not through the engine argument
+   vector.
 5. Feed the private live log to a separately supervised
    `progress-monitor.sh`, which emits Zenity's numeric/text protocol through a
    private mode-`0600` FIFO without learning or displaying the media URL.
@@ -115,10 +171,17 @@ to the current single native-audio profile.
    is normalized, contained in the selected destination, and validated.
 
 Nested long-running commands use dedicated process groups even when the engine
-itself was launched without the GUI. Child registration is signal-atomic;
-HUP, INT, and TERM are relayed to those groups during runtime preparation,
-transfer, and post-processing, and cleanup removes only state owned by the
-current invocation.
+itself was launched without the GUI. Child registration is signal-atomic. In
+autonomous mode, job control remains disabled and an outer `env` ignores HUP,
+INT, and TERM until the no-fork `setsid --wait` process has become the new
+session leader; an inner `env` then restores default dispositions before the
+worker command is exposed as ready. In GUI-owned-session mode, readiness is
+likewise published only after default dispositions are restored. The critical
+section remains active until that readiness marker or PGID is published, so the
+first signal cannot disappear in the fork/exec window; a repeated signal still
+escalates immediately to KILL while retaining the first requested status.
+Signals are relayed during runtime preparation, transfer, and post-processing,
+and cleanup removes only state owned by the current invocation.
 
 ## Transport boundary and Python helper
 

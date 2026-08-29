@@ -89,12 +89,16 @@ assert_packaged_executables() {
     done
 
     local private_aria2_helper="${private_dir}/private-aria2-plan.py"
+    local private_launcher_helper="${private_dir}/private-launcher-manager.py"
     [[ -f ${private_aria2_helper} &&
         ! -L ${private_aria2_helper} &&
         ! -x ${private_aria2_helper} ]] \
         || fail 'Missing or unsafe packaged private aria2 helper.'
     assert_path_mode "${private_aria2_helper}" 644 \
         'private-aria2-plan.py permissions'
+
+    [[ ! -e ${private_launcher_helper} && ! -L ${private_launcher_helper} ]] \
+        || fail 'System package contains the portable-only launcher helper.'
 }
 
 assert_packaged_entrypoints() {

@@ -7,6 +7,9 @@
 # ==============================================================================
 
 set -euo pipefail
+# Keep asynchronous children in this shell's process group until an explicit
+# setsid call. This makes the no-fork worker-registration contract deterministic.
+set +m
 umask 077
 
 readonly VERSION="2.3.5"
@@ -45,12 +48,14 @@ OUTPUT_LOCK_ROOT=''
 DOWNLOAD_WORKER_PID=''
 DOWNLOAD_WORKER_PGID=''
 DOWNLOAD_PGID_FILE=''
+DOWNLOAD_READY_FILE=''
 DOWNLOAD_STATUS=125
 REQUESTED_EXIT_STATUS=''
 SHUTDOWN_REQUESTED=false
 DEFERRED_SIGNAL_NAME=''
 DEFERRED_SIGNAL_STATUS=''
 SIGNAL_REGISTRATION_ACTIVE=false
+REGISTRATION_ESCALATION_REQUESTED=false
 RUNTIME_ATTESTATION_TMP=''
 REUSE_CURRENT_SESSION=${YTDLP_ARIA2_SUPERVISED_SESSION:-false}
 case ${REUSE_CURRENT_SESSION} in
@@ -72,6 +77,9 @@ cleanup() {
     fi
     if [[ -n ${DOWNLOAD_PGID_FILE} ]]; then
         rm -f -- "${DOWNLOAD_PGID_FILE}" "${DOWNLOAD_PGID_FILE}.tmp" || true
+    fi
+    if [[ -n ${DOWNLOAD_READY_FILE} ]]; then
+        rm -f -- "${DOWNLOAD_READY_FILE}" "${DOWNLOAD_READY_FILE}.tmp" || true
     fi
     if [[ -n ${RUNTIME_ATTESTATION_TMP} ]]; then
         rm -f -- "${RUNTIME_ATTESTATION_TMP}" || true
@@ -110,10 +118,29 @@ request_shutdown() {
 
     if [[ ${SIGNAL_REGISTRATION_ACTIVE} == true ]]; then
         if [[ -z ${DEFERRED_SIGNAL_STATUS} ]]; then
-            DEFERRED_SIGNAL_NAME=${signal_name}
             DEFERRED_SIGNAL_STATUS=${exit_status}
+            DEFERRED_SIGNAL_NAME=${signal_name}
+        else
+            REGISTRATION_ESCALATION_REQUESTED=true
+            if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]] \
+                && declare -F signal_download_worker >/dev/null 2>&1; then
+                signal_download_worker KILL
+            fi
         fi
         return 0
+    fi
+
+    if [[ -n ${DEFERRED_SIGNAL_STATUS} ]]; then
+        REQUESTED_EXIT_STATUS=${DEFERRED_SIGNAL_STATUS}
+        SHUTDOWN_REQUESTED=true
+        DEFERRED_SIGNAL_NAME=''
+        DEFERRED_SIGNAL_STATUS=''
+        if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]] \
+            && declare -F signal_download_worker >/dev/null 2>&1; then
+            signal_download_worker KILL
+            return 0
+        fi
+        exit "${REQUESTED_EXIT_STATUS}"
     fi
 
     if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
@@ -136,18 +163,31 @@ request_shutdown() {
 }
 
 begin_signal_registration() {
+    REGISTRATION_ESCALATION_REQUESTED=false
     SIGNAL_REGISTRATION_ACTIVE=true
 }
 
 finish_signal_registration() {
-    local deferred_name=${DEFERRED_SIGNAL_NAME}
-    local deferred_status=${DEFERRED_SIGNAL_STATUS}
+    local deferred_name=''
+    local deferred_status=''
 
     SIGNAL_REGISTRATION_ACTIVE=false
+    deferred_name=${DEFERRED_SIGNAL_NAME}
+    deferred_status=${DEFERRED_SIGNAL_STATUS}
+    if [[ -n ${deferred_status} ]]; then
+        REQUESTED_EXIT_STATUS=${deferred_status}
+        SHUTDOWN_REQUESTED=true
+    fi
+    REGISTRATION_ESCALATION_REQUESTED=false
     DEFERRED_SIGNAL_NAME=''
     DEFERRED_SIGNAL_STATUS=''
     if [[ -n ${deferred_status} ]]; then
-        request_shutdown "${deferred_name}" "${deferred_status}"
+        if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]] \
+            && declare -F signal_download_worker >/dev/null 2>&1; then
+            signal_download_worker "${deferred_name}"
+            return 0
+        fi
+        exit "${deferred_status}"
     fi
 }
 
@@ -464,21 +504,37 @@ check_aria2_capabilities() {
 }
 
 check_setsid_capabilities() {
-    local required_option
     local setsid_help
 
     if ! setsid_help=$(LC_ALL=C setsid --help 2>&1); then
         error 'unable to inspect setsid capabilities.'
         return 1
     fi
-    for required_option in --fork --wait; do
-        if ! grep -Eq -- \
-            "^[[:space:]]*(-[^[:space:]]+,[[:space:]]+)?${required_option}([=[:space:]]|$)" \
-            <<<"${setsid_help}"; then
-            error "this version of setsid does not support ${required_option}."
-            return 1
-        fi
-    done
+    if ! grep -Eq -- \
+        '^[[:space:]]*(-[^[:space:]]+,[[:space:]]+)?--wait([=[:space:]]|$)' \
+        <<<"${setsid_help}"; then
+        error 'this version of setsid does not support --wait.'
+        return 1
+    fi
+}
+
+check_env_capabilities() {
+    if ! LC_ALL=C env \
+        --ignore-signal=HUP \
+        --ignore-signal=INT \
+        --ignore-signal=TERM \
+        bash -c 'exit 0' </dev/null >/dev/null 2>&1; then
+        error 'this version of env does not support --ignore-signal.'
+        return 1
+    fi
+    if ! LC_ALL=C env \
+        --default-signal=HUP \
+        --default-signal=INT \
+        --default-signal=TERM \
+        bash -c 'exit 0' </dev/null >/dev/null 2>&1; then
+        error 'this version of env does not support --default-signal.'
+        return 1
+    fi
 }
 
 check_runtime_compatibility() {
@@ -492,7 +548,6 @@ check_runtime_compatibility() {
     fi
     check_aria2_runtime
     check_aria2_capabilities
-    check_setsid_capabilities
 }
 
 # Parse the line-safe, versioned contract emitted by the adjacent runtime
@@ -681,6 +736,17 @@ signal_download_worker() {
     fi
 
     if [[ -z ${DOWNLOAD_WORKER_PGID} ]]; then
+        # In the no-fork topology the registered worker is already the group
+        # leader before marker publication. Use that identity only for urgent
+        # signaling: readiness must still wait until the inner env has restored
+        # default dispositions and the worker has published its marker.
+        if [[ -n ${DOWNLOAD_WORKER_PID} ]] \
+            && kill -0 -- "-${DOWNLOAD_WORKER_PID}" 2>/dev/null; then
+            DOWNLOAD_WORKER_PGID=${DOWNLOAD_WORKER_PID}
+        fi
+    fi
+
+    if [[ -z ${DOWNLOAD_WORKER_PGID} ]]; then
         # shellcheck disable=SC2310 # A missing PGID is an expected race.
         recover_download_pgid || true
     fi
@@ -704,36 +770,80 @@ signal_download_worker() {
 wait_for_download_pgid() {
     local attempt
 
-    for ((attempt = 0; attempt < 50; attempt++)); do
+    for ((attempt = 0; attempt < 500; attempt++)); do
+        if [[ ${REGISTRATION_ESCALATION_REQUESTED} == true ]]; then
+            signal_download_worker KILL
+            return 1
+        fi
         # shellcheck disable=SC2310 # Predicate success means the PGID is ready.
         if recover_download_pgid; then
             return 0
         fi
-        # shellcheck disable=SC2310 # Predicate failure means the supervisor exited.
+        # shellcheck disable=SC2310 # Predicate failure means the worker exited.
         if [[ -n ${DOWNLOAD_WORKER_PID} ]] \
             && ! process_is_running "${DOWNLOAD_WORKER_PID}"; then
             return 1
         fi
-        sleep 0.1
+        sleep 0.01
     done
 
     return 1
 }
 
+wait_for_download_ready() {
+    local attempt
+    local candidate=''
+
+    for ((attempt = 0; attempt < 500; attempt++)); do
+        if [[ ${REGISTRATION_ESCALATION_REQUESTED} == true ]]; then
+            signal_download_worker KILL
+            return 1
+        fi
+        if [[ -n ${DOWNLOAD_READY_FILE} && -f ${DOWNLOAD_READY_FILE} ]] \
+            && { IFS= read -r candidate <"${DOWNLOAD_READY_FILE}"; } 2>/dev/null \
+            && [[ ${candidate} == "${DOWNLOAD_WORKER_PID}" ]]; then
+            return 0
+        fi
+        # shellcheck disable=SC2310 # Predicate failure means the wrapper exited.
+        if [[ -n ${DOWNLOAD_WORKER_PID} ]] \
+            && ! process_is_running "${DOWNLOAD_WORKER_PID}"; then
+            return 1
+        fi
+        sleep 0.01
+    done
+
+    return 1
+}
+
+cleanup_download_registration_files() {
+    if [[ -n ${DOWNLOAD_PGID_FILE} ]]; then
+        rm -f -- \
+            "${DOWNLOAD_PGID_FILE}" \
+            "${DOWNLOAD_PGID_FILE}.tmp" || true
+        DOWNLOAD_PGID_FILE=''
+    fi
+    if [[ -n ${DOWNLOAD_READY_FILE} ]]; then
+        rm -f -- \
+            "${DOWNLOAD_READY_FILE}" \
+            "${DOWNLOAD_READY_FILE}.tmp" || true
+        DOWNLOAD_READY_FILE=''
+    fi
+}
+
 wait_for_download_exit() {
     local attempts=$1
     local attempt
-    local supervisor_alive=false
+    local worker_alive=false
     local group_alive=false
 
     for ((attempt = 0; attempt < attempts; attempt++)); do
-        supervisor_alive=false
+        worker_alive=false
         group_alive=false
 
         if [[ -n ${DOWNLOAD_WORKER_PID} ]]; then
             # shellcheck disable=SC2310 # Predicate success means it is still alive.
             if process_is_running "${DOWNLOAD_WORKER_PID}"; then
-                supervisor_alive=true
+                worker_alive=true
             else
                 wait "${DOWNLOAD_WORKER_PID}" 2>/dev/null || true
                 DOWNLOAD_WORKER_PID=''
@@ -748,7 +858,7 @@ wait_for_download_exit() {
             fi
         fi
 
-        if [[ ${supervisor_alive} == false && ${group_alive} == false ]]; then
+        if [[ ${worker_alive} == false && ${group_alive} == false ]]; then
             return 0
         fi
         sleep 0.1
@@ -773,6 +883,7 @@ stop_download_worker() {
 }
 
 run_supervised_command() {
+    local registration_ready=false
     local worker_status=0
     local -a worker_command=("$@")
 
@@ -780,14 +891,46 @@ run_supervised_command() {
     DOWNLOAD_WORKER_PID=''
     DOWNLOAD_WORKER_PGID=''
     DOWNLOAD_PGID_FILE=''
+    DOWNLOAD_READY_FILE=''
 
     if [[ ${REUSE_CURRENT_SESSION} == true ]]; then
+        if ! DOWNLOAD_READY_FILE=$(mktemp \
+            --tmpdir="${OUTPUT_LOCK_ROOT}" \
+            '.worker-ready.XXXXXXXX'); then
+            error 'unable to create the command-readiness file.'
+            return 0
+        fi
+        rm -f -- "${DOWNLOAD_READY_FILE}"
+
         # The GUI has already placed this engine and every descendant in one
         # dedicated session. Do not create a nested session that the GUI could
         # lose after an emergency SIGKILL of this wrapper.
         begin_signal_registration
-        LC_ALL=C "${worker_command[@]}" &
+        # shellcheck disable=SC2016 # Expanded by the intentionally nested shell.
+        LC_ALL=C env \
+            --default-signal=HUP \
+            --default-signal=INT \
+            --default-signal=TERM \
+            bash -c '
+            set -euo pipefail
+            ready_file=$1
+            shift
+            ready_temporary="${ready_file}.tmp"
+            trap "exit 129" HUP
+            trap "exit 130" INT
+            trap "exit 143" TERM
+            printf "%s\n" "$$" >"${ready_temporary}" || exit 125
+            mv -Tf -- "${ready_temporary}" "${ready_file}" || exit 125
+            trap - HUP INT TERM
+            exec "$@"
+        ' bash "${DOWNLOAD_READY_FILE}" "${worker_command[@]}" &
         DOWNLOAD_WORKER_PID=$!
+        # Keep signals deferred until env has restored their default disposition
+        # and the post-env wrapper has atomically published its readiness.
+        # shellcheck disable=SC2310
+        if wait_for_download_ready; then
+            registration_ready=true
+        fi
         finish_signal_registration
     else
         if ! DOWNLOAD_PGID_FILE=$(mktemp \
@@ -798,10 +941,21 @@ run_supervised_command() {
         fi
 
         # Standalone CLI mode needs its own session so signals sent only to the
-        # wrapper PID can be relayed to the complete command tree.
+        # wrapper PID can be relayed to the complete command tree. The outer env
+        # keeps the registration process immune to foreground-group signals.
+        # With monitor mode disabled above, setsid does not need to fork: $!
+        # remains the future session leader throughout the critical section.
         begin_signal_registration
         # shellcheck disable=SC2016 # Expanded by the intentionally nested shell.
-        LC_ALL=C setsid --fork --wait bash -c '
+        LC_ALL=C env \
+            --ignore-signal=HUP \
+            --ignore-signal=INT \
+            --ignore-signal=TERM \
+            setsid --wait env \
+            --default-signal=HUP \
+            --default-signal=INT \
+            --default-signal=TERM \
+            bash -c '
             set -euo pipefail
             pgid_file=$1
             shift
@@ -811,45 +965,50 @@ run_supervised_command() {
             exec "$@"
         ' bash "${DOWNLOAD_PGID_FILE}" "${worker_command[@]}" &
         DOWNLOAD_WORKER_PID=$!
-        finish_signal_registration
-
-        # A command may fail before the PGID probe observes its group. Preserve
-        # the real command status instead of converting a legitimate fast
-        # failure into the internal startup status 125.
+        # PGID publication happens only after the inner env restored signal
+        # dispositions inside the new session.
+        # Holding the registration critical section until then prevents an
+        # inherited ignored SIGINT from consuming the first shutdown request.
         # shellcheck disable=SC2310
-        if ! wait_for_download_pgid; then
-            worker_status=0
-            # shellcheck disable=SC2310
-            if ! process_is_running "${DOWNLOAD_WORKER_PID}"; then
-                wait "${DOWNLOAD_WORKER_PID}" 2>/dev/null || worker_status=$?
-                DOWNLOAD_WORKER_PID=''
-                DOWNLOAD_WORKER_PGID=''
-                if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
-                    DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS:-143}
-                else
-                    DOWNLOAD_STATUS=${worker_status}
-                fi
-                rm -f -- \
-                    "${DOWNLOAD_PGID_FILE}" \
-                    "${DOWNLOAD_PGID_FILE}.tmp" || true
-                DOWNLOAD_PGID_FILE=''
-                return 0
-            fi
+        if wait_for_download_pgid; then
+            registration_ready=true
+        fi
+        finish_signal_registration
+    fi
 
-            if [[ ${SHUTDOWN_REQUESTED} != true ]]; then
-                error 'unable to determine the command process group.'
+    # A command may fail before its readiness marker appears. Preserve the real
+    # command status instead of converting a legitimate fast failure into the
+    # internal startup status 125.
+    if [[ ${registration_ready} != true ]]; then
+        worker_status=0
+        # shellcheck disable=SC2310
+        if ! process_is_running "${DOWNLOAD_WORKER_PID}"; then
+            wait "${DOWNLOAD_WORKER_PID}" 2>/dev/null || worker_status=$?
+            DOWNLOAD_WORKER_PID=''
+            DOWNLOAD_WORKER_PGID=''
+            if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
+                DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS:-143}
+            else
+                DOWNLOAD_STATUS=${worker_status}
             fi
-            # shellcheck disable=SC2310
-            stop_download_worker || true
-            if [[ -n ${REQUESTED_EXIT_STATUS} ]]; then
-                DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS}
-            fi
-            rm -f -- \
-                "${DOWNLOAD_PGID_FILE}" \
-                "${DOWNLOAD_PGID_FILE}.tmp" || true
-            DOWNLOAD_PGID_FILE=''
+            cleanup_download_registration_files
             return 0
         fi
+
+        if [[ ${SHUTDOWN_REQUESTED} != true ]]; then
+            if [[ ${REUSE_CURRENT_SESSION} == true ]]; then
+                error 'unable to confirm command readiness.'
+            else
+                error 'unable to determine the command process group.'
+            fi
+        fi
+        # shellcheck disable=SC2310
+        stop_download_worker || true
+        if [[ -n ${REQUESTED_EXIT_STATUS} ]]; then
+            DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS}
+        fi
+        cleanup_download_registration_files
+        return 0
     fi
 
     if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
@@ -880,12 +1039,7 @@ run_supervised_command() {
         fi
     fi
 
-    if [[ -n ${DOWNLOAD_PGID_FILE} ]]; then
-        rm -f -- \
-            "${DOWNLOAD_PGID_FILE}" \
-            "${DOWNLOAD_PGID_FILE}.tmp" || true
-        DOWNLOAD_PGID_FILE=''
-    fi
+    cleanup_download_registration_files
     return 0
 }
 
@@ -1656,12 +1810,14 @@ initialize_runtime_dependencies() {
     local runtime_attestation=''
     local runtime_status=0
 
-    for command_name in aria2c ffmpeg ffprobe python3 sed stdbuf tr realpath grep mktemp mv rm rmdir chmod flock mkdir sha256sum stat setsid sleep timeout find; do
+    for command_name in aria2c env ffmpeg ffprobe python3 sed stdbuf tr realpath grep mktemp mv rm rmdir chmod flock mkdir sha256sum stat setsid sleep timeout find; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             error "required command \"${command_name}\" was not found."
             exit 127
         fi
     done
+    check_env_capabilities
+    check_setsid_capabilities
 
     script_path=$(realpath -e -- "${BASH_SOURCE[0]}") || {
         error 'unable to resolve the engine path.'

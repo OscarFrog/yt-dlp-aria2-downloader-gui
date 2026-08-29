@@ -498,6 +498,20 @@ L'entrée du menu appelle un lien de lancement stable stocké dans :
 
 Ce lien privé cible le chemin absolu du script graphique dans le dépôt. Après
 avoir déplacé le dossier du projet, relancez `./install-gui.sh install`.
+Pour garantir le confinement, l'installateur portable exige un
+`XDG_DATA_HOME` appartenant à l'utilisateur courant et non inscriptible par le
+groupe ou les autres utilisateurs ; il refuse aussi tout lien symbolique à la
+racine ou dans un composant parent. Le chemin de données doit aussi être en
+UTF-8 valide et pouvoir être représenté sans ambiguïté dans une clé `Exec` de
+fichier desktop. Il conserve des descripteurs sans suivi de liens pendant toute
+la transaction : un remplacement concurrent du chemin ne peut donc pas
+rediriger l'installation, le retrait ou le nettoyage.
+Les demandes concurrentes d'installation et de retrait portables sont
+sérialisées. Après l'échec d'une mise à jour multifichier, le helper tente de
+restaurer l'état précédent du lanceur avant de signaler l'erreur principale et
+tout échec de rollback. La cible graphique exécutable est revalidée avant tout
+succès. HUP, INT et TERM déclenchent également ce nettoyage transactionnel avant
+que la commande retourne respectivement le statut 129, 130 ou 143.
 
 ## Utilisation graphique
 

@@ -16,8 +16,27 @@
 - Ignore non-regular, symbolic-link, oversized, or overlong GUI configuration
   inputs without blocking or partially applying them; accept at most 64 KiB
   and 128 lines before atomically publishing loaded settings.
-- Refuse portable-launcher removal through symbolic-link XDG directories and
-  reject overflowing NSS UID/GID values before any Bash arithmetic or cleanup.
+- Refuse portable-launcher mutation through a symbolic-link XDG root or any
+  parent/intermediate component or a shared-writable data root, anchor every
+  transaction to no-follow directory descriptors so concurrent path replacement
+  cannot redirect it, reject false success after root or managed-directory identity
+  changes, restrict stale cleanup to exact private token formats and expected
+  non-mounted artifact types without recursive traversal, clean partial
+  allocation failures, serialize concurrent install/uninstall transactions on
+  the anchored data-root inode with bounded waiting, revalidate the executable
+  GUI target and visible root immediately before success, roll back partial
+  three-leaf publication/removal, bound desktop-validator time and output, and
+  keep missing managed branches from falling back to the process working
+  directory, reject non-UTF-8 desktop-entry paths without a traceback, and
+  reject overflowing NSS UID/GID values before Bash arithmetic or cleanup.
+- Make portable-launcher interruption transactional across the Bash/Python
+  boundary: preserve 129/130/143, cancel and reap an active validator, register
+  temporary files and hard-link backups before delivering a pending signal,
+  keep the asynchronous handler flag-only under concurrent group/wrapper
+  delivery, revalidate retained child identities before signaling and avoid
+  KILL after validator reaping, finish rollback/cleanup before exit, preserve
+  the first request through final cleanup and process return, and keep
+  descriptor-close diagnostics from masking the primary failure.
 
 ### GUI process reliability
 
@@ -34,8 +53,17 @@
   the negated EXIT-trap condition cannot mistake a live pre-PGID supervisor for
   a terminated worker and block while waiting without first signaling it.
 - Supervise managed-runtime preparation and protect every CLI child-registration
-  window, so HUP/INT/TERM is relayed and reaped without leaking descendants or
-  replacing the requested 129/130/143 status with a raw `setsid` signal number.
+  window; restore default HUP/INT/TERM dispositions inherited by asynchronous
+  children and wait for post-restoration readiness before replaying a deferred
+  signal while allowing a repeated request to escalate immediately, so every
+  signal is relayed and reaped without leaking descendants, waiting for forced
+  escalation, or replacing the requested 129/130/143 status with a raw `setsid`
+  signal number.
+- Remove the opaque `setsid --fork` supervisor from GUI and autonomous CLI
+  launches. With job control explicitly disabled, the directly registered
+  worker becomes the session leader (`PID = PGID = SID`), closing the
+  foreground-group signal race before PGID publication and on repeated-signal
+  escalation.
 
 ### Runtime performance
 
