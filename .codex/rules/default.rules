@@ -2,20 +2,57 @@
 # Repository-local Codex guardrails. These rules supplement task authority and
 # AGENTS.md; they do not grant permission for an external mutation.
 
-# Rules compare exact argv prefixes. Prompting for direct Git/GitHub CLI
-# executables keeps global option placement from bypassing mutation guards.
+# Prefix rules cannot express an end-of-argv constraint, and the strictest
+# matching decision wins. Keep direct Git interactive. The tracked inspection
+# helper uses the ordinary sandbox/baseline policy instead of receiving an
+# execution-policy exemption.
 prefix_rule(
     pattern = [["git", "/usr/bin/git", "/bin/git"]],
     decision = "prompt",
-    justification = "Git commands requested outside the sandbox require confirmation; mutations still require explicit task authority.",
+    justification = "Every direct Git command remains interactive; use the fixed tracked helper for unattended read-only inspection.",
     match = [
-        "git status",
-        "git -C . push origin feature-branch",
+        "git status --short --branch",
+        "git diff --check",
+        "git add download-video-gui.sh",
+        "git commit -m update",
+        "git update-ref refs/heads/main HEAD",
+        "git push origin feature-branch",
         "/usr/bin/git tag v9.9.9",
     ],
     not_match = [
+        "./scripts/git-inspect.sh status",
         "gh pr view 56",
         "env git status",
+    ],
+)
+
+# Global Git options can change command resolution or target another worktree.
+# Keep those forms interactive instead of trying to infer a later subcommand.
+prefix_rule(
+    pattern = [
+        ["git", "/usr/bin/git", "/bin/git"],
+        [
+            "-C",
+            "-c",
+            "--bare",
+            "--config-env",
+            "--exec-path",
+            "--git-dir",
+            "--namespace",
+            "--work-tree",
+        ],
+    ],
+    decision = "prompt",
+    justification = "Git global options can redirect repository state or command resolution and remain interactive.",
+    match = [
+        "git -C . status",
+        "git --git-dir .git status",
+        "/usr/bin/git -c alias.publish=push publish origin main",
+    ],
+    not_match = [
+        "git status",
+        "git diff --check",
+        "git push origin feature-branch",
     ],
 )
 

@@ -10,8 +10,12 @@ profile and destination, then supervises a single
 .BR yt-dlp-aria2-downloader (1)
 session with progress reporting and cancellation.
 .PP
-The graphical interface supports complete MKV video, authenticated YouTube HLS
-video using Firefox cookies, and native-format audio profiles.
+The graphical interface always supports complete MKV video and native-format
+audio profiles. It adds the authenticated HLS video profile using Firefox
+cookies only for youtube.com, youtu.be, youtube-nocookie.com, or their
+subdomains. A remembered YouTube-only profile falls back to complete video for
+every other normalized host. Errors with a safely retained diagnostic offer
+direct View log and Close actions.
 .SH FILES
 .TP
 .I ~/.config/yt-dlp-aria2-downloader/gui.conf
@@ -19,10 +23,12 @@ Default GUI configuration file when
 .B XDG_CONFIG_HOME
 is not set.
 .TP
-.I ~/.local/state/yt-dlp-aria2-downloader/
-Default retained GUI state and diagnostic-log location when
+.I ~/.local/state/yt-dlp-aria2-downloader/download-*.log
+Default retained GUI diagnostic-log pattern when
 .B XDG_STATE_HOME
-is not set.
+is not set. Each sanitized log ends with its exact basename and canonical
+absolute path; the identity section and retained payload together remain within
+the 8 MiB limit.
 .SH SEE ALSO
 .BR yt-dlp-aria2-downloader (1),
 .BR zenity (1)

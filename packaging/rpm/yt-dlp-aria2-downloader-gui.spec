@@ -75,6 +75,11 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sun Aug 30 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.7-1
+- Improve GUI profile continuity and one-click diagnostic access.
+- Add final retained-log identity with fail-closed atomic publication.
+- Add fixed unattended read-only Git inspection actions.
+
 * Sun Aug 30 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.6-1
 - Improve two-stream Zenity progress weighting while preserving exact byte progress.
 - Align release installation documentation and add guarded post-release updates.

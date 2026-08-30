@@ -81,6 +81,19 @@ parallel:
 ./tests/run-all.sh --full --jobs 4
 ```
 
+For unattended Codex inspection of repository state, use the tracked helper:
+
+```bash
+./scripts/git-inspect.sh status
+./scripts/git-inspect.sh diff-check
+```
+
+Its closed action parser also provides `diff`, `diff-staged`, and `inventory`.
+It accepts no caller-provided Git option, revision, path, helper, or output
+filename. The helper has no explicit Codex `allow` rule: it runs under the
+ordinary sandbox or baseline policy. Direct Git remains interactive under the
+repository execution policy.
+
 Every static step and integration suite reports its elapsed time. The read-only
 shfmt check, static behavioral validation, and four ShellCheck inventories
 share the requested job limit. Parallel output is buffered separately and
@@ -231,6 +244,9 @@ The automated suite checks, among other things:
 - argument validation, terminal `--`, and exactly one URL per run;
 - preservation of URLs containing shell metacharacters;
 - trimming of leading and trailing whitespace entered in the GUI;
+- exact GUI YouTube-host classification, dynamic removal of the authenticated
+  HLS profile for other hosts, false-domain rejection, and compatible fallback
+  from a remembered YouTube-only profile;
 - native-audio selection with `ba/b`, `best`, and quality `0`;
 - absence of forced MP3, M4A, or Opus output formats;
 - MKV video selection without forced re-encoding;
@@ -244,7 +260,15 @@ The automated suite checks, among other things:
   extraction, late progress, and error paths;
 - verification that a local transfer reaching 100% does not complete the global
   operation and that global 100% appears only after final-result publication;
-- deletion of successful-download logs and retention of failure logs;
+- deletion of successful-download logs and retention of failure logs, with
+  shared View log/Close actions for every interactive failure that has a safely
+  sanitized diagnostic and fail-closed refusal to open the raw live log;
+- View log/Close handling for bounded pre-session Zenity diagnostics, including
+  correct text-viewer content, Close without viewing, private containment, and
+  immediate removal after the interaction;
+- exact retained-log basename/canonical-path footers, byte-bounded survival of
+  that identity after an over-8-MiB source truncation, private atomic
+  publication, and refusal to publish a footer-only artificial diagnostic;
 - automatic removal of retained diagnostic logs older than 15 days while
   preserving newer logs, unrelated files, and symbolic links;
 - atomic process-group publication, bounded cancellation tests, explicit
@@ -356,8 +380,9 @@ The automated suite checks, among other things:
   that native-fallback guard is removed, while protected runs keep secrets out
   of aria2 argv and captured output;
 - retained-log URL redaction even when the 8 MiB boundary crosses a
-  secret-bearing URL, a strict final retained-size limit, and private live
-  diagnostics kept under the runtime temporary directory;
+  secret-bearing URL, a strict final retained-size limit including the final
+  identity section, no leaked temporary path or partial staging file, and
+  private live diagnostics kept under the runtime temporary directory;
 - GUI configuration acceptance at the exact 64 KiB and 128-line limits,
   atomic fallback above either limit, and non-blocking replacement of FIFO or
   symbolic-link configuration paths;
@@ -530,8 +555,12 @@ version and runs the same qualification without changing PR pins.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the complete validation and the hermetic real-tool integration first, verifies
-tag ancestry and project versions, then resolves the previous semantic-version
-release.
+tag ancestry and project versions, and requires the published RPM, DEB, ZIP,
+and verification references in both tagged READMEs to match that tag before it
+builds immutable artifacts. It then resolves the previous semantic-version
+release. This guard is intentionally pre-publication: the Fedora bootstrap is
+version locked, and post-release documentation cannot repair README bytes
+already embedded in a package or source archive.
 
 That previous release must be immutable. Its exact published RPM and DEB are
 downloaded and verified with the published SHA256SUMS, `gh release verify`,
@@ -570,7 +599,9 @@ revalidates that exact successful run, semantic tag, source SHA, and immutable
 release. A read-only job invokes `scripts/update-published-version.py` to update
 only the known English/French release references and
 `EXPECTED_PUBLISHED_VERSION`; exact reference counts make documentation drift
-fail closed. A fresh read-only verifier applies the data-only patch and runs
+fail closed. With the pre-publication tag guard, this is normally an idempotent
+consistency check and no branch is needed. If a bounded patch is still produced,
+a fresh read-only verifier applies the data-only patch and runs
 the complete local contract. The final job alone receives repository-content
 write permission. It performs no repository checkout, resolves protected
 `main` through the GitHub API, requires the release SHA to be its ancestor,
@@ -646,8 +677,9 @@ is a **tag** policy. It also verifies Immutable Releases, exactly one required
 reviewer, that the reviewer matches the authenticated GitHub account, that
 self-review remains allowed for this single-maintainer mode, secret scope, the
 pinned public certificate, the dedicated signing subkey,
-signed-tag/HEAD/version identity, and warns when the signing subkey is within
-90 days of expiry.
+signed-tag/HEAD/version identity, and exact alignment between the tag version
+and the published-asset references that will be embedded in the ZIP, RPM, and
+DEB. It warns when the signing subkey is within 90 days of expiry.
 
 For manual workflow recovery, invoke the workflow from the exact same tag:
 

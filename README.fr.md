@@ -26,8 +26,9 @@
 - [Limites et utilisation légale](#limites-et-utilisation-légale)
 - [Licence](#licence)
 
-Interface graphique Zenity et moteur Bash exclusivement pour GNU/Linux. Le programme télécharge
-une seule URL avec l'un des trois profils suivants :
+Interface graphique Zenity et moteur Bash exclusivement pour GNU/Linux. Le
+programme télécharge une seule URL avec deux profils généraux et un profil
+supplémentaire réservé à YouTube :
 
 - une **vidéo MKV complète**, avec les meilleures pistes vidéo et audio
   disponibles ;
@@ -42,20 +43,20 @@ FFmpeg pour fusionner, remuxer ou extraire les flux. HTTPS repasse
 automatiquement sur le transport natif de yt-dlp lorsque le backend TLS d'aria2
 n'offre pas le durcissement requis de validation des certificats. Les flux DASH
 et HLS restent eux aussi natifs.
-La version de développement actuelle est la **2.3.6**.
-La dernière release de paquets publiée est la **2.3.6**.
+La version de développement actuelle est la **2.3.7**.
+La dernière release de paquets publiée est la **2.3.7**.
 
 ## Installation recommandée
 
 Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
-Les noms exacts ci-dessous correspondent à la release v2.3.6 actuellement publiée.
+Les noms exacts ci-dessous correspondent à la release v2.3.7 actuellement publiée.
 
 Pour **Fedora 44**, téléchargez ces quatre fichiers :
 
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.3.6-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.3.7-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -63,7 +64,7 @@ Vérifiez les fichiers téléchargés puis lancez le bootstrap Fedora officiel :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.6-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.7-1.fc44.noarch.rpm
 ```
 
 Le bootstrap authentifie et active RPM Fusion Free si nécessaire, remplace `ffmpeg-free` par
@@ -73,7 +74,7 @@ runtimes yt-dlp et Deno propres à l'utilisateur.
 
 Pour **Debian ou Ubuntu**, téléchargez le DEB versionné et `SHA256SUMS`,
 vérifiez-les puis installez le paquet avec `sudo apt install
-./yt-dlp-aria2-downloader-gui_2.3.6-1_all.deb`. Pour **les autres distributions
+./yt-dlp-aria2-downloader-gui_2.3.7-1_all.deb`. Pour **les autres distributions
 GNU/Linux ou une utilisation portable**, utilisez le ZIP versionné ou un clone
 Git. Les runtimes yt-dlp et Deno gérés automatiquement prennent actuellement en
 charge Linux `x86_64` et `aarch64`.
@@ -187,8 +188,8 @@ l'identité de la release :
 
 ```bash
 gh attestation verify ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.3.6 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.3.6 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.3.7 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.3.7 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 `SHA256SUMS` reste utile pour un contrôle local ou hors ligne ; les attestations
@@ -240,7 +241,7 @@ de déploiement **tag** sélectionnée `v*`. La reprise manuelle reste disponibl
 mais elle doit exécuter le workflow depuis le tag exact de la release :
 
 ```bash
-gh workflow run release.yml   --ref v2.3.6   -f tag=v2.3.6   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref v2.3.7   -f tag=v2.3.7   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Le workflow refuse indépendamment toute exécution manuelle dont le type de ref,
@@ -285,7 +286,7 @@ Téléchargez :
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.3.6-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.3.7-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -298,7 +299,7 @@ sha256sum --ignore-missing --check SHA256SUMS
 Puis lancez :
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.6-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.7-1.fc44.noarch.rpm
 ```
 
 Le bootstrap refuse par défaut un RPM de release non signé. Il vérifie que
@@ -350,12 +351,12 @@ de l'utilisateur et vérifiés avant activation.
 
 ### Debian et Ubuntu
 
-La dernière release publiée, la 2.3.6, fournit un DEB indépendant de
+La dernière release publiée, la 2.3.7, fournit un DEB indépendant de
 l'architecture, aligné sur le même modèle de runtimes gérés que Fedora.
 Téléchargez :
 
 ```text
-yt-dlp-aria2-downloader-gui_2.3.6-1_all.deb
+yt-dlp-aria2-downloader-gui_2.3.7-1_all.deb
 SHA256SUMS
 ```
 
@@ -363,7 +364,7 @@ Vérifiez puis installez :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.6-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.7-1_all.deb
 ```
 
 Le DEB dépend explicitement d'`aria2`, de Python 3.10+, de FFmpeg/FFprobe,
@@ -459,7 +460,7 @@ courant.
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.3.6.zip
+yt-dlp-aria2-downloader-gui-2.3.7.zip
 SHA256SUMS
 ```
 
@@ -467,8 +468,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.3.6.zip
-cd yt-dlp-aria2-downloader-gui-2.3.6
+unzip yt-dlp-aria2-downloader-gui-2.3.7.zip
+cd yt-dlp-aria2-downloader-gui-2.3.7
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -536,15 +537,20 @@ l'interface graphique.
 
 ### 2. Choisir le mode de téléchargement
 
-Sélectionnez l'un des trois profils disponibles :
+L'interface classe l'hôte normalisé de l'URL avant d'afficher ce menu. Elle
+propose toujours :
 
 - **Complete video (MKV)** télécharge les meilleures pistes vidéo et audio
   disponibles, puis les rassemble dans un conteneur MKV ;
-- **YouTube video - Firefox cookies (HLS/MKV)** constitue un mode de repli
-  authentifié réservé à YouTube : il lit la session Firefox locale, télécharge
-  un flux HLS puis le remuxe en MKV ;
 - **Audio track (native format)** télécharge la meilleure piste audio disponible
   en conservant son format natif chaque fois que cela est possible.
+
+Pour `youtube.com`, `youtu.be`, `youtube-nocookie.com` et leurs sous-domaines,
+elle propose aussi **YouTube video - Firefox cookies (HLS/MKV)**. Ce mode de
+repli authentifié lit la session Firefox locale, télécharge un flux HLS puis le
+remuxe en MKV. Il n'apparaît jamais pour un autre hôte. Si ce profil a été
+mémorisé lors d'un téléchargement YouTube, une requête non-YouTube suivante
+sélectionne **Complete video (MKV)** à sa place.
 
 
 ### 3. Choisir le dossier de destination
@@ -561,14 +567,36 @@ processus.
 ### 5. Résultat du téléchargement
 
 Après un téléchargement réussi, l'interface affiche le chemin du fichier
-multimédia terminé.
+multimédia terminé. **Open folder** ouvre son dossier de destination, **New
+download** lance une nouvelle demande et **Close** termine la session. Dans le
+cas exceptionnel où un journal de réussite n'a pas pu être supprimé mais où une
+copie expurgée sûre existe, **View log** l'ouvre puis rend de nouveau accessibles
+ces actions de fin.
 
 
-Lorsque le téléchargement échoue, l'interface affiche une fenêtre d'erreur et
-conserve le journal de diagnostic.
+Lorsqu'une erreur survient après la création d'un diagnostic utile du worker ou
+de la progression, l'interface conserve un journal expurgé et propose **View
+log** et **Close**. Cela couvre notamment le démarrage du worker, le runtime, le
+téléchargeur, le moniteur de progression, le post-traitement et la validation
+du résultat final.
+
+Lorsque Zenity lui-même renvoie des détails techniques utiles avant qu'une
+session de téléchargement existe, les mêmes actions **View log** et **Close**
+ouvrent un diagnostic temporaire privé et borné. Ce diagnostic est supprimé
+immédiatement après la boîte de dialogue ; il n'est pas présenté comme un
+journal conservé persistant.
 
 
-Le journal conservé peut être ouvert depuis la fenêtre d’erreur. Avant sa conservation, les valeurs ressemblant à des URL sont remplacées par `[REDACTED_URL]` et seuls les 8 derniers Mio sont gardés. Le journal actif reste privé (`0600`) pendant l’exécution.
+Le journal conservé peut être ouvert directement depuis la fenêtre d’erreur.
+Avant sa conservation, les valeurs ressemblant à des URL sont remplacées par
+`[REDACTED_URL]` et seule la portion tenant dans la limite finale de 8 Mio est
+gardée. Une section clairement identifiée à la fin indique le nom exact du
+fichier conservé et son chemin absolu canonique ; elle survit donc à la
+troncature du journal source et désigne toujours le fichier ouvert par **View
+log**. Le journal actif reste privé (`0600`) pendant l’exécution et n'est jamais
+proposé comme solution de repli si la sanitisation sûre échoue. Les erreurs de
+saisie et les autres échecs précoces sans diagnostic utile restent de simples
+messages d'erreur.
 
 
 
@@ -739,19 +767,22 @@ Runtimes yt-dlp et Deno gérés :
 ~/.local/share/yt-dlp-aria2-downloader/runtime/
 ```
 
-Journaux d'exécution :
+Journaux de diagnostic de la GUI :
 
 ```text
 ~/.local/state/yt-dlp-aria2-downloader/download-*.log
 ```
 
 Le journal actif du processus est créé en mode `0600` dans le dossier
-temporaire d’exécution privé, puis supprimé après un succès. Pour une exécution
-échouée, annulée, interrompue ou incohérente, seule une copie de diagnostic
-expurgée est publiée dans le dossier d’état : les valeurs ressemblant à des URL
-sont remplacées, seuls les 8 derniers Mio sont conservés et le fichier final
-reste en mode `0600`. Les journaux de diagnostic conservés depuis plus de 15
-jours sont supprimés automatiquement au prochain démarrage de l’interface.
+temporaire d’exécution privé, puis supprimé après un succès. Lorsqu’une
+exécution échouée, annulée, interrompue ou incohérente a produit un journal
+actif non vide et utile, seule une copie de diagnostic expurgée est publiée
+dans le dossier d’état. Les valeurs ressemblant à des URL sont remplacées, le
+contenu et les métadonnées d’identité finales restent ensemble dans la limite de
+8 Mio, et le fichier obtenu conserve le mode `0600`. Sa section finale donne le
+basename `download-*.log` exact et son chemin absolu canonique. Les journaux de
+diagnostic conservés depuis plus de 15 jours sont supprimés automatiquement
+lors de la prochaine préparation d’une session de téléchargement graphique.
 
 Un verrou consultatif par utilisateur et par dossier de destination est
 conservé sous `$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader` lorsque ce dossier

@@ -38,7 +38,7 @@ defect. Resolve both surfaces together.
 | `REPOSITORY_FILES.md` | Exact tracked-file inventory, each file's consumer, packaging status, and retention reason |
 | `README.md` and `README.fr.md` | Current English and French user-facing behavior, requirements, installation, and usage |
 | `CHANGELOG.md` | Chronological release history, not current operating policy |
-| `.codex/rules/default.rules` | Mechanical prompts and prohibitions for remote or destructive Codex command prefixes |
+| `.codex/rules/default.rules` | Fixed-helper route for unattended Git inspection plus mechanical prompts and prohibitions for direct, mutating, or remote Codex command prefixes |
 
 Use `AGENTS.md` to decide what to read, not as a substitute for those documents.
 
@@ -180,12 +180,19 @@ unexplained failure.
 The protected `main` branch is updated through pull requests and required
 checks. Do not bypass branch protection or force-push `main`.
 
-Repository-local Codex rules prompt before direct Git, GitHub CLI, and common
-environment-wrapped commands requested outside the sandbox. More-specific
-rules document mutation intent and forbid common force-push-to-`main` forms,
-including destination refspecs. These exact-argv checks supplement task
-authority; they never create it and must not be bypassed with a non-canonical
-wrapper or spelling.
+For unattended repository inspection, use the tracked
+`scripts/git-inspect.sh` helper. It accepts only fixed status, inventory, diff,
+and diff-check actions, rejects caller-provided Git arguments, and runs under
+the ordinary sandbox or baseline policy rather than an explicit Codex
+`allow` rule. Its closed Git invocation trusts only the canonical physical path
+of its own checkout so container ownership mappings cannot break inspection;
+it never grants wildcard safe-directory trust. Direct Git, direct GitHub CLI,
+Git global-option forms, and common environment wrappers remain interactive
+when requested outside the sandbox.
+More-specific rules document mutation intent and forbid common
+force-push-to-`main` forms, including destination refspecs. These exact-argv
+checks supplement task authority; they never create it and must not be
+bypassed with another wrapper or spelling.
 
 Do not create or push release tags, publish releases or packages, alter
 repository rules, secrets, or environments, or initiate a version bump unless
