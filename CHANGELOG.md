@@ -1,5 +1,40 @@
 # Changelog
 
+## 2.3.7 - 2026-08-30
+
+### GUI continuity
+
+- Classify URL hosts with the engine's exact YouTube host rules, hide the
+  authenticated Firefox HLS profile for every other site, and replace an
+  incompatible remembered profile with complete video for the current request.
+- Centralize safe diagnostic errors behind consistent **View log** and **Close**
+  actions across worker startup, runtime, downloader, progress, post-processing,
+  final-result validation, and bounded Zenity technical failures.
+
+### Diagnostic logs
+
+- Add the retained diagnostic's exact final basename and canonical absolute
+  path to a terminal identity section that survives bounded source-log
+  truncation.
+- Preserve URL sanitization, private permissions, symlink defenses, bounded
+  retention, atomic no-overwrite publication, and fail closed when no useful
+  sanitized payload remains after reserving the identity section.
+
+### Agent tooling
+
+- Add a fixed-action read-only Git inspection helper so unattended status,
+  inventory, diff, and diff-check operations no longer require a broad direct
+  Git exemption; mutating and remote commands remain protected.
+
+### Release integrity
+
+- Align the English/French RPM, DEB, ZIP, and verification examples with
+  v2.3.7 before tagging so the immutable artifacts do not embed instructions
+  rejected by the version-locked Fedora bootstrap.
+- Make both the maintainer preflight and the read-only release validation fail
+  closed unless the packaged documentation's published-version contract
+  matches the release tag.
+
 ## 2.3.6 - 2026-08-30
 
 ### Progress accuracy

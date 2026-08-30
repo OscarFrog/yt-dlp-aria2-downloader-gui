@@ -28,8 +28,8 @@ fi
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 # The development tree can lead the latest installable GitHub release. Keep the
 # two contracts explicit so README package names never advertise absent assets.
-readonly EXPECTED_VERSION='2.3.6'
-readonly EXPECTED_PUBLISHED_VERSION='2.3.6'
+readonly EXPECTED_VERSION='2.3.7'
+readonly EXPECTED_PUBLISHED_VERSION='2.3.7'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SOURCE_INVENTORY_FILE=''
 REPOSITORY_INVENTORY_FILE=''
@@ -529,7 +529,8 @@ assert_codex_rules_have_explicit_decisions() {
                 else
                     decision='invalid'
                 fi
-                if [[ ${decision} != prompt && ${decision} != forbidden ]]; then
+                if [[ ${decision} != allow && ${decision} != prompt &&
+                    ${decision} != forbidden ]]; then
                     printf 'FAIL: unsafe Codex decision in rule %d: %s.\n' \
                         "${rule_count}" "${decision}" >&2
                     return 65
@@ -558,13 +559,62 @@ assert_codex_rules_have_explicit_decisions() {
     fi
 }
 
+assert_codex_execpolicy_decision() {
+    (($# >= 4)) || return 2
+    local expected_decision=$1
+    local assertion_label=$2
+    local rules_file=$3
+    local actual_decision=''
+    local matched_rule_count=''
+    shift 3
+
+    assert_status_split 0 "${assertion_label} execpolicy evaluation" \
+        codex execpolicy check --rules "${rules_file}" -- "$@"
+    if ! actual_decision=$(python3 -c '
+import json
+import sys
+
+document = json.load(sys.stdin)
+decision = document.get("decision")
+if decision is None:
+    print("null")
+elif isinstance(decision, str):
+    print(decision)
+else:
+    raise SystemExit(65)
+' <<<"${ASSERT_STDOUT}"); then
+        fail "${assertion_label}: unable to parse the execpolicy decision"
+    fi
+    assert_equals "${expected_decision}" "${actual_decision}" \
+        "${assertion_label} execpolicy decision"
+    if [[ ${expected_decision} == null ]]; then
+        if ! matched_rule_count=$(python3 -c '
+import json
+import sys
+
+document = json.load(sys.stdin)
+matched_rules = document.get("matchedRules")
+if not isinstance(matched_rules, list):
+    raise SystemExit(65)
+print(len(matched_rules))
+' <<<"${ASSERT_STDOUT}"); then
+            fail "${assertion_label}: unable to parse execpolicy matched rules"
+        fi
+        assert_equals 0 "${matched_rule_count}" \
+            "${assertion_label} execpolicy matched-rule count"
+    fi
+}
+
 assert_codex_rules_are_conservative() {
     local rules_file="${SCRIPT_DIR}/.codex/rules/default.rules"
+    local allow_count=''
     local first_line=''
     local required_fragment=''
     local -a required_fragments=(
         'decision = "prompt"'
         'decision = "forbidden"'
+        'helper uses the ordinary sandbox/baseline policy instead of receiving an'
+        'Every direct Git command remains interactive; use the fixed tracked helper for unattended read-only inspection.'
         'pattern = ["git", "push"]'
         'pattern = ["git", "tag"]'
         'pattern = ["git", "merge"]'
@@ -589,15 +639,90 @@ assert_codex_rules_are_conservative() {
         return 65
     fi
 
-    assert_file_not_contains "${rules_file}" \
-        'decision = "allow"' \
-        'project Codex policy never grants unconditional execution'
     assert_codex_rules_have_explicit_decisions "${rules_file}"
+    allow_count=$(awk '
+        $0 == "    decision = \"allow\"," { count += 1 }
+        END { print count + 0 }
+    ' "${rules_file}")
+    assert_equals '0' "${allow_count}" \
+        'Codex policy grants no execution-policy allowance'
+    assert_file_not_contains "${rules_file}" \
+        'pattern = [["./scripts/git-inspect.sh", "scripts/git-inspect.sh"]],' \
+        'Codex inspection helper receives no execution-policy exemption'
+    assert_file_contains "${rules_file}" \
+        'git diff --check' \
+        'Codex direct-git prompt examples contain git diff'
+    assert_file_contains "${rules_file}" \
+        'git commit -m update' \
+        'Codex direct-git prompt examples contain git commit'
+    assert_file_contains "${SCRIPT_DIR}/scripts/git-inspect.sh" \
+        'status|diff|diff-staged|diff-check|inventory' \
+        'Codex inspection helper exposes only fixed actions'
+    assert_file_contains "${SCRIPT_DIR}/tests/lib/project-files.sh" \
+        '    scripts/git-inspect.sh' \
+        'shell inventory contains the Codex inspection helper'
+    # shellcheck disable=SC2016 # Backticks are literal Markdown delimiters.
+    assert_file_contains "${SCRIPT_DIR}/REPOSITORY_FILES.md" \
+        '| `scripts/git-inspect.sh` |' \
+        'tracked-file inventory documents the Codex inspection helper'
     for required_fragment in "${required_fragments[@]}"; do
         assert_file_contains "${rules_file}" \
             "${required_fragment}" \
             "Codex execution policy contains ${required_fragment}"
     done
+
+    # Source archives intentionally have no Git database. Exercise the
+    # repository-backed read-only actions only in a worktree while retaining
+    # parser and policy coverage for both supported source layouts.
+    if [[ -e ${SCRIPT_DIR}/.git || -L ${SCRIPT_DIR}/.git ]]; then
+        assert_status 0 'Codex inspection helper fixed status action' \
+            "${SCRIPT_DIR}/scripts/git-inspect.sh" status
+        assert_status 0 'Codex inspection helper fixed diff check action' \
+            "${SCRIPT_DIR}/scripts/git-inspect.sh" diff-check
+        assert_status 0 'Codex inspection helper fixed inventory action' \
+            "${SCRIPT_DIR}/scripts/git-inspect.sh" inventory
+    fi
+    assert_status 2 'Codex inspection helper rejects an extra argument' \
+        "${SCRIPT_DIR}/scripts/git-inspect.sh" status unexpected
+    assert_status 2 'Codex inspection helper rejects an unknown action' \
+        "${SCRIPT_DIR}/scripts/git-inspect.sh" publish
+
+    if command -v codex >/dev/null 2>&1 \
+        && codex execpolicy check --help >/dev/null 2>&1; then
+        assert_codex_execpolicy_decision null \
+            'fixed status helper baseline policy' "${rules_file}" \
+            ./scripts/git-inspect.sh status
+        assert_codex_execpolicy_decision null \
+            'fixed helper extra-argument baseline policy' "${rules_file}" \
+            ./scripts/git-inspect.sh status unexpected
+        assert_codex_execpolicy_decision prompt \
+            'direct git status' "${rules_file}" \
+            git status --short --branch
+        assert_codex_execpolicy_decision prompt \
+            'direct git diff' "${rules_file}" \
+            git diff --check
+        assert_codex_execpolicy_decision prompt \
+            'git diff output-file option' "${rules_file}" \
+            git diff --output=/tmp/codex-execpolicy-diff.patch
+        assert_codex_execpolicy_decision prompt \
+            'git log output-file option' "${rules_file}" \
+            git log --output=/tmp/codex-execpolicy-log.txt -1
+        assert_codex_execpolicy_decision prompt \
+            'git show output-file option' "${rules_file}" \
+            git show --output=/tmp/codex-execpolicy-show.txt HEAD
+        assert_codex_execpolicy_decision prompt \
+            'git commit mutation' "${rules_file}" \
+            git commit -m execpolicy-probe
+        assert_codex_execpolicy_decision prompt \
+            'git update-ref mutation' "${rules_file}" \
+            git update-ref refs/heads/execpolicy-probe HEAD
+        assert_codex_execpolicy_decision prompt \
+            'git hash-object write mutation' "${rules_file}" \
+            git hash-object -w README.md
+        assert_codex_execpolicy_decision forbidden \
+            'force-push to main' "${rules_file}" \
+            git push --force origin HEAD:main
+    fi
 
     if ! CODEX_RULE_MUTATION_FILE=$(mktemp); then
         printf 'FAIL: unable to create Codex policy mutation fixture.\n' >&2
@@ -615,7 +740,7 @@ assert_codex_rules_are_conservative() {
         return 65
     fi
     assert_status 65 \
-        'Codex policy validation rejects an implicit allow decision' \
+        'Codex policy validation rejects a missing explicit decision' \
         assert_codex_rules_have_explicit_decisions \
         "${CODEX_RULE_MUTATION_FILE}"
     rm -f -- "${CODEX_RULE_MUTATION_FILE}"
@@ -1106,8 +1231,7 @@ publisher_job_executes_repo_shell() {
                 ((index < word_count)) || continue
                 script_path=${words[index]}
                 ;;
-            *)
-                ;;
+            *) ;;
         esac
 
         script_path=${script_path#\"}
@@ -2061,7 +2185,8 @@ test_static_tooling_contracts() {
         test_mock_gui_config_recovery \
         test_mock_gui_file_selection \
         test_mock_gui_diagnostic_logs \
-        test_mock_gui_state_initialization; do
+        test_mock_gui_state_initialization \
+        test_mock_gui_input_validation; do
         assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
             "${gui_phase}() {" \
             "mock GUI phase ${gui_phase}"
@@ -2518,6 +2643,10 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'grep -Fq "développement actuelle est la **${version}**." README.fr.md' \
         'release validates French README development version'
+    # shellcheck disable=SC2016
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
+        'python3 -B scripts/update-published-version.py --check "${version}"' \
+        'release binds packaged documentation to the release tag'
     for release_workflow in \
         "${SCRIPT_DIR}/.github/workflows/packages.yml" \
         "${SCRIPT_DIR}/.github/workflows/release.yml"; do
@@ -2836,6 +2965,9 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
         'unable to query the project version.' \
         'release preflight diagnoses project-version lookup failure'
+    assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
+        "--check \"\${version}\"" \
+        'release preflight binds packaged documentation to the release tag'
 }
 
 test_static_cleanup_and_qualification_contracts() {
@@ -3264,6 +3396,92 @@ test_static_application_contracts() {
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         '[REDACTED_SOURCE]' \
         'retained GUI logs apply defense-in-depth source-label redaction'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'url_is_youtube() {' \
+        'GUI uses a dedicated YouTube URL classifier'
+    # shellcheck disable=SC2016 # Literal GUI-source assertions.
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'url_host=${url_authority%%:*}' \
+        'GUI YouTube classifier isolates the normalized host'
+    # shellcheck disable=SC2016 # Literal GUI-source assertions.
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'url_host=${url_host,,}' \
+        'GUI YouTube classifier lowercases the host'
+    # shellcheck disable=SC2016 # Literal GUI-source assertions.
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'url_host=${url_host%.}' \
+        'GUI YouTube classifier removes one DNS root dot'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'youtube.com | *.youtube.com | youtu.be | *.youtu.be' \
+        'GUI YouTube classifier uses exact primary and short host suffixes'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'youtube-nocookie.com | *.youtube-nocookie.com)' \
+        'GUI YouTube classifier uses the exact privacy host suffix'
+    # shellcheck disable=SC2016 # Literal GUI-source assertion.
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'select_profile PROFILE "${is_youtube}"' \
+        'GUI profile menu consumes the current URL classification'
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        '--youtube-hls-firefox requires a YouTube URL.' \
+        'engine keeps independent YouTube HLS URL validation'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'show_error_with_log() {' \
+        'GUI centralizes errors with safe diagnostics'
+    assert_file_fragments_ordered \
+        "${SCRIPT_DIR}/download-video-gui.sh" \
+        'simple GUI errors use a Close action' \
+        'show_error() {' \
+        "--ok-label='Close'" \
+        '    return 0'
+    # shellcheck disable=SC2016 # Literal GUI-source assertion.
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'python3 -I -S - "${expected_identity}"' \
+        'retained-log identity comparison isolates Python startup'
+    # shellcheck disable=SC2016 # Literal GUI-source assertion.
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'mv -Tn -- "${retained_file}" "${final_log_path}"' \
+        'retained GUI logs use no-clobber atomic publication'
+    assert_file_fragments_ordered \
+        "${SCRIPT_DIR}/download-video-gui.sh" \
+        'diagnostic dialogs require a sanitized retained log' \
+        'show_error_with_log() {' \
+        '    retain_sanitized_log' \
+        'validated_retained_log_path retained_log' \
+        '    show_diagnostic_dialog' \
+        '    return 0'
+    assert_file_fragments_ordered \
+        "${SCRIPT_DIR}/download-video-gui.sh" \
+        'all safe diagnostics use the shared View log and Close dialog' \
+        'show_diagnostic_dialog() {' \
+        'resolve_viewable_diagnostic' \
+        "--ok-label='View log'" \
+        "--cancel-label='Close'" \
+        '            view_diagnostic_file'
+    assert_file_fragments_ordered \
+        "${SCRIPT_DIR}/download-video-gui.sh" \
+        'Zenity technical failures expose a private bounded diagnostic' \
+        'show_zenity_error() {' \
+        'zenity-diagnostic.XXXXXXXX' \
+        'show_diagnostic_dialog' \
+        'temporary'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        "--cancel-label='Close'" \
+        'GUI diagnostic dialogs provide a Close action'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        '--text-info' \
+        'GUI opens sanitized diagnostics in a text viewer'
+    assert_file_not_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'Log:' \
+        'GUI never leaves a diagnostic path behind an OK-only error'
+    assert_file_fragments_ordered \
+        "${SCRIPT_DIR}/download-video-gui.sh" \
+        'successful-download log viewing returns to the completion dialog' \
+        'show_success_dialog() {' \
+        '    while true; do' \
+        "if [[ \${success_action} == 'View log' ]]" \
+        '            view_retained_log' \
+        '            continue' \
+        '        break'
     assert_file_contains "${SCRIPT_DIR}/tests/lib/test-runner.sh" \
         'TEST_RUNNER_STARTING_CHILD=true' \
         'test runner marks the launch/registration critical section'

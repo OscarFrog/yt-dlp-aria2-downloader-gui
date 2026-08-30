@@ -26,8 +26,9 @@
 - [Limitations and lawful use](#limitations-and-lawful-use)
 - [License](#license)
 
-A Zenity graphical interface and Bash download engine for GNU/Linux only. It downloads a
-single URL using one of three profiles:
+A Zenity graphical interface and Bash download engine for GNU/Linux only. It
+downloads one URL using two general profiles and one additional YouTube-only
+profile:
 
 - a **complete MKV video**, using the best available video and audio streams;
 - an explicit **authenticated YouTube HLS video** profile that reads Firefox
@@ -40,20 +41,20 @@ direct downloads through a private aria2 input file, and FFmpeg to merge,
 remux, or extract streams. HTTPS automatically stays on yt-dlp's native
 transport when the installed aria2 TLS backend lacks the required certificate
 validation hardening. DASH and HLS streams also remain native. The current
-development version is **2.3.6**.
-The latest published package release is **2.3.6**.
+development version is **2.3.7**.
+The latest published package release is **2.3.7**.
 
 ## Recommended installation
 
 Open the [latest GitHub release](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
-The exact asset names below match the currently published v2.3.6 release.
+The exact asset names below match the currently published v2.3.7 release.
 
 For **Fedora 44**, download these four assets:
 
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.3.6-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.3.7-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -61,7 +62,7 @@ Verify the downloaded files, then run the supported Fedora bootstrap:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.6-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.7-1.fc44.noarch.rpm
 ```
 
 The bootstrap authenticates and enables RPM Fusion Free when needed, replaces
@@ -70,7 +71,7 @@ the application RPM, validates the FFmpeg provider, and initializes the
 per-user yt-dlp and Deno runtimes.
 
 For **Debian or Ubuntu**, download the versioned DEB and `SHA256SUMS`, verify
-it, then install it with `sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.6-1_all.deb`.
+it, then install it with `sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.7-1_all.deb`.
 For **other GNU/Linux distributions or portable use**, use the versioned ZIP or
 a Git checkout. The managed yt-dlp and Deno runtimes currently support Linux
 `x86_64` and `aarch64`.
@@ -172,8 +173,8 @@ both build provenance and immutable-release identity:
 
 ```bash
 gh attestation verify ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.3.6 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.3.6 ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.3.7 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.3.7 ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 `SHA256SUMS` remains useful for offline/local integrity checks; the GitHub
@@ -223,8 +224,8 @@ but it must execute the workflow from the exact release tag:
 
 ```bash
 gh workflow run release.yml \
-  --ref v2.3.6 \
-  -f tag=v2.3.6 \
+  --ref v2.3.7 \
+  -f tag=v2.3.7 \
   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
@@ -268,7 +269,7 @@ Download:
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.3.6-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.3.7-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -281,7 +282,7 @@ sha256sum --ignore-missing --check SHA256SUMS
 Then run:
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.6-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.7-1.fc44.noarch.rpm
 ```
 
 The bootstrap refuses an unsigned release RPM. It validates that
@@ -333,11 +334,11 @@ verified before activation.
 
 ### Debian and Ubuntu
 
-The latest published release, 2.3.6, provides an architecture-independent DEB
+The latest published release, 2.3.7, provides an architecture-independent DEB
 aligned with the same managed-runtime model as Fedora. Download:
 
 ```text
-yt-dlp-aria2-downloader-gui_2.3.6-1_all.deb
+yt-dlp-aria2-downloader-gui_2.3.7-1_all.deb
 SHA256SUMS
 ```
 
@@ -345,7 +346,7 @@ Verify and install it:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.6-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.7-1_all.deb
 ```
 
 The DEB explicitly depends on `aria2`, Python 3.10+, FFmpeg/FFprobe,
@@ -432,7 +433,7 @@ desktop installation from the current user's home directory.
 Download these release assets:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.3.6.zip
+yt-dlp-aria2-downloader-gui-2.3.7.zip
 SHA256SUMS
 ```
 
@@ -440,8 +441,8 @@ Verify and extract the archive:
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.3.6.zip
-cd yt-dlp-aria2-downloader-gui-2.3.6
+unzip yt-dlp-aria2-downloader-gui-2.3.7.zip
+cd yt-dlp-aria2-downloader-gui-2.3.7
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -513,15 +514,20 @@ the graphical interface.
 
 ### 2. Choose the download mode
 
-Select one of the three available profiles:
+The interface classifies the normalized URL host before displaying this menu.
+It always offers:
 
 - **Complete video (MKV)** downloads the best available video and audio streams
   and combines them in an MKV container;
-- **YouTube video - Firefox cookies (HLS/MKV)** is an explicit authenticated
-  fallback for YouTube and reads the local Firefox session before downloading
-  an HLS stream and remuxing it to MKV;
 - **Audio track (native format)** downloads the best available audio track while
   preserving its native format whenever possible.
+
+For `youtube.com`, `youtu.be`, `youtube-nocookie.com`, and their subdomains, it
+also offers **YouTube video - Firefox cookies (HLS/MKV)**. This explicit
+authenticated fallback reads the local Firefox session before downloading an
+HLS stream and remuxing it to MKV. It is never shown for another host. If this
+profile was remembered from a previous YouTube download, a later non-YouTube
+request selects **Complete video (MKV)** instead.
 
 
 ### 3. Choose the destination folder
@@ -538,14 +544,31 @@ the cancel button to stop the complete download process.
 ### 5. Download result
 
 After a successful download, the interface displays the path of the completed
-media file.
+media file. **Open folder** opens its destination, **New download** starts a
+fresh request, and **Close** ends the session. In the exceptional case where a
+successful-run log could not be removed but a safe sanitized copy is
+available, **View log** opens it and then returns to these completion actions.
 
 
-When the download fails, the interface displays an error dialog and preserves
-the diagnostic log.
+When an error occurs after a useful worker or progress diagnostic exists, the
+interface preserves a sanitized log and offers **View log** and **Close**. This
+includes worker startup, runtime, downloader, progress-monitor,
+post-processing, and final-result validation failures.
+
+When Zenity itself returns useful technical details before a download session
+exists, the same **View log** and **Close** actions open a bounded private
+temporary diagnostic. That diagnostic is removed immediately after the dialog;
+it is not presented as a persistent retained log.
 
 
-The retained log can be opened from the error dialog. Before retention, URL-like values are replaced with `[REDACTED_URL]` and only the last 8 MiB are kept. The live log is private (`0600`) while the worker is running.
+The retained log can be opened directly from the error dialog. Before
+retention, URL-like values are replaced with `[REDACTED_URL]` and only the last
+portion fitting the 8 MiB final limit is kept. A clearly marked section at the
+end records the retained file's exact name and canonical absolute path, so that
+information survives source-log truncation and always names the file opened by
+**View log**. The live log is private (`0600`) while the worker is running and
+is never offered as a fallback if safe sanitization fails. Input errors and
+other early failures without a useful diagnostic remain simple error messages.
 
 
 
@@ -711,18 +734,21 @@ Managed yt-dlp and Deno runtimes:
 ~/.local/share/yt-dlp-aria2-downloader/runtime/
 ```
 
-Execution logs:
+GUI diagnostic logs:
 
 ```text
 ~/.local/state/yt-dlp-aria2-downloader/download-*.log
 ```
 
 The live worker log is created with mode `0600` inside the private runtime
-temporary directory and is removed after success. Failed, canceled, interrupted,
-or inconsistent runs publish only a sanitized diagnostic copy in the state
-directory: URL-like values are replaced, only the last 8 MiB are retained, and
-the resulting file remains mode `0600`. Retained diagnostic logs older than 15
-days are removed automatically the next time the graphical interface starts.
+temporary directory and is removed after success. When a failed, canceled,
+interrupted, or inconsistent run produced a useful non-empty live log, only a
+sanitized diagnostic copy is published in the state directory. URL-like values
+are replaced, payload and final identity metadata together remain within 8 MiB,
+and the resulting file stays mode `0600`. Its final section gives the exact
+`download-*.log` basename and canonical absolute path. Retained diagnostic logs
+older than 15 days are removed automatically the next time a graphical download
+session is prepared.
 
 A same-user, per-destination advisory lock is kept under
 `$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader` when that runtime directory is

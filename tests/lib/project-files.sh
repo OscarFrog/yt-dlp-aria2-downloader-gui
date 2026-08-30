@@ -71,6 +71,7 @@ DEVELOPMENT_SHELL_FILES=(
     scripts/dev-tools/ensure-shfmt.sh
     scripts/check-shell-format.sh
     scripts/format-shell.sh
+    scripts/git-inspect.sh
     scripts/release-evidence-qualification.sh
 )
 

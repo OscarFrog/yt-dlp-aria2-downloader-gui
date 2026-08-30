@@ -227,6 +227,7 @@ jobs:
           grep -Fqx "readonly APP_VERSION='${version}'" install-fedora.sh
           grep -Fq "development version is **${version}**." README.md
           grep -Fq "développement actuelle est la **${version}**." README.fr.md
+          python3 -B scripts/update-published-version.py --check "${version}"
           grep -Fq "## ${version} - " CHANGELOG.md
       - run: bash ./tests/run-all.sh --jobs 4
 

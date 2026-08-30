@@ -117,8 +117,11 @@ claiming post-return immutability.
 1. Resolve safe XDG configuration and state paths and validate required host
    commands, adjacent engine files, and `setsid` capabilities.
 2. Load `gui.conf` only when it is a regular non-symbolic-link file within the
-   64 KiB and 128-line limits. Collect the URL, profile, and destination with
-   Zenity, then persist only the destination and selected profile; never
+   64 KiB and 128-line limits. Collect the URL, classify its normalized host
+   with the engine's exact YouTube host set, and omit the authenticated HLS
+   profile for every other host. An incompatible remembered HLS profile falls
+   back to complete video for the current request. Collect the destination,
+   then persist only the destination and selected compatible profile; never
    persist the URL.
 3. Create a private temporary session containing a mode-`0600` URL file, live
    log, result record, and process-group record.
@@ -137,7 +140,18 @@ claiming post-return immutability.
 7. Accept success only when the worker succeeded and the private result record
    names a valid final path. Retain a sanitized diagnostic log only when useful;
    when its source exceeds 8 MiB, discard the first potentially partial tail
-   line before URL redaction and enforce the size bound again afterward.
+   line before URL redaction and abandon retention if no useful safe payload
+   remains. After validating the state directory's owner and mode, assemble the
+   payload in a hidden private staging file and reserve space inside the same
+   8 MiB limit for a final section containing the future file's exact basename
+   and canonical absolute path. Compare that section byte-for-byte, publish the
+   completed inode atomically without overwriting, and revalidate identity,
+   containment, ownership, mode, type, and size before viewing. Every
+   interactive error with such a safely retained diagnostic uses one shared
+   View log/Close path. Pre-session Zenity failures with bounded technical
+   output use that same dialog with a mode-`0600` diagnostic inside a private
+   temporary directory, then remove it immediately after the interaction. The
+   GUI never falls back to the private raw worker log.
 
 The GUI recognizes legacy audio-profile values solely to migrate old settings
 to the current single native-audio profile.
@@ -212,10 +226,10 @@ contract; `SHELL_STYLE.md`'s Bash banner does not apply.
 
 ## Progress protocol
 
-The engine writes human diagnostics and machine records to one private log.
-`progress-monitor.sh` tails that log and maintains a monotonic display model for
-yt-dlp native downloads, aria2 direct transfers, yt-dlp post-processing, and
-FFmpeg remux progress.
+The GUI captures the engine's human diagnostics and machine records in one
+private live log. `progress-monitor.sh` tails that log and maintains a monotonic
+display model for yt-dlp native downloads, aria2 direct transfers, yt-dlp
+post-processing, and FFmpeg remux progress.
 
 Machine records include plan membership, stable format identifiers, byte or
 fragment counters, post-processing state, FFmpeg duration/progress, and the
@@ -255,9 +269,9 @@ The other persistent paths are:
 | Data | Default location | Lifetime |
 | --- | --- | --- |
 | GUI preferences | `${XDG_CONFIG_HOME:-$HOME/.config}/yt-dlp-aria2-downloader/gui.conf` | Preserved across ordinary package removal |
-| Retained sanitized logs | `${XDG_STATE_HOME:-$HOME/.local/state}/yt-dlp-aria2-downloader/` | Pruned by age and removed only by bounded cleanup |
+| Retained sanitized logs | `${XDG_STATE_HOME:-$HOME/.local/state}/yt-dlp-aria2-downloader/download-*.log` | Self-identify their canonical final path, are pruned by age, and are removed only by bounded cleanup |
 | Managed runtimes | `${XDG_DATA_HOME:-$HOME/.local/share}/yt-dlp-aria2-downloader/runtime/` | Preserved across upgrade/removal; eligible for proven-owned final RPM cleanup |
-| GUI live session | `${TMPDIR:-/tmp}/yt-dlp-gui.*` | Private and removed at session end unless a sanitized diagnostic is retained |
+| GUI live session | `${TMPDIR:-/tmp}/yt-dlp-gui.*` | Private and always removed at session end; a useful diagnostic may first be copied to retained state |
 | Direct-transfer staging | Destination child `.yt-dlp-aria2.*` | Private, marker-owned, committed or recovered by the engine |
 
 ## Packaging architecture
@@ -299,12 +313,18 @@ publication. The RPM signing job receives signing secrets but does not execute
 candidate repository code. The publisher consumes reviewed artifacts and
 revalidates their inventory and digests before attestation and publication.
 Fresh-download verification independently compares public immutable assets with
-the tested artifacts.
+the tested artifacts. Before any package or source archive is built, release
+validation also requires the English/French published-asset references and
+their static contract to match the tag version. This keeps the README files
+embedded in the immutable ZIP, RPM, and DEB compatible with the version-locked
+Fedora bootstrap; a later documentation update cannot repair those bytes.
 
 The post-release documentation workflow is a separate `workflow_run` trust
 zone. Its read-only preparation and verification jobs bind the triggering
 successful `release.yml` run, semantic tag, exact source commit, and immutable
-public release before producing a data-only patch. Only the final job receives
+public release before producing a data-only patch when one is still needed.
+For releases created under the tagged-documentation guard, the updater is
+expected to be an idempotent no-op. Only the final job receives
 `contents: write`; it does not execute repository code or check out any
 repository ref. It resolves the protected `main` identity through the GitHub
 API, requires the release SHA to be its ancestor, verifies the current
@@ -336,10 +356,14 @@ stress runs are separate qualifications documented in `TESTING.md`.
 Contributor control is layered around that runner. Repository skills route a
 task to the relevant policy; issue and pull-request templates make scope,
 invariants, validation evidence, and external authority explicit; conservative
-Codex execution rules prompt for Git, GitHub CLI, and common environment
-wrappers requested outside the sandbox, and forbid common force-push-to-`main`
-forms. These controls improve task execution but do not grant release, merge,
-or repository-administration authority.
+Codex execution rules route unattended repository inspection through the
+tracked fixed-action Git helper, which runs under the ordinary sandbox or
+baseline policy without an explicit `allow` rule. They keep every direct Git
+command, global-option form, GitHub CLI command, and common environment wrapper
+interactive outside the sandbox, and forbid common force-push-to-`main` forms.
+These controls improve task
+execution but do not grant release, merge, or repository-administration
+authority.
 
 Tests use private temporary homes, mock binaries, fixtures, and bounded process
 supervision. The parallel runner binds cancellation to a child-published Linux

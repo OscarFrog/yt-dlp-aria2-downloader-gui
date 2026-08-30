@@ -104,7 +104,7 @@ parse_preflight_arguments() {
 require_preflight_commands() {
     local command_name=''
 
-    for command_name in awk chmod date gh git gpg grep mktemp rm; do
+    for command_name in awk chmod date gh git gpg grep mktemp python3 rm; do
         command -v -- "${command_name}" >/dev/null 2>&1 \
             || fail "required preflight command is absent: ${command_name}"
     done
@@ -184,6 +184,11 @@ verify_release_tree_and_version() {
     fi
     [[ ${release_tag} == "v${version}" ]] \
         || fail "release tag/version mismatch: tag=${release_tag} project=${version}"
+
+    if ! python3 -B scripts/update-published-version.py \
+        --check "${version}"; then
+        fail 'release documentation does not describe the tagged artifacts.'
+    fi
 
     [[ -f ${RPM_SIGNING_KEY} && ! -L ${RPM_SIGNING_KEY} ]] \
         || fail "RPM signing public certificate is missing or unsafe: ${RPM_SIGNING_KEY}"

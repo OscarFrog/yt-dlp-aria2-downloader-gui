@@ -334,6 +334,9 @@ if [[ ${probe_operation} == '--version' ]]; then
         printf '%s\n' --version >>"${MOCK_YTDLP_CONTROL_LOG}"
     fi
     [[ ${LC_ALL:-} == C ]] || { printf 'localized yt-dlp version output\n'; exit 65; }
+    if [[ -n ${MOCK_YTDLP_VERSION_DELAY_SECONDS:-} ]]; then
+        sleep "${MOCK_YTDLP_VERSION_DELAY_SECONDS}"
+    fi
     printf '%s\n' "${MOCK_YTDLP_VERSION:-2026.06.09}"
     exit 0
 fi
@@ -602,6 +605,10 @@ if [[ ${MOCK_YTDLP_EXIT_STATUS:-0} != 0 ]]; then
         printf '%s' "${boundary_line}"
         head -c "${filler_size}" -- /dev/zero | tr '\0' Y
         printf '%s' "${trailer}"
+    fi
+    if [[ ${MOCK_FAILURE_DIAGNOSTIC_URL:-0} == 1 ]]; then
+        printf '%s\n' \
+            'https://example.invalid/private?token=UNSANITIZED_DIAGNOSTIC_SECRET'
     fi
     printf 'Simulated yt-dlp failure.\n' >&2
     exit "${MOCK_YTDLP_EXIT_STATUS}"
@@ -1027,8 +1034,9 @@ chmod +x "${MOCK_BIN}/ffprobe"
 
 REAL_ENV=$(command -v env)
 REAL_MV=$(command -v mv)
+REAL_SED=$(command -v sed)
 REAL_SETSID=$(command -v setsid)
-export REAL_ENV REAL_MV REAL_SETSID
+export REAL_ENV REAL_MV REAL_SED REAL_SETSID
 cat >"${MOCK_BIN}/env" <<'EOF_ENV'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1087,6 +1095,26 @@ exec "${REAL_MV:?}" "$@"
 EOF_MV
 chmod +x "${MOCK_BIN}/mv"
 
+cat >"${MOCK_BIN}/sed" <<'EOF_SED'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ ${MOCK_SANITIZATION_FAILURE:-0} == 1 ]]; then
+    for argument in "$@"; do
+        case ${argument} in
+            */log-snapshot.* | */log-truncated.*)
+                printf '%s\n' 'Simulated diagnostic sanitization failure.' >&2
+                exit 75
+                ;;
+            *) ;;
+        esac
+    done
+fi
+
+exec "${REAL_SED:?}" "$@"
+EOF_SED
+chmod +x "${MOCK_BIN}/sed"
+
 cat >"${MOCK_BIN}/setsid" <<'EOF_SETSID'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1095,6 +1123,9 @@ if (($# == 1)) && [[ $1 == '--help' ]]; then
     exec "${REAL_SETSID:?}" "$@"
 fi
 if [[ -n ${MOCK_SETSID_START_STATUS:-} ]]; then
+    if [[ ${MOCK_SETSID_SILENT_FAILURE:-0} != 1 ]]; then
+        printf '%s\n' 'Simulated worker session startup failure.' >&2
+    fi
     exit "${MOCK_SETSID_START_STATUS}"
 fi
 if [[ -n ${MOCK_SETSID_LOG:-} ]]; then
@@ -1145,10 +1176,36 @@ block_for_signal() {
     done
 }
 
+emit_mock_file_error() {
+    local file_error_output=''
+
+    if [[ -n ${MOCK_ZENITY_FILE_ERROR_BYTES:-} ]]; then
+        printf -v file_error_output '%*s' \
+            "${MOCK_ZENITY_FILE_ERROR_BYTES}" ''
+        printf 'file chooser failed for https://secret.example/%s\n' \
+            "${file_error_output// /X}" >&2
+    else
+        printf '%s\n' \
+            "${MOCK_ZENITY_FILE_ERROR:-simulated file chooser failure}" >&2
+    fi
+}
+
 case " $* " in
     *' --entry '*)
         block_for_signal entry
+        if [[ ${MOCK_INVALID_URL_THEN_CANCEL:-0} == 1 ]]; then
+            : "${MOCK_ENTRY_ATTEMPT_MARKER:?}"
+            if [[ ! -e ${MOCK_ENTRY_ATTEMPT_MARKER} ]]; then
+                : >"${MOCK_ENTRY_ATTEMPT_MARKER}"
+                printf '%s\n' 'not-a-valid-url'
+                exit 0
+            fi
+            exit 1
+        fi
         if [[ -n ${MOCK_ZENITY_ENTRY_STATUS:-} ]]; then
+            if [[ -n ${MOCK_ZENITY_ENTRY_ERROR:-} ]]; then
+                printf '%s\n' "${MOCK_ZENITY_ENTRY_ERROR}" >&2
+            fi
             exit "${MOCK_ZENITY_ENTRY_STATUS}"
         fi
         if [[ -n ${MOCK_ZENITY_ENTRY_OUTPUT_BYTES:-} ]]; then
@@ -1192,13 +1249,11 @@ case " $* " in
         fi
         if [[ -n ${MOCK_ZENITY_FILE_STATUS_WITH_FILENAME:-} ]] \
             && [[ " $* " == *' --filename='* ]]; then
-            printf '%s\n' \
-                "${MOCK_ZENITY_FILE_ERROR:-simulated --filename failure}" >&2
+            emit_mock_file_error
             exit "${MOCK_ZENITY_FILE_STATUS_WITH_FILENAME}"
         fi
         if [[ -n ${MOCK_ZENITY_FILE_STATUS:-} ]]; then
-            printf '%s\n' \
-                "${MOCK_ZENITY_FILE_ERROR:-simulated file chooser failure}" >&2
+            emit_mock_file_error
             exit "${MOCK_ZENITY_FILE_STATUS}"
         fi
         printf '%s\n' "${MOCK_OUTPUT_DIR}"
@@ -1267,13 +1322,33 @@ case " $* " in
         done
         ;;
     *' --question '*)
-        exit 1
+        block_for_signal question
+        if [[ -n ${MOCK_QUESTION_ARGS_LOG:-} ]]; then
+            printf '%s\0' "$@" >"${MOCK_QUESTION_ARGS_LOG}"
+        fi
+        printf '%s' "${MOCK_QUESTION_OUTPUT:-}"
+        exit "${MOCK_QUESTION_STATUS:-1}"
         ;;
     *' --info '*)
         exit 0
         ;;
     *' --text-info '*)
-        exit 0
+        block_for_signal text-info
+        if [[ -n ${MOCK_TEXT_INFO_ARGS_LOG:-} ]]; then
+            printf '%s\0' "$@" >"${MOCK_TEXT_INFO_ARGS_LOG}"
+        fi
+        if [[ -n ${MOCK_TEXT_INFO_CONTENT_CAPTURE:-} ]]; then
+            diagnostic_file=''
+            for argument in "$@"; do
+                case ${argument} in
+                    --filename=*) diagnostic_file=${argument#--filename=} ;;
+                    *) ;;
+                esac
+            done
+            [[ -n ${diagnostic_file} && -f ${diagnostic_file} ]] || exit 66
+            cp -- "${diagnostic_file}" "${MOCK_TEXT_INFO_CONTENT_CAPTURE}"
+        fi
+        exit "${MOCK_TEXT_INFO_STATUS:-0}"
         ;;
     *' --error '*)
         if [[ -n ${MOCK_ERROR_CAPTURE:-} ]]; then
@@ -1363,6 +1438,102 @@ assert_array_not_contains() {
         [[ ${value} != "${unexpected}" ]] \
             || fail "${label}: unexpected array element: ${unexpected}"
     done
+}
+
+assert_diagnostic_question() {
+    (($# == 3)) || return 2
+    local arguments_text=''
+    local question_log=$1
+    local expected_message=$2
+    local label=$3
+    local -a question_arguments=()
+
+    read_arguments "${question_log}" question_arguments
+    assert_array_contains question_arguments '--question' \
+        "${label} uses a question dialog"
+    assert_array_contains question_arguments '--ok-label=View log' \
+        "${label} View log action"
+    assert_array_contains question_arguments '--cancel-label=Close' \
+        "${label} Close action"
+    arguments_text=$(printf '%s\n' "${question_arguments[@]}")
+    assert_text_contains "${arguments_text}" "${expected_message}" \
+        "${label} user-facing message"
+}
+
+assert_retained_log_identity_footer() {
+    (($# == 2)) || return 2
+    local retained_log=$1
+    local label=$2
+    local actual_footer=''
+    local expected_footer=''
+    local resolved_log=''
+    local retained_name=''
+
+    resolved_log=$(realpath -e -- "${retained_log}") \
+        || fail "${label}: unable to resolve retained log: ${retained_log}"
+    retained_name=${resolved_log##*/}
+    printf -v expected_footer '%s\n%s\n%s\n%s\n%s\n%s' \
+        '============================================================' \
+        'Diagnostic log information' \
+        '============================================================' \
+        "Log file name: ${retained_name}" \
+        "Log full path: ${resolved_log}" \
+        '============================================================'
+    actual_footer=$(tail -n 6 -- "${retained_log}") \
+        || fail "${label}: unable to read retained-log footer."
+    assert_equals "${expected_footer}" "${actual_footer}" \
+        "${label} exact terminal identity footer"
+    assert_file_not_contains "${retained_log}" 'live-download-log.' \
+        "${label} excludes the live temporary log"
+    assert_file_not_contains "${retained_log}" 'log-snapshot.' \
+        "${label} excludes the temporary snapshot"
+    assert_file_not_contains "${retained_log}" 'log-truncated.' \
+        "${label} excludes the temporary truncation file"
+    assert_file_not_contains "${retained_log}" '/yt-dlp-gui.' \
+        "${label} excludes the temporary GUI session"
+}
+
+assert_no_retained_log_staging() {
+    (($# == 2)) || return 2
+    local log_dir=$1
+    local label=$2
+    local staging_file=''
+
+    for staging_file in "${log_dir}"/.download-*.log.part; do
+        [[ -e ${staging_file} || -L ${staging_file} ]] || continue
+        fail "${label}: retained-log staging file remains: ${staging_file}"
+    done
+}
+
+assert_gui_profile_menu() {
+    (($# == 4)) || return 2
+    local scenario=$1
+    local requested_url=$2
+    local youtube_expected=$3
+    local label=$4
+    # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+    local -a profile_arguments=()
+
+    prepare_argument_log "${scenario}"
+    assert_status 0 "${label} GUI run" \
+        env MOCK_ZENITY_ENTRY_VALUE="${requested_url}" \
+        MOCK_PROFILE='Audio track (native format)' \
+        "${GUI_UNDER_TEST}"
+    read_arguments "${LIST_ARGS_LOG}" profile_arguments
+    assert_array_contains profile_arguments 'Complete video (MKV)' \
+        "${label} complete-video profile"
+    assert_array_contains profile_arguments 'Audio track (native format)' \
+        "${label} audio profile"
+    if [[ ${youtube_expected} == true ]]; then
+        assert_array_contains profile_arguments \
+            'YouTube video - Firefox cookies (HLS/MKV)' \
+            "${label} YouTube HLS profile"
+    else
+        assert_array_not_contains profile_arguments \
+            'YouTube video - Firefox cookies (HLS/MKV)' \
+            "${label} excludes YouTube HLS"
+    fi
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 }
 
 assert_option_value() {
@@ -1593,11 +1764,11 @@ initialize_mock_integration() {
 
     readonly MOCK_NO_DENO_BIN="${TEST_ROOT}/bin-no-deno"
     mkdir -p -- "${MOCK_NO_DENO_BIN}"
-    for managed_mock in yt-dlp aria2c zenity env ffmpeg ffprobe mv setsid; do
+    for managed_mock in yt-dlp aria2c zenity env ffmpeg ffprobe mv sed setsid; do
         ln -s -- "${MOCK_BIN}/${managed_mock}" "${MOCK_NO_DENO_BIN}/${managed_mock}"
     done
 
-    for mocked_command in yt-dlp aria2c deno zenity env ffmpeg ffprobe mv setsid; do
+    for mocked_command in yt-dlp aria2c deno zenity env ffmpeg ffprobe mv sed setsid; do
         resolved_mock=$(command -v "${mocked_command}")
         assert_equals "${MOCK_BIN}/${mocked_command}" "${resolved_mock}" \
             "${mocked_command} mock selection"
@@ -1625,6 +1796,7 @@ test_mock_engine_log_retention() {
     : >"${recent_retained_log}"
     : >"${unrelated_old_file}"
     : >"${symlink_target}"
+    chmod 600 -- "${old_retained_log}" "${recent_retained_log}"
     LC_ALL=C touch -d '16 days ago' -- \
         "${old_retained_log}" "${unrelated_old_file}" "${symlink_target}"
     LC_ALL=C touch -d '14 days ago' -- "${recent_retained_log}"
@@ -2648,23 +2820,47 @@ test_mock_gui_aria_progress() {
 }
 
 test_mock_gui_profiles() {
-    local config_file expected_profile_label removed_profile_label
-    local -a list_arguments video_gui_arguments youtube_hls_default_arguments
+    local config_file profile_case removed_profile_label requested_url scenario
+    local -a false_youtube_cases incompatible_default_arguments list_arguments
+    local -a video_gui_arguments youtube_cases youtube_hls_default_arguments
     local -a youtube_hls_gui_arguments
+
+    youtube_cases=(
+        'gui-profile-youtube-root|https://youtube.com/watch?v=profile-root'
+        'gui-profile-youtube-subdomain|https://media.youtube.com/watch?v=profile-subdomain'
+        'gui-profile-youtu-be|https://youtu.be/profile-short'
+        'gui-profile-youtu-be-subdomain|https://media.youtu.be/profile-short-subdomain'
+        'gui-profile-nocookie|https://youtube-nocookie.com/embed/profile-nocookie'
+        'gui-profile-nocookie-subdomain|https://media.youtube-nocookie.com/embed/profile-nocookie-subdomain'
+        'gui-profile-normalized-host|https://WWW.YOUTUBE.COM.:443/watch?v=profile-normalized'
+    )
+    for profile_case in "${youtube_cases[@]}"; do
+        IFS='|' read -r scenario requested_url <<<"${profile_case}"
+        assert_gui_profile_menu "${scenario}" "${requested_url}" true \
+            "recognized YouTube URL ${requested_url}"
+    done
 
     # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
     list_arguments=()
     read_arguments "${LIST_ARGS_LOG}" list_arguments
-    for expected_profile_label in \
-        'Complete video (MKV)' \
-        'YouTube video - Firefox cookies (HLS/MKV)' \
-        'Audio track (native format)'; do
-        assert_array_contains list_arguments "${expected_profile_label}" \
-            "GUI profile label ${expected_profile_label}"
-    done
     for removed_profile_label in 'Audio - MP3' 'Audio - M4A' 'Audio - Opus'; do
         assert_array_not_contains list_arguments "${removed_profile_label}" \
             "removed GUI profile ${removed_profile_label}"
+    done
+
+    false_youtube_cases=(
+        'gui-profile-generic|https://example.com/video'
+        'gui-profile-false-name|https://notyoutube.com/video'
+        'gui-profile-false-prefix|https://youtube.example.com/video'
+        'gui-profile-false-suffix|https://youtube.com.example.org/video'
+        'gui-profile-false-short-suffix|https://youtu.be.example.org/video'
+        'gui-profile-false-nocookie-suffix|https://youtube-nocookie.com.example.org/video'
+        'gui-profile-false-path|https://example.org/youtube.com/video'
+    )
+    for profile_case in "${false_youtube_cases[@]}"; do
+        IFS='|' read -r scenario requested_url <<<"${profile_case}"
+        assert_gui_profile_menu "${scenario}" "${requested_url}" false \
+            "non-YouTube URL ${requested_url}"
     done
 
     prepare_argument_log 'gui-ytdlp-progress'
@@ -2718,6 +2914,27 @@ test_mock_gui_profiles() {
     assert_option_value youtube_hls_default_arguments '--cookies-from-browser' 'firefox' \
         'persisted GUI YouTube HLS profile'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].mkv"
+
+    prepare_argument_log 'gui-incompatible-youtube-hls-default'
+    assert_status 0 'non-YouTube URL replaces an incompatible persisted profile' \
+        env MOCK_USE_DEFAULT_PROFILE=1 \
+        MOCK_ZENITY_ENTRY_VALUE='https://vimeo.com/123456789' \
+        "${GUI_UNDER_TEST}"
+    # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+    list_arguments=()
+    read_arguments "${LIST_ARGS_LOG}" list_arguments
+    assert_array_not_contains list_arguments \
+        'YouTube video - Firefox cookies (HLS/MKV)' \
+        'non-YouTube menu excludes the persisted YouTube HLS profile'
+    # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+    incompatible_default_arguments=()
+    read_arguments "${MOCK_ARG_LOG}" incompatible_default_arguments
+    assert_option_value incompatible_default_arguments '--format' 'bv*+ba/b' \
+        'incompatible persisted profile falls back to complete video'
+    assert_array_not_contains incompatible_default_arguments \
+        '--cookies-from-browser' \
+        'incompatible persisted profile does not enable Firefox cookies'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 }
 
 test_mock_gui_progress_completion() {
@@ -2756,6 +2973,9 @@ test_mock_gui_progress_completion() {
     current_log_count=$(count_logs)
     assert_equals '0' "${current_log_count}" \
         'confirmed successful GUI downloads must not retain logs'
+    assert_no_retained_log_staging \
+        "${XDG_STATE_HOME}/yt-dlp-aria2-downloader" \
+        'confirmed successful GUI download'
 }
 
 test_mock_gui_config_recovery() {
@@ -2907,8 +3127,9 @@ EOF_BAD_CONFIG
 
 test_mock_gui_file_selection() {
     local argument file_selection_args_log file_selection_calls
-    local filename_attempts
-    local -a file_selection_arguments
+    local filename_attempts oversized_capture oversized_diagnostic
+    local oversized_question_log oversized_size oversized_text_info_log
+    local -a file_selection_arguments oversized_text_info_arguments
 
     # Scenario: file chooser fallback after a GTK/Zenity initial-directory failure.
     file_selection_args_log="${TEST_ROOT}/file-selection-args.bin"
@@ -2938,20 +3159,83 @@ test_mock_gui_file_selection() {
     done
     assert_equals '2' "${file_selection_calls}" 'file chooser fallback call count'
     assert_equals '1' "${filename_attempts}" 'preselected file chooser attempt count'
+
+    # Two bounded Zenity stderr captures can exceed the single diagnostic
+    # limit when the chooser fallback also fails. Redact before retaining only
+    # the final 64 KiB so an URL suffix cannot escape sanitization.
+    oversized_question_log="${TEST_ROOT}/file-selection-oversized-question.bin"
+    oversized_text_info_log="${TEST_ROOT}/file-selection-oversized-text-info.bin"
+    oversized_capture="${TEST_ROOT}/file-selection-oversized-diagnostic.txt"
+    rm -f -- "${oversized_question_log}" \
+        "${oversized_text_info_log}" "${oversized_capture}"
+    prepare_argument_log 'file-selection-oversized-diagnostic'
+    assert_status 1 'two large file-chooser errors expose a bounded diagnostic' \
+        env MOCK_ZENITY_FILE_STATUS_WITH_FILENAME=42 \
+        MOCK_ZENITY_FILE_STATUS=42 \
+        MOCK_ZENITY_FILE_ERROR_BYTES=40000 \
+        MOCK_QUESTION_STATUS=0 \
+        MOCK_QUESTION_ARGS_LOG="${oversized_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${oversized_text_info_log}" \
+        MOCK_TEXT_INFO_CONTENT_CAPTURE="${oversized_capture}" \
+        "${GUI_UNDER_TEST}"
+    assert_diagnostic_question "${oversized_question_log}" \
+        'Zenity could not display the folder selection dialog.' \
+        'oversized file-chooser diagnostic'
+    oversized_text_info_arguments=()
+    read_arguments \
+        "${oversized_text_info_log}" oversized_text_info_arguments
+    oversized_diagnostic=''
+    for argument in "${oversized_text_info_arguments[@]}"; do
+        case ${argument} in
+            --filename=*) oversized_diagnostic=${argument#--filename=} ;;
+            *) ;;
+        esac
+    done
+    [[ -n ${oversized_diagnostic} && ! -e ${oversized_diagnostic} ]] \
+        || fail 'The oversized private Zenity diagnostic was not removed.'
+    oversized_size=$(stat -c '%s' -- "${oversized_capture}") \
+        || fail 'Unable to inspect the bounded Zenity diagnostic.'
+    ((oversized_size > 0 && oversized_size <= 65536)) \
+        || fail "Zenity diagnostic exceeded its bound: ${oversized_size}"
+    assert_file_contains "${oversized_capture}" '[REDACTED_URL]' \
+        'oversized file-chooser diagnostic redacts URL-like values'
+    assert_file_not_contains "${oversized_capture}" 'secret.example' \
+        'oversized file-chooser diagnostic hides the raw URL'
 }
 
 test_mock_gui_diagnostic_logs() {
-    local boundary_log_found failure_record_found log_dir log_mode
-    local log_record_found log_size logs_after logs_before outside_result_path
-    local retained_log
-    local -a failed_logs inconsistent_logs
+    local boundary_log_found boundary_question_log boundary_text_info_log
+    local failure_question_log failure_record_found final_probe_question_log
+    local final_result_bundle final_result_question_log final_result_text_info_log
+    local inconsistent_question_log inconsistent_text_info_log log_dir log_mode
+    local log_record_found log_size logs_after logs_before outside_question_log
+    local outside_result_path retained_log runtime_question_log
+    local sanitization_error_capture sanitization_question_log
+    local sanitization_text_info_log single_line_bundle
+    local single_line_error_capture
+    local single_line_question_log single_line_text_info_log viewed_log
+    local bounded_whitespace_error_capture bounded_whitespace_question_log
+    local bounded_whitespace_text_info_log whitespace_error_capture
+    local whitespace_question_log whitespace_text_info_log
+    local -a failed_logs inconsistent_logs viewed_log_arguments
 
     # Scenario group: diagnostic log retention and cleanup.
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     logs_before=$(count_logs)
     prepare_argument_log 'inconsistent-result'
+    inconsistent_question_log="${TEST_ROOT}/inconsistent-result-question.bin"
+    inconsistent_text_info_log="${TEST_ROOT}/inconsistent-result-text-info.bin"
+    rm -f -- "${inconsistent_question_log}" "${inconsistent_text_info_log}"
     assert_status 1 'missing final path is reported as a failed GUI run' \
-        env MOCK_SKIP_RESULT_FILE=1 "${GUI_UNDER_TEST}"
+        env MOCK_SKIP_RESULT_FILE=1 \
+        MOCK_QUESTION_ARGS_LOG="${inconsistent_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${inconsistent_text_info_log}" \
+        "${GUI_UNDER_TEST}"
+    assert_diagnostic_question "${inconsistent_question_log}" \
+        'The download failed with status 1.' \
+        'engine-missing-final-path diagnostic'
+    [[ ! -s ${inconsistent_text_info_log} ]] \
+        || fail 'Close unexpectedly opened the missing-final-path diagnostic log.'
     logs_after=$(count_logs)
     assert_equals "$((logs_before + 1))" "${logs_after}" \
         'an inconsistent run retains one new log'
@@ -2973,10 +3257,16 @@ test_mock_gui_diagnostic_logs() {
     outside_result_path="${TEST_ROOT}/outside-result.webm"
     logs_before=$(count_logs)
     prepare_argument_log 'result-outside-output-dir'
+    outside_question_log="${TEST_ROOT}/outside-result-question.bin"
+    rm -f -- "${outside_question_log}"
     assert_status 1 'GUI rejects a result outside the selected destination folder' \
         env MOCK_RESULT_OUTSIDE_OUTPUT=1 \
         MOCK_OUTSIDE_RESULT_PATH="${outside_result_path}" \
+        MOCK_QUESTION_ARGS_LOG="${outside_question_log}" \
         "${GUI_UNDER_TEST}"
+    assert_diagnostic_question "${outside_question_log}" \
+        'The download failed with status 1.' \
+        'engine-outside-final-path diagnostic'
     logs_after=$(count_logs)
     assert_equals "$((logs_before + 1))" "${logs_after}" \
         'an outside-directory result retains one diagnostic log'
@@ -2987,10 +3277,16 @@ test_mock_gui_diagnostic_logs() {
 
     logs_before=$(count_logs)
     prepare_argument_log 'failed-download'
+    failure_question_log="${TEST_ROOT}/failed-download-question.bin"
+    rm -f -- "${failure_question_log}"
     assert_status 7 'failed GUI download status is propagated' \
         env MOCK_PLAN_PROTOCOL='m3u8_native' \
         MOCK_YTDLP_EXIT_STATUS=7 \
+        MOCK_QUESTION_ARGS_LOG="${failure_question_log}" \
         "${GUI_UNDER_TEST}"
+    assert_diagnostic_question "${failure_question_log}" \
+        'The download failed with status 7.' \
+        'downloader-failure diagnostic'
     logs_after=$(count_logs)
     assert_equals "$((logs_before + 1))" "${logs_after}" \
         'a failed download retains one new log'
@@ -3006,14 +3302,57 @@ test_mock_gui_diagnostic_logs() {
     done
     [[ ${failure_record_found} == true ]] \
         || fail 'No retained log contains the simulated failure.'
+    assert_retained_log_identity_footer "${retained_log}" \
+        'ordinary retained diagnostic'
+    assert_no_retained_log_staging "${log_dir}" \
+        'ordinary failed GUI download'
 
     logs_before=$(count_logs)
     prepare_argument_log 'retained-log-boundary-redaction'
+    boundary_question_log="${TEST_ROOT}/boundary-question.bin"
+    boundary_text_info_log="${TEST_ROOT}/boundary-text-info.bin"
+    rm -f -- "${boundary_question_log}" "${boundary_text_info_log}"
     assert_status 7 'boundary-crossing failed GUI download status is propagated' \
         env MOCK_PLAN_PROTOCOL='m3u8_native' \
         MOCK_BOUNDARY_LOG=1 \
         MOCK_YTDLP_EXIT_STATUS=7 \
+        MOCK_QUESTION_ARGS_LOG="${boundary_question_log}" \
+        MOCK_QUESTION_STATUS=0 \
+        MOCK_TEXT_INFO_ARGS_LOG="${boundary_text_info_log}" \
         "${GUI_UNDER_TEST}"
+    assert_diagnostic_question "${boundary_question_log}" \
+        'The download failed with status 7.' \
+        'boundary-redaction diagnostic'
+    # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+    viewed_log_arguments=()
+    read_arguments "${boundary_text_info_log}" viewed_log_arguments
+    assert_array_contains viewed_log_arguments '--text-info' \
+        'View log opens the Zenity text viewer'
+    assert_array_contains viewed_log_arguments '--ok-label=Close' \
+        'diagnostic viewer Close action'
+    viewed_log=''
+    for retained_log in "${viewed_log_arguments[@]}"; do
+        case ${retained_log} in
+            --filename=*) viewed_log=${retained_log#--filename=} ;;
+            *) ;;
+        esac
+    done
+    [[ -n ${viewed_log} ]] \
+        || fail 'The diagnostic viewer did not receive a retained-log filename.'
+    [[ ${viewed_log} == "${log_dir}"/download-*.log ]] \
+        || fail "The diagnostic viewer escaped the private state directory: ${viewed_log}"
+    [[ -f ${viewed_log} && ! -L ${viewed_log} ]] \
+        || fail "The diagnostic viewer did not receive a regular retained log: ${viewed_log}"
+    assert_path_mode "${viewed_log}" 600 \
+        'diagnostic viewer retained-log mode'
+    assert_file_contains "${viewed_log}" 'FINAL_MARKER' \
+        'diagnostic viewer opens the current failure log'
+    assert_file_contains "${viewed_log}" '[REDACTED_URL]' \
+        'diagnostic viewer opens a sanitized log'
+    assert_file_not_contains "${viewed_log}" 'COMPLETE_SECRET' \
+        'diagnostic viewer never opens the raw failure log'
+    assert_retained_log_identity_footer "${viewed_log}" \
+        'truncated retained diagnostic'
     logs_after=$(count_logs)
     assert_equals "$((logs_before + 1))" "${logs_after}" \
         'a boundary-crossing failure retains one new log'
@@ -3040,12 +3379,279 @@ test_mock_gui_diagnostic_logs() {
     done
     [[ ${boundary_log_found} == true ]] \
         || fail 'No retained boundary-redaction log contains the final marker.'
+
+    single_line_bundle="${TEST_ROOT}/single-line-diagnostic-bundle"
+    mkdir -p -- "${single_line_bundle}"
+    install -m 0755 -- "${PROJECT_DIR}/download-video-gui.sh" \
+        "${PROJECT_DIR}/progress-monitor.sh" "${single_line_bundle}/"
+    cat >"${single_line_bundle}/download-video.sh" <<'EOF_SINGLE_LINE_ENGINE'
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : download-video.sh
+# Purpose     : Emit one oversized line for GUI log-retention coverage.
+# ==============================================================================
+
+set -euo pipefail
+
+if (($# == 1)) && [[ $1 == --version ]]; then
+    printf '%s\n' 'yt-dlp-aria2-downloader-gui 9.9.9'
+    exit 0
+fi
+sleep 0.2
+if [[ ${MOCK_WHITESPACE_DIAGNOSTIC:-0} == 1 ]]; then
+    printf '  \n\t\n'
+    exit 7
+fi
+if [[ ${MOCK_BOUNDED_WHITESPACE_DIAGNOSTIC:-0} == 1 ]]; then
+    printf 'X'
+    head -c "$((8388608 - 1))" -- /dev/zero | tr '\0' ' '
+    exit 7
+fi
+head -c "$((8388608 + 16384))" -- /dev/zero | tr '\0' Z
+printf '%s' 'OVERSIZED_SINGLE_LINE_END'
+exit 7
+EOF_SINGLE_LINE_ENGINE
+    chmod 0755 -- "${single_line_bundle}/download-video.sh"
+    cat >"${single_line_bundle}/progress-monitor.sh" <<'EOF_SINGLE_LINE_MONITOR'
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : progress-monitor.sh
+# Purpose     : Keep retention coverage independent of progress parsing.
+# ==============================================================================
+
+set -euo pipefail
+
+sleep 0.2
+exit 0
+EOF_SINGLE_LINE_MONITOR
+    chmod 0755 -- "${single_line_bundle}/progress-monitor.sh"
+    logs_before=$(count_logs)
+    prepare_argument_log 'retained-log-oversized-single-line'
+    single_line_error_capture="${TEST_ROOT}/single-line-error.txt"
+    single_line_question_log="${TEST_ROOT}/single-line-question.bin"
+    single_line_text_info_log="${TEST_ROOT}/single-line-text-info.bin"
+    rm -f -- "${single_line_error_capture}" \
+        "${single_line_question_log}" "${single_line_text_info_log}"
+    assert_status 7 'oversized single-line diagnostic is not retained' \
+        env MOCK_GUI_REAL="${single_line_bundle}/download-video-gui.sh" \
+        MOCK_ERROR_CAPTURE="${single_line_error_capture}" \
+        MOCK_QUESTION_ARGS_LOG="${single_line_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${single_line_text_info_log}" \
+        "${GUI_UNDER_TEST}"
+    logs_after=$(count_logs)
+    assert_equals "${logs_before}" "${logs_after}" \
+        'oversized single-line diagnostic publishes no footer-only log'
+    assert_file_contains "${single_line_error_capture}" \
+        'A safe diagnostic log could not be prepared.' \
+        'oversized single-line safe fallback'
+    [[ ! -s ${single_line_question_log} ]] \
+        || fail 'Oversized single-line diagnostic incorrectly offered View log.'
+    [[ ! -s ${single_line_text_info_log} ]] \
+        || fail 'Oversized single-line diagnostic opened a log viewer.'
+    assert_no_retained_log_staging "${log_dir}" \
+        'oversized single-line diagnostic'
+
+    logs_before=$(count_logs)
+    prepare_argument_log 'retained-log-whitespace-only'
+    whitespace_error_capture="${TEST_ROOT}/whitespace-error.txt"
+    whitespace_question_log="${TEST_ROOT}/whitespace-question.bin"
+    whitespace_text_info_log="${TEST_ROOT}/whitespace-text-info.bin"
+    rm -f -- "${whitespace_error_capture}" \
+        "${whitespace_question_log}" "${whitespace_text_info_log}"
+    assert_status 7 'whitespace-only diagnostic is not retained' \
+        env MOCK_GUI_REAL="${single_line_bundle}/download-video-gui.sh" \
+        MOCK_WHITESPACE_DIAGNOSTIC=1 \
+        MOCK_ERROR_CAPTURE="${whitespace_error_capture}" \
+        MOCK_QUESTION_ARGS_LOG="${whitespace_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${whitespace_text_info_log}" \
+        "${GUI_UNDER_TEST}"
+    logs_after=$(count_logs)
+    assert_equals "${logs_before}" "${logs_after}" \
+        'whitespace-only diagnostic publishes no footer-only log'
+    assert_file_contains "${whitespace_error_capture}" \
+        'A safe diagnostic log could not be prepared.' \
+        'whitespace-only diagnostic safe fallback'
+    [[ ! -s ${whitespace_question_log} && ! -s ${whitespace_text_info_log} ]] \
+        || fail 'Whitespace-only diagnostic exposed a log-viewing action.'
+    assert_no_retained_log_staging "${log_dir}" \
+        'whitespace-only diagnostic'
+
+    logs_before=$(count_logs)
+    prepare_argument_log 'retained-log-bounded-whitespace-only'
+    bounded_whitespace_error_capture="${TEST_ROOT}/bounded-whitespace-error.txt"
+    bounded_whitespace_question_log="${TEST_ROOT}/bounded-whitespace-question.bin"
+    bounded_whitespace_text_info_log="${TEST_ROOT}/bounded-whitespace-text-info.bin"
+    rm -f -- "${bounded_whitespace_error_capture}" \
+        "${bounded_whitespace_question_log}" \
+        "${bounded_whitespace_text_info_log}"
+    assert_status 7 'bounded whitespace-only diagnostic is not retained' \
+        env MOCK_GUI_REAL="${single_line_bundle}/download-video-gui.sh" \
+        MOCK_BOUNDED_WHITESPACE_DIAGNOSTIC=1 \
+        MOCK_ERROR_CAPTURE="${bounded_whitespace_error_capture}" \
+        MOCK_QUESTION_ARGS_LOG="${bounded_whitespace_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${bounded_whitespace_text_info_log}" \
+        "${GUI_UNDER_TEST}"
+    logs_after=$(count_logs)
+    assert_equals "${logs_before}" "${logs_after}" \
+        'bounded whitespace-only diagnostic publishes no footer-only log'
+    assert_file_contains "${bounded_whitespace_error_capture}" \
+        'A safe diagnostic log could not be prepared.' \
+        'bounded whitespace-only diagnostic safe fallback'
+    [[ ! -s ${bounded_whitespace_question_log} &&
+        ! -s ${bounded_whitespace_text_info_log} ]] \
+        || fail 'Bounded whitespace-only diagnostic exposed a log-viewing action.'
+    assert_no_retained_log_staging "${log_dir}" \
+        'bounded whitespace-only diagnostic'
+
+    final_result_bundle="${TEST_ROOT}/missing-final-result-bundle"
+    mkdir -p -- "${final_result_bundle}"
+    install -m 0755 -- "${PROJECT_DIR}/download-video-gui.sh" \
+        "${PROJECT_DIR}/progress-monitor.sh" "${final_result_bundle}/"
+    cat >"${final_result_bundle}/download-video.sh" <<'EOF_MISSING_FINAL_ENGINE'
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : download-video.sh
+# Purpose     : Return success without a result for GUI validation coverage.
+# ==============================================================================
+
+set -euo pipefail
+
+if (($# == 1)) && [[ $1 == --version ]]; then
+    printf '%s\n' 'yt-dlp-aria2-downloader-gui 9.9.9'
+    exit 0
+fi
+printf '%s\n' 'Simulated worker success without a final result.'
+sleep 0.2
+exit 0
+EOF_MISSING_FINAL_ENGINE
+    chmod 0755 -- "${final_result_bundle}/download-video.sh"
+    final_result_question_log="${TEST_ROOT}/missing-final-result-question.bin"
+    final_result_text_info_log="${TEST_ROOT}/missing-final-result-text-info.bin"
+    rm -f -- "${final_result_question_log}" "${final_result_text_info_log}"
+    prepare_argument_log 'gui-missing-final-result-validation'
+    assert_status 1 'GUI rejects successful worker without a confirmed final file' \
+        env MOCK_GUI_REAL="${final_result_bundle}/download-video-gui.sh" \
+        MOCK_QUESTION_ARGS_LOG="${final_result_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${final_result_text_info_log}" \
+        "${GUI_UNDER_TEST}"
+    assert_diagnostic_question "${final_result_question_log}" \
+        'final media file could not be confirmed' \
+        'GUI final-result validation diagnostic'
+    [[ ! -s ${final_result_text_info_log} ]] \
+        || fail 'Close unexpectedly opened the final-result diagnostic log.'
+
+    prepare_argument_log 'gui-final-probe-diagnostic'
+    final_probe_question_log="${TEST_ROOT}/final-probe-question.bin"
+    rm -f -- "${final_probe_question_log}"
+    assert_status 65 'GUI media-validation failure exposes its diagnostic' \
+        env MOCK_FFPROBE_EXIT_STATUS=1 \
+        MOCK_QUESTION_ARGS_LOG="${final_probe_question_log}" \
+        "${GUI_UNDER_TEST}"
+    assert_diagnostic_question "${final_probe_question_log}" \
+        'The download failed with status 65.' \
+        'final-media-validation diagnostic'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    prepare_argument_log 'gui-runtime-preparation-diagnostic'
+    runtime_question_log="${TEST_ROOT}/runtime-preparation-question.bin"
+    rm -f -- "${runtime_question_log}"
+    assert_status 1 'GUI runtime-preparation failure exposes its diagnostic' \
+        env MOCK_YTDLP_VERSION=2026.06.08 \
+        MOCK_YTDLP_VERSION_DELAY_SECONDS=0.5 \
+        MOCK_QUESTION_ARGS_LOG="${runtime_question_log}" \
+        "${GUI_UNDER_TEST}"
+    assert_diagnostic_question "${runtime_question_log}" \
+        'The download failed with status 1.' \
+        'runtime-preparation diagnostic'
+
+    logs_before=$(count_logs)
+    prepare_argument_log 'gui-sanitization-failure'
+    sanitization_error_capture="${TEST_ROOT}/sanitization-failure-error.txt"
+    sanitization_question_log="${TEST_ROOT}/sanitization-failure-question.bin"
+    sanitization_text_info_log="${TEST_ROOT}/sanitization-failure-text-info.bin"
+    rm -f -- "${sanitization_error_capture}" \
+        "${sanitization_question_log}" "${sanitization_text_info_log}"
+    assert_status 7 'failed log sanitization never exposes the live diagnostic' \
+        env MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_YTDLP_EXIT_STATUS=7 \
+        MOCK_FAILURE_DIAGNOSTIC_URL=1 \
+        MOCK_SANITIZATION_FAILURE=1 \
+        MOCK_ERROR_CAPTURE="${sanitization_error_capture}" \
+        MOCK_QUESTION_ARGS_LOG="${sanitization_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${sanitization_text_info_log}" \
+        "${GUI_UNDER_TEST}"
+    logs_after=$(count_logs)
+    assert_equals "${logs_before}" "${logs_after}" \
+        'failed sanitization publishes no retained diagnostic log'
+    assert_file_contains "${sanitization_error_capture}" \
+        'A safe diagnostic log could not be prepared.' \
+        'failed-sanitization safe fallback'
+    assert_file_not_contains "${sanitization_error_capture}" \
+        'UNSANITIZED_DIAGNOSTIC_SECRET' \
+        'failed-sanitization fallback hides the raw diagnostic URL'
+    [[ ! -s ${sanitization_question_log} ]] \
+        || fail 'Failed sanitization still offered an unsafe View log action.'
+    [[ ! -s ${sanitization_text_info_log} ]] \
+        || fail 'Failed sanitization opened an unsafe diagnostic viewer.'
+    if grep -R -Fq -- 'UNSANITIZED_DIAGNOSTIC_SECRET' "${log_dir}"; then
+        fail 'A raw diagnostic URL escaped into the retained state directory.'
+    fi
 }
 
 test_mock_gui_state_initialization() {
-    local blocked_state_home state_error_capture
+    local blocked_state_home home_error_capture home_question_log
+    local home_text_info_log hostile_error_capture hostile_old_log
+    local hostile_question_log hostile_state_home hostile_state_target
+    local hostile_text_info_log logs_after logs_before state_error_capture
 
     # Initialization failures must be visible when the GUI is launched without a terminal.
+    home_error_capture="${TEST_ROOT}/home-init-error.txt"
+    home_question_log="${TEST_ROOT}/home-init-question.bin"
+    home_text_info_log="${TEST_ROOT}/home-init-text-info.bin"
+    rm -f -- "${home_error_capture}" "${home_question_log}" \
+        "${home_text_info_log}"
+    logs_before=$(count_logs)
+    prepare_argument_log 'missing-home-startup'
+    assert_status 1 'missing HOME is reported as a simple startup error' \
+        env -u HOME \
+        MOCK_ERROR_CAPTURE="${home_error_capture}" \
+        MOCK_QUESTION_ARGS_LOG="${home_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${home_text_info_log}" \
+        "${GUI_UNDER_TEST}"
+    assert_file_contains "${home_error_capture}" \
+        'The HOME environment variable is not defined.' \
+        'missing-HOME startup diagnostic'
+    logs_after=$(count_logs)
+    assert_equals "${logs_before}" "${logs_after}" \
+        'missing HOME creates no retained diagnostic'
+    [[ ! -s ${home_question_log} && ! -s ${home_text_info_log} ]] \
+        || fail 'Missing HOME incorrectly exposed a diagnostic-log action.'
+
+    rm -f -- "${home_error_capture}" "${home_question_log}" \
+        "${home_text_info_log}"
+    logs_before=$(count_logs)
+    prepare_argument_log 'relative-home-startup'
+    assert_status 1 'relative HOME is reported as a simple startup error' \
+        env HOME='relative-home' \
+        MOCK_ERROR_CAPTURE="${home_error_capture}" \
+        MOCK_QUESTION_ARGS_LOG="${home_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${home_text_info_log}" \
+        "${GUI_UNDER_TEST}"
+    assert_file_contains "${home_error_capture}" \
+        'The HOME environment variable must be an absolute path.' \
+        'relative-HOME startup diagnostic'
+    logs_after=$(count_logs)
+    assert_equals "${logs_before}" "${logs_after}" \
+        'relative HOME creates no retained diagnostic'
+    [[ ! -s ${home_question_log} && ! -s ${home_text_info_log} ]] \
+        || fail 'Relative HOME incorrectly exposed a diagnostic-log action.'
+
     blocked_state_home="${TEST_ROOT}/blocked-state-home"
     : >"${blocked_state_home}"
     state_error_capture="${TEST_ROOT}/state-init-error.txt"
@@ -3058,6 +3664,70 @@ test_mock_gui_state_initialization() {
     assert_file_contains "${state_error_capture}" \
         'Unable to create the application state directory.' \
         'state-directory GUI diagnostic'
+
+    hostile_state_home="${TEST_ROOT}/hostile-state-home"
+    hostile_state_target="${TEST_ROOT}/hostile-state-target"
+    hostile_old_log="${hostile_state_target}/download-hostile-old.log"
+    hostile_error_capture="${TEST_ROOT}/hostile-state-error.txt"
+    hostile_question_log="${TEST_ROOT}/hostile-state-question.bin"
+    hostile_text_info_log="${TEST_ROOT}/hostile-state-text-info.bin"
+    mkdir -p -- "${hostile_state_home}" "${hostile_state_target}"
+    chmod 700 -- "${hostile_state_home}" "${hostile_state_target}"
+    printf '%s\n' 'preserve hostile-state target' >"${hostile_old_log}"
+    chmod 600 -- "${hostile_old_log}"
+    LC_ALL=C touch -d '16 days ago' -- "${hostile_old_log}"
+    ln -s -- "${hostile_state_target}" \
+        "${hostile_state_home}/yt-dlp-aria2-downloader"
+    rm -f -- "${hostile_error_capture}" "${hostile_question_log}" \
+        "${hostile_text_info_log}"
+    prepare_argument_log 'hostile-state-directory'
+    assert_status 1 'symbolic-link state directory is rejected before pruning' \
+        env XDG_STATE_HOME="${hostile_state_home}" \
+        MOCK_ERROR_CAPTURE="${hostile_error_capture}" \
+        MOCK_QUESTION_ARGS_LOG="${hostile_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${hostile_text_info_log}" \
+        "${GUI_UNDER_TEST}"
+    assert_file_contains "${hostile_error_capture}" \
+        'The application state path must not be a symbolic link.' \
+        'hostile state-directory diagnostic'
+    [[ -f ${hostile_old_log} ]] \
+        || fail 'Hostile state-directory target was pruned before validation.'
+    [[ ! -s ${hostile_question_log} && ! -s ${hostile_text_info_log} ]] \
+        || fail 'Hostile state-directory rejection exposed a diagnostic-log action.'
+    assert_no_retained_log_staging "${hostile_state_target}" \
+        'hostile state-directory rejection'
+}
+
+test_mock_gui_input_validation() {
+    local entry_attempt_marker error_capture logs_after logs_before
+    local question_log text_info_log
+
+    # Trivial input validation has no session diagnostic and must not invent one.
+    entry_attempt_marker="${TEST_ROOT}/invalid-url-entry-attempted"
+    error_capture="${TEST_ROOT}/invalid-url-error.txt"
+    question_log="${TEST_ROOT}/invalid-url-question.bin"
+    text_info_log="${TEST_ROOT}/invalid-url-text-info.bin"
+    rm -f -- "${entry_attempt_marker}" "${error_capture}" \
+        "${question_log}" "${text_info_log}"
+    logs_before=$(count_logs)
+    prepare_argument_log 'invalid-url-without-diagnostic'
+    assert_status 0 'invalid URL remains a simple input error before cancellation' \
+        env MOCK_INVALID_URL_THEN_CANCEL=1 \
+        MOCK_ENTRY_ATTEMPT_MARKER="${entry_attempt_marker}" \
+        MOCK_ERROR_CAPTURE="${error_capture}" \
+        MOCK_QUESTION_ARGS_LOG="${question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${text_info_log}" \
+        "${GUI_UNDER_TEST}"
+    assert_file_contains "${error_capture}" \
+        'The URL must start with http:// or https://.' \
+        'invalid URL input diagnostic'
+    logs_after=$(count_logs)
+    assert_equals "${logs_before}" "${logs_after}" \
+        'trivial URL validation creates no retained log'
+    [[ ! -s ${question_log} ]] \
+        || fail 'Trivial URL validation incorrectly offered View log.'
+    [[ ! -s ${text_info_log} ]] \
+        || fail 'Trivial URL validation incorrectly opened a log viewer.'
 }
 
 run_mock_gui_progress_group() {
@@ -3071,6 +3741,7 @@ run_mock_gui_state_group() {
     test_mock_gui_file_selection
     test_mock_gui_diagnostic_logs
     test_mock_gui_state_initialization
+    test_mock_gui_input_validation
 }
 
 run_mock_gui_group() {
@@ -3689,6 +4360,62 @@ test_mock_signal_gui_blocked_entry() {
     assert_no_test_processes 'blocked-entry TERM left GUI descendants'
 }
 
+test_mock_signal_gui_zenity_diagnostic_cleanup() {
+    local controller_pid diagnostic_mode gui_pid gui_status signal_log
+    local signal_pid_file signal_tmpdir zenity_started_marker
+    local zenity_termination_marker
+    local -a diagnostic_modes=(question text-info)
+
+    # A Zenity failure owns a private diagnostic until the error question and,
+    # when selected, its viewer have both finished. TERM at either boundary
+    # must remove that diagnostic through the normal GUI cleanup trap.
+    for diagnostic_mode in "${diagnostic_modes[@]}"; do
+        signal_tmpdir="${TEST_ROOT}/zenity-diagnostic-signal-${diagnostic_mode}"
+        signal_pid_file="${TEST_ROOT}/zenity-diagnostic-signal-${diagnostic_mode}.pid"
+        signal_log="${TEST_ROOT}/zenity-diagnostic-signal-${diagnostic_mode}.log"
+        zenity_started_marker="${TEST_ROOT}/zenity-diagnostic-${diagnostic_mode}-started"
+        zenity_termination_marker="${TEST_ROOT}/zenity-diagnostic-${diagnostic_mode}-terminated"
+        mkdir -p -- "${signal_tmpdir}"
+        rm -f -- "${signal_pid_file}" "${signal_log}" \
+            "${zenity_started_marker}" "${zenity_termination_marker}"
+        prepare_argument_log \
+            "gui-signal-zenity-diagnostic-${diagnostic_mode}"
+
+        timeout --signal=TERM --kill-after=2s 8s \
+            env TMPDIR="${signal_tmpdir}" \
+            MOCK_GUI_SIGNAL_PID_FILE="${signal_pid_file}" \
+            MOCK_ZENITY_ENTRY_STATUS=42 \
+            MOCK_ZENITY_ENTRY_ERROR='entry failed for https://secret.example/token' \
+            MOCK_QUESTION_STATUS=0 \
+            MOCK_ZENITY_BLOCK_MODE="${diagnostic_mode}" \
+            MOCK_ZENITY_STARTED_MARKER="${zenity_started_marker}" \
+            MOCK_ZENITY_TERMINATION_MARKER="${zenity_termination_marker}" \
+            "${GUI_SIGNAL_UNDER_TEST}" >"${signal_log}" 2>&1 &
+        controller_pid=$!
+        wait_for_file "${signal_pid_file}" 5 \
+            "Zenity diagnostic ${diagnostic_mode} GUI PID publication"
+        wait_for_file "${zenity_started_marker}" 5 \
+            "Zenity diagnostic ${diagnostic_mode} dialog startup"
+        IFS= read -r gui_pid <"${signal_pid_file}"
+        [[ ${gui_pid} =~ ^[1-9][0-9]*$ ]] \
+            || fail "Invalid Zenity diagnostic GUI PID: ${gui_pid}"
+
+        kill -TERM -- "${gui_pid}"
+        gui_status=0
+        wait "${controller_pid}" || gui_status=$?
+        assert_equals 143 "${gui_status}" \
+            "Zenity diagnostic ${diagnostic_mode} TERM status"
+        wait_for_file "${zenity_termination_marker}" 5 \
+            "Zenity diagnostic ${diagnostic_mode} receives TERM"
+        assert_file_contains "${zenity_termination_marker}" TERM \
+            "Zenity diagnostic ${diagnostic_mode} termination signal"
+        assert_directory_empty "${signal_tmpdir}" \
+            "Zenity diagnostic ${diagnostic_mode} cleanup left temporary state"
+        assert_no_test_processes \
+            "Zenity diagnostic ${diagnostic_mode} TERM left descendants"
+    done
+}
+
 test_mock_signal_gui_worker_registration() {
     local elapsed_milliseconds gui_status
     local gui_source_copy launched_worker_pid signal_finished_at signal_log
@@ -3936,24 +4663,56 @@ test_mock_signal_gui_cancellation() {
 }
 
 test_mock_signal_gui_startup_error() {
-    local pgid_error_capture pgid_error_text
+    local logs_after logs_before pgid_question_log pgid_text_info_log
+    local silent_error_capture silent_question_log silent_text_info_log
 
-    # Scenario: failed PGID publication preserves actual newlines in the error dialog.
-    pgid_error_capture="${TEST_ROOT}/pgid-start-error.txt"
+    # A worker that fails before PGID publication still exposes its safe diagnostic.
+    pgid_question_log="${TEST_ROOT}/pgid-start-question.bin"
+    pgid_text_info_log="${TEST_ROOT}/pgid-start-text-info.bin"
+    rm -f -- "${pgid_question_log}" "${pgid_text_info_log}"
     prepare_argument_log 'failed-pgid-publication'
     assert_status 1 'failed PGID publication is reported' \
-        env MOCK_SETSID_START_STATUS=75 MOCK_ERROR_CAPTURE="${pgid_error_capture}" \
+        env MOCK_SETSID_START_STATUS=75 \
+        MOCK_QUESTION_ARGS_LOG="${pgid_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${pgid_text_info_log}" \
         "${GUI_UNDER_TEST}"
-    pgid_error_text=$(<"${pgid_error_capture}")
-    assert_text_contains "${pgid_error_text}" \
-        $'The download could not start.\n\nLog:' \
-        'startup error uses real newlines'
-    assert_text_not_contains "${pgid_error_text}" '\\n\\nLog:' \
-        'startup error has no literal newline escapes'
+    assert_diagnostic_question "${pgid_question_log}" \
+        'The download could not start.' \
+        'worker-startup diagnostic'
+    [[ ! -s ${pgid_text_info_log} ]] \
+        || fail 'Close unexpectedly opened the worker-startup diagnostic log.'
+
+    silent_error_capture="${TEST_ROOT}/silent-start-error.txt"
+    silent_question_log="${TEST_ROOT}/silent-start-question.bin"
+    silent_text_info_log="${TEST_ROOT}/silent-start-text-info.bin"
+    rm -f -- "${silent_error_capture}" "${silent_question_log}" \
+        "${silent_text_info_log}"
+    logs_before=$(count_logs)
+    prepare_argument_log 'silent-worker-start-failure'
+    assert_status 1 'silent worker-start failure exposes no empty diagnostic' \
+        env MOCK_SETSID_START_STATUS=75 \
+        MOCK_SETSID_SILENT_FAILURE=1 \
+        MOCK_ERROR_CAPTURE="${silent_error_capture}" \
+        MOCK_QUESTION_ARGS_LOG="${silent_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${silent_text_info_log}" \
+        "${GUI_UNDER_TEST}"
+    assert_file_contains "${silent_error_capture}" \
+        'A safe diagnostic log could not be prepared.' \
+        'silent-worker safe fallback'
+    logs_after=$(count_logs)
+    assert_equals "${logs_before}" "${logs_after}" \
+        'silent worker-start failure retains no empty log'
+    [[ ! -s ${silent_question_log} ]] \
+        || fail 'Silent worker-start failure incorrectly offered View log.'
+    [[ ! -s ${silent_text_info_log} ]] \
+        || fail 'Silent worker-start failure incorrectly opened a log viewer.'
 }
 
 test_mock_signal_zenity_status() {
-    local error_capture
+    local diagnostic_capture diagnostic_file error_capture
+    local oversized_question_log oversized_text_info_log
+    local unexpected_question_log unexpected_text_info_log
+    local -a text_info_arguments=()
 
     # Scenario group: Zenity dialog status mapping.
     error_capture="${TEST_ROOT}/zenity-errors.txt"
@@ -3963,20 +4722,55 @@ test_mock_signal_zenity_status() {
     assert_file_contains "${error_capture}" 'URL entry dialog timed out' \
         'URL timeout dialog'
 
-    : >"${error_capture}"
+    unexpected_question_log="${TEST_ROOT}/zenity-error-question.bin"
+    unexpected_text_info_log="${TEST_ROOT}/zenity-error-text-info.bin"
+    diagnostic_capture="${TEST_ROOT}/zenity-error-diagnostic.txt"
+    rm -f -- "${unexpected_question_log}" \
+        "${unexpected_text_info_log}" "${diagnostic_capture}"
     assert_status 1 'unexpected Zenity entry error is reported' \
-        env MOCK_ZENITY_ENTRY_STATUS=42 MOCK_ERROR_CAPTURE="${error_capture}" \
+        env MOCK_ZENITY_ENTRY_STATUS=42 \
+        MOCK_ZENITY_ENTRY_ERROR='Zenity failed for https://secret.example/private-token' \
+        MOCK_QUESTION_STATUS=0 \
+        MOCK_QUESTION_ARGS_LOG="${unexpected_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${unexpected_text_info_log}" \
+        MOCK_TEXT_INFO_CONTENT_CAPTURE="${diagnostic_capture}" \
         "${GUI_UNDER_TEST}"
-    assert_file_contains "${error_capture}" 'Zenity could not display' \
-        'Zenity entry error dialog'
+    assert_diagnostic_question "${unexpected_question_log}" \
+        'Zenity could not display the URL entry dialog.' \
+        'Zenity entry error diagnostic'
+    read_arguments "${unexpected_text_info_log}" text_info_arguments
+    assert_array_contains text_info_arguments '--text-info' \
+        'Zenity error opens the diagnostic viewer'
+    diagnostic_file=''
+    for argument in "${text_info_arguments[@]}"; do
+        case ${argument} in
+            --filename=*) diagnostic_file=${argument#--filename=} ;;
+            *) ;;
+        esac
+    done
+    [[ -n ${diagnostic_file} && ! -e ${diagnostic_file} ]] \
+        || fail 'The private Zenity diagnostic was not removed after viewing.'
+    assert_file_contains "${diagnostic_capture}" \
+        '[REDACTED_URL]' \
+        'Zenity viewer receives the correct private diagnostic'
+    assert_file_not_contains "${diagnostic_capture}" \
+        'secret.example' \
+        'Zenity diagnostic redacts URL-like values'
 
-    : >"${error_capture}"
+    oversized_question_log="${TEST_ROOT}/zenity-oversized-question.bin"
+    oversized_text_info_log="${TEST_ROOT}/zenity-oversized-text-info.bin"
+    rm -f -- "${oversized_question_log}" "${oversized_text_info_log}"
     assert_status 1 'oversized Zenity entry output is rejected' \
         env MOCK_ZENITY_ENTRY_OUTPUT_BYTES=65537 \
-        MOCK_ERROR_CAPTURE="${error_capture}" \
+        MOCK_QUESTION_STATUS=1 \
+        MOCK_QUESTION_ARGS_LOG="${oversized_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${oversized_text_info_log}" \
         "${GUI_UNDER_TEST}"
-    assert_file_contains "${error_capture}" 'Zenity could not display' \
-        'oversized Zenity entry output dialog'
+    assert_diagnostic_question "${oversized_question_log}" \
+        'Zenity could not display the URL entry dialog.' \
+        'oversized Zenity output diagnostic'
+    [[ ! -s ${oversized_text_info_log} ]] \
+        || fail 'Close unexpectedly opened the oversized-output diagnostic.'
 }
 
 run_mock_signal_group() {
@@ -3990,6 +4784,7 @@ run_mock_signal_group() {
     test_mock_signal_cli_ffmpeg
     test_mock_signal_gui_session
     test_mock_signal_gui_blocked_entry
+    test_mock_signal_gui_zenity_diagnostic_cleanup
     test_mock_signal_gui_worker_registration
     test_mock_signal_gui_foreground_group_registration
     test_mock_signal_gui_blocked_progress
@@ -4292,15 +5087,21 @@ test_mock_runtime_dependencies() {
 }
 
 test_mock_runtime_progress_errors() {
-    local progress_error_capture progress_error_marker progress_error_started
-    local progress_timeout_errors progress_timeout_marker progress_timeout_started
+    local monitor_bundle monitor_question_log monitor_text_info_log
+    local progress_error_marker progress_error_question_log progress_error_started
+    local progress_error_text_info_log progress_timeout_marker
+    local progress_timeout_question_log progress_timeout_started
+    local progress_timeout_text_info_log
 
     # Progress-dialog timeout and unexpected error terminate the worker group.
     # Synchronize the injected Zenity failure with a worker-start marker so the
     # termination assertion proves signal delivery, not scheduler ordering.
     progress_timeout_started="${TEST_ROOT}/progress-timeout-started"
     progress_timeout_marker="${TEST_ROOT}/progress-timeout-terminated"
-    progress_timeout_errors="${TEST_ROOT}/progress-timeout-errors.txt"
+    progress_timeout_question_log="${TEST_ROOT}/progress-timeout-question.bin"
+    progress_timeout_text_info_log="${TEST_ROOT}/progress-timeout-text-info.bin"
+    rm -f -- "${progress_timeout_question_log}" \
+        "${progress_timeout_text_info_log}"
     prepare_argument_log 'progress-timeout'
     assert_status 1 'progress dialog timeout is propagated' \
         env MOCK_PLAN_PROTOCOL='m3u8_native' \
@@ -4308,18 +5109,25 @@ test_mock_runtime_progress_errors() {
         MOCK_ZENITY_WAIT_FOR_WORKER_START=1 \
         MOCK_STARTED_MARKER="${progress_timeout_started}" \
         MOCK_TERMINATION_MARKER="${progress_timeout_marker}" \
-        MOCK_ERROR_CAPTURE="${progress_timeout_errors}" \
+        MOCK_QUESTION_ARGS_LOG="${progress_timeout_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${progress_timeout_text_info_log}" \
         "${GUI_UNDER_TEST}"
     wait_for_file "${progress_timeout_started}" 10 \
         'progress-timeout worker started before injected timeout'
     wait_for_file "${progress_timeout_marker}" 10 \
         'progress-timeout worker receives TERM'
-    assert_file_contains "${progress_timeout_errors}" 'progress dialog timed out' \
+    assert_diagnostic_question "${progress_timeout_question_log}" \
+        'progress dialog timed out' \
         'progress-timeout diagnostic'
+    [[ ! -s ${progress_timeout_text_info_log} ]] \
+        || fail 'Close unexpectedly opened the progress-timeout diagnostic log.'
 
     progress_error_started="${TEST_ROOT}/progress-error-started"
     progress_error_marker="${TEST_ROOT}/progress-error-terminated"
-    progress_error_capture="${TEST_ROOT}/progress-error-errors.txt"
+    progress_error_question_log="${TEST_ROOT}/progress-error-question.bin"
+    progress_error_text_info_log="${TEST_ROOT}/progress-error-text-info.bin"
+    rm -f -- "${progress_error_question_log}" \
+        "${progress_error_text_info_log}"
     prepare_argument_log 'progress-error'
     assert_status 1 'unexpected progress dialog status is reported' \
         env MOCK_PLAN_PROTOCOL='m3u8_native' \
@@ -4327,14 +5135,55 @@ test_mock_runtime_progress_errors() {
         MOCK_ZENITY_WAIT_FOR_WORKER_START=1 \
         MOCK_STARTED_MARKER="${progress_error_started}" \
         MOCK_TERMINATION_MARKER="${progress_error_marker}" \
-        MOCK_ERROR_CAPTURE="${progress_error_capture}" \
+        MOCK_QUESTION_ARGS_LOG="${progress_error_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${progress_error_text_info_log}" \
         "${GUI_UNDER_TEST}"
     wait_for_file "${progress_error_started}" 10 \
         'progress-error worker started before injected error'
     wait_for_file "${progress_error_marker}" 10 \
         'progress-error worker receives TERM'
-    assert_file_contains "${progress_error_capture}" 'status 42' \
+    assert_diagnostic_question "${progress_error_question_log}" \
+        'status 42' \
         'unexpected progress status diagnostic'
+    [[ ! -s ${progress_error_text_info_log} ]] \
+        || fail 'Close unexpectedly opened the progress-error diagnostic log.'
+
+    monitor_bundle="${TEST_ROOT}/progress-monitor-failure-bundle"
+    mkdir -p -- "${monitor_bundle}"
+    install -m 0755 -- "${PROJECT_DIR}/download-video-gui.sh" \
+        "${PROJECT_DIR}/download-video.sh" "${monitor_bundle}/"
+    install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
+        "${monitor_bundle}/private-aria2-plan.py"
+    cat >"${monitor_bundle}/progress-monitor.sh" <<'EOF_PROGRESS_MONITOR_FAILURE'
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : progress-monitor.sh
+# Purpose     : Fail deterministically for GUI diagnostic integration coverage.
+# ==============================================================================
+
+set -euo pipefail
+
+printf '%s\n' 'Simulated progress monitor diagnostic.' >&2
+exit 42
+EOF_PROGRESS_MONITOR_FAILURE
+    chmod 0755 -- "${monitor_bundle}/progress-monitor.sh"
+    monitor_question_log="${TEST_ROOT}/progress-monitor-question.bin"
+    monitor_text_info_log="${TEST_ROOT}/progress-monitor-text-info.bin"
+    rm -f -- "${monitor_question_log}" "${monitor_text_info_log}"
+    prepare_argument_log 'progress-monitor-failure'
+    assert_status 1 'progress monitor failure exposes its diagnostic' \
+        env MOCK_GUI_REAL="${monitor_bundle}/download-video-gui.sh" \
+        MOCK_QUESTION_ARGS_LOG="${monitor_question_log}" \
+        MOCK_TEXT_INFO_ARGS_LOG="${monitor_text_info_log}" \
+        "${GUI_UNDER_TEST}"
+    assert_diagnostic_question "${monitor_question_log}" \
+        'The progress monitor failed with status 42.' \
+        'progress-monitor failure diagnostic'
+    [[ ! -s ${monitor_text_info_log} ]] \
+        || fail 'Close unexpectedly opened the progress-monitor diagnostic log.'
+    assert_no_test_processes 'progress-monitor failure left GUI descendants'
 }
 
 test_mock_runtime_missing_zenity() {
