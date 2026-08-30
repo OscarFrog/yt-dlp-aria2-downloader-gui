@@ -105,7 +105,7 @@ real_bash = os.environ["REAL_BASH"]
 real_sleep = os.environ["REAL_SLEEP"]
 
 
-def running(pid: int) -> bool:
+def running(pid: int, identity_token: str) -> bool:
     stat_path = pathlib.Path(f"/proc/{pid}/stat")
     try:
         fields = stat_path.read_text(encoding="ascii").split()
@@ -113,7 +113,12 @@ def running(pid: int) -> bool:
         return False
     if len(fields) >= 3 and fields[2] == "Z":
         return False
-    return True
+    expected = f"YTDLP_ARIA2_RUN_ALL_SIGNAL_TOKEN={identity_token}".encode()
+    try:
+        environment = pathlib.Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return False
+    return expected in environment.split(b"\0")
 
 
 def wait_marker(path: pathlib.Path, runner: subprocess.Popen[bytes]) -> int:
@@ -129,13 +134,13 @@ def wait_marker(path: pathlib.Path, runner: subprocess.Popen[bytes]) -> int:
     raise AssertionError(f"timed out waiting for marker {path}")
 
 
-def wait_gone(pid: int) -> bool:
+def wait_gone(pid: int, identity_token: str) -> bool:
     deadline = time.monotonic() + 6
     while time.monotonic() < deadline:
-        if not running(pid):
+        if not running(pid, identity_token):
             return True
         time.sleep(0.05)
-    return not running(pid)
+    return not running(pid, identity_token)
 
 
 def wait_signal_guard(runner: subprocess.Popen[bytes]) -> None:
@@ -167,8 +172,8 @@ def wait_signal_guard(runner: subprocess.Popen[bytes]) -> None:
     raise AssertionError("run-all did not arm its fatal-signal guard in time")
 
 
-def terminate_if_needed(pid: int) -> None:
-    if not running(pid):
+def terminate_if_needed(pid: int, identity_token: str) -> None:
+    if not running(pid, identity_token):
         return
     try:
         os.kill(pid, signal.SIGKILL)
@@ -177,11 +182,13 @@ def terminate_if_needed(pid: int) -> None:
 
 
 for name, sig, expected in (
+    ("hup", signal.SIGHUP, 129),
     ("int", signal.SIGINT, 130),
     ("term", signal.SIGTERM, 143),
 ):
     immediate_marker = test_root / f"{name}-immediate.pid"
     descendant_marker = test_root / f"{name}-descendant.pid"
+    identity_token = str(test_root / f"{name}-identity")
     env = os.environ.copy()
     env.update(
         {
@@ -194,6 +201,7 @@ for name, sig, expected in (
             "YTDLP_ARIA2_TEST_RUNNER_TERMINATION_POLL_ATTEMPTS": "10",
             "MOCK_IMMEDIATE_MARKER": str(immediate_marker),
             "MOCK_DESCENDANT_MARKER": str(descendant_marker),
+            "YTDLP_ARIA2_RUN_ALL_SIGNAL_TOKEN": identity_token,
         }
     )
 
@@ -222,11 +230,11 @@ for name, sig, expected in (
             raise AssertionError(
                 f"run-all {name} returned {return_code}, expected {expected}: {stderr}"
             )
-        if not wait_gone(immediate_pid):
+        if not wait_gone(immediate_pid, identity_token):
             raise AssertionError(
                 f"run-all {name} left immediate suite process {immediate_pid}"
             )
-        if not wait_gone(descendant_pid):
+        if not wait_gone(descendant_pid, identity_token):
             raise AssertionError(
                 f"run-all {name} left descendant process {descendant_pid}"
             )
@@ -235,15 +243,16 @@ for name, sig, expected in (
             runner.kill()
             runner.wait(timeout=5)
         if immediate_pid:
-            terminate_if_needed(immediate_pid)
+            terminate_if_needed(immediate_pid, identity_token)
         if descendant_pid:
-            terminate_if_needed(descendant_pid)
+            terminate_if_needed(descendant_pid, identity_token)
 
 # A second fatal signal during the grace period must not interrupt cleanup.
 # The synthetic child and descendant ignore TERM/INT so run-all must reach its
 # KILL escalation after the second signal arrives.
 immediate_marker = test_root / "reentrant-immediate.pid"
 descendant_marker = test_root / "reentrant-descendant.pid"
+identity_token = str(test_root / "reentrant-identity")
 env = os.environ.copy()
 env.update(
     {
@@ -254,6 +263,7 @@ env.update(
         "MOCK_IMMEDIATE_MARKER": str(immediate_marker),
         "MOCK_DESCENDANT_MARKER": str(descendant_marker),
         "MOCK_IGNORE_SIGNALS": "1",
+        "YTDLP_ARIA2_RUN_ALL_SIGNAL_TOKEN": identity_token,
     }
 )
 
@@ -290,12 +300,12 @@ try:
             f"run-all repeated-signal cleanup returned {return_code}, "
             f"expected 130: {stderr}"
         )
-    if not wait_gone(immediate_pid):
+    if not wait_gone(immediate_pid, identity_token):
         raise AssertionError(
             f"run-all repeated-signal cleanup left immediate process "
             f"{immediate_pid}"
         )
-    if not wait_gone(descendant_pid):
+    if not wait_gone(descendant_pid, identity_token):
         raise AssertionError(
             f"run-all repeated-signal cleanup left descendant "
             f"{descendant_pid}"
@@ -305,9 +315,9 @@ finally:
         runner.kill()
         runner.wait(timeout=5)
     if immediate_pid:
-        terminate_if_needed(immediate_pid)
+        terminate_if_needed(immediate_pid, identity_token)
     if descendant_pid:
-        terminate_if_needed(descendant_pid)
+        terminate_if_needed(descendant_pid, identity_token)
 
 # Generic os.execvp OSError handling is defensive hardening. Do not qualify it with an ENOEXEC text fixture: POSIX execvp falls back to a shell interpreter for that case.
 

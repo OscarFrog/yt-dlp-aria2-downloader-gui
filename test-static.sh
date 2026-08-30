@@ -1487,6 +1487,9 @@ test_static_tooling_contracts() {
         "${SCRIPT_DIR}/tests/run-all.sh" --doctor --list
     assert_status 2 'run-all rejects zero integration concurrency' \
         "${SCRIPT_DIR}/tests/run-all.sh" --jobs 0 --list
+    assert_status 2 'run-all rejects overflowing integration concurrency' \
+        "${SCRIPT_DIR}/tests/run-all.sh" \
+        --jobs 18446744073709551617 --list
     assert_status 0 'mock integration lists its parallel-safe groups' \
         "${SCRIPT_DIR}/tests/mock-integration.sh" --list-groups
     assert_text_contains "${ASSERT_OUTPUT}" 'engine' \

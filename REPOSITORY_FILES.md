@@ -1,107 +1,22 @@
 # Inventaire et utilité des fichiers du dépôt
 
 Ce document est l’inventaire technique courant du dépôt. Il ne vise aucune
-ancienne version applicative comme état de référence. La passe initiale a été
-réalisée le 29 août 2026 depuis la base Git
-`85d394cfccce96e9c509a8ce530bf5b249f3962c`, puis les corrections décrites
-ci-dessous ont été intégrées. Le snapshot courant comprend une carte
-d’architecture, trois skills Codex spécialisées, un diagnostic d’environnement,
-des garde-fous d’exécution et des modèles de contribution structurés.
+ancienne version applicative comme état de référence. Sa table est contrôlée
+contre l’arbre Git courant et décrit la raison durable de conserver chaque
+chemin.
+
+Le document a été créé en français parce que la revue exhaustive initiale et
+ses libellés obligatoires ont été demandés en français. Seuls les chemins de la
+table sont consommés mécaniquement ; la langue de cette documentation technique
+n’établit pas une seconde source de vérité parallèle aux documents utilisateur.
 
 ## Inventaire exact
 
-L’état courant audité contient exactement les 83 chemins tracked suivants :
-
-```text
-.agents/skills/packaging-release/SKILL.md
-.agents/skills/shell-change/SKILL.md
-.agents/skills/workflow-supply-chain/SKILL.md
-.codex/rules/default.rules
-.editorconfig
-.github/ISSUE_TEMPLATE/codex-task.yml
-.github/pull_request_template.md
-.github/workflows/packages.yml
-.github/workflows/qualification.yml
-.github/workflows/real-tools.yml
-.github/workflows/release.yml
-.github/workflows/shell.yml
-.github/workflows/shfmt-update.yml
-.github/workflows/stress.yml
-.gitignore
-AGENTS.md
-ARCHITECTURE.md
-CHANGELOG.md
-LICENSE
-README.fr.md
-README.md
-REPOSITORY_FILES.md
-SHELL_STYLE.md
-TESTING.md
-download-video-gui.sh
-download-video.sh
-install-fedora.sh
-install-gui.sh
-packaging/deb/build-deb.sh
-packaging/deb/copyright
-packaging/deb/test-package-lifecycle.sh
-packaging/deb/test-package-upgrade.sh
-packaging/icons/yt-dlp-aria2-downloader.svg
-packaging/install-tree.sh
-packaging/keys/RPM-GPG-KEY-OscarFrog
-packaging/keys/yt-dlp-public.key
-packaging/man/yt-dlp-aria2-downloader-gui.1
-packaging/man/yt-dlp-aria2-downloader.1
-packaging/package-user-cleanup.sh
-packaging/rpm/build-rpm.sh
-packaging/rpm/test-package-lifecycle.sh
-packaging/rpm/test-package-upgrade.sh
-packaging/rpm/yt-dlp-aria2-downloader-gui.spec
-packaging/yt-dlp-aria2-downloader.desktop
-private-aria2-plan.py
-private-launcher-manager.py
-progress-monitor.sh
-runtime-manager.sh
-scripts/check-shell-format.sh
-scripts/dev-tools/ensure-shfmt.sh
-scripts/dev-tools/shfmt-pin.env
-scripts/format-shell.sh
-scripts/release-evidence-qualification.sh
-scripts/release-preflight.sh
-test-static.sh
-tests/aria2-auth-headers-integration.sh
-tests/aria2-real-behavior-integration.sh
-tests/ffmpeg-generation-compatibility.sh
-tests/ffmpeg-generation-qualification.sh
-tests/ffmpeg-progress-integration.sh
-tests/ffmpeg-real-progress-integration.sh
-tests/hls-remux-duration-integration.sh
-tests/install-fedora-authentication-integration.sh
-tests/installer-integration.sh
-tests/lib/assert.sh
-tests/lib/package-lifecycle.sh
-tests/lib/package-runtime-preservation.sh
-tests/lib/project-files.sh
-tests/lib/test-runner.sh
-tests/mock-integration.sh
-tests/package-user-cleanup-integration.sh
-tests/packaging-integration.sh
-tests/private-aria2-plan-integration.sh
-tests/progress-monitor-integration.sh
-tests/real-tools-integration.sh
-tests/repeat-qualification.sh
-tests/rpm6-multisig-integration.sh
-tests/run-all-signal-integration.sh
-tests/run-all.sh
-tests/runtime-manager-hardening-integration.sh
-tests/runtime-manager-integration.sh
-tests/test-runner-integration.sh
-tests/zenity-real-session-qualification.sh
-```
-
-`test-static.sh` compare mécaniquement la première colonne de la table ci-dessous
-à `git ls-files` ; dans une archive sans `.git`, il la compare à l’arbre de
-fichiers de l’archive. Un ajout, retrait ou renommage tracked exige donc une mise
-à jour explicite de ce document.
+La première colonne de la table ci-dessous contient exactement les **83**
+chemins tracked. `test-static.sh` la compare mécaniquement à `git ls-files` ;
+dans une archive sans `.git`, il la compare à l’arbre de fichiers de l’archive.
+Un ajout, retrait ou renommage tracked exige donc une mise à jour explicite de
+ce document.
 
 ## Pourquoi l’en-tête Python est différent
 
@@ -152,11 +67,11 @@ historique. Les colonnes condensent les vingt questions de la revue :
 - `Action` répond à la possibilité de retrait. Aucun retrait n’est proposé sans
   preuve couvrant toutes les surfaces citées ci-dessus.
 
-La dernière release publique a été vérifiée comme étant v2.3.4, immuable, avec
-les six assets attendus ; la branche `main` distante correspondait à la base
-auditée. Les mentions 2.1.27–2.1.29 restent justifiées par la migration et le
-nettoyage de données. Les autres anciennes versions restent confinées au
-`CHANGELOG`, au changelog RPM ou à des fixtures de compatibilité explicites.
+Les versions courante et publiée sont contrôlées par les validations statiques
+et de release plutôt que figées ici. Les mentions 2.1.27–2.1.29 restent
+justifiées par la migration et le nettoyage de données. Les autres anciennes
+versions restent confinées au `CHANGELOG`, au changelog RPM ou à des fixtures
+de compatibilité explicites.
 
 | Fichier | Type | Rôle | Utilisé par | Nécessaire ? | Contenu correct ? | Historique ? | Redondant ? | Action |
 | ------- | ---- | ---- | ----------- | ------------ | ----------------- | ------------ | ----------- | ------ |
@@ -183,7 +98,7 @@ nettoyage de données. Les autres anciennes versions restent confinées au
 | `README.md` | Documentation utilisateur | Guide utilisateur anglais de référence | Utilisateurs, packages, ZIP, release | Oui — documentation installée | Oui — exigences, paquets et assets publics vérifiés | Compatibilité cleanup documentée et justifiée | Non | KEEP |
 | `REPOSITORY_FILES.md` | Documentation technique | Inventorie le rôle et la conservation de chaque fichier tracked | `AGENTS.md`, `test-static.sh`, mainteneurs | Oui — traçabilité active de l’arbre | Oui — couverture exacte validée | Non, inventaire courant et non rapport de version | Non | KEEP |
 | `SHELL_STYLE.md` | Politique technique | Contrat Bash, shfmt, ShellCheck et frontières d’en-tête | Tous les Shell, agents, tests | Oui — développement/CI | Oui — périmètre Bash et différence Python explicites | Non | Non | KEEP |
-| `TESTING.md` | Documentation technique | Procédures locales, CI, packaging, release et qualifications manuelles | Mainteneurs, README, agents | Oui — validation | Oui — documente désormais Zenity réel et preuve post-release | Non | Non | KEEP |
+| `TESTING.md` | Documentation technique | Procédures locales, CI, packaging, release et qualifications manuelles | Mainteneurs, README, agents | Oui — validation | Oui — profils, matrices CI, Zenity réel et preuve post-release alignés | Non | Non | KEEP |
 | `download-video-gui.sh` | Bash production | Interface Zenity et supervision d’une session | Desktop entry, launcher, package, tests GUI | Oui — exécution GUI, installé | Oui — rôle/en-tête/options cohérents | Compatibilité de configuration testée | Non, sépare UI et moteur | KEEP |
 | `download-video.sh` | Bash production | Moteur CLI pour une URL, média et publication finale | GUI, launchers, packages, tests réels/mocks | Oui — cœur d’exécution, installé | Oui — version 2.3.5 et interface/manpage alignées | Récupération de staging ancien volontaire | Non | KEEP |
 | `install-fedora.sh` | Bash installation | Authentifie puis installe RPM et dépendances Fedora | Utilisateurs, packages/release CI, tests auth | Oui — installation Fedora | Oui — clés/fingerprints et chemin dev non signé contrôlés | Compatibilité RPM volontaire | Non | KEEP |
@@ -224,11 +139,11 @@ nettoyage de données. Les autres anciennes versions restent confinées au
 | `tests/hls-remux-duration-integration.sh` | Bash test réel | Empêche la publication d’un remux HLS tronqué malgré succès FFmpeg | Real-tools, release, qualification | Oui — intégrité média | Oui — cas reproductible et réparation | Régression historique devenue contrat courant | Non | KEEP |
 | `tests/install-fedora-authentication-integration.sh` | Bash test | Teste auth RPM fail-closed et staging root immuable | `run-all.sh`, tests statiques | Oui — sécurité installation | Oui — mutations de clé/paquet couvertes | Non | Non | KEEP |
 | `tests/installer-integration.sh` | Bash test | Teste installation portable, réinstallation, échecs, signaux transactionnels et retrait | `run-all.sh`, tests statiques | Oui — launcher | Oui — modes, espaces, symlinks, allocations/validator interrompus, rollback et temporaires | Cleanup d’artefacts anciens volontaire | Non | KEEP |
-| `tests/lib/assert.sh` | Bibliothèque Bash test | Assertions partagées de statut, texte, fichier, lien et mode | Sept suites et `test-static.sh` | Oui — infrastructure tests | Oui — API appelée directement | Non | Non, évite la duplication | KEEP |
+| `tests/lib/assert.sh` | Bibliothèque Bash test | Assertions partagées de statut, texte, fichier, lien et mode | Suites d’intégration ciblées et `test-static.sh` | Oui — infrastructure tests | Oui — API appelée directement | Non | Non, évite la duplication | KEEP |
 | `tests/lib/package-lifecycle.sh` | Bibliothèque Bash test | Assertions communes de payload et retrait RPM/DEB | Quatre scripts lifecycle/upgrade | Oui — packaging tests | Oui — abstraction commune aux formats | Non | Non, factorisation active | KEEP |
 | `tests/lib/package-runtime-preservation.sh` | Bibliothèque Bash test | Prépare et compare l’arbre runtime utilisateur pendant lifecycle/upgrade | Tests RPM/DEB | Oui — preuve de non-perte | Oui — snapshots déterministes et cleanup | Oui — compatibilité d’upgrade nécessaire | Non | KEEP — COMPATIBILITÉ |
-| `tests/lib/project-files.sh` | Bibliothèque Bash test | Source de vérité des inventaires Shell et Python | shfmt, ShellCheck, run-all, static, workflow updater | Oui — validation | Oui — catégories canoniques exactes | Non | Non | KEEP |
-| `tests/lib/test-runner.sh` | Bibliothèque Bash test | Supervise enfants, délais, logs, signaux et collecte parallèle | `run-all.sh`, repeat helper, tests runner | Oui — infrastructure tests | Oui — contrats de statut/processus testés | Non | Non | KEEP |
+| `tests/lib/project-files.sh` | Bibliothèque Bash test | Source de vérité des inventaires Shell et Python | shfmt, ShellCheck, run-all, static, workflow updater et test du manifeste runner | Oui — validation | Oui — catégories canoniques exactes | Non | Non | KEEP |
+| `tests/lib/test-runner.sh` | Bibliothèque Bash test | Supervise enfants, délais, logs, signaux, identité des processus et collecte parallèle | `run-all.sh`, repeat helper, tests runner | Oui — infrastructure tests | Oui — statuts, groupes, handshake/fallback start time, superviseur tokenisé et PID obsolètes testés | Non | Non | KEEP |
 | `tests/mock-integration.sh` | Bash test hermétique | Couvre moteur, GUI, signaux, runtime et staging via mocks | `run-all.sh`, stress CI | Oui — couverture fonctionnelle rapide | Oui — groupes explicites, sessions no-fork PID/PGID/SID, signaux de groupe et fixtures privées | Migrations/legacy testés volontairement | Non, complément des vrais outils | KEEP |
 | `tests/package-user-cleanup-integration.sh` | Bash test | Attaque les bornes HOME/XDG/symlink du cleanup RPM | `run-all.sh`, stress CI | Oui — sécurité suppression | Oui — scénarios forgés et répétitions | Compatibilité de chemins anciens nécessaire | Non | KEEP |
 | `tests/packaging-integration.sh` | Bash test | Vérifie l’arbre DESTDIR, modes, assets et exclusions | `run-all.sh`, tests statiques | Oui — packaging hermétique | Oui — payload attendu actuel | Vérifie aussi l’absence d’assets obsolètes | Non | KEEP |
@@ -237,20 +152,21 @@ nettoyage de données. Les autres anciennes versions restent confinées au
 | `tests/real-tools-integration.sh` | Bash test réel | Génère des médias locaux et exerce vrais yt-dlp/aria2/FFmpeg/FFprobe | Real-tools, release, qualification | Oui — intégration réelle | Oui — routes direct/HLS/DASH/audio et mutants | Pins reproductibles volontaires | Non, complément des mocks | KEEP |
 | `tests/repeat-qualification.sh` | Bash orchestrateur test | Répète en parallèle des qualifications indépendantes et ordonne les logs | Quatre workflows, qualification FFmpeg | Oui — détection de races | Oui — limites et isolation documentées | Non | Non | KEEP |
 | `tests/rpm6-multisig-integration.sh` | Bash test packaging | Prouve les sémantiques signatures RPM v4/v6 et corruption | Packages/release CI | Oui — décision de format/signature | Oui — v4 production et v6 qualification séparés | Oui — compatibilité v4/v6 nécessaire | Non | KEEP — COMPATIBILITÉ |
-| `tests/run-all-signal-integration.sh` | Bash test | Vérifie qu’une interruption de run-all tue les groupes enfants | `run-all.sh`, tests statiques | Oui — sûreté du runner | Oui — descendant et délai bornés | Non | Non | KEEP |
-| `tests/run-all.sh` | Bash orchestrateur test | Diagnostique l’environnement ou lance format, static, ShellCheck et suites profilées/parallèles | Développeurs, agents, quatre workflows | Oui — entrée canonique de diagnostic et validation | Oui — doctor non provisionnant avec sondes bornées, readiness Git/shfmt fail-closed, JSON versionné et manifestes full/fast | Non | Non | KEEP |
+| `tests/run-all-signal-integration.sh` | Bash test | Vérifie qu’une interruption de run-all tue les groupes enfants sans cibler un PID réutilisé | `run-all.sh`, tests statiques | Oui — sûreté du runner | Oui — identité héritée, descendant et délai bornés | Non | Non | KEEP |
+| `tests/run-all.sh` | Bash orchestrateur test | Diagnostique l’environnement ou lance format, static, ShellCheck et suites profilées/parallèles | Développeurs, agents, quatre workflows | Oui — entrée canonique de diagnostic et validation | Oui — doctor borné, manifestes exacts, ordre d’échec déterministe et suites dominantes lancées en premier | Non | Non | KEEP |
 | `tests/runtime-manager-hardening-integration.sh` | Bash test | Stresse locks, réseau nul, bootstrap, journal, rollback et bornes | `run-all.sh`, stress CI | Oui — supply chain/runtime | Oui — mutations et répétitions | Récupération/compatibilité volontaire | Non | KEEP |
 | `tests/runtime-manager-integration.sh` | Bash test | Vérifie installation normale, chemins, offline et rollback runtime | `run-all.sh`, signal test | Oui — runtime | Oui — x86_64/aarch64 et états courants/précédents | Compatibilité rollback nécessaire | Non | KEEP |
-| `tests/test-runner-integration.sh` | Bash test | Teste doctor JSON, concurrence, timing, transitions finales et terminaison du runner | `run-all.sh`, tests statiques | Oui — infrastructure tests | Oui — couvre cache shfmt, Git, JSON C0, sondes bornées et stress de signaux avec mocks hermétiques | Non | Non | KEEP |
+| `tests/test-runner-integration.sh` | Bash test | Teste doctor JSON, concurrence, manifestes exacts, timing, transitions finales et terminaison du runner | `run-all.sh`, tests statiques | Oui — infrastructure tests | Oui — couvre environnement, ordre d’échec, signaux, PID réutilisé et enfant sans token résistant à TERM | Non | Non | KEEP |
 | `tests/zenity-real-session-qualification.sh` | Bash qualification manuelle | Enregistre une session GUI réelle contrôlée avec preuve de confidentialité/processus | Mainteneurs via `TESTING.md`; inventaire Shell | Oui — validation UI non simulable | Oui — scénarios, plateformes et preuves documentés | Non | Non, ne peut être remplacé par le mock headless | KEEP |
 
 ## Vérification des candidats historiques et temporaires
 
 La recherche globale n’a trouvé aucun blob tracked identique, aucun fichier de
 rejet/sauvegarde/éditeur, aucun cache Python, aucune preuve générée et aucun
-répertoire d’anciennes captures. Tous les chemins sauf `.gitignore` ont une
-référence directe dans le dépôt ; `.gitignore` est consommé intrinsèquement par
-Git. Les scripts de qualification manuelle qui ne sont pas lancés en CI ont un
+répertoire d’anciennes captures. Tous les chemins ont un consommateur explicite
+dans la table. `.gitignore` est utilisé par Git et contrôlé par `test-static.sh` ;
+les trois skills sont découvertes dynamiquement dans `.agents/skills/`. Les
+scripts de qualification manuelle qui ne sont pas lancés en CI ont un
 consommateur et une procédure explicites dans `TESTING.md`.
 
 Pour chaque fichier pouvant sembler ancien, la question demandée a été posée :
@@ -277,33 +193,9 @@ Pour chaque fichier pouvant sembler ancien, la question demandée a été posée
   ponctuel abandonné ; sa valeur disparaîtrait seulement si ce contrôle était
   remplacé par une source de vérité équivalente.
 
-`AUDIT_REPORT_2.3.0.md` et `QUALIFICATION_2.2.0.md` avaient déjà été retirés
-avant le snapshot, avec leur valeur historique préservée par Git. Ils ne sont
-donc pas des fichiers tracked à supprimer et ne sont pas réintroduits. Les
-sorties nouvelles des helpers vont dans `qualification-evidence/`, désormais
-ignoré, afin qu’un rapport généré ou temporaire ne redevienne pas par accident
-une documentation courante contradictoire.
-
 Aucun fichier ne satisfait les conditions de
 `SUPPRIMER — PROUVÉ INUTILE`. Il n’existe donc aucun candidat nécessitant une
 preuve individuelle de suppression supplémentaire.
-
-## Corrections réalisées pendant la passe
-
-Neuf fichiers existants ont été corrigés sans changement fonctionnel du moteur :
-
-- `private-aria2-plan.py`, `AGENTS.md`, `SHELL_STYLE.md`,
-  `tests/lib/project-files.sh` et `test-static.sh` définissent et contrôlent
-  désormais l’identité Python adaptée au langage ;
-- `.editorconfig` explicite l’indentation Python ;
-- `TESTING.md` documente les deux qualifications manuelles orphelines de guide ;
-- `.gitignore` exclut les caches Python et les preuves locales générées ;
-- `scripts/release-evidence-qualification.sh` utilise un exemple sémantique
-  neutre plutôt qu’une ancienne release du projet.
-
-Le présent inventaire est le nouveau fichier technique ajouté par la passe. Les
-actions de la table décrivent l’état final : aucune correction connue ne reste
-ouverte.
 
 # AUDIT DE L’UTILITÉ DE TOUS LES FICHIERS
 
@@ -312,8 +204,7 @@ ouverte.
 - Nombre de fichiers à conserver : **83**, dont les catégories historique et
   compatibilité ci-dessous.
 - Nombre de fichiers historiques : **1** (`CHANGELOG.md`).
-- Nombre de fichiers à corriger : **0** après remédiation (**9** corrigés
-  pendant la passe).
+- Nombre de fichiers à corriger : **0**.
 - Nombre de fichiers redondants : **0**.
 - Nombre de suppressions réellement justifiées : **0**.
 - Nombre de cas à revalider : **0**.

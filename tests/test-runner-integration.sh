@@ -16,6 +16,9 @@ readonly SCRIPT_DIR
 # shellcheck source=lib/assert.sh
 source "${SCRIPT_DIR}/lib/assert.sh"
 # shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/project-files.sh
+source "${SCRIPT_DIR}/lib/project-files.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/test-runner.sh
 source "${SCRIPT_DIR}/lib/test-runner.sh"
 
@@ -71,6 +74,8 @@ test_runner_terminate_children() {
         unset 'TEST_RUNNER_CHILD_PIDS[slot]'
         unset 'TEST_RUNNER_CHILD_PGIDS[slot]'
         unset 'TEST_RUNNER_CHILD_COMPLETIONS[slot]'
+        unset 'TEST_RUNNER_CHILD_TOKENS[slot]'
+        unset 'TEST_RUNNER_CHILD_START_TIMES[slot]'
     done
 }
 
@@ -232,6 +237,8 @@ test_runner_terminate_children() {
         unset 'TEST_RUNNER_CHILD_PIDS[slot]'
         unset 'TEST_RUNNER_CHILD_PGIDS[slot]'
         unset 'TEST_RUNNER_CHILD_COMPLETIONS[slot]'
+        unset 'TEST_RUNNER_CHILD_TOKENS[slot]'
+        unset 'TEST_RUNNER_CHILD_START_TIMES[slot]'
     done
 }
 
@@ -354,6 +361,543 @@ test_parallel_repeat_runner() {
     assert_text_contains "${ASSERT_STDERR}" \
         'Synthetic repeat 2/3: FAIL (status 17,' \
         'repeat runner reports the exact child failure'
+}
+
+test_recycled_child_identity_guard() {
+    local runner_library="${SCRIPT_DIR}/lib/test-runner.sh"
+    local sleep_path=''
+
+    sleep_path=$(command -v -- sleep) \
+        || fail 'recycled-child guard could not resolve sleep'
+    python3 - "${runner_library}" "${sleep_path}" <<'PY_RECYCLED_CHILD'
+import os
+import signal
+import subprocess
+import sys
+
+library, sleep_path = sys.argv[1:]
+decoy = subprocess.Popen([sleep_path, "30"], start_new_session=True)
+fixture = r'''
+set -euo pipefail
+source "$1"
+decoy_pid=$2
+
+# Model a completed child slot whose numeric PID and PGID have since been
+# recycled by an unrelated process without the registered identities.
+set_decoy_slot() {
+    TEST_RUNNER_CHILD_PIDS[0]=${decoy_pid}
+    TEST_RUNNER_CHILD_PGIDS[0]=${decoy_pid}
+    TEST_RUNNER_CHILD_COMPLETIONS[0]=''
+    TEST_RUNNER_CHILD_TOKENS[0]='expected-original-child-token'
+    TEST_RUNNER_CHILD_START_TIMES[0]=1
+}
+
+set_decoy_slot
+status=0
+test_runner_wait_any completed_slot 2>/dev/null || status=$?
+[[ ${completed_slot} == 0 ]]
+((status != 0))
+[[ ${#TEST_RUNNER_CHILD_PIDS[@]} == 0 ]]
+
+set_decoy_slot
+TEST_RUNNER_TERMINATION_POLL_ATTEMPTS=1
+
+test_runner_terminate_children TERM
+[[ ${#TEST_RUNNER_CHILD_PIDS[@]} == 0 ]]
+[[ ${#TEST_RUNNER_CHILD_PGIDS[@]} == 0 ]]
+[[ ${#TEST_RUNNER_CHILD_COMPLETIONS[@]} == 0 ]]
+[[ ${#TEST_RUNNER_CHILD_TOKENS[@]} == 0 ]]
+[[ ${#TEST_RUNNER_CHILD_START_TIMES[@]} == 0 ]]
+'''
+
+try:
+    result = subprocess.run(
+        ["bash", "-c", fixture, "bash", library, str(decoy.pid)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            "recycled-child fixture failed: "
+            + result.stderr.decode(errors="replace")
+        )
+    if decoy.poll() is not None:
+        raise AssertionError(
+            "test runner signaled a process that did not match the retained "
+            "child identity"
+        )
+finally:
+    if decoy.poll() is None:
+        try:
+            os.killpg(decoy.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    decoy.wait(timeout=5)
+PY_RECYCLED_CHILD
+}
+
+test_delayed_child_identity_handshake() {
+    local runner_library="${SCRIPT_DIR}/lib/test-runner.sh"
+
+    if ! bash -s -- "${runner_library}" <<'BASH_DELAYED_IDENTITY'; then
+set -euo pipefail
+source "$1"
+
+# The input is a function definition produced by this trusted shell itself;
+# rename only its declaration so the fixture can insert a deterministic delay.
+eval "$(
+    declare -f test_runner_read_start_time \
+        | sed '1s/^test_runner_read_start_time /_test_runner_original_read_start_time /'
+)"
+test_runner_read_start_time() {
+    sleep 0.35
+    _test_runner_original_read_start_time "$@"
+}
+
+trap 'test_runner_cleanup' EXIT
+test_runner_initialize
+test_runner_start_child 0 '' bash -c 'exit 0'
+[[ ${TEST_RUNNER_CHILD_START_TIMES[0]:-} =~ ^[1-9][0-9]*$ ]]
+
+shopt -s nullglob
+identity_files=("${TEST_RUNNER_LOG_DIR}"/child-*.identity)
+shopt -u nullglob
+((${#identity_files[@]} == 0))
+
+test_runner_wait_child 0
+test_runner_cleanup
+trap - EXIT
+BASH_DELAYED_IDENTITY
+        fail 'runner accepted or leaked a delayed child identity handshake'
+    fi
+}
+
+test_partial_child_identity_handshake() {
+    local runner_library="${SCRIPT_DIR}/lib/test-runner.sh"
+
+    if ! bash -s -- "${runner_library}" <<'BASH_PARTIAL_IDENTITY'; then
+set -euo pipefail
+source "$1"
+
+# These definitions are emitted by this trusted shell and renamed only at
+# their declarations so the fixture can expose the handoff race exactly.
+eval "$(
+    declare -f test_runner_read_active_child_start_time \
+        | sed '1s/^test_runner_read_active_child_start_time /_test_runner_original_read_active_child_start_time /'
+)"
+eval "$(
+    declare -f test_runner_read_child_identity \
+        | sed '1s/^test_runner_read_child_identity /_test_runner_original_read_child_identity /'
+)"
+
+identity_read_attempts=0
+test_runner_read_child_identity() {
+    identity_read_attempts=$((identity_read_attempts + 1))
+    if ((identity_read_attempts == 1)); then
+        return 1
+    fi
+    _test_runner_original_read_child_identity "$@"
+}
+
+test_runner_read_active_child_start_time() {
+    sleep 0.2
+    _test_runner_original_read_active_child_start_time "$@"
+}
+
+_test_runner_launch_child() {
+    local child_token=$1
+    local identity_file=$2
+    local launcher_pid=${BASHPID}
+    local launcher_start_time=''
+    shift 2
+
+    export YTDLP_ARIA2_TEST_RUNNER_CHILD_TOKEN=${child_token}
+    test_runner_read_start_time launcher_start_time "${launcher_pid}" \
+        || return 70
+    : >"${identity_file}"
+    sleep 0.05
+    printf '%s %s\n' "${launcher_pid}" "${launcher_start_time}" \
+        >"${identity_file}"
+}
+
+trap 'test_runner_cleanup' EXIT
+test_runner_initialize
+test_runner_start_child 0 '' bash -c 'exit 0'
+[[ ${TEST_RUNNER_CHILD_START_TIMES[0]:-} =~ ^[1-9][0-9]*$ ]]
+test_runner_wait_child 0
+test_runner_cleanup
+trap - EXIT
+BASH_PARTIAL_IDENTITY
+        fail 'runner lost a child identity after observing a partial handoff'
+    fi
+}
+
+test_pre_identity_stopped_launcher_signal() {
+    python3 - "${SCRIPT_DIR}/lib/test-runner.sh" <<'PY_STOPPED_IDENTITY'
+import os
+import pathlib
+import signal
+import subprocess
+import tempfile
+import time
+
+library = pathlib.Path(__import__("sys").argv[1])
+fixture = r'''
+set -u
+source "$1"
+marker=$2
+
+_test_runner_launch_child() {
+    printf '%s\n' "$BASHPID" >"${marker}"
+    kill -STOP -- "$BASHPID"
+    return 70
+}
+
+trap 'test_runner_handle_signal TERM 143' TERM
+TEST_RUNNER_TERMINATION_POLL_ATTEMPTS=2
+test_runner_initialize
+test_runner_start_child 0 '' bash -c 'exit 0'
+exit 99
+'''
+
+
+def running(pid: int, identity_token: str) -> bool:
+    try:
+        stat_fields = pathlib.Path(f"/proc/{pid}/stat").read_text(
+            encoding="ascii"
+        ).split()
+    except OSError:
+        return False
+    if len(stat_fields) >= 3 and stat_fields[2] == "Z":
+        return False
+    expected = f"YTDLP_ARIA2_STOPPED_IDENTITY_TOKEN={identity_token}".encode()
+    try:
+        environment = pathlib.Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return False
+    return expected in environment.split(b"\0")
+
+
+with tempfile.TemporaryDirectory(prefix="runner-stopped-identity-") as temp_dir:
+    root = pathlib.Path(temp_dir)
+    marker = root / "launcher.pid"
+    identity_token = str(root / "identity")
+    environment = os.environ.copy()
+    environment["YTDLP_ARIA2_STOPPED_IDENTITY_TOKEN"] = identity_token
+    runner = subprocess.Popen(
+        ["bash", "-c", fixture, "bash", str(library), str(marker)],
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    child_pid = 0
+    try:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if marker.exists() and marker.stat().st_size:
+                child_pid = int(marker.read_text(encoding="ascii").strip())
+                break
+            if runner.poll() is not None:
+                raise AssertionError(
+                    "runner exited before the stopped launcher published its PID"
+                )
+            time.sleep(0.01)
+        if not child_pid:
+            raise AssertionError("stopped launcher did not publish its PID")
+
+        runner.send_signal(signal.SIGTERM)
+        _, stderr = runner.communicate(timeout=5)
+        if runner.returncode != 143:
+            raise AssertionError(
+                f"runner returned {runner.returncode}, expected 143: "
+                + stderr.decode(errors="replace")
+            )
+        if running(child_pid, identity_token):
+            raise AssertionError(
+                "runner left a launcher stopped before identity publication"
+            )
+    finally:
+        if runner.poll() is None:
+            runner.kill()
+            runner.wait(timeout=5)
+        if child_pid and running(child_pid, identity_token):
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+PY_STOPPED_IDENTITY
+}
+
+test_signal_resistant_sanitized_child() {
+    local runner_library="${SCRIPT_DIR}/lib/test-runner.sh"
+    local sleep_path=''
+
+    sleep_path=$(command -v -- sleep) \
+        || fail 'signal-resistant fixture could not resolve sleep'
+    python3 - "${runner_library}" "${sleep_path}" <<'PY_SIGNAL_RESISTANT'
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+library, sleep_path = sys.argv[1:]
+fixture = r'''
+set -euo pipefail
+source "$1"
+marker=$2
+sleep_path=$3
+
+trap 'test_runner_cleanup' EXIT
+test_runner_initialize
+TEST_RUNNER_TERMINATION_POLL_ATTEMPTS=2
+test_runner_start_child 0 '' \
+    env -u YTDLP_ARIA2_TEST_RUNNER_CHILD_TOKEN \
+    bash -c \
+    'trap "" HUP INT TERM; printf "%s\n" "$BASHPID" >"$1"; exec "$2" 30' \
+    bash "${marker}" "${sleep_path}"
+
+[[ ${TEST_RUNNER_CHILD_START_TIMES[0]:-} =~ ^[1-9][0-9]*$ ]]
+for _ in {1..200}; do
+    [[ -s ${marker} ]] && break
+    sleep 0.001
+done
+[[ -s ${marker} ]]
+
+test_runner_terminate_children TERM
+[[ ${#TEST_RUNNER_CHILD_PIDS[@]} == 0 ]]
+[[ ${#TEST_RUNNER_CHILD_PGIDS[@]} == 0 ]]
+[[ ${#TEST_RUNNER_CHILD_COMPLETIONS[@]} == 0 ]]
+[[ ${#TEST_RUNNER_CHILD_TOKENS[@]} == 0 ]]
+[[ ${#TEST_RUNNER_CHILD_START_TIMES[@]} == 0 ]]
+test_runner_cleanup
+trap - EXIT
+'''
+
+
+def running(pid: int, identity_token: str) -> bool:
+    stat_path = pathlib.Path(f"/proc/{pid}/stat")
+    try:
+        stat_fields = stat_path.read_text(encoding="ascii").split()
+    except OSError:
+        return False
+    if len(stat_fields) >= 3 and stat_fields[2] == "Z":
+        return False
+    expected = f"YTDLP_ARIA2_STUBBORN_FIXTURE_TOKEN={identity_token}".encode()
+    try:
+        environment = pathlib.Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return False
+    return expected in environment.split(b"\0")
+
+
+with tempfile.TemporaryDirectory(prefix="runner-signal-resistant-") as temp_dir:
+    root = pathlib.Path(temp_dir)
+    marker = root / "child.pid"
+    identity_token = str(root / "identity")
+    environment = os.environ.copy()
+    environment["YTDLP_ARIA2_STUBBORN_FIXTURE_TOKEN"] = identity_token
+    child_pid = 0
+    try:
+        result = subprocess.run(
+            ["bash", "-c", fixture, "bash", library, str(marker), sleep_path],
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=5,
+            check=False,
+        )
+        if marker.exists():
+            child_pid = int(marker.read_text(encoding="ascii").strip())
+        if result.returncode != 0:
+            raise AssertionError(
+                "signal-resistant fixture failed: "
+                + result.stderr.decode(errors="replace")
+            )
+        deadline = time.monotonic() + 2
+        while child_pid and running(child_pid, identity_token):
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    "test runner lost KILL escalation after the child removed "
+                    "its runner token"
+                )
+            time.sleep(0.02)
+    finally:
+        if child_pid and running(child_pid, identity_token):
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+PY_SIGNAL_RESISTANT
+}
+
+test_run_all_manifest_execution() {
+    local manifest_root="${TEST_RUNNER_LOG_DIR}/run-all-manifest"
+    local mock_bin="${manifest_root}/bin"
+    local failure_root="${manifest_root}/ordered-failures"
+    local invocation_root=''
+    local profile=''
+    local real_bash=''
+
+    real_bash=$(command -v -- bash) \
+        || fail 'run-all manifest test could not resolve Bash'
+    mkdir -p -- "${mock_bin}"
+    cat >"${mock_bin}/bash" <<'EOF_MANIFEST_BASH'
+#!/bin/bash
+set -euo pipefail
+
+: "${RUN_ALL_MANIFEST_LOG_DIR:?}"
+record=$(mktemp \
+    --tmpdir="${RUN_ALL_MANIFEST_LOG_DIR}" \
+    'bash.XXXXXXXX.bin')
+printf '%s\0' "$@" >"${record}"
+if [[ ${RUN_ALL_MANIFEST_FAILURE_MODE:-} == ordered ]]; then
+    case " $* " in
+        *' ./tests/test-runner-integration.sh '*)
+            sleep 0.2
+            exit 17
+            ;;
+        *' ./tests/runtime-manager-integration.sh '*)
+            exit 23
+            ;;
+    esac
+fi
+EOF_MANIFEST_BASH
+    cat >"${mock_bin}/shellcheck" <<'EOF_MANIFEST_SHELLCHECK'
+#!/bin/bash
+set -euo pipefail
+
+if [[ ${1:-} == --version ]]; then
+    printf '%s\n' 'ShellCheck - synthetic manifest fixture' 'version: 0.10.0'
+    exit 0
+fi
+: "${RUN_ALL_MANIFEST_LOG_DIR:?}"
+record=$(mktemp \
+    --tmpdir="${RUN_ALL_MANIFEST_LOG_DIR}" \
+    'shellcheck.XXXXXXXX.bin')
+printf '%s\0' "$@" >"${record}"
+EOF_MANIFEST_SHELLCHECK
+    chmod 0755 -- "${mock_bin}/bash" "${mock_bin}/shellcheck"
+
+    for profile in fast full; do
+        invocation_root="${manifest_root}/${profile}"
+        mkdir -p -- "${invocation_root}"
+        assert_status 0 "run-all executes the exact ${profile} manifest" \
+            env \
+            PATH="${mock_bin}:/usr/bin:/bin" \
+            RUN_ALL_MANIFEST_LOG_DIR="${invocation_root}" \
+            "${real_bash}" "${SCRIPT_DIR}/run-all.sh" \
+            "--${profile}" --jobs 4
+
+        python3 - \
+            "${profile}" "${invocation_root}" -- \
+            "${ALL_SHELL_FILES[@]}" <<'PY_MANIFEST'
+import collections
+import pathlib
+import sys
+
+profile = sys.argv[1]
+root = pathlib.Path(sys.argv[2])
+if sys.argv[3] != "--":
+    raise AssertionError("missing shell-inventory separator")
+expected_shell_files = sys.argv[4:]
+
+static_bash_commands = [
+    ("--", "./scripts/check-shell-format.sh"),
+    ("--", "./test-static.sh"),
+]
+full_suite_commands = [
+    ("--", "./tests/mock-integration.sh", "--group", "signals"),
+    ("--", "./tests/test-runner-integration.sh"),
+    ("--", "./tests/runtime-manager-hardening-integration.sh"),
+    ("--", "./tests/mock-integration.sh", "--group", "engine-core"),
+    ("--", "./tests/progress-monitor-integration.sh"),
+    ("--", "./tests/run-all-signal-integration.sh"),
+    ("--", "./tests/runtime-manager-integration.sh"),
+    ("--", "./tests/mock-integration.sh", "--group", "engine-hls"),
+    ("--", "./tests/mock-integration.sh", "--group", "engine-staging"),
+    ("--", "./tests/mock-integration.sh", "--group", "gui-state"),
+    ("--", "./tests/mock-integration.sh", "--group", "gui-progress"),
+    ("--", "./tests/mock-integration.sh", "--group", "runtime-compat"),
+    ("--", "./tests/mock-integration.sh", "--group", "runtime-validation"),
+    ("--", "./tests/private-aria2-plan-integration.sh"),
+    ("--", "./tests/aria2-auth-headers-integration.sh"),
+    ("--", "./tests/install-fedora-authentication-integration.sh"),
+    ("--", "./tests/ffmpeg-progress-integration.sh"),
+    ("--", "./tests/installer-integration.sh"),
+    ("--", "./tests/package-user-cleanup-integration.sh"),
+    ("--", "./tests/packaging-integration.sh"),
+]
+fast_suite_commands = [
+    ("--", "./tests/test-runner-integration.sh"),
+    ("--", "./tests/runtime-manager-integration.sh"),
+    ("--", "./tests/private-aria2-plan-integration.sh"),
+    ("--", "./tests/progress-monitor-integration.sh"),
+    ("--", "./tests/ffmpeg-progress-integration.sh"),
+    ("--", "./tests/installer-integration.sh"),
+    ("--", "./tests/install-fedora-authentication-integration.sh"),
+    ("--", "./tests/packaging-integration.sh"),
+    ("--", "./tests/package-user-cleanup-integration.sh"),
+]
+
+
+def read_record(path: pathlib.Path) -> tuple[str, ...]:
+    payload = path.read_bytes()
+    if not payload.endswith(b"\0"):
+        raise AssertionError(f"unterminated argv record: {path.name}")
+    return tuple(
+        field.decode("utf-8", errors="strict")
+        for field in payload[:-1].split(b"\0")
+    )
+
+
+actual_bash = collections.Counter(
+    read_record(path) for path in root.glob("bash.*.bin")
+)
+expected_suites = (
+    fast_suite_commands if profile == "fast" else full_suite_commands
+)
+expected_bash = collections.Counter(static_bash_commands + expected_suites)
+if actual_bash != expected_bash:
+    raise AssertionError(
+        f"{profile} Bash manifest mismatch: "
+        f"actual={actual_bash!r} expected={expected_bash!r}"
+    )
+
+shellcheck_records = [
+    read_record(path) for path in root.glob("shellcheck.*.bin")
+]
+if len(shellcheck_records) != 4:
+    raise AssertionError(
+        f"expected four ShellCheck inventories, got {len(shellcheck_records)}"
+    )
+actual_shell_files = []
+for record in shellcheck_records:
+    if record[:4] != ("-x", "-o", "all", "--"):
+        raise AssertionError(f"invalid ShellCheck argv: {record!r}")
+    actual_shell_files.extend(record[4:])
+if collections.Counter(actual_shell_files) != collections.Counter(
+    expected_shell_files
+):
+    raise AssertionError("ShellCheck inventories omit or duplicate shell files")
+if len(actual_shell_files) != len(set(actual_shell_files)):
+    raise AssertionError("ShellCheck inventories overlap")
+PY_MANIFEST
+    done
+
+    mkdir -p -- "${failure_root}"
+    assert_status 17 \
+        'run-all preserves the first manifest failure after inverse completion' \
+        env \
+        PATH="${mock_bin}:/usr/bin:/bin" \
+        RUN_ALL_MANIFEST_LOG_DIR="${failure_root}" \
+        RUN_ALL_MANIFEST_FAILURE_MODE=ordered \
+        "${real_bash}" "${SCRIPT_DIR}/run-all.sh" \
+        --fast --jobs 4
 }
 
 test_run_all_doctor_contract() {
@@ -739,7 +1283,7 @@ main() {
     local failure_completion
     local status=0
 
-    for command_name in bash cat chmod env ln mkdir mktemp python3 rm sleep timeout; do
+    for command_name in bash cat chmod env ln mkdir mktemp python3 rm sed sleep timeout; do
         require_test_command "${command_name}"
     done
 
@@ -826,10 +1370,20 @@ main() {
         'all concurrent process-group slots are released'
     assert_equals '0' "${#TEST_RUNNER_CHILD_COMPLETIONS[@]}" \
         'all concurrent completion slots are released'
+    assert_equals '0' "${#TEST_RUNNER_CHILD_TOKENS[@]}" \
+        'all concurrent child-token slots are released'
+    assert_equals '0' "${#TEST_RUNNER_CHILD_START_TIMES[@]}" \
+        'all concurrent child start-time slots are released'
 
     test_startup_signal_registration_stress
     test_startup_signal_final_transition
     test_parallel_repeat_runner
+    test_recycled_child_identity_guard
+    test_delayed_child_identity_handshake
+    test_partial_child_identity_handshake
+    test_pre_identity_stopped_launcher_signal
+    test_signal_resistant_sanitized_child
+    test_run_all_manifest_execution
     test_run_all_doctor_contract
 
     printf 'Test-runner integration passed.\n'

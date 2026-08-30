@@ -323,9 +323,16 @@ forms. These controls improve task execution but do not grant release, merge,
 or repository-administration authority.
 
 Tests use private temporary homes, mock binaries, fixtures, and bounded process
-supervision. They are part of the architecture: changing a trust, cleanup,
-progress, process, packaging, or compatibility boundary requires updating or
-adding the matching regression proof.
+supervision. The parallel runner binds cancellation to a child-published Linux
+process start time and a private inherited token. If a fatal signal arrives
+before publication, one `/proc` snapshot must instead bind the still-direct
+launcher to the runner through its state, parent PID, and start time. The Python
+session supervisor retains that identity until signal-resistant same-group
+descendants have exited or the runner reaches authenticated KILL escalation;
+inactive slots are reaped before any retained PID or process group is signaled.
+Tests are part of the architecture: changing a trust, cleanup, progress,
+process, packaging, or compatibility boundary requires updating or adding the
+matching regression proof.
 
 ## Change boundaries
 
