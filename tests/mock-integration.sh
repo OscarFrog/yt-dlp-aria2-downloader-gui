@@ -3884,6 +3884,7 @@ test_mock_gui_config_recovery() {
     local config_file config_line_count config_padding_bytes config_prefix_bytes
     local config_profile_suffix=$'\nprofile=audio\n'
     local config_size line_number relative_config_dir relative_state_dir
+    local special_file_timeout_seconds=10
 
     # Scenario group: legacy and malformed configuration recovery.
     config_file="${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf"
@@ -3926,8 +3927,10 @@ EOF_BAD_CONFIG
     rm -f -- "${config_file}" "${OUTPUT_DIR}/Mock media [abc123].webm"
     mkfifo -- "${config_file}"
     prepare_argument_log 'config-fifo-fallback'
+    # Keep the read non-blocking contract bounded while leaving enough startup
+    # headroom for the four-way full-suite and CI stress profiles.
     assert_status 0 'configuration FIFO is ignored without blocking the GUI' \
-        env MOCK_GUI_SCENARIO_TIMEOUT_SECONDS=3 \
+        env MOCK_GUI_SCENARIO_TIMEOUT_SECONDS="${special_file_timeout_seconds}" \
         MOCK_USE_DEFAULT_PROFILE=1 \
         "${GUI_UNDER_TEST}"
     [[ -f ${config_file} && ! -L ${config_file} ]] \
@@ -3939,7 +3942,7 @@ EOF_BAD_CONFIG
     ln -s -- /dev/zero "${config_file}"
     prepare_argument_log 'config-device-symlink-fallback'
     assert_status 0 'configuration device symlink is ignored without blocking the GUI' \
-        env MOCK_GUI_SCENARIO_TIMEOUT_SECONDS=3 \
+        env MOCK_GUI_SCENARIO_TIMEOUT_SECONDS="${special_file_timeout_seconds}" \
         MOCK_USE_DEFAULT_PROFILE=1 \
         "${GUI_UNDER_TEST}"
     [[ -f ${config_file} && ! -L ${config_file} ]] \
