@@ -29,7 +29,7 @@ readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 # The development tree can lead the latest installable GitHub release. Keep the
 # two contracts explicit so README package names never advertise absent assets.
 readonly EXPECTED_VERSION='2.3.6'
-readonly EXPECTED_PUBLISHED_VERSION='2.3.5'
+readonly EXPECTED_PUBLISHED_VERSION='2.3.6'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SOURCE_INVENTORY_FILE=''
 REPOSITORY_INVENTORY_FILE=''
@@ -1431,6 +1431,38 @@ release_docs_verifier_job_policy() {
     return 0
 }
 
+assert_release_docs_blob_payload_streaming() (
+    local decoded_payload=''
+    local encoded_payload=''
+    local large_source=''
+
+    trap 'rm -f -- "${decoded_payload}" "${encoded_payload}" "${large_source}"' EXIT
+    decoded_payload=$(mktemp) \
+        || fail 'unable to create release-docs decoded-payload fixture.'
+    encoded_payload=$(mktemp) \
+        || fail 'unable to create release-docs encoded-payload fixture.'
+    large_source=$(mktemp) \
+        || fail 'unable to create release-docs large-source fixture.'
+
+    head -c 262144 /dev/zero >"${large_source}" \
+        || fail 'unable to create the large release-docs payload fixture.'
+    if ! base64 --wrap=0 -- "${large_source}" \
+        | jq -Rs '{content: ., encoding: "base64"}' \
+            >"${encoded_payload}"; then
+        fail 'release-docs streaming blob payload encoding failed.'
+    fi
+    jq -e \
+        '.encoding == "base64" and (.content | type == "string")' \
+        "${encoded_payload}" >/dev/null \
+        || fail 'release-docs streaming blob payload metadata is invalid.'
+    if ! jq -r '.content' "${encoded_payload}" \
+        | base64 --decode >"${decoded_payload}"; then
+        fail 'release-docs streaming blob payload decoding failed.'
+    fi
+    cmp -s -- "${large_source}" "${decoded_payload}" \
+        || fail 'release-docs streaming blob payload changed verified bytes.'
+)
+
 release_docs_publisher_job_policy() {
     local job_block=$1
     local permissions=''
@@ -1472,9 +1504,17 @@ release_docs_publisher_job_policy() {
     [[ ${job_block} == *'contents/${path}?ref=${main_sha}'* ]] || return 65
     [[ ${job_block} == *'mode: "100755"'* ]] || return 65
     # shellcheck disable=SC2016 # Literal byte-preserving artifact encoding.
-    [[ ${job_block} == *'base64 --wrap=0 -- "${handoff_dir}/${path}"'* ]] \
+    [[ ${job_block} == *'base64 --wrap=0 -- "${handoff_dir}/${path}"'*'| jq -Rs'* ]] \
         || return 65
+    [[ ${job_block} != *'--arg content'* ]] || return 65
     [[ ${job_block} == *'encoding: "base64"'* ]] || return 65
+    [[ ${job_block} == *'unable to encode verified blob payload'* ]] \
+        || return 65
+    [[ ${job_block} == *'unable to create verified Git blob'* ]] \
+        || return 65
+    # shellcheck disable=SC2016 # Literal Git blob identity validation.
+    [[ ${job_block} == *'if [[ ! ${blob_sha} =~ ^[0-9a-f]{40}$ ]]; then'* ]] \
+        || return 65
     # shellcheck disable=SC2016 # Literal Git database API boundaries.
     [[ ${job_block} == *'repos/${GITHUB_REPOSITORY}/git/blobs'* ]] || return 65
     # shellcheck disable=SC2016 # Literal Git database API boundaries.
@@ -1518,6 +1558,11 @@ assert_release_docs_workflow_policy() {
     local publisher_tag_binding='${release_tag_sha} != "${RELEASE_SHA}"'
     # shellcheck disable=SC2016 # Literal negative-control fragments.
     local publisher_ancestry_binding='${merge_base_sha} != "${RELEASE_SHA}"'
+    # shellcheck disable=SC2016 # Literal negative-control fragment.
+    local publisher_argv_blob='| jq -n --arg content "${encoded_content}"'
+    # shellcheck disable=SC2016 # Literal negative-control fragment.
+    local publisher_blob_identity='if [[ ! ${blob_sha} =~ ^[0-9a-f]{40}$ ]]; then'
+    local publisher_streaming_blob='| jq -Rs'
 
     prepare_block=$(workflow_job_block "${workflow}" prepare-release-docs)
     verifier_block=$(workflow_job_block "${workflow}" verify-release-docs)
@@ -1541,6 +1586,7 @@ assert_release_docs_workflow_policy() {
     # shellcheck disable=SC2310
     release_docs_publisher_job_policy "${publisher_block}" \
         || fail 'release-docs publisher job violates its privileged trust boundary.'
+    assert_release_docs_blob_payload_streaming
 
     mutated=${prepare_block//contents: read/contents: write}
     mutation_must_change "${prepare_block}" "${mutated}" \
@@ -1672,6 +1718,24 @@ assert_release_docs_workflow_policy() {
     # shellcheck disable=SC2310
     if release_docs_publisher_job_policy "${mutated}"; then
         fail 'release-docs policy allowed a non-byte-preserving blob encoding.'
+    fi
+
+    mutated=${publisher_block/"${publisher_streaming_blob}"/"${publisher_argv_blob}"}
+    mutation_must_change "${publisher_block}" "${mutated}" \
+        'release-docs oversized blob argument mutation'
+    # Predicate failure is expected for an argv-sized verified blob payload.
+    # shellcheck disable=SC2310
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed verified blob content in a CLI argument.'
+    fi
+
+    mutated=${publisher_block/"${publisher_blob_identity}"/'if false; then'}
+    mutation_must_change "${publisher_block}" "${mutated}" \
+        'release-docs blob identity guard removal'
+    # Predicate failure is expected when the Git blob identity is not checked.
+    # shellcheck disable=SC2310
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed removal of the Git blob identity guard.'
     fi
 }
 

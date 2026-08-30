@@ -561,19 +561,29 @@ jobs:
           create_blob() {
             local path=$1
             local blob_sha=''
-            local encoded_content=''
 
-            encoded_content=$(base64 --wrap=0 -- "${handoff_dir}/${path}")
-            jq -n \
-              --arg content "${encoded_content}" \
-              '{content: $content, encoding: "base64"}' \
-              >"${api_payload}"
-            blob_sha=$(gh api \
+            if ! base64 --wrap=0 -- "${handoff_dir}/${path}" \
+              | jq -Rs \
+                '{content: ., encoding: "base64"}' \
+                >"${api_payload}"; then
+              printf 'Error: unable to encode verified blob payload: %s\n' \
+                "${path}" >&2
+              return 65
+            fi
+            if ! blob_sha=$(gh api \
               --method POST \
               "repos/${GITHUB_REPOSITORY}/git/blobs" \
               --input "${api_payload}" \
-              --jq '.sha')
-            [[ ${blob_sha} =~ ^[0-9a-f]{40}$ ]]
+              --jq '.sha'); then
+              printf 'Error: unable to create verified Git blob: %s\n' \
+                "${path}" >&2
+              return 65
+            fi
+            if [[ ! ${blob_sha} =~ ^[0-9a-f]{40}$ ]]; then
+              printf 'Error: invalid verified Git blob identity: %s\n' \
+                "${path}" >&2
+              return 65
+            fi
             printf '%s\n' "${blob_sha}"
           }
 
