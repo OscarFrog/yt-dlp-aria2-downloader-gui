@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.3.5 - 2026-08-29
+## 2.3.5 - 2026-08-30
 
 ### Security and state robustness
 
@@ -84,11 +84,25 @@
 - Synchronize the startup-signal stress test with the sender acknowledgement,
   allowing Bash 5.2 to dispatch a pending trap after the `DEBUG` hook returns
   while still proving that the signal preceded complete child registration.
+- Reject oversized `--jobs` values before Bash arithmetic, make suite/static
+  mappings exact, and execute a hermetic manifest regression that proves all
+  full, fast and ShellCheck commands without omissions, overlap or duplicates.
+- Authenticate runner cancellation with a child-published Linux start time and
+  private inherited token, plus a same-snapshot parent/start-time fallback when
+  a fatal signal precedes publication. Keep the token-bearing session
+  supervisor alive through signal-resistant descendants and apply the same
+  stale-identity rejection to signal-test cleanup.
+- Front-load the latency-dominant signal and test-runner suites at four-way
+  concurrency, reducing the parallel tail without increasing worker count or
+  removing validation.
 
 ### Repository maintenance
 
 - Add a statically enforced tracked-file utility inventory and document the
   active, historical, and compatibility reason for retaining every path.
+- Revalidate all 83 tracked paths and their package, CI, test, documentation,
+  and compatibility consumers; remove the duplicate raw path list and stale
+  snapshot narrative from the current inventory.
 - Define a language-appropriate Python identity contract instead of copying the
   Bash-only header, and document the manual real-Zenity and post-release
   qualification helpers.

@@ -42,10 +42,12 @@ source "${PROJECT_FILES}"
 # shellcheck source=lib/test-runner.sh
 source "${TEST_RUNNER_LIBRARY}"
 
-# Stagger CPU-heavy shell/mocking suites with wait-heavy monitor and signal
-# suites. This keeps four-core runners busy without making every long scenario
-# compete for the same resource at startup.
+# Start the latency-dominant signal and runner suites first, then retain the
+# deliberate CPU-heavy/wait-heavy stagger. This reduces the four-worker tail
+# without increasing concurrency or weakening any validation.
 readonly -a FULL_SUITE_IDS=(
+    mock-signals
+    test-runner
     runtime-manager-hardening
     mock-engine-core
     progress-monitor
@@ -56,12 +58,10 @@ readonly -a FULL_SUITE_IDS=(
     mock-gui-state
     mock-gui-progress
     mock-runtime-compat
-    mock-signals
     mock-runtime-validation
     private-aria2-plan
     aria2-auth-headers
     install-fedora-auth
-    test-runner
     ffmpeg-progress
     installer
     package-user-cleanup
@@ -71,6 +71,7 @@ readonly -a FULL_SUITE_IDS=(
 # The fast profile is an explicit developer feedback loop. The default full
 # profile remains the release-equivalent local contract.
 readonly -a FAST_SUITE_IDS=(
+    test-runner
     runtime-manager
     private-aria2-plan
     progress-monitor
@@ -79,7 +80,6 @@ readonly -a FAST_SUITE_IDS=(
     install-fedora-auth
     packaging
     package-user-cleanup
-    test-runner
 )
 
 declare -Ar SUITE_LABELS=(
@@ -139,20 +139,29 @@ declare -Ar SUITE_GROUP_ARGUMENTS=(
     ['mock-runtime-validation']='runtime-validation'
 )
 
-readonly -a STATIC_VALIDATION_LABELS=(
-    'shfmt validation'
-    'Static validation'
-    'Production ShellCheck'
-    'Packaging ShellCheck'
-    'Test-suite ShellCheck'
-    'Development tooling ShellCheck'
+readonly -a STATIC_VALIDATION_IDS=(
+    shfmt
+    static
+    shellcheck-production
+    shellcheck-packaging
+    shellcheck-tests
+    shellcheck-development
 )
 
-readonly -a STATIC_SHELLCHECK_ARRAY_NAMES=(
-    PRODUCTION_SHELL_FILES
-    PACKAGING_SHELL_FILES
-    TEST_SHELL_FILES
-    DEVELOPMENT_SHELL_FILES
+declare -Ar STATIC_VALIDATION_LABELS=(
+    ['shfmt']='shfmt validation'
+    ['static']='Static validation'
+    ['shellcheck-production']='Production ShellCheck'
+    ['shellcheck-packaging']='Packaging ShellCheck'
+    ['shellcheck-tests']='Test-suite ShellCheck'
+    ['shellcheck-development']='Development tooling ShellCheck'
+)
+
+declare -Ar STATIC_SHELLCHECK_ARRAY_NAMES=(
+    ['shellcheck-production']='PRODUCTION_SHELL_FILES'
+    ['shellcheck-packaging']='PACKAGING_SHELL_FILES'
+    ['shellcheck-tests']='TEST_SHELL_FILES'
+    ['shellcheck-development']='DEVELOPMENT_SHELL_FILES'
 )
 
 PROFILE='full'
@@ -224,14 +233,22 @@ select_profile() {
 validate_jobs() {
     (($# == 1)) || return 2
     local candidate=$1
+    local jobs_value=0
 
-    if [[ ! ${candidate} =~ ^[0-9]+$ ]] \
-        || ((10#${candidate} < 1 || 10#${candidate} > 32)); then
+    # Bound decimal syntax before arithmetic so an oversized argv value cannot
+    # wrap Bash's fixed-width integer and enter the accepted range.
+    if [[ ! ${candidate} =~ ^[0-9]{1,2}$ ]]; then
         printf 'Error: test concurrency must be an integer from 1 through 32: %s\n' \
             "${candidate}" >&2
         return 2
     fi
-    JOBS=$((10#${candidate}))
+    jobs_value=$((10#${candidate}))
+    if ((jobs_value < 1 || jobs_value > 32)); then
+        printf 'Error: test concurrency must be an integer from 1 through 32: %s\n' \
+            "${candidate}" >&2
+        return 2
+    fi
+    JOBS=${jobs_value}
 }
 
 parse_arguments() {
@@ -995,9 +1012,15 @@ validate_shell_file_arrays() {
 }
 
 validate_suite_manifest() {
+    local execution_key
+    local group_argument
+    local static_validation_id
     local suite_id
     local suite_path
     local -A seen=()
+    local -A seen_executions=()
+    local -A seen_fast=()
+    local -A seen_static=()
 
     for suite_id in "${FULL_SUITE_IDS[@]}"; do
         if [[ -n ${seen[${suite_id}]:-} ]]; then
@@ -1019,12 +1042,92 @@ validate_suite_manifest() {
                 "${SUITE_PATHS[${suite_id}]}" >&2
             return 66
         fi
+
+        group_argument=${SUITE_GROUP_ARGUMENTS[${suite_id}]:-}
+        if [[ ${SUITE_PATHS[${suite_id}]} == './tests/mock-integration.sh' &&
+            -z ${group_argument} ]]; then
+            printf 'Error: mock validation suite has no group mapping: %s\n' \
+                "${suite_id}" >&2
+            return 65
+        fi
+        execution_key="${SUITE_PATHS[${suite_id}]}"$'\034'"${group_argument}"
+        if [[ -n ${seen_executions[${execution_key}]:-} ]]; then
+            printf 'Error: duplicate validation suite execution mapping: %s\n' \
+                "${suite_id}" >&2
+            return 65
+        fi
+        seen_executions[${execution_key}]=1
+    done
+
+    if ((${#SUITE_LABELS[@]} != ${#FULL_SUITE_IDS[@]} || \
+        ${#SUITE_PATHS[@]} != ${#FULL_SUITE_IDS[@]})); then
+        printf 'Error: validation suite labels or paths do not match the full manifest.\n' >&2
+        return 65
+    fi
+    for suite_id in "${!SUITE_LABELS[@]}" "${!SUITE_PATHS[@]}"; do
+        if [[ -z ${seen[${suite_id}]:-} ]]; then
+            printf 'Error: validation suite mapping is outside the full manifest: %s\n' \
+                "${suite_id}" >&2
+            return 65
+        fi
+    done
+    for suite_id in "${!SUITE_GROUP_ARGUMENTS[@]}"; do
+        if [[ -z ${seen[${suite_id}]:-} ]]; then
+            printf 'Error: validation group mapping is outside the full manifest: %s\n' \
+                "${suite_id}" >&2
+            return 65
+        fi
     done
 
     for suite_id in "${FAST_SUITE_IDS[@]}"; do
+        if [[ -n ${seen_fast[${suite_id}]:-} ]]; then
+            printf 'Error: duplicate fast-profile suite identifier: %s\n' \
+                "${suite_id}" >&2
+            return 65
+        fi
+        seen_fast[${suite_id}]=1
         if [[ -z ${seen[${suite_id}]:-} ]]; then
             printf 'Error: fast profile references an unknown suite: %s\n' \
                 "${suite_id}" >&2
+            return 65
+        fi
+    done
+
+    for static_validation_id in "${STATIC_VALIDATION_IDS[@]}"; do
+        if [[ -n ${seen_static[${static_validation_id}]:-} ]]; then
+            printf 'Error: duplicate static validation identifier: %s\n' \
+                "${static_validation_id}" >&2
+            return 65
+        fi
+        seen_static[${static_validation_id}]=1
+        if [[ -z ${STATIC_VALIDATION_LABELS[${static_validation_id}]:-} ]]; then
+            printf 'Error: static validation has no label: %s\n' \
+                "${static_validation_id}" >&2
+            return 65
+        fi
+        case ${static_validation_id} in
+            shfmt | static) ;;
+            *)
+                if [[ -z ${STATIC_SHELLCHECK_ARRAY_NAMES[${static_validation_id}]:-} ]]; then
+                    printf 'Error: static validation has no command mapping: %s\n' \
+                        "${static_validation_id}" >&2
+                    return 65
+                fi
+                ;;
+        esac
+    done
+    if ((${#STATIC_VALIDATION_LABELS[@]} != ${#STATIC_VALIDATION_IDS[@]} || \
+        ${#STATIC_SHELLCHECK_ARRAY_NAMES[@]} + 2 != \
+        ${#STATIC_VALIDATION_IDS[@]})); then
+        printf 'Error: static validation labels and commands are inconsistent.\n' >&2
+        return 65
+    fi
+    for static_validation_id in \
+        "${!STATIC_VALIDATION_LABELS[@]}" \
+        "${!STATIC_SHELLCHECK_ARRAY_NAMES[@]}"; do
+        if [[ -z ${seen_static[${static_validation_id}]:-} ]]; then
+            printf 'Error: static validation mapping is outside the manifest: %s\n' \
+                "${static_validation_id}" >&2
             return 65
         fi
     done
@@ -1043,24 +1146,24 @@ start_static_validation() {
     (($# == 2)) || return 2
     local validation_index=$1
     local slot=$2
-    local label=${STATIC_VALIDATION_LABELS[${validation_index}]}
+    local validation_id=${STATIC_VALIDATION_IDS[${validation_index}]}
+    local label=${STATIC_VALIDATION_LABELS[${validation_id}]}
     local log_file="${TEST_RUNNER_LOG_DIR}/static-${validation_index}.log"
     local completion_file="${TEST_RUNNER_LOG_DIR}/static-${validation_index}.completed"
-    local shellcheck_index
+    local shell_array_name=''
     local -a validation_command=()
 
-    case ${validation_index} in
-        0)
+    case ${validation_id} in
+        shfmt)
             validation_command=(bash -- ./scripts/check-shell-format.sh)
             ;;
-        1)
+        static)
             validation_command=(bash -- ./test-static.sh)
             ;;
         *)
-            shellcheck_index=$((validation_index - 2))
-            ((shellcheck_index < ${#STATIC_SHELLCHECK_ARRAY_NAMES[@]})) \
-                || return 70
-            declare -n static_shell_files_ref="${STATIC_SHELLCHECK_ARRAY_NAMES[${shellcheck_index}]}"
+            shell_array_name=${STATIC_SHELLCHECK_ARRAY_NAMES[${validation_id}]:-}
+            [[ -n ${shell_array_name} ]] || return 70
+            declare -n static_shell_files_ref="${shell_array_name}"
             validation_command=(
                 shellcheck -x -o all -- "${static_shell_files_ref[@]}"
             )
@@ -1103,13 +1206,15 @@ collect_completed_static_validation() {
 
 report_static_validations() {
     local validation_index
+    local validation_id
     local label
     local duration
     local status=0
     local first_failure=0
 
-    for validation_index in "${!STATIC_VALIDATION_LABELS[@]}"; do
-        label=${STATIC_VALIDATION_LABELS[${validation_index}]}
+    for validation_index in "${!STATIC_VALIDATION_IDS[@]}"; do
+        validation_id=${STATIC_VALIDATION_IDS[${validation_index}]}
+        label=${STATIC_VALIDATION_LABELS[${validation_id}]}
         status=${STATIC_VALIDATION_STATUSES[${validation_index}]}
         test_runner_format_duration \
             "$((STATIC_VALIDATION_ENDS[validation_index] - STATIC_VALIDATION_STARTS[validation_index]))" \
@@ -1137,14 +1242,14 @@ run_static_validations() {
     local active_count=0
     local slot=0
 
-    ((static_jobs <= ${#STATIC_VALIDATION_LABELS[@]})) \
-        || static_jobs=${#STATIC_VALIDATION_LABELS[@]}
+    ((static_jobs <= ${#STATIC_VALIDATION_IDS[@]})) \
+        || static_jobs=${#STATIC_VALIDATION_IDS[@]}
     initialize_static_validation_schedule
     printf '\nStarting static validations (jobs: %d)\n' "${static_jobs}"
 
-    while ((next_index < ${#STATIC_VALIDATION_LABELS[@]} || active_count > 0)); do
+    while ((next_index < ${#STATIC_VALIDATION_IDS[@]} || active_count > 0)); do
         for ((slot = 0; slot < static_jobs; slot++)); do
-            ((next_index < ${#STATIC_VALIDATION_LABELS[@]})) || break
+            ((next_index < ${#STATIC_VALIDATION_IDS[@]})) || break
             [[ -z ${STATIC_VALIDATION_SLOT_INDEX[${slot}]+x} ]] || continue
 
             start_static_validation "${next_index}" "${slot}"

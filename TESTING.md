@@ -85,13 +85,24 @@ Every static step and integration suite reports its elapsed time. The read-only
 shfmt check, static behavioral validation, and four ShellCheck inventories
 share the requested job limit. Parallel output is buffered separately and
 printed in canonical manifest order, so completion races do not produce
-interleaved logs. The integration manifest staggers CPU-heavy mocks with
-wait-heavy monitor and signal suites, and the scheduler immediately reuses a
-slot when any suite finishes; a short suite therefore cannot leave a worker
-idle while an unrelated long suite is still running.
+interleaved logs. The integration manifest starts the latency-dominant signal
+and runner suites first, then staggers CPU-heavy mocks with wait-heavy suites.
+The scheduler immediately reuses a slot when any suite finishes; a short suite
+therefore cannot leave a worker idle while an unrelated long suite is still
+running. Reports and the first nonzero status remain selected in manifest order
+rather than completion order.
+
 Interruption still terminates every supervised validation process group. A
 descendant that deliberately creates a new session is outside that
-process-group contract.
+process-group contract. Before signaling, the runner reaps slots whose original
+identity has disappeared and authenticates every retained PID/process group
+with a child-published Linux start time or a private inherited token. A fatal
+signal received before publication uses one state/parent/start-time `/proc`
+snapshot of the still-direct launcher instead. A stale numeric PID is therefore
+never sufficient signaling authority. The Python session supervisor retains
+its token through cancellation until every same-group descendant exits or the
+authenticated KILL escalation completes, including when the direct command
+removes the token from its own environment and ignores the first signal.
 
 The complete mock contract is divided into eight isolated scheduler suites
 (`engine-core`, `engine-hls`, `engine-staging`, `gui-progress`, `gui-state`,
@@ -492,9 +503,10 @@ no longer depends on distribution yt-dlp or Deno packages.
 
 `.github/workflows/real-tools.yml` installs actual yt-dlp, aria2c, FFmpeg, and
 FFprobe on Ubuntu. Pull-request qualification retains the pinned yt-dlp
-`2026.6.9` and `2026.8.19` matrix for reproducibility. It generates tiny direct
-HTTP, AAC/M4A, Opus/WebM, combined-audio, HLS and DASH fixtures locally, serves
-them over loopback, proves the aria2c/native downloader boundary, exercises real
+`2026.6.9`, `2026.7.4`, and `2026.8.19` matrix for reproducibility. It generates
+tiny direct HTTP, AAC/M4A, Opus/WebM, combined-audio, HLS and DASH fixtures
+locally, serves them over loopback, proves the aria2c/native downloader boundary,
+exercises real
 FFmpeg progress, and checks HLS post-remux duration consistency without
 contacting a public media service. Audio/routing and HLS-duration scenarios are
 repeated three times concurrently with ordered per-run logs. The controlled
