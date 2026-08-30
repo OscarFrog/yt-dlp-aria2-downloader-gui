@@ -25,6 +25,7 @@ readonly LEGACY_GUI_ID='yt-dlp-aria2-downloader-gui'
 readonly MARKER_NAME='.package-runtime-data-home-v1'
 readonly RUNTIME_OWNER_SENTINEL='.package-runtime-owner-v1'
 readonly MAX_METADATA_BYTES=4096
+readonly MAX_LINUX_ID=4294967294
 
 SELF=''
 
@@ -76,6 +77,29 @@ safe_home() {
 
 safe_xdg_base() {
     safe_absolute_path "$1"
+}
+
+normalize_linux_id() {
+    local output_variable=$1
+    local value=$2
+    local normalized_value=''
+    local LC_ALL=C
+
+    [[ ${value} =~ ^[0-9]+$ ]] || return 1
+    normalized_value=${value#"${value%%[!0]*}"}
+    [[ -n ${normalized_value} ]] || normalized_value=0
+
+    # Bound the decimal text before arithmetic. Bash integers are signed and
+    # fixed-width, so an attacker-controlled NSS field must never wrap to UID 0.
+    # shellcheck disable=SC2071 # Equal-length decimal strings are compared lexically.
+    if ((${#normalized_value} > ${#MAX_LINUX_ID})) \
+        || { ((${#normalized_value} == ${#MAX_LINUX_ID})) \
+            && [[ ${normalized_value} > ${MAX_LINUX_ID} ]]; }; then
+        return 1
+    fi
+
+    printf -v "${output_variable}" '%s' "${normalized_value}" || return 1
+    return 0
 }
 
 metadata_file_is_bounded() {
@@ -327,6 +351,16 @@ run_as_user() {
     local uid=$1
     local gid=$2
     local home=$3
+    local normalized_uid=''
+    local normalized_gid=''
+
+    if ! normalize_linux_id normalized_uid "${uid}" \
+        || ! normalize_linux_id normalized_gid "${gid}"; then
+        warn "refusing invalid numeric uid/gid: uid=${uid} gid=${gid}"
+        return 0
+    fi
+    uid=${normalized_uid}
+    gid=${normalized_gid}
 
     safe_home "${home}" || {
         warn "refusing invalid HOME for uid=${uid}: ${home}"
@@ -381,6 +415,7 @@ enumerate_users() {
     local line
     local getent_output=''
     local _name _passwd uid gid _gecos home _shell key
+    local normalized_uid normalized_gid
     local passwd_source_usable=false
     local getent_source_usable=false
     local -a records=()
@@ -416,6 +451,10 @@ enumerate_users() {
 
         [[ ${uid:-} =~ ^[0-9]+$ ]] || continue
         [[ ${gid:-} =~ ^[0-9]+$ ]] || continue
+        normalize_linux_id normalized_uid "${uid}" || continue
+        normalize_linux_id normalized_gid "${gid}" || continue
+        uid=${normalized_uid}
+        gid=${normalized_gid}
         safe_home "${home:-}" || continue
         while [[ ${home} == */ && ${home} != / ]]; do
             home=${home%/}
@@ -469,6 +508,9 @@ run_user_home_mode() {
 }
 
 run_numeric_home_mode() {
+    local normalized_uid=''
+    local normalized_gid=''
+
     (($# == 4)) || {
         usage
         exit 2
@@ -477,15 +519,16 @@ run_numeric_home_mode() {
         warn '--numeric-home must run as root'
         exit 77
     }
-    [[ $2 =~ ^[0-9]+$ && $3 =~ ^[0-9]+$ ]] || {
+    if ! normalize_linux_id normalized_uid "$2" \
+        || ! normalize_linux_id normalized_gid "$3"; then
         usage
         exit 2
-    }
+    fi
     safe_home "$4" || {
         warn "refusing invalid HOME: $4"
         exit 64
     }
-    run_as_user "$2" "$3" "$4"
+    run_as_user "${normalized_uid}" "${normalized_gid}" "$4"
 }
 
 main() {

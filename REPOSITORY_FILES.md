@@ -10,7 +10,7 @@ des garde-fous d’exécution et des modèles de contribution structurés.
 
 ## Inventaire exact
 
-L’état courant audité contient exactement les 82 chemins tracked suivants :
+L’état courant audité contient exactement les 83 chemins tracked suivants :
 
 ```text
 .agents/skills/packaging-release/SKILL.md
@@ -58,6 +58,7 @@ packaging/rpm/test-package-upgrade.sh
 packaging/rpm/yt-dlp-aria2-downloader-gui.spec
 packaging/yt-dlp-aria2-downloader.desktop
 private-aria2-plan.py
+private-launcher-manager.py
 progress-monitor.sh
 runtime-manager.sh
 scripts/check-shell-format.sh
@@ -120,6 +121,11 @@ projet et du module au docstring, documenté la frontière entre formats dans
 `AGENTS.md` et `SHELL_STYLE.md`, créé `PYTHON_FILES`, et ajouté une validation
 SPDX/docstring par l’AST. Copier le bandeau Bash ou ajouter un shebang aurait été
 une fausse uniformisation.
+
+`private-launcher-manager.py` suit la même identité Python sans shebang. Il
+reste toutefois propre au ZIP et au checkout Git : `install-gui.sh` l’appelle
+explicitement avec `python3` pour ancrer les transactions du launcher portable
+sur des descripteurs de répertoire, et les paquets système ne l’installent pas.
 
 Les autres formats utilisent leur mécanisme natif : titre Markdown, champ
 `name` d’un workflow, métadonnées RPM/Debian, section `NAME` des manpages,
@@ -199,6 +205,7 @@ nettoyage de données. Les autres anciennes versions restent confinées au
 | `packaging/rpm/yt-dlp-aria2-downloader-gui.spec` | Spec RPM | Déclare dépendances, installation, `%files`, scriptlet cleanup et changelog RPM | rpmbuild via `build-rpm.sh` | Oui — packaging RPM | Oui — version macro, payload et changelog figé cohérents | Changelog embarqué légitime | Non | KEEP |
 | `packaging/yt-dlp-aria2-downloader.desktop` | Desktop Entry | Lance la commande GUI système | `install-tree.sh`, packages, desktop shell | Oui — intégration bureau, installé | Oui — Exec/TryExec/icône/catégories valides | Non | Non | KEEP |
 | `private-aria2-plan.py` | Module Python privé | Classe, construit et publie atomiquement les transferts aria2 privés | `download-video.sh`, packages, cinq suites ciblées | Oui — confidentialité/transport, installé en 0644 | Oui — SPDX, docstring projet/chemin/rôle et syntaxe validés | Non | Non, isole le traitement JSON et fichiers privés | KEEP |
+| `private-launcher-manager.py` | Module Python privé | Ancre et sérialise les transactions du launcher portable avec `flock` et `openat`/`dir_fd`, puis tente leur rollback sans suivre les liens symboliques | `install-gui.sh`, ZIP/Git, tests installer | Oui — confinement installation portable, présent dans le ZIP mais non installé par RPM/DEB | Oui — cible exécutable, publication/retrait et interruption avec rollback best-effort, validator borné/reapé et stale cleanup typé/non récursif restent liés aux descripteurs ouverts, avec rejet final des remplacements de la racine ou d'un répertoire géré | Non | Non, fournit les primitives transactionnelles indisponibles en Bash | KEEP |
 | `progress-monitor.sh` | Bash production | Transforme les événements yt-dlp/aria2/FFmpeg en progression Zenity | GUI, package, tests progress/réels | Oui — exécution GUI, installé | Oui — protocoles v2/legacy et bornes cohérents | Fallback de flux legacy encore testé | Non | KEEP |
 | `runtime-manager.sh` | Bash production | Installe, atteste, active et restaure yt-dlp/Deno par utilisateur | Moteur, Fedora installer, packages, tests runtime | Oui — exécution et supply chain, installé | Oui — versions minimales, locks, journal et rollback cohérents | Compatibilité/récupération volontaire | Non | KEEP |
 | `scripts/check-shell-format.sh` | Bash développement | Vérifie sans modifier le format de tous les Shell canoniques | `run-all.sh`, agents, CI | Oui — validation | Oui — utilise pin et `.editorconfig` | Non | Non, contrepartie non mutante du formatter | KEEP |
@@ -216,13 +223,13 @@ nettoyage de données. Les autres anciennes versions restent confinées au
 | `tests/ffmpeg-real-progress-integration.sh` | Bash test réel | Vérifie `-progress`, monotonie et publication avec vrai FFmpeg | Real-tools, release, qualification | Oui — intégration réelle | Oui — répétable et borné | Non | Non | KEEP |
 | `tests/hls-remux-duration-integration.sh` | Bash test réel | Empêche la publication d’un remux HLS tronqué malgré succès FFmpeg | Real-tools, release, qualification | Oui — intégrité média | Oui — cas reproductible et réparation | Régression historique devenue contrat courant | Non | KEEP |
 | `tests/install-fedora-authentication-integration.sh` | Bash test | Teste auth RPM fail-closed et staging root immuable | `run-all.sh`, tests statiques | Oui — sécurité installation | Oui — mutations de clé/paquet couvertes | Non | Non | KEEP |
-| `tests/installer-integration.sh` | Bash test | Teste installation portable, réinstallation, échecs et retrait | `run-all.sh`, tests statiques | Oui — launcher | Oui — modes, espaces, symlinks et temporaires | Cleanup d’artefacts anciens volontaire | Non | KEEP |
+| `tests/installer-integration.sh` | Bash test | Teste installation portable, réinstallation, échecs, signaux transactionnels et retrait | `run-all.sh`, tests statiques | Oui — launcher | Oui — modes, espaces, symlinks, allocations/validator interrompus, rollback et temporaires | Cleanup d’artefacts anciens volontaire | Non | KEEP |
 | `tests/lib/assert.sh` | Bibliothèque Bash test | Assertions partagées de statut, texte, fichier, lien et mode | Sept suites et `test-static.sh` | Oui — infrastructure tests | Oui — API appelée directement | Non | Non, évite la duplication | KEEP |
 | `tests/lib/package-lifecycle.sh` | Bibliothèque Bash test | Assertions communes de payload et retrait RPM/DEB | Quatre scripts lifecycle/upgrade | Oui — packaging tests | Oui — abstraction commune aux formats | Non | Non, factorisation active | KEEP |
 | `tests/lib/package-runtime-preservation.sh` | Bibliothèque Bash test | Prépare et compare l’arbre runtime utilisateur pendant lifecycle/upgrade | Tests RPM/DEB | Oui — preuve de non-perte | Oui — snapshots déterministes et cleanup | Oui — compatibilité d’upgrade nécessaire | Non | KEEP — COMPATIBILITÉ |
 | `tests/lib/project-files.sh` | Bibliothèque Bash test | Source de vérité des inventaires Shell et Python | shfmt, ShellCheck, run-all, static, workflow updater | Oui — validation | Oui — catégories canoniques exactes | Non | Non | KEEP |
 | `tests/lib/test-runner.sh` | Bibliothèque Bash test | Supervise enfants, délais, logs, signaux et collecte parallèle | `run-all.sh`, repeat helper, tests runner | Oui — infrastructure tests | Oui — contrats de statut/processus testés | Non | Non | KEEP |
-| `tests/mock-integration.sh` | Bash test hermétique | Couvre moteur, GUI, signaux, runtime et staging via mocks | `run-all.sh`, stress CI | Oui — couverture fonctionnelle rapide | Oui — groupes explicites et fixtures privées | Migrations/legacy testés volontairement | Non, complément des vrais outils | KEEP |
+| `tests/mock-integration.sh` | Bash test hermétique | Couvre moteur, GUI, signaux, runtime et staging via mocks | `run-all.sh`, stress CI | Oui — couverture fonctionnelle rapide | Oui — groupes explicites, sessions no-fork PID/PGID/SID, signaux de groupe et fixtures privées | Migrations/legacy testés volontairement | Non, complément des vrais outils | KEEP |
 | `tests/package-user-cleanup-integration.sh` | Bash test | Attaque les bornes HOME/XDG/symlink du cleanup RPM | `run-all.sh`, stress CI | Oui — sécurité suppression | Oui — scénarios forgés et répétitions | Compatibilité de chemins anciens nécessaire | Non | KEEP |
 | `tests/packaging-integration.sh` | Bash test | Vérifie l’arbre DESTDIR, modes, assets et exclusions | `run-all.sh`, tests statiques | Oui — packaging hermétique | Oui — payload attendu actuel | Vérifie aussi l’absence d’assets obsolètes | Non | KEEP |
 | `tests/private-aria2-plan-integration.sh` | Bash test | Teste validation, construction et commit atomique du module Python | `run-all.sh`, tests statiques | Oui — helper privé | Oui — erreurs, collisions et rollback couverts | Non | Non | KEEP |
@@ -300,9 +307,9 @@ ouverte.
 
 # AUDIT DE L’UTILITÉ DE TOUS LES FICHIERS
 
-- Nombre total de fichiers tracked : **82**.
-- Nombre de fichiers examinés : **82**.
-- Nombre de fichiers à conserver : **82**, dont les catégories historique et
+- Nombre total de fichiers tracked : **83**.
+- Nombre de fichiers examinés : **83**.
+- Nombre de fichiers à conserver : **83**, dont les catégories historique et
   compatibilité ci-dessous.
 - Nombre de fichiers historiques : **1** (`CHANGELOG.md`).
 - Nombre de fichiers à corriger : **0** après remédiation (**9** corrigés

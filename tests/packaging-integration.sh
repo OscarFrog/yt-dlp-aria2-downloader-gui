@@ -89,12 +89,16 @@ assert_packaged_executables() {
     done
 
     local private_aria2_helper="${private_dir}/private-aria2-plan.py"
+    local private_launcher_helper="${private_dir}/private-launcher-manager.py"
     [[ -f ${private_aria2_helper} &&
         ! -L ${private_aria2_helper} &&
         ! -x ${private_aria2_helper} ]] \
         || fail 'Missing or unsafe packaged private aria2 helper.'
     assert_path_mode "${private_aria2_helper}" 644 \
         'private-aria2-plan.py permissions'
+
+    [[ ! -e ${private_launcher_helper} && ! -L ${private_launcher_helper} ]] \
+        || fail 'System package contains the portable-only launcher helper.'
 }
 
 assert_packaged_entrypoints() {
@@ -142,6 +146,22 @@ assert_packaged_assets() {
             || fail "Missing packaged document: ${document}"
         assert_path_mode "${document_path}" 644 "${document} permissions"
     done
+
+    for document in README.md README.fr.md; do
+        document_path="${root}/usr/share/doc/yt-dlp-aria2-downloader-gui/${document}"
+        assert_file_not_contains "${document_path}" '](TESTING.md)' \
+            "${document} has no broken installed TESTING link"
+        assert_file_not_contains "${document_path}" '](LICENSE)' \
+            "${document} has no broken installed LICENSE link"
+    done
+    assert_file_contains \
+        "${root}/usr/share/doc/yt-dlp-aria2-downloader-gui/README.md" \
+        'For a launcher installed from a portable ZIP or Git checkout' \
+        'English source-tree uninstall command is explicitly qualified'
+    assert_file_contains \
+        "${root}/usr/share/doc/yt-dlp-aria2-downloader-gui/README.fr.md" \
+        'Pour un lanceur installé depuis une archive ZIP portable ou un checkout Git' \
+        'French source-tree uninstall command is explicitly qualified'
 
     [[ ! -e ${root}/usr/share/doc/yt-dlp-aria2-downloader-gui/tests ]] \
         || fail 'Package tree contains the test suite.'

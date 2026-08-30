@@ -241,18 +241,33 @@ The automated suite checks, among other things:
   entry or progress dialog is blocked, with exact 129/130/143 statuses, bounded
   Zenity/monitor/worker reaping, and no private temporary path left behind;
 - deterministic TERM injection after the worker fork but immediately before
-  `WORKER_PID` registration, proving that the launched supervisor is still
+  `WORKER_PID` registration, proving that the launched session leader is still
   registered, terminated, and reaped without leaving private temporary state;
+- HUP, INT, and TERM delivered to isolated complete GUI and CLI foreground
+  groups while worker PGID publication is blocked, with runtime proof that the
+  directly supervised worker has identical PID, PGID, and SID and leaves no
+  detached descendant; repeated pre-publication requests retain the first
+  status while escalating immediately;
 - independent progress-monitor and Zenity statuses across the private
   owner-only FIFO, plus 64 KiB accepted-stdout and in-memory stderr bounds for
   captured dialogs;
 - process-group recovery when PGID-file publication is delayed;
+- immediate readiness-record unlinking in standalone-PGID and shared-session
+  PID paths, including before an uncatchable worker crash;
 - atomic publication and failure cleanup of the result-path file;
 - rejection of a second writer targeting the same canonical output directory;
 - explicit refusal to overwrite completed or post-processed media files while
   preserving interrupted-download resume behavior;
 - disabling of inherited yt-dlp plugins and personal configuration;
 - forwarding of HUP, INT, and TERM sent only to the CLI wrapper PID;
+- signal-safe CLI child registration before `$!` is published, plus bounded
+  cancellation of managed-runtime preparation with restored asynchronous-child
+  signal dispositions, outer ignored dispositions around no-fork `setsid`, a
+  post-restoration readiness barrier exercised at the pre-`env` race window,
+  immediate repeated-signal escalation, exact 129/130/143 status, and proof of
+  the signal received by the runtime manager;
+- requested-signal status preservation when a supervised child exits during
+  process-group discovery;
 - forwarding of termination signals during the wrapper-managed HLS FFmpeg remux;
 - preservation of immediate command failure statuses before PGID observation;
 - one shared process session for GUI, engine, yt-dlp, aria2c, FFmpeg, and Deno;
@@ -271,10 +286,29 @@ The automated suite checks, among other things:
   optional netrc capability;
 - `.desktop` launcher installation through a stable private link, exact Exec
   escaping, restrictive-path handling, validation, permissions, reinstall, and
-  removal;
+  removal, including refusal to mutate through a symbolic-link XDG root,
+  parent, terminal, intermediate, or shared-writable directory plus
+  synchronized root and managed-directory replacements after descriptor anchoring
+  while preserving victim files and rejecting false success; allocation fault
+  cleanup and exact current/legacy stale namespaces are covered, with
+  close-name, wrong-type, unknown-content, mount-boundary, and non-UTF-8 path
+  cases preserved,
+  overlapping install/uninstall transactions must follow a serial order, each
+  publication/removal fault must restore the prior three-leaf state, late root
+  or executable-target replacement must reject success, lock/validator waits
+  and validator output must remain bounded, and cleanup must retain the primary
+  failure diagnostic; wrapper-only and foreground-group HUP/INT/TERM must return
+  129/130/143 only after validator reaping and rollback, including deterministic
+  retained-non-child PID rejection, already-reaped validator-group rejection,
+  pre-Python, post-open, post-hardlink, post-publication, post-validator-fork,
+  validator-finally, transaction-cleanup, diagnostic-output, and final
+  entrypoint-return windows while preserving the first request through a
+  flag-only asynchronous handler; an absent managed branch must never redirect
+  backup, removal, or rollback operations to same-named working-directory decoys;
 - package install-tree layout, stable command symlinks, system desktop entry,
-  dedicated hicolor icon, documentation permissions, and exclusion of tests
-  and obsolete images;
+  dedicated hicolor icon, documentation permissions, positive inclusion of the
+  native aria2 helper, and exclusion of tests, obsolete images, and the
+  portable-only launcher helper;
 - real privileged installation and removal of the generated RPM in Fedora 44
   `fresh` and `ffmpeg-free` GitHub Actions environments, including launcher and
   icon cleanup;
@@ -364,7 +398,8 @@ The automated suite checks, among other things:
   preservation of a portable ZIP/Git launcher;
 - adversarial cleanup coverage for forged, multi-line, and oversized
   custom-XDG metadata, symlinked ownership sentinels, missing homes, terminal
-  runtime symlinks, and refusal of direct root cleanup for a non-root HOME;
+  runtime symlinks, overflowing UID/GID text, and refusal of direct root cleanup
+  for a non-root HOME;
 - refusal to traverse symlinked intermediate cleanup components beneath
   authorized XDG roots, with that cleanup safety suite repeated ten times in
   stress CI;

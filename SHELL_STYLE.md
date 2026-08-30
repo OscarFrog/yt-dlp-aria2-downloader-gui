@@ -343,8 +343,8 @@ canonical shell file therefore requires updating its header.
 The `Purpose` field describes durable responsibility, not release history,
 implementation chronology, or an audit finding.
 
-This banner is intentionally Bash-specific. It does not apply to the
-non-executable Python helper, workflows, Markdown, packaging metadata, desktop
+This banner is intentionally Bash-specific. It does not apply to
+non-executable Python helpers, workflows, Markdown, packaging metadata, desktop
 entries, manpages, graphics, or public keys. Those files use the
 language/format-specific identity rules in `AGENTS.md`; in particular, Python
 uses an SPDX line followed by an idiomatic module docstring and does not acquire

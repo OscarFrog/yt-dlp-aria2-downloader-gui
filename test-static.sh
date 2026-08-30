@@ -1724,6 +1724,11 @@ test_static_shell_interface_contracts() {
         require_installer_commands \
         validate_install_arguments \
         initialize_install_paths \
+        validate_private_launcher_helper \
+        installer_helper_is_direct_child \
+        terminate_installer_helper_if_child \
+        request_installer_shutdown \
+        run_private_launcher_helper \
         install_launcher \
         uninstall_launcher \
         dispatch_install_action; do
@@ -1735,6 +1740,17 @@ test_static_shell_interface_contracts() {
         test_installer_initial_installation \
         test_installer_reinstallation \
         test_installer_failure_modes \
+        test_installer_uninstall_symlink_boundaries \
+        test_installer_uninstall_anchor_race \
+        test_installer_install_anchor_race \
+        test_installer_install_branch_races \
+        test_installer_concurrent_transactions \
+        test_installer_transaction_rollbacks \
+        test_installer_signal_supervision \
+        test_installer_final_revalidation \
+        test_installer_allocation_failure_cleanup \
+        test_installer_bounded_dependencies \
+        test_installer_stale_mount_boundaries \
         test_installer_uninstall_lifecycle; do
         assert_file_contains "${SCRIPT_DIR}/tests/installer-integration.sh" \
             "${installer_test_phase}() {" \
@@ -1743,8 +1759,8 @@ test_static_shell_interface_contracts() {
 
     assert_file_contains \
         "${SCRIPT_DIR}/download-video-gui.sh" \
-        'LC_ALL=C setsid --fork --wait bash -c' \
-        'GUI worker locale stabilization'
+        'LC_ALL=C setsid --wait bash -c' \
+        'GUI worker uses a no-fork session leader'
 
     # shellcheck disable=SC2016 # Literal source probes; do not expand variables here.
     engine_probe_contracts=(
@@ -1793,11 +1809,11 @@ test_static_shell_interface_contracts() {
         'aria2 human-readable byte counters are parsed for weighted progress'
     assert_file_contains \
         "${SCRIPT_DIR}/install-gui.sh" \
-        "readonly LAUNCHER_LINK=\"\${LAUNCHER_DIR}/launch\"" \
+        "readonly LAUNCHER_LINK=\"\${DATA_HOME}/\${APP_ID}/launch\"" \
         'stable desktop launcher link'
     assert_file_contains \
-        "${SCRIPT_DIR}/install-gui.sh" \
-        "desktop-file-validate \\" \
+        "${SCRIPT_DIR}/private-launcher-manager.py" \
+        'validator = shutil.which("desktop-file-validate")' \
         'desktop launcher validation'
     # shellcheck disable=SC2016 # Literal shell-source assertions.
     assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
@@ -1810,6 +1826,7 @@ test_static_shell_interface_contracts() {
 }
 
 test_static_release_contracts() {
+    local changelog_first_line changelog_h1_count
     local engine_reported_version evidence_phase preflight_phase readme_path
     local release_workflow
 
@@ -1888,6 +1905,12 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/CHANGELOG.md" \
         "## ${EXPECTED_VERSION} - " \
         'changelog current-version heading'
+    IFS= read -r changelog_first_line <"${SCRIPT_DIR}/CHANGELOG.md"
+    assert_equals '# Changelog' "${changelog_first_line}" \
+        'changelog native document title'
+    changelog_h1_count=$(grep -c '^# ' "${SCRIPT_DIR}/CHANGELOG.md")
+    assert_equals 1 "${changelog_h1_count}" \
+        'changelog has one document title'
 
     # The release workflow must derive the release version from the tag and compare
     # it with executable/constants-based project version carriers, never comments.
@@ -2003,7 +2026,7 @@ test_static_release_contracts() {
     # shellcheck disable=SC2016 # Literal shell-source assertion.
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         'kill -0 -- "-${WORKER_PGID}"' \
-        'worker group remains tracked after supervisor exit'
+        'worker group remains tracked after session-leader exit'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'the result-file already exists; refusing to overwrite it.' \
         'existing result files are protected'
@@ -2686,10 +2709,18 @@ test_static_application_contracts() {
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         '--no-post-overwrites' \
         'yt-dlp post-processing overwrite protection'
-    # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        'LC_ALL=C setsid --fork --wait bash -c' \
-        'CLI worker isolated for signal forwarding'
+        '            setsid --wait env' \
+        'CLI worker uses a no-fork session leader'
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        '--ignore-signal=TERM' \
+        'CLI registration leader ignores outer termination signals'
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        '--default-signal=INT' \
+        'CLI workers restore the inherited SIGINT disposition'
+    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
+        'wait_for_download_ready' \
+        'CLI reused-session worker has a post-env readiness barrier'
     # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'signal_download_worker "${signal_name}"' \
@@ -2722,6 +2753,7 @@ test_static_application_contracts() {
         check_ytdlp_capabilities \
         check_aria2_runtime \
         check_aria2_capabilities \
+        check_env_capabilities \
         check_setsid_capabilities \
         check_runtime_compatibility \
         parse_arguments \
@@ -3106,7 +3138,7 @@ test_static_runtime_regression_contracts() {
     assert_file_contains "${SCRIPT_DIR}/progress-monitor.sh" \
         'MAX_SAFE_COUNTER=9000000000000000' 'bounded progress arithmetic'
     assert_file_contains "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
-        'aria2 (>= 1.37.0), python3 (>= 3.10), ffmpeg, gnupg, unzip, zenity' \
+        'ca-certificates, curl, aria2 (>= 1.37.0), python3 (>= 3.10), ffmpeg, gnupg, unzip, zenity' \
         'DEB managed-runtime system dependencies'
     assert_file_not_contains "${SCRIPT_DIR}/download-video.sh" \
         '--downloader-args' \
@@ -3123,7 +3155,22 @@ test_static_runtime_regression_contracts() {
     assert_file_contains "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
         'Requires:       aria2 >= 1.37.0' 'RPM minimum aria2 dependency'
     assert_file_contains "${SCRIPT_DIR}/install-gui.sh" \
-        'readonly ICON_FILE=' 'per-user dedicated icon installation'
+        'private-launcher-manager.py' 'portable installer uses anchored Python helper'
+    for launcher_helper_phase in \
+        open_data_home \
+        lock_data_home \
+        open_managed_directories \
+        open_launcher_target \
+        validate_launcher_target_identity \
+        create_backup_link \
+        restore_published_leaf \
+        remove_stale_artifacts \
+        install_launcher \
+        uninstall_launcher; do
+        assert_file_contains "${SCRIPT_DIR}/private-launcher-manager.py" \
+            "def ${launcher_helper_phase}(" \
+            "private launcher helper phase ${launcher_helper_phase}"
+    done
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26' \
         'release provenance attestation action'

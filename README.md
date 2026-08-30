@@ -114,7 +114,8 @@ System commands required by the application are:
 - Python **3.10 or newer**;
 - FFmpeg and `ffprobe`;
 - Zenity for the graphical interface;
-- `curl`, GnuPG, and `unzip` for managed runtime bootstrap/update;
+- `ca-certificates`, `curl`, GnuPG, and `unzip` for verified managed-runtime
+  bootstrap/update;
 - GNU coreutils, GNU grep, `find`, and `setsid`/`flock`, normally provided by
   Fedora's core system packages and `util-linux`;
 - Firefox with an authenticated YouTube session only when using the optional
@@ -348,9 +349,10 @@ sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.4-1_all.deb
 ```
 
 The DEB explicitly depends on `aria2`, Python 3.10+, FFmpeg/FFprobe,
-Zenity, curl, GnuPG, unzip, and the hicolor icon theme. GNU coreutils, grep,
-findutils, sed, and util-linux are supplied by the Debian/Ubuntu Essential base
-and are not redundantly declared as unversioned package dependencies. The DEB
+Zenity, CA certificates, curl, GnuPG, unzip, and the hicolor icon theme. GNU
+coreutils, grep, findutils, sed, and util-linux are supplied by the
+Debian/Ubuntu Essential base and are not redundantly declared as unversioned
+package dependencies. The DEB
 **does not depend on distribution yt-dlp or Deno packages**. yt-dlp and Deno
 are installed and verified in the invoking user's runtime directory on first
 use.
@@ -476,6 +478,18 @@ The desktop entry calls a stable per-user launcher link stored under:
 
 That private link targets the repository's absolute GUI-script path. After
 moving the project directory, run `./install-gui.sh install` again.
+For containment, the portable installer requires a current-user-owned
+`XDG_DATA_HOME` that is not writable by group or other users, and refuses a
+root or parent component that is a symbolic link. The data path must be valid
+UTF-8 and safely representable in a desktop `Exec` key. It keeps no-follow
+directory descriptors open for the complete transaction, so a concurrent
+pathname replacement cannot redirect installation, removal, or stale-file
+cleanup.
+Concurrent portable install/remove requests are serialized. After a failed
+multi-file update, the helper attempts to restore the preceding launcher state
+before reporting the primary error and any rollback failure. The executable GUI
+target is revalidated before success. HUP, INT, and TERM also trigger this
+transaction cleanup before the command returns status 129, 130, or 143.
 
 ## Graphical usage
 
@@ -720,10 +734,14 @@ concurrently.
 
 ## Tests
 
-See [TESTING.md](TESTING.md) for local validation, Fedora-specific checks, and
-the GitHub Actions jobs.
+See the repository's
+[testing guide](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md)
+for local validation, Fedora-specific checks, and the GitHub Actions jobs.
 
-## Uninstalling the launcher
+## Uninstalling a portable launcher
+
+For a launcher installed from a portable ZIP or Git checkout, run this command
+from that source directory:
 
 ```bash
 ./install-gui.sh uninstall
@@ -742,4 +760,5 @@ the GitHub Actions jobs.
 
 ## License
 
-This project is distributed under the MIT License. See [LICENSE](LICENSE).
+This project is distributed under the MIT License. See the repository
+[license](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/LICENSE).

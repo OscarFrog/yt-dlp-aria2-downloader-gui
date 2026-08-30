@@ -22,6 +22,8 @@ readonly ENGINE_RUNTIME_CONTRACT_VERSION='1'
 LOCK_FD=''
 VALIDATED_YTDLP_VERSION=''
 VALIDATED_DENO_VERSION=''
+VALIDATED_YTDLP_PATH=''
+VALIDATED_DENO_PATH=''
 
 error() {
     printf 'Error: %s\n' "$*" >&2
@@ -489,6 +491,7 @@ validate_ytdlp() {
     local version_output=''
 
     VALIDATED_YTDLP_VERSION=''
+    VALIDATED_YTDLP_PATH=''
 
     if [[ ! -x ${candidate} ]]; then
         error "yt-dlp runtime validation failed: candidate is not executable: ${candidate}"
@@ -566,6 +569,7 @@ validate_ytdlp() {
     fi
 
     VALIDATED_YTDLP_VERSION=${version_output}
+    VALIDATED_YTDLP_PATH=${candidate}
     return 0
 }
 
@@ -597,6 +601,7 @@ validate_deno() {
     local supported=false
 
     VALIDATED_DENO_VERSION=''
+    VALIDATED_DENO_PATH=''
 
     if ! parse_deno_version "${candidate}" version; then
         return 1
@@ -639,6 +644,7 @@ validate_deno() {
 
     [[ ${supported} == true ]] || return 1
     VALIDATED_DENO_VERSION=${version}
+    VALIDATED_DENO_PATH=${candidate}
     return 0
 }
 
@@ -1305,10 +1311,6 @@ print_runtime_versions() {
 # rejects line breaks before any managed path is constructed.
 print_engine_runtime_attestation() {
     local action=$1
-    local ytdlp=''
-    local ytdlp_version=''
-    local deno=''
-    local deno_version=''
 
     case ${action} in
         require)
@@ -1323,24 +1325,18 @@ print_engine_runtime_attestation() {
             ;;
     esac
 
-    ytdlp=$(component_path yt-dlp) || return 69
-    deno=$(component_path deno) || return 69
-    validate_ytdlp "${ytdlp}" || return 69
-    ytdlp_version=${VALIDATED_YTDLP_VERSION}
-    validate_deno "${deno}" || return 69
-    deno_version=${VALIDATED_DENO_VERSION}
-    if [[ -z ${ytdlp_version} || -z ${deno_version} ]] \
-        || [[ ${ytdlp} != "${YTDLP_ROOT}/${ytdlp_version}/${YTDLP_ASSET}" ]] \
-        || [[ ${deno} != "${DENO_ROOT}/${deno_version}/deno" ]]; then
+    if [[ -z ${VALIDATED_YTDLP_VERSION} || -z ${VALIDATED_DENO_VERSION} ]] \
+        || [[ ${VALIDATED_YTDLP_PATH} != "${YTDLP_ROOT}/${VALIDATED_YTDLP_VERSION}/${YTDLP_ASSET}" ]] \
+        || [[ ${VALIDATED_DENO_PATH} != "${DENO_ROOT}/${VALIDATED_DENO_VERSION}/deno" ]]; then
         error 'managed runtime validation did not produce a complete engine attestation.'
         return 69
     fi
 
     printf 'runtime-contract=%s\n' "${ENGINE_RUNTIME_CONTRACT_VERSION}"
-    printf 'yt-dlp-path=%s\n' "${ytdlp}"
-    printf 'yt-dlp-version=%s\n' "${ytdlp_version}"
-    printf 'deno-path=%s\n' "${deno}"
-    printf 'deno-version=%s\n' "${deno_version}"
+    printf 'yt-dlp-path=%s\n' "${VALIDATED_YTDLP_PATH}"
+    printf 'yt-dlp-version=%s\n' "${VALIDATED_YTDLP_VERSION}"
+    printf 'deno-path=%s\n' "${VALIDATED_DENO_PATH}"
+    printf 'deno-version=%s\n' "${VALIDATED_DENO_VERSION}"
 }
 
 dispatch_runtime_command() {

@@ -21,6 +21,7 @@ HOME_DIR=''
 DATA_HOME=''
 MOCK_BIN=''
 CURL_LOG=''
+PROBE_LOG=''
 LOCK_LEAK_MARKER=''
 runtime_root=''
 ytdlp_root=''
@@ -55,9 +56,13 @@ done
     \${seen_no_update} == true && \${YTDLP_NO_PLUGINS:-} == 1 ]] || exit 68
 case \${operation} in
 --version)
+    [[ -z \${MOCK_RUNTIME_PROBE_LOG:-} ]] \
+        || printf '%s\n' 'yt-dlp:--version' >>"\${MOCK_RUNTIME_PROBE_LOG}"
     printf '%s\\n' '${version}'
     ;;
 --help)
+    [[ -z \${MOCK_RUNTIME_PROBE_LOG:-} ]] \
+        || printf '%s\n' 'yt-dlp:--help' >>"\${MOCK_RUNTIME_PROBE_LOG}"
     printf '%s\\n' \\
         '--batch-file FILE' \\
         '--break-match-filters FILTER' \\
@@ -88,6 +93,8 @@ case \${operation} in
         '--socket-timeout SECONDS'
     ;;
 --list-impersonate-targets)
+    [[ -z \${MOCK_RUNTIME_PROBE_LOG:-} ]] \
+        || printf '%s\n' 'yt-dlp:--list-impersonate-targets' >>"\${MOCK_RUNTIME_PROBE_LOG}"
     printf '%s\\n' 'Chrome-140 Linux curl_cffi'
     ;;
 *)
@@ -107,6 +114,8 @@ make_deno() {
 set -euo pipefail
 case \${1:-} in
 --version)
+    [[ -z \${MOCK_RUNTIME_PROBE_LOG:-} ]] \
+        || printf '%s\n' 'deno:--version' >>"\${MOCK_RUNTIME_PROBE_LOG}"
     printf '%s\\n' 'deno ${version} (stable, release, x86_64-unknown-linux-gnu)'
     printf '%s\\n' 'v8 0.0.0' 'typescript 0.0.0'
     ;;
@@ -139,6 +148,7 @@ prepare_runtime_manager_fixture() {
     readonly DATA_HOME="${TEST_ROOT}/data"
     readonly MOCK_BIN="${TEST_ROOT}/bin"
     readonly CURL_LOG="${TEST_ROOT}/curl.args"
+    readonly PROBE_LOG="${TEST_ROOT}/runtime-probes.log"
     readonly LOCK_LEAK_MARKER="${TEST_ROOT}/lock-leaked"
     mkdir -p -- "${HOME_DIR}" "${DATA_HOME}" "${MOCK_BIN}"
 
@@ -176,6 +186,7 @@ EOF_CURL
         XDG_DATA_HOME="${DATA_HOME}"
         PATH="${MOCK_BIN}:${PATH}"
         MOCK_CURL_LOG="${CURL_LOG}"
+        MOCK_RUNTIME_PROBE_LOG="${PROBE_LOG}"
         MOCK_LOCK_LEAK_MARKER="${LOCK_LEAK_MARKER}"
         YTDLP_ARIA2_RUNTIME_LOCK_WAIT_SECONDS=1
         YTDLP_ARIA2_RUNTIME_CONNECT_TIMEOUT_SECONDS=2
@@ -190,6 +201,7 @@ test_runtime_paths_and_locking() {
     local attested_version=''
     local actual_deno actual_ytdlp expected_attestation expected_ytdlp
     local fallback_attestation lock_holder_pid lock_holder_ready
+    local probe_count=0
 
     expected_ytdlp="${ytdlp_root}/2026.07.04/yt-dlp_linux"
     actual_ytdlp=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" path yt-dlp)
@@ -201,10 +213,27 @@ test_runtime_paths_and_locking() {
         'runtime-contract=1\nyt-dlp-path=%s\nyt-dlp-version=2026.07.04\ndeno-path=%s\ndeno-version=2.9.5' \
         "${expected_ytdlp}" "${deno_root}/2.9.5/deno")
     : >"${CURL_LOG}"
+    : >"${PROBE_LOG}"
     actual_ytdlp=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" prepare require)
     assert_equals "${expected_attestation}" "${actual_ytdlp}" \
         'strict runtime preparation attestation'
     [[ ! -s ${CURL_LOG} ]] || fail 'prepare require invoked the network'
+    probe_count=$(grep -Fxc -- 'yt-dlp:--version' "${PROBE_LOG}") \
+        || probe_count=0
+    assert_equals 1 "${probe_count}" \
+        'prepare require yt-dlp version probe count'
+    probe_count=$(grep -Fxc -- 'yt-dlp:--help' "${PROBE_LOG}") \
+        || probe_count=0
+    assert_equals 1 "${probe_count}" \
+        'prepare require yt-dlp help probe count'
+    probe_count=$(grep -Fxc -- 'yt-dlp:--list-impersonate-targets' "${PROBE_LOG}") \
+        || probe_count=0
+    assert_equals 1 "${probe_count}" \
+        'prepare require yt-dlp impersonation probe count'
+    probe_count=$(grep -Fxc -- 'deno:--version' "${PROBE_LOG}") \
+        || probe_count=0
+    assert_equals 1 "${probe_count}" \
+        'prepare require Deno version probe count'
 
     # An attested path names the validated immutable version, not the mutable
     # activation link. A later rollback must not change what an existing engine

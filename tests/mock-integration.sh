@@ -129,6 +129,7 @@ readonly GUI_SCENARIO_TIMEOUT_SECONDS
 readonly GUI_UNDER_TEST="${MOCK_BIN}/download-video-gui-under-test"
 readonly GUI_SIGNAL_UNDER_TEST="${MOCK_BIN}/download-video-gui-signal-under-test"
 readonly GUI_SIGNAL_REGISTRATION_UNDER_TEST="${MOCK_BIN}/gui-signal-registration-under-test"
+readonly CLI_SIGNAL_REGISTRATION_UNDER_TEST="${MOCK_BIN}/cli-signal-registration-under-test"
 export MOCK_GUI_REAL="${PROJECT_DIR}/download-video-gui.sh"
 export MOCK_GUI_SCENARIO_TIMEOUT_SECONDS=${GUI_SCENARIO_TIMEOUT_SECONDS}
 mkdir -p -- \
@@ -146,6 +147,25 @@ set -euo pipefail
 
 : "${MOCK_RUNTIME_MANAGER_LOG:?}"
 printf '%s\0' "$@" >"${MOCK_RUNTIME_MANAGER_LOG}"
+if [[ ${MOCK_RUNTIME_MANAGER_BLOCK:-0} == 1 ]]; then
+    : "${MOCK_RUNTIME_STARTED_MARKER:?}"
+    : "${MOCK_RUNTIME_TERMINATION_MARKER:?}"
+    handle_runtime_signal() {
+        local signal_name=$1
+        local signal_status=$2
+
+        printf '%s\n' "${signal_name}" \
+            >"${MOCK_RUNTIME_TERMINATION_MARKER}"
+        exit "${signal_status}"
+    }
+    trap 'handle_runtime_signal HUP 129' HUP
+    trap 'handle_runtime_signal INT 130' INT
+    trap 'handle_runtime_signal TERM 143' TERM
+    printf '%s\n' started >"${MOCK_RUNTIME_STARTED_MARKER}"
+    while :; do
+        sleep 1
+    done
+fi
 if [[ ${MOCK_RUNTIME_ATTESTATION_MALFORMED:-0} == 1 ]]; then
     printf '%s\n' 'runtime-contract=unsupported'
     exit 0
@@ -242,6 +262,40 @@ finish_signal_registration
 exit 70
 EOF_GUI_SIGNAL_REGISTRATION
 chmod 0755 -- "${GUI_SIGNAL_REGISTRATION_UNDER_TEST}"
+
+cat >"${CLI_SIGNAL_REGISTRATION_UNDER_TEST}" <<'EOF_CLI_SIGNAL_REGISTRATION'
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${MOCK_CLI_SOURCE_COPY:?}"
+: "${MOCK_WORKER_DEFERRED_STATUS_MARKER:?}"
+: "${MOCK_WORKER_IDENTITY:?}"
+: "${MOCK_WORKER_LAUNCH_STATE_MARKER:?}"
+: "${MOCK_WORKER_PRE_REGISTRATION_MARKER:?}"
+: "${MOCK_WORKER_SIGNAL_NAME:?}"
+: "${MOCK_WORKER_SIGNAL_STATUS:?}"
+
+# Load the production engine functions without entering main.
+# shellcheck disable=SC1090
+source "${MOCK_CLI_SOURCE_COPY}"
+trap cleanup EXIT
+
+begin_signal_registration
+bash -c 'exec -a "$1" sleep 30' bash "${MOCK_WORKER_IDENTITY}" &
+printf '%s\n' "${SIGNAL_REGISTRATION_ACTIVE}" \
+    >"${MOCK_WORKER_LAUNCH_STATE_MARKER}"
+request_shutdown "${MOCK_WORKER_SIGNAL_NAME}" \
+    "${MOCK_WORKER_SIGNAL_STATUS}"
+DOWNLOAD_WORKER_PID=$!
+printf '%s\n' "${DOWNLOAD_WORKER_PID}" \
+    >"${MOCK_WORKER_PRE_REGISTRATION_MARKER}"
+printf '%s\n' "${DEFERRED_SIGNAL_STATUS}" \
+    >"${MOCK_WORKER_DEFERRED_STATUS_MARKER}"
+finish_signal_registration
+stop_download_worker || true
+exit "${REQUESTED_EXIT_STATUS:-70}"
+EOF_CLI_SIGNAL_REGISTRATION
+chmod 0755 -- "${CLI_SIGNAL_REGISTRATION_UNDER_TEST}"
 
 cat >"${MOCK_BIN}/yt-dlp" <<'EOF_YTDLP'
 #!/usr/bin/env bash
@@ -971,17 +1025,63 @@ fi
 EOF_FFPROBE
 chmod +x "${MOCK_BIN}/ffprobe"
 
+REAL_ENV=$(command -v env)
 REAL_MV=$(command -v mv)
 REAL_SETSID=$(command -v setsid)
-export REAL_MV REAL_SETSID
+export REAL_ENV REAL_MV REAL_SETSID
+cat >"${MOCK_BIN}/env" <<'EOF_ENV'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (($# >= 3)) \
+    && [[ $1 == '--ignore-signal=HUP' &&
+        $2 == '--ignore-signal=INT' &&
+        $3 == '--ignore-signal=TERM' ]]; then
+    exec "${REAL_ENV:?}" "$@"
+fi
+
+if (($# == 6)) \
+    && [[ $1 == '--default-signal=HUP' &&
+        $2 == '--default-signal=INT' &&
+        $3 == '--default-signal=TERM' &&
+        $4 == bash && $5 == -c && $6 == 'exit 0' ]]; then
+    exec "${REAL_ENV:?}" "$@"
+fi
+
+if [[ -n ${MOCK_ENV_DELAY_MARKER:-} ]]; then
+    : "${MOCK_ENV_CONTINUE_MARKER:?}"
+    printf '%s\n' started >"${MOCK_ENV_DELAY_MARKER}"
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        [[ -e ${MOCK_ENV_CONTINUE_MARKER} ]] && break
+        sleep 0.1
+    done
+    [[ -e ${MOCK_ENV_CONTINUE_MARKER} ]] || exit 125
+fi
+
+exec "${REAL_ENV:?}" "$@"
+EOF_ENV
+chmod +x "${MOCK_BIN}/env"
+
 cat >"${MOCK_BIN}/mv" <<'EOF_MV'
 #!/usr/bin/env bash
 set -euo pipefail
 
 destination=${!#}
-if [[ ${destination} == */pgid && ${MOCK_DELAY_PGID_PUBLISH:-0} == 1 ]]; then
+if [[ (${destination} == */pgid || ${destination##*/} == .worker-pgid.*) &&
+    ${MOCK_DELAY_PGID_PUBLISH:-0} == 1 ]]; then
     trap 'printf terminated >"${MOCK_PGID_DELAY_TERMINATION_MARKER:?}"; exit 143' TERM INT
-    sleep "${MOCK_PGID_PUBLISH_DELAY_SECONDS:-6}"
+    if [[ -n ${MOCK_PGID_DELAY_STARTED_MARKER:-} ]]; then
+        printf '%s\n' "$$" >"${MOCK_PGID_DELAY_STARTED_MARKER}"
+    fi
+    if [[ -n ${MOCK_PGID_DELAY_CONTINUE_MARKER:-} ]]; then
+        for ((attempt = 0; attempt < 100; attempt++)); do
+            [[ -e ${MOCK_PGID_DELAY_CONTINUE_MARKER} ]] && break
+            sleep 0.1
+        done
+        [[ -e ${MOCK_PGID_DELAY_CONTINUE_MARKER} ]] || exit 125
+    else
+        sleep "${MOCK_PGID_PUBLISH_DELAY_SECONDS:-6}"
+    fi
 fi
 exec "${REAL_MV:?}" "$@"
 EOF_MV
@@ -1304,6 +1404,27 @@ wait_for_file() {
     fail "${label}: file did not appear within ${timeout}s: ${path}"
 }
 
+wait_for_worker_registration_cleanup() {
+    local timeout=$1
+    local label=$2
+    local deadline=$((SECONDS + timeout))
+    local registration_path=''
+
+    while ((SECONDS < deadline)); do
+        if ! registration_path=$(find \
+            "${RUNTIME_DIR}/yt-dlp-aria2-downloader" \
+            -mindepth 1 -maxdepth 1 \
+            \( -name '.worker-pgid.*' -o -name '.worker-ready.*' \) \
+            -print -quit); then
+            fail "${label}: unable to inspect worker registration paths"
+        fi
+        [[ -z ${registration_path} ]] && return 0
+        sleep 0.01
+    done
+
+    fail "${label}: registration path remains: ${registration_path}"
+}
+
 assert_directory_empty() {
     local directory=$1
     local label=$2
@@ -1472,11 +1593,11 @@ initialize_mock_integration() {
 
     readonly MOCK_NO_DENO_BIN="${TEST_ROOT}/bin-no-deno"
     mkdir -p -- "${MOCK_NO_DENO_BIN}"
-    for managed_mock in yt-dlp aria2c zenity ffmpeg ffprobe mv setsid; do
+    for managed_mock in yt-dlp aria2c zenity env ffmpeg ffprobe mv setsid; do
         ln -s -- "${MOCK_BIN}/${managed_mock}" "${MOCK_NO_DENO_BIN}/${managed_mock}"
     done
 
-    for mocked_command in yt-dlp aria2c deno zenity ffmpeg ffprobe mv setsid; do
+    for mocked_command in yt-dlp aria2c deno zenity env ffmpeg ffprobe mv setsid; do
         resolved_mock=$(command -v "${mocked_command}")
         assert_equals "${MOCK_BIN}/${mocked_command}" "${resolved_mock}" \
             "${mocked_command} mock selection"
@@ -2302,6 +2423,9 @@ test_mock_engine_private_staging() {
     [[ -f ${crash_staging}/.yt-dlp-aria2-owner-v1 ]] \
         || fail 'Crash staging ownership marker is missing.'
 
+    wait_for_worker_registration_cleanup 5 \
+        'Crash worker readiness cleanup'
+
     # Do not derive the process group immediately after `setsid ... &`.
     # Before util-linux setsid(1) has created the new session, the asynchronous
     # launcher can still temporarily belong to this test shell's process group.
@@ -2983,12 +3107,493 @@ test_mock_signal_cli_download() {
         >"${cli_signal_log}" 2>&1 &
     cli_engine_pid=$!
     wait_for_file "${cli_started_marker}" 10 'CLI worker startup'
+    wait_for_worker_registration_cleanup 5 \
+        'CLI worker readiness cleanup'
     kill -TERM -- "${cli_engine_pid}"
     cli_engine_status=0
     wait "${cli_engine_pid}" || cli_engine_status=$?
     assert_equals '143' "${cli_engine_status}" 'CLI TERM exit status'
     wait_for_file "${cli_termination_marker}" 10 'CLI child process receives TERM'
     assert_no_test_processes 'CLI signal forwarding left worker processes'
+}
+
+test_mock_signal_cli_worker_registration() {
+    local cli_source_copy cli_status elapsed_milliseconds launched_worker_pid
+    local index signal_finished_at signal_log signal_name signal_started_at
+    local signal_status worker_identity
+    local worker_deferred_status_marker worker_launch_state_marker
+    local worker_registration_marker
+    local -a signal_names=(HUP INT TERM)
+    local -a signal_statuses=(129 130 143)
+
+    # Exercise the production critical-section helpers in the vulnerable
+    # source order: launch, receive a signal, publish $!, then finish registration.
+    cli_source_copy="${TEST_ROOT}/download-video-source-only.sh"
+    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${cli_source_copy}"
+    chmod 0600 -- "${cli_source_copy}"
+    printf '%s\n' 'Mock scenario: cli-signal-worker-registration'
+
+    for index in "${!signal_names[@]}"; do
+        signal_name=${signal_names[index]}
+        signal_status=${signal_statuses[index]}
+        signal_log="${TEST_ROOT}/cli-worker-registration-${signal_name}.log"
+        worker_launch_state_marker="${TEST_ROOT}/cli-worker-launch-state-${signal_name}"
+        worker_deferred_status_marker="${TEST_ROOT}/cli-worker-deferred-status-${signal_name}"
+        worker_identity="${TEST_ROOT}/cli-worker-pre-registration-child-${signal_name}"
+        worker_registration_marker="${TEST_ROOT}/cli-worker-pre-registration-${signal_name}.pid"
+
+        signal_started_at=$(date +%s%3N)
+        cli_status=0
+        timeout --signal=TERM --kill-after=2s 8s \
+            env MOCK_CLI_SOURCE_COPY="${cli_source_copy}" \
+            MOCK_WORKER_DEFERRED_STATUS_MARKER="${worker_deferred_status_marker}" \
+            MOCK_WORKER_IDENTITY="${worker_identity}" \
+            MOCK_WORKER_LAUNCH_STATE_MARKER="${worker_launch_state_marker}" \
+            MOCK_WORKER_PRE_REGISTRATION_MARKER="${worker_registration_marker}" \
+            MOCK_WORKER_SIGNAL_NAME="${signal_name}" \
+            MOCK_WORKER_SIGNAL_STATUS="${signal_status}" \
+            "${CLI_SIGNAL_REGISTRATION_UNDER_TEST}" >"${signal_log}" 2>&1 \
+            || cli_status=$?
+        signal_finished_at=$(date +%s%3N)
+        elapsed_milliseconds=$((signal_finished_at - signal_started_at))
+        assert_equals "${signal_status}" "${cli_status}" \
+            "CLI worker pre-registration ${signal_name} is deferred and reaped"
+        ((elapsed_milliseconds < 5000)) \
+            || fail "CLI pre-registration ${signal_name} handling took ${elapsed_milliseconds}ms."
+        assert_file_has_line "${worker_launch_state_marker}" true \
+            "CLI ${signal_name} worker launch occurs inside signal-registration critical section"
+        assert_file_has_line "${worker_deferred_status_marker}" \
+            "${signal_status}" \
+            "CLI worker pre-registration handler defers ${signal_name}"
+        IFS= read -r launched_worker_pid <"${worker_registration_marker}"
+        [[ ${launched_worker_pid} =~ ^[1-9][0-9]*$ ]] \
+            || fail "Invalid CLI pre-registration worker PID: ${launched_worker_pid}"
+        assert_no_test_processes \
+            "CLI worker pre-registration ${signal_name} left descendants"
+    done
+}
+
+test_mock_signal_cli_runtime_preparation() {
+    local cli_engine_pid cli_engine_status elapsed_milliseconds index
+    local runtime_signal_log runtime_started_marker runtime_termination_marker
+    local signal_finished_at signal_name signal_started_at signal_status
+    local -a signal_names=(HUP INT TERM)
+    local -a signal_statuses=(129 130 143)
+
+    # Managed runtime preparation is part of launch and must obey the same
+    # signal-forwarding and bounded-reaping contract as the media worker.
+    for index in "${!signal_names[@]}"; do
+        signal_name=${signal_names[index]}
+        signal_status=${signal_statuses[index]}
+        runtime_started_marker="${TEST_ROOT}/runtime-prepare-${signal_name}-started"
+        runtime_termination_marker="${TEST_ROOT}/runtime-prepare-${signal_name}-terminated"
+        runtime_signal_log="${TEST_ROOT}/runtime-prepare-${signal_name}.log"
+        : >"${MOCK_RUNTIME_MANAGER_LOG}"
+        env \
+            --default-signal=HUP \
+            --default-signal=INT \
+            --default-signal=TERM \
+            -u YTDLP_ARIA2_SKIP_RUNTIME_UPDATE \
+            MOCK_RUNTIME_MANAGER_BLOCK=1 \
+            MOCK_RUNTIME_STARTED_MARKER="${runtime_started_marker}" \
+            MOCK_RUNTIME_TERMINATION_MARKER="${runtime_termination_marker}" \
+            "${MANAGED_ENGINE_UNDER_TEST}" \
+            --output-dir "${OUTPUT_DIR}" \
+            -- "https://example.com/watch?v=runtime-prepare-${signal_name}" \
+            >"${runtime_signal_log}" 2>&1 &
+        cli_engine_pid=$!
+        wait_for_file "${runtime_started_marker}" 10 \
+            "runtime preparation ${signal_name} startup"
+        signal_started_at=$(date +%s%3N)
+        kill "-${signal_name}" -- "${cli_engine_pid}"
+        cli_engine_status=0
+        wait "${cli_engine_pid}" || cli_engine_status=$?
+        signal_finished_at=$(date +%s%3N)
+        elapsed_milliseconds=$((signal_finished_at - signal_started_at))
+        assert_equals "${signal_status}" "${cli_engine_status}" \
+            "CLI runtime preparation ${signal_name} exit status"
+        ((elapsed_milliseconds < 5000)) \
+            || fail "CLI runtime preparation ${signal_name} took ${elapsed_milliseconds}ms."
+        wait_for_file "${runtime_termination_marker}" 10 \
+            "runtime manager receives ${signal_name}"
+        assert_file_has_line "${runtime_termination_marker}" \
+            "${signal_name}" \
+            "runtime manager records ${signal_name}"
+        assert_no_test_processes \
+            "CLI runtime preparation ${signal_name} left descendants"
+    done
+}
+
+test_mock_signal_cli_pre_env_registration() {
+    local cli_engine_pid cli_engine_status continue_marker delay_marker
+    local elapsed_milliseconds mode runtime_signal_log signal_finished_at
+    local signal_started_at
+    local -a registration_leftovers=()
+    local -a session_modes=(false true)
+
+    # Interpose immediately before GNU env restores dispositions. SIGINT sent
+    # in this exact post-fork window must remain deferred until the child has
+    # published post-env readiness, rather than being lost as an inherited
+    # ignored signal and requiring the ten-second KILL escalation.
+    printf '%s\n' 'Mock scenario: cli-signal-pre-env-registration'
+    for mode in "${session_modes[@]}"; do
+        delay_marker="${TEST_ROOT}/pre-env-${mode}-delayed"
+        continue_marker="${TEST_ROOT}/pre-env-${mode}-continue"
+        runtime_signal_log="${TEST_ROOT}/pre-env-${mode}.log"
+
+        /usr/bin/env \
+            --default-signal=HUP \
+            --default-signal=INT \
+            --default-signal=TERM \
+            -u YTDLP_ARIA2_SKIP_RUNTIME_UPDATE \
+            MOCK_ENV_DELAY_MARKER="${delay_marker}" \
+            MOCK_ENV_CONTINUE_MARKER="${continue_marker}" \
+            MOCK_RUNTIME_MANAGER_BLOCK=1 \
+            MOCK_RUNTIME_STARTED_MARKER="${TEST_ROOT}/pre-env-${mode}-runtime-started" \
+            MOCK_RUNTIME_TERMINATION_MARKER="${TEST_ROOT}/pre-env-${mode}-runtime-terminated" \
+            YTDLP_ARIA2_SUPERVISED_SESSION="${mode}" \
+            "${MANAGED_ENGINE_UNDER_TEST}" \
+            --output-dir "${OUTPUT_DIR}" \
+            -- "https://example.com/watch?v=pre-env-${mode}" \
+            >"${runtime_signal_log}" 2>&1 &
+        cli_engine_pid=$!
+        wait_for_file "${delay_marker}" 10 \
+            "pre-env ${mode} launch delay"
+        signal_started_at=$(date +%s%3N)
+        kill -INT -- "${cli_engine_pid}"
+        : >"${continue_marker}"
+        cli_engine_status=0
+        wait "${cli_engine_pid}" || cli_engine_status=$?
+        signal_finished_at=$(date +%s%3N)
+        elapsed_milliseconds=$((signal_finished_at - signal_started_at))
+        assert_equals 130 "${cli_engine_status}" \
+            "pre-env ${mode} SIGINT exit status"
+        ((elapsed_milliseconds < 5000)) \
+            || fail "Pre-env ${mode} SIGINT handling took ${elapsed_milliseconds}ms."
+        assert_no_test_processes \
+            "pre-env ${mode} SIGINT left descendants"
+        shopt -s nullglob
+        registration_leftovers=(
+            "${RUNTIME_DIR}/yt-dlp-aria2-downloader"/.worker-pgid.*
+            "${RUNTIME_DIR}/yt-dlp-aria2-downloader"/.worker-ready.*
+        )
+        shopt -u nullglob
+        if ((${#registration_leftovers[@]} != 0)); then
+            printf 'Registration file left after pre-env %s SIGINT: %s\n' \
+                "${mode}" "${registration_leftovers[@]}" >&2
+            fail "Pre-env ${mode} SIGINT left registration files."
+        fi
+    done
+
+    # A repeated signal retains the first conventional status but escalates
+    # immediately even when the child never reaches env or publishes readiness.
+    for mode in "${session_modes[@]}"; do
+        delay_marker="${TEST_ROOT}/pre-env-escalate-${mode}-delayed"
+        continue_marker="${TEST_ROOT}/pre-env-escalate-${mode}-continue"
+        runtime_signal_log="${TEST_ROOT}/pre-env-escalate-${mode}.log"
+
+        /usr/bin/env \
+            --default-signal=HUP \
+            --default-signal=INT \
+            --default-signal=TERM \
+            -u YTDLP_ARIA2_SKIP_RUNTIME_UPDATE \
+            MOCK_ENV_DELAY_MARKER="${delay_marker}" \
+            MOCK_ENV_CONTINUE_MARKER="${continue_marker}" \
+            MOCK_RUNTIME_MANAGER_BLOCK=1 \
+            MOCK_RUNTIME_STARTED_MARKER="${TEST_ROOT}/pre-env-escalate-${mode}-runtime-started" \
+            MOCK_RUNTIME_TERMINATION_MARKER="${TEST_ROOT}/pre-env-escalate-${mode}-runtime-terminated" \
+            YTDLP_ARIA2_SUPERVISED_SESSION="${mode}" \
+            "${MANAGED_ENGINE_UNDER_TEST}" \
+            --output-dir "${OUTPUT_DIR}" \
+            -- "https://example.com/watch?v=pre-env-escalate-${mode}" \
+            >"${runtime_signal_log}" 2>&1 &
+        cli_engine_pid=$!
+        wait_for_file "${delay_marker}" 10 \
+            "pre-env escalation ${mode} launch delay"
+        signal_started_at=$(date +%s%3N)
+        kill -INT -- "${cli_engine_pid}"
+        sleep 0.05
+        kill -INT -- "${cli_engine_pid}"
+        cli_engine_status=0
+        wait "${cli_engine_pid}" || cli_engine_status=$?
+        signal_finished_at=$(date +%s%3N)
+        elapsed_milliseconds=$((signal_finished_at - signal_started_at))
+        assert_equals 130 "${cli_engine_status}" \
+            "pre-env escalation ${mode} preserves first SIGINT status"
+        ((elapsed_milliseconds < 2000)) \
+            || fail "Pre-env escalation ${mode} took ${elapsed_milliseconds}ms."
+        shopt -s nullglob
+        registration_leftovers=(
+            "${RUNTIME_DIR}/yt-dlp-aria2-downloader"/.worker-pgid.*
+            "${RUNTIME_DIR}/yt-dlp-aria2-downloader"/.worker-ready.*
+        )
+        shopt -u nullglob
+        if ((${#registration_leftovers[@]} != 0)); then
+            printf 'Registration file left after pre-env escalation %s: %s\n' \
+                "${mode}" "${registration_leftovers[@]}" >&2
+            fail "Pre-env escalation ${mode} left registration files."
+        fi
+        assert_no_test_processes \
+            "pre-env escalation ${mode} left descendants"
+    done
+}
+
+test_mock_signal_registration_handoff() {
+    local source_copy="${TEST_ROOT}/download-video-registration-handoff.sh"
+    local handoff_status=0
+    local late_first_status=0
+
+    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${source_copy}"
+    chmod 0600 -- "${source_copy}"
+    printf '%s\n' 'Mock scenario: cli-signal-registration-handoff'
+    # The DEBUG trap injects TERM after the critical-section flag is cleared.
+    # HUP must already own the requested status at that exact handoff boundary.
+    # shellcheck disable=SC2016 # Variables belong to the intentionally nested shell.
+    bash -c '
+        set -euo pipefail
+        set -T
+        source "$1"
+        begin_signal_registration
+        request_shutdown HUP 129
+
+        inject_second_signal() {
+            if [[ ${SIGNAL_REGISTRATION_ACTIVE} == false &&
+                ${BASH_COMMAND} == "REGISTRATION_ESCALATION_REQUESTED=false" ]]; then
+                trap - DEBUG
+                request_shutdown TERM 143
+            fi
+        }
+
+        trap inject_second_signal DEBUG
+        finish_signal_registration
+    ' bash "${source_copy}" || handoff_status=$?
+    assert_equals 129 "${handoff_status}" \
+        'registration handoff preserves the first HUP status'
+
+    # Inject the first signal after finish_signal_registration has initialized
+    # its local state but immediately before it closes the registration flag.
+    # A stale early copy must not erase this late arrival.
+    # shellcheck disable=SC2016 # Variables belong to the intentionally nested shell.
+    bash -c '
+        set -euo pipefail
+        set -T
+        source "$1"
+        begin_signal_registration
+
+        inject_late_first_signal() {
+            if [[ ${BASH_COMMAND} == "SIGNAL_REGISTRATION_ACTIVE=false" ]]; then
+                trap - DEBUG
+                request_shutdown HUP 129
+            fi
+        }
+
+        trap inject_late_first_signal DEBUG
+        finish_signal_registration
+    ' bash "${source_copy}" || late_first_status=$?
+    assert_equals 129 "${late_first_status}" \
+        'registration handoff preserves a late first HUP status'
+
+    # Opening the barrier must not clear an escalation already requested after
+    # the active flag became visible.
+    # shellcheck disable=SC2016 # Variables belong to the intentionally nested shell.
+    assert_status 0 'registration opening preserves immediate escalation' \
+        bash -c '
+            set -euo pipefail
+            set -T
+            source "$1"
+            injected=false
+
+            inject_opening_signals() {
+                if [[ ${SIGNAL_REGISTRATION_ACTIVE} == true &&
+                    ${injected} == false ]]; then
+                    injected=true
+                    trap - DEBUG
+                    request_shutdown HUP 129
+                    request_shutdown TERM 143
+                fi
+            }
+
+            trap inject_opening_signals DEBUG
+            begin_signal_registration
+            trap - DEBUG
+            [[ ${DEFERRED_SIGNAL_STATUS} == 129 &&
+                ${REGISTRATION_ESCALATION_REQUESTED} == true ]]
+        ' bash "${source_copy}"
+
+    # A second trap may run between the two assignments that publish the first
+    # deferred signal. The status is the ownership sentinel and must become
+    # visible before the descriptive signal name.
+    # shellcheck disable=SC2016 # Variables belong to the intentionally nested shell.
+    assert_status 0 'deferred signal publication is reentrant-safe' \
+        bash -c '
+            set -euo pipefail
+            set -T
+            source "$1"
+            begin_signal_registration
+            injected=false
+
+            inject_reentrant_signal() {
+                if [[ ${injected} == false &&
+                    ${BASH_COMMAND} == "DEFERRED_SIGNAL_NAME=\${signal_name}" ]]; then
+                    injected=true
+                    trap - DEBUG
+                    request_shutdown TERM 143
+                fi
+            }
+
+            trap inject_reentrant_signal DEBUG
+            request_shutdown HUP 129
+            trap - DEBUG
+            [[ ${DEFERRED_SIGNAL_NAME} == HUP &&
+                ${DEFERRED_SIGNAL_STATUS} == 129 &&
+                ${REGISTRATION_ESCALATION_REQUESTED} == true ]]
+        ' bash "${source_copy}"
+}
+
+test_mock_signal_cli_foreground_group_registration() {
+    local continue_marker engine_pid engine_status index signal_log signal_name
+    local marker_pgid marker_pid marker_sid started_marker termination_marker
+    local process_fields worker_identity worker_pid
+    local worker_parent worker_pgid worker_sid
+    local -a signal_names=(HUP INT TERM)
+    local -a signal_statuses=(129 130 143)
+
+    # The autonomous engine and the command session deliberately occupy
+    # different process groups. Block the command after setsid but before PGID
+    # publication, then signal the complete outer foreground group.
+    printf '%s\n' 'Mock scenario: cli-signal-foreground-group-registration'
+    for index in "${!signal_names[@]}"; do
+        signal_name=${signal_names[index]}
+        started_marker="${TEST_ROOT}/group-registration-${signal_name}-started"
+        continue_marker="${TEST_ROOT}/group-registration-${signal_name}-continue"
+        termination_marker="${TEST_ROOT}/group-registration-${signal_name}-terminated"
+        worker_identity="${TEST_ROOT}/group-registration-${signal_name}-worker"
+        signal_log="${TEST_ROOT}/group-registration-${signal_name}.log"
+        prepare_argument_log "group-registration-${signal_name}"
+
+        "${REAL_SETSID}" --wait env \
+            --default-signal=HUP \
+            --default-signal=INT \
+            --default-signal=TERM \
+            MOCK_DELAY_PGID_PUBLISH=1 \
+            MOCK_PGID_DELAY_STARTED_MARKER="${started_marker}" \
+            MOCK_PGID_DELAY_CONTINUE_MARKER="${continue_marker}" \
+            MOCK_PGID_DELAY_TERMINATION_MARKER="${termination_marker}" \
+            MOCK_WORKER_IDENTITY="${worker_identity}" \
+            "${MANAGED_ENGINE_UNDER_TEST}" \
+            --output-dir "${OUTPUT_DIR}" \
+            -- "https://example.com/watch?v=group-registration-${signal_name}" \
+            >"${signal_log}" 2>&1 &
+        engine_pid=$!
+        wait_for_file "${started_marker}" 10 \
+            "foreground-group ${signal_name} registration barrier"
+        IFS= read -r marker_pid <"${started_marker}"
+        [[ ${marker_pid} =~ ^[1-9][0-9]*$ ]] \
+            || fail "Invalid foreground-group marker PID: ${marker_pid}"
+        process_fields=$(ps -o pgid=,sid= -p "${marker_pid}") \
+            || fail "Unable to inspect foreground-group marker ${marker_pid}."
+        read -r marker_pgid marker_sid <<<"${process_fields}"
+        assert_equals "${marker_pgid}" "${marker_sid}" \
+            "foreground-group ${signal_name} marker stays in the worker session"
+        worker_pid=${marker_sid}
+        process_fields=$(ps -o ppid=,pgid=,sid= -p "${worker_pid}") \
+            || fail "Unable to inspect foreground-group worker ${worker_pid}."
+        read -r worker_parent worker_pgid worker_sid <<<"${process_fields}"
+        assert_equals "${engine_pid}" "${worker_parent}" \
+            "foreground-group ${signal_name} worker remains a direct child"
+        assert_equals "${worker_pid}" "${worker_pgid}" \
+            "foreground-group ${signal_name} worker PID equals PGID"
+        assert_equals "${worker_pid}" "${worker_sid}" \
+            "foreground-group ${signal_name} worker PID equals SID"
+
+        kill "-${signal_name}" -- "-${engine_pid}"
+        : >"${continue_marker}"
+        engine_status=0
+        wait "${engine_pid}" || engine_status=$?
+        assert_equals "${signal_statuses[index]}" "${engine_status}" \
+            "foreground-group ${signal_name} preserves requested status"
+        assert_no_test_processes \
+            "foreground-group ${signal_name} left descendants"
+    done
+
+    # A repeated request escalates immediately while retaining the first
+    # conventional status, even before the PGID marker is published.
+    started_marker="${TEST_ROOT}/group-registration-repeat-started"
+    termination_marker="${TEST_ROOT}/group-registration-repeat-terminated"
+    worker_identity="${TEST_ROOT}/group-registration-repeat-worker"
+    signal_log="${TEST_ROOT}/group-registration-repeat.log"
+    prepare_argument_log 'group-registration-repeat'
+    "${REAL_SETSID}" --wait env \
+        --default-signal=HUP \
+        --default-signal=INT \
+        --default-signal=TERM \
+        MOCK_DELAY_PGID_PUBLISH=1 \
+        MOCK_PGID_PUBLISH_DELAY_SECONDS=30 \
+        MOCK_PGID_DELAY_STARTED_MARKER="${started_marker}" \
+        MOCK_PGID_DELAY_TERMINATION_MARKER="${termination_marker}" \
+        MOCK_WORKER_IDENTITY="${worker_identity}" \
+        "${MANAGED_ENGINE_UNDER_TEST}" \
+        --output-dir "${OUTPUT_DIR}" \
+        -- 'https://example.com/watch?v=group-registration-repeat' \
+        >"${signal_log}" 2>&1 &
+    engine_pid=$!
+    wait_for_file "${started_marker}" 10 \
+        'foreground-group repeated-signal registration barrier'
+    kill -HUP -- "-${engine_pid}"
+    sleep 0.05
+    kill -TERM -- "-${engine_pid}"
+    engine_status=0
+    wait "${engine_pid}" || engine_status=$?
+    assert_equals 129 "${engine_status}" \
+        'foreground-group escalation preserves first HUP status'
+    # Do not release the blocked publication helper: the repeated signal must
+    # discover PID=PGID and kill the complete no-fork session by itself.
+    assert_no_test_processes \
+        'foreground-group repeated signals left descendants'
+}
+
+test_mock_signal_cli_pgid_discovery_race() {
+    local cli_source_copy="${TEST_ROOT}/download-video-pgid-race-source-only.sh"
+    local race_identity="${TEST_ROOT}/cli-pgid-discovery-race-child"
+    local race_log="${TEST_ROOT}/cli-pgid-discovery-race.log"
+    local race_status=0
+
+    # Force TERM after the child has published its PGID but before the caller
+    # accepts it. util-linux setsid then reports raw status 15; the engine must
+    # retain the conventional requested status 143.
+    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${cli_source_copy}"
+    chmod 0600 -- "${cli_source_copy}"
+    printf '%s\n' 'Mock scenario: cli-signal-pgid-discovery-race'
+    # shellcheck disable=SC2016 # Variables belong to the intentionally nested shell.
+    timeout --signal=TERM --kill-after=2s 8s \
+        env MOCK_CLI_SOURCE_COPY="${cli_source_copy}" \
+        MOCK_WORKER_IDENTITY="${race_identity}" \
+        bash -c '
+            set -euo pipefail
+            source "${MOCK_CLI_SOURCE_COPY}"
+            trap cleanup EXIT
+            resolve_lock_root
+            wait_for_download_pgid() {
+                local attempt
+                for ((attempt = 0; attempt < 100; attempt++)); do
+                    if recover_download_pgid; then
+                        request_shutdown TERM 143
+                        return 0
+                    fi
+                    sleep 0.01
+                done
+                return 1
+            }
+            # shellcheck disable=SC2016
+            run_supervised_command \
+                bash -c '\''exec -a "$1" sleep 30'\'' bash \
+                "${MOCK_WORKER_IDENTITY}"
+            exit "${DOWNLOAD_STATUS}"
+        ' >"${race_log}" 2>&1 || race_status=$?
+    assert_equals 143 "${race_status}" \
+        'CLI PGID-discovery TERM preserves requested status'
+    assert_no_test_processes \
+        'CLI PGID-discovery TERM left descendants'
 }
 
 test_mock_signal_cli_ffmpeg() {
@@ -3132,6 +3737,77 @@ test_mock_signal_gui_worker_registration() {
         || fail "Invalid pre-registration worker PID: ${launched_worker_pid}"
     assert_no_test_processes \
         'worker pre-registration TERM left GUI descendants'
+}
+
+test_mock_signal_gui_foreground_group_registration() {
+    local continue_marker gui_pid gui_status index signal_log signal_name
+    local process_fields
+    local signal_pid_file signal_tmpdir started_marker termination_marker
+    local marker_pgid marker_pid marker_sid worker_parent worker_pgid worker_pid
+    local worker_sid
+    local -a signal_names=(HUP INT TERM)
+    local -a signal_statuses=(129 130 143)
+
+    # Block the engine after it creates its session but before the GUI accepts
+    # the PGID. A foreground-group signal must not strand that isolated engine.
+    printf '%s\n' 'Mock scenario: gui-signal-foreground-group-registration'
+    for index in "${!signal_names[@]}"; do
+        signal_name=${signal_names[index]}
+        signal_tmpdir="${TEST_ROOT}/gui-group-registration-${signal_name}"
+        signal_pid_file="${TEST_ROOT}/gui-group-registration-${signal_name}.pid"
+        started_marker="${TEST_ROOT}/gui-group-registration-${signal_name}-started"
+        continue_marker="${TEST_ROOT}/gui-group-registration-${signal_name}-continue"
+        termination_marker="${TEST_ROOT}/gui-group-registration-${signal_name}-terminated"
+        signal_log="${TEST_ROOT}/gui-group-registration-${signal_name}.log"
+        mkdir -p -- "${signal_tmpdir}"
+        prepare_argument_log "gui-group-registration-${signal_name}"
+
+        "${REAL_SETSID}" --wait env \
+            --default-signal=HUP \
+            --default-signal=INT \
+            --default-signal=TERM \
+            TMPDIR="${signal_tmpdir}" \
+            MOCK_GUI_SIGNAL_PID_FILE="${signal_pid_file}" \
+            MOCK_DELAY_PGID_PUBLISH=1 \
+            MOCK_PGID_DELAY_STARTED_MARKER="${started_marker}" \
+            MOCK_PGID_DELAY_CONTINUE_MARKER="${continue_marker}" \
+            MOCK_PGID_DELAY_TERMINATION_MARKER="${termination_marker}" \
+            "${GUI_SIGNAL_UNDER_TEST}" >"${signal_log}" 2>&1 &
+        gui_pid=$!
+        wait_for_file "${signal_pid_file}" 5 \
+            "GUI foreground-group ${signal_name} PID publication"
+        wait_for_file "${started_marker}" 10 \
+            "GUI foreground-group ${signal_name} worker barrier"
+        IFS= read -r marker_pid <"${started_marker}"
+        [[ ${marker_pid} =~ ^[1-9][0-9]*$ ]] \
+            || fail "Invalid GUI foreground-group marker PID: ${marker_pid}"
+        process_fields=$(ps -o pgid=,sid= -p "${marker_pid}") \
+            || fail "Unable to inspect GUI foreground-group marker ${marker_pid}."
+        read -r marker_pgid marker_sid <<<"${process_fields}"
+        assert_equals "${marker_pgid}" "${marker_sid}" \
+            "GUI foreground-group ${signal_name} marker stays in the worker session"
+        worker_pid=${marker_sid}
+        process_fields=$(ps -o ppid=,pgid=,sid= -p "${worker_pid}") \
+            || fail "Unable to inspect GUI foreground-group worker ${worker_pid}."
+        read -r worker_parent worker_pgid worker_sid <<<"${process_fields}"
+        assert_equals "${gui_pid}" "${worker_parent}" \
+            "GUI foreground-group ${signal_name} worker remains a direct child"
+        assert_equals "${worker_pid}" "${worker_pgid}" \
+            "GUI foreground-group ${signal_name} worker PID equals PGID"
+        assert_equals "${worker_pid}" "${worker_sid}" \
+            "GUI foreground-group ${signal_name} worker PID equals SID"
+
+        kill "-${signal_name}" -- "-${gui_pid}"
+        : >"${continue_marker}"
+        gui_status=0
+        wait "${gui_pid}" || gui_status=$?
+        assert_equals "${signal_statuses[index]}" "${gui_status}" \
+            "GUI foreground-group ${signal_name} preserves requested status"
+        assert_directory_empty "${signal_tmpdir}" \
+            "GUI foreground-group ${signal_name} left private state"
+        assert_no_test_processes \
+            "GUI foreground-group ${signal_name} left descendants"
+    done
 }
 
 test_mock_signal_gui_blocked_progress() {
@@ -3305,10 +3981,17 @@ test_mock_signal_zenity_status() {
 
 run_mock_signal_group() {
     test_mock_signal_cli_download
+    test_mock_signal_cli_worker_registration
+    test_mock_signal_cli_runtime_preparation
+    test_mock_signal_cli_pre_env_registration
+    test_mock_signal_registration_handoff
+    test_mock_signal_cli_foreground_group_registration
+    test_mock_signal_cli_pgid_discovery_race
     test_mock_signal_cli_ffmpeg
     test_mock_signal_gui_session
     test_mock_signal_gui_blocked_entry
     test_mock_signal_gui_worker_registration
+    test_mock_signal_gui_foreground_group_registration
     test_mock_signal_gui_blocked_progress
     test_mock_signal_gui_cancellation
     test_mock_signal_gui_startup_error

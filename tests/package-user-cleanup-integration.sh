@@ -57,7 +57,7 @@ write_valid_sentinel() {
 require_cleanup_test_environment() {
     local command_name=''
 
-    for command_name in bash chmod grep ln mkdir mktemp rm stat touch; do
+    for command_name in bash chmod grep ln mkdir mktemp rm sed stat touch; do
         require_test_command "${command_name}"
     done
     [[ -x ${HELPER} ]] || fail "cleanup helper is not executable: ${HELPER}"
@@ -249,6 +249,44 @@ test_oversized_marker() {
     assert_present "${custom_data}/${APP_ID}/runtime/valuable/keep"
 }
 
+test_numeric_identity_bounds() {
+    local cleanup_source_copy="${root}/package-user-cleanup-source-only.sh"
+    local invalid_home="${root}/invalid-numeric-id-home"
+    local invalid_output=''
+    local invalid_status=0
+
+    sed '$d' "${HELPER}" >"${cleanup_source_copy}"
+    chmod 0600 -- "${cleanup_source_copy}"
+    mkdir -p -- "${invalid_home}/.local/share/${APP_ID}/runtime/valuable"
+    touch -- "${invalid_home}/.local/share/${APP_ID}/runtime/valuable/keep"
+
+    invalid_output=$(
+        bash -c '
+            set -euo pipefail
+            source "$1"
+            run_as_user 18446744073709551616 0 "$2"
+        ' bash "${cleanup_source_copy}" "${invalid_home}" 2>&1
+    ) || invalid_status=$?
+    assert_equals 0 "${invalid_status}" \
+        'overflowing numeric identity is skipped without aborting package cleanup'
+    assert_text_contains "${invalid_output}" \
+        'refusing invalid numeric uid/gid' \
+        'overflowing numeric identity diagnostic'
+    assert_present \
+        "${invalid_home}/.local/share/${APP_ID}/runtime/valuable/keep"
+
+    # shellcheck disable=SC2016 # Variables belong to the intentionally nested shell.
+    assert_status 0 'maximum Linux UID/GID is accepted without arithmetic' \
+        bash -c '
+            set -euo pipefail
+            source "$1"
+            normalized=""
+            normalize_linux_id normalized 0004294967294
+            [[ ${normalized} == 4294967294 ]]
+            ! normalize_linux_id normalized 4294967295
+        ' bash "${cleanup_source_copy}"
+}
+
 test_foreign_owned_home_rejection() {
     local foreign_home="${root}/foreign-owned-home"
     local foreign_output=''
@@ -308,6 +346,7 @@ main() {
     test_control_character_marker
     test_unavailable_home
     test_oversized_marker
+    test_numeric_identity_bounds
     test_foreign_owned_home_rejection
     test_symlinked_foreign_home_rejection
 

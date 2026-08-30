@@ -123,7 +123,8 @@ Les commandes système requises par l'application sont :
 - Python **3.10 ou plus récent** ;
 - FFmpeg et `ffprobe` ;
 - Zenity pour l'interface graphique ;
-- `curl`, GnuPG et `unzip` pour l'initialisation et la mise à jour des runtimes ;
+- `ca-certificates`, `curl`, GnuPG et `unzip` pour l'initialisation et la mise
+  à jour vérifiées des runtimes ;
 - GNU coreutils, GNU grep, `find` et `setsid`/`flock`, normalement fournis par
   les paquets système de base et `util-linux` ;
 - Firefox avec une session YouTube authentifiée uniquement pour le profil
@@ -366,9 +367,10 @@ sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.4-1_all.deb
 ```
 
 Le DEB dépend explicitement d'`aria2`, de Python 3.10+, de FFmpeg/FFprobe,
-de Zenity, curl, GnuPG, unzip et du thème d'icônes hicolor. GNU coreutils, grep,
-findutils, sed et util-linux sont fournis par la base Essential de Debian/Ubuntu
-et ne sont pas redéclarés inutilement comme dépendances non versionnées. Le DEB
+de Zenity, des certificats CA, de curl, GnuPG, unzip et du thème d'icônes
+hicolor. GNU coreutils, grep, findutils, sed et util-linux sont fournis par la
+base Essential de Debian/Ubuntu et ne sont pas redéclarés inutilement comme
+dépendances non versionnées. Le DEB
 **ne dépend pas de paquets yt-dlp ou Deno fournis par la distribution**. yt-dlp
 et Deno sont installés et vérifiés dans le runtime de l'utilisateur au premier
 lancement.
@@ -496,6 +498,20 @@ L'entrée du menu appelle un lien de lancement stable stocké dans :
 
 Ce lien privé cible le chemin absolu du script graphique dans le dépôt. Après
 avoir déplacé le dossier du projet, relancez `./install-gui.sh install`.
+Pour garantir le confinement, l'installateur portable exige un
+`XDG_DATA_HOME` appartenant à l'utilisateur courant et non inscriptible par le
+groupe ou les autres utilisateurs ; il refuse aussi tout lien symbolique à la
+racine ou dans un composant parent. Le chemin de données doit aussi être en
+UTF-8 valide et pouvoir être représenté sans ambiguïté dans une clé `Exec` de
+fichier desktop. Il conserve des descripteurs sans suivi de liens pendant toute
+la transaction : un remplacement concurrent du chemin ne peut donc pas
+rediriger l'installation, le retrait ou le nettoyage.
+Les demandes concurrentes d'installation et de retrait portables sont
+sérialisées. Après l'échec d'une mise à jour multifichier, le helper tente de
+restaurer l'état précédent du lanceur avant de signaler l'erreur principale et
+tout échec de rollback. La cible graphique exécutable est revalidée avant tout
+succès. HUP, INT et TERM déclenchent également ce nettoyage transactionnel avant
+que la commande retourne respectivement le statut 129, 130 ou 143.
 
 ## Utilisation graphique
 
@@ -747,10 +763,15 @@ des dossiers différents peuvent s'exécuter simultanément.
 
 ## Tests
 
-Consultez [TESTING.md](TESTING.md) pour les validations locales, les contrôles
-spécifiques à Fedora et les tâches GitHub Actions.
+Consultez le
+[guide de test](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md)
+du dépôt pour les validations locales, les contrôles spécifiques à Fedora et
+les tâches GitHub Actions.
 
-## Désinstallation du lanceur
+## Désinstallation d'un lanceur portable
+
+Pour un lanceur installé depuis une archive ZIP portable ou un checkout Git,
+exécutez cette commande depuis le dossier source correspondant :
 
 ```bash
 ./install-gui.sh uninstall
@@ -770,4 +791,5 @@ spécifiques à Fedora et les tâches GitHub Actions.
 
 ## Licence
 
-Ce projet est distribué sous licence MIT. Consultez [LICENSE](LICENSE).
+Ce projet est distribué sous licence MIT. Consultez la
+[licence du dépôt](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/LICENSE).
