@@ -662,10 +662,6 @@ for argument in "$@"; do
     fi
 done
 
-if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
-    trap 'printf terminated > "${MOCK_TERMINATION_MARKER:?}"; exit 143' TERM INT
-fi
-
 if [[ ${load_info_json} != true ]]; then
     if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
         printf '\r[#a1b2c3 4.0MiB/0B CN:8 DL:1.00MiB]\r'
@@ -681,13 +677,37 @@ if [[ ${load_info_json} != true ]]; then
 fi
 
 if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
-    sleep "${MOCK_WORKER_START_JITTER_SECONDS:-0}"
-    if [[ -n ${MOCK_STARTED_MARKER:-} ]]; then
-        printf started >"${MOCK_STARTED_MARKER}"
-    fi
-    while true; do
-        sleep 0.1
-    done
+    # A single process installs its handlers before either startup jitter or
+    # readiness publication, so a signal cannot terminate an interrupted Bash
+    # child before the fixture records delivery.
+    exec python3 -c '
+import signal
+import sys
+import time
+
+termination_marker = sys.argv[1]
+started_marker = sys.argv[2]
+startup_delay = float(sys.argv[3])
+
+
+def terminate(signal_number, _frame):
+    if termination_marker:
+        with open(termination_marker, "w", encoding="utf-8") as marker:
+            marker.write("terminated")
+    raise SystemExit(128 + signal_number)
+
+
+signal.signal(signal.SIGTERM, terminate)
+signal.signal(signal.SIGINT, terminate)
+time.sleep(startup_delay)
+if started_marker:
+    with open(started_marker, "w", encoding="utf-8") as marker:
+        marker.write("started")
+while True:
+    signal.pause()
+' "${MOCK_TERMINATION_MARKER:-}" \
+        "${MOCK_STARTED_MARKER:-}" \
+        "${MOCK_WORKER_START_JITTER_SECONDS:-0}"
 fi
 
 if [[ ${MOCK_EXIT_WITH_LIVE_DESCENDANT:-0} == 1 ]]; then
@@ -970,9 +990,11 @@ while True:
     done <"${input_file}"
 
     if [[ ${MOCK_REPLACE_ARIA2_INPUT_BEFORE_EXIT:-0} == 1 ]]; then
-        rm -f -- "${input_file}"
-        printf '%s\n' 'foreign aria2 input replacement' >"${input_file}"
-        chmod 600 -- "${input_file}"
+        input_replacement="${input_file}.replacement"
+        printf '%s\n' 'foreign aria2 input replacement' \
+            >"${input_replacement}"
+        chmod 600 -- "${input_replacement}"
+        mv -Tf -- "${input_replacement}" "${input_file}"
     fi
     if [[ ${MOCK_REPLACE_ARIA2_MANIFEST_BEFORE_EXIT:-0} == 1 ]]; then
         manifest_path="${download_dir}/manifest.json"
@@ -3048,7 +3070,7 @@ test_mock_engine_failure_paths() {
 }
 
 test_mock_engine_private_staging() {
-    local active_file_log active_file_pid active_file_plan
+    local active_file_log active_file_pid active_file_plan active_file_replacement
     local active_file_result active_file_staging active_file_started
     local active_file_status active_file_termination_marker
     local ambiguous_marked attempt candidate candidate_ambiguous candidate_pgid
@@ -3225,10 +3247,11 @@ test_mock_engine_private_staging() {
         -f ${active_file_staging}/manifest.json ]] \
         || fail 'Sensitive-file replacement metadata was not initialized.'
 
-    rm -f -- "${active_file_plan}"
+    active_file_replacement="${active_file_plan}.foreign-replacement"
     printf '%s\n' 'foreign allowlisted-name replacement must survive cleanup' \
-        >"${active_file_plan}"
-    chmod 600 -- "${active_file_plan}"
+        >"${active_file_replacement}"
+    chmod 600 -- "${active_file_replacement}"
+    mv -Tf -- "${active_file_replacement}" "${active_file_plan}"
     kill -TERM -- "${active_file_pid}" 2>/dev/null \
         || fail 'Unable to terminate sensitive-file replacement worker.'
     active_file_status=0
