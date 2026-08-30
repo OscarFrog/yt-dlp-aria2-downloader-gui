@@ -561,15 +561,20 @@ release. A read-only job invokes `scripts/update-published-version.py` to update
 only the known English/French release references and
 `EXPECTED_PUBLISHED_VERSION`; exact reference counts make documentation drift
 fail closed. A fresh read-only verifier applies the data-only patch and runs
-the complete local contract. The final job alone receives repository and pull
-request write permission, rechecks the allowlisted handoff without executing
-repository code, and creates or refreshes
-`automation/release-docs-vX.Y.Z`. It does not write directly to `main`.
+the complete local contract. The final job alone receives repository-content
+write permission. It performs no repository checkout, resolves protected
+`main` through the GitHub API, requires the release SHA to be its ancestor,
+checks the current allowlisted bytes and file modes against the release base,
+then creates an exact Git tree and
+`automation/release-docs-vX.Y.Z` branch from the independently tested files.
+It does not execute repository code, receive pull-request permission, or write
+directly to `main`.
 
-The automation pull request still requires human review. Pull-request workflows
-created with the repository `GITHUB_TOKEN` enter GitHub's approval-required
-state; approve those runs, inspect their results, and merge through the normal
-protected-branch path. The updater's local non-mutating consistency check is:
+The successful workflow summary identifies the exact branch and commit. Open
+the pull request with a maintainer-authenticated GitHub session, inspect its
+checks, and merge through the normal protected-branch path. The repository
+intentionally leaves GitHub Actions pull-request creation disabled. The
+updater's local non-mutating consistency check is:
 
 ```bash
 python3 scripts/update-published-version.py --check X.Y.Z

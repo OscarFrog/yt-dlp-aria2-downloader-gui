@@ -1080,6 +1080,10 @@ publisher_job_executes_repo_shell() {
             bash | sh)
                 index=$((index + 1))
                 while ((index < word_count)) && [[ ${words[index]} == -* ]]; do
+                    if [[ ${words[index]} == -c ||
+                        ${words[index]} == --command ]]; then
+                        return 0
+                    fi
                     if [[ ${words[index]} == -- ]]; then
                         index=$((index + 1))
                         break
@@ -1088,6 +1092,14 @@ publisher_job_executes_repo_shell() {
                 done
                 ((index < word_count)) || continue
                 script_path=${words[index]}
+                ;;
+            deno | node | perl | php | python | python3 | ruby)
+                index=$((index + 1))
+                if [[ ${command_name} == python3 &&
+                    ${words[index]:-} == - ]]; then
+                    continue
+                fi
+                return 0
                 ;;
             source | .)
                 index=$((index + 1))
@@ -1104,6 +1116,9 @@ publisher_job_executes_repo_shell() {
         script_path=${script_path%\'}
         script_path=${script_path%;}
         script_path=${script_path%\\}
+        if [[ ${script_path} == ./* || ${script_path} == ../* ]]; then
+            return 0
+        fi
         if [[ ${script_path} != /* && ${script_path} == *.sh ]]; then
             return 0
         fi
@@ -1362,6 +1377,11 @@ release_docs_prepare_job_policy() {
     [[ ${job_block} == *"repos/\${GITHUB_REPOSITORY}/actions/runs/\${RELEASE_RUN_ID}"* ]] \
         || return 65
     [[ ${job_block} == *"gh release verify \"\${RELEASE_TAG}\""* ]] || return 65
+    # shellcheck disable=SC2016 # Literal immutable tag binding.
+    [[ ${job_block} == *'tag_sha=$(git rev-parse "${RELEASE_TAG}^{commit}")'* ]] \
+        || return 65
+    # shellcheck disable=SC2016 # Literal immutable tag comparison.
+    [[ ${job_block} == *'${tag_sha} != "${RELEASE_SHA}"'* ]] || return 65
     [[ ${job_block} == *"python3 -B scripts/update-published-version.py \"\${version}\""* ]] \
         || return 65
     [[ ${job_block} == *'bash ./test-static.sh'* ]] || return 65
@@ -1390,6 +1410,9 @@ release_docs_verifier_job_policy() {
         || return 65
     [[ ${job_block} == *"git apply --check -- \"\${handoff_dir}/release-docs.patch\""* ]] \
         || return 65
+    # shellcheck disable=SC2016 # Literal immutable tag binding.
+    [[ ${job_block} == *'[[ $(git rev-parse "${RELEASE_TAG}^{commit}") == "${RELEASE_SHA}" ]]'* ]] \
+        || return 65
     [[ ${job_block} == *'README.fr.md README.md test-static.sh'* ]] || return 65
     [[ ${job_block} == *'candidate handoff path is not a regular file'* ]] \
         || return 65
@@ -1397,6 +1420,9 @@ release_docs_verifier_job_policy() {
         || return 65
     [[ ${job_block} == *'bash ./tests/run-all.sh --full --jobs 4'* ]] || return 65
     [[ ${job_block} == *'release-docs-tested-tree.sha256'* ]] || return 65
+    [[ ${job_block} == *'release-docs-base-tree.sha256'* ]] || return 65
+    [[ ${job_block} == *'release-docs-verified/README.fr.md'* ]] || return 65
+    [[ ${job_block} == *'release-docs-verified/test-static.sh'* ]] || return 65
     [[ ${job_block} == *'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'* ]] \
         || return 65
     # shellcheck disable=SC2016 # Literal run-scoped artifact name.
@@ -1410,31 +1436,62 @@ release_docs_publisher_job_policy() {
     local permissions=''
 
     permissions=$(job_permissions_block "${job_block}")
-    [[ ${permissions} == $'    permissions:\n      contents: write\n      pull-requests: write' ]] \
-        || return 65
+    [[ ${permissions} == $'    permissions:\n      contents: write' ]] || return 65
     [[ ${job_block} == *"if: needs.prepare-release-docs.outputs.update == 'true'"* ]] \
         || return 65
-    # shellcheck disable=SC2016 # Literal GitHub Actions checkout ref.
-    [[ ${job_block} == *'ref: ${{ env.RELEASE_SHA }}'* ]] || return 65
-    [[ ${job_block} == *'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'* ]] \
-        || return 65
+    [[ ${job_block} != *'actions/checkout@'* ]] || return 65
     [[ ${job_block} == *'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3'* ]] \
         || return 65
     # shellcheck disable=SC2016 # Literal run-scoped artifact name.
     [[ ${job_block} == *'release-docs-verified-${{ github.run_id }}-${{ github.run_attempt }}'* ]] \
         || return 65
     [[ ${job_block} == *"gh release verify \"\${RELEASE_TAG}\""* ]] || return 65
-    [[ ${job_block} == *"git apply --check -- \"\${handoff_dir}/release-docs.patch\""* ]] \
+    # shellcheck disable=SC2016 # Literal API tag binding.
+    [[ ${job_block} == *'repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}'* ]] \
+        || return 65
+    # shellcheck disable=SC2016 # Literal API tag-to-run comparison.
+    [[ ${job_block} == *'${release_tag_sha} != "${RELEASE_SHA}"'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal API ancestry comparison.
+    [[ ${job_block} == *'repos/${GITHUB_REPOSITORY}/compare/${RELEASE_SHA}...${main_sha}'* ]] \
+        || return 65
+    # shellcheck disable=SC2016 # Literal API ancestry check.
+    [[ ${job_block} == *'${merge_base_sha} != "${RELEASE_SHA}"'* ]] \
         || return 65
     [[ ${job_block} == *'README.fr.md README.md test-static.sh'* ]] || return 65
     [[ ${job_block} == *'verified handoff path is not a regular file'* ]] \
         || return 65
+    [[ ${job_block} == *'release-docs-base-tree.sha256'* ]] || return 65
     [[ ${job_block} == *'release-docs-tested-tree.sha256'* ]] || return 65
-    [[ ${job_block} == *'core.hooksPath=/dev/null'* ]] || return 65
-    [[ ${job_block} == *"--force-with-lease=\"refs/heads/\${branch}:\${remote_sha}\""* ]] \
+    [[ ${job_block} == *'handoff_line_count != 6'* ]] || return 65
+    [[ ${job_block} == *'base_line_count != 3'* ]] || return 65
+    [[ ${job_block} == *'tested_line_count != 3'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal validation-before-use ordering.
+    [[ ${job_block} == *'handoff_line_count=$(wc -l'*'sha256sum --check release-docs-handoff.sha256'* ]] \
         || return 65
-    [[ ${job_block} == *'gh pr create'* ]] || return 65
-    [[ ${job_block} != *'HEAD:refs/heads/main'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal protected-main content binding.
+    [[ ${job_block} == *'contents/${path}?ref=${main_sha}'* ]] || return 65
+    [[ ${job_block} == *'mode: "100755"'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal byte-preserving artifact encoding.
+    [[ ${job_block} == *'base64 --wrap=0 -- "${handoff_dir}/${path}"'* ]] \
+        || return 65
+    [[ ${job_block} == *'encoding: "base64"'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal Git database API boundaries.
+    [[ ${job_block} == *'repos/${GITHUB_REPOSITORY}/git/blobs'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal Git database API boundaries.
+    [[ ${job_block} == *'repos/${GITHUB_REPOSITORY}/git/trees'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal Git database API boundaries.
+    [[ ${job_block} == *'repos/${GITHUB_REPOSITORY}/git/commits'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal Git database API boundaries.
+    [[ ${job_block} == *'repos/${GITHUB_REPOSITORY}/git/refs'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal bounded automation branch.
+    [[ ${job_block} == *'branch="automation/release-docs-v${RELEASE_VERSION}"'* ]] \
+        || return 65
+    [[ ${job_block} == *'Reviewed documentation branch ready'* ]] || return 65
+    [[ ${job_block} != *'gh pr '* ]] || return 65
+    [[ ${job_block} != *'git '* ]] || return 65
+    [[ ${job_block} != *'refs/heads/main'* ]] || return 65
+    [[ ${job_block} != *'--method PATCH'* ]] || return 65
+    [[ ${job_block} != *'--method DELETE'* ]] || return 65
     [[ ${job_block} != *'scripts/update-published-version.py'* ]] || return 65
     [[ ${job_block} != *'bash ./test-static.sh'* ]] || return 65
     [[ ${job_block} != *'bash ./tests/run-all.sh'* ]] || return 65
@@ -1453,17 +1510,25 @@ assert_release_docs_workflow_policy() {
     local verifier_block=''
     local publisher_block=''
     local mutated=''
+    # shellcheck disable=SC2016 # Literal negative-control fragments.
+    local prepare_tag_binding='${tag_sha} != "${RELEASE_SHA}"'
+    # shellcheck disable=SC2016 # Literal negative-control fragments.
+    local verifier_tag_binding='[[ $(git rev-parse "${RELEASE_TAG}^{commit}") == "${RELEASE_SHA}" ]]'
+    # shellcheck disable=SC2016 # Literal negative-control fragments.
+    local publisher_tag_binding='${release_tag_sha} != "${RELEASE_SHA}"'
+    # shellcheck disable=SC2016 # Literal negative-control fragments.
+    local publisher_ancestry_binding='${merge_base_sha} != "${RELEASE_SHA}"'
 
     prepare_block=$(workflow_job_block "${workflow}" prepare-release-docs)
     verifier_block=$(workflow_job_block "${workflow}" verify-release-docs)
-    publisher_block=$(workflow_job_block "${workflow}" publish-release-docs-pr)
+    publisher_block=$(workflow_job_block "${workflow}" publish-release-docs-branch)
 
     [[ -n ${prepare_block} ]] \
         || fail 'release-docs read-only preparation job is missing.'
     [[ -n ${verifier_block} ]] \
         || fail 'release-docs fresh read-only verifier job is missing.'
     [[ -n ${publisher_block} ]] \
-        || fail 'release-docs privileged PR publisher job is missing.'
+        || fail 'release-docs privileged branch publisher job is missing.'
 
     # Policy helpers are explicit-status predicates and intentionally do not rely
     # on errexit inside their bodies.
@@ -1486,6 +1551,15 @@ assert_release_docs_workflow_policy() {
         fail 'release-docs policy allowed write permission during preparation.'
     fi
 
+    mutated=${prepare_block/"${prepare_tag_binding}"/false}
+    mutation_must_change "${prepare_block}" "${mutated}" \
+        'release-docs preparation tag binding removal'
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if release_docs_prepare_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed removal of the preparation tag binding.'
+    fi
+
     mutated=${verifier_block//bash .\/tests\/run-all.sh --full --jobs 4/true}
     mutation_must_change "${verifier_block}" "${mutated}" \
         'release-docs verifier full-suite removal'
@@ -1495,13 +1569,13 @@ assert_release_docs_workflow_policy() {
         fail 'release-docs policy allowed removal of complete verification.'
     fi
 
-    mutated=${publisher_block//git apply --check/git apply}
-    mutation_must_change "${publisher_block}" "${mutated}" \
-        'release-docs publisher apply precheck removal'
+    mutated=${verifier_block/"${verifier_tag_binding}"/true}
+    mutation_must_change "${verifier_block}" "${mutated}" \
+        'release-docs verifier tag binding removal'
     # Predicate failure is expected for this negative-control mutation.
     # shellcheck disable=SC2310
-    if release_docs_publisher_job_policy "${mutated}"; then
-        fail 'release-docs policy allowed removal of git apply --check.'
+    if release_docs_verifier_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed removal of the verifier tag binding.'
     fi
 
     mutated="${publisher_block}"$'\n''      python3 scripts/update-published-version.py 9.9.9'
@@ -1509,6 +1583,43 @@ assert_release_docs_workflow_policy() {
     # shellcheck disable=SC2310
     if release_docs_publisher_job_policy "${mutated}"; then
         fail 'release-docs policy allowed updater execution in publication.'
+    fi
+
+    mutated=${publisher_block/contents: write/$'contents: write\n      pull-requests: write'}
+    mutation_must_change "${publisher_block}" "${mutated}" \
+        'release-docs branch publisher pull-request permission'
+    # Predicate failure is expected for permission expansion.
+    # shellcheck disable=SC2310
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed pull-request permission in branch publication.'
+    fi
+
+    mutated="${publisher_block}"$'\n''      branch_ref=refs/heads/main'
+    # Predicate failure is expected for a direct protected-branch target.
+    # shellcheck disable=SC2310
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed direct protected-main publication.'
+    fi
+
+    mutated="${publisher_block}"$'\n''      gh api --method PATCH repos/example/git/refs/heads/main'
+    # Predicate failure is expected for mutable reference updates.
+    # shellcheck disable=SC2310
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed a mutable Git reference update.'
+    fi
+
+    mutated="${publisher_block}"$'\n''      ./candidate-tool'
+    # Predicate failure is expected for direct candidate-code execution.
+    # shellcheck disable=SC2310
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed direct candidate binary execution.'
+    fi
+
+    mutated="${publisher_block}"$'\n''      node candidate.js'
+    # Predicate failure is expected for interpreted candidate-code execution.
+    # shellcheck disable=SC2310
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed interpreted candidate execution.'
     fi
 
     mutated=${publisher_block//README.fr.md README.md test-static.sh/README.md test-static.sh}
@@ -1520,6 +1631,48 @@ assert_release_docs_workflow_policy() {
         fail 'release-docs policy allowed mutation of the exact path allowlist.'
     fi
 
+    mutated="${publisher_block}"$'\n''      - uses: actions/checkout@untrusted'
+    # Predicate failure is expected for an untrusted privileged checkout.
+    # shellcheck disable=SC2310
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed an untrusted privileged checkout.'
+    fi
+
+    mutated=${publisher_block/"${publisher_tag_binding}"/false}
+    mutation_must_change "${publisher_block}" "${mutated}" \
+        'release-docs publisher tag binding removal'
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed removal of the publisher tag binding.'
+    fi
+
+    mutated=${publisher_block/"${publisher_ancestry_binding}"/false}
+    mutation_must_change "${publisher_block}" "${mutated}" \
+        'release-docs publisher ancestry binding removal'
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed removal of the publisher ancestry check.'
+    fi
+
+    mutated=${publisher_block//mode: \"100755\"/mode: \"100644\"}
+    mutation_must_change "${publisher_block}" "${mutated}" \
+        'release-docs executable mode mutation'
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed loss of the static-test executable mode.'
+    fi
+
+    mutated=${publisher_block//encoding: \"base64\"/encoding: \"utf-8\"}
+    mutation_must_change "${publisher_block}" "${mutated}" \
+        'release-docs blob encoding mutation'
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed a non-byte-preserving blob encoding.'
+    fi
 }
 
 test_static_tooling_contracts() {

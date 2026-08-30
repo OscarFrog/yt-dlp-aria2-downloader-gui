@@ -17,8 +17,8 @@
   names to the immutable v2.3.5 RPM, DEB, and ZIP assets.
 - Add a fail-closed post-release documentation updater and workflow that
   independently revalidates the successful immutable release, exact data-only
-  handoffs, and the complete local suite before opening a reviewable pull
-  request for future published-version alignment.
+  handoffs, and the complete local suite before publishing a bounded branch for
+  a maintainer-opened, reviewable pull request.
 
 ## 2.3.5 - 2026-08-30
 

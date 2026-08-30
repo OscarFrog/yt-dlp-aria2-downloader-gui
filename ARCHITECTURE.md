@@ -289,7 +289,7 @@ architecture document. The source ZIP contains the tracked source tree.
 | `stress.yml` | Repeated cancellation, runtime, and cleanup race coverage |
 | `shfmt-update.yml` | Prepare an untrusted formatter-pin candidate, verify it separately, and publish only allowlisted data |
 | `release.yml` | Validate an authorized tag, build once, sign, test, attest, publish immutably, then verify fresh public downloads |
-| `release-docs.yml` | After a successful immutable release, prepare and independently verify a bounded published-version patch, then open a reviewable documentation PR |
+| `release-docs.yml` | After a successful immutable release, prepare and independently verify a bounded published-version patch, then publish a branch for a maintainer-reviewed documentation PR |
 
 Third-party Actions are pinned by full commit SHA and checkout credentials stay
 disabled. Jobs receive only the permissions they need.
@@ -305,10 +305,14 @@ The post-release documentation workflow is a separate `workflow_run` trust
 zone. Its read-only preparation and verification jobs bind the triggering
 successful `release.yml` run, semantic tag, exact source commit, and immutable
 public release before producing a data-only patch. Only the final job receives
-`contents: write` and `pull-requests: write`; it does not execute repository
-code, accepts exactly the two READMEs and the static published-version contract,
-rechecks the verified handoff, and updates an automation branch for a pull
-request. It never writes directly to `main`.
+`contents: write`; it does not execute repository code or check out any
+repository ref. It resolves the protected `main` identity through the GitHub
+API, requires the release SHA to be its ancestor, verifies the current
+allowlisted bytes and modes against the release base, accepts only the
+independently tested two READMEs and static published-version contract, and uses
+Git database objects to create a versioned automation branch. A maintainer then
+opens the reviewed pull request; the workflow never writes directly to `main`
+or receives pull-request permission.
 
 Creating a tag, signing an RPM, publishing a release, or changing repository
 secrets/environments is outside ordinary code-change authority.
