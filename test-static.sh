@@ -28,8 +28,8 @@ fi
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 # The development tree can lead the latest installable GitHub release. Keep the
 # two contracts explicit so README package names never advertise absent assets.
-readonly EXPECTED_VERSION='2.3.5'
-readonly EXPECTED_PUBLISHED_VERSION='2.3.4'
+readonly EXPECTED_VERSION='2.3.6'
+readonly EXPECTED_PUBLISHED_VERSION='2.3.5'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SOURCE_INVENTORY_FILE=''
 REPOSITORY_INVENTORY_FILE=''
@@ -1343,6 +1343,185 @@ assert_shfmt_update_workflow_policy() {
     fi
 }
 
+release_docs_prepare_job_policy() {
+    local job_block=$1
+    local permissions=''
+
+    permissions=$(job_permissions_block "${job_block}")
+    [[ ${permissions} == $'    permissions:\n      contents: read' ]] || return 65
+    # shellcheck disable=SC2016 # Literal GitHub Actions expression.
+    [[ ${job_block} != *'${{ secrets.'* ]] || return 65
+    [[ ${job_block} == *"if: github.event.workflow_run.conclusion == 'success'"* ]] \
+        || return 65
+    # shellcheck disable=SC2016 # Literal GitHub Actions checkout ref.
+    [[ ${job_block} == *'ref: ${{ env.RELEASE_SHA }}'* ]] || return 65
+    [[ ${job_block} == *'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'* ]] \
+        || return 65
+    [[ ${job_block} == *'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'* ]] \
+        || return 65
+    [[ ${job_block} == *"repos/\${GITHUB_REPOSITORY}/actions/runs/\${RELEASE_RUN_ID}"* ]] \
+        || return 65
+    [[ ${job_block} == *"gh release verify \"\${RELEASE_TAG}\""* ]] || return 65
+    [[ ${job_block} == *"python3 -B scripts/update-published-version.py \"\${version}\""* ]] \
+        || return 65
+    [[ ${job_block} == *'bash ./test-static.sh'* ]] || return 65
+    [[ ${job_block} == *'README.fr.md README.md test-static.sh'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal run-scoped artifact name.
+    [[ ${job_block} == *'release-docs-candidate-${{ github.run_id }}-${{ github.run_attempt }}'* ]] \
+        || return 65
+    return 0
+}
+
+release_docs_verifier_job_policy() {
+    local job_block=$1
+    local permissions=''
+
+    permissions=$(job_permissions_block "${job_block}")
+    [[ ${permissions} == $'    permissions:\n      contents: read' ]] || return 65
+    # shellcheck disable=SC2016 # Literal GitHub Actions expression.
+    [[ ${job_block} != *'${{ secrets.'* ]] || return 65
+    [[ ${job_block} == *"if: needs.prepare-release-docs.outputs.update == 'true'"* ]] \
+        || return 65
+    # shellcheck disable=SC2016 # Literal GitHub Actions checkout ref.
+    [[ ${job_block} == *'ref: ${{ env.RELEASE_SHA }}'* ]] || return 65
+    [[ ${job_block} == *'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'* ]] \
+        || return 65
+    [[ ${job_block} == *'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3'* ]] \
+        || return 65
+    [[ ${job_block} == *"git apply --check -- \"\${handoff_dir}/release-docs.patch\""* ]] \
+        || return 65
+    [[ ${job_block} == *'README.fr.md README.md test-static.sh'* ]] || return 65
+    [[ ${job_block} == *'candidate handoff path is not a regular file'* ]] \
+        || return 65
+    [[ ${job_block} == *'python3 -B scripts/update-published-version.py'* ]] \
+        || return 65
+    [[ ${job_block} == *'bash ./tests/run-all.sh --full --jobs 4'* ]] || return 65
+    [[ ${job_block} == *'release-docs-tested-tree.sha256'* ]] || return 65
+    [[ ${job_block} == *'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'* ]] \
+        || return 65
+    # shellcheck disable=SC2016 # Literal run-scoped artifact name.
+    [[ ${job_block} == *'release-docs-verified-${{ github.run_id }}-${{ github.run_attempt }}'* ]] \
+        || return 65
+    return 0
+}
+
+release_docs_publisher_job_policy() {
+    local job_block=$1
+    local permissions=''
+
+    permissions=$(job_permissions_block "${job_block}")
+    [[ ${permissions} == $'    permissions:\n      contents: write\n      pull-requests: write' ]] \
+        || return 65
+    [[ ${job_block} == *"if: needs.prepare-release-docs.outputs.update == 'true'"* ]] \
+        || return 65
+    # shellcheck disable=SC2016 # Literal GitHub Actions checkout ref.
+    [[ ${job_block} == *'ref: ${{ env.RELEASE_SHA }}'* ]] || return 65
+    [[ ${job_block} == *'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'* ]] \
+        || return 65
+    [[ ${job_block} == *'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3'* ]] \
+        || return 65
+    # shellcheck disable=SC2016 # Literal run-scoped artifact name.
+    [[ ${job_block} == *'release-docs-verified-${{ github.run_id }}-${{ github.run_attempt }}'* ]] \
+        || return 65
+    [[ ${job_block} == *"gh release verify \"\${RELEASE_TAG}\""* ]] || return 65
+    [[ ${job_block} == *"git apply --check -- \"\${handoff_dir}/release-docs.patch\""* ]] \
+        || return 65
+    [[ ${job_block} == *'README.fr.md README.md test-static.sh'* ]] || return 65
+    [[ ${job_block} == *'verified handoff path is not a regular file'* ]] \
+        || return 65
+    [[ ${job_block} == *'release-docs-tested-tree.sha256'* ]] || return 65
+    [[ ${job_block} == *'core.hooksPath=/dev/null'* ]] || return 65
+    [[ ${job_block} == *"--force-with-lease=\"refs/heads/\${branch}:\${remote_sha}\""* ]] \
+        || return 65
+    [[ ${job_block} == *'gh pr create'* ]] || return 65
+    [[ ${job_block} != *'HEAD:refs/heads/main'* ]] || return 65
+    [[ ${job_block} != *'scripts/update-published-version.py'* ]] || return 65
+    [[ ${job_block} != *'bash ./test-static.sh'* ]] || return 65
+    [[ ${job_block} != *'bash ./tests/run-all.sh'* ]] || return 65
+    [[ ${job_block} != *'python3 '* ]] || return 65
+    # Predicate success identifies forbidden repository-controlled execution.
+    # shellcheck disable=SC2310
+    if publisher_job_executes_repo_shell "${job_block}"; then
+        return 65
+    fi
+    return 0
+}
+
+assert_release_docs_workflow_policy() {
+    local workflow="${SCRIPT_DIR}/.github/workflows/release-docs.yml"
+    local prepare_block=''
+    local verifier_block=''
+    local publisher_block=''
+    local mutated=''
+
+    prepare_block=$(workflow_job_block "${workflow}" prepare-release-docs)
+    verifier_block=$(workflow_job_block "${workflow}" verify-release-docs)
+    publisher_block=$(workflow_job_block "${workflow}" publish-release-docs-pr)
+
+    [[ -n ${prepare_block} ]] \
+        || fail 'release-docs read-only preparation job is missing.'
+    [[ -n ${verifier_block} ]] \
+        || fail 'release-docs fresh read-only verifier job is missing.'
+    [[ -n ${publisher_block} ]] \
+        || fail 'release-docs privileged PR publisher job is missing.'
+
+    # Policy helpers are explicit-status predicates and intentionally do not rely
+    # on errexit inside their bodies.
+    # shellcheck disable=SC2310
+    release_docs_prepare_job_policy "${prepare_block}" \
+        || fail 'release-docs preparation job violates its read-only trust boundary.'
+    # shellcheck disable=SC2310
+    release_docs_verifier_job_policy "${verifier_block}" \
+        || fail 'release-docs verifier job violates its read-only trust boundary.'
+    # shellcheck disable=SC2310
+    release_docs_publisher_job_policy "${publisher_block}" \
+        || fail 'release-docs publisher job violates its privileged trust boundary.'
+
+    mutated=${prepare_block//contents: read/contents: write}
+    mutation_must_change "${prepare_block}" "${mutated}" \
+        'release-docs preparation write permission'
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if release_docs_prepare_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed write permission during preparation.'
+    fi
+
+    mutated=${verifier_block//bash .\/tests\/run-all.sh --full --jobs 4/true}
+    mutation_must_change "${verifier_block}" "${mutated}" \
+        'release-docs verifier full-suite removal'
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if release_docs_verifier_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed removal of complete verification.'
+    fi
+
+    mutated=${publisher_block//git apply --check/git apply}
+    mutation_must_change "${publisher_block}" "${mutated}" \
+        'release-docs publisher apply precheck removal'
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed removal of git apply --check.'
+    fi
+
+    mutated="${publisher_block}"$'\n''      python3 scripts/update-published-version.py 9.9.9'
+    # Predicate failure is expected for candidate-code execution in publication.
+    # shellcheck disable=SC2310
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed updater execution in publication.'
+    fi
+
+    mutated=${publisher_block//README.fr.md README.md test-static.sh/README.md test-static.sh}
+    mutation_must_change "${publisher_block}" "${mutated}" \
+        'release-docs publisher allowlist mutation'
+    # Predicate failure is expected for this negative-control mutation.
+    # shellcheck disable=SC2310
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed mutation of the exact path allowlist.'
+    fi
+
+}
+
 test_static_tooling_contracts() {
     local doctor_phase engine_phase gui_phase mock_engine_group mock_engine_suite
     local mock_gui_group mock_gui_suite mock_phase
@@ -1359,6 +1538,7 @@ test_static_tooling_contracts() {
     assert_unique_source_file_list PYTHON_FILES "${PYTHON_FILES[@]}"
     assert_workflow_dependencies_are_hardened
     assert_shfmt_update_workflow_policy
+    assert_release_docs_workflow_policy
     assert_file_contains "${SCRIPT_DIR}/AGENTS.md" \
         'persist-credentials: false' \
         'agent policy preserves disabled checkout credentials'
@@ -1645,10 +1825,80 @@ test_static_tooling_contracts() {
 
 test_static_python_interface_contracts() {
     local file=''
+    local published_update_fixture=''
+    local synthetic_version='99.98.97'
+    local before_checksums=''
+    local after_checksums=''
+    local readme_mode=''
+    local static_mode=''
+    local updated_readme_mode=''
+    local updated_static_mode=''
 
     for file in "${PYTHON_FILES[@]}"; do
         assert_standard_python_header "${file}"
     done
+
+    assert_status 0 'published-version helper verifies current documentation' \
+        python3 -B "${SCRIPT_DIR}/scripts/update-published-version.py" \
+        --check "${EXPECTED_PUBLISHED_VERSION}"
+    assert_status 2 'published-version helper requires a version' \
+        python3 -B "${SCRIPT_DIR}/scripts/update-published-version.py"
+
+    published_update_fixture=$(mktemp -d)
+    (
+        trap 'rm -rf -- "${published_update_fixture}"' EXIT
+        cp -- \
+            "${SCRIPT_DIR}/README.md" \
+            "${SCRIPT_DIR}/README.fr.md" \
+            "${SCRIPT_DIR}/test-static.sh" \
+            "${published_update_fixture}/"
+        readme_mode=$(stat -c '%a' "${published_update_fixture}/README.md")
+        static_mode=$(stat -c '%a' "${published_update_fixture}/test-static.sh")
+        sed -i \
+            "s/^readonly EXPECTED_VERSION='[^']*'/readonly EXPECTED_VERSION='${synthetic_version}'/" \
+            "${published_update_fixture}/test-static.sh"
+        printf '\nHistorical compatibility reference: %s.\n' \
+            "${EXPECTED_PUBLISHED_VERSION}" \
+            >>"${published_update_fixture}/README.md"
+
+        assert_status 0 'published-version helper updates an isolated fixture' \
+            python3 -B "${SCRIPT_DIR}/scripts/update-published-version.py" \
+            --root "${published_update_fixture}" "${synthetic_version}"
+        assert_status 0 'updated published-version fixture passes check mode' \
+            python3 -B "${SCRIPT_DIR}/scripts/update-published-version.py" \
+            --root "${published_update_fixture}" \
+            --check "${synthetic_version}"
+        assert_file_contains \
+            "${published_update_fixture}/README.md" \
+            "Historical compatibility reference: ${EXPECTED_PUBLISHED_VERSION}." \
+            'published-version helper preserves unrelated historical prose'
+        assert_file_contains \
+            "${published_update_fixture}/test-static.sh" \
+            "readonly EXPECTED_PUBLISHED_VERSION='${synthetic_version}'" \
+            'published-version helper updates the static contract'
+        updated_readme_mode=$(stat -c '%a' \
+            "${published_update_fixture}/README.md")
+        updated_static_mode=$(stat -c '%a' \
+            "${published_update_fixture}/test-static.sh")
+        assert_equals "${readme_mode}" "${updated_readme_mode}" \
+            'published-version helper preserves README mode'
+        assert_equals "${static_mode}" "${updated_static_mode}" \
+            'published-version helper preserves static-test mode'
+
+        before_checksums=$(sha256sum -- \
+            "${published_update_fixture}/README.md" \
+            "${published_update_fixture}/README.fr.md" \
+            "${published_update_fixture}/test-static.sh")
+        assert_status 0 'published-version helper is idempotent' \
+            python3 -B "${SCRIPT_DIR}/scripts/update-published-version.py" \
+            --root "${published_update_fixture}" "${synthetic_version}"
+        after_checksums=$(sha256sum -- \
+            "${published_update_fixture}/README.md" \
+            "${published_update_fixture}/README.fr.md" \
+            "${published_update_fixture}/test-static.sh")
+        assert_equals "${before_checksums}" "${after_checksums}" \
+            'published-version helper idempotence preserves exact bytes'
+    )
 }
 
 test_static_shell_interface_contracts() {

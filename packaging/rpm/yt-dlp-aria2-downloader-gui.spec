@@ -75,6 +75,10 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sun Aug 30 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.6-1
+- Improve two-stream Zenity progress weighting while preserving exact byte progress.
+- Align release installation documentation and add guarded post-release updates.
+
 * Sun Aug 30 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.5-1
 - Harden runtime, GUI, launcher, cancellation, privacy, and trust boundaries.
 - Reduce managed-runtime and validation latency while preserving exact checks.

@@ -203,6 +203,7 @@ set_plan() {
 
     PLANNED_KEYS=()
     PLANNED_FORMAT_IDS=()
+    video_audio_fallback_plan=false
 
     sanitize_identifier "${first_id}"
     first_id=${SANITIZED_IDENTIFIER}
@@ -224,6 +225,17 @@ set_plan() {
     if ((${#PLANNED_KEYS[@]} == 0)); then
         PLANNED_KEYS=('plan:1')
         PLANNED_FORMAT_IDS=("${combined_id}")
+    fi
+
+    # The video selector is bv*+ba/b. An exact combined identifier matching
+    # the two requested slots therefore identifies its video-then-audio branch;
+    # the /b fallback and any ambiguous future plan retain generic weighting.
+    if [[ ${PROFILE} == video &&
+        -n ${first_id} &&
+        -n ${second_id} &&
+        ${combined_id} == "${first_id}+${second_id}" ]] \
+        && ((${#PLANNED_KEYS[@]} == 2)); then
+        video_audio_fallback_plan=true
     fi
 
     planned_items=${#PLANNED_KEYS[@]}
@@ -331,6 +343,8 @@ resolve_aria_key() {
 calculate_download_percent() {
     local key
     local item_count=${planned_items}
+    local first_percent=0
+    local second_percent=0
     local sum_percent=0
     local sum_downloaded=0
     local sum_total=0
@@ -378,6 +392,14 @@ calculate_download_percent() {
         else
             value=$((sum_downloaded / (sum_total / 100 + 1)))
         fi
+    elif [[ ${video_audio_fallback_plan} == true ]] \
+        && ((${#PLANNED_KEYS[@]} == 2)); then
+        first_percent=${ITEM_PERCENT[${PLANNED_KEYS[0]}]:-0}
+        second_percent=${ITEM_PERCENT[${PLANNED_KEYS[1]}]:-0}
+        value=$(((\
+            first_percent * VIDEO_STREAM_FALLBACK_WEIGHT + \
+            second_percent * AUDIO_STREAM_FALLBACK_WEIGHT) / (\
+            VIDEO_STREAM_FALLBACK_WEIGHT + AUDIO_STREAM_FALLBACK_WEIGHT)))
     else
         value=$((sum_percent / item_count))
     fi
@@ -577,6 +599,7 @@ handle_aria_plan() {
     planned_items=${count}
     PLANNED_KEYS=()
     PLANNED_FORMAT_IDS=()
+    video_audio_fallback_plan=false
 
     # Pre-register every direct item. Without placeholders, the first aria2
     # item with a known byte total can be mistaken for the whole transfer and
@@ -587,6 +610,12 @@ handle_aria_plan() {
         PLANNED_FORMAT_IDS+=('')
         register_item "${key}" "${slot}"
     done
+
+    # The validated direct-transfer count preserves the configured video
+    # selector order. Exactly two video-profile transfers are video then audio.
+    if [[ ${PROFILE} == video ]] && ((count == 2)); then
+        video_audio_fallback_plan=true
+    fi
 
     phase='downloading'
     if ((stable_percent < DOWNLOAD_START)); then
@@ -897,6 +926,8 @@ initialize_progress_inputs() {
 
     readonly DOWNLOAD_START=5
     readonly DOWNLOAD_END=90
+    readonly VIDEO_STREAM_FALLBACK_WEIGHT=80
+    readonly AUDIO_STREAM_FALLBACK_WEIGHT=20
     readonly POSTPROCESS_START=92
     readonly POSTPROCESS_END=98
     readonly VERIFY_PERCENT=99
@@ -970,6 +1001,7 @@ initialize_progress_state() {
     SANITIZED_IDENTIFIER=''
     pending_data=''
     discarding_oversized_record=false
+    video_audio_fallback_plan=false
 }
 
 open_progress_log() {

@@ -113,4 +113,5 @@ ALL_SHELL_FILES=(
 PYTHON_FILES=(
     private-aria2-plan.py
     private-launcher-manager.py
+    scripts/update-published-version.py
 )
