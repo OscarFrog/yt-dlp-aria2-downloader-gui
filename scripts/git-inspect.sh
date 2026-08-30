@@ -64,6 +64,9 @@ main() {
         "${git_binary}"
         -c core.fsmonitor=false
         -c diff.external=
+        # Containerized checkouts may deliberately have a different numeric
+        # owner. Trust only this canonical repository path for this invocation.
+        -c "safe.directory=${project_dir}"
         -C "${project_dir}"
     )
 

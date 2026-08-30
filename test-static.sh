@@ -658,6 +658,13 @@ assert_codex_rules_are_conservative() {
     assert_file_contains "${SCRIPT_DIR}/scripts/git-inspect.sh" \
         'status|diff|diff-staged|diff-check|inventory' \
         'Codex inspection helper exposes only fixed actions'
+    # shellcheck disable=SC2016 # The helper variable is matched as literal source.
+    assert_file_contains "${SCRIPT_DIR}/scripts/git-inspect.sh" \
+        '-c "safe.directory=${project_dir}"' \
+        'Codex inspection helper trusts only its canonical checkout path'
+    assert_file_not_contains "${SCRIPT_DIR}/scripts/git-inspect.sh" \
+        'safe.directory=*' \
+        'Codex inspection helper never trusts every repository path'
     assert_file_contains "${SCRIPT_DIR}/tests/lib/project-files.sh" \
         '    scripts/git-inspect.sh' \
         'shell inventory contains the Codex inspection helper'
