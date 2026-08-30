@@ -64,29 +64,44 @@ case \${operation} in
     [[ -z \${MOCK_RUNTIME_PROBE_LOG:-} ]] \
         || printf '%s\n' 'yt-dlp:--help' >>"\${MOCK_RUNTIME_PROBE_LOG}"
     printf '%s\\n' \\
+        '--audio-format FORMAT' \\
+        '--audio-quality QUALITY' \\
         '--batch-file FILE' \\
         '--break-match-filters FILTER' \\
+        '--color POLICY' \\
+        '--concurrent-fragments N' \\
+        '--continue' \\
         '--cookies FILE' \\
         '--cookies-from-browser BROWSER' \\
+        '--downloader PROTOCOL:NAME' \\
         '--dump-single-json' \\
+        '--embed-metadata' \\
+        '--extract-audio' \\
         '--extractor-args KEY:ARGS' \\
         '--extractor-retries RETRIES' \\
         '--fixup POLICY' \\
+        '--format FORMAT' \\
         '--fragment-retries RETRIES' \\
         '--ignore-config' \\
         '--js-runtimes RUNTIME' \\
         '--list-impersonate-targets' \\
         '--load-info-json FILE' \\
+        '--merge-output-format FORMAT' \\
         '--no-clean-info-json' \\
         '--no-overwrites' \\
+        '--no-playlist' \\
         '--no-plugin-dirs' \\
         '--no-post-overwrites' \\
         '--no-update' \\
+        '--newline' \\
+        '--output TEMPLATE' \\
         '--parse-metadata FROM:TO' \\
         '--print TEMPLATE' \\
         '--print-to-file TEMPLATE FILE' \\
+        '--progress' \\
         '--progress-delta SECONDS' \\
         '--progress-template TEMPLATE' \\
+        '--remux-video FORMAT' \\
         '--retries RETRIES' \\
         '--retry-sleep EXPR' \\
         '--skip-download' \\

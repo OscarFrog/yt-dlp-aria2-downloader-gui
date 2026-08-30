@@ -291,7 +291,12 @@ The automated suite checks, among other things:
 - process-group recovery when PGID-file publication is delayed;
 - immediate readiness-record unlinking in standalone-PGID and shared-session
   PID paths, including before an uncatchable worker crash;
-- atomic publication and failure cleanup of the result-path file;
+- authenticated-descriptor publication and failure cleanup of the result-path
+  file, including a deterministic temporary-inode replacement mutation;
+- rejection of non-sticky shared destination/result ancestors, safe fallback
+  from hostile runtime/TMPDIR/XDG roots, acceptance of sticky shared parents,
+  and descriptor-first HLS/result publication with no-clobber rename fallback
+  when the filesystem does not support hard links;
 - rejection of a second writer targeting the same canonical output directory;
 - explicit refusal to overwrite completed or post-processed media files while
   preserving interrupted-download resume behavior;
@@ -372,7 +377,9 @@ The automated suite checks, among other things:
   the requested URL absent from GUI, engine, and yt-dlp process arguments;
 - conservative recovery of abandoned private aria2 staging after SIGKILL,
   including owner-marker, legacy-fingerprint, symlink, unknown-entry,
-  invalid-mode and cross-destination negative controls;
+  invalid-mode and cross-destination negative controls, plus active-session
+  inode replacement of the plan and post-success replacement of the aria2
+  input and manifest so cleanup never removes an ambiguous replacement;
 - real two-origin aria2 qualification proving that replay-safe direct
   headers can stay on private aria2 while `Referer`, `Cookie`, `Authorization`,
   proxy authorization and non-allowlisted custom headers force native yt-dlp;
@@ -401,7 +408,10 @@ The automated suite checks, among other things:
 - HLS post-remux duration consistency with real FFmpeg/FFprobe, including a
   reproducible truncated-input case where FFmpeg exits 0 with both streams but
   a materially shortened MKV; that result must not be published, and the
-  repaired HLS source remains available until global validation/publication succeeds;
+  repaired HLS source remains available until global validation/publication
+  succeeds; mock replacement of the temporary remux inode proves that failure
+  cleanup cannot remove it and that an identity-changed publication is never
+  accepted as an application result;
 - hermetic real-tool direct HTTP, AAC/M4A, Opus/WebM, combined-source audio,
   attached-cover audio, HLS and DASH transfers using generated media and loopback HTTP servers, with
   transparent shims proving that real aria2c is used for direct transfers and
@@ -415,9 +425,12 @@ The automated suite checks, among other things:
   strict zero-network `require` mode, exact-tag stable/nightly/stable switching,
   isolation from personal curl/yt-dlp configuration and yt-dlp plugins, exact
   executable-version binding to the resolved yt-dlp and Deno release tags,
-  single-member Deno archive extraction, immutable attested paths that survive
-  later activation changes, rejection of a symlinked managed XDG application
-  root, and a versioned engine attestation that avoids duplicate
+  bounded runtime-probe output, same-repository release redirects,
+  single-member non-symlink Deno archive extraction, immutable attested paths
+  that survive later activation changes, canonical and non-replaceable XDG
+  path chains, descriptor/path lock identity, repair of invalid active runtimes
+  without a previous target, same-channel downgrade refusal, and a versioned
+  engine attestation that avoids duplicate
   path/version/capability discovery, explicit invalid-`path` and
   invalid-`prepare` diagnostics,
   lock-descriptor isolation, repeated contention/double-rollback coverage

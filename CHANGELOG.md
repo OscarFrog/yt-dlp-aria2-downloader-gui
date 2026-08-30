@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.3.8 - 2026-08-30
+
+### Process and transfer reliability
+
+- Preserve the engine status across yt-dlp and aria2 output-redaction
+  pipelines, keep machine-progress output parseable, and report FFprobe
+  timeouts separately from invalid media.
+- Authenticate worker process groups before signaling them, keep cancellation
+  bounded across GUI and engine descendants, and resolve late cancellation
+  against the atomically published final result.
+- Revalidate private aria2 metadata immediately before cleanup, bind HLS and
+  result publication to authenticated descriptors, preserve ambiguous
+  replacements, and retain a compatible no-clobber rename fallback on
+  filesystems without hard links.
+- Canonicalize destination, result, runtime, temporary, configuration, and
+  state directory chains; reject or safely fall back from shared writable
+  ancestors that lack sticky-bit protection.
+
+### GUI continuity
+
+- Distinguish fast engine exits from process-group startup failures, treat a
+  progress FIFO closure after user cancellation as cancellation rather than a
+  monitor fault, and retain the live diagnostic until the completion dialog
+  has resolved.
+- Reject relative temporary roots, preserve renamed launcher identity across a
+  new-download restart, and use a valid folder fallback when the configured
+  home directory is unavailable.
+
+### Runtime hardening
+
+- Canonicalize and validate the managed XDG path chain, bind the update lock to
+  its opened inode, bound runtime probe output, reject cross-repository release
+  redirects and symbolic-link Deno archive members, and validate the complete
+  yt-dlp capability set.
+- Repair invalid active runtimes through verified bootstrap when no rollback
+  target exists, keep `require` strictly offline, reject automatic
+  same-channel downgrades, and validate rollback arguments before locking.
+
 ## 2.3.7 - 2026-08-30
 
 ### GUI continuity
