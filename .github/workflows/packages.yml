@@ -78,6 +78,7 @@ jobs:
         id: previous
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -94,9 +95,79 @@ jobs:
           current_tag="v${current_version}"
           if [[ ${GITHUB_EVENT_NAME} == pull_request ]] &&
               git show-ref --verify --quiet "refs/tags/${current_tag}"; then
-            printf 'Error: project version already has a release tag: %s\n' \
-              "${current_tag}" >&2
-            exit 65
+            expected_automation_head="automation/release-docs-${current_tag}"
+            expected_recovery_head="fix/release-docs-${current_tag}"
+            if [[ ${PR_HEAD_REPOSITORY} != "${GITHUB_REPOSITORY}" ||
+                ${GITHUB_BASE_REF} != main ||
+                (${GITHUB_HEAD_REF} != "${expected_automation_head}" &&
+                  ${GITHUB_HEAD_REF} != "${expected_recovery_head}") ]]; then
+              printf 'Error: project version already has a release tag: %s\n' \
+                "${current_tag}" >&2
+              exit 65
+            fi
+
+            current_release_commit=$(git rev-parse "${current_tag}^{commit}")
+            if [[ ! ${current_release_commit} =~ ^[0-9a-f]{40}$ ]] ||
+                ! git merge-base --is-ancestor \
+                  "${current_release_commit}" HEAD; then
+              printf 'Error: tagged documentation base is not an ancestor: %s\n' \
+                "${current_tag}" >&2
+              exit 65
+            fi
+            current_release_immutable=$(
+              gh release view "${current_tag}" \
+                -R "${GITHUB_REPOSITORY}" \
+                --json isImmutable \
+                --jq '.isImmutable'
+            )
+            if [[ ${current_release_immutable} != true ]]; then
+              printf 'Error: tagged documentation base is not immutable: %s\n' \
+                "${current_tag}" >&2
+              exit 65
+            fi
+            gh release verify "${current_tag}" \
+              -R "${GITHUB_REPOSITORY}"
+
+            tagged_change_count=0
+            while IFS=$'\t' read -r \
+              tagged_change_status \
+              tagged_change_path \
+              tagged_change_extra; do
+              [[ -n ${tagged_change_status} ]] || continue
+              ((tagged_change_count += 1))
+              if [[ ${tagged_change_status} != M ||
+                  -n ${tagged_change_extra} ]]; then
+                printf 'Error: post-release documentation path is not a simple modification: %s\n' \
+                  "${tagged_change_path}" >&2
+                exit 65
+              fi
+              case ${tagged_change_path} in
+                .github/workflows/packages.yml | \
+                  .github/workflows/release-docs.yml | \
+                  README.fr.md | \
+                  README.md | \
+                  TESTING.md | \
+                  test-static.sh) ;;
+                *)
+                  printf 'Error: unexpected post-release documentation path: %s\n' \
+                    "${tagged_change_path}" >&2
+                  exit 65
+                  ;;
+              esac
+            done < <(
+              git diff \
+                --name-status \
+                --no-renames \
+                "${current_release_commit}" \
+                HEAD
+            )
+            if ((tagged_change_count == 0)); then
+              printf '%s\n' \
+                'Error: post-release documentation change set is empty.' >&2
+              exit 65
+            fi
+            printf 'Allowing reviewed post-release documentation maintenance for immutable %s.\n' \
+              "${current_tag}"
           fi
 
           highest_tag=$(

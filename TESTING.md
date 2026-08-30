@@ -485,6 +485,16 @@ repository, release workflow, and exact source commit. The RPM and DEB upgrade
 jobs consume those verified bytes through a short-lived Actions artifact and
 recheck their transferred SHA-256 digests before installation.
 
+A pull request whose development version already has a tag normally fails this
+job. The narrow post-release documentation exception accepts only
+`automation/release-docs-vX.Y.Z` or `fix/release-docs-vX.Y.Z`, with the branch
+version equal to the current immutable release. That release commit must remain
+an ancestor, and every change since it must be a simple modification of the two
+READMEs, `TESTING.md`, `test-static.sh`, or the package/release-documentation
+workflow contracts. Runtime, packaging, installer, key, and release payload
+changes therefore still require a new development version. The exception keeps
+using the release preceding the current tag for the normal upgrade tests.
+
 Pull-request CI builds one unsigned noarch RPM and proves that the production
 bootstrap rejects it unless `--allow-unsigned-dev` is explicitly selected.
 Release CI builds the RPM once, explicitly requires RPM package format v4,
