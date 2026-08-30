@@ -98,36 +98,59 @@ if [[ \${MOCK_REQUIRE_YTDLP_ISOLATION:-0} == 1 ]]; then
     [[ \${seen_ignore_config} == true && \${seen_no_plugin_dirs} == true &&
         \${seen_no_update} == true && \${YTDLP_NO_PLUGINS:-} == 1 ]] || exit 68
 fi
+if [[ \${MOCK_YTDLP_OVERSIZED_HELP:-0} == 1 && \${operation} == --help ]]; then
+    printf '%*s\n' 300000 oversized-help
+    exit 0
+fi
 case \${operation} in
 --version) printf '%s\\n' '${version}' ;;
---help) printf '%s\\n' \\
+--help)
+    printf '%s\\n' \\
+    '--audio-format FORMAT' \\
     '--batch-file FILE' \\
     '--break-match-filters FILTER' \\
+    '--color POLICY' \\
+    '--concurrent-fragments N' \\
+    '--continue' \\
     '--cookies FILE' \\
     '--cookies-from-browser BROWSER' \\
+    '--downloader PROTOCOL:NAME' \\
     '--dump-single-json' \\
+    '--embed-metadata' \\
+    '--extract-audio' \\
     '--extractor-args KEY:ARGS' \\
     '--extractor-retries RETRIES' \\
     '--fixup POLICY' \\
+    '--format FORMAT' \\
     '--fragment-retries RETRIES' \\
     '--ignore-config' \\
     '--js-runtimes RUNTIME' \\
     '--list-impersonate-targets' \\
     '--load-info-json FILE' \\
+    '--merge-output-format FORMAT' \\
     '--no-clean-info-json' \\
     '--no-overwrites' \\
+    '--no-playlist' \\
     '--no-plugin-dirs' \\
     '--no-post-overwrites' \\
     '--no-update' \\
+    '--newline' \\
+    '--output TEMPLATE' \\
     '--parse-metadata FROM:TO' \\
     '--print TEMPLATE' \\
     '--print-to-file TEMPLATE FILE' \\
+    '--progress' \\
     '--progress-delta SECONDS' \\
     '--progress-template TEMPLATE' \\
+    '--remux-video FORMAT' \\
     '--retries RETRIES' \\
     '--retry-sleep EXPR' \\
     '--skip-download' \\
-    '--socket-timeout SECONDS' ;;
+    '--socket-timeout SECONDS'
+    if [[ \${MOCK_YTDLP_OMIT_AUDIO_QUALITY:-0} != 1 ]]; then
+        printf '%s\\n' '--audio-quality QUALITY'
+    fi
+    ;;
 --list-impersonate-targets) printf '%s\\n' 'Chrome-140 Linux curl_cffi' ;;
 *) exit 64 ;;
 esac
@@ -145,6 +168,11 @@ for fd_path in /proc/\$\$/fd/*; do
     target=\$(readlink -- "\${fd_path}" 2>/dev/null || true)
     [[ \${target} != */yt-dlp-aria2-downloader/runtime/update.lock ]] || : >"\${MOCK_FD_LEAK_MARKER:?}"
 done
+if [[ \${MOCK_DENO_PROBE_FAILURE:-0} == 1 ]]; then
+    printf '%s\n' 'mock Deno probe failure' >&2
+    printf '%*s\n' 300000 oversized-deno-diagnostic >&2
+    exit 93
+fi
 printf '%s\\n' 'deno ${version} (stable, release, test-target)' 'v8 0.0.0' 'typescript 0.0.0'
 EOF_DENO
     chmod 0755 -- "${path}"
@@ -237,6 +265,10 @@ done
 [[ -n ${archive} && ${requested_deno} == true ]]
 version=${MOCK_DENO_ASSET_VERSION_OVERRIDE:-$(sed -n 's/^deno-archive=//p' "${archive}")}
 [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+if [[ ${MOCK_DENO_SYMLINK_MEMBER:-0} == 1 ]]; then
+    ln -s -- /bin/true deno
+    exit 0
+fi
 cat >deno <<EOF_DENO
 #!/usr/bin/env bash
 set -euo pipefail
@@ -289,15 +321,15 @@ if [[ ${MOCK_NETWORK_FORBIDDEN:-0} == 1 ]]; then
     exit 97
 fi
 if [[ ${url} == 'https://github.com/yt-dlp/yt-dlp/releases/latest' ]]; then
-    printf 'https://github.com/yt-dlp/yt-dlp/releases/tag/%s' "${MOCK_YTDLP_STABLE_VERSION:?}"
+    printf '%s' "${MOCK_YTDLP_EFFECTIVE_URL_OVERRIDE:-https://github.com/yt-dlp/yt-dlp/releases/tag/${MOCK_YTDLP_STABLE_VERSION:?}}"
     exit 0
 fi
 if [[ ${url} == 'https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest' ]]; then
-    printf 'https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/tag/%s' "${MOCK_YTDLP_NIGHTLY_VERSION:?}"
+    printf '%s' "${MOCK_YTDLP_EFFECTIVE_URL_OVERRIDE:-https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/tag/${MOCK_YTDLP_NIGHTLY_VERSION:?}}"
     exit 0
 fi
 if [[ ${url} == 'https://github.com/denoland/deno/releases/latest' ]]; then
-    printf 'https://github.com/denoland/deno/releases/tag/v%s' "${MOCK_DENO_LATEST_VERSION:?}"
+    printf '%s' "${MOCK_DENO_EFFECTIVE_URL_OVERRIDE:-https://github.com/denoland/deno/releases/tag/v${MOCK_DENO_LATEST_VERSION:?}}"
     exit 0
 fi
 [[ -n ${output} ]] || exit 64
@@ -342,29 +374,44 @@ fi
 case \${operation} in
 --version) printf '%s\\n' '${candidate_version}' ;;
 --help) printf '%s\\n' \\
+    '--audio-format FORMAT' \\
+    '--audio-quality QUALITY' \\
     '--batch-file FILE' \\
     '--break-match-filters FILTER' \\
+    '--color POLICY' \\
+    '--concurrent-fragments N' \\
+    '--continue' \\
     '--cookies FILE' \\
     '--cookies-from-browser BROWSER' \\
+    '--downloader PROTOCOL:NAME' \\
     '--dump-single-json' \\
+    '--embed-metadata' \\
+    '--extract-audio' \\
     '--extractor-args KEY:ARGS' \\
     '--extractor-retries RETRIES' \\
     '--fixup POLICY' \\
+    '--format FORMAT' \\
     '--fragment-retries RETRIES' \\
     '--ignore-config' \\
     '--js-runtimes RUNTIME' \\
     '--list-impersonate-targets' \\
     '--load-info-json FILE' \\
+    '--merge-output-format FORMAT' \\
     '--no-clean-info-json' \\
     '--no-overwrites' \\
+    '--no-playlist' \\
     '--no-plugin-dirs' \\
     '--no-post-overwrites' \\
     '--no-update' \\
+    '--newline' \\
+    '--output TEMPLATE' \\
     '--parse-metadata FROM:TO' \\
     '--print TEMPLATE' \\
     '--print-to-file TEMPLATE FILE' \\
+    '--progress' \\
     '--progress-delta SECONDS' \\
     '--progress-template TEMPLATE' \\
+    '--remux-video FORMAT' \\
     '--retries RETRIES' \\
     '--retry-sleep EXPR' \\
     '--skip-download' \\
@@ -482,6 +529,184 @@ EOF_VALIDATION_EXTERNAL
     done
 }
 
+test_runtime_command_and_lock_errors() {
+    local chmod_race_bin="${TEST_ROOT}/chmod-race-bin"
+    local chmod_race_data="${TEST_ROOT}/chmod-race-data"
+    local chmod_race_lock="${chmod_race_data}/yt-dlp-aria2-downloader/runtime/update.lock"
+    local chmod_race_marker="${TEST_ROOT}/chmod-race-triggered"
+    local failure_bin="${TEST_ROOT}/flock-failure-bin"
+    local invalid_data_home="${TEST_ROOT}/invalid-rollback-data"
+    local invalid_lock="${invalid_data_home}/yt-dlp-aria2-downloader/runtime/update.lock"
+    local lock_error=''
+    local lock_status=0
+    local rollback_error=''
+    local rollback_status=0
+
+    rollback_error=$(
+        "${runtime_env[@]}" XDG_DATA_HOME="${invalid_data_home}" \
+            "${RUNTIME_MANAGER}" rollback yt-dlp extra 2>&1
+    ) || rollback_status=$?
+    [[ ${rollback_status} == 2 ]] \
+        || fail "invalid rollback arity returned ${rollback_status}, expected 2"
+    grep -Fq 'rollback requires exactly one component' <<<"${rollback_error}" \
+        || fail 'invalid rollback arity diagnostic is missing'
+    [[ ! -e ${invalid_lock} ]] \
+        || fail 'invalid rollback invocation acquired the runtime lock'
+
+    mkdir -p -- "${failure_bin}"
+    cat >"${failure_bin}/flock" <<'EOF_FLOCK_FAILURE'
+#!/usr/bin/env bash
+if [[ " $* " == *' --unlock '* ]]; then
+    exit 0
+fi
+exit 70
+EOF_FLOCK_FAILURE
+    chmod 0755 -- "${failure_bin}/flock"
+    lock_error=$(
+        "${runtime_env[@]}" PATH="${failure_bin}:${MOCK_BIN}:${PATH}" \
+            "${RUNTIME_MANAGER}" ensure 2>&1
+    ) || lock_status=$?
+    [[ ${lock_status} == 70 ]] \
+        || fail "operational flock failure returned ${lock_status}, expected 70"
+    ! grep -Fq 'another runtime update is in progress' <<<"${lock_error}" \
+        || fail 'operational flock failure was misreported as contention'
+
+    mkdir -p -- "${chmod_race_bin}"
+    cat >"${chmod_race_bin}/chmod" <<'EOF_CHMOD_RACE'
+#!/usr/bin/env bash
+set -euo pipefail
+for argument in "$@"; do
+    if [[ ${argument} == /proc/*/fd/* && ! -e ${MOCK_CHMOD_RACE_MARKER:?} ]]; then
+        rm -f -- "${MOCK_RUNTIME_LOCK_PATH:?}"
+        printf '%s\n' replacement >"${MOCK_RUNTIME_LOCK_PATH}"
+        : >"${MOCK_CHMOD_RACE_MARKER}"
+        break
+    fi
+done
+exec /usr/bin/chmod "$@"
+EOF_CHMOD_RACE
+    chmod 0755 -- "${chmod_race_bin}/chmod"
+    lock_status=0
+    lock_error=$(
+        "${runtime_env[@]}" \
+            XDG_DATA_HOME="${chmod_race_data}" \
+            PATH="${chmod_race_bin}:${MOCK_BIN}:${PATH}" \
+            MOCK_RUNTIME_LOCK_PATH="${chmod_race_lock}" \
+            MOCK_CHMOD_RACE_MARKER="${chmod_race_marker}" \
+            "${RUNTIME_MANAGER}" ensure 2>&1
+    ) || lock_status=$?
+    [[ ${lock_status} == 73 ]] \
+        || fail "replaced lock path returned ${lock_status}, expected 73"
+    grep -Fq 'runtime update lock changed while it was being secured' \
+        <<<"${lock_error}" || fail 'replaced lock path diagnostic is missing'
+    assert_file_contains "${chmod_race_lock}" replacement \
+        'replacement lock path content'
+}
+
+test_xdg_data_home_hardening() {
+    local canonical_data_home="${TEST_ROOT}/canonical-data"
+    local dotdot_parent="${TEST_ROOT}/dotdot-parent"
+    local recorded_data_home=''
+    local shared_data_home="${TEST_ROOT}/shared-data"
+    local symlink_data_home="${TEST_ROOT}/symlink-xdg"
+    local symlink_target="${TEST_ROOT}/symlink-xdg-target"
+    local status=0
+
+    mkdir -p -- "${canonical_data_home}" "${dotdot_parent}"
+    "${runtime_env[@]}" \
+        XDG_DATA_HOME="${dotdot_parent}/../canonical-data" \
+        "${RUNTIME_MANAGER}" path yt-dlp >/dev/null 2>&1 || status=$?
+    [[ ${status} == 1 ]] || fail "canonical dotdot path returned ${status}, expected 1"
+    IFS= read -r recorded_data_home \
+        <"${HOME_DIR}/.local/share/yt-dlp-aria2-downloader/.package-runtime-data-home-v1" \
+        || fail 'canonical XDG data-home marker is missing'
+    assert_equals "${canonical_data_home}" "${recorded_data_home}" \
+        'dotdot XDG data home was not recorded canonically'
+
+    mkdir -p -- "${shared_data_home}"
+    chmod 0777 -- "${shared_data_home}"
+    status=0
+    "${runtime_env[@]}" XDG_DATA_HOME="${shared_data_home}" \
+        "${RUNTIME_MANAGER}" versions >/dev/null 2>&1 || status=$?
+    [[ ${status} == 73 ]] \
+        || fail "shared-writable XDG data home returned ${status}, expected 73"
+    [[ ! -e ${shared_data_home}/yt-dlp-aria2-downloader ]] \
+        || fail 'shared-writable XDG data home received managed state'
+
+    mkdir -p -- "${symlink_target}"
+    ln -s -- "${symlink_target}" "${symlink_data_home}"
+    status=0
+    "${runtime_env[@]}" XDG_DATA_HOME="${symlink_data_home}" \
+        "${RUNTIME_MANAGER}" path yt-dlp >/dev/null 2>&1 || status=$?
+    [[ ${status} == 1 ]] \
+        || fail "canonical symlinked XDG data home returned ${status}, expected 1"
+    [[ -d ${symlink_target}/yt-dlp-aria2-downloader/runtime ]] \
+        || fail 'symlinked XDG data home was not anchored at its physical target'
+    IFS= read -r recorded_data_home \
+        <"${HOME_DIR}/.local/share/yt-dlp-aria2-downloader/.package-runtime-data-home-v1" \
+        || fail 'physical XDG data-home marker is missing'
+    assert_equals "${symlink_target}" "${recorded_data_home}" \
+        'symlinked XDG data home was not recorded by its physical path'
+}
+
+test_bounded_runtime_probes() {
+    local diagnostic=''
+    local diagnostic_size=0
+    local status=0
+
+    diagnostic=$(
+        MOCK_YTDLP_OVERSIZED_HELP=1 MOCK_NETWORK_FORBIDDEN=1 \
+            "${runtime_env[@]}" "${RUNTIME_MANAGER}" require 2>&1
+    ) || status=$?
+    [[ ${status} == 69 ]] \
+        || fail "oversized yt-dlp help returned ${status}, expected 69"
+    grep -Fq 'exceeded the 262144-byte output limit' <<<"${diagnostic}" \
+        || fail 'oversized yt-dlp help diagnostic is missing'
+    diagnostic_size=${#diagnostic}
+    ((diagnostic_size < 20000)) \
+        || fail "oversized yt-dlp diagnostic was not bounded: ${diagnostic_size}"
+    ! find "${runtime_root}" -maxdepth 1 -name '.runtime-probe.*' -print -quit \
+        | grep -q . || fail 'yt-dlp probe capture was not removed'
+
+    status=0
+    diagnostic=$(
+        MOCK_YTDLP_OMIT_AUDIO_QUALITY=1 MOCK_NETWORK_FORBIDDEN=1 \
+            "${runtime_env[@]}" "${RUNTIME_MANAGER}" require 2>&1
+    ) || status=$?
+    [[ ${status} == 69 ]] \
+        || fail "incomplete managed yt-dlp capability set returned ${status}, expected 69"
+    grep -Fq 'required option is absent: --audio-quality' <<<"${diagnostic}" \
+        || fail 'managed yt-dlp capability contract omitted --audio-quality'
+
+    status=0
+    diagnostic=$(
+        MOCK_DENO_PROBE_FAILURE=1 MOCK_NETWORK_FORBIDDEN=1 \
+            "${runtime_env[@]}" "${RUNTIME_MANAGER}" require 2>&1
+    ) || status=$?
+    [[ ${status} == 69 ]] \
+        || fail "failed Deno probe returned ${status}, expected 69"
+    grep -Fq 'Deno runtime validation failed: --version exited with status' \
+        <<<"${diagnostic}" || fail 'bounded Deno failure diagnostic is missing'
+    diagnostic_size=${#diagnostic}
+    ((diagnostic_size < 20000)) \
+        || fail "Deno failure diagnostic was not bounded: ${diagnostic_size}"
+
+    make_deno "${deno_root}/suffix-version/deno" '2.9.5+metadata'
+    rm -f -- "${deno_root}/current"
+    ln -s suffix-version "${deno_root}/current"
+    status=0
+    diagnostic=$(
+        MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" \
+            "${RUNTIME_MANAGER}" require 2>&1
+    ) || status=$?
+    [[ ${status} == 69 ]] \
+        || fail "suffixed managed Deno version returned ${status}, expected 69"
+    grep -Fq 'stable X.Y.Z version' <<<"${diagnostic}" \
+        || fail 'suffixed managed Deno version diagnostic is missing'
+    rm -f -- "${deno_root}/current"
+    ln -s 2.8.0 "${deno_root}/current"
+}
+
 test_oversized_deno_versions() {
     local deno_overflow_case=''
     local deno_overflow_name=''
@@ -568,6 +793,58 @@ test_mismatched_deno_candidate() {
         || fail 'mismatched Deno candidate diagnostic is missing'
     [[ ! -L ${mismatch_deno_root}/current ]] \
         || fail 'mismatched Deno candidate was activated'
+}
+
+test_release_location_and_archive_hardening() {
+    local deno_redirect_data="${TEST_ROOT}/deno-redirect-data"
+    local deno_redirect_root="${deno_redirect_data}/yt-dlp-aria2-downloader/runtime/deno"
+    local symlink_member_data="${TEST_ROOT}/deno-symlink-member-data"
+    local symlink_member_root="${symlink_member_data}/yt-dlp-aria2-downloader/runtime/deno"
+    local ytdlp_redirect_data="${TEST_ROOT}/ytdlp-redirect-data"
+    local ytdlp_redirect_root="${ytdlp_redirect_data}/yt-dlp-aria2-downloader/runtime/yt-dlp"
+    local error_output=''
+    local status=0
+
+    error_output=$(
+        "${runtime_env[@]}" \
+            XDG_DATA_HOME="${ytdlp_redirect_data}" \
+            MOCK_YTDLP_EFFECTIVE_URL_OVERRIDE='https://example.invalid/yt-dlp/releases/tag/2026.07.04' \
+            "${RUNTIME_MANAGER}" ensure 2>&1
+    ) || status=$?
+    [[ ${status} == 1 ]] \
+        || fail "cross-host yt-dlp redirect returned ${status}, expected 1"
+    grep -Fq 'escaped the expected GitHub repository' <<<"${error_output}" \
+        || fail 'cross-host yt-dlp redirect diagnostic is missing'
+    [[ ! -L ${ytdlp_redirect_root}/current ]] \
+        || fail 'cross-host yt-dlp redirect activated a runtime'
+
+    status=0
+    error_output=$(
+        "${runtime_env[@]}" \
+            XDG_DATA_HOME="${deno_redirect_data}" \
+            MOCK_DENO_EFFECTIVE_URL_OVERRIDE='https://example.invalid/deno/releases/tag/v2.9.5' \
+            "${RUNTIME_MANAGER}" ensure 2>&1
+    ) || status=$?
+    [[ ${status} == 1 ]] \
+        || fail "cross-host Deno redirect returned ${status}, expected 1"
+    grep -Fq 'Deno latest-release lookup escaped the expected GitHub repository' \
+        <<<"${error_output}" || fail 'cross-host Deno redirect diagnostic is missing'
+    [[ ! -L ${deno_redirect_root}/current ]] \
+        || fail 'cross-host Deno redirect activated a runtime'
+
+    status=0
+    error_output=$(
+        "${runtime_env[@]}" \
+            XDG_DATA_HOME="${symlink_member_data}" \
+            MOCK_DENO_SYMLINK_MEMBER=1 \
+            "${RUNTIME_MANAGER}" ensure 2>&1
+    ) || status=$?
+    [[ ${status} == 1 ]] \
+        || fail "symlink Deno archive member returned ${status}, expected 1"
+    grep -Fq 'extracted deno member is not a regular file' <<<"${error_output}" \
+        || fail 'symlink Deno archive member diagnostic is missing'
+    [[ ! -L ${symlink_member_root}/current ]] \
+        || fail 'symlink Deno archive member was activated'
 }
 
 test_symlinked_managed_data_root() {
@@ -707,6 +984,8 @@ test_no_network_require() {
 }
 
 test_invalid_active_runtime_recovery() {
+    local require_status=0
+
     # `ensure` must validate an executable active runtime and recover locally
     # instead of accepting a corrupted current target.
     make_ytdlp "${ytdlp_root}/2026.06.09/${YTDLP_ASSET}" malformed-version
@@ -739,6 +1018,37 @@ test_invalid_active_runtime_recovery() {
     rm -f -- "${ytdlp_root}/current" "${ytdlp_root}/previous"
     ln -s 2026.06.09 "${ytdlp_root}/current"
     ln -s 2026.03.17 "${ytdlp_root}/previous"
+
+    # With no usable previous target, mutating modes reinstall through the
+    # authenticated bootstrap while strict require remains offline and read-only.
+    make_ytdlp "${ytdlp_root}/2026.06.09/${YTDLP_ASSET}" malformed-version
+    rm -f -- "${ytdlp_root}/previous" "${NETWORK_MARKER}" "${URL_LOG}"
+    MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" \
+        "${RUNTIME_MANAGER}" require >/dev/null 2>&1 || require_status=$?
+    [[ ${require_status} == 69 ]] \
+        || fail "invalid no-previous require returned ${require_status}, expected 69"
+    [[ ! -e ${NETWORK_MARKER} ]] \
+        || fail 'invalid no-previous require invoked the network'
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" ensure >/dev/null
+    assert_link_target "${ytdlp_root}/current" 2026.07.04 \
+        'ensure did not reinstall an invalid yt-dlp runtime without previous'
+
+    make_deno "${deno_root}/2.8.0/deno" malformed-version
+    rm -f -- "${deno_root}/previous"
+    "${runtime_env[@]}" "${RUNTIME_MANAGER}" ensure >/dev/null
+    assert_link_target "${deno_root}/current" 2.9.5 \
+        'ensure did not reinstall an invalid Deno runtime without previous'
+
+    # Restore the canonical pre-update state for the remaining scenarios.
+    rm -f -- "${ytdlp_root}/current" "${ytdlp_root}/previous" \
+        "${deno_root}/current" "${deno_root}/previous"
+    rm -rf -- "${ytdlp_root}/2026.07.04" "${deno_root}/2.9.5"
+    make_ytdlp "${ytdlp_root}/2026.06.09/${YTDLP_ASSET}" 2026.06.09
+    make_deno "${deno_root}/2.8.0/deno" 2.8.0
+    ln -s 2026.06.09 "${ytdlp_root}/current"
+    ln -s 2026.03.17 "${ytdlp_root}/previous"
+    ln -s 2.8.0 "${deno_root}/current"
+    ln -s 2.7.0 "${deno_root}/previous"
 }
 
 test_runtime_updates() {
@@ -746,6 +1056,7 @@ test_runtime_updates() {
     local deno_inode_before=''
     local stable_inode_after=''
     local stable_inode_before=''
+    local downgrade_error=''
 
     # Scenario group: exact-tag stable update, Deno update, nightly opt-in, then stable.
     : >"${URL_LOG}"
@@ -760,6 +1071,21 @@ test_runtime_updates() {
     grep -Fq '/releases/download/v2.9.5/' "${URL_LOG}" || fail 'Deno exact tag URL missing'
     ! grep -Fq '/releases/latest/download/' "${URL_LOG}" || fail 'latest/download TOCTOU path remains'
     [[ ! -e ${FD_LEAK_MARKER} ]] || fail 'runtime update lock leaked into a child process'
+
+    downgrade_error=$(
+        "${runtime_env[@]}" \
+            MOCK_YTDLP_STABLE_VERSION=2026.06.09 \
+            MOCK_DENO_LATEST_VERSION=2.8.0 \
+            "${RUNTIME_MANAGER}" update 2>&1
+    ) || fail 'same-channel downgrade refusal failed'
+    assert_link_target "${ytdlp_root}/current" 2026.07.04 \
+        'same-channel yt-dlp downgrade was activated'
+    assert_link_target "${deno_root}/current" 2.9.5 \
+        'Deno downgrade was activated'
+    grep -Fq 'refusing to downgrade the active stable yt-dlp runtime' \
+        <<<"${downgrade_error}" || fail 'yt-dlp downgrade refusal diagnostic is missing'
+    grep -Fq 'refusing to downgrade the active Deno runtime' \
+        <<<"${downgrade_error}" || fail 'Deno downgrade refusal diagnostic is missing'
 
     YTDLP_ARIA2_YTDLP_CHANNEL=nightly "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null
     assert_link_target "${ytdlp_root}/current" 2026.08.20.123456 'stable -> nightly failed'
@@ -912,10 +1238,14 @@ main() {
     write_runtime_hardening_mocks
     initialize_runtime_hardening_fixtures
     test_runtime_setting_bounds
+    test_runtime_command_and_lock_errors
+    test_xdg_data_home_hardening
+    test_bounded_runtime_probes
     test_oversized_deno_versions
     test_invalid_runtime_path
     test_mismatched_ytdlp_candidate
     test_mismatched_deno_candidate
+    test_release_location_and_archive_hardening
     test_symlinked_managed_data_root
     test_signature_failure_bootstrap
     test_fresh_runtime_bootstrap

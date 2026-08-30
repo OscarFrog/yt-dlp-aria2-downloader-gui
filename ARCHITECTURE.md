@@ -114,8 +114,11 @@ claiming post-return immutability.
 
 `download-video-gui.sh` performs one bounded session:
 
-1. Resolve safe XDG configuration and state paths and validate required host
-   commands, adjacent engine files, and `setsid` capabilities.
+1. Resolve physical GUI temporary, XDG configuration, and state paths; accept
+   only system/current-user-owned chains whose shared writable components use
+   sticky-bit protection; and validate required host commands, adjacent engine
+   files, and `setsid` capabilities. Unsafe optional roots fall back to the
+   independently validated standard locations.
 2. Load `gui.conf` only when it is a regular non-symbolic-link file within the
    64 KiB and 128-line limits. Collect the URL, classify its normalized host
    with the engine's exact YouTube host set, and omit the authenticated HLS
@@ -169,9 +172,11 @@ to the current single native-audio profile.
 3. Validate the yt-dlp, Deno, aria2c, and `setsid` versions or capabilities used
    by the current option contract, and require FFmpeg, FFprobe, and the other
    host commands used later in the pipeline.
-4. Resolve the destination canonically, acquire a same-user destination lock,
-   recover abandoned owned staging directories, and remove only allowlisted
-   stale temporary files.
+4. Resolve the destination canonically and require a system/current-user-owned
+   physical chain with sticky-bit protection on every shared writable
+   component. Apply the same rule to the runtime lock and optional result-file
+   parents, acquire a same-user destination lock, recover abandoned owned
+   staging directories, and remove only allowlisted stale temporary files.
 5. Create private URL, cookie, plan, manifest, staging, and result-path state.
 6. Run a metadata-only yt-dlp planning pass and ask
    `private-aria2-plan.py classify` whether the selected formats may use the
@@ -180,9 +185,18 @@ to the current single native-audio profile.
    records when the GUI requested machine progress.
 8. Validate the produced media with FFprobe. The repaired YouTube HLS profile
    additionally checks duration/tail consistency and remuxes to a temporary MKV
-   with FFmpeg before no-overwrite publication.
+   with FFmpeg before no-overwrite publication. The temporary inode is held by
+   an authenticated open descriptor from before FFmpeg starts, preventing
+   unlink-and-recreate inode reuse from satisfying the identity checks.
+   Publication first links from that descriptor; filesystems without hard
+   links use the compatible no-clobber rename only after the protected parent
+   chain and temporary pathname identity are revalidated.
 9. Atomically publish the private result record only after the final media path
-   is normalized, contained in the selected destination, and validated.
+   is normalized, contained in the selected destination, and validated. Its
+   canonical parent chain and inode are authenticated before use. Reads,
+   rewrites, and primary no-overwrite publication remain bound to the opened
+   descriptor; the filesystem-compatibility fallback revalidates the parent and
+   temporary pathname immediately before a no-clobber rename.
 
 Nested long-running commands use dedicated process groups even when the engine
 itself was launched without the GUI. Child registration is signal-atomic. In
@@ -195,10 +209,18 @@ section remains active until that readiness marker or PGID is published, so the
 first signal cannot disappear in the fork/exec window; a repeated signal still
 escalates immediately to KILL while retaining the first requested status.
 Signals are relayed during runtime preparation, transfer, and post-processing,
-and cleanup removes only state owned by the current invocation. Once readiness
-has been consumed into the in-memory PID or PGID state, its private record is
-unlinked before the registration critical section ends so a later SIGKILL
-cannot strand it.
+and cleanup removes only state owned by the current invocation. Before using a
+PID or negative process-group target, the supervisor revalidates its direct
+parent where applicable and its Linux PID, PGID, SID, and start-time identity.
+The autonomous engine keeps an authenticated session-leader sentinel alive
+until every live same-session descendant has exited. If Bash has already
+harvested the GUI's leader asynchronously, an inherited private token plus a
+fresh PID, PGID, SID, and start-time check authenticates a surviving member
+instead. Cancellation can therefore still reach a child that outlives the
+command wrapper without granting authority to a recycled numeric process
+group. Once readiness has been consumed into the in-memory PID or PGID state,
+its private record is unlinked before the registration critical section ends
+so a later SIGKILL cannot strand it.
 
 ## Transport boundary and Python helper
 
@@ -217,7 +239,18 @@ URLs and replayed HTTP headers are written to private files rather than command
 arguments. aria2 diagnostics pass through URL redaction. Fragmented DASH/HLS,
 unsafe headers, URL user information, unrepresentable formats, and HTTPS on an
 aria2 build that lacks the required safety capability stay on yt-dlp's native
-transport.
+transport. Cleanup revalidates the recorded filesystem identities of the
+transaction-owned plan, cookie jar, aria2 input, and transfer manifest
+immediately before pathname removal. The temporary HLS remux is kept open from
+before FFmpeg starts, the result record is likewise opened and authenticated,
+and their primary no-overwrite publications are bound to those descriptors
+instead of their mutable names. A replacement that is visible at an identity
+check is preserved for diagnosis. As with the installer transaction, a process
+running under the same Unix UID remains in the same trust domain and can race a
+later path-based cleanup after its final check.
+If an otherwise owned staging directory must be preserved because it contains
+an unknown artifact, validated private authentication metadata is still removed
+before the directory is left for diagnosis.
 
 The helper is Python because bounded JSON parsing, URL decomposition, file-mode
 inspection, and transactional manifest handling are clearer there than in
@@ -261,6 +294,18 @@ instead of probing the executables again or resolving the mutable activation
 links a second time. Activation uses a journal so interrupted link changes can
 be recovered; a validated previous version remains available for rollback.
 
+The selected XDG data root is resolved once to a canonical physical path before
+use. Every existing component of that resolved path must be owned by root or
+the current user and must not be replaceable by another user; later operations
+never follow the original XDG spelling again. Lock acquisition
+revalidates that the opened descriptor and the named mode-`0600` lock are the
+same inode before and after `flock`, and distinguishes ordinary contention from
+an operational locking failure. Runtime probe output is bounded before it is
+captured in the shell. Mutating `ensure` and `update` operations repair an
+invalid active runtime through a verified bootstrap when no valid rollback is
+available, while `require` remains strictly offline. Automatic updates refuse
+a same-channel version downgrade; an explicit rollback remains available.
+
 The manager records an ownership sentinel for custom XDG data roots. Package
 cleanup uses that evidence to avoid deleting unrelated user data.
 
@@ -268,11 +313,11 @@ The other persistent paths are:
 
 | Data | Default location | Lifetime |
 | --- | --- | --- |
-| GUI preferences | `${XDG_CONFIG_HOME:-$HOME/.config}/yt-dlp-aria2-downloader/gui.conf` | Preserved across ordinary package removal |
-| Retained sanitized logs | `${XDG_STATE_HOME:-$HOME/.local/state}/yt-dlp-aria2-downloader/download-*.log` | Self-identify their canonical final path, are pruned by age, and are removed only by bounded cleanup |
+| GUI preferences | `${XDG_CONFIG_HOME:-$HOME/.config}/yt-dlp-aria2-downloader/gui.conf` | Preserved across ordinary package removal; an unsafe XDG chain falls back to the validated HOME path |
+| Retained sanitized logs | `${XDG_STATE_HOME:-$HOME/.local/state}/yt-dlp-aria2-downloader/download-*.log` | Self-identify their canonical final path, are pruned by age, and use the same safe-XDG fallback |
 | Managed runtimes | `${XDG_DATA_HOME:-$HOME/.local/share}/yt-dlp-aria2-downloader/runtime/` | Preserved across upgrade/removal; eligible for proven-owned final RPM cleanup |
-| GUI live session | `${TMPDIR:-/tmp}/yt-dlp-gui.*` | Private and always removed at session end; a useful diagnostic may first be copied to retained state |
-| Direct-transfer staging | Destination child `.yt-dlp-aria2.*` | Private, marker-owned, committed or recovered by the engine |
+| GUI live session | `${TMPDIR:-/tmp}/yt-dlp-gui.*` | Private and always removed at session end; unsafe TMPDIR chains fall back to `/tmp` |
+| Direct-transfer staging | Destination child `.yt-dlp-aria2.*` | Private, marker-owned, and allowed only below a safely shared physical destination chain |
 
 ## Packaging architecture
 

@@ -12,7 +12,7 @@ set -euo pipefail
 set +m
 umask 077
 
-readonly VERSION="2.3.7"
+readonly VERSION="2.3.8"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -33,23 +33,41 @@ MANAGED_RUNTIME_ATTESTED=false
 MANAGED_YTDLP_VERSION=''
 MANAGED_DENO_VERSION=''
 RESULT_FILE_TMP=''
+RESULT_FILE_PARENT=''
+RESULT_FILE_PARENT_IDENTITY=''
 INTERNAL_PATH_FILE_TMP=''
+PATH_RECORD_TMP=''
+PATH_RECORD_FD=''
+PATH_RECORD_FD_PATH=''
+PATH_RECORD_IDENTITY=''
 HLS_REMUX_TMP=''
+HLS_REMUX_TMP_IDENTITY=''
+HLS_REMUX_FD=''
+HLS_REMUX_FD_PATH=''
 HLS_SOURCE_TO_CLEAN=''
+HLS_SOURCE_TO_CLEAN_IDENTITY=''
 YTDLP_BATCH_FILE_TMP=''
 PRIVATE_ARIA2_STAGING=''
+PRIVATE_ARIA2_STAGING_IDENTITY=''
 PRIVATE_ARIA2_PLAN=''
+PRIVATE_ARIA2_PLAN_IDENTITY=''
 PRIVATE_ARIA2_COOKIE_JAR=''
+PRIVATE_ARIA2_COOKIE_JAR_IDENTITY=''
 PRIVATE_ARIA2_INPUT=''
+PRIVATE_ARIA2_INPUT_IDENTITY=''
 PRIVATE_ARIA2_MANIFEST=''
+PRIVATE_ARIA2_MANIFEST_IDENTITY=''
 OUTPUT_LOCK_FD=''
 OUTPUT_LOCK_FILE=''
 OUTPUT_LOCK_ROOT=''
 DOWNLOAD_WORKER_PID=''
+DOWNLOAD_WORKER_START_TIME=''
 DOWNLOAD_WORKER_PGID=''
+DOWNLOAD_WORKER_PGID_START_TIME=''
 DOWNLOAD_PGID_FILE=''
 DOWNLOAD_READY_FILE=''
 DOWNLOAD_STATUS=125
+DOWNLOAD_WAITED_STATUS=''
 REQUESTED_EXIT_STATUS=''
 SHUTDOWN_REQUESTED=false
 DEFERRED_SIGNAL_NAME=''
@@ -65,6 +83,7 @@ esac
 
 cleanup() {
     local status=$?
+    local active_staging_metadata_safe=true
 
     trap - EXIT HUP INT TERM
     trap '' HUP INT TERM
@@ -84,23 +103,54 @@ cleanup() {
     if [[ -n ${RUNTIME_ATTESTATION_TMP} ]]; then
         rm -f -- "${RUNTIME_ATTESTATION_TMP}" || true
     fi
-    if [[ -n ${RESULT_FILE_TMP} ]]; then
-        rm -f -- "${RESULT_FILE_TMP}" || true
+    if [[ -n ${PATH_RECORD_TMP} ]]; then
+        if declare -F remove_owned_path_record_temp >/dev/null 2>&1; then
+            # shellcheck disable=SC2310 # Cleanup preserves a changed inode.
+            if ! remove_owned_path_record_temp "${PATH_RECORD_TMP}"; then
+                printf 'Warning: preserving a changed temporary path record: %s\n' \
+                    "${PATH_RECORD_TMP}" >&2
+            fi
+        else
+            printf 'Warning: preserving an unverified temporary path record: %s\n' \
+                "${PATH_RECORD_TMP}" >&2
+        fi
     fi
-    if [[ -n ${INTERNAL_PATH_FILE_TMP} ]]; then
-        rm -f -- "${INTERNAL_PATH_FILE_TMP}" || true
+    if [[ -n ${PATH_RECORD_FD} ]]; then
+        { exec {PATH_RECORD_FD}>&-; } 2>/dev/null || true
     fi
     if [[ -n ${HLS_REMUX_TMP} ]]; then
-        rm -f -- "${HLS_REMUX_TMP}" || true
+        if declare -F remove_owned_hls_remux_temp >/dev/null 2>&1; then
+            # shellcheck disable=SC2310 # Cleanup preserves a changed inode.
+            remove_owned_hls_remux_temp || true
+        else
+            printf 'Warning: preserving an unverified temporary HLS remux: %s\n' \
+                "${HLS_REMUX_TMP}" >&2
+        fi
+    fi
+    if [[ -n ${HLS_REMUX_FD} ]]; then
+        close_hls_remux_fd
     fi
     if [[ -n ${YTDLP_BATCH_FILE_TMP} ]]; then
         rm -f -- "${YTDLP_BATCH_FILE_TMP}" || true
     fi
     if [[ -n ${PRIVATE_ARIA2_STAGING} &&
         (-e ${PRIVATE_ARIA2_STAGING} || -L ${PRIVATE_ARIA2_STAGING}) ]]; then
+        if declare -F remove_active_private_aria2_sensitive_metadata \
+            >/dev/null 2>&1; then
+            # shellcheck disable=SC2310 # A changed identity is the preserve path.
+            if ! remove_active_private_aria2_sensitive_metadata; then
+                active_staging_metadata_safe=false
+                printf 'Warning: preserving ambiguous private aria2 authentication metadata: %s\n' \
+                    "${PRIVATE_ARIA2_STAGING##*/}" >&2
+            fi
+        fi
+        # A sensitive pathname whose recorded inode changed is external state,
+        # even when its replacement reused an otherwise allowlisted basename.
+        # Preserve the directory instead of letting structural cleanup erase it.
         # shellcheck disable=SC2310 # Cleanup preserves staging that no longer validates.
-        if ! remove_private_aria2_staging_candidate \
-            "${PRIVATE_ARIA2_STAGING}" true; then
+        if [[ ${active_staging_metadata_safe} != true ]] \
+            || ! remove_private_aria2_staging_candidate \
+                "${PRIVATE_ARIA2_STAGING}" true; then
             printf 'Warning: preserving ambiguous active private aria2 staging directory: %s\n' \
                 "${PRIVATE_ARIA2_STAGING##*/}" >&2
         fi
@@ -220,6 +270,15 @@ EOF_USAGE
 
 error() {
     printf 'Error: %s\n' "$*" >&2
+}
+
+print_human_line() {
+    (($# == 1)) || return 2
+    if [[ ${MACHINE_PROGRESS:-false} == true ]]; then
+        printf '%s\n' "$1" >&2
+    else
+        printf '%s\n' "$1"
+    fi
 }
 
 emit_machine_postprocess() {
@@ -408,9 +467,24 @@ check_ytdlp_capabilities() {
         --no-plugin-dirs \
         --extractor-retries \
         --retry-sleep \
+        --no-playlist \
         --no-overwrites \
         --no-post-overwrites \
         --break-match-filters \
+        --embed-metadata \
+        --output \
+        --continue \
+        --downloader \
+        --concurrent-fragments \
+        --format \
+        --merge-output-format \
+        --remux-video \
+        --extract-audio \
+        --audio-format \
+        --audio-quality \
+        --newline \
+        --progress \
+        --color \
         --no-update; do
         if ! grep -Eq -- \
             "^[[:space:]]*(-[^,[:space:]]+,[[:space:]]+)?${required_option}([=[:space:]]|$)" <<<"${yt_dlp_help}"; then
@@ -592,15 +666,24 @@ require_value() {
 
 resolve_lock_root() {
     local candidate=''
+    local canonical_candidate=''
+    local canonical_runtime_dir=''
     local owner=''
     local mode=''
 
     if [[ -n ${XDG_RUNTIME_DIR:-} && ${XDG_RUNTIME_DIR} == /* &&
-        -d ${XDG_RUNTIME_DIR} && ! -L ${XDG_RUNTIME_DIR} ]]; then
-        owner=$(stat -c '%u' -- "${XDG_RUNTIME_DIR}" 2>/dev/null || true)
-        mode=$(stat -c '%a' -- "${XDG_RUNTIME_DIR}" 2>/dev/null || true)
-        if [[ ${owner} == "${EUID}" && ${mode} == 700 ]]; then
-            candidate="${XDG_RUNTIME_DIR}/yt-dlp-aria2-downloader"
+        -d ${XDG_RUNTIME_DIR} && ! -L ${XDG_RUNTIME_DIR} ]] \
+        && canonical_runtime_dir=$(realpath -e -- \
+            "${XDG_RUNTIME_DIR}" 2>/dev/null); then
+        if owner=$(stat -c '%u' -- \
+            "${canonical_runtime_dir}" 2>/dev/null) \
+            && mode=$(stat -c '%a' -- \
+                "${canonical_runtime_dir}" 2>/dev/null); then
+            # shellcheck disable=SC2310 # An unsafe runtime chain selects the private /tmp fallback.
+            if [[ ${owner} == "${EUID}" && ${mode} == 700 ]] \
+                && private_directory_chain_is_safe "${canonical_runtime_dir}"; then
+                candidate="${canonical_runtime_dir}/yt-dlp-aria2-downloader"
+            fi
         fi
     fi
 
@@ -615,7 +698,10 @@ resolve_lock_root() {
         return 73
     fi
 
-    owner=$(stat -c '%u' -- "${candidate}" 2>/dev/null || true)
+    if ! owner=$(stat -c '%u' -- "${candidate}" 2>/dev/null); then
+        error 'unable to determine the download-lock directory owner.'
+        return 73
+    fi
     if [[ ${owner} != "${EUID}" ]]; then
         error 'the download-lock directory is not owned by the current user.'
         return 73
@@ -625,7 +711,26 @@ resolve_lock_root() {
         return 73
     fi
 
-    OUTPUT_LOCK_ROOT=${candidate}
+    canonical_candidate=$(realpath -e -- "${candidate}" 2>/dev/null) || {
+        error 'unable to resolve the download-lock directory.'
+        return 73
+    }
+    if [[ ${canonical_candidate} != "${candidate}" ]]; then
+        error 'the download-lock directory changed during validation.'
+        return 73
+    fi
+    if ! mode=$(stat -c '%a' -- "${canonical_candidate}" 2>/dev/null); then
+        error 'unable to determine the download-lock directory permissions.'
+        return 73
+    fi
+    # shellcheck disable=SC2310 # Final validation precedes all private work-file creation.
+    if [[ ${mode} != 700 ]] \
+        || ! private_directory_chain_is_safe "${canonical_candidate}"; then
+        error 'the download-lock directory has an unsafe ownership or shared-write chain.'
+        return 73
+    fi
+
+    OUTPUT_LOCK_ROOT=${canonical_candidate}
     return 0
 }
 
@@ -633,7 +738,11 @@ acquire_output_lock() {
     local output_dir=$1
     local lock_key
 
-    resolve_lock_root
+    # shellcheck disable=SC2310 # Failure is converted to a lock setup status.
+    if ! resolve_lock_root || [[ -z ${OUTPUT_LOCK_ROOT} ]]; then
+        error 'unable to resolve the download-lock directory.'
+        return 73
+    fi
 
     if ! lock_key=$(printf '%s\0' "${output_dir}" | sha256sum); then
         error 'unable to derive the destination lock identifier.'
@@ -688,18 +797,221 @@ process_is_running() {
     return 0
 }
 
+process_is_session_group_leader() {
+    (($# == 4)) || return 2
+    local pid=$1
+    local expected_parent=$2
+    local output_variable=$3
+    local allow_zombie=$4
+    local process_stat=''
+    local process_state=''
+    local process_parent=''
+    local process_group=''
+    local process_session=''
+    local process_start_time=''
+    local -a process_fields=()
+
+    # A negative kill target is trusted only after proving the complete Linux
+    # session-leader identity that was adopted from the current worker tree.
+    [[ ${pid} =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ -r /proc/${pid}/stat ]] || return 1
+    if ! { IFS= read -r process_stat <"/proc/${pid}/stat"; } 2>/dev/null; then
+        return 1
+    fi
+    read -r -a process_fields <<<"${process_stat##*) }"
+    ((${#process_fields[@]} > 19)) || return 1
+    process_state=${process_fields[0]}
+    process_parent=${process_fields[1]}
+    process_group=${process_fields[2]}
+    process_session=${process_fields[3]}
+    process_start_time=${process_fields[19]}
+
+    [[ ${process_state} != X ]] || return 1
+    if [[ ${allow_zombie} != true && ${process_state} == Z ]]; then
+        return 1
+    fi
+    [[ ${process_group} == "${pid}" && ${process_session} == "${pid}" ]] \
+        || return 1
+    [[ -z ${expected_parent} || ${process_parent} == "${expected_parent}" ]] \
+        || return 1
+    [[ ${process_start_time} =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 -- "-${pid}" 2>/dev/null || return 1
+    printf -v "${output_variable}" '%s' "${process_start_time}" || return 1
+    return 0
+}
+
+process_is_direct_child_of() {
+    (($# == 4)) || return 2
+    local pid=$1
+    local expected_parent=$2
+    local output_variable=$3
+    local allow_zombie=$4
+    local process_stat=''
+    local process_state=''
+    local process_parent=''
+    local process_start_time=''
+    local -a process_fields=()
+
+    [[ ${pid} =~ ^[1-9][0-9]*$ && ${expected_parent} =~ ^[1-9][0-9]*$ ]] \
+        || return 1
+    [[ -r /proc/${pid}/stat ]] || return 1
+    if ! { IFS= read -r process_stat <"/proc/${pid}/stat"; } 2>/dev/null; then
+        return 1
+    fi
+    read -r -a process_fields <<<"${process_stat##*) }"
+    ((${#process_fields[@]} > 19)) || return 1
+    process_state=${process_fields[0]}
+    process_parent=${process_fields[1]}
+    process_start_time=${process_fields[19]}
+
+    [[ ${process_state} != X ]] || return 1
+    if [[ ${allow_zombie} != true && ${process_state} == Z ]]; then
+        return 1
+    fi
+    [[ ${process_parent} == "${expected_parent}" ]] || return 1
+    [[ ${process_start_time} =~ ^[1-9][0-9]*$ ]] || return 1
+    printf -v "${output_variable}" '%s' "${process_start_time}" || return 1
+    return 0
+}
+
+download_worker_is_current() {
+    local allow_zombie=$1
+    local current_start_time=''
+
+    [[ -n ${DOWNLOAD_WORKER_PID} && -n ${DOWNLOAD_WORKER_START_TIME} ]] \
+        || return 1
+    # shellcheck disable=SC2310 # Failure revokes direct-child authority.
+    process_is_direct_child_of \
+        "${DOWNLOAD_WORKER_PID}" "${BASHPID}" \
+        current_start_time "${allow_zombie}" || return 1
+    [[ ${current_start_time} == "${DOWNLOAD_WORKER_START_TIME}" ]]
+}
+
+download_group_is_current() {
+    local current_start_time=''
+
+    [[ -n ${DOWNLOAD_WORKER_PGID} &&
+        -n ${DOWNLOAD_WORKER_PGID_START_TIME} ]] || return 1
+    # shellcheck disable=SC2310 # Failure revokes process-group authority.
+    process_is_session_group_leader \
+        "${DOWNLOAD_WORKER_PGID}" '' current_start_time true || return 1
+    [[ ${current_start_time} == "${DOWNLOAD_WORKER_PGID_START_TIME}" ]]
+}
+
+download_group_has_live_member() {
+    local process_path=''
+    local process_stat=''
+    local process_state=''
+    local process_group=''
+    local process_session=''
+    local -a process_fields=()
+
+    [[ -n ${DOWNLOAD_WORKER_PGID} ]] || return 1
+    for process_path in /proc/[1-9]*/stat; do
+        [[ -r ${process_path} ]] || continue
+        process_stat=''
+        if ! { IFS= read -r process_stat <"${process_path}"; } 2>/dev/null; then
+            continue
+        fi
+        process_fields=()
+        read -r -a process_fields <<<"${process_stat##*) }"
+        ((${#process_fields[@]} > 3)) || continue
+        process_state=${process_fields[0]}
+        process_group=${process_fields[2]}
+        process_session=${process_fields[3]}
+        if [[ ${process_state} != Z && ${process_state} != X &&
+            ${process_group} == "${DOWNLOAD_WORKER_PGID}" &&
+            ${process_session} == "${DOWNLOAD_WORKER_PGID}" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+get_path_identity() {
+    local identity_output_variable=$1
+    local path=$2
+    local path_kind=$3
+    local identity=''
+
+    case ${path_kind} in
+        directory)
+            [[ ! -L ${path} && -d ${path} ]] || return 1
+            ;;
+        regular-file)
+            [[ ! -L ${path} && -f ${path} ]] || return 1
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+
+    identity=$(stat -c '%d:%i' -- "${path}" 2>/dev/null) || return 1
+    [[ ${identity} =~ ^[0-9]+:[0-9]+$ ]] || return 1
+    printf -v "${identity_output_variable}" '%s' "${identity}"
+}
+
+open_private_path_record() {
+    local record_path=$1
+    local opened_identity=''
+
+    # shellcheck disable=SC2310 # Failure rejects an unauthenticated record.
+    get_path_identity PATH_RECORD_IDENTITY "${record_path}" regular-file \
+        || return 1
+    exec {PATH_RECORD_FD}<>"${record_path}" || return 1
+    PATH_RECORD_FD_PATH="/proc/${BASHPID}/fd/${PATH_RECORD_FD}"
+    opened_identity=$(stat -Lc '%d:%i' -- "${PATH_RECORD_FD_PATH}" 2>/dev/null) \
+        || return 1
+    [[ ${opened_identity} == "${PATH_RECORD_IDENTITY}" ]] || return 1
+}
+
+path_record_temp_identity_matches() {
+    local record_path=$1
+    local current_identity=''
+
+    [[ -n ${PATH_RECORD_IDENTITY} ]] || return 1
+    # shellcheck disable=SC2310 # Failure is the false identity predicate.
+    get_path_identity current_identity "${record_path}" regular-file \
+        || return 1
+    [[ ${current_identity} == "${PATH_RECORD_IDENTITY}" ]]
+}
+
+remove_owned_path_record_temp() {
+    local record_path=$1
+
+    if [[ ! -e ${record_path} && ! -L ${record_path} ]]; then
+        return 0
+    fi
+    # shellcheck disable=SC2310 # A changed pathname is external state.
+    path_record_temp_identity_matches "${record_path}" || return 1
+    rm -f -- "${record_path}"
+}
+
 recover_download_pgid() {
     local candidate=''
+    local candidate_start_time=''
+    local expected_parent=''
     local children=''
     local children_file=''
     local -a child_pids=()
 
     if [[ -n ${DOWNLOAD_PGID_FILE} && -f ${DOWNLOAD_PGID_FILE} ]]; then
         if { IFS= read -r candidate <"${DOWNLOAD_PGID_FILE}"; } 2>/dev/null \
-            && [[ ${candidate} =~ ^[1-9][0-9]*$ ]] \
-            && kill -0 -- "-${candidate}" 2>/dev/null; then
-            DOWNLOAD_WORKER_PGID=${candidate}
-            return 0
+            && [[ ${candidate} =~ ^[1-9][0-9]*$ ]]; then
+            if [[ ${candidate} == "${DOWNLOAD_WORKER_PID}" ]]; then
+                expected_parent=${BASHPID}
+            else
+                expected_parent=${DOWNLOAD_WORKER_PID}
+            fi
+            candidate_start_time=''
+            # shellcheck disable=SC2310 # Failure rejects an unauthenticated PGID.
+            if process_is_session_group_leader \
+                "${candidate}" "${expected_parent}" \
+                candidate_start_time false; then
+                DOWNLOAD_WORKER_PGID=${candidate}
+                DOWNLOAD_WORKER_PGID_START_TIME=${candidate_start_time}
+                return 0
+            fi
         fi
     fi
 
@@ -710,8 +1022,13 @@ recover_download_pgid() {
             read -r -a child_pids <<<"${children}"
             for candidate in "${child_pids[@]}"; do
                 [[ ${candidate} =~ ^[1-9][0-9]*$ ]] || continue
-                if kill -0 -- "-${candidate}" 2>/dev/null; then
+                candidate_start_time=''
+                # shellcheck disable=SC2310 # Failure rejects an unrelated child.
+                if process_is_session_group_leader \
+                    "${candidate}" "${DOWNLOAD_WORKER_PID}" \
+                    candidate_start_time false; then
                     DOWNLOAD_WORKER_PGID=${candidate}
+                    DOWNLOAD_WORKER_PGID_START_TIME=${candidate_start_time}
                     return 0
                 fi
             done
@@ -723,13 +1040,15 @@ recover_download_pgid() {
 
 signal_download_worker() {
     local signal_name=$1
+    local candidate_start_time=''
     local group_signaled=false
 
     # When the GUI already created the session, the entire outer process group
     # receives its signal directly. Avoid signaling our own group recursively;
     # target the direct child only as a best-effort fallback.
     if [[ ${REUSE_CURRENT_SESSION} == true ]]; then
-        if [[ -n ${DOWNLOAD_WORKER_PID} ]]; then
+        # shellcheck disable=SC2310 # A failed identity check forbids signaling.
+        if download_worker_is_current false; then
             kill "-${signal_name}" -- "${DOWNLOAD_WORKER_PID}" 2>/dev/null || true
         fi
         return 0
@@ -740,9 +1059,14 @@ signal_download_worker() {
         # leader before marker publication. Use that identity only for urgent
         # signaling: readiness must still wait until the inner env has restored
         # default dispositions and the worker has published its marker.
+        candidate_start_time=''
+        # shellcheck disable=SC2310 # Failure leaves discovery to the PGID record.
         if [[ -n ${DOWNLOAD_WORKER_PID} ]] \
-            && kill -0 -- "-${DOWNLOAD_WORKER_PID}" 2>/dev/null; then
+            && process_is_session_group_leader \
+                "${DOWNLOAD_WORKER_PID}" "${BASHPID}" \
+                candidate_start_time false; then
             DOWNLOAD_WORKER_PGID=${DOWNLOAD_WORKER_PID}
+            DOWNLOAD_WORKER_PGID_START_TIME=${candidate_start_time}
         fi
     fi
 
@@ -752,15 +1076,25 @@ signal_download_worker() {
     fi
 
     if [[ -n ${DOWNLOAD_WORKER_PGID} ]]; then
-        if kill "-${signal_name}" -- "-${DOWNLOAD_WORKER_PGID}" 2>/dev/null; then
+        # Holding the authenticated sentinel leader alive across graceful
+        # signals prevents its numeric process-group identity from being recycled.
+        # shellcheck disable=SC2310 # Either predicate may safely revoke authority.
+        if download_group_is_current \
+            && download_group_has_live_member \
+            && kill "-${signal_name}" -- "-${DOWNLOAD_WORKER_PGID}" 2>/dev/null; then
             group_signaled=true
         else
             DOWNLOAD_WORKER_PGID=''
+            DOWNLOAD_WORKER_PGID_START_TIME=''
         fi
     fi
 
     if [[ ${signal_name} == KILL || ${group_signaled} == false ]] \
         && [[ -n ${DOWNLOAD_WORKER_PID} ]]; then
+        # shellcheck disable=SC2310 # Direct fallback requires the original child.
+        if ! download_worker_is_current false; then
+            return 0
+        fi
         kill "-${signal_name}" -- "${DOWNLOAD_WORKER_PID}" 2>/dev/null || true
     fi
 
@@ -834,28 +1168,53 @@ wait_for_download_exit() {
     local attempts=$1
     local attempt
     local worker_alive=false
+    local worker_current=false
     local group_alive=false
+    local wait_status=0
 
     for ((attempt = 0; attempt < attempts; attempt++)); do
         worker_alive=false
+        worker_current=false
         group_alive=false
 
         if [[ -n ${DOWNLOAD_WORKER_PID} ]]; then
+            # Never explicitly reap an observable leader while its authenticated
+            # group still has live members. The standalone sentinel normally
+            # remains alive itself until every descendant is quiescent.
+            # shellcheck disable=SC2310 # Failure revokes direct-PID authority.
+            if download_worker_is_current true; then
+                worker_current=true
+            fi
             # shellcheck disable=SC2310 # Predicate success means it is still alive.
-            if process_is_running "${DOWNLOAD_WORKER_PID}"; then
+            if [[ ${worker_current} == true ]] \
+                && process_is_running "${DOWNLOAD_WORKER_PID}"; then
                 worker_alive=true
-            else
-                wait "${DOWNLOAD_WORKER_PID}" 2>/dev/null || true
-                DOWNLOAD_WORKER_PID=''
             fi
         fi
 
-        if [[ -n ${DOWNLOAD_WORKER_PGID} ]]; then
-            if kill -0 -- "-${DOWNLOAD_WORKER_PGID}" 2>/dev/null; then
+        if [[ ${worker_alive} != true && -n ${DOWNLOAD_WORKER_PGID} ]]; then
+            # shellcheck disable=SC2310 # Failed authentication ends group tracking.
+            if download_group_is_current \
+                && download_group_has_live_member; then
                 group_alive=true
             else
                 DOWNLOAD_WORKER_PGID=''
+                DOWNLOAD_WORKER_PGID_START_TIME=''
             fi
+        fi
+
+        if [[ ${worker_alive} != true && ${group_alive} != true &&
+            -n ${DOWNLOAD_WORKER_PID} ]]; then
+            # `wait` can reap only this shell's registered child. Even if /proc
+            # disappeared before the identity probe, it cannot target a reused
+            # unrelated process.
+            wait_status=0
+            wait "${DOWNLOAD_WORKER_PID}" 2>/dev/null || wait_status=$?
+            if [[ -z ${DOWNLOAD_WAITED_STATUS} ]]; then
+                DOWNLOAD_WAITED_STATUS=${wait_status}
+            fi
+            DOWNLOAD_WORKER_PID=''
+            DOWNLOAD_WORKER_START_TIME=''
         fi
 
         if [[ ${worker_alive} == false && ${group_alive} == false ]]; then
@@ -889,9 +1248,12 @@ run_supervised_command() {
 
     DOWNLOAD_STATUS=125
     DOWNLOAD_WORKER_PID=''
+    DOWNLOAD_WORKER_START_TIME=''
     DOWNLOAD_WORKER_PGID=''
+    DOWNLOAD_WORKER_PGID_START_TIME=''
     DOWNLOAD_PGID_FILE=''
     DOWNLOAD_READY_FILE=''
+    DOWNLOAD_WAITED_STATUS=''
 
     if [[ ${REUSE_CURRENT_SESSION} == true ]]; then
         if ! DOWNLOAD_READY_FILE=$(mktemp \
@@ -925,6 +1287,10 @@ run_supervised_command() {
             exec "$@"
         ' bash "${DOWNLOAD_READY_FILE}" "${worker_command[@]}" &
         DOWNLOAD_WORKER_PID=$!
+        # shellcheck disable=SC2310 # A fast failure is handled after registration.
+        process_is_direct_child_of \
+            "${DOWNLOAD_WORKER_PID}" "${BASHPID}" \
+            DOWNLOAD_WORKER_START_TIME true || DOWNLOAD_WORKER_START_TIME=''
         # Keep signals deferred until env has restored their default disposition
         # and the post-env wrapper has atomically published its readiness.
         # shellcheck disable=SC2310
@@ -960,12 +1326,63 @@ run_supervised_command() {
             set -euo pipefail
             pgid_file=$1
             shift
-            pgid_temporary="${pgid_file}.tmp"
-            printf "%s\n" "$$" >"${pgid_temporary}" || exit 125
-            mv -Tf -- "${pgid_temporary}" "${pgid_file}" || exit 125
-            exec "$@"
+            # The sentinel must survive the first graceful group signal so it
+            # remains an authenticated PGID anchor for bounded KILL escalation.
+            trap "" HUP INT TERM
+            env \
+                --default-signal=HUP \
+                --default-signal=INT \
+                --default-signal=TERM \
+                bash -c "
+                    set -euo pipefail
+                    pgid_file=\$1
+                    shift
+                    pgid_temporary=\"\${pgid_file}.tmp\"
+                    printf \"%s\\n\" \"\${PPID}\" \
+                        >\"\${pgid_temporary}\" || exit 125
+                    mv -Tf -- \"\${pgid_temporary}\" \
+                        \"\${pgid_file}\" || exit 125
+                    exec \"\$@\"
+                " bash "${pgid_file}" "$@" &
+            command_pid=$!
+            command_status=0
+            wait "${command_pid}" || command_status=$?
+
+            # Stay alive as the authenticated session leader until every
+            # same-session descendant has exited. A command may otherwise
+            # orphan work after returning and make its numeric PGID unsafe to
+            # reuse as signaling authority.
+            while true; do
+                group_member_alive=false
+                for process_path in /proc/[1-9]*/stat; do
+                    [[ -r ${process_path} ]] || continue
+                    process_stat=""
+                    if ! IFS= read -r process_stat <"${process_path}" 2>/dev/null; then
+                        continue
+                    fi
+                    process_pid=${process_stat%% *}
+                    [[ ${process_pid} != "$$" ]] || continue
+                    process_fields=()
+                    read -r -a process_fields <<<"${process_stat##*) }"
+                    ((${#process_fields[@]} > 3)) || continue
+                    if [[ ${process_fields[0]} != Z &&
+                        ${process_fields[0]} != X &&
+                        ${process_fields[2]} == "$$" &&
+                        ${process_fields[3]} == "$$" ]]; then
+                        group_member_alive=true
+                        break
+                    fi
+                done
+                [[ ${group_member_alive} == true ]] || break
+                sleep 0.1
+            done
+            exit "${command_status}"
         ' bash "${DOWNLOAD_PGID_FILE}" "${worker_command[@]}" &
         DOWNLOAD_WORKER_PID=$!
+        # shellcheck disable=SC2310 # A fast failure is handled after registration.
+        process_is_direct_child_of \
+            "${DOWNLOAD_WORKER_PID}" "${BASHPID}" \
+            DOWNLOAD_WORKER_START_TIME true || DOWNLOAD_WORKER_START_TIME=''
         # PGID publication happens only after the inner env restored signal
         # dispositions inside the new session.
         # Holding the registration critical section until then prevents an
@@ -986,8 +1403,11 @@ run_supervised_command() {
         # shellcheck disable=SC2310
         if ! process_is_running "${DOWNLOAD_WORKER_PID}"; then
             wait "${DOWNLOAD_WORKER_PID}" 2>/dev/null || worker_status=$?
+            DOWNLOAD_WAITED_STATUS=${worker_status}
             DOWNLOAD_WORKER_PID=''
+            DOWNLOAD_WORKER_START_TIME=''
             DOWNLOAD_WORKER_PGID=''
+            DOWNLOAD_WORKER_PGID_START_TIME=''
             if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
                 DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS:-143}
             else
@@ -1008,6 +1428,8 @@ run_supervised_command() {
         stop_download_worker || true
         if [[ -n ${REQUESTED_EXIT_STATUS} ]]; then
             DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS}
+        elif [[ ${DOWNLOAD_WAITED_STATUS} =~ ^[0-9]+$ ]]; then
+            DOWNLOAD_STATUS=${DOWNLOAD_WAITED_STATUS}
         fi
         cleanup_download_registration_files
         return 0
@@ -1022,8 +1444,14 @@ run_supervised_command() {
         fi
         DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS:-143}
     else
-        worker_status=0
-        wait "${DOWNLOAD_WORKER_PID}" || worker_status=$?
+        # Poll rather than immediately reaping the session leader. A command
+        # can exit after leaving a same-session descendant behind; retaining
+        # the leader identity is the only safe authority for later group
+        # cancellation.
+        # shellcheck disable=SC2310 # Bounded predicates keep long jobs responsive.
+        while ! wait_for_download_exit 10; do
+            [[ ${SHUTDOWN_REQUESTED} == true ]] && break
+        done
         if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
             # A signal interrupted wait. Bound shutdown and reap any group
             # member that deliberately ignored the first graceful signal.
@@ -1035,9 +1463,7 @@ run_supervised_command() {
             fi
             DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS:-143}
         else
-            DOWNLOAD_WORKER_PID=''
-            DOWNLOAD_WORKER_PGID=''
-            DOWNLOAD_STATUS=${worker_status}
+            DOWNLOAD_STATUS=${DOWNLOAD_WAITED_STATUS:-125}
         fi
     fi
 
@@ -1067,10 +1493,158 @@ run_supervised_ytdlp() {
             exec sed -u -E \
                 "s/${forbidden_source_name}/[REDACTED_SOURCE]/gI"
         ) >&2
-        pipeline_status=$?
+        pipeline_statuses=("${PIPESTATUS[@]}")
+        producer_status=${pipeline_statuses[0]:-125}
+        redactor_status=${pipeline_statuses[1]:-125}
         exec 3>&-
-        exit "${pipeline_status}"
+        # Never turn a broken diagnostic redaction boundary into the
+        # producer status. Otherwise preserve the exact yt-dlp result.
+        if ((redactor_status != 0)); then
+            exit "${redactor_status}"
+        fi
+        exit "${producer_status}"
     ' bash "$@"
+}
+
+remove_recorded_private_aria2_sensitive_file() {
+    local sensitive_path=$1
+    local recorded_identity=$2
+    local current_identity=''
+
+    [[ -n ${sensitive_path} && -n ${recorded_identity} ]] || return 0
+    if [[ ! -e ${sensitive_path} && ! -L ${sensitive_path} ]]; then
+        return 0
+    fi
+    # shellcheck disable=SC2310 # Failure preserves the sensitive pathname.
+    get_path_identity current_identity "${sensitive_path}" regular-file \
+        || return 1
+    [[ ${current_identity} == "${recorded_identity}" ]] || return 1
+    rm -f -- "${sensitive_path}"
+}
+
+remove_active_private_aria2_sensitive_metadata() {
+    local current_staging_identity=''
+    local removal_status=0
+    local -a unrecorded_sensitive_names=()
+
+    [[ -n ${PRIVATE_ARIA2_STAGING_IDENTITY} ]] || return 1
+    # shellcheck disable=SC2310 # Failure preserves the complete staging tree.
+    get_path_identity \
+        current_staging_identity "${PRIVATE_ARIA2_STAGING}" directory \
+        || return 1
+    [[ ${current_staging_identity} == "${PRIVATE_ARIA2_STAGING_IDENTITY}" ]] \
+        || return 1
+
+    [[ -z ${PRIVATE_ARIA2_PLAN_IDENTITY} && -n ${PRIVATE_ARIA2_PLAN} ]] \
+        && unrecorded_sensitive_names+=(plan.json)
+    [[ -z ${PRIVATE_ARIA2_COOKIE_JAR_IDENTITY} &&
+        -n ${PRIVATE_ARIA2_COOKIE_JAR} ]] \
+        && unrecorded_sensitive_names+=(cookies.txt)
+    [[ -z ${PRIVATE_ARIA2_INPUT_IDENTITY} && -n ${PRIVATE_ARIA2_INPUT} ]] \
+        && unrecorded_sensitive_names+=(aria2.input)
+    [[ -z ${PRIVATE_ARIA2_MANIFEST_IDENTITY} &&
+        -n ${PRIVATE_ARIA2_MANIFEST} ]] \
+        && unrecorded_sensitive_names+=(manifest.json)
+
+    # shellcheck disable=SC2310 # Cleanup aggregates every removal failure.
+    remove_recorded_private_aria2_sensitive_file \
+        "${PRIVATE_ARIA2_PLAN}" "${PRIVATE_ARIA2_PLAN_IDENTITY}" \
+        || removal_status=1
+    # shellcheck disable=SC2310 # Cleanup aggregates every removal failure.
+    remove_recorded_private_aria2_sensitive_file \
+        "${PRIVATE_ARIA2_COOKIE_JAR}" "${PRIVATE_ARIA2_COOKIE_JAR_IDENTITY}" \
+        || removal_status=1
+    # shellcheck disable=SC2310 # Cleanup aggregates every removal failure.
+    remove_recorded_private_aria2_sensitive_file \
+        "${PRIVATE_ARIA2_INPUT}" "${PRIVATE_ARIA2_INPUT_IDENTITY}" \
+        || removal_status=1
+    # shellcheck disable=SC2310 # Cleanup aggregates every removal failure.
+    remove_recorded_private_aria2_sensitive_file \
+        "${PRIVATE_ARIA2_MANIFEST}" "${PRIVATE_ARIA2_MANIFEST_IDENTITY}" \
+        || removal_status=1
+    # Creation precedes identity recording by a few commands. Remove only the
+    # unrecorded names through the ownership marker fallback; an identity-bound
+    # file that changed must stay preserved as ambiguous external state.
+    # shellcheck disable=SC2310 # Marker cleanup contributes to the aggregate.
+    if ((${#unrecorded_sensitive_names[@]} > 0)) \
+        && ! remove_marked_private_aria2_sensitive_metadata \
+            "${PRIVATE_ARIA2_STAGING}" \
+            "${unrecorded_sensitive_names[@]}"; then
+        removal_status=1
+    fi
+    return "${removal_status}"
+}
+
+remove_marked_private_aria2_sensitive_metadata() {
+    local candidate=$1
+    shift
+    local candidate_name=${candidate##*/}
+    local candidate_owner=''
+    local candidate_mode=''
+    local candidate_parent=''
+    local marker_path="${candidate}/${PRIVATE_ARIA2_STAGING_MARKER}"
+    local marker_owner=''
+    local marker_mode=''
+    local marker_size=''
+    local marker_value=''
+    local sensitive_name=''
+    local sensitive_path=''
+    local sensitive_owner=''
+    local sensitive_mode=''
+    local removal_status=0
+    local -a sensitive_names=("$@")
+
+    if ((${#sensitive_names[@]} == 0)); then
+        sensitive_names=(plan.json cookies.txt aria2.input manifest.json)
+    fi
+
+    [[ ${candidate_name} =~ ^[.]yt-dlp-aria2[.][A-Za-z0-9]{8}$ ]] || return 1
+    [[ ! -L ${candidate} && -d ${candidate} ]] || return 1
+    candidate_owner=$(stat -c '%u' -- "${candidate}" 2>/dev/null) || return 1
+    candidate_mode=$(stat -c '%a' -- "${candidate}" 2>/dev/null) || return 1
+    [[ ${candidate_owner} == "${EUID}" && ${candidate_mode} == 700 ]] || return 1
+    candidate_parent=$(realpath -e -- "${candidate}/.." 2>/dev/null) || return 1
+    [[ ${candidate_parent} == "${OUTPUT_DIR}" ]] || return 1
+
+    [[ ! -L ${marker_path} && -f ${marker_path} ]] || return 1
+    marker_owner=$(stat -c '%u' -- "${marker_path}" 2>/dev/null) || return 1
+    marker_mode=$(stat -c '%a' -- "${marker_path}" 2>/dev/null) || return 1
+    marker_size=$(stat -c '%s' -- "${marker_path}" 2>/dev/null) || return 1
+    [[ ${marker_owner} == "${EUID}" && ${marker_mode} == 600 ]] || return 1
+    [[ ${marker_size} == "$((${#PRIVATE_ARIA2_STAGING_MARKER_VALUE} + 1))" ]] \
+        || return 1
+    IFS= read -r marker_value <"${marker_path}" || return 1
+    [[ ${marker_value} == "${PRIVATE_ARIA2_STAGING_MARKER_VALUE}" ]] || return 1
+
+    for sensitive_name in "${sensitive_names[@]}"; do
+        case ${sensitive_name} in
+            plan.json | cookies.txt | aria2.input | manifest.json) ;;
+            *) return 2 ;;
+        esac
+        sensitive_path="${candidate}/${sensitive_name}"
+        if [[ ! -e ${sensitive_path} && ! -L ${sensitive_path} ]]; then
+            continue
+        fi
+        if [[ -L ${sensitive_path} || ! -f ${sensitive_path} ]]; then
+            removal_status=1
+            continue
+        fi
+        sensitive_owner=$(stat -c '%u' -- "${sensitive_path}" 2>/dev/null) \
+            || {
+                removal_status=1
+                continue
+            }
+        sensitive_mode=$(stat -c '%a' -- "${sensitive_path}" 2>/dev/null) \
+            || {
+                removal_status=1
+                continue
+            }
+        if [[ ${sensitive_owner} != "${EUID}" || ${sensitive_mode} != 600 ]] \
+            || ! rm -f -- "${sensitive_path}"; then
+            removal_status=1
+        fi
+    done
+    return "${removal_status}"
 }
 
 private_aria2_staging_candidate_is_safe() {
@@ -1188,6 +1762,17 @@ recover_abandoned_private_aria2_staging() {
                     "${candidate##*/}" >&2
             fi
         else
+            if [[ ${require_marker} == true ]]; then
+                # Even when an unknown transfer artifact forces preservation,
+                # remove authenticated URLs and cookies from a directory whose
+                # ownership marker and private metadata still validate.
+                # shellcheck disable=SC2310
+                if ! remove_marked_private_aria2_sensitive_metadata \
+                    "${candidate}"; then
+                    printf 'Warning: unable to remove ambiguous private aria2 authentication metadata: %s\n' \
+                        "${candidate##*/}" >&2
+                fi
+            fi
             printf 'Warning: preserving ambiguous private aria2 staging directory: %s\n' \
                 "${candidate##*/}" >&2
         fi
@@ -1219,6 +1804,7 @@ cleanup_stale_temporary_files() {
 
 probe_media_summary() {
     local media_path=$1
+    local -a probe_statuses=()
 
     LC_ALL=C timeout --signal=TERM --kill-after=2s 15s \
         ffprobe -v error \
@@ -1290,6 +1876,16 @@ print(
     duration_microseconds,
 )
 '
+
+    probe_statuses=("${PIPESTATUS[@]}")
+    ((${#probe_statuses[@]} == 2)) || return 1
+    if ((probe_statuses[0] == 124 || probe_statuses[0] == 137)); then
+        return 124
+    fi
+    if ((probe_statuses[0] != 0)); then
+        return 1
+    fi
+    return "${probe_statuses[1]}"
 }
 
 probe_duration_microseconds() {
@@ -1506,6 +2102,7 @@ validate_final_media_file() {
     local start_microseconds='-'
     local duration_microseconds='-'
     local unexpected_summary_field=''
+    local media_summary_status=0
     local tail_status=0
 
     FINAL_MEDIA_VALIDATION_REASON='unknown'
@@ -1517,8 +2114,14 @@ validate_final_media_file() {
     # probe_media_summary is a status-returning pipeline whose failure is
     # deliberately converted into a stable validation reason.
     # shellcheck disable=SC2310
-    if ! media_summary=$(probe_media_summary "${final_path}"); then
-        FINAL_MEDIA_VALIDATION_REASON='probe-error'
+    media_summary=$(probe_media_summary "${final_path}") \
+        || media_summary_status=$?
+    if ((media_summary_status != 0)); then
+        if ((media_summary_status == 124)); then
+            FINAL_MEDIA_VALIDATION_REASON='probe-timeout'
+        else
+            FINAL_MEDIA_VALIDATION_REASON='probe-error'
+        fi
         return 1
     fi
     read -r \
@@ -1812,7 +2415,7 @@ initialize_runtime_dependencies() {
     local runtime_attestation=''
     local runtime_status=0
 
-    for command_name in aria2c env ffmpeg ffprobe python3 sed stdbuf tr realpath grep mktemp mv rm rmdir chmod flock mkdir sha256sum stat setsid sleep timeout find; do
+    for command_name in aria2c env ffmpeg ffprobe python3 sed stdbuf tr realpath grep ln mktemp mv rm rmdir chmod flock mkdir sha256sum stat setsid sleep timeout find; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             error "required command \"${command_name}\" was not found."
             exit 127
@@ -1854,7 +2457,11 @@ initialize_runtime_dependencies() {
                 exit 64
                 ;;
         esac
-        resolve_lock_root
+        # shellcheck disable=SC2310 # Failure becomes a bounded setup diagnostic.
+        if ! resolve_lock_root || [[ -z ${OUTPUT_LOCK_ROOT} ]]; then
+            error 'unable to resolve the runtime-attestation directory.'
+            exit 73
+        fi
         RUNTIME_ATTESTATION_TMP=$(mktemp \
             --tmpdir="${OUTPUT_LOCK_ROOT}" \
             '.runtime-attestation.XXXXXXXX') || {
@@ -1900,6 +2507,55 @@ initialize_runtime_dependencies() {
     readonly ARIA2_HTTPS_DIRECT_SAFE
 }
 
+# A canonical directory chain may cross a shared location such as /tmp only
+# when sticky-bit ownership rules prevent another user from replacing its
+# descendants. This makes later pathname-based private staging safe against a
+# different UID without excluding root-owned system parents or user mounts.
+private_directory_chain_is_safe() {
+    local candidate=$1
+    local component=''
+    local current_path=/
+    local metadata=''
+    local mode=''
+    local mode_value=0
+    local owner=''
+    local remainder=${candidate#/}
+    local root_owner=''
+    local unexpected=''
+
+    [[ ${candidate} == /* && -d ${candidate} ]] || return 1
+    root_owner=$(stat -c '%u' -- / 2>/dev/null) || return 1
+    [[ ${root_owner} =~ ^[0-9]+$ ]] || return 1
+
+    while true; do
+        [[ -d ${current_path} && ! -L ${current_path} ]] || return 1
+        metadata=$(stat -c '%u:%a' -- "${current_path}" 2>/dev/null) \
+            || return 1
+        IFS=: read -r owner mode unexpected <<<"${metadata}"
+        [[ -z ${unexpected} && ${owner} =~ ^[0-9]+$ &&
+            ${mode} =~ ^[0-7]{3,4}$ ]] || return 1
+        [[ ${owner} == 0 || ${owner} == "${root_owner}" ||
+            ${owner} == "${EUID}" ]] || return 1
+        mode_value=$((8#${mode}))
+        if ((mode_value & 0022)) && ! ((mode_value & 01000)); then
+            return 1
+        fi
+
+        [[ -n ${remainder} ]] || break
+        if [[ ${remainder} == */* ]]; then
+            component=${remainder%%/*}
+            remainder=${remainder#*/}
+        else
+            component=${remainder}
+            remainder=''
+        fi
+        [[ -n ${component} ]] || return 1
+        current_path="${current_path%/}/${component}"
+    done
+
+    return 0
+}
+
 # Canonicalize and lock the destination before creating any transfer state.
 prepare_output_directory() {
     if [[ -z ${OUTPUT_DIR} ]]; then
@@ -1922,6 +2578,12 @@ prepare_output_directory() {
     fi
     readonly OUTPUT_DIR
 
+    # shellcheck disable=SC2310 # Failure is a fatal destination trust check.
+    if ! private_directory_chain_is_safe "${OUTPUT_DIR}"; then
+        error "destination directory or one of its ancestors is owned by another user or is shared without sticky-bit protection: ${OUTPUT_DIR}"
+        exit 13
+    fi
+
     # --output is an yt-dlp output template. Escape literal percent signs from
     # the real destination path.
     OUTPUT_DIR_TEMPLATE=${OUTPUT_DIR//%/%%}
@@ -1940,6 +2602,7 @@ prepare_output_directory() {
 
 # Create private path records and aria2/yt-dlp transfer metadata.
 prepare_private_work_files() {
+    local result_name
     local result_parent
     local staging_marker_path
 
@@ -1950,14 +2613,30 @@ prepare_private_work_files() {
         fi
 
         result_parent=${RESULT_FILE%/*}
+        result_name=${RESULT_FILE##*/}
         if [[ ${result_parent} == "${RESULT_FILE}" ]]; then
             result_parent='.'
         elif [[ -z ${result_parent} ]]; then
             result_parent='/'
         fi
 
-        if [[ ! -d ${result_parent} || ! -w ${result_parent} || ! -x ${result_parent} ]]; then
+        if [[ -z ${result_name} || ${result_name} == . || ${result_name} == .. ]] \
+            || ! result_parent=$(realpath -e -- "${result_parent}" 2>/dev/null) \
+            || [[ ! -d ${result_parent} || ! -w ${result_parent} || ! -x ${result_parent} ]]; then
             error 'the result-file directory is not writable.'
+            exit 13
+        fi
+        # shellcheck disable=SC2310 # Failure is a fatal result-path trust check.
+        if ! private_directory_chain_is_safe "${result_parent}"; then
+            error 'the result-file directory or one of its ancestors is unsafe.'
+            exit 13
+        fi
+        RESULT_FILE="${result_parent%/}/${result_name}"
+        RESULT_FILE_PARENT=${result_parent}
+        # shellcheck disable=SC2310 # Failure rejects an unstable parent.
+        if ! get_path_identity \
+            RESULT_FILE_PARENT_IDENTITY "${RESULT_FILE_PARENT}" directory; then
+            error 'unable to authenticate the result-file directory.'
             exit 13
         fi
 
@@ -1984,6 +2663,13 @@ prepare_private_work_files() {
         fi
     fi
 
+    PATH_RECORD_TMP=${RESULT_FILE_TMP:-${INTERNAL_PATH_FILE_TMP}}
+    # shellcheck disable=SC2310 # Failure is a fatal private-record trust check.
+    if ! open_private_path_record "${PATH_RECORD_TMP}"; then
+        error 'unable to authenticate the private result-path file.'
+        exit 13
+    fi
+
     if ! YTDLP_BATCH_FILE_TMP=$(mktemp \
         --tmpdir="${OUTPUT_LOCK_ROOT}" \
         '.url-batch.XXXXXXXX'); then
@@ -2007,6 +2693,13 @@ prepare_private_work_files() {
         error 'unable to secure the private aria2 staging directory.'
         exit 13
     fi
+    # shellcheck disable=SC2310 # Failure rejects the newly created directory.
+    if ! get_path_identity \
+        PRIVATE_ARIA2_STAGING_IDENTITY \
+        "${PRIVATE_ARIA2_STAGING}" directory; then
+        error 'unable to identify the private aria2 staging directory.'
+        exit 13
+    fi
 
     staging_marker_path="${PRIVATE_ARIA2_STAGING}/${PRIVATE_ARIA2_STAGING_MARKER}"
     if ! printf '%s\n' "${PRIVATE_ARIA2_STAGING_MARKER_VALUE}" \
@@ -2021,13 +2714,23 @@ prepare_private_work_files() {
     PRIVATE_ARIA2_INPUT="${PRIVATE_ARIA2_STAGING}/aria2.input"
     PRIVATE_ARIA2_MANIFEST="${PRIVATE_ARIA2_STAGING}/manifest.json"
 
+    # shellcheck disable=SC2310 # Failure rejects partially initialized state.
     if ! : >"${PRIVATE_ARIA2_PLAN}" \
-        || ! printf '%s\n' '# Netscape HTTP Cookie File' \
-            >"${PRIVATE_ARIA2_COOKIE_JAR}" \
-        || ! chmod 600 -- \
-            "${PRIVATE_ARIA2_PLAN}" \
-            "${PRIVATE_ARIA2_COOKIE_JAR}"; then
-        error 'unable to initialize private transfer metadata.'
+        || ! chmod 600 -- "${PRIVATE_ARIA2_PLAN}" \
+        || ! get_path_identity \
+            PRIVATE_ARIA2_PLAN_IDENTITY \
+            "${PRIVATE_ARIA2_PLAN}" regular-file; then
+        error 'unable to initialize the private transfer plan.'
+        exit 13
+    fi
+    # shellcheck disable=SC2310 # Failure rejects partially initialized state.
+    if ! printf '%s\n' '# Netscape HTTP Cookie File' \
+        >"${PRIVATE_ARIA2_COOKIE_JAR}" \
+        || ! chmod 600 -- "${PRIVATE_ARIA2_COOKIE_JAR}" \
+        || ! get_path_identity \
+            PRIVATE_ARIA2_COOKIE_JAR_IDENTITY \
+            "${PRIVATE_ARIA2_COOKIE_JAR}" regular-file; then
+        error 'unable to initialize the private transfer cookie jar.'
         exit 13
     fi
 }
@@ -2037,11 +2740,11 @@ configure_download_options() {
     local aria2_arguments
     local video_format
 
-    printf '%s version %s\n' "${SCRIPT_NAME}" "${VERSION}"
-    printf 'Download directory: %s\n' "${OUTPUT_DIR}"
-    printf 'Mode: %s\n' "${MODE}"
+    print_human_line "${SCRIPT_NAME} version ${VERSION}"
+    print_human_line "Download directory: ${OUTPUT_DIR}"
+    print_human_line "Mode: ${MODE}"
     if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
-        printf '%s\n' 'YouTube access: Firefox cookies with web_safari HLS'
+        print_human_line 'YouTube access: Firefox cookies with web_safari HLS'
     fi
 
     aria2_arguments='-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true'
@@ -2224,11 +2927,9 @@ configure_download_reporting() {
         )
     fi
 
-    PATH_RECORD_TMP=${RESULT_FILE_TMP:-${INTERNAL_PATH_FILE_TMP}}
-    readonly PATH_RECORD_TMP
-    if [[ -n ${PATH_RECORD_TMP} ]]; then
+    if [[ -n ${PATH_RECORD_FD_PATH} ]]; then
         # The FILE argument is itself an output template.
-        path_record_template=${PATH_RECORD_TMP//%/%%}
+        path_record_template=${PATH_RECORD_FD_PATH//%/%%}
         YT_DLP_OPTIONS+=(
             --print-to-file 'after_move:%(filepath)s' "${path_record_template}"
         )
@@ -2259,12 +2960,42 @@ execute_selected_transport() {
             error 'unable to build the private aria2 transfer plan.'
             exit 65
         fi
+        # shellcheck disable=SC2310 # Failure rejects an unbound sensitive file.
+        if ! chmod 600 -- "${PRIVATE_ARIA2_INPUT}" \
+            || ! get_path_identity \
+                PRIVATE_ARIA2_INPUT_IDENTITY \
+                "${PRIVATE_ARIA2_INPUT}" regular-file; then
+            error 'unable to secure the private aria2 input file.'
+            exit 13
+        fi
+        # shellcheck disable=SC2310 # Failure rejects an unbound sensitive file.
+        if ! chmod 600 -- "${PRIVATE_ARIA2_MANIFEST}" \
+            || ! get_path_identity \
+                PRIVATE_ARIA2_MANIFEST_IDENTITY \
+                "${PRIVATE_ARIA2_MANIFEST}" regular-file; then
+            error 'unable to secure the private aria2 transfer manifest.'
+            exit 13
+        fi
 
         # Redact every HTTP(S) token from aria2 diagnostics.
+        # shellcheck disable=SC2016 # Expanded by the intentionally nested shell.
         run_supervised_command bash -c '
             set -o pipefail
             "$@" 2>&1 |
                 stdbuf -o0 tr "\r" "\n" | sed -u -E "s#https?://[^[:space:]]+#[REDACTED_URL]#g"
+            pipeline_statuses=("${PIPESTATUS[@]}")
+            producer_status=${pipeline_statuses[0]:-125}
+            normalizer_status=${pipeline_statuses[1]:-125}
+            redactor_status=${pipeline_statuses[2]:-125}
+            # Diagnostic normalization/redaction failures remain fatal;
+            # otherwise preserve the exact aria2c result.
+            if ((redactor_status != 0)); then
+                exit "${redactor_status}"
+            fi
+            if ((normalizer_status != 0)); then
+                exit "${normalizer_status}"
+            fi
+            exit "${producer_status}"
         ' bash \
             aria2c \
             --input-file="${PRIVATE_ARIA2_INPUT}" \
@@ -2274,11 +3005,14 @@ execute_selected_transport() {
 
         aria2_status=${DOWNLOAD_STATUS}
 
-        if ! rm -f -- "${PRIVATE_ARIA2_INPUT}"; then
+        # shellcheck disable=SC2310 # A changed inode is a hard preservation path.
+        if ! remove_recorded_private_aria2_sensitive_file \
+            "${PRIVATE_ARIA2_INPUT}" "${PRIVATE_ARIA2_INPUT_IDENTITY}"; then
             error 'unable to remove the private aria2 input file.'
             exit 13
         fi
         PRIVATE_ARIA2_INPUT=''
+        PRIVATE_ARIA2_INPUT_IDENTITY=''
 
         if ((aria2_status == 0)); then
             commit_status=0
@@ -2295,6 +3029,16 @@ execute_selected_transport() {
                 error 'unable to publish the completed aria2 transfer.'
                 exit 65
             fi
+
+            # shellcheck disable=SC2310 # A changed inode is a hard preservation path.
+            if ! remove_recorded_private_aria2_sensitive_file \
+                "${PRIVATE_ARIA2_MANIFEST}" \
+                "${PRIVATE_ARIA2_MANIFEST_IDENTITY}"; then
+                error 'unable to remove the private aria2 transfer manifest.'
+                exit 13
+            fi
+            PRIVATE_ARIA2_MANIFEST=''
+            PRIVATE_ARIA2_MANIFEST_IDENTITY=''
 
             run_supervised_ytdlp "${YTDLP_BIN}" \
                 "${YT_DLP_OPTIONS[@]}" \
@@ -2320,10 +3064,10 @@ execute_selected_transport() {
 normalize_successful_path_record() {
     local path_record_status
 
-    [[ -n ${PATH_RECORD_TMP} ]] || return 0
+    [[ -n ${PATH_RECORD_FD_PATH} ]] || return 0
 
     set +e
-    normalize_path_record "${PATH_RECORD_TMP}" "${OUTPUT_DIR}"
+    normalize_path_record "${PATH_RECORD_FD_PATH}" "${OUTPUT_DIR}"
     path_record_status=$?
     set -e
     case ${path_record_status} in
@@ -2372,32 +3116,218 @@ validate_hls_duration_parity() {
     exit 65
 }
 
+hls_remux_temp_identity_matches() {
+    local current_remux_identity=''
+    local opened_remux_identity=''
+
+    [[ -n ${HLS_REMUX_TMP} && -n ${HLS_REMUX_TMP_IDENTITY} &&
+        -n ${HLS_REMUX_FD} && -n ${HLS_REMUX_FD_PATH} ]] || return 1
+    # shellcheck disable=SC2310 # Failure is the false identity predicate.
+    get_path_identity \
+        current_remux_identity "${HLS_REMUX_TMP}" regular-file || return 1
+    opened_remux_identity=$(stat -Lc '%d:%i' -- \
+        "${HLS_REMUX_FD_PATH}" 2>/dev/null) || return 1
+    [[ ${opened_remux_identity} =~ ^[0-9]+:[0-9]+$ &&
+        ${current_remux_identity} == "${HLS_REMUX_TMP_IDENTITY}" &&
+        ${opened_remux_identity} == "${HLS_REMUX_TMP_IDENTITY}" ]]
+}
+
+close_hls_remux_fd() {
+    if [[ -n ${HLS_REMUX_FD} ]]; then
+        if ! { exec {HLS_REMUX_FD}>&-; } 2>/dev/null; then
+            printf 'Warning: unable to close the authenticated HLS remux descriptor.\n' >&2
+        fi
+    fi
+    HLS_REMUX_FD=''
+    HLS_REMUX_FD_PATH=''
+    return 0
+}
+
+remove_owned_hls_remux_temp() {
+    [[ -n ${HLS_REMUX_TMP} ]] || return 0
+    if [[ ! -e ${HLS_REMUX_TMP} && ! -L ${HLS_REMUX_TMP} ]]; then
+        HLS_REMUX_TMP=''
+        HLS_REMUX_TMP_IDENTITY=''
+        close_hls_remux_fd
+        return 0
+    fi
+    # shellcheck disable=SC2310 # Failure preserves an identity-changed path.
+    if ! hls_remux_temp_identity_matches; then
+        printf 'Warning: preserving a changed temporary HLS remux: %s\n' \
+            "${HLS_REMUX_TMP}" >&2
+        HLS_REMUX_TMP=''
+        HLS_REMUX_TMP_IDENTITY=''
+        close_hls_remux_fd
+        return 1
+    fi
+    if ! rm -f -- "${HLS_REMUX_TMP}"; then
+        return 1
+    fi
+    HLS_REMUX_TMP=''
+    HLS_REMUX_TMP_IDENTITY=''
+    close_hls_remux_fd
+}
+
 # Atomically publish a verified HLS remux and update the private path record.
+preserve_verified_hls_remux() {
+    local retained_remux_path=${HLS_REMUX_TMP}
+    local retained_remux_dir=''
+    local retained_remux_name=''
+    local retained_remux_candidate=''
+    local current_retained_identity=''
+    local retained_remux_identity=''
+
+    [[ -n ${retained_remux_path} ]] || return 0
+    # shellcheck disable=SC2310 # A replacement must not be moved or removed.
+    if ! hls_remux_temp_identity_matches; then
+        printf 'Warning: preserving a changed temporary HLS remux in place: %s\n' \
+            "${retained_remux_path}" >&2
+        HLS_REMUX_TMP=''
+        HLS_REMUX_TMP_IDENTITY=''
+        close_hls_remux_fd
+        return 0
+    fi
+
+    retained_remux_identity=${HLS_REMUX_TMP_IDENTITY}
+    if [[ ! -L ${retained_remux_path} && -f ${retained_remux_path} ]]; then
+        retained_remux_dir=${retained_remux_path%/*}
+        retained_remux_name=${retained_remux_path##*/}
+        if [[ ${retained_remux_name} == .yt-dlp-remux.*.mkv ]]; then
+            retained_remux_name=${retained_remux_name/#.yt-dlp-remux./.yt-dlp-retained-remux.}
+            retained_remux_candidate="${retained_remux_dir}/${retained_remux_name}"
+            if mv -nT -- \
+                "${retained_remux_path}" "${retained_remux_candidate}" \
+                && [[ ! -e ${retained_remux_path} &&
+                    ! -L ${retained_remux_path} ]]; then
+                retained_remux_path=${retained_remux_candidate}
+            fi
+        fi
+        # The moved inode must still be the remux that was verified. If the
+        # pathname changed again, leave it untouched and report only that the
+        # ambiguous path was preserved.
+        current_retained_identity=''
+        # shellcheck disable=SC2310 # Failure leaves the ambiguous path untouched.
+        if ! get_path_identity \
+            current_retained_identity "${retained_remux_path}" regular-file \
+            || [[ ${current_retained_identity} != "${retained_remux_identity}" ]]; then
+            printf 'Warning: preserving an identity-changed retained HLS remux: %s\n' \
+                "${retained_remux_path}" >&2
+            HLS_REMUX_TMP=''
+            HLS_REMUX_TMP_IDENTITY=''
+            close_hls_remux_fd
+            return 0
+        fi
+        HLS_REMUX_TMP=''
+        HLS_REMUX_TMP_IDENTITY=''
+        close_hls_remux_fd
+        printf 'The verified remuxed MKV was retained at: %s\n' \
+            "${retained_remux_path}" >&2
+    fi
+    return 0
+}
+
 publish_hls_remux_result() {
     local source_path=$1
     local final_path=$2
+    local source_identity=$3
+    local current_remux_identity=''
+    local current_source_identity=''
+    local opened_remux_identity=''
 
-    if ! mv -nT -- "${HLS_REMUX_TMP}" "${final_path}"; then
+    # shellcheck disable=SC2310 # Failure preserves the repaired source.
+    if ! get_path_identity \
+        current_source_identity "${source_path}" regular-file \
+        || [[ ${current_source_identity} != "${source_identity}" ]]; then
         emit_machine_postprocess error FFmpegVideoRemuxer
-        error 'unable to publish the final MKV file.'
+        error 'the repaired HLS source changed during remux; refusing publication.'
+        preserve_verified_hls_remux
         exit 13
     fi
-    if [[ -e ${HLS_REMUX_TMP} || -L ${HLS_REMUX_TMP} ]]; then
+    # shellcheck disable=SC2310 # A changed temporary inode forbids publication.
+    if ! hls_remux_temp_identity_matches; then
         emit_machine_postprocess error FFmpegVideoRemuxer
-        error "the final MKV appeared during publication; refusing to overwrite it: ${final_path}"
+        error 'the temporary HLS remux changed before publication.'
+        preserve_verified_hls_remux
         exit 13
     fi
-    HLS_REMUX_TMP=''
-    if ! printf '%s\n' "${final_path}" >"${PATH_RECORD_TMP}"; then
+    if [[ ! -f ${HLS_REMUX_FD_PATH} ]] \
+        || ! opened_remux_identity=$(stat -Lc '%d:%i' -- "${HLS_REMUX_FD_PATH}" 2>/dev/null) \
+        || [[ ! ${opened_remux_identity} =~ ^[0-9]+:[0-9]+$ ]] \
+        || [[ ${opened_remux_identity} != "${HLS_REMUX_TMP_IDENTITY}" ]]; then
+        emit_machine_postprocess error FFmpegVideoRemuxer
+        error 'the temporary HLS remux changed while it was opened for publication.'
+        preserve_verified_hls_remux
+        exit 13
+    fi
+    # Hard-link from the authenticated descriptor so a pathname replacement
+    # after the last check cannot become the published media inode. Filesystems
+    # without hard links retain the compatible no-clobber rename path only
+    # after the safe directory chain and source identity are revalidated.
+    if ! ln -LT -- "${HLS_REMUX_FD_PATH}" "${final_path}"; then
+        if [[ -e ${final_path} || -L ${final_path} ]]; then
+            emit_machine_postprocess error FFmpegVideoRemuxer
+            error "the final MKV appeared during publication; refusing to overwrite it: ${final_path}"
+            preserve_verified_hls_remux
+            exit 13
+        fi
+        # shellcheck disable=SC2310 # A changed pathname forbids the fallback move.
+        if ! hls_remux_temp_identity_matches; then
+            emit_machine_postprocess error FFmpegVideoRemuxer
+            error 'the temporary HLS remux changed during publication.'
+            preserve_verified_hls_remux
+            exit 13
+        fi
+        if ! mv -nT -- "${HLS_REMUX_TMP}" "${final_path}" \
+            || [[ -e ${HLS_REMUX_TMP} || -L ${HLS_REMUX_TMP} ]]; then
+            emit_machine_postprocess error FFmpegVideoRemuxer
+            error 'unable to publish the final MKV without overwriting an existing path.'
+            preserve_verified_hls_remux
+            exit 13
+        fi
+    fi
+    # shellcheck disable=SC2310 # Failure rejects the publication identity.
+    if ! get_path_identity \
+        current_remux_identity "${final_path}" regular-file \
+        || [[ ${current_remux_identity} != "${opened_remux_identity}" ]]; then
+        emit_machine_postprocess error FFmpegVideoRemuxer
+        error 'the final MKV identity changed during publication.'
+        preserve_verified_hls_remux
+        exit 13
+    fi
+    # The final name now anchors the verified inode. Remove only an unchanged
+    # temporary name; an injected replacement remains external state.
+    # shellcheck disable=SC2310 # A changed path is deliberately preserved.
+    if ! remove_owned_hls_remux_temp && [[ -n ${HLS_REMUX_TMP} ]]; then
+        printf 'Warning: unable to remove the published HLS remux temporary name: %s\n' \
+            "${HLS_REMUX_TMP}" >&2
+    fi
+    if ! printf '%s\n' "${final_path}" >"${PATH_RECORD_FD_PATH}"; then
         error 'unable to record the final MKV path.'
         printf 'The repaired HLS intermediate was retained at: %s\n' \
             "${source_path}" >&2
         exit 13
     fi
     emit_machine_postprocess finished FFmpegVideoRemuxer
-    if [[ ${source_path} != "${final_path}" ]]; then
-        HLS_SOURCE_TO_CLEAN=${source_path}
+    HLS_SOURCE_TO_CLEAN=${source_path}
+    HLS_SOURCE_TO_CLEAN_IDENTITY=${source_identity}
+}
+
+remove_repaired_hls_source() {
+    local current_source_identity=''
+
+    [[ -n ${HLS_SOURCE_TO_CLEAN} ]] || return 0
+    # shellcheck disable=SC2310 # Failure preserves a changed source.
+    if ! get_path_identity \
+        current_source_identity "${HLS_SOURCE_TO_CLEAN}" regular-file \
+        || [[ ${current_source_identity} != "${HLS_SOURCE_TO_CLEAN_IDENTITY}" ]]; then
+        printf 'Warning: preserving a changed repaired HLS source: %s\n' \
+            "${HLS_SOURCE_TO_CLEAN}" >&2
+    elif ! rm -f -- "${HLS_SOURCE_TO_CLEAN}"; then
+        printf 'Warning: unable to remove the repaired HLS intermediate: %s\n' \
+            "${HLS_SOURCE_TO_CLEAN}" >&2
     fi
+    HLS_SOURCE_TO_CLEAN=''
+    HLS_SOURCE_TO_CLEAN_IDENTITY=''
 }
 
 # Remux the authenticated YouTube HLS intermediate and verify duration parity.
@@ -2407,11 +3337,12 @@ remux_hls_result() {
     local hls_source_name
     local hls_source_stem
     local hls_final_path
+    local hls_source_identity=''
     local hls_source_duration_us=''
     local hls_final_duration_us=''
     local ffmpeg_status
 
-    hls_source_path=$(<"${PATH_RECORD_TMP}") || {
+    hls_source_path=$(<"${PATH_RECORD_FD_PATH}") || {
         error 'unable to read the repaired HLS file path.'
         exit 13
     }
@@ -2423,7 +3354,19 @@ remux_hls_result() {
     hls_source_name=${hls_source_path##*/}
     hls_source_stem=${hls_source_name%.*}
     hls_final_path="${hls_source_dir}/${hls_source_stem}.mkv"
+    if [[ ${hls_final_path} == "${hls_source_path}" ]]; then
+        # A conditional inode replacement is not available through mv. Publish
+        # under a distinct no-clobber name and remove the source only after the
+        # remuxed result has passed global validation.
+        hls_final_path="${hls_source_dir}/${hls_source_stem}.remuxed.mkv"
+    fi
 
+    # shellcheck disable=SC2310 # Failure rejects an unsafe repaired source.
+    if ! get_path_identity \
+        hls_source_identity "${hls_source_path}" regular-file; then
+        error 'the repaired HLS source is missing or unsafe.'
+        exit 13
+    fi
     if [[ -e ${hls_final_path} || -L ${hls_final_path} ]]; then
         error "the final MKV already exists; refusing to overwrite it: ${hls_final_path}"
         exit 13
@@ -2450,6 +3393,26 @@ remux_hls_result() {
         error 'unable to create the temporary MKV file.'
         exit 13
     fi
+    # shellcheck disable=SC2310 # Failure rejects an unbound temporary inode.
+    if ! chmod 600 -- "${HLS_REMUX_TMP}" \
+        || ! get_path_identity \
+            HLS_REMUX_TMP_IDENTITY "${HLS_REMUX_TMP}" regular-file; then
+        emit_machine_postprocess error FFmpegVideoRemuxer
+        error 'unable to secure the temporary MKV file.'
+        exit 13
+    fi
+    if ! exec {HLS_REMUX_FD}<>"${HLS_REMUX_TMP}"; then
+        emit_machine_postprocess error FFmpegVideoRemuxer
+        error 'unable to open the temporary MKV file for authenticated remuxing.'
+        exit 13
+    fi
+    HLS_REMUX_FD_PATH="/proc/${BASHPID}/fd/${HLS_REMUX_FD}"
+    # shellcheck disable=SC2310 # Failure rejects an unauthenticated remux descriptor.
+    if ! hls_remux_temp_identity_matches; then
+        emit_machine_postprocess error FFmpegVideoRemuxer
+        error 'unable to authenticate the temporary MKV descriptor.'
+        exit 13
+    fi
 
     run_supervised_command \
         ffmpeg \
@@ -2474,6 +3437,13 @@ remux_hls_result() {
             "${hls_source_path}" >&2
         exit "${ffmpeg_status}"
     fi
+    # shellcheck disable=SC2310 # A replacement must never reach FFprobe or mv.
+    if ! hls_remux_temp_identity_matches; then
+        emit_machine_postprocess error FFmpegVideoRemuxer
+        error 'the temporary HLS remux changed while FFmpeg was running.'
+        preserve_verified_hls_remux
+        exit 13
+    fi
 
     probe_duration_microseconds \
         hls_final_duration_us "${HLS_REMUX_TMP}" 2>/dev/null
@@ -2488,15 +3458,19 @@ remux_hls_result() {
         "${hls_source_duration_us}" \
         "${hls_final_duration_us}" \
         "${hls_source_path}"
-    publish_hls_remux_result "${hls_source_path}" "${hls_final_path}"
+    publish_hls_remux_result \
+        "${hls_source_path}" "${hls_final_path}" "${hls_source_identity}"
 }
 
 # Validate the final media and atomically publish or discard its path record.
 validate_and_publish_result() {
+    local current_parent_identity=''
     local final_media_path=''
+    local opened_record_identity=''
+    local published_record_identity=''
     local validation_status
 
-    if ! { IFS= read -r final_media_path <"${PATH_RECORD_TMP}"; } 2>/dev/null \
+    if ! { IFS= read -r final_media_path <"${PATH_RECORD_FD_PATH}"; } 2>/dev/null \
         || [[ -z ${final_media_path} ]]; then
         error 'unable to read the final media path for validation.'
         exit 13
@@ -2527,29 +3501,69 @@ validate_and_publish_result() {
     emit_machine_postprocess finished MediaValidation
 
     if [[ -n ${RESULT_FILE} ]]; then
-        if ! mv -nT -- "${RESULT_FILE_TMP}" "${RESULT_FILE}"; then
-            error 'unable to publish the result file.'
+        # Reauthenticate both endpoints immediately before publication. The
+        # hard link is sourced from the open descriptor so a pathname swap
+        # after validation cannot select a different result-record inode.
+        # shellcheck disable=SC2310 # Failure rejects an unstable parent.
+        if ! get_path_identity \
+            current_parent_identity "${RESULT_FILE_PARENT}" directory \
+            || [[ ${current_parent_identity} != "${RESULT_FILE_PARENT_IDENTITY}" ]]; then
+            error 'the result-file directory changed before publication.'
             exit 13
         fi
-        if [[ -e ${RESULT_FILE_TMP} || -L ${RESULT_FILE_TMP} ]]; then
-            error 'the result file appeared during publication; refusing to overwrite it.'
+        opened_record_identity=$(stat -Lc '%d:%i' -- \
+            "${PATH_RECORD_FD_PATH}" 2>/dev/null) || {
+            error 'unable to reauthenticate the private result-path file.'
+            exit 13
+        }
+        if [[ ${opened_record_identity} != "${PATH_RECORD_IDENTITY}" ]]; then
+            error 'the private result-path identity changed before publication.'
             exit 13
         fi
-        RESULT_FILE_TMP=''
-    elif [[ -n ${INTERNAL_PATH_FILE_TMP} ]]; then
-        if ! rm -f -- "${INTERNAL_PATH_FILE_TMP}"; then
-            error 'unable to remove the internal result-path file.'
+        if ! ln -LT -- "${PATH_RECORD_FD_PATH}" "${RESULT_FILE}"; then
+            if [[ -e ${RESULT_FILE} || -L ${RESULT_FILE} ]]; then
+                error 'the result file appeared during publication; refusing to overwrite it.'
+                exit 13
+            fi
+            # shellcheck disable=SC2310 # A changed pathname forbids fallback publication.
+            if ! path_record_temp_identity_matches "${PATH_RECORD_TMP}"; then
+                error 'the private result-path pathname changed during publication.'
+                exit 13
+            fi
+            if ! mv -nT -- "${PATH_RECORD_TMP}" "${RESULT_FILE}" \
+                || [[ -e ${PATH_RECORD_TMP} || -L ${PATH_RECORD_TMP} ]]; then
+                error 'unable to publish the result file without overwriting an existing path.'
+                exit 13
+            fi
+        fi
+        # shellcheck disable=SC2310 # Failure rejects a changed publication.
+        if ! get_path_identity \
+            published_record_identity "${RESULT_FILE}" regular-file \
+            || [[ ${published_record_identity} != "${opened_record_identity}" ]]; then
+            error 'the published result-file identity changed during publication.'
             exit 13
         fi
-        INTERNAL_PATH_FILE_TMP=''
     fi
 
+    # The authenticated descriptor, rather than this mutable pathname, owns
+    # the record. Never remove an injected replacement at the temporary name.
+    # shellcheck disable=SC2310 # A changed pathname is deliberately preserved.
+    if ! remove_owned_path_record_temp "${PATH_RECORD_TMP}"; then
+        printf 'Warning: preserving a changed temporary path record: %s\n' \
+            "${PATH_RECORD_TMP}" >&2
+    fi
+    RESULT_FILE_TMP=''
+    INTERNAL_PATH_FILE_TMP=''
+    PATH_RECORD_TMP=''
+    if ! exec {PATH_RECORD_FD}>&-; then
+        printf 'Warning: unable to close the private result-path descriptor.\n' >&2
+    fi
+    PATH_RECORD_FD=''
+    PATH_RECORD_FD_PATH=''
+    PATH_RECORD_IDENTITY=''
+
     if [[ -n ${HLS_SOURCE_TO_CLEAN} ]]; then
-        if ! rm -f -- "${HLS_SOURCE_TO_CLEAN}"; then
-            printf 'Warning: unable to remove the repaired HLS intermediate: %s\n' \
-                "${HLS_SOURCE_TO_CLEAN}" >&2
-        fi
-        HLS_SOURCE_TO_CLEAN=''
+        remove_repaired_hls_source
     fi
 }
 
@@ -2568,7 +3582,8 @@ finalize_download() {
         remux_hls_result
     fi
     validate_and_publish_result
-    printf '\nDownload completed successfully.\n'
+    print_human_line ''
+    print_human_line 'Download completed successfully.'
 }
 
 main() {

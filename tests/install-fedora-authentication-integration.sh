@@ -122,7 +122,10 @@ if [[ ${1:-} == -qp ]]; then
         ${query_format} != *'%{RELEASE}'* ]]; then
         rpm_path=${*: -1}
         [[ $(<"${rpm_path}") == verified-rpm ]] || exit 1
-        printf '%s\n' yt-dlp-aria2-downloader-gui 2.3.7 noarch
+        printf '%s\n' \
+            yt-dlp-aria2-downloader-gui \
+            "${MOCK_APPLICATION_VERSION:?}" \
+            noarch
         exit 0
     fi
     printf '%s\n' \
@@ -290,10 +293,17 @@ run_application_stage_mutation() {
     local mock_bin=$2
     local source_rpm=$3
     local source_key=$4
+    local application_version=''
+
+    # shellcheck disable=SC2016 # APP_VERSION belongs to the sourced fixture.
+    application_version=$(bash -c \
+        'source "$1"; printf "%s\n" "${APP_VERSION}"' \
+        bash "${library_copy}")
 
     env \
         PATH="${mock_bin}:/usr/bin:/bin" \
         MOCK_APPLICATION_STAGE=1 \
+        MOCK_APPLICATION_VERSION="${application_version}" \
         MOCK_DNF_LOG="${TEST_ROOT}/dnf.log" \
         MOCK_ORIGINAL_RPM="${source_rpm}" \
         MOCK_ORIGINAL_KEY="${source_key}" \

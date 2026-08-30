@@ -43,20 +43,20 @@ FFmpeg pour fusionner, remuxer ou extraire les flux. HTTPS repasse
 automatiquement sur le transport natif de yt-dlp lorsque le backend TLS d'aria2
 n'offre pas le durcissement requis de validation des certificats. Les flux DASH
 et HLS restent eux aussi natifs.
-La version de développement actuelle est la **2.3.7**.
-La dernière release de paquets publiée est la **2.3.7**.
+La version de développement actuelle est la **2.3.8**.
+La dernière release de paquets publiée est la **2.3.8**.
 
 ## Installation recommandée
 
 Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
-Les noms exacts ci-dessous correspondent à la release v2.3.7 actuellement publiée.
+Les noms exacts ci-dessous correspondent à la release v2.3.8 actuellement publiée.
 
 Pour **Fedora 44**, téléchargez ces quatre fichiers :
 
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.3.7-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.3.8-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -64,7 +64,7 @@ Vérifiez les fichiers téléchargés puis lancez le bootstrap Fedora officiel :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.7-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.8-1.fc44.noarch.rpm
 ```
 
 Le bootstrap authentifie et active RPM Fusion Free si nécessaire, remplace `ffmpeg-free` par
@@ -74,7 +74,7 @@ runtimes yt-dlp et Deno propres à l'utilisateur.
 
 Pour **Debian ou Ubuntu**, téléchargez le DEB versionné et `SHA256SUMS`,
 vérifiez-les puis installez le paquet avec `sudo apt install
-./yt-dlp-aria2-downloader-gui_2.3.7-1_all.deb`. Pour **les autres distributions
+./yt-dlp-aria2-downloader-gui_2.3.8-1_all.deb`. Pour **les autres distributions
 GNU/Linux ou une utilisation portable**, utilisez le ZIP versionné ou un clone
 Git. Les runtimes yt-dlp et Deno gérés automatiquement prennent actuellement en
 charge Linux `x86_64` et `aarch64`.
@@ -188,8 +188,8 @@ l'identité de la release :
 
 ```bash
 gh attestation verify ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.3.7 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.3.7 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.3.8 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.3.8 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 `SHA256SUMS` reste utile pour un contrôle local ou hors ligne ; les attestations
@@ -241,7 +241,7 @@ de déploiement **tag** sélectionnée `v*`. La reprise manuelle reste disponibl
 mais elle doit exécuter le workflow depuis le tag exact de la release :
 
 ```bash
-gh workflow run release.yml   --ref v2.3.7   -f tag=v2.3.7   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref v2.3.8   -f tag=v2.3.8   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Le workflow refuse indépendamment toute exécution manuelle dont le type de ref,
@@ -286,7 +286,7 @@ Téléchargez :
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.3.7-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.3.8-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -299,7 +299,7 @@ sha256sum --ignore-missing --check SHA256SUMS
 Puis lancez :
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.7-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.8-1.fc44.noarch.rpm
 ```
 
 Le bootstrap refuse par défaut un RPM de release non signé. Il vérifie que
@@ -351,12 +351,12 @@ de l'utilisateur et vérifiés avant activation.
 
 ### Debian et Ubuntu
 
-La dernière release publiée, la 2.3.7, fournit un DEB indépendant de
+La dernière release publiée, la 2.3.8, fournit un DEB indépendant de
 l'architecture, aligné sur le même modèle de runtimes gérés que Fedora.
 Téléchargez :
 
 ```text
-yt-dlp-aria2-downloader-gui_2.3.7-1_all.deb
+yt-dlp-aria2-downloader-gui_2.3.8-1_all.deb
 SHA256SUMS
 ```
 
@@ -364,7 +364,7 @@ Vérifiez puis installez :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.7-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.8-1_all.deb
 ```
 
 Le DEB dépend explicitement d'`aria2`, de Python 3.10+, de FFmpeg/FFprobe,
@@ -460,7 +460,7 @@ courant.
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.3.7.zip
+yt-dlp-aria2-downloader-gui-2.3.8.zip
 SHA256SUMS
 ```
 
@@ -468,8 +468,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.3.7.zip
-cd yt-dlp-aria2-downloader-gui-2.3.7
+unzip yt-dlp-aria2-downloader-gui-2.3.8.zip
+cd yt-dlp-aria2-downloader-gui-2.3.8
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -556,6 +556,11 @@ sélectionne **Complete video (MKV)** à sa place.
 ### 3. Choisir le dossier de destination
 
 Sélectionnez le dossier dans lequel le média téléchargé sera enregistré.
+Pour protéger le staging privé, chaque ancêtre physique doit appartenir au
+système ou à l'utilisateur courant ; tout ancêtre accessible en écriture au
+groupe ou aux autres utilisateurs doit être protégé par le sticky bit (comme
+`/tmp` normalement). L'application refuse un dossier partagé dangereux avant
+d'y écrire une URL, un cookie, un fichier partiel ou un média.
 
 
 ### 4. Suivre la progression
@@ -785,12 +790,14 @@ diagnostic conservés depuis plus de 15 jours sont supprimés automatiquement
 lors de la prochaine préparation d’une session de téléchargement graphique.
 
 Un verrou consultatif par utilisateur et par dossier de destination est
-conservé sous `$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader` lorsque ce dossier
-d'exécution est absolu, privé et appartient à l'utilisateur courant. Sinon, le
-moteur utilise le repli privé `/tmp/yt-dlp-aria2-downloader-UID`. Les fichiers
-de verrou ne contiennent ni URL, ni cookie, ni chemin de média, et le noyau
-libère automatiquement le verrou à la fin du moteur. Des téléchargements vers
-des dossiers différents peuvent s'exécuter simultanément.
+conservé sous le chemin canonique
+`$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader` lorsque toute sa chaîne physique est
+sûre et que le dossier d'exécution est privé et appartient à l'utilisateur
+courant. Sinon, le moteur utilise le repli privé revalidé
+`/tmp/yt-dlp-aria2-downloader-UID`. Les fichiers de verrou ne contiennent ni
+URL, ni cookie, ni chemin de média, et le noyau libère automatiquement le
+verrou à la fin du moteur. Des téléchargements vers des dossiers différents
+peuvent s'exécuter simultanément.
 
 ## Tests
 

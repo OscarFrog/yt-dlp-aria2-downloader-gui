@@ -75,6 +75,11 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sun Aug 30 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.8-1
+- Preserve supervised command status and authenticate process-group signaling.
+- Harden private transfer cleanup and HLS no-overwrite publication.
+- Harden managed-runtime paths, locks, probes, updates, and recovery.
+
 * Sun Aug 30 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.7-1
 - Improve GUI profile continuity and one-click diagnostic access.
 - Add final retained-log identity with fail-closed atomic publication.

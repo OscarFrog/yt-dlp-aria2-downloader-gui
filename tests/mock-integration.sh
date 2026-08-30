@@ -129,6 +129,8 @@ readonly GUI_SCENARIO_TIMEOUT_SECONDS
 readonly GUI_UNDER_TEST="${MOCK_BIN}/download-video-gui-under-test"
 readonly GUI_SIGNAL_UNDER_TEST="${MOCK_BIN}/download-video-gui-signal-under-test"
 readonly GUI_SIGNAL_REGISTRATION_UNDER_TEST="${MOCK_BIN}/gui-signal-registration-under-test"
+readonly GUI_GROUP_DESCENDANT_UNDER_TEST="${MOCK_BIN}/gui-group-descendant-under-test"
+readonly GUI_GROUP_CHILD_UNDER_TEST="${MOCK_BIN}/gui-group-child-under-test"
 readonly CLI_SIGNAL_REGISTRATION_UNDER_TEST="${MOCK_BIN}/cli-signal-registration-under-test"
 export MOCK_GUI_REAL="${PROJECT_DIR}/download-video-gui.sh"
 export MOCK_GUI_SCENARIO_TIMEOUT_SECONDS=${GUI_SCENARIO_TIMEOUT_SECONDS}
@@ -250,11 +252,19 @@ source "${MOCK_GUI_SOURCE_COPY}"
 trap cleanup EXIT
 
 begin_signal_registration
-bash -c 'exec -a "$1" sleep 30' bash "${MOCK_WORKER_IDENTITY}" &
+WORKER_IDENTITY_TOKEN="${MOCK_WORKER_IDENTITY}.token"
+YTDLP_ARIA2_GUI_WORKER_TOKEN="${WORKER_IDENTITY_TOKEN}" \
+    bash -c 'exec -a "$1" sleep 30' bash "${MOCK_WORKER_IDENTITY}" &
 printf '%s\n' "${SIGNAL_REGISTRATION_ACTIVE}" \
     >"${MOCK_WORKER_LAUNCH_STATE_MARKER}"
 handle_gui_signal 143
 WORKER_PID=$!
+worker_start_time=''
+# shellcheck disable=SC2310 # Fixture reproduces production identity registration before signal replay.
+process_is_direct_child_of \
+    "${WORKER_PID}" "${BASHPID}" worker_start_time true \
+    || exit 70
+WORKER_PID_START_TIME=${worker_start_time}
 printf '%s\n' "${WORKER_PID}" >"${MOCK_WORKER_PRE_REGISTRATION_MARKER}"
 printf '%s\n' "${DEFERRED_SIGNAL_STATUS}" \
     >"${MOCK_WORKER_DEFERRED_STATUS_MARKER}"
@@ -262,6 +272,104 @@ finish_signal_registration
 exit 70
 EOF_GUI_SIGNAL_REGISTRATION
 chmod 0755 -- "${GUI_SIGNAL_REGISTRATION_UNDER_TEST}"
+
+cat >"${GUI_GROUP_CHILD_UNDER_TEST}" <<'EOF_GUI_GROUP_CHILD'
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${MOCK_GROUP_CHILD_READY_MARKER:?}"
+: "${MOCK_GROUP_TERMINATION_MARKER:?}"
+
+handle_group_child_signal() {
+    printf '%s\n' TERM >"${MOCK_GROUP_TERMINATION_MARKER}"
+    exit 143
+}
+
+trap handle_group_child_signal TERM
+trap '' HUP
+printf '%s\n' "${BASHPID}" >"${MOCK_GROUP_CHILD_READY_MARKER}"
+while :; do
+    sleep 0.1
+done
+EOF_GUI_GROUP_CHILD
+chmod 0755 -- "${GUI_GROUP_CHILD_UNDER_TEST}"
+
+cat >"${GUI_GROUP_DESCENDANT_UNDER_TEST}" <<'EOF_GUI_GROUP_DESCENDANT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${MOCK_GUI_SOURCE_COPY:?}"
+: "${MOCK_GROUP_CHILD_UNDER_TEST:?}"
+: "${MOCK_GROUP_CHILD_READY_MARKER:?}"
+: "${MOCK_GROUP_LEADER_RELEASE_MARKER:?}"
+: "${MOCK_GROUP_TERMINATION_MARKER:?}"
+: "${MOCK_WORKER_IDENTITY:?}"
+: "${REAL_SETSID:?}"
+
+# Load the production GUI supervision functions without entering main.
+# shellcheck disable=SC1090
+source "${MOCK_GUI_SOURCE_COPY}"
+trap cleanup EXIT
+
+WORKER_IDENTITY_TOKEN="${MOCK_WORKER_IDENTITY}.token"
+begin_signal_registration
+YTDLP_ARIA2_GUI_WORKER_TOKEN="${WORKER_IDENTITY_TOKEN}" \
+    "${REAL_SETSID}" --wait bash -c '
+        group_child=$1
+        child_ready_marker=$2
+        leader_release_marker=$3
+        "${group_child}" &
+        while [[ ! -s ${child_ready_marker} ]]; do
+            sleep 0.01
+        done
+        while [[ ! -e ${leader_release_marker} ]]; do
+            sleep 0.01
+        done
+        exit 0
+    ' bash \
+    "${MOCK_GROUP_CHILD_UNDER_TEST}" \
+    "${MOCK_GROUP_CHILD_READY_MARKER}" \
+    "${MOCK_GROUP_LEADER_RELEASE_MARKER}" &
+WORKER_PID=$!
+worker_start_time=''
+# shellcheck disable=SC2310 # Fixture captures the same direct-child identity as production.
+process_is_direct_child_of \
+    "${WORKER_PID}" "${BASHPID}" worker_start_time true \
+    || exit 70
+WORKER_PID_START_TIME=${worker_start_time}
+finish_signal_registration
+
+for _ in {1..100}; do
+    [[ -s ${MOCK_GROUP_CHILD_READY_MARKER} ]] || {
+        sleep 0.01
+        continue
+    }
+    # shellcheck disable=SC2310 # Group publication is deliberately recovered from /proc.
+    if recover_worker_pgid "${WORKER_PID}"; then
+        break
+    fi
+    sleep 0.01
+done
+[[ -n ${WORKER_PGID} ]] || exit 70
+: >"${MOCK_GROUP_LEADER_RELEASE_MARKER}"
+
+group_reauthenticated=false
+for _ in {1..100}; do
+    # shellcheck disable=SC2310 # The regression requires inherited-token identity after leader exit.
+    if ! worker_pid_is_current true && worker_group_is_current; then
+        group_reauthenticated=true
+        break
+    fi
+    sleep 0.02
+done
+[[ ${group_reauthenticated} == true ]] || exit 70
+
+# shellcheck disable=SC2310 # The regression requires complete authenticated shutdown.
+stop_worker || exit 70
+[[ -s ${MOCK_GROUP_TERMINATION_MARKER} ]] || exit 70
+exit 0
+EOF_GUI_GROUP_DESCENDANT
+chmod 0755 -- "${GUI_GROUP_DESCENDANT_UNDER_TEST}"
 
 cat >"${CLI_SIGNAL_REGISTRATION_UNDER_TEST}" <<'EOF_CLI_SIGNAL_REGISTRATION'
 #!/usr/bin/env bash
@@ -287,6 +395,11 @@ printf '%s\n' "${SIGNAL_REGISTRATION_ACTIVE}" \
 request_shutdown "${MOCK_WORKER_SIGNAL_NAME}" \
     "${MOCK_WORKER_SIGNAL_STATUS}"
 DOWNLOAD_WORKER_PID=$!
+# shellcheck disable=SC2310 # Fixture reproduces production identity registration before signal replay.
+process_is_direct_child_of \
+    "${DOWNLOAD_WORKER_PID}" "${BASHPID}" \
+    DOWNLOAD_WORKER_START_TIME true \
+    || exit 70
 printf '%s\n' "${DOWNLOAD_WORKER_PID}" \
     >"${MOCK_WORKER_PRE_REGISTRATION_MARKER}"
 printf '%s\n' "${DEFERRED_SIGNAL_STATUS}" \
@@ -373,7 +486,24 @@ if [[ ${probe_operation} == '--help' ]]; then
         '--ignore-config' \
         '--no-plugin-dirs' \
         '--extractor-retries RETRIES' \
-        '--retry-sleep [TYPE:]EXPR'
+        '--retry-sleep [TYPE:]EXPR' \
+        '--no-playlist' \
+        '--embed-metadata' \
+        '--output TEMPLATE' \
+        '--continue' \
+        '--downloader [PROTO:]NAME' \
+        '--concurrent-fragments N' \
+        '--format FORMAT' \
+        '--merge-output-format FORMAT' \
+        '--remux-video FORMAT' \
+        '--extract-audio' \
+        '--audio-format FORMAT' \
+        '--newline' \
+        '--progress' \
+        '--color STREAM:POLICY'
+    if [[ ${MOCK_YTDLP_MISSING_AUDIO_QUALITY:-0} != 1 ]]; then
+        printf '%s\n' '--audio-quality QUALITY'
+    fi
     exit 0
 fi
 
@@ -417,6 +547,15 @@ if [[ -n ${batch_file} && -n ${MOCK_URL_SEEN_LOG:-} ]]; then
 fi
 
 plan_youtube_hls=false
+youtube_hls_source_ext=${MOCK_YOUTUBE_HLS_SOURCE_EXT:-mp4}
+case ${youtube_hls_source_ext} in
+    mp4 | mkv) ;;
+    *)
+        printf 'Invalid mock YouTube HLS source extension: %s\n' \
+            "${youtube_hls_source_ext}" >&2
+        exit 64
+        ;;
+esac
 
 for argument in "$@"; do
     case ${argument} in
@@ -443,10 +582,10 @@ if [[ ${dump_single_json} == true ]]; then
     fi
 
     if [[ ${plan_youtube_hls} == true ]]; then
-        plan_filename="${MOCK_OUTPUT_DIR}/Mock media [abc123].mp4"
+        plan_filename="${MOCK_OUTPUT_DIR}/Mock media [abc123].${youtube_hls_source_ext}"
         plan_protocol='m3u8_native'
         plan_url='https://example.invalid/mock-manifest.m3u8'
-        plan_ext='mp4'
+        plan_ext=${youtube_hls_source_ext}
     else
         plan_filename="${MOCK_OUTPUT_DIR}/Mock media [abc123].webm"
         plan_protocol='http'
@@ -523,10 +662,6 @@ for argument in "$@"; do
     fi
 done
 
-if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
-    trap 'printf terminated > "${MOCK_TERMINATION_MARKER:?}"; exit 143' TERM INT
-fi
-
 if [[ ${load_info_json} != true ]]; then
     if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
         printf '\r[#a1b2c3 4.0MiB/0B CN:8 DL:1.00MiB]\r'
@@ -542,13 +677,52 @@ if [[ ${load_info_json} != true ]]; then
 fi
 
 if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
-    sleep "${MOCK_WORKER_START_JITTER_SECONDS:-0}"
-    if [[ -n ${MOCK_STARTED_MARKER:-} ]]; then
-        printf started >"${MOCK_STARTED_MARKER}"
-    fi
-    while true; do
-        sleep 0.1
-    done
+    # A single process installs its handlers before either startup jitter or
+    # readiness publication, so a signal cannot terminate an interrupted Bash
+    # child before the fixture records delivery.
+    exec python3 -c '
+import signal
+import sys
+import time
+
+termination_marker = sys.argv[1]
+started_marker = sys.argv[2]
+startup_delay = float(sys.argv[3])
+
+
+def terminate(signal_number, _frame):
+    if termination_marker:
+        with open(termination_marker, "w", encoding="utf-8") as marker:
+            marker.write("terminated")
+    raise SystemExit(128 + signal_number)
+
+
+signal.signal(signal.SIGTERM, terminate)
+signal.signal(signal.SIGINT, terminate)
+time.sleep(startup_delay)
+if started_marker:
+    with open(started_marker, "w", encoding="utf-8") as marker:
+        marker.write("started")
+while True:
+    signal.pause()
+' "${MOCK_TERMINATION_MARKER:-}" \
+        "${MOCK_STARTED_MARKER:-}" \
+        "${MOCK_WORKER_START_JITTER_SECONDS:-0}"
+fi
+
+if [[ ${MOCK_EXIT_WITH_LIVE_DESCENDANT:-0} == 1 ]]; then
+    bash -c '
+        set -euo pipefail
+        trap "" HUP INT
+        if [[ ${MOCK_DESCENDANT_IGNORE_TERM:-0} == 1 ]]; then
+            trap "" TERM
+        else
+            trap '\''printf terminated >"${MOCK_DESCENDANT_TERMINATION_MARKER:?}"; exit 143'\'' TERM
+        fi
+        printf "%s\n" "$$" >"${MOCK_DESCENDANT_STARTED_MARKER:?}"
+        sleep 86400
+    ' </dev/null >/dev/null 2>&1 &
+    exit "${MOCK_DESCENDANT_PARENT_STATUS:-23}"
 fi
 
 if [[ ${load_info_json} != true ]]; then
@@ -583,7 +757,7 @@ elif [[ -z ${postprocess_ready_marker} ]]; then
 fi
 
 if [[ ${youtube_hls_mode} == true ]]; then
-    output_path="${MOCK_OUTPUT_DIR}/Mock media [abc123].mp4"
+    output_path="${MOCK_OUTPUT_DIR}/Mock media [abc123].${youtube_hls_source_ext}"
     printf 'YTDLP_POSTPROCESS|started|FixupM3u8\n'
 else
     output_path="${MOCK_OUTPUT_DIR}/Mock media [abc123].webm"
@@ -637,6 +811,23 @@ if [[ -n ${result_file} && ${MOCK_SKIP_RESULT_FILE:-0} != 1 ]]; then
         printf '%s\n' "${MOCK_OUTPUT_DIR}/stale-result.webm" >>"${result_file}"
     fi
     printf '%s\n' "${output_path}" >>"${result_file}"
+    if [[ ${MOCK_REPLACE_RESULT_RECORD_AFTER_WRITE:-0} == 1 ]]; then
+        result_record_path=$(readlink -- "${result_file}")
+        if [[ ${result_record_path##*/} != .yt-dlp-result.* ]]; then
+            printf 'Unexpected private result-record target: %s\n' \
+                "${result_record_path}" >&2
+            exit 70
+        fi
+        result_record_backup="${result_record_path}.authenticated-backup"
+        "${REAL_MV:?}" -T -- \
+            "${result_record_path}" "${result_record_backup}"
+        printf '%s\n' 'foreign result-record replacement' \
+            >"${result_record_path}"
+        chmod 600 -- "${result_record_path}"
+        rm -f -- "${result_record_backup}"
+        printf '%s\n' "${result_record_path}" \
+            >"${MOCK_REPLACED_RESULT_RECORD_PATH:?}"
+    fi
 fi
 EOF_YTDLP
 chmod +x "${MOCK_BIN}/yt-dlp"
@@ -681,6 +872,12 @@ case ${1:-} in
 *)
     : "${MOCK_ARIA2_ARG_LOG:?}"
     printf '%s\0' "$@" >"${MOCK_ARIA2_ARG_LOG}"
+
+    if [[ ${MOCK_ARIA2_EXIT_STATUS:-0} != 0 ]]; then
+        printf '%s\n' \
+            'Simulated aria2 failure for https://secret.example/private.' >&2
+        exit "${MOCK_ARIA2_EXIT_STATUS}"
+    fi
 
     input_file=''
     download_dir=''
@@ -751,19 +948,33 @@ case ${1:-} in
     fi
 
     if [[ ${MOCK_LONG_DOWNLOAD:-0} == 1 ]]; then
-        trap \
-            'printf terminated >"${MOCK_TERMINATION_MARKER:?}"; exit 143' \
-            TERM INT
-
         sleep "${MOCK_WORKER_START_JITTER_SECONDS:-0}"
+        # Publish readiness only after the long-running process has installed
+        # its handlers. A Bash trap at the head of a pipeline can otherwise
+        # exit from an interrupted child without running the trap body.
+        exec python3 -c '
+import signal
+import sys
 
-        if [[ -n ${MOCK_STARTED_MARKER:-} ]]; then
-            printf started >"${MOCK_STARTED_MARKER}"
-        fi
+termination_marker = sys.argv[1]
+started_marker = sys.argv[2]
 
-        while true; do
-            sleep 0.1
-        done
+
+def terminate(signal_number, _frame):
+    if termination_marker:
+        with open(termination_marker, "w", encoding="utf-8") as marker:
+            marker.write("terminated")
+    raise SystemExit(128 + signal_number)
+
+
+signal.signal(signal.SIGTERM, terminate)
+signal.signal(signal.SIGINT, terminate)
+if started_marker:
+    with open(started_marker, "w", encoding="utf-8") as marker:
+        marker.write("started")
+while True:
+    signal.pause()
+' "${MOCK_TERMINATION_MARKER:-}" "${MOCK_STARTED_MARKER:-}"
     fi
 
     while IFS= read -r input_line || [[ -n ${input_line} ]]; do
@@ -777,6 +988,22 @@ case ${1:-} in
                 ;;
         esac
     done <"${input_file}"
+
+    if [[ ${MOCK_REPLACE_ARIA2_INPUT_BEFORE_EXIT:-0} == 1 ]]; then
+        input_replacement="${input_file}.replacement"
+        printf '%s\n' 'foreign aria2 input replacement' \
+            >"${input_replacement}"
+        chmod 600 -- "${input_replacement}"
+        mv -Tf -- "${input_replacement}" "${input_file}"
+    fi
+    if [[ ${MOCK_REPLACE_ARIA2_MANIFEST_BEFORE_EXIT:-0} == 1 ]]; then
+        manifest_path="${download_dir}/manifest.json"
+        manifest_replacement="${manifest_path}.replacement"
+        cp -- "${manifest_path}" "${manifest_replacement}"
+        rm -f -- "${manifest_path}"
+        mv -T -- "${manifest_replacement}" "${manifest_path}"
+        chmod 600 -- "${manifest_path}"
+    fi
 
     if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
         printf '\r[#a1b2c3 10.0MiB/0B CN:1 DL:2.00MiB]\r'
@@ -844,6 +1071,11 @@ output_parent=${output_path%/*}
     exit 64
 }
 printf '%s\n' 'mock remuxed media payload' >"${output_path}"
+if [[ ${MOCK_REPLACE_HLS_REMUX_AFTER_WRITE:-0} == 1 ]]; then
+    rm -f -- "${output_path}"
+    printf '%s\n' 'foreign HLS remux replacement' >"${output_path}"
+    chmod 600 -- "${output_path}"
+fi
 EOF_FFMPEG
 chmod +x "${MOCK_BIN}/ffmpeg"
 
@@ -1033,10 +1265,11 @@ EOF_FFPROBE
 chmod +x "${MOCK_BIN}/ffprobe"
 
 REAL_ENV=$(command -v env)
+REAL_LN=$(command -v ln)
 REAL_MV=$(command -v mv)
 REAL_SED=$(command -v sed)
 REAL_SETSID=$(command -v setsid)
-export REAL_ENV REAL_MV REAL_SED REAL_SETSID
+export REAL_ENV REAL_LN REAL_MV REAL_SED REAL_SETSID
 cat >"${MOCK_BIN}/env" <<'EOF_ENV'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1070,11 +1303,67 @@ exec "${REAL_ENV:?}" "$@"
 EOF_ENV
 chmod +x "${MOCK_BIN}/env"
 
+cat >"${MOCK_BIN}/ln" <<'EOF_LN'
+#!/usr/bin/env bash
+set -euo pipefail
+
+destination=${!#}
+source_path=${@: -2:1}
+remux_backup=''
+if [[ ${source_path} == /proc/[1-9]*/fd/[0-9]* &&
+    ${destination} == *.mkv && ! -e ${destination} ]]; then
+    if [[ ${MOCK_HLS_PUBLISH_COLLISION:-0} == 1 ]]; then
+        printf '%s\n' 'preserve racing MKV destination' >"${destination}"
+    fi
+    if [[ ${MOCK_REPLACE_HLS_REMUX_DURING_PUBLISH:-0} == 1 ]]; then
+        remux_path=$(readlink -- "${source_path}")
+        if [[ ${remux_path##*/} != .yt-dlp-remux.*.mkv ]]; then
+            printf 'Unexpected HLS remux descriptor target: %s\n' \
+                "${remux_path}" >&2
+            exit 70
+        fi
+        remux_backup="${remux_path}.verified-backup"
+        "${REAL_MV:?}" -T -- "${remux_path}" "${remux_backup}"
+        printf '%s\n' 'foreign HLS publication replacement' >"${remux_path}"
+        chmod 600 -- "${remux_path}"
+    fi
+fi
+link_status=0
+if [[ ${MOCK_HLS_HARDLINK_UNAVAILABLE:-0} == 1 &&
+    ${source_path} == /proc/[1-9]*/fd/[0-9]* &&
+    ${destination} == *.mkv ]]; then
+    link_status=95
+elif [[ ${MOCK_RESULT_HARDLINK_UNAVAILABLE:-0} == 1 &&
+    ${source_path} == /proc/[1-9]*/fd/[0-9]* &&
+    ${destination##*/} == result-hardlink-fallback.txt ]]; then
+    link_status=95
+else
+    "${REAL_LN:?}" "$@" || link_status=$?
+fi
+if ((link_status == 0)) && [[ -n ${remux_backup} ]]; then
+    rm -f -- "${remux_backup}"
+fi
+if ((link_status == 0)) \
+    && [[ ${MOCK_BLOCK_AFTER_RESULT_PUBLICATION:-0} == 1 &&
+        ${source_path} == /proc/[1-9]*/fd/[0-9]* &&
+        ${destination##*/} == result.txt ]]; then
+    : "${MOCK_RESULT_PUBLICATION_MARKER:?}"
+    printf '%s\n' published >"${MOCK_RESULT_PUBLICATION_MARKER}"
+    trap 'exit 143' TERM INT
+    while true; do
+        sleep 0.1
+    done
+fi
+exit "${link_status}"
+EOF_LN
+chmod +x "${MOCK_BIN}/ln"
+
 cat >"${MOCK_BIN}/mv" <<'EOF_MV'
 #!/usr/bin/env bash
 set -euo pipefail
 
 destination=${!#}
+source_path=${@: -2:1}
 if [[ (${destination} == */pgid || ${destination##*/} == .worker-pgid.*) &&
     ${MOCK_DELAY_PGID_PUBLISH:-0} == 1 ]]; then
     trap 'printf terminated >"${MOCK_PGID_DELAY_TERMINATION_MARKER:?}"; exit 143' TERM INT
@@ -1104,6 +1393,18 @@ if [[ ${MOCK_SANITIZATION_FAILURE:-0} == 1 ]]; then
         case ${argument} in
             */log-snapshot.* | */log-truncated.*)
                 printf '%s\n' 'Simulated diagnostic sanitization failure.' >&2
+                exit 75
+                ;;
+            *) ;;
+        esac
+    done
+fi
+
+if [[ ${MOCK_PIPELINE_REDACTOR_FAILURE:-0} == 1 ]]; then
+    for argument in "$@"; do
+        case ${argument} in
+            *'[REDACTED_SOURCE]'* | *'[REDACTED_URL]'*)
+                printf '%s\n' 'Simulated pipeline redactor failure.' >&2
                 exit 75
                 ;;
             *) ;;
@@ -1193,6 +1494,11 @@ emit_mock_file_error() {
 case " $* " in
     *' --entry '*)
         block_for_signal entry
+        if [[ ${MOCK_CANCEL_ENTRY_AFTER_NEW_DOWNLOAD:-0} == 1 &&
+            -n ${MOCK_NEW_DOWNLOAD_ONCE_MARKER:-} &&
+            -e ${MOCK_NEW_DOWNLOAD_ONCE_MARKER} ]]; then
+            exit 1
+        fi
         if [[ ${MOCK_INVALID_URL_THEN_CANCEL:-0} == 1 ]]; then
             : "${MOCK_ENTRY_ATTEMPT_MARKER:?}"
             if [[ ! -e ${MOCK_ENTRY_ATTEMPT_MARKER} ]]; then
@@ -1326,10 +1632,27 @@ case " $* " in
         if [[ -n ${MOCK_QUESTION_ARGS_LOG:-} ]]; then
             printf '%s\0' "$@" >"${MOCK_QUESTION_ARGS_LOG}"
         fi
+        if [[ -n ${MOCK_NEW_DOWNLOAD_ONCE_MARKER:-} &&
+            " $* " == *'The download is complete.'* &&
+            ! -e ${MOCK_NEW_DOWNLOAD_ONCE_MARKER} ]]; then
+            : >"${MOCK_NEW_DOWNLOAD_ONCE_MARKER}"
+            printf '%s' 'New download'
+            exit 1
+        fi
+        if [[ -n ${MOCK_COMPLETION_QUESTION_STATUS:-} &&
+            " $* " == *'The download is complete.'* ]]; then
+            if [[ -n ${MOCK_COMPLETION_QUESTION_ERROR:-} ]]; then
+                printf '%s\n' "${MOCK_COMPLETION_QUESTION_ERROR}" >&2
+            fi
+            exit "${MOCK_COMPLETION_QUESTION_STATUS}"
+        fi
         printf '%s' "${MOCK_QUESTION_OUTPUT:-}"
         exit "${MOCK_QUESTION_STATUS:-1}"
         ;;
     *' --info '*)
+        if [[ -n ${MOCK_INFO_ARGS_LOG:-} ]]; then
+            printf '%s\0' "$@" >"${MOCK_INFO_ARGS_LOG}"
+        fi
         exit 0
         ;;
     *' --text-info '*)
@@ -1764,11 +2087,11 @@ initialize_mock_integration() {
 
     readonly MOCK_NO_DENO_BIN="${TEST_ROOT}/bin-no-deno"
     mkdir -p -- "${MOCK_NO_DENO_BIN}"
-    for managed_mock in yt-dlp aria2c zenity env ffmpeg ffprobe mv sed setsid; do
+    for managed_mock in yt-dlp aria2c zenity env ffmpeg ffprobe ln mv sed setsid; do
         ln -s -- "${MOCK_BIN}/${managed_mock}" "${MOCK_NO_DENO_BIN}/${managed_mock}"
     done
 
-    for mocked_command in yt-dlp aria2c deno zenity env ffmpeg ffprobe mv sed setsid; do
+    for mocked_command in yt-dlp aria2c deno zenity env ffmpeg ffprobe ln mv sed setsid; do
         resolved_mock=$(command -v "${mocked_command}")
         assert_equals "${MOCK_BIN}/${mocked_command}" "${resolved_mock}" \
             "${mocked_command} mock selection"
@@ -1956,6 +2279,27 @@ test_mock_engine_audio_downloads() {
     # The preceding successful audio-engine scenario leaves its media
     # artifact in the shared mock output directory. The next scenario must
     # start from a clean destination so it can reach FFprobe validation.
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    prepare_argument_log 'machine-output-channel-contract'
+    assert_status_split 0 'machine output keeps human banners on stderr' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio --machine-progress \
+        -- 'https://example.com/watch?v=machine-output-channel-contract'
+    assert_text_not_contains "${ASSERT_STDOUT}" \
+        "${SCRIPT_NAME:-download-video.sh} version" \
+        'machine stdout excludes the human version banner'
+    assert_text_not_contains "${ASSERT_STDOUT}" \
+        'Download completed successfully.' \
+        'machine stdout excludes the human completion banner'
+    assert_text_contains "${ASSERT_STDERR}" \
+        'download-video.sh version' \
+        'machine stderr contains the human version banner'
+    assert_text_contains "${ASSERT_STDERR}" \
+        'Download completed successfully.' \
+        'machine stderr contains the human completion banner'
+    assert_text_contains "${ASSERT_STDOUT}" 'ARIA2_PLAN|1' \
+        'machine stdout retains transfer records'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     prepare_argument_log 'audio-content-video-validation'
@@ -2164,11 +2508,16 @@ test_mock_engine_video_downloads() {
 }
 
 test_mock_engine_youtube_hls() {
-    local hls_collision_result hls_existing_target oversized_duration_result
+    local hls_collision_result hls_existing_target hls_mkv_source_ffmpeg_args
+    local hls_hardlink_fallback_result
+    local hls_mkv_source_result hls_publish_collision_result
+    local hls_publish_replacement_result hls_temp_replacement_result
     local oversized_hls_duration youtube_hls_failed_result
     local youtube_hls_ffmpeg_args youtube_hls_final_duration_result
     local youtube_hls_result youtube_hls_source_duration_result
     local -a youtube_hls_arguments youtube_hls_ffmpeg_arguments
+    local -a hls_publish_collision_temps hls_publish_replacement_temps
+    local -a hls_temp_replacement_temps
     local -a youtube_hls_path_files
 
     # Scenario: authenticated YouTube HLS profile.
@@ -2220,6 +2569,28 @@ test_mock_engine_youtube_hls() {
         "${OUTPUT_DIR}/Mock media [abc123].mp4" \
         'YouTube HLS remux reads the fixed MP4 intermediate'
 
+    rm -f -- \
+        "${youtube_hls_result}" \
+        "${OUTPUT_DIR}/Mock media [abc123].mkv"
+    hls_hardlink_fallback_result="${TEST_ROOT}/youtube-hls-hardlink-fallback.txt"
+    prepare_argument_log 'youtube-hls-hardlink-fallback'
+    assert_status 0 'YouTube HLS supports filesystems without hard links' \
+        env MOCK_HLS_HARDLINK_UNAVAILABLE=1 \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode video \
+        --youtube-hls-firefox \
+        --result-file "${hls_hardlink_fallback_result}" \
+        -- 'https://www.youtube.com/watch?v=youtube-hls-hardlink-fallback'
+    assert_file_has_line "${hls_hardlink_fallback_result}" \
+        "${OUTPUT_DIR}/Mock media [abc123].mkv" \
+        'HLS hard-link fallback publishes the final path'
+    assert_file_has_line "${OUTPUT_DIR}/Mock media [abc123].mkv" \
+        'mock remuxed media payload' \
+        'HLS hard-link fallback publishes the verified remux'
+    rm -f -- \
+        "${hls_hardlink_fallback_result}" \
+        "${OUTPUT_DIR}/Mock media [abc123].mkv"
+
     hls_existing_target="${OUTPUT_DIR}/Mock media [abc123].mkv"
     printf 'preserve existing MKV\n' >"${hls_existing_target}"
     hls_collision_result="${TEST_ROOT}/youtube-hls-collision-result.txt"
@@ -2240,6 +2611,145 @@ test_mock_engine_youtube_hls() {
     [[ -f "${OUTPUT_DIR}/Mock media [abc123].mp4" ]] \
         || fail 'An HLS target collision did not retain the repaired MP4.'
     rm -f -- "${hls_existing_target}" "${OUTPUT_DIR}/Mock media [abc123].mp4"
+
+    # yt-dlp can already expose the repaired HLS artifact with an MKV suffix.
+    # Publish the verified remux under a distinct no-clobber name: shell `mv`
+    # cannot atomically replace a path only when its inode still matches.
+    prepare_argument_log 'youtube-hls-mkv-source'
+    hls_mkv_source_result="${TEST_ROOT}/youtube-hls-mkv-source-result.txt"
+    hls_mkv_source_ffmpeg_args="${TEST_ROOT}/youtube-hls-mkv-source-ffmpeg.bin"
+    assert_status 0 'YouTube HLS remux accepts a transaction-owned MKV source' \
+        env MOCK_YOUTUBE_HLS_SOURCE_EXT=mkv \
+        MOCK_FFMPEG_ARG_LOG="${hls_mkv_source_ffmpeg_args}" \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode video \
+        --youtube-hls-firefox \
+        --result-file "${hls_mkv_source_result}" \
+        -- 'https://www.youtube.com/watch?v=youtube-hls-mkv-source'
+    assert_file_has_line "${hls_mkv_source_result}" \
+        "${OUTPUT_DIR}/Mock media [abc123].remuxed.mkv" \
+        'transaction-owned MKV source result path'
+    assert_file_has_line "${OUTPUT_DIR}/Mock media [abc123].remuxed.mkv" \
+        'mock remuxed media payload' \
+        'transaction-owned MKV source publishes a verified remux'
+    [[ ! -e "${OUTPUT_DIR}/Mock media [abc123].mkv" ]] \
+        || fail 'Validated transaction-owned MKV source was not removed.'
+    # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+    youtube_hls_ffmpeg_arguments=()
+    read_arguments \
+        "${hls_mkv_source_ffmpeg_args}" youtube_hls_ffmpeg_arguments
+    assert_array_contains youtube_hls_ffmpeg_arguments \
+        "${OUTPUT_DIR}/Mock media [abc123].mkv" \
+        'YouTube HLS remux reads the transaction-owned MKV source'
+    rm -f -- \
+        "${hls_mkv_source_result}" \
+        "${OUTPUT_DIR}/Mock media [abc123].remuxed.mkv"
+
+    # GNU mv -n reports success when a target appears during publication while
+    # leaving the source in place. Preserve that already-verified remux instead
+    # of deleting it from EXIT cleanup.
+    prepare_argument_log 'youtube-hls-publication-race'
+    hls_publish_collision_result="${TEST_ROOT}/youtube-hls-publication-race-result.txt"
+    assert_status 13 'YouTube HLS publication race preserves the verified remux' \
+        env MOCK_HLS_PUBLISH_COLLISION=1 \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode video \
+        --youtube-hls-firefox \
+        --result-file "${hls_publish_collision_result}" \
+        -- 'https://www.youtube.com/watch?v=youtube-hls-publication-race'
+    assert_file_has_line "${OUTPUT_DIR}/Mock media [abc123].mkv" \
+        'preserve racing MKV destination' \
+        'racing YouTube HLS destination is not overwritten'
+    shopt -s nullglob
+    hls_publish_collision_temps=(
+        "${OUTPUT_DIR}"/.yt-dlp-retained-remux.*.mkv
+    )
+    shopt -u nullglob
+    assert_equals '1' "${#hls_publish_collision_temps[@]}" \
+        'publication race retains one verified remux'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        "The verified remuxed MKV was retained at: ${hls_publish_collision_temps[0]}" \
+        'publication race reports the retained remux path'
+    touch -d '2 days ago' -- "${hls_publish_collision_temps[0]}"
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].mkv"
+    prepare_argument_log 'retained-hls-remux-survives-stale-cleanup'
+    assert_status 0 'explicitly retained HLS remux survives stale cleanup' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=retained-hls-remux'
+    [[ -f ${hls_publish_collision_temps[0]} ]] \
+        || fail 'A later session deleted an explicitly retained HLS remux.'
+    [[ ! -e ${hls_publish_collision_result} ]] \
+        || fail 'An HLS publication race published a result file.'
+    rm -f -- \
+        "${hls_publish_collision_result}" \
+        "${hls_publish_collision_temps[@]}" \
+        "${OUTPUT_DIR}/Mock media [abc123].webm" \
+        "${OUTPUT_DIR}/Mock media [abc123].mp4" \
+        "${OUTPUT_DIR}/Mock media [abc123].mkv"
+
+    # Mutation test: FFmpeg success cannot authorize a replacement inode for
+    # validation, preservation, publication, or EXIT cleanup.
+    prepare_argument_log 'youtube-hls-remux-temp-replacement'
+    hls_temp_replacement_result="${TEST_ROOT}/youtube-hls-temp-replacement-result.txt"
+    assert_status 13 'YouTube HLS rejects a replaced temporary remux inode' \
+        env MOCK_REPLACE_HLS_REMUX_AFTER_WRITE=1 \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode video \
+        --youtube-hls-firefox \
+        --result-file "${hls_temp_replacement_result}" \
+        -- 'https://www.youtube.com/watch?v=youtube-hls-temp-replacement'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'temporary HLS remux changed while FFmpeg was running' \
+        'temporary HLS remux identity diagnostic'
+    shopt -s nullglob
+    hls_temp_replacement_temps=("${OUTPUT_DIR}"/.yt-dlp-remux.*.mkv)
+    shopt -u nullglob
+    assert_equals 1 "${#hls_temp_replacement_temps[@]}" \
+        'one changed temporary HLS remux is preserved'
+    assert_file_has_line "${hls_temp_replacement_temps[0]}" \
+        'foreign HLS remux replacement' \
+        'changed temporary HLS remux inode survives cleanup'
+    [[ -f "${OUTPUT_DIR}/Mock media [abc123].mp4" ]] \
+        || fail 'Temporary remux replacement did not preserve the HLS source.'
+    [[ ! -e ${hls_temp_replacement_result} ]] \
+        || fail 'Temporary remux replacement published a result file.'
+    rm -f -- \
+        "${hls_temp_replacement_temps[@]}" \
+        "${OUTPUT_DIR}/Mock media [abc123].mp4"
+
+    # Mutation test: replace the temporary pathname after its descriptor has
+    # been authenticated. Descriptor-linked publication must still select the
+    # verified inode and must leave the injected replacement untouched.
+    prepare_argument_log 'youtube-hls-remux-publication-replacement'
+    hls_publish_replacement_result="${TEST_ROOT}/youtube-hls-publish-replacement-result.txt"
+    assert_status 0 'YouTube HLS publishes the descriptor-bound remux inode' \
+        env MOCK_REPLACE_HLS_REMUX_DURING_PUBLISH=1 \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode video \
+        --youtube-hls-firefox \
+        --result-file "${hls_publish_replacement_result}" \
+        -- 'https://www.youtube.com/watch?v=youtube-hls-publish-replacement'
+    assert_file_has_line "${OUTPUT_DIR}/Mock media [abc123].mkv" \
+        'mock remuxed media payload' \
+        'descriptor-bound publication keeps the verified HLS remux inode'
+    assert_file_has_line "${hls_publish_replacement_result}" \
+        "${OUTPUT_DIR}/Mock media [abc123].mkv" \
+        'descriptor-bound publication result path'
+    shopt -s nullglob
+    hls_publish_replacement_temps=("${OUTPUT_DIR}"/.yt-dlp-remux.*.mkv)
+    shopt -u nullglob
+    assert_equals 1 "${#hls_publish_replacement_temps[@]}" \
+        'publication replacement remains under its injected temporary name'
+    assert_file_has_line "${hls_publish_replacement_temps[0]}" \
+        'foreign HLS publication replacement' \
+        'publication does not move or remove the injected replacement'
+    [[ ! -e "${OUTPUT_DIR}/Mock media [abc123].mp4" ]] \
+        || fail 'Successful descriptor-bound publication retained the HLS source.'
+    rm -f -- \
+        "${hls_publish_replacement_result}" \
+        "${hls_publish_replacement_temps[@]}" \
+        "${OUTPUT_DIR}/Mock media [abc123].mkv"
 
     # 2^64+1 seconds must be rejected before Bash arithmetic. Converting first
     # wraps this value to 1 on a typical 64-bit shell and can turn an absurd
@@ -2344,6 +2854,11 @@ test_mock_engine_youtube_hls() {
 test_mock_engine_failure_paths() {
     local atomic_result_file existing_result_file held_lock_fd
     local lock_file lock_key lock_root
+    local result_hardlink_fallback_file
+    local replaced_result_file replaced_result_record replaced_result_record_path
+    local unsafe_output_dir unsafe_output_parent
+    local unsafe_result_parent
+    local unsafe_runtime_dir unsafe_runtime_parent
 
     # Scenario group: engine failures before yt-dlp invocation.
     prepare_argument_log 'invalid-output'
@@ -2354,6 +2869,40 @@ test_mock_engine_failure_paths() {
     assert_text_contains "${ASSERT_OUTPUT}" 'destination directory does not exist' \
         'nonexistent output diagnostic'
 
+    unsafe_output_parent="${TEST_ROOT}/unsafe-output-parent"
+    unsafe_output_dir="${unsafe_output_parent}/destination"
+    mkdir -p -- "${unsafe_output_dir}"
+    chmod 0777 -- "${unsafe_output_parent}"
+    chmod 0700 -- "${unsafe_output_dir}"
+    assert_status 13 'shared non-sticky output ancestor is rejected' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${unsafe_output_dir}" \
+        -- 'https://example.com/watch?v=unsafe-output-parent'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'owned by another user or is shared without sticky-bit protection' \
+        'unsafe output ancestor diagnostic'
+    assert_directory_empty "${unsafe_output_dir}" \
+        'unsafe output ancestor creates no transfer state'
+    rm -rf -- "${unsafe_output_parent}"
+
+    unsafe_runtime_parent="${TEST_ROOT}/unsafe-runtime-parent"
+    unsafe_runtime_dir="${unsafe_runtime_parent}/runtime"
+    mkdir -p -- "${unsafe_runtime_dir}"
+    chmod 0777 -- "${unsafe_runtime_parent}"
+    chmod 0700 -- "${unsafe_runtime_dir}"
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    prepare_argument_log 'unsafe-runtime-fallback'
+    assert_status 0 'unsafe XDG runtime ancestor uses the private /tmp fallback' \
+        env XDG_RUNTIME_DIR="${unsafe_runtime_dir}" \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" \
+        --mode audio \
+        -- 'https://example.com/watch?v=unsafe-runtime-parent'
+    assert_directory_empty "${unsafe_runtime_dir}" \
+        'unsafe XDG runtime directory receives no private engine state'
+    rm -rf -- "${unsafe_runtime_parent}"
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
     assert_status 13 'missing result-file parent is rejected' \
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${OUTPUT_DIR}" \
@@ -2361,6 +2910,22 @@ test_mock_engine_failure_paths() {
         -- 'https://example.com/watch?v=bad-result-parent'
     assert_text_contains "${ASSERT_OUTPUT}" 'result-file directory is not writable' \
         'missing result parent diagnostic'
+
+    unsafe_result_parent="${TEST_ROOT}/unsafe-result-parent"
+    mkdir -p -- "${unsafe_result_parent}"
+    chmod 0777 -- "${unsafe_result_parent}"
+    assert_status 13 'shared non-sticky result-file ancestor is rejected' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" \
+        --result-file "${unsafe_result_parent}/result.txt" \
+        -- 'https://example.com/watch?v=unsafe-result-parent'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'result-file directory or one of its ancestors is unsafe' \
+        'unsafe result-file ancestor diagnostic'
+    assert_directory_empty "${unsafe_result_parent}" \
+        'unsafe result-file ancestor creates no private record'
+    chmod 0700 -- "${unsafe_result_parent}"
+    rmdir -- "${unsafe_result_parent}"
 
     assert_status 2 'result-file line breaks are rejected' \
         "${PROJECT_DIR}/download-video.sh" \
@@ -2398,6 +2963,85 @@ test_mock_engine_failure_paths() {
     [[ ! -e ${atomic_result_file} ]] \
         || fail 'A failed engine run published a stale or partial result file.'
 
+    result_hardlink_fallback_file="${TEST_ROOT}/result-hardlink-fallback.txt"
+    prepare_argument_log 'result-hardlink-fallback'
+    assert_status 0 'result publication supports filesystems without hard links' \
+        env MOCK_RESULT_HARDLINK_UNAVAILABLE=1 \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        --result-file "${result_hardlink_fallback_file}" \
+        -- 'https://example.com/watch?v=result-hardlink-fallback'
+    assert_file_has_line "${result_hardlink_fallback_file}" \
+        "${OUTPUT_DIR}/Mock media [abc123].webm" \
+        'result hard-link fallback publishes the verified path record'
+    rm -f -- \
+        "${result_hardlink_fallback_file}" \
+        "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    # Mutation test: replace the temporary record after yt-dlp has written it.
+    # The descriptor-bound record remains authoritative for normalization,
+    # validation, and no-clobber publication; the foreign pathname is preserved.
+    replaced_result_file="${TEST_ROOT}/replaced-result-record.txt"
+    replaced_result_record="${TEST_ROOT}/replaced-result-record-path.txt"
+    prepare_argument_log 'replaced-result-record'
+    assert_status 13 'an unlinked authenticated result inode fails closed' \
+        env MOCK_REPLACE_RESULT_RECORD_AFTER_WRITE=1 \
+        MOCK_REPLACED_RESULT_RECORD_PATH="${replaced_result_record}" \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        --result-file "${replaced_result_file}" \
+        -- 'https://example.com/watch?v=replaced-result-record'
+    [[ ! -e ${replaced_result_file} && ! -L ${replaced_result_file} ]] \
+        || fail 'A replacement temporary record reached the public result path.'
+    replaced_result_record_path=$(<"${replaced_result_record}")
+    assert_file_has_line "${replaced_result_record_path}" \
+        'foreign result-record replacement' \
+        'foreign temporary result-record replacement is preserved'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'preserving a changed temporary path record' \
+        'changed temporary result-record diagnostic'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'private result-path pathname changed during publication' \
+        'unlinked authenticated result-record refusal diagnostic'
+    rm -f -- \
+        "${replaced_result_file}" \
+        "${replaced_result_record}" \
+        "${replaced_result_record_path}" \
+        "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    prepare_argument_log 'aria2-producer-status'
+    assert_status 29 'aria2 pipeline preserves the transport status' \
+        env MOCK_ARIA2_EXIT_STATUS=29 \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=aria2-producer-status'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'Download failed with exit code 29.' \
+        'aria2 producer status diagnostic'
+    assert_text_not_contains "${ASSERT_OUTPUT}" \
+        'https://secret.example/private' \
+        'aria2 producer diagnostic remains redacted'
+
+    prepare_argument_log 'pipeline-redactor-status'
+    assert_status 75 'a successful producer does not mask redactor failure' \
+        env MOCK_PIPELINE_REDACTOR_FAILURE=1 \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=pipeline-redactor-status'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'format planning with exit code 75' \
+        'redactor failure status diagnostic'
+
+    prepare_argument_log 'pipeline-redactor-priority'
+    assert_status 75 'redactor failure remains fatal when the producer also fails' \
+        env MOCK_PLAN_EXIT_STATUS=23 MOCK_PIPELINE_REDACTOR_FAILURE=1 \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=pipeline-redactor-priority'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'format planning with exit code 75' \
+        'redactor failure is not masked by a producer failure'
+
     # A second engine instance targeting the same canonical destination must fail
     # before yt-dlp can manipulate shared .part, merge, or remux files.
     # Use the exact runtime lock directory selected by the engine. Locking the
@@ -2426,6 +3070,9 @@ test_mock_engine_failure_paths() {
 }
 
 test_mock_engine_private_staging() {
+    local active_file_log active_file_pid active_file_plan active_file_replacement
+    local active_file_result active_file_staging active_file_started
+    local active_file_status active_file_termination_marker
     local ambiguous_marked attempt candidate candidate_ambiguous candidate_pgid
     local candidate_pid crash_log crash_pgid crash_pid crash_result
     local crash_staging crash_started crash_started_seen cross_candidate
@@ -2433,7 +3080,33 @@ test_mock_engine_private_staging() {
     local replacement_log replacement_original replacement_pid
     local replacement_result replacement_staging replacement_started
     local replacement_status replacement_termination_marker
+    local successful_mutation_diagnostic successful_mutation_file
+    local successful_mutation_name
+    local successful_mutation_staging successful_mutation_variable
+    local -a successful_mutation_cases=(input manifest)
+    local sticky_output_dir sticky_output_parent sticky_staging_leftover
     local staging_symlink_target symlink_candidate test_pgid
+
+    # A root- or current-user-owned sticky shared ancestor protects private
+    # children from other UIDs and must remain a supported destination shape.
+    sticky_output_parent="${TEST_ROOT}/sticky-output-parent"
+    sticky_output_dir="${sticky_output_parent}/destination"
+    mkdir -p -- "${sticky_output_dir}"
+    chmod 1777 -- "${sticky_output_parent}"
+    chmod 0700 -- "${sticky_output_dir}"
+    prepare_argument_log 'private-staging-sticky-output-parent'
+    assert_status 0 'sticky shared output ancestor permits private staging' \
+        env MOCK_OUTPUT_DIR="${sticky_output_dir}" \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${sticky_output_dir}" \
+        --mode audio \
+        -- 'https://example.com/watch?v=sticky-output-parent'
+    sticky_staging_leftover=$(find "${sticky_output_dir}" \
+        -mindepth 1 -maxdepth 1 -type d \
+        -name '.yt-dlp-aria2.????????' -print -quit 2>/dev/null)
+    [[ -z ${sticky_staging_leftover} ]] \
+        || fail 'Sticky shared output ancestor retained private staging.'
+    rm -rf -- "${sticky_output_parent}"
 
     # Regression guard: active private staging cleanup must not follow a
     # pathname that has been replaced by a different filesystem object.
@@ -2531,6 +3204,125 @@ test_mock_engine_private_staging() {
         "${replacement_log}" \
         "${replacement_termination_marker}" \
         "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    # Replacing one identity-bound sensitive file inside the original staging
+    # must preserve that replacement while still removing the remaining secret
+    # metadata. Structural allowlisting alone must not erase the foreign inode.
+    active_file_started="${TEST_ROOT}/private-staging-file-replacement-started"
+    active_file_result="${TEST_ROOT}/private-staging-file-replacement-result.txt"
+    active_file_log="${TEST_ROOT}/private-staging-file-replacement.log"
+    active_file_termination_marker="${TEST_ROOT}/private-staging-file-replacement-terminated"
+    rm -f -- \
+        "${active_file_started}" \
+        "${active_file_result}" \
+        "${active_file_log}" \
+        "${active_file_termination_marker}"
+
+    prepare_argument_log 'private-staging-active-file-replacement'
+    env MOCK_LONG_DOWNLOAD=1 \
+        MOCK_STARTED_MARKER="${active_file_started}" \
+        MOCK_TERMINATION_MARKER="${active_file_termination_marker}" \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" \
+        --mode audio \
+        --result-file "${active_file_result}" \
+        -- 'https://example.com/watch?v=private-staging-active-file-replacement' \
+        >"${active_file_log}" 2>&1 &
+    active_file_pid=$!
+
+    wait_for_file "${active_file_started}" 10 \
+        'private staging sensitive-file replacement worker startup'
+    active_file_staging=''
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        active_file_staging=$(find "${OUTPUT_DIR}" \
+            -mindepth 1 -maxdepth 1 -type d \
+            -name '.yt-dlp-aria2.????????' -print -quit 2>/dev/null || true)
+        [[ -n ${active_file_staging} ]] && break
+        sleep 0.05
+    done
+    [[ -n ${active_file_staging} && -d ${active_file_staging} ]] \
+        || fail 'Sensitive-file replacement staging was not created.'
+    active_file_plan="${active_file_staging}/plan.json"
+    [[ -f ${active_file_plan} && -f ${active_file_staging}/aria2.input &&
+        -f ${active_file_staging}/manifest.json ]] \
+        || fail 'Sensitive-file replacement metadata was not initialized.'
+
+    active_file_replacement="${active_file_plan}.foreign-replacement"
+    printf '%s\n' 'foreign allowlisted-name replacement must survive cleanup' \
+        >"${active_file_replacement}"
+    chmod 600 -- "${active_file_replacement}"
+    mv -Tf -- "${active_file_replacement}" "${active_file_plan}"
+    kill -TERM -- "${active_file_pid}" 2>/dev/null \
+        || fail 'Unable to terminate sensitive-file replacement worker.'
+    active_file_status=0
+    wait "${active_file_pid}" 2>/dev/null || active_file_status=$?
+
+    assert_equals '143' "${active_file_status}" \
+        'private staging sensitive-file replacement TERM exit status'
+    wait_for_file "${active_file_termination_marker}" 10 \
+        'private staging sensitive-file replacement receives TERM'
+    assert_file_contains "${active_file_plan}" \
+        'foreign allowlisted-name replacement must survive cleanup' \
+        'identity-changed private plan replacement'
+    [[ ! -e ${active_file_staging}/cookies.txt &&
+        ! -e ${active_file_staging}/aria2.input &&
+        ! -e ${active_file_staging}/manifest.json ]] \
+        || fail 'Sensitive-file replacement cleanup retained transaction secrets.'
+    assert_file_contains "${active_file_log}" \
+        'preserving ambiguous active private aria2 staging directory' \
+        'sensitive-file replacement preservation diagnostic'
+    assert_no_test_processes \
+        'private staging sensitive-file replacement left worker processes'
+    rm -rf -- "${active_file_staging}"
+    rm -f -- \
+        "${active_file_started}" \
+        "${active_file_result}" \
+        "${active_file_log}" \
+        "${active_file_termination_marker}"
+
+    # Mutation tests: even after aria2 and commit report success, cleanup may
+    # remove only the exact sensitive inode recorded at creation time.
+    for successful_mutation_name in "${successful_mutation_cases[@]}"; do
+        case ${successful_mutation_name} in
+            input)
+                successful_mutation_variable=MOCK_REPLACE_ARIA2_INPUT_BEFORE_EXIT
+                successful_mutation_file=aria2.input
+                successful_mutation_diagnostic='unable to remove the private aria2 input file'
+                ;;
+            manifest)
+                successful_mutation_variable=MOCK_REPLACE_ARIA2_MANIFEST_BEFORE_EXIT
+                successful_mutation_file=manifest.json
+                successful_mutation_diagnostic='unable to remove the private aria2 transfer manifest'
+                ;;
+            *) fail "Unknown successful mutation case: ${successful_mutation_name}" ;;
+        esac
+        prepare_argument_log \
+            "private-staging-success-${successful_mutation_name}-replacement"
+        assert_status 13 \
+            "successful transfer preserves replaced aria2 ${successful_mutation_name}" \
+            env "${successful_mutation_variable}=1" \
+            "${PROJECT_DIR}/download-video.sh" \
+            --output-dir "${OUTPUT_DIR}" \
+            --mode audio \
+            -- "https://example.com/watch?v=successful-${successful_mutation_name}-replacement"
+        assert_text_contains "${ASSERT_OUTPUT}" \
+            "${successful_mutation_diagnostic}" \
+            "replaced aria2 ${successful_mutation_name} removal diagnostic"
+        successful_mutation_staging=$(find "${OUTPUT_DIR}" \
+            -mindepth 1 -maxdepth 1 -type d \
+            -name '.yt-dlp-aria2.????????' -print -quit 2>/dev/null || true)
+        [[ -n ${successful_mutation_staging} &&
+            -f ${successful_mutation_staging}/${successful_mutation_file} ]] \
+            || fail "Replaced aria2 ${successful_mutation_name} inode was removed."
+        [[ ! -e ${successful_mutation_staging}/plan.json &&
+            ! -e ${successful_mutation_staging}/cookies.txt ]] \
+            || fail "Replaced aria2 ${successful_mutation_name} retained other secrets."
+        assert_text_contains "${ASSERT_OUTPUT}" \
+            'preserving ambiguous active private aria2 staging directory' \
+            "replaced aria2 ${successful_mutation_name} preservation diagnostic"
+        rm -rf -- "${successful_mutation_staging}"
+        rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    done
 
     # The conservative replacement protection must not turn ordinary owned
     # staging into a leak: a normal successful transaction still cleans it.
@@ -2674,9 +3466,24 @@ test_mock_engine_private_staging() {
 
     printf '%s\n' 'yt-dlp-aria2-private-staging-v1' \
         >"${ambiguous_marked}/.yt-dlp-aria2-owner-v1"
+    printf '%s\n' '{"url":"https://secret.example/private"}' \
+        >"${ambiguous_marked}/plan.json"
+    printf '%s\n' '# Netscape HTTP Cookie File' \
+        >"${ambiguous_marked}/cookies.txt"
+    printf '%s\n' \
+        'https://secret.example/signed?token=do-not-retain' \
+        '  header=Authorization: Bearer do-not-retain' \
+        >"${ambiguous_marked}/aria2.input"
+    printf '%s\n' \
+        '{"output_dir":"/private/output","items":[]}' \
+        >"${ambiguous_marked}/manifest.json"
     printf '%s\n' 'foreign payload' >"${ambiguous_marked}/foreign.txt"
     chmod 600 -- \
         "${ambiguous_marked}/.yt-dlp-aria2-owner-v1" \
+        "${ambiguous_marked}/plan.json" \
+        "${ambiguous_marked}/cookies.txt" \
+        "${ambiguous_marked}/aria2.input" \
+        "${ambiguous_marked}/manifest.json" \
         "${ambiguous_marked}/foreign.txt"
 
     printf '%s\n' 'yt-dlp-aria2-private-staging-v1' \
@@ -2703,6 +3510,13 @@ test_mock_engine_private_staging() {
         || fail 'Exact legacy staging fingerprint was not recovered.'
     [[ -d ${ambiguous_marked} ]] \
         || fail 'Ambiguous marked staging was deleted.'
+    [[ ! -e ${ambiguous_marked}/plan.json &&
+        ! -e ${ambiguous_marked}/cookies.txt &&
+        ! -e ${ambiguous_marked}/aria2.input &&
+        ! -e ${ambiguous_marked}/manifest.json ]] \
+        || fail 'Ambiguous marked staging retained authenticated transfer metadata.'
+    [[ -f ${ambiguous_marked}/foreign.txt ]] \
+        || fail 'Ambiguous marked staging recovery removed an unknown artifact.'
     [[ -d ${invalid_mode} ]] \
         || fail 'Invalid-mode staging was deleted.'
     [[ -L ${symlink_candidate} && -f ${staging_symlink_target}/sentinel ]] \
@@ -2938,8 +3752,15 @@ test_mock_gui_profiles() {
 }
 
 test_mock_gui_progress_completion() {
+    local completion_error_log_dir completion_error_question_log
+    local completion_error_state completion_timeout_log_dir
+    local completion_timeout_question_log completion_timeout_state
     local config_file current_log_count late_progress_capture
-    local progress_check_status
+    local new_download_bundle new_download_config new_download_marker
+    local new_download_state new_download_tmp progress_check_status
+    local renamed_gui
+    local -a completion_error_logs=() completion_timeout_logs=()
+    local -a new_download_logs=()
 
     # Regression guard: post-processing progress must never regress.
     prepare_argument_log 'gui-late-progress'
@@ -2976,12 +3797,117 @@ test_mock_gui_progress_completion() {
     assert_no_retained_log_staging \
         "${XDG_STATE_HOME}/yt-dlp-aria2-downloader" \
         'confirmed successful GUI download'
+
+    # A timeout after successful publication must keep the live diagnostic
+    # until it has been sanitized and offered through the shared View log UI.
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    completion_timeout_state="${TEST_ROOT}/completion-timeout-state"
+    completion_timeout_log_dir="${completion_timeout_state}/yt-dlp-aria2-downloader"
+    completion_timeout_question_log="${TEST_ROOT}/completion-timeout-question.bin"
+    rm -f -- "${completion_timeout_question_log}"
+    prepare_argument_log 'gui-completion-timeout'
+    assert_status 0 \
+        'completion-dialog timeout preserves the successful download' \
+        env XDG_STATE_HOME="${completion_timeout_state}" \
+        MOCK_COMPLETION_QUESTION_STATUS=5 \
+        MOCK_QUESTION_ARGS_LOG="${completion_timeout_question_log}" \
+        "${GUI_UNDER_TEST}"
+    assert_diagnostic_question "${completion_timeout_question_log}" \
+        'The completion dialog timed out.' \
+        'completion-timeout retained diagnostic'
+    shopt -s nullglob
+    completion_timeout_logs=("${completion_timeout_log_dir}"/download-*.log)
+    shopt -u nullglob
+    assert_equals '1' "${#completion_timeout_logs[@]}" \
+        'completion timeout retains one sanitized log'
+    assert_path_mode "${completion_timeout_logs[0]}" 600 \
+        'completion-timeout retained-log mode'
+    assert_retained_log_identity_footer "${completion_timeout_logs[0]}" \
+        'completion-timeout retained diagnostic'
+    assert_no_retained_log_staging "${completion_timeout_log_dir}" \
+        'completion-timeout retained diagnostic'
+
+    # A technical failure of the completion dialog exposes its bounded Zenity
+    # diagnostic and still retains the completed session log during EXIT cleanup.
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    completion_error_state="${TEST_ROOT}/completion-error-state"
+    completion_error_log_dir="${completion_error_state}/yt-dlp-aria2-downloader"
+    completion_error_question_log="${TEST_ROOT}/completion-error-question.bin"
+    rm -f -- "${completion_error_question_log}"
+    prepare_argument_log 'gui-completion-error'
+    assert_status 0 \
+        'completion-dialog error preserves the successful download' \
+        env XDG_STATE_HOME="${completion_error_state}" \
+        MOCK_COMPLETION_QUESTION_STATUS=42 \
+        MOCK_COMPLETION_QUESTION_ERROR='Simulated completion dialog failure.' \
+        MOCK_QUESTION_ARGS_LOG="${completion_error_question_log}" \
+        "${GUI_UNDER_TEST}"
+    assert_diagnostic_question "${completion_error_question_log}" \
+        'Zenity could not display the completion dialog.' \
+        'completion-dialog technical diagnostic'
+    shopt -s nullglob
+    completion_error_logs=("${completion_error_log_dir}"/download-*.log)
+    shopt -u nullglob
+    assert_equals '1' "${#completion_error_logs[@]}" \
+        'completion error retains one sanitized session log'
+    assert_path_mode "${completion_error_logs[0]}" 600 \
+        'completion-error retained-log mode'
+    assert_retained_log_identity_footer "${completion_error_logs[0]}" \
+        'completion-error retained diagnostic'
+    assert_no_retained_log_staging "${completion_error_log_dir}" \
+        'completion-error retained diagnostic'
+
+    # New download re-execs the resolved source path. Exercise a deliberately
+    # renamed installation and cancel the second lifecycle at its URL dialog.
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    new_download_bundle="${TEST_ROOT}/renamed-gui-bundle"
+    new_download_config="${TEST_ROOT}/renamed-gui-config"
+    new_download_marker="${TEST_ROOT}/renamed-gui-second-cycle"
+    new_download_state="${TEST_ROOT}/renamed-gui-state"
+    new_download_tmp="${TEST_ROOT}/renamed-gui-tmp"
+    renamed_gui="${new_download_bundle}/renamed-downloader-gui"
+    mkdir -p -- \
+        "${new_download_bundle}" \
+        "${new_download_config}" \
+        "${new_download_state}" \
+        "${new_download_tmp}"
+    install -m 0755 -- \
+        "${PROJECT_DIR}/download-video-gui.sh" "${renamed_gui}"
+    install -m 0755 -- \
+        "${PROJECT_DIR}/download-video.sh" \
+        "${PROJECT_DIR}/progress-monitor.sh" \
+        "${new_download_bundle}/"
+    install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
+        "${new_download_bundle}/private-aria2-plan.py"
+    prepare_argument_log 'gui-renamed-new-download'
+    assert_status 0 'New download re-execs the resolved renamed GUI path' \
+        env MOCK_GUI_REAL="${renamed_gui}" \
+        XDG_CONFIG_HOME="${new_download_config}" \
+        XDG_STATE_HOME="${new_download_state}" \
+        TMPDIR="${new_download_tmp}" \
+        MOCK_NEW_DOWNLOAD_ONCE_MARKER="${new_download_marker}" \
+        MOCK_CANCEL_ENTRY_AFTER_NEW_DOWNLOAD=1 \
+        "${GUI_UNDER_TEST}"
+    [[ -f ${new_download_marker} ]] \
+        || fail 'The renamed GUI never entered its second download lifecycle.'
+    assert_directory_empty "${new_download_tmp}" \
+        'renamed New download cleanup left temporary state'
+    shopt -s nullglob
+    new_download_logs=(
+        "${new_download_state}/yt-dlp-aria2-downloader"/download-*.log
+    )
+    shopt -u nullglob
+    assert_equals '0' "${#new_download_logs[@]}" \
+        'renamed New download retains no successful-session log'
+    assert_no_test_processes 'renamed New download left GUI descendants'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 }
 
 test_mock_gui_config_recovery() {
     local config_file config_line_count config_padding_bytes config_prefix_bytes
     local config_profile_suffix=$'\nprofile=audio\n'
     local config_size line_number relative_config_dir relative_state_dir
+    local special_file_timeout_seconds=10
 
     # Scenario group: legacy and malformed configuration recovery.
     config_file="${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf"
@@ -3024,8 +3950,10 @@ EOF_BAD_CONFIG
     rm -f -- "${config_file}" "${OUTPUT_DIR}/Mock media [abc123].webm"
     mkfifo -- "${config_file}"
     prepare_argument_log 'config-fifo-fallback'
+    # Keep the read non-blocking contract bounded while leaving enough startup
+    # headroom for the four-way full-suite and CI stress profiles.
     assert_status 0 'configuration FIFO is ignored without blocking the GUI' \
-        env MOCK_GUI_SCENARIO_TIMEOUT_SECONDS=3 \
+        env MOCK_GUI_SCENARIO_TIMEOUT_SECONDS="${special_file_timeout_seconds}" \
         MOCK_USE_DEFAULT_PROFILE=1 \
         "${GUI_UNDER_TEST}"
     [[ -f ${config_file} && ! -L ${config_file} ]] \
@@ -3037,7 +3965,7 @@ EOF_BAD_CONFIG
     ln -s -- /dev/zero "${config_file}"
     prepare_argument_log 'config-device-symlink-fallback'
     assert_status 0 'configuration device symlink is ignored without blocking the GUI' \
-        env MOCK_GUI_SCENARIO_TIMEOUT_SECONDS=3 \
+        env MOCK_GUI_SCENARIO_TIMEOUT_SECONDS="${special_file_timeout_seconds}" \
         MOCK_USE_DEFAULT_PROFILE=1 \
         "${GUI_UNDER_TEST}"
     [[ -f ${config_file} && ! -L ${config_file} ]] \
@@ -3128,8 +4056,10 @@ EOF_BAD_CONFIG
 test_mock_gui_file_selection() {
     local argument file_selection_args_log file_selection_calls
     local filename_attempts oversized_capture oversized_diagnostic
+    local missing_home missing_home_args_log missing_home_config
     local oversized_question_log oversized_size oversized_text_info_log
-    local -a file_selection_arguments oversized_text_info_arguments
+    local -a file_selection_arguments missing_home_arguments
+    local -a oversized_text_info_arguments
 
     # Scenario: file chooser fallback after a GTK/Zenity initial-directory failure.
     file_selection_args_log="${TEST_ROOT}/file-selection-args.bin"
@@ -3159,6 +4089,27 @@ test_mock_gui_file_selection() {
     done
     assert_equals '2' "${file_selection_calls}" 'file chooser fallback call count'
     assert_equals '1' "${filename_attempts}" 'preselected file chooser attempt count'
+
+    # If HOME itself does not exist and no configured download directory is
+    # usable, the chooser must receive an existing absolute fallback.
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    missing_home="${TEST_ROOT}/missing-default-output-home"
+    missing_home_args_log="${TEST_ROOT}/missing-home-file-selection.bin"
+    missing_home_config="${TEST_ROOT}/missing-home-config"
+    [[ ! -e ${missing_home} ]] \
+        || fail 'The missing-HOME output fallback fixture already exists.'
+    : >"${missing_home_args_log}"
+    prepare_argument_log 'missing-home-default-output-directory'
+    assert_status 0 'nonexistent HOME uses an existing chooser fallback' \
+        env HOME="${missing_home}" \
+        XDG_CONFIG_HOME="${missing_home_config}" \
+        MOCK_FILE_SELECTION_ARGS_LOG="${missing_home_args_log}" \
+        "${GUI_UNDER_TEST}"
+    # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+    missing_home_arguments=()
+    read_arguments "${missing_home_args_log}" missing_home_arguments
+    assert_array_contains missing_home_arguments '--filename=/' \
+        'nonexistent HOME file-chooser fallback'
 
     # Two bounded Zenity stderr captures can exceed the single diagnostic
     # limit when the chooser fallback also fails. Redact before retaining only
@@ -3608,7 +4559,14 @@ test_mock_gui_state_initialization() {
     local blocked_state_home home_error_capture home_question_log
     local home_text_info_log hostile_error_capture hostile_old_log
     local hostile_question_log hostile_state_home hostile_state_target
-    local hostile_text_info_log logs_after logs_before state_error_capture
+    local hostile_text_info_log logs_after logs_before mktemp_probe_bin
+    local mktemp_probe_log original_directory real_mktemp relative_tmp_cwd
+    local relative_tmp_dir state_error_capture sticky_tmp_dir
+    local unsafe_home_error_capture unsafe_home_parent unsafe_home_path
+    local unsafe_tmp_dir unsafe_tmp_parent unsafe_xdg_config
+    local unsafe_xdg_parent unsafe_xdg_state
+    # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+    local -a mktemp_probe_arguments=()
 
     # Initialization failures must be visible when the GUI is launched without a terminal.
     home_error_capture="${TEST_ROOT}/home-init-error.txt"
@@ -3651,6 +4609,141 @@ test_mock_gui_state_initialization() {
         'relative HOME creates no retained diagnostic'
     [[ ! -s ${home_question_log} && ! -s ${home_text_info_log} ]] \
         || fail 'Relative HOME incorrectly exposed a diagnostic-log action.'
+
+    # TMPDIR is an inherited path input. A relative value must not redirect
+    # private Zenity captures into the launcher's current working directory.
+    mktemp_probe_bin="${TEST_ROOT}/relative-tmpdir-bin"
+    mktemp_probe_log="${TEST_ROOT}/relative-tmpdir-mktemp.bin"
+    relative_tmp_cwd="${TEST_ROOT}/relative-tmpdir-cwd"
+    relative_tmp_dir="${relative_tmp_cwd}/relative-tmp"
+    real_mktemp=$(command -v mktemp) \
+        || fail 'Unable to resolve the real mktemp for TMPDIR coverage.'
+    mkdir -p -- "${mktemp_probe_bin}" "${relative_tmp_dir}"
+    cat >"${mktemp_probe_bin}/mktemp" <<'EOF_RELATIVE_TMPDIR_MKTEMP'
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : mktemp
+# Purpose     : Record GUI temporary-directory routing for integration tests.
+# ==============================================================================
+
+set -euo pipefail
+
+: "${MOCK_MKTEMP_ARGUMENT_LOG:?}"
+: "${MOCK_REAL_MKTEMP:?}"
+printf '%s\0' "$@" >>"${MOCK_MKTEMP_ARGUMENT_LOG}"
+exec "${MOCK_REAL_MKTEMP}" "$@"
+EOF_RELATIVE_TMPDIR_MKTEMP
+    chmod 0755 -- "${mktemp_probe_bin}/mktemp"
+    : >"${mktemp_probe_log}"
+    original_directory=${PWD}
+    cd -- "${relative_tmp_cwd}"
+    prepare_argument_log 'relative-tmpdir-fallback'
+    assert_status 0 'relative TMPDIR falls back outside the launcher cwd' \
+        env PATH="${mktemp_probe_bin}:${PATH}" \
+        TMPDIR='relative-tmp' \
+        MOCK_REAL_MKTEMP="${real_mktemp}" \
+        MOCK_MKTEMP_ARGUMENT_LOG="${mktemp_probe_log}" \
+        MOCK_ZENITY_ENTRY_STATUS=1 \
+        "${GUI_UNDER_TEST}"
+    cd -- "${original_directory}"
+    read_arguments "${mktemp_probe_log}" mktemp_probe_arguments
+    assert_array_contains mktemp_probe_arguments '--tmpdir=/tmp' \
+        'relative TMPDIR absolute fallback'
+    assert_array_not_contains mktemp_probe_arguments '--tmpdir=relative-tmp' \
+        'relative TMPDIR is never passed to mktemp'
+    assert_directory_empty "${relative_tmp_dir}" \
+        'relative TMPDIR launcher directory'
+
+    # An absolute TMPDIR remains unsafe when any physical ancestor grants
+    # shared writes without sticky-bit rename protection.
+    unsafe_tmp_parent="${TEST_ROOT}/unsafe-tmpdir-parent"
+    unsafe_tmp_dir="${unsafe_tmp_parent}/private-tmp"
+    mkdir -p -- "${unsafe_tmp_dir}"
+    chmod 0777 -- "${unsafe_tmp_parent}"
+    chmod 0700 -- "${unsafe_tmp_dir}"
+    : >"${mktemp_probe_log}"
+    prepare_argument_log 'unsafe-tmpdir-fallback'
+    assert_status 0 'non-sticky shared TMPDIR falls back to safe /tmp' \
+        env PATH="${mktemp_probe_bin}:${PATH}" \
+        TMPDIR="${unsafe_tmp_dir}" \
+        MOCK_REAL_MKTEMP="${real_mktemp}" \
+        MOCK_MKTEMP_ARGUMENT_LOG="${mktemp_probe_log}" \
+        MOCK_ZENITY_ENTRY_STATUS=1 \
+        "${GUI_UNDER_TEST}"
+    read_arguments "${mktemp_probe_log}" mktemp_probe_arguments
+    assert_array_contains mktemp_probe_arguments '--tmpdir=/tmp' \
+        'unsafe TMPDIR safe fallback'
+    assert_array_not_contains mktemp_probe_arguments \
+        "--tmpdir=${unsafe_tmp_dir}" \
+        'unsafe TMPDIR is never passed to mktemp'
+    assert_directory_empty "${unsafe_tmp_dir}" \
+        'unsafe TMPDIR receives no private GUI state'
+
+    sticky_tmp_dir="${TEST_ROOT}/sticky-tmpdir"
+    mkdir -p -- "${sticky_tmp_dir}"
+    chmod 1777 -- "${sticky_tmp_dir}"
+    : >"${mktemp_probe_log}"
+    prepare_argument_log 'sticky-tmpdir-accepted'
+    assert_status 0 'current-user sticky TMPDIR remains supported' \
+        env PATH="${mktemp_probe_bin}:${PATH}" \
+        TMPDIR="${sticky_tmp_dir}" \
+        MOCK_REAL_MKTEMP="${real_mktemp}" \
+        MOCK_MKTEMP_ARGUMENT_LOG="${mktemp_probe_log}" \
+        MOCK_ZENITY_ENTRY_STATUS=1 \
+        "${GUI_UNDER_TEST}"
+    read_arguments "${mktemp_probe_log}" mktemp_probe_arguments
+    assert_array_contains mktemp_probe_arguments \
+        "--tmpdir=${sticky_tmp_dir}" \
+        'sticky TMPDIR is passed to mktemp'
+    assert_directory_empty "${sticky_tmp_dir}" \
+        'sticky TMPDIR private state is cleaned'
+
+    # Unsafe absolute XDG roots fall back to independently validated HOME
+    # roots and never receive configuration, logs, or staging paths.
+    unsafe_xdg_parent="${TEST_ROOT}/unsafe-xdg-parent"
+    unsafe_xdg_config="${unsafe_xdg_parent}/config"
+    unsafe_xdg_state="${unsafe_xdg_parent}/state"
+    mkdir -p -- "${unsafe_xdg_parent}"
+    chmod 0777 -- "${unsafe_xdg_parent}"
+    rm -rf -- "${unsafe_xdg_config}" "${unsafe_xdg_state}"
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    prepare_argument_log 'unsafe-xdg-home-fallback'
+    assert_status 0 'unsafe XDG roots fall back to safe HOME roots' \
+        env XDG_CONFIG_HOME="${unsafe_xdg_config}" \
+        XDG_STATE_HOME="${unsafe_xdg_state}" \
+        MOCK_USE_DEFAULT_PROFILE=1 \
+        "${GUI_UNDER_TEST}"
+    [[ ! -e ${unsafe_xdg_config} && ! -e ${unsafe_xdg_state} ]] \
+        || fail 'Unsafe XDG roots received private application state.'
+    assert_file_has_line \
+        "${HOME}/.config/yt-dlp-aria2-downloader/gui.conf" \
+        "output_dir=${OUTPUT_DIR}" \
+        'unsafe XDG roots use the safe HOME configuration fallback'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    # A fallback under HOME is not an escape hatch: when its existing parent
+    # is shared and non-sticky, startup fails before creating private state.
+    unsafe_home_parent="${TEST_ROOT}/unsafe-home-parent"
+    unsafe_home_path="${unsafe_home_parent}/home"
+    unsafe_home_error_capture="${TEST_ROOT}/unsafe-home-error.txt"
+    mkdir -p -- "${unsafe_home_parent}"
+    chmod 0777 -- "${unsafe_home_parent}"
+    rm -rf -- "${unsafe_home_path}"
+    rm -f -- "${unsafe_home_error_capture}"
+    prepare_argument_log 'unsafe-home-fallback-refused'
+    assert_status 1 'unsafe HOME fallback fails closed' \
+        env HOME="${unsafe_home_path}" \
+        XDG_CONFIG_HOME='relative-config-home' \
+        XDG_STATE_HOME='relative-state-home' \
+        MOCK_ERROR_CAPTURE="${unsafe_home_error_capture}" \
+        "${GUI_UNDER_TEST}"
+    assert_file_contains "${unsafe_home_error_capture}" \
+        'No safe application configuration directory is available.' \
+        'unsafe HOME fallback diagnostic'
+    [[ ! -e ${unsafe_home_path} ]] \
+        || fail 'Unsafe HOME fallback created private application state.'
 
     blocked_state_home="${TEST_ROOT}/blocked-state-home"
     : >"${blocked_state_home}"
@@ -3786,6 +4879,87 @@ test_mock_signal_cli_download() {
     assert_equals '143' "${cli_engine_status}" 'CLI TERM exit status'
     wait_for_file "${cli_termination_marker}" 10 'CLI child process receives TERM'
     assert_no_test_processes 'CLI signal forwarding left worker processes'
+}
+
+test_mock_signal_cli_leader_exit_descendant() {
+    local cli_engine_pid cli_engine_status descendant_pid descendant_signal_log
+    local descendant_started_marker descendant_termination_marker
+
+    # Regression guard: keep the authenticated session leader alive after the
+    # primary command exits while a same-session descendant remains. The
+    # retained leader prevents PGID reuse and authorizes a later wrapper signal.
+    descendant_started_marker="${TEST_ROOT}/leader-exit-descendant-started"
+    descendant_termination_marker="${TEST_ROOT}/leader-exit-descendant-terminated"
+    descendant_signal_log="${TEST_ROOT}/leader-exit-descendant.log"
+    rm -f -- \
+        "${descendant_started_marker}" \
+        "${descendant_termination_marker}" \
+        "${descendant_signal_log}"
+    prepare_argument_log 'cli-leader-exit-descendant'
+    env MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_EXIT_WITH_LIVE_DESCENDANT=1 \
+        MOCK_DESCENDANT_STARTED_MARKER="${descendant_started_marker}" \
+        MOCK_DESCENDANT_TERMINATION_MARKER="${descendant_termination_marker}" \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=leader-exit-descendant' \
+        >"${descendant_signal_log}" 2>&1 &
+    cli_engine_pid=$!
+    wait_for_file "${descendant_started_marker}" 10 \
+        'leader-exit descendant startup'
+    IFS= read -r descendant_pid <"${descendant_started_marker}"
+    [[ ${descendant_pid} =~ ^[1-9][0-9]*$ ]] \
+        || fail "Invalid leader-exit descendant PID: ${descendant_pid}"
+    sleep 0.2
+    kill -0 -- "${descendant_pid}" 2>/dev/null \
+        || fail 'The leader-exit test descendant did not remain alive.'
+    kill -0 -- "${cli_engine_pid}" 2>/dev/null \
+        || fail 'The CLI released its worker group before quiescence.'
+    kill -TERM -- "${cli_engine_pid}"
+    cli_engine_status=0
+    wait "${cli_engine_pid}" || cli_engine_status=$?
+    assert_equals 143 "${cli_engine_status}" \
+        'CLI leader-exit descendant TERM status'
+    wait_for_file "${descendant_termination_marker}" 10 \
+        'leader-exit descendant receives TERM'
+    assert_no_test_processes \
+        'leader-exit descendant signal left worker processes'
+
+    # A signal-resistant descendant requires the repeated request to KILL the
+    # still-authenticated group immediately; the first TERM must not destroy
+    # the sentinel and leave the numeric PGID unauthenticated.
+    rm -f -- \
+        "${descendant_started_marker}" \
+        "${descendant_termination_marker}" \
+        "${descendant_signal_log}"
+    prepare_argument_log 'cli-leader-exit-resistant-descendant'
+    env MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_EXIT_WITH_LIVE_DESCENDANT=1 \
+        MOCK_DESCENDANT_IGNORE_TERM=1 \
+        MOCK_DESCENDANT_STARTED_MARKER="${descendant_started_marker}" \
+        MOCK_DESCENDANT_TERMINATION_MARKER="${descendant_termination_marker}" \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=leader-exit-resistant-descendant' \
+        >"${descendant_signal_log}" 2>&1 &
+    cli_engine_pid=$!
+    wait_for_file "${descendant_started_marker}" 10 \
+        'leader-exit resistant descendant startup'
+    IFS= read -r descendant_pid <"${descendant_started_marker}"
+    [[ ${descendant_pid} =~ ^[1-9][0-9]*$ ]] \
+        || fail "Invalid resistant descendant PID: ${descendant_pid}"
+    kill -TERM -- "${cli_engine_pid}"
+    sleep 0.05
+    kill -TERM -- "${cli_engine_pid}"
+    cli_engine_status=0
+    wait "${cli_engine_pid}" || cli_engine_status=$?
+    assert_equals 143 "${cli_engine_status}" \
+        'CLI resistant descendant repeated-TERM status'
+    if kill -0 -- "${descendant_pid}" 2>/dev/null; then
+        fail 'Repeated TERM left the signal-resistant descendant alive.'
+    fi
+    assert_no_test_processes \
+        'resistant descendant escalation left worker processes'
 }
 
 test_mock_signal_cli_worker_registration() {
@@ -4466,6 +5640,44 @@ test_mock_signal_gui_worker_registration() {
         'worker pre-registration TERM left GUI descendants'
 }
 
+test_mock_signal_gui_group_identity_after_leader_exit() {
+    local child_ready_marker="${TEST_ROOT}/gui-group-child-ready"
+    local gui_source_copy="${TEST_ROOT}/download-video-gui-group-source-only.sh"
+    local leader_release_marker="${TEST_ROOT}/gui-group-leader-release"
+    local signal_log="${TEST_ROOT}/gui-group-descendant-signal.log"
+    local termination_marker="${TEST_ROOT}/gui-group-descendant-terminated"
+    local worker_identity="${TEST_ROOT}/gui-group-descendant"
+
+    # Regression guard: after Bash reaps the original session leader, one
+    # inherited-token descendant must keep the group authenticated for TERM and
+    # bounded reaping without granting authority to a recycled numeric PGID.
+    rm -f -- \
+        "${child_ready_marker}" \
+        "${leader_release_marker}" \
+        "${signal_log}" \
+        "${termination_marker}"
+    sed '$d' "${PROJECT_DIR}/download-video-gui.sh" >"${gui_source_copy}"
+    chmod 0600 -- "${gui_source_copy}"
+    printf '%s\n' 'Mock scenario: gui-group-identity-after-leader-exit'
+
+    assert_status 0 \
+        'token-authenticated descendants retain worker-group authority' \
+        timeout --signal=TERM --kill-after=2s 8s \
+        env MOCK_GUI_SOURCE_COPY="${gui_source_copy}" \
+        MOCK_GROUP_CHILD_UNDER_TEST="${GUI_GROUP_CHILD_UNDER_TEST}" \
+        MOCK_GROUP_CHILD_READY_MARKER="${child_ready_marker}" \
+        MOCK_GROUP_LEADER_RELEASE_MARKER="${leader_release_marker}" \
+        MOCK_GROUP_TERMINATION_MARKER="${termination_marker}" \
+        MOCK_WORKER_IDENTITY="${worker_identity}" \
+        "${GUI_GROUP_DESCENDANT_UNDER_TEST}"
+    wait_for_file "${termination_marker}" 5 \
+        'authenticated descendant receives TERM after leader exit'
+    assert_file_has_line "${termination_marker}" TERM \
+        'descendant termination signal after leader exit'
+    assert_no_test_processes \
+        'leader-exit group authentication left GUI descendants'
+}
+
 test_mock_signal_gui_foreground_group_registration() {
     local continue_marker gui_pid gui_status index signal_log signal_name
     local process_fields
@@ -4616,7 +5828,15 @@ test_mock_signal_gui_blocked_progress() {
 }
 
 test_mock_signal_gui_cancellation() {
+    local cancel_info_log cancel_monitor_bundle cancel_monitor_question_log
+    local cancel_monitor_termination_marker cancel_monitor_worker_marker
+    local published_cancel_info_log published_cancel_marker
+    local published_cancel_question_log
     local pgid_delay_marker termination_marker worker_start_marker
+    # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+    local -a cancel_info_arguments=()
+    # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
+    local -a published_cancel_question_arguments=()
 
     # Scenario: user cancellation terminates the complete process group.
     termination_marker="${TEST_ROOT}/terminated"
@@ -4633,6 +5853,107 @@ test_mock_signal_gui_cancellation() {
         "${GUI_UNDER_TEST}"
     wait_for_file "${termination_marker}" 10 'worker group receives TERM'
     assert_no_test_processes 'ordinary cancellation left worker processes'
+
+    # Closing Zenity also closes the progress FIFO. A monitor terminated by the
+    # resulting SIGPIPE must not turn an explicit user cancellation into a
+    # technical progress-monitor failure.
+    cancel_monitor_bundle="${TEST_ROOT}/cancel-sigpipe-monitor-bundle"
+    mkdir -p -- "${cancel_monitor_bundle}"
+    install -m 0755 -- \
+        "${PROJECT_DIR}/download-video-gui.sh" \
+        "${PROJECT_DIR}/download-video.sh" \
+        "${cancel_monitor_bundle}/"
+    install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
+        "${cancel_monitor_bundle}/private-aria2-plan.py"
+    cat >"${cancel_monitor_bundle}/progress-monitor.sh" <<'EOF_CANCEL_SIGPIPE_MONITOR'
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : progress-monitor.sh
+# Purpose     : Simulate the expected monitor status after Zenity cancellation.
+# ==============================================================================
+
+set -euo pipefail
+
+printf '%s\n' '0'
+exit 141
+EOF_CANCEL_SIGPIPE_MONITOR
+    chmod 0755 -- "${cancel_monitor_bundle}/progress-monitor.sh"
+    cancel_info_log="${TEST_ROOT}/cancel-sigpipe-info.bin"
+    cancel_monitor_question_log="${TEST_ROOT}/cancel-sigpipe-question.bin"
+    cancel_monitor_termination_marker="${TEST_ROOT}/cancel-sigpipe-terminated"
+    cancel_monitor_worker_marker="${TEST_ROOT}/cancel-sigpipe-worker-started"
+    rm -f -- \
+        "${cancel_info_log}" \
+        "${cancel_monitor_question_log}" \
+        "${cancel_monitor_termination_marker}" \
+        "${cancel_monitor_worker_marker}"
+    prepare_argument_log 'cancel-with-monitor-sigpipe'
+    assert_status_split 130 \
+        'monitor SIGPIPE does not mask an explicit cancellation' \
+        env MOCK_GUI_REAL="${cancel_monitor_bundle}/download-video-gui.sh" \
+        MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_LONG_DOWNLOAD=1 MOCK_CANCEL=1 \
+        MOCK_ZENITY_WAIT_FOR_WORKER_START=1 \
+        MOCK_STARTED_MARKER="${cancel_monitor_worker_marker}" \
+        MOCK_TERMINATION_MARKER="${cancel_monitor_termination_marker}" \
+        MOCK_INFO_ARGS_LOG="${cancel_info_log}" \
+        MOCK_QUESTION_ARGS_LOG="${cancel_monitor_question_log}" \
+        "${GUI_UNDER_TEST}"
+    wait_for_file "${cancel_monitor_termination_marker}" 10 \
+        'monitor-SIGPIPE cancellation reaches the worker group'
+    read_arguments "${cancel_info_log}" cancel_info_arguments
+    assert_array_contains cancel_info_arguments '--info' \
+        'monitor-SIGPIPE cancellation uses an information dialog'
+    assert_array_contains cancel_info_arguments \
+        '--text=The download was canceled.' \
+        'monitor-SIGPIPE cancellation message'
+    assert_array_contains cancel_info_arguments '--ok-label=Close' \
+        'monitor-SIGPIPE cancellation Close action'
+    [[ ! -s ${cancel_monitor_question_log} ]] \
+        || fail 'Monitor SIGPIPE cancellation opened a failure diagnostic.'
+    assert_text_not_contains "${ASSERT_STDERR}" \
+        'The progress monitor failed' \
+        'monitor-SIGPIPE cancellation diagnostic'
+    assert_no_test_processes \
+        'monitor-SIGPIPE cancellation left worker processes'
+
+    # The private result record is the engine's atomic success boundary. A
+    # cancel that arrives after its no-overwrite publication must not report a
+    # contradiction while the confirmed media and result already exist.
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    published_cancel_marker="${TEST_ROOT}/published-result-before-cancel"
+    published_cancel_info_log="${TEST_ROOT}/published-result-cancel-info.bin"
+    published_cancel_question_log="${TEST_ROOT}/published-result-cancel-question.bin"
+    rm -f -- \
+        "${published_cancel_marker}" \
+        "${published_cancel_info_log}" \
+        "${published_cancel_question_log}"
+    prepare_argument_log 'cancel-after-result-publication'
+    assert_status 0 'confirmed result publication wins the cancel race' \
+        env MOCK_BLOCK_AFTER_RESULT_PUBLICATION=1 \
+        MOCK_RESULT_PUBLICATION_MARKER="${published_cancel_marker}" \
+        MOCK_CANCEL=1 MOCK_ZENITY_WAIT_FOR_WORKER_START=1 \
+        MOCK_STARTED_MARKER="${published_cancel_marker}" \
+        MOCK_INFO_ARGS_LOG="${published_cancel_info_log}" \
+        MOCK_QUESTION_ARGS_LOG="${published_cancel_question_log}" \
+        "${GUI_UNDER_TEST}"
+    wait_for_file "${published_cancel_marker}" 10 \
+        'result record is published before cancellation'
+    [[ ! -s ${published_cancel_info_log} ]] \
+        || fail 'A confirmed published result was reported as canceled.'
+    read_arguments \
+        "${published_cancel_question_log}" \
+        published_cancel_question_arguments
+    assert_array_contains_prefix published_cancel_question_arguments \
+        '--text=The download is complete.' \
+        'published-result cancel race completion dialog'
+    [[ -f "${OUTPUT_DIR}/Mock media [abc123].webm" ]] \
+        || fail 'Published-result cancel race lost the confirmed media.'
+    assert_no_test_processes \
+        'published-result cancel race left worker processes'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     # Delayed PGID-file publication must still leave the GUI in control of the
     # setsid child group through the Linux /proc fallback. Some nested container
@@ -4671,13 +5992,13 @@ test_mock_signal_gui_startup_error() {
     pgid_text_info_log="${TEST_ROOT}/pgid-start-text-info.bin"
     rm -f -- "${pgid_question_log}" "${pgid_text_info_log}"
     prepare_argument_log 'failed-pgid-publication'
-    assert_status 1 'failed PGID publication is reported' \
+    assert_status 75 'failed worker startup status is preserved' \
         env MOCK_SETSID_START_STATUS=75 \
         MOCK_QUESTION_ARGS_LOG="${pgid_question_log}" \
         MOCK_TEXT_INFO_ARGS_LOG="${pgid_text_info_log}" \
         "${GUI_UNDER_TEST}"
     assert_diagnostic_question "${pgid_question_log}" \
-        'The download could not start.' \
+        'The download process exited during startup with status 75.' \
         'worker-startup diagnostic'
     [[ ! -s ${pgid_text_info_log} ]] \
         || fail 'Close unexpectedly opened the worker-startup diagnostic log.'
@@ -4689,7 +6010,7 @@ test_mock_signal_gui_startup_error() {
         "${silent_text_info_log}"
     logs_before=$(count_logs)
     prepare_argument_log 'silent-worker-start-failure'
-    assert_status 1 'silent worker-start failure exposes no empty diagnostic' \
+    assert_status 75 'silent worker-start failure preserves its status' \
         env MOCK_SETSID_START_STATUS=75 \
         MOCK_SETSID_SILENT_FAILURE=1 \
         MOCK_ERROR_CAPTURE="${silent_error_capture}" \
@@ -4775,6 +6096,7 @@ test_mock_signal_zenity_status() {
 
 run_mock_signal_group() {
     test_mock_signal_cli_download
+    test_mock_signal_cli_leader_exit_descendant
     test_mock_signal_cli_worker_registration
     test_mock_signal_cli_runtime_preparation
     test_mock_signal_cli_pre_env_registration
@@ -4786,6 +6108,7 @@ run_mock_signal_group() {
     test_mock_signal_gui_blocked_entry
     test_mock_signal_gui_zenity_diagnostic_cleanup
     test_mock_signal_gui_worker_registration
+    test_mock_signal_gui_group_identity_after_leader_exit
     test_mock_signal_gui_foreground_group_registration
     test_mock_signal_gui_blocked_progress
     test_mock_signal_gui_cancellation
@@ -4876,8 +6199,8 @@ test_mock_runtime_version_formats() {
 }
 
 test_mock_runtime_worker_failure() {
-    local forbidden_source_name=''
-    local invalid_probe_result
+    local escalated_timeout_probe_result forbidden_source_name=''
+    local invalid_probe_result timeout_probe_result
 
     forbidden_source_name=$(printf '\170\150\141\155\163\164\145\162')
     prepare_argument_log 'forbidden-external-diagnostic-redaction'
@@ -4918,6 +6241,36 @@ test_mock_runtime_worker_failure() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'Media validation reason: probe-error' \
         'FFprobe failure bounded reason'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    prepare_argument_log 'ffprobe-validation-timeout'
+    timeout_probe_result="${TEST_ROOT}/timeout-probe-result.txt"
+    assert_status 65 'an FFprobe timeout has a distinct validation reason' \
+        env MOCK_FFPROBE_EXIT_STATUS=124 \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        --result-file "${timeout_probe_result}" \
+        -- 'https://example.com/watch?v=timeout-probe'
+    [[ ! -e ${timeout_probe_result} ]] \
+        || fail 'A result file was published after an FFprobe timeout.'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'Media validation reason: probe-timeout' \
+        'FFprobe timeout bounded reason'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    prepare_argument_log 'ffprobe-validation-escalated-timeout'
+    escalated_timeout_probe_result="${TEST_ROOT}/escalated-timeout-probe-result.txt"
+    assert_status 65 'an escalated FFprobe timeout keeps the timeout reason' \
+        env MOCK_FFPROBE_EXIT_STATUS=137 \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        --result-file "${escalated_timeout_probe_result}" \
+        -- 'https://example.com/watch?v=escalated-timeout-probe'
+    [[ ! -e ${escalated_timeout_probe_result} ]] \
+        || fail 'A result file was published after an escalated FFprobe timeout.'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'Media validation reason: probe-timeout' \
+        'FFprobe escalated-timeout bounded reason'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 }
 
@@ -5031,6 +6384,16 @@ test_mock_runtime_dependencies() {
     [[ -s ${MOCK_ARIA2_ARG_LOG} ]] \
         || fail 'Fixed-generation aria2 GnuTLS build did not use direct HTTPS.'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    prepare_argument_log 'missing-required-ytdlp-capability'
+    assert_status 1 'yt-dlp builds missing a consumed option fail early' \
+        env MOCK_YTDLP_MISSING_AUDIO_QUALITY=1 \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=missing-ytdlp-capability'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'this yt-dlp build does not support --audio-quality.' \
+        'missing consumed yt-dlp capability diagnostic'
 
     assert_status 1 'old yt-dlp version is rejected' \
         env MOCK_YTDLP_VERSION=2026.06.08 \

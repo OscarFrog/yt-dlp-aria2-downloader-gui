@@ -35,7 +35,10 @@ CONFIG_DIR=''
 STATE_DIR=''
 CONFIG_FILE=''
 WORKER_PID=''
+WORKER_PID_START_TIME=''
 WORKER_PGID=''
+WORKER_PGID_START_TIME=''
+WORKER_IDENTITY_TOKEN=''
 TEMP_DIR=''
 CLEANUP_DONE=false
 DEFERRED_SIGNAL_STATUS=''
@@ -50,6 +53,8 @@ PROGRESS_PIPE=''
 PROGRESS_MONITOR_ERROR_FILE=''
 PROGRESS_DIALOG_ERROR_FILE=''
 RUNTIME_TMPDIR=''
+SCRIPT_DIR=''
+SCRIPT_PATH=''
 WAITED_WORKER_STATUS=''
 WORKER_STATUS=''
 LOG_FILE=''
@@ -57,9 +62,93 @@ LOG_RETAINED=false
 LOG_RETENTION_ATTEMPTED=false
 LOG_TIMESTAMP=''
 
+# Accept shared physical ancestors only when sticky-bit ownership rules keep a
+# different UID from replacing private application paths below them.
+private_directory_chain_is_safe() {
+    local candidate=$1
+    local component=''
+    local current_path=/
+    local metadata=''
+    local mode=''
+    local mode_value=0
+    local owner=''
+    local remainder=${candidate#/}
+    local root_owner=''
+    local unexpected=''
+
+    [[ ${candidate} == /* && -d ${candidate} ]] || return 1
+    root_owner=$(stat -c '%u' -- / 2>/dev/null) || return 1
+    [[ ${root_owner} =~ ^[0-9]+$ ]] || return 1
+
+    while true; do
+        [[ -d ${current_path} && ! -L ${current_path} ]] || return 1
+        metadata=$(stat -c '%u:%a' -- "${current_path}" 2>/dev/null) \
+            || return 1
+        IFS=: read -r owner mode unexpected <<<"${metadata}"
+        [[ -z ${unexpected} && ${owner} =~ ^[0-9]+$ &&
+            ${mode} =~ ^[0-7]{3,4}$ ]] || return 1
+        [[ ${owner} == 0 || ${owner} == "${root_owner}" ||
+            ${owner} == "${EUID}" ]] || return 1
+        mode_value=$((8#${mode}))
+        if ((mode_value & 0022)) && ! ((mode_value & 01000)); then
+            return 1
+        fi
+
+        [[ -n ${remainder} ]] || break
+        if [[ ${remainder} == */* ]]; then
+            component=${remainder%%/*}
+            remainder=${remainder#*/}
+        else
+            component=${remainder}
+            remainder=''
+        fi
+        [[ -n ${component} ]] || return 1
+        current_path="${current_path%/}/${component}"
+    done
+
+    return 0
+}
+
+# Canonicalize an intended private root and authenticate the complete existing
+# prefix. A later creator must revalidate the full chain after mkdir wins any
+# race for the missing suffix.
+resolve_private_directory_target() {
+    local output_variable=$1
+    local candidate=$2
+    local existing_ancestor=''
+    local resolved_candidate=''
+
+    [[ ${candidate} == /* && ! ${candidate} =~ [[:cntrl:]] ]] || return 1
+    resolved_candidate=$(realpath -m -- "${candidate}" 2>/dev/null) \
+        || return 1
+    [[ ${resolved_candidate} == /* &&
+        ! ${resolved_candidate} =~ [[:cntrl:]] ]] || return 1
+    printf -v "${output_variable}" '%s' "${resolved_candidate}" || return 1
+
+    existing_ancestor=${resolved_candidate}
+    while [[ ! -e ${existing_ancestor} && ! -L ${existing_ancestor} ]]; do
+        [[ ${existing_ancestor} != / ]] || return 1
+        existing_ancestor=${existing_ancestor%/*}
+        [[ -n ${existing_ancestor} ]] || existing_ancestor=/
+    done
+    if [[ ! -d ${existing_ancestor} || -L ${existing_ancestor} ]]; then
+        return 2
+    fi
+    # shellcheck disable=SC2310 # Failure rejects this candidate root.
+    private_directory_chain_is_safe "${existing_ancestor}" || return 1
+
+    return 0
+}
+
 initialize_gui_paths() {
     local config_home=''
+    local config_home_candidate=''
+    local config_home_status=0
+    local fallback_config_home=''
+    local fallback_state_home=''
     local state_home=''
+    local state_home_candidate=''
+    local state_home_status=0
 
     if [[ -z ${HOME:-} ]]; then
         show_error 'The HOME environment variable is not defined.'
@@ -70,13 +159,32 @@ initialize_gui_paths() {
         exit 1
     fi
 
-    config_home=${XDG_CONFIG_HOME:-${HOME}/.config}
-    state_home=${XDG_STATE_HOME:-${HOME}/.local/state}
-    if [[ ${config_home} != /* ]]; then
-        config_home="${HOME}/.config"
+    fallback_config_home="${HOME}/.config"
+    fallback_state_home="${HOME}/.local/state"
+    config_home_candidate=${XDG_CONFIG_HOME:-${fallback_config_home}}
+    state_home_candidate=${XDG_STATE_HOME:-${fallback_state_home}}
+
+    # shellcheck disable=SC2310 # Status 2 preserves an existing non-directory so the established save path can reject it.
+    resolve_private_directory_target \
+        config_home "${config_home_candidate}" || config_home_status=$?
+    if ((config_home_status != 0 && config_home_status != 2)); then
+        # shellcheck disable=SC2310 # The HOME fallback must independently validate.
+        if ! resolve_private_directory_target \
+            config_home "${fallback_config_home}"; then
+            show_error 'No safe application configuration directory is available.'
+            exit 1
+        fi
     fi
-    if [[ ${state_home} != /* ]]; then
-        state_home="${HOME}/.local/state"
+    # shellcheck disable=SC2310 # Status 2 preserves an existing non-directory so session setup reports it.
+    resolve_private_directory_target \
+        state_home "${state_home_candidate}" || state_home_status=$?
+    if ((state_home_status != 0 && state_home_status != 2)); then
+        # shellcheck disable=SC2310 # The HOME fallback must independently validate.
+        if ! resolve_private_directory_target \
+            state_home "${fallback_state_home}"; then
+            show_error 'No safe application state directory is available.'
+            exit 1
+        fi
     fi
 
     CONFIG_DIR="${config_home}/yt-dlp-aria2-downloader"
@@ -88,15 +196,30 @@ initialize_gui_paths() {
 resolve_runtime_tmpdir() {
     local output_variable=$1
     local candidate=${TMPDIR:-/tmp}
+    local resolved_candidate=''
 
-    if [[ ! -d ${candidate} || ! -w ${candidate} || ! -x ${candidate} ]]; then
+    if [[ ${candidate} != /* || ! -d ${candidate} ||
+        ! -w ${candidate} || ! -x ${candidate} ]]; then
         candidate=/tmp
     fi
-    if [[ ! -d ${candidate} || ! -w ${candidate} || ! -x ${candidate} ]]; then
+    # shellcheck disable=SC2310 # An unsafe candidate deliberately selects the fallback.
+    if ! resolved_candidate=$(realpath -e -- "${candidate}" 2>/dev/null) \
+        || [[ ! -d ${resolved_candidate} || ! -w ${resolved_candidate} ||
+            ! -x ${resolved_candidate} ]] \
+        || ! private_directory_chain_is_safe "${resolved_candidate}"; then
+        candidate=/tmp
+        if ! resolved_candidate=$(realpath -e -- "${candidate}" 2>/dev/null); then
+            return 1
+        fi
+    fi
+    # shellcheck disable=SC2310 # The fallback is trusted only after the same check.
+    if [[ ! -d ${resolved_candidate} || ! -w ${resolved_candidate} ||
+        ! -x ${resolved_candidate} ]] \
+        || ! private_directory_chain_is_safe "${resolved_candidate}"; then
         return 1
     fi
 
-    printf -v "${output_variable}" '%s' "${candidate}" || return 1
+    printf -v "${output_variable}" '%s' "${resolved_candidate}" || return 1
     return 0
 }
 
@@ -271,7 +394,9 @@ run_zenity_capture() {
 }
 
 resolve_script_dir() {
-    local output_variable=$1
+    (($# == 2)) || return 2
+    local directory_output_variable=$1
+    local path_output_variable=$2
     local script_source=${BASH_SOURCE[0]}
     local script_path
     local script_dir
@@ -286,7 +411,8 @@ resolve_script_dir() {
 
     script_path=$(realpath -e -- "${script_source}") || return 1
     script_dir=$(dirname -- "${script_path}") || return 1
-    printf -v "${output_variable}" '%s' "${script_dir}" || return 1
+    printf -v "${directory_output_variable}" '%s' "${script_dir}" || return 1
+    printf -v "${path_output_variable}" '%s' "${script_path}" || return 1
     return 0
 }
 
@@ -295,12 +421,16 @@ recover_worker_pgid() {
     local children_file="/proc/${worker_pid}/task/${worker_pid}/children"
     local children=''
     local candidate
+    local candidate_start_time=''
     local -a child_pids=()
 
     # With monitor mode disabled, the direct worker becomes the new session
     # leader without an intermediate setsid supervisor.
-    if kill -0 -- "-${worker_pid}" 2>/dev/null; then
+    # shellcheck disable=SC2310 # This predicate authenticates the recovered group.
+    if process_is_session_group_leader \
+        "${worker_pid}" "${BASHPID}" candidate_start_time false; then
         WORKER_PGID=${worker_pid}
+        WORKER_PGID_START_TIME=${candidate_start_time}
         return 0
     fi
 
@@ -312,12 +442,236 @@ recover_worker_pgid() {
 
     for candidate in "${child_pids[@]}"; do
         [[ ${candidate} =~ ^[1-9][0-9]*$ ]] || continue
-        if kill -0 -- "-${candidate}" 2>/dev/null; then
+        candidate_start_time=''
+        # shellcheck disable=SC2310 # This predicate authenticates the recovered group.
+        if process_is_session_group_leader \
+            "${candidate}" "${worker_pid}" candidate_start_time false; then
             WORKER_PGID=${candidate}
+            WORKER_PGID_START_TIME=${candidate_start_time}
             return 0
         fi
     done
 
+    return 1
+}
+
+process_is_session_group_leader() {
+    (($# == 4)) || return 2
+    local pid=$1
+    local expected_parent=$2
+    local output_variable=$3
+    local allow_zombie=$4
+    local process_stat=''
+    local process_state=''
+    local process_parent=''
+    local process_group=''
+    local process_session=''
+    local process_start_time=''
+    local -a process_fields=()
+
+    [[ ${pid} =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ -r /proc/${pid}/stat ]] || return 1
+    if ! { IFS= read -r process_stat <"/proc/${pid}/stat"; } 2>/dev/null; then
+        return 1
+    fi
+    read -r -a process_fields <<<"${process_stat##*) }"
+    ((${#process_fields[@]} > 19)) || return 1
+    process_state=${process_fields[0]}
+    process_parent=${process_fields[1]}
+    process_group=${process_fields[2]}
+    process_session=${process_fields[3]}
+    process_start_time=${process_fields[19]}
+
+    [[ ${process_state} != X ]] || return 1
+    if [[ ${allow_zombie} != true && ${process_state} == Z ]]; then
+        return 1
+    fi
+    [[ ${process_group} == "${pid}" && ${process_session} == "${pid}" ]] \
+        || return 1
+    [[ -z ${expected_parent} || ${process_parent} == "${expected_parent}" ]] \
+        || return 1
+    [[ ${process_start_time} =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 -- "-${pid}" 2>/dev/null || return 1
+    printf -v "${output_variable}" '%s' "${process_start_time}" || return 1
+    return 0
+}
+
+worker_group_is_current() {
+    local current_start_time=''
+    local expected_parent=''
+
+    [[ -n ${WORKER_PGID} && -n ${WORKER_PGID_START_TIME} &&
+        -n ${WORKER_IDENTITY_TOKEN} ]] || return 1
+    if [[ ${WORKER_PGID} == "${WORKER_PID}" ]]; then
+        expected_parent=${BASHPID}
+    else
+        expected_parent=${WORKER_PID}
+    fi
+
+    # The registered leader is the strongest authority while it remains
+    # visible. After Bash has reaped it asynchronously, an inherited private
+    # token authenticates a same-session descendant instead of trusting a
+    # potentially recycled numeric process-group identifier.
+    # shellcheck disable=SC2310 # Both branches are identity predicates.
+    if process_is_session_group_leader \
+        "${WORKER_PGID}" "${expected_parent}" current_start_time true; then
+        [[ ${current_start_time} == "${WORKER_PGID_START_TIME}" ]]
+        return
+    fi
+    worker_group_has_identity_token
+}
+
+process_is_direct_child_of() {
+    (($# == 4)) || return 2
+    local pid=$1
+    local expected_parent=$2
+    local output_variable=$3
+    local allow_zombie=$4
+    local process_parent=''
+    local process_stat=''
+    local process_state=''
+    local process_start_time=''
+    local -a process_fields=()
+
+    [[ ${pid} =~ ^[1-9][0-9]*$ && ${expected_parent} =~ ^[1-9][0-9]*$ ]] \
+        || return 1
+    [[ -r /proc/${pid}/stat ]] || return 1
+    if ! { IFS= read -r process_stat <"/proc/${pid}/stat"; } 2>/dev/null; then
+        return 1
+    fi
+    read -r -a process_fields <<<"${process_stat##*) }"
+    ((${#process_fields[@]} > 19)) || return 1
+    process_state=${process_fields[0]}
+    process_parent=${process_fields[1]}
+    process_start_time=${process_fields[19]}
+
+    [[ ${process_parent} == "${expected_parent}" &&
+        ${process_state} != X ]] || return 1
+    if [[ ${allow_zombie} != true && ${process_state} == Z ]]; then
+        return 1
+    fi
+    [[ ${process_start_time} =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 -- "${pid}" 2>/dev/null || return 1
+    printf -v "${output_variable}" '%s' "${process_start_time}" || return 1
+    return 0
+}
+
+worker_pid_is_current() {
+    (($# == 1)) || return 2
+    local allow_zombie=$1
+    local current_start_time=''
+
+    [[ -n ${WORKER_PID} && -n ${WORKER_PID_START_TIME} ]] || return 1
+    # shellcheck disable=SC2310 # Failure is this identity predicate's result.
+    process_is_direct_child_of \
+        "${WORKER_PID}" "${BASHPID}" current_start_time "${allow_zombie}" \
+        || return 1
+    [[ ${current_start_time} == "${WORKER_PID_START_TIME}" ]]
+}
+
+process_has_worker_identity_token() {
+    (($# == 1)) || return 2
+    local pid=$1
+    local environment_entry=''
+    local environment_path="/proc/${pid}/environ"
+    local expected_entry="YTDLP_ARIA2_GUI_WORKER_TOKEN=${WORKER_IDENTITY_TOKEN}"
+
+    [[ ${pid} =~ ^[1-9][0-9]*$ && -n ${WORKER_IDENTITY_TOKEN} ]] || return 1
+    [[ -r ${environment_path} ]] || return 1
+    while IFS= read -r -d '' environment_entry; do
+        if [[ ${environment_entry} == "${expected_entry}" ]]; then
+            return 0
+        fi
+    done 2>/dev/null <"${environment_path}"
+    return 1
+}
+
+process_has_worker_group_identity() {
+    (($# == 2)) || return 2
+    local pid=$1
+    local expected_start_time=$2
+    local observed_start_time=''
+    local process_group=''
+    local process_session=''
+    local process_stat=''
+    local process_state=''
+    local -a process_fields=()
+
+    [[ ${pid} =~ ^[1-9][0-9]*$ &&
+        ${WORKER_PGID} =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ -r /proc/${pid}/stat ]] || return 1
+    if ! { IFS= read -r process_stat <"/proc/${pid}/stat"; } 2>/dev/null; then
+        return 1
+    fi
+    read -r -a process_fields <<<"${process_stat##*) }"
+    ((${#process_fields[@]} > 19)) || return 1
+    process_state=${process_fields[0]}
+    process_group=${process_fields[2]}
+    process_session=${process_fields[3]}
+    observed_start_time=${process_fields[19]}
+    [[ ${process_state} != Z && ${process_state} != X &&
+        ${process_group} == "${WORKER_PGID}" &&
+        ${process_session} == "${WORKER_PGID}" &&
+        ${observed_start_time} =~ ^[1-9][0-9]*$ ]] || return 1
+
+    if [[ -n ${expected_start_time} ]]; then
+        [[ ${observed_start_time} == "${expected_start_time}" ]]
+        return
+    fi
+
+    # shellcheck disable=SC2310 # Failure is this identity predicate's result.
+    process_has_worker_identity_token "${pid}" || return 1
+    # Recheck the same PID and its group fields after reading /proc/PID/environ
+    # so an exiting token-bearing process cannot authenticate a replacement.
+    process_has_worker_group_identity "${pid}" "${observed_start_time}"
+}
+
+worker_group_has_identity_token() {
+    local process_dir=''
+    local process_pid=''
+
+    [[ ${WORKER_PGID} =~ ^[1-9][0-9]*$ &&
+        -n ${WORKER_IDENTITY_TOKEN} ]] || return 1
+    for process_dir in /proc/[0-9]*; do
+        [[ -d ${process_dir} ]] || continue
+        process_pid=${process_dir##*/}
+        # shellcheck disable=SC2310 # Every candidate must prove group and token identity.
+        if process_has_worker_group_identity "${process_pid}" ''; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+worker_group_has_live_member() {
+    local process_dir=''
+    local process_group=''
+    local process_pid=''
+    local process_session=''
+    local process_stat=''
+    local process_state=''
+    local -a process_fields=()
+
+    [[ ${WORKER_PGID} =~ ^[1-9][0-9]*$ ]] || return 1
+    for process_dir in /proc/[0-9]*; do
+        [[ -d ${process_dir} ]] || continue
+        process_pid=${process_dir##*/}
+        [[ -r ${process_dir}/stat ]] || continue
+        process_stat=''
+        if ! { IFS= read -r process_stat <"${process_dir}/stat"; } 2>/dev/null; then
+            continue
+        fi
+        read -r -a process_fields <<<"${process_stat##*) }"
+        ((${#process_fields[@]} > 3)) || continue
+        process_state=${process_fields[0]}
+        process_group=${process_fields[2]}
+        process_session=${process_fields[3]}
+        if [[ ${process_state} != Z && ${process_state} != X &&
+            ${process_group} == "${WORKER_PGID}" &&
+            ${process_session} == "${WORKER_PGID}" ]]; then
+            return 0
+        fi
+    done
     return 1
 }
 
@@ -348,7 +702,7 @@ process_is_running() {
 
 gui_child_is_running() {
     local pid=$1
-    local process_fields=''
+    local process_fields_text=''
     local process_parent=''
     local process_stat=''
     local process_state=''
@@ -360,8 +714,8 @@ gui_child_is_running() {
     if ! { IFS= read -r process_stat <"/proc/${pid}/stat"; } 2>/dev/null; then
         return 1
     fi
-    process_fields=${process_stat##*) }
-    read -r process_state process_parent _ <<<"${process_fields}"
+    process_fields_text=${process_stat##*) }
+    read -r process_state process_parent _ <<<"${process_fields_text}"
     [[ ${process_parent} == "${BASHPID}" &&
         ${process_state} != Z && ${process_state} != X ]]
 }
@@ -434,13 +788,20 @@ stop_gui_children() {
 }
 
 worker_tree_alive() {
-    if [[ -n ${WORKER_PGID} ]] \
-        && kill -0 -- "-${WORKER_PGID}" 2>/dev/null; then
-        return 0
+    if [[ -n ${WORKER_PGID} ]]; then
+        # shellcheck disable=SC2310 # Both predicates authenticate current group liveness.
+        if worker_group_is_current; then
+            if worker_group_has_live_member; then
+                return 0
+            fi
+        else
+            WORKER_PGID=''
+            WORKER_PGID_START_TIME=''
+        fi
     fi
     if [[ -n ${WORKER_PID} ]]; then
-        # shellcheck disable=SC2310 # Expected failure means the worker exited.
-        if process_is_running "${WORKER_PID}"; then
+        # shellcheck disable=SC2310 # Expected failure means the worker exited or lost identity.
+        if worker_pid_is_current false; then
             return 0
         fi
         return 1
@@ -455,17 +816,21 @@ signal_worker_tree() {
     local candidate
     local signaled_target=false
     local group_signal_succeeded=false
+    local candidate_start_time=''
     local -a child_pids=()
 
     if [[ -z ${WORKER_PGID} && -n ${WORKER_PID} ]]; then
         # A missing PGID is expected while the setsid child is not yet visible.
-        # shellcheck disable=SC2310
-        recover_worker_pgid "${WORKER_PID}" || true
+        # shellcheck disable=SC2310 # Failed recovery leaves only authenticated direct-child fallback authority.
+        if ! recover_worker_pgid "${WORKER_PID}"; then
+            :
+        fi
     fi
 
     # Snapshot direct children before signaling anything. If the session leader
     # exits during shutdown, its /proc children entry disappears.
-    if [[ -n ${WORKER_PID} ]]; then
+    # shellcheck disable=SC2310 # A current direct-child identity gates the snapshot.
+    if [[ -n ${WORKER_PID} ]] && worker_pid_is_current false; then
         children_file="/proc/${WORKER_PID}/task/${WORKER_PID}/children"
         if [[ -r ${children_file} ]]; then
             children=''
@@ -478,36 +843,47 @@ signal_worker_tree() {
     # Do not treat a successful existence probe as successful delivery.
     # kill itself is the authoritative, race-free result.
     if [[ -n ${WORKER_PGID} ]]; then
-        if kill "-${signal_name}" -- "-${WORKER_PGID}" 2>/dev/null; then
+        # shellcheck disable=SC2310 # Identity and liveness gate negative-PGID delivery.
+        if worker_group_is_current \
+            && worker_group_has_live_member \
+            && kill "-${signal_name}" -- "-${WORKER_PGID}" 2>/dev/null; then
             signaled_target=true
             group_signal_succeeded=true
         else
             WORKER_PGID=''
+            WORKER_PGID_START_TIME=''
         fi
     fi
 
-    # Target each direct child as a process group and then as an individual PID.
-    # This remains effective if PGID publication was stale or the group signal
-    # raced with process creation.
-    for candidate in "${child_pids[@]}"; do
-        [[ ${candidate} =~ ^[1-9][0-9]*$ ]] || continue
+    # A successful group signal already reaches the complete session. Fan out
+    # only after group delivery failed, and revalidate every snapshotted child
+    # immediately before using it as either a group or direct-process target.
+    if [[ ${group_signal_succeeded} != true ]]; then
+        for candidate in "${child_pids[@]}"; do
+            [[ ${candidate} =~ ^[1-9][0-9]*$ ]] || continue
 
-        if [[ ${group_signal_succeeded} == true &&
-            ${candidate} == "${WORKER_PGID}" ]]; then
-            continue
-        fi
-
-        if kill "-${signal_name}" -- "-${candidate}" 2>/dev/null \
-            || kill "-${signal_name}" -- "${candidate}" 2>/dev/null; then
-            signaled_target=true
-        fi
-    done
+            candidate_start_time=''
+            # shellcheck disable=SC2310 # Each branch authenticates the current child before signaling.
+            if process_is_session_group_leader \
+                "${candidate}" "${WORKER_PID}" candidate_start_time false; then
+                if kill "-${signal_name}" -- "-${candidate}" 2>/dev/null; then
+                    signaled_target=true
+                fi
+            elif process_is_direct_child_of \
+                "${candidate}" "${WORKER_PID}" candidate_start_time false \
+                && kill "-${signal_name}" -- "${candidate}" 2>/dev/null; then
+                signaled_target=true
+            fi
+        done
+    fi
 
     # Avoid a redundant direct TERM after a group member was reached. For KILL,
     # stop the registered leader as the final bounded fallback so the caller's
     # wait cannot block indefinitely.
+    # shellcheck disable=SC2310 # The launch identity gates direct-PID fallback delivery.
     if [[ ${signal_name} == KILL || ${signaled_target} == false ]] \
-        && [[ -n ${WORKER_PID} ]]; then
+        && [[ -n ${WORKER_PID} ]] \
+        && worker_pid_is_current false; then
         kill "-${signal_name}" -- "${WORKER_PID}" 2>/dev/null || true
     fi
 }
@@ -517,42 +893,64 @@ wait_for_worker_exit() {
     local attempt
     local status=0
     local worker_alive=false
+    local worker_identity_current=false
     local group_alive=false
 
     for ((attempt = 0; attempt < attempts; attempt++)); do
         worker_alive=false
+        worker_identity_current=false
         group_alive=false
 
-        if [[ -n ${WORKER_PID} ]]; then
-            # process_is_running returns false for a terminated zombie, at
-            # which point wait can reap the direct worker without blocking.
-            # shellcheck disable=SC2310
-            if process_is_running "${WORKER_PID}"; then
-                worker_alive=true
-            else
-                set +e
-                wait "${WORKER_PID}" 2>/dev/null
-                status=$?
-                set -e
-                if [[ -z ${WAITED_WORKER_STATUS} ]]; then
-                    WAITED_WORKER_STATUS=${status}
+        # Authenticate the group before considering the direct worker. If Bash
+        # already reaped the leader, a live inherited-token member keeps group
+        # authority without granting it to a recycled numeric PGID.
+        if [[ -n ${WORKER_PGID} ]]; then
+            # shellcheck disable=SC2310 # Both predicates form one authenticated liveness proof.
+            if worker_group_is_current; then
+                if worker_group_has_live_member; then
+                    group_alive=true
                 fi
-                WORKER_PID=''
+            else
+                WORKER_PGID=''
+                WORKER_PGID_START_TIME=''
             fi
         fi
 
-        # The session leader can disappear before a descendant. Retain the PGID
-        # until the complete process group is gone so TERM/KILL can still reach
-        # surviving yt-dlp, aria2c, FFmpeg, or Deno descendants.
-        if [[ -n ${WORKER_PGID} ]]; then
-            if kill -0 -- "-${WORKER_PGID}" 2>/dev/null; then
-                group_alive=true
+        if [[ -n ${WORKER_PID} ]]; then
+            # shellcheck disable=SC2310 # This probe distinguishes a live child from its cached exit status.
+            if worker_pid_is_current false; then
+                worker_alive=true
             else
-                WORKER_PGID=''
+                # A zombie remains an authenticated direct child until Bash
+                # harvests it. Bash may also harvest it asynchronously and keep
+                # only the wait status; either case is safe to wait once the
+                # authenticated group has no live member.
+                # shellcheck disable=SC2310 # A zombie identity is expected here.
+                if worker_pid_is_current true; then
+                    worker_identity_current=true
+                fi
+                if [[ ${group_alive} == false ]]; then
+                    set +e
+                    wait "${WORKER_PID}" 2>/dev/null
+                    status=$?
+                    set -e
+                    if [[ -z ${WAITED_WORKER_STATUS} ]]; then
+                        WAITED_WORKER_STATUS=${status}
+                    fi
+                    WORKER_PID=''
+                    WORKER_PID_START_TIME=''
+                elif [[ ${worker_identity_current} == false ]]; then
+                    # Bash already harvested the direct child. Keep its cached
+                    # PID solely as a wait handle while the token-authenticated
+                    # process group remains alive.
+                    worker_alive=false
+                fi
             fi
         fi
 
         if [[ ${worker_alive} == false && ${group_alive} == false ]]; then
+            WORKER_PGID=''
+            WORKER_PGID_START_TIME=''
             return 0
         fi
         sleep 0.1
@@ -629,6 +1027,8 @@ validate_private_state_directory() {
     canonical_metadata=$(stat -c '%d:%i:%u:%a' \
         -- "${canonical_state}" 2>/dev/null) || return 1
     [[ ${canonical_metadata} == "${state_metadata}" ]] || return 1
+    # shellcheck disable=SC2310 # An unsafe ancestor rejects retained-log access.
+    private_directory_chain_is_safe "${canonical_state}" || return 1
 
     printf -v "${output_variable}" '%s' "${canonical_state}" || return 1
     return 0
@@ -1290,7 +1690,9 @@ cleanup() {
         if ! stop_worker; then
             printf 'Warning: the worker group did not terminate after SIGKILL; cleanup will continue.\n' >&2
             WORKER_PID=''
+            WORKER_PID_START_TIME=''
             WORKER_PGID=''
+            WORKER_PGID_START_TIME=''
         fi
     fi
 
@@ -1376,6 +1778,9 @@ load_settings() {
 save_settings() {
     local output_dir=$1
     local profile=$2
+    local canonical_config=''
+    local config_mode=''
+    local config_owner=''
     local temporary_file
 
     if [[ -L ${CONFIG_DIR} ]]; then
@@ -1383,7 +1788,17 @@ save_settings() {
     fi
     mkdir -p -- "${CONFIG_DIR}" || return 1
     [[ ! -L ${CONFIG_DIR} ]] || return 1
-    chmod 700 -- "${CONFIG_DIR}" 2>/dev/null || true
+    chmod 700 -- "${CONFIG_DIR}" 2>/dev/null || return 1
+    canonical_config=$(realpath -e -- "${CONFIG_DIR}" 2>/dev/null) \
+        || return 1
+    [[ ${canonical_config} == "${CONFIG_DIR}" ]] || return 1
+    config_owner=$(stat -c '%u' -- "${canonical_config}" 2>/dev/null) \
+        || return 1
+    config_mode=$(stat -c '%a' -- "${canonical_config}" 2>/dev/null) \
+        || return 1
+    [[ ${config_owner} == "${EUID}" && ${config_mode} == 700 ]] || return 1
+    # shellcheck disable=SC2310 # Unsafe ancestors prohibit settings writes.
+    private_directory_chain_is_safe "${canonical_config}" || return 1
 
     temporary_file=$(mktemp --tmpdir="${CONFIG_DIR}" gui.conf.XXXXXX) || return 1
     if ! {
@@ -1522,8 +1937,10 @@ default_output_dir() {
             candidate=${HOME}/Downloads
         elif [[ -d ${HOME}/Videos ]]; then
             candidate=${HOME}/Videos
-        else
+        elif [[ -d ${HOME} ]]; then
             candidate=${HOME}
+        else
+            candidate=/
         fi
     fi
 
@@ -1730,15 +2147,28 @@ wait_for_worker_pgid() {
     local worker_pid=$2
     local attempt
     local candidate=''
+    local candidate_start_time=''
+    local expected_parent=''
 
     for ((attempt = 0; attempt < PGID_WAIT_ATTEMPTS; attempt++)); do
         if [[ -f ${pgid_file} ]]; then
             candidate=''
             if { IFS= read -r candidate <"${pgid_file}"; } 2>/dev/null \
-                && [[ ${candidate} =~ ^[1-9][0-9]*$ ]] \
-                && kill -0 -- "-${candidate}" 2>/dev/null; then
-                WORKER_PGID=${candidate}
-                return 0
+                && [[ ${candidate} =~ ^[1-9][0-9]*$ ]]; then
+                candidate_start_time=''
+                if [[ ${candidate} == "${worker_pid}" ]]; then
+                    expected_parent=${BASHPID}
+                else
+                    expected_parent=${worker_pid}
+                fi
+                # shellcheck disable=SC2310 # The published PGID is accepted only with full process identity.
+                if process_is_session_group_leader \
+                    "${candidate}" "${expected_parent}" \
+                    candidate_start_time false; then
+                    WORKER_PGID=${candidate}
+                    WORKER_PGID_START_TIME=${candidate_start_time}
+                    return 0
+                fi
             fi
         fi
 
@@ -1760,7 +2190,9 @@ wait_for_worker_pgid() {
         sleep 0.1
     done
 
-    return 1
+    # Status 1 means the worker exited before its process group was published;
+    # status 2 is the bounded publication timeout while the worker stayed live.
+    return 2
 }
 
 # Validate host capabilities and resolve the adjacent production scripts.
@@ -1774,7 +2206,7 @@ initialize_gui_environment() {
     # Establish the minimal capture stack first. Once it is available, later
     # startup failures remain visible from a desktop launcher without creating
     # an artificial diagnostic log.
-    for command_name in mktemp rm stat tail zenity; do
+    for command_name in mktemp realpath rm stat tail zenity; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             printf 'Error: required command "%s" was not found.\n' \
                 "${command_name}" >&2
@@ -1810,14 +2242,14 @@ initialize_gui_environment() {
     fi
 
     set +e
-    resolve_script_dir SCRIPT_DIR
+    resolve_script_dir SCRIPT_DIR SCRIPT_PATH
     resolve_status=$?
     set -e
     if ((resolve_status != 0)); then
         show_error 'Unable to determine the script directory.'
         exit 1
     fi
-    readonly SCRIPT_DIR
+    readonly SCRIPT_DIR SCRIPT_PATH
     readonly DOWNLOAD_SCRIPT="${SCRIPT_DIR}/download-video.sh"
     readonly PROGRESS_MONITOR="${SCRIPT_DIR}/progress-monitor.sh"
 
@@ -1972,6 +2404,7 @@ Path: ${STATE_DIR}"
         show_error 'Unable to create the temporary working directory.'
         exit 1
     fi
+    WORKER_IDENTITY_TOKEN="${TEMP_DIR}/worker-identity"
     if ! LOG_TIMESTAMP=$(date '+%Y%m%d-%H%M%S'); then
         show_error 'Unable to determine the timestamp for the diagnostic log.'
         exit 1
@@ -2046,10 +2479,14 @@ Path: ${STATE_DIR}"
 # Start the isolated engine session and require a controllable process group.
 start_download_worker() {
     local pgid_status
+    local worker_start_time=''
+    local worker_exit_status=''
 
     begin_signal_registration
     # shellcheck disable=SC2016 # Expanded by the intentionally nested shell.
-    YTDLP_ARIA2_SUPERVISED_SESSION=true LC_ALL=C setsid --wait bash -c '
+    YTDLP_ARIA2_GUI_WORKER_TOKEN="${WORKER_IDENTITY_TOKEN}" \
+        YTDLP_ARIA2_SUPERVISED_SESSION=true \
+        LC_ALL=C setsid --wait bash -c '
         pgid_file=$1
         shift
         pgid_temporary="${pgid_file}.tmp"
@@ -2058,6 +2495,13 @@ start_download_worker() {
         exec "$@"
     ' bash "${PGID_FILE}" "${COMMAND[@]}" >"${LOG_FILE}" 2>&1 &
     WORKER_PID=$!
+    # The direct-child start time is captured before deferred signals are
+    # replayed, so cleanup never grants a recycled PID fallback authority.
+    # shellcheck disable=SC2310 # Failure is handled by the startup path after registration closes.
+    if process_is_direct_child_of \
+        "${WORKER_PID}" "${BASHPID}" worker_start_time true; then
+        WORKER_PID_START_TIME=${worker_start_time}
+    fi
     finish_signal_registration
 
     set +e
@@ -2069,17 +2513,32 @@ start_download_worker() {
         if ! stop_worker; then
             printf 'Warning: the failed worker could not be reaped after SIGKILL.\n' >&2
             WORKER_PID=''
+            WORKER_PID_START_TIME=''
             WORKER_PGID=''
+            WORKER_PGID_START_TIME=''
+        fi
+        if ((pgid_status == 1)) \
+            && [[ ${WAITED_WORKER_STATUS} =~ ^[0-9]+$ ]]; then
+            worker_exit_status=${WAITED_WORKER_STATUS}
+            show_error_with_log \
+                'Download failed' \
+                "The download process exited during startup with status ${worker_exit_status}."
+            if ((worker_exit_status != 0)); then
+                exit "${worker_exit_status}"
+            fi
+            exit 1
         fi
         show_error_with_log \
             'Download failed' \
-            'The download could not start.'
+            'The download process group could not be confirmed during startup.'
         exit 1
     fi
 }
 
 # Run the progress pipeline, map dialog outcomes, and reap the engine worker.
 run_progress_dialog() {
+    # shellcheck disable=SC2034 # Populated through resolve_confirmed_final_path's output parameter.
+    local confirmed_result=''
     local ignored_output=''
     local monitor_status=0
     local zenity_status=0
@@ -2108,29 +2567,32 @@ run_progress_dialog() {
     set -e
     ZENITY_PID=''
 
-    set +e
-    wait "${PROGRESS_MONITOR_PID}"
-    monitor_status=$?
-    set -e
-    PROGRESS_MONITOR_PID=''
-
-    # Zenity closing its input is normal; other monitor failures are technical.
-    if ((monitor_status != 0)); then
-        # shellcheck disable=SC2310
-        if ! stop_worker; then
-            printf 'Warning: the worker could not be reaped after a monitor failure.\n' >&2
-            WORKER_PID=''
-            WORKER_PGID=''
-        fi
-        append_session_diagnostic \
-            "${PROGRESS_MONITOR_ERROR_FILE}" \
-            'Progress monitor diagnostic:'
-        show_error_with_log \
-            'Download failed' \
-            "The progress monitor failed with status ${monitor_status}."
-        exit 1
-    fi
     if ((zenity_status != 0)); then
+        # A canceled or failed dialog no longer consumes the FIFO. Stop and
+        # reap the producer with the existing bounded GUI-child policy instead
+        # of waiting indefinitely for a defective monitor.
+        # shellcheck disable=SC2310
+        if ! stop_gui_children; then
+            printf 'Warning: the progress monitor did not terminate after SIGKILL.\n' >&2
+        fi
+        monitor_status=0
+    else
+        set +e
+        wait "${PROGRESS_MONITOR_PID}"
+        monitor_status=$?
+        set -e
+        PROGRESS_MONITOR_PID=''
+    fi
+
+    # Resolve the dialog result first: closing Zenity also closes the FIFO and
+    # can make an otherwise healthy progress monitor exit on SIGPIPE.
+    if ((zenity_status != 0)); then
+        if ((zenity_status == 1)); then
+            # Give an engine already leaving its atomic publication path a
+            # short opportunity to finish before cancellation sends TERM.
+            # shellcheck disable=SC2310
+            wait_for_worker_exit 2 || true
+        fi
         # shellcheck disable=SC2310
         if stop_worker; then
             worker_status=${WAITED_WORKER_STATUS:-143}
@@ -2138,11 +2600,23 @@ run_progress_dialog() {
             printf 'Warning: the canceled worker did not terminate after SIGKILL.\n' >&2
             worker_status=143
             WORKER_PID=''
+            WORKER_PID_START_TIME=''
             WORKER_PGID=''
+            WORKER_PGID_START_TIME=''
+        fi
+
+        # The result file is the engine's atomic success boundary. If it was
+        # published before TERM won the exit-status race, report the confirmed
+        # media rather than contradicting on-disk success with "canceled".
+        # shellcheck disable=SC2310 # Result validation intentionally selects the cancel-race outcome.
+        if ((zenity_status == 1)) \
+            && resolve_confirmed_final_path confirmed_result; then
+            worker_status=0
         fi
 
         if ((zenity_status == 1 && worker_status == 0)); then
             zenity_status=0
+            monitor_status=0
         elif ((zenity_status == 1)); then
             run_zenity_capture ignored_output --info \
                 --title="${APP_DIALOG_TITLE}" \
@@ -2171,6 +2645,25 @@ run_progress_dialog() {
         fi
     fi
 
+    # A nonzero monitor status is technical only when Zenity ended normally.
+    if ((monitor_status != 0)); then
+        # shellcheck disable=SC2310
+        if ! stop_worker; then
+            printf 'Warning: the worker could not be reaped after a monitor failure.\n' >&2
+            WORKER_PID=''
+            WORKER_PID_START_TIME=''
+            WORKER_PGID=''
+            WORKER_PGID_START_TIME=''
+        fi
+        append_session_diagnostic \
+            "${PROGRESS_MONITOR_ERROR_FILE}" \
+            'Progress monitor diagnostic:'
+        show_error_with_log \
+            'Download failed' \
+            "The progress monitor failed with status ${monitor_status}."
+        exit 1
+    fi
+
     if [[ -z ${worker_status} ]]; then
         # shellcheck disable=SC2310
         if wait_for_worker_exit 100; then
@@ -2180,7 +2673,9 @@ run_progress_dialog() {
             if ! stop_worker; then
                 printf 'Warning: the worker did not terminate after the progress dialog closed.\n' >&2
                 WORKER_PID=''
+                WORKER_PID_START_TIME=''
                 WORKER_PGID=''
+                WORKER_PGID_START_TIME=''
             fi
             show_error_with_log \
                 'Download failed' \
@@ -2217,12 +2712,24 @@ resolve_confirmed_final_path() {
     printf -v "${output_name}" '%s' "${resolved}"
 }
 
+discard_success_log() {
+    if [[ ${LOG_RETAINED} == true || -z ${LOG_FILE} ]]; then
+        return 0
+    fi
+    if rm -f -- "${LOG_FILE}"; then
+        LOG_FILE=''
+        return 0
+    fi
+
+    retain_sanitized_log
+    return 1
+}
+
 # Present the successful result and handle open-folder/new-download actions.
 show_success_dialog() {
     (($# == 1)) || return 2
     local final_path=$1
     local success_text='The download is complete.'
-    local log_notice=''
     local retained_log=''
     local success_action=''
     local success_status
@@ -2230,13 +2737,6 @@ show_success_dialog() {
 
     success_text+=$'\n\nFile: '
     success_text+="${final_path}"
-    if rm -f -- "${LOG_FILE}"; then
-        LOG_FILE=''
-    else
-        retain_sanitized_log
-        log_notice=$'\n\nWarning: the successful-download log could not be deleted.'
-    fi
-    success_text+="${log_notice}"
 
     success_dialog_arguments=(
         --question
@@ -2265,14 +2765,39 @@ show_success_dialog() {
         if [[ ${success_action} == 'New download' ]]; then
             # exec does not run EXIT cleanup; remove the completed private
             # session before starting a fresh GUI lifecycle.
+            # shellcheck disable=SC2310 # Failure retains a safe diagnostic before cleanup.
+            if ! discard_success_log; then
+                show_error_with_log \
+                    'Cleanup warning' \
+                    'The download completed, but its private live diagnostic log could not be deleted.'
+            fi
+            # shellcheck disable=SC2310 # Failure keeps this lifecycle instead of re-execing with stale state.
+            if ! remove_temporary_zenity_diagnostic; then
+                show_error \
+                    'A temporary interface diagnostic could not be removed before starting a new download.'
+                return 1
+            fi
+            if [[ -n ${ZENITY_CAPTURE_DIR} && -d ${ZENITY_CAPTURE_DIR} ]]; then
+                rm -rf -- "${ZENITY_CAPTURE_DIR}"
+            fi
+            ZENITY_CAPTURE_DIR=''
             if [[ -n ${TEMP_DIR} && -d ${TEMP_DIR} ]]; then
                 rm -rf -- "${TEMP_DIR}"
             fi
             TEMP_DIR=''
-            exec bash "${SCRIPT_DIR}/download-video-gui.sh"
+            exec bash "${SCRIPT_PATH}"
         fi
         break
     done
+
+    if ((success_status == 0 || success_status == 1)); then
+        # shellcheck disable=SC2310 # Failure retains a safe diagnostic for the warning dialog.
+        if ! discard_success_log; then
+            show_error_with_log \
+                'Cleanup warning' \
+                'The download completed, but its private live diagnostic log could not be deleted.'
+        fi
+    fi
 
     case ${success_status} in
         0)
@@ -2282,7 +2807,9 @@ show_success_dialog() {
             ;;
         1) ;;
         5)
-            show_error 'The completion dialog timed out.'
+            show_error_with_log \
+                'Interface error' \
+                'The completion dialog timed out.'
             ;;
         *)
             show_zenity_error 'Zenity could not display the completion dialog.'
