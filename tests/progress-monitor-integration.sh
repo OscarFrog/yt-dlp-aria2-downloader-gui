@@ -20,6 +20,56 @@ done
 readonly MONITOR="${PROJECT_DIR}/progress-monitor.sh"
 assert_readable_file "${MONITOR}" 'progress monitor'
 
+read_monitor_integer_constant() {
+    local name=$1
+    local value=''
+
+    [[ ${name} =~ ^[A-Z][A-Z0-9_]*$ ]] \
+        || fail "invalid progress-monitor constant name: ${name}"
+    value=$(
+        sed -n \
+            "s/^[[:space:]]*readonly ${name}=\\([0-9][0-9]*\\)$/\\1/p" \
+            "${MONITOR}"
+    )
+    [[ ${value} =~ ^[0-9]+$ ]] \
+        || fail "unable to read one integer progress-monitor constant: ${name}"
+    printf '%d' "$((10#${value}))"
+}
+
+map_download_to_zenity() {
+    local download_percent=$1
+
+    printf '%d' "$((\
+    DOWNLOAD_START_VALUE + \
+    download_percent * (DOWNLOAD_END_VALUE - DOWNLOAD_START_VALUE) / 100))"
+}
+
+video_audio_fallback_percent() {
+    local video_percent=$1
+    local audio_percent=$2
+
+    printf '%d' "$(((\
+    video_percent * VIDEO_FALLBACK_WEIGHT_VALUE + \
+    audio_percent * AUDIO_FALLBACK_WEIGHT_VALUE) / (\
+    VIDEO_FALLBACK_WEIGHT_VALUE + AUDIO_FALLBACK_WEIGHT_VALUE)))"
+}
+
+DOWNLOAD_START_VALUE=$(read_monitor_integer_constant DOWNLOAD_START)
+readonly DOWNLOAD_START_VALUE
+DOWNLOAD_END_VALUE=$(read_monitor_integer_constant DOWNLOAD_END)
+readonly DOWNLOAD_END_VALUE
+VIDEO_FALLBACK_WEIGHT_VALUE=$(
+    read_monitor_integer_constant VIDEO_STREAM_FALLBACK_WEIGHT
+)
+readonly VIDEO_FALLBACK_WEIGHT_VALUE
+AUDIO_FALLBACK_WEIGHT_VALUE=$(
+    read_monitor_integer_constant AUDIO_STREAM_FALLBACK_WEIGHT
+)
+readonly AUDIO_FALLBACK_WEIGHT_VALUE
+assert_equals '100' \
+    "$((VIDEO_FALLBACK_WEIGHT_VALUE + AUDIO_FALLBACK_WEIGHT_VALUE))" \
+    'video/audio fallback weights form one complete download phase'
+
 TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
 trap 'rm -rf -- "${TEST_ROOT}" || true' EXIT
@@ -425,8 +475,14 @@ test_monitor_reader_lifecycle() {
 }
 
 test_monitor_planning_progress() {
+    local fallback_video_complete fallback_video_internal
+    local generic_three_expected generic_three_max
     local metadata_capture_lines metadata_download_max metadata_preprocess_max
-    local private_first_max
+    local private_after_second_max private_first_max
+
+    fallback_video_internal=$(video_audio_fallback_percent 100 0)
+    fallback_video_complete=$(map_download_to_zenity \
+        "${fallback_video_internal}")
 
     # Regression guard: --parse-metadata creates a MetadataParser postprocessor
     # at yt-dlp's pre_process stage. The generic postprocess progress hook fires
@@ -474,12 +530,15 @@ test_monitor_planning_progress() {
     wait_for_text "${CAPTURE_FILE}" '100% (aria2c)' \
         'private direct first aria item'
     private_first_max=$(max_percentage "${CAPTURE_FILE}")
-    assert_equals '47' "${private_first_max}" \
-        'first of two private direct items cannot fill the download phase'
+    assert_equals "${fallback_video_complete}" "${private_first_max}" \
+        'first private video item uses the two-stream fallback weight'
     printf '\r[#d4e5f6 2MiB/10MiB(20%%) CN:8 DL:1MiB ETA:8s]\r' \
         >>"${LOG_FILE}"
     wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 20% (aria2c)' \
         'private direct second aria item'
+    private_after_second_max=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals "${fallback_video_complete}" "${private_after_second_max}" \
+        'real-byte weighting cannot regress the prior fallback display'
     assert_percentages_never_decrease \
         "${CAPTURE_FILE}" 'private direct aria progress'
     finish_success '/tmp/private-direct-aria-plan.mkv'
@@ -492,6 +551,20 @@ test_monitor_planning_progress() {
     wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 40% (aria2c)' \
         'combined direct video uses the exact private transfer count'
     finish_success '/tmp/private-direct-combined-video.mkv'
+
+    # More than two planned transfers retain the generic equal-item fallback.
+    start_scenario private-direct-three-items video
+    {
+        printf '%s\n' 'ARIA2_PLAN|3'
+        printf '\r[#a1b2c3 10MiB/10MiB(100%%) CN:8 DL:2MiB ETA:0s]\r'
+    } >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 1/3 - 100% (aria2c)' \
+        'generic three-item direct plan'
+    generic_three_expected=$(map_download_to_zenity "$((100 / 3))")
+    generic_three_max=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals "${generic_three_expected}" "${generic_three_max}" \
+        'three-item plan does not receive the video/audio fallback'
+    finish_success '/tmp/private-direct-three-items.mkv'
 }
 
 test_monitor_direct_transfer_progress() {
@@ -623,6 +696,136 @@ test_monitor_native_transfer_progress() {
     wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 40%' \
         'DASH estimated-byte percentage'
     finish_success '/tmp/dash.mkv'
+}
+
+test_monitor_video_audio_weighting() {
+    local audio_half_expected audio_half_internal audio_half_max
+    local download_complete_expected download_complete_max
+    local known_audio_half_expected known_audio_half_max
+    local known_video_complete_expected known_video_complete_max
+    local transition_max video_complete_expected video_complete_internal
+    local video_complete_max
+
+    video_complete_internal=$(video_audio_fallback_percent 100 0)
+    video_complete_expected=$(map_download_to_zenity \
+        "${video_complete_internal}")
+    audio_half_internal=$(video_audio_fallback_percent 100 50)
+    audio_half_expected=$(map_download_to_zenity "${audio_half_internal}")
+    download_complete_expected=$(map_download_to_zenity 100)
+
+    # Regression guard: when neither stream has a reliable total yet, the
+    # explicit full-video plan reserves 80% for video and 20% for audio.
+    start_scenario native-video-audio-unknown-sizes video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|137+140|137|140' \
+        'YTDLP_PROGRESS_V2|media|137|finished|0|0|0|0|0|100.0%||Unknown' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 1/2 - 100%' \
+        'unknown-size video completion'
+    video_complete_max=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals "${video_complete_expected}" "${video_complete_max}" \
+        'completed unknown-size video occupies its fallback share'
+
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|media|140|downloading|0|0|0|0|0|50.0%||Unknown' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 50%' \
+        'unknown-size audio midpoint'
+    audio_half_max=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals "${audio_half_expected}" "${audio_half_max}" \
+        'audio midpoint advances the final half of its fallback share'
+
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|media|140|finished|0|0|0|0|0|100.0%||Unknown' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 100%' \
+        'unknown-size audio completion'
+    download_complete_max=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals "${download_complete_expected}" "${download_complete_max}" \
+        'both unknown-size streams fill only the download phase'
+    assert_file_has_no_line "${CAPTURE_FILE}" '100' \
+        'two-stream transfer completion is not final media completion'
+    assert_percentages_never_decrease \
+        "${CAPTURE_FILE}" 'unknown-size video/audio fallback'
+    finish_success '/tmp/native-video-audio-unknown-sizes.mkv'
+
+    # Once both totals are known, byte weighting takes priority over 80/20.
+    # A 900-byte video plus 100-byte audio is 90% complete at audio byte zero.
+    start_scenario native-video-audio-known-sizes video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|137+140|137|140' \
+        'YTDLP_PROGRESS_V2|media|137|finished|900|900|0|0|0|100.0%||Unknown' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 1/2 - 100%' \
+        'known-size video completion before audio total'
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|media|140|downloading|0|100|0|0|0|0.0%||Unknown' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 0%' \
+        'known-size audio start'
+    known_video_complete_expected=$(map_download_to_zenity \
+        "$((900 * 100 / (900 + 100)))")
+    known_video_complete_max=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals \
+        "${known_video_complete_expected}" "${known_video_complete_max}" \
+        'known 900/100 byte totals override the 80/20 fallback'
+
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|media|140|downloading|50|100|0|0|0|50.0%||Unknown' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 50%' \
+        'known-size audio midpoint'
+    known_audio_half_expected=$(map_download_to_zenity \
+        "$((950 * 100 / (900 + 100)))")
+    known_audio_half_max=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals \
+        "${known_audio_half_expected}" "${known_audio_half_max}" \
+        'known byte weighting tracks audio bytes exactly'
+
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|media|140|finished|100|100|0|0|0|100.0%||Unknown' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 100%' \
+        'known-size audio completion'
+    download_complete_max=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals "${download_complete_expected}" "${download_complete_max}" \
+        'known-size streams fill the download phase'
+    assert_percentages_never_decrease \
+        "${CAPTURE_FILE}" 'known-size video/audio weighting'
+    finish_success '/tmp/native-video-audio-known-sizes.mkv'
+
+    # If late totals reveal that the real byte ratio is below the earlier 80/20
+    # approximation, the stable display holds its prior value instead of moving
+    # backward. It resumes once the real transfer catches up.
+    start_scenario native-video-audio-weight-transition video
+    printf '%s\n' \
+        'YTDLP_PLAN|media|137+140|137|140' \
+        'YTDLP_PROGRESS_V2|media|137|finished|0|0|0|0|0|100.0%||Unknown' \
+        'YTDLP_PROGRESS_V2|media|140|downloading|0|900|0|0|0|0.0%||Unknown' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 0%' \
+        'transition starts from the fallback display'
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|media|137|finished|100|100|0|0|0|100.0%|1MiB/s|Unknown' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" \
+        'Downloading item 1/2 - 100% - 1MiB/s' \
+        'late video total enables real-byte weighting'
+    transition_max=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals "${video_complete_expected}" "${transition_max}" \
+        'lower real-byte estimate cannot regress the fallback display'
+    assert_percentages_never_decrease \
+        "${CAPTURE_FILE}" 'fallback-to-byte-weight transition'
+
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|media|140|finished|900|900|0|0|0|100.0%||Unknown' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 100%' \
+        'transition completes after audio transfer'
+    download_complete_max=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals "${download_complete_expected}" "${download_complete_max}" \
+        'real-byte transition eventually reaches the download boundary'
+    finish_success '/tmp/native-video-audio-weight-transition.mkv'
 }
 
 test_monitor_composite_and_postprocess_progress() {
@@ -781,6 +984,7 @@ main() {
     test_monitor_planning_progress
     test_monitor_direct_transfer_progress
     test_monitor_native_transfer_progress
+    test_monitor_video_audio_weighting
     test_monitor_composite_and_postprocess_progress
     test_monitor_failure_and_input_hardening
     printf '%s\n' 'Progress-monitor integration tests passed.'

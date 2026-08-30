@@ -221,7 +221,12 @@ Machine records include plan membership, stable format identifiers, byte or
 fragment counters, post-processing state, FFmpeg duration/progress, and the
 final result record. The monitor sanitizes untrusted fields, bounds arithmetic,
 and confirms output through the private result file rather than treating a
-progress percentage as proof of success.
+progress percentage as proof of success. Complete-video plans with an explicit
+video-then-audio pair use an 80/20 fallback only while at least one byte total
+is unavailable; exact aggregate byte weighting takes priority as soon as every
+total is known, and the stable display prevents that transition from moving the
+Zenity bar backward. Single streams and other plan shapes retain their generic
+progress model.
 
 ## Managed runtimes and persistent state
 
@@ -284,6 +289,7 @@ architecture document. The source ZIP contains the tracked source tree.
 | `stress.yml` | Repeated cancellation, runtime, and cleanup race coverage |
 | `shfmt-update.yml` | Prepare an untrusted formatter-pin candidate, verify it separately, and publish only allowlisted data |
 | `release.yml` | Validate an authorized tag, build once, sign, test, attest, publish immutably, then verify fresh public downloads |
+| `release-docs.yml` | After a successful immutable release, prepare and independently verify a bounded published-version patch, then publish a branch for a maintainer-reviewed documentation PR |
 
 Third-party Actions are pinned by full commit SHA and checkout credentials stay
 disabled. Jobs receive only the permissions they need.
@@ -294,6 +300,19 @@ candidate repository code. The publisher consumes reviewed artifacts and
 revalidates their inventory and digests before attestation and publication.
 Fresh-download verification independently compares public immutable assets with
 the tested artifacts.
+
+The post-release documentation workflow is a separate `workflow_run` trust
+zone. Its read-only preparation and verification jobs bind the triggering
+successful `release.yml` run, semantic tag, exact source commit, and immutable
+public release before producing a data-only patch. Only the final job receives
+`contents: write`; it does not execute repository code or check out any
+repository ref. It resolves the protected `main` identity through the GitHub
+API, requires the release SHA to be its ancestor, verifies the current
+allowlisted bytes and modes against the release base, accepts only the
+independently tested two READMEs and static published-version contract, and uses
+Git database objects to create a versioned automation branch. A maintainer then
+opens the reviewed pull request; the workflow never writes directly to `main`
+or receives pull-request permission.
 
 Creating a tag, signing an RPM, publishing a release, or changing repository
 secrets/environments is outside ordinary code-change authority.

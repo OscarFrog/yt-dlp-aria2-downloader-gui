@@ -1,0 +1,670 @@
+name: Update published release documentation
+on:
+  workflow_run:
+    workflows: ['Release packages']
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-docs-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+  RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+  RELEASE_RUN_ID: ${{ github.event.workflow_run.id }}
+
+jobs:
+  prepare-release-docs:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      update: ${{ steps.prepare.outputs.update }}
+      version: ${{ steps.prepare.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate successful immutable release source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          if [[ ! ${RELEASE_TAG} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Error: release workflow head is not a semantic tag: %s\n' \
+              "${RELEASE_TAG}" >&2
+            exit 65
+          fi
+          if [[ ! ${RELEASE_SHA} =~ ^[0-9a-f]{40}$ ||
+              ! ${RELEASE_RUN_ID} =~ ^[1-9][0-9]*$ ]]; then
+            printf '%s\n' 'Error: release workflow identity is malformed.' >&2
+            exit 65
+          fi
+
+          run_identity=$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${RELEASE_RUN_ID}" \
+              --jq \
+              '[.name,.path,.status,.conclusion,.event,.head_branch,.head_sha,.head_repository.full_name] | @tsv'
+          )
+          IFS=$'\t' read -r \
+            workflow_name workflow_path workflow_status workflow_conclusion \
+            workflow_event workflow_tag workflow_sha workflow_repository \
+            <<<"${run_identity}"
+
+          if [[ ${workflow_name} != 'Release packages' ||
+              ${workflow_path} != '.github/workflows/release.yml' ||
+              ${workflow_status} != completed ||
+              ${workflow_conclusion} != success ||
+              (${workflow_event} != push && ${workflow_event} != workflow_dispatch) ||
+              ${workflow_tag} != "${RELEASE_TAG}" ||
+              ${workflow_sha} != "${RELEASE_SHA}" ||
+              ${workflow_repository} != "${GITHUB_REPOSITORY}" ]]; then
+            printf '%s\n' \
+              'Error: triggering workflow is not the exact successful release run.' >&2
+            exit 65
+          fi
+
+          checkout_sha=$(git rev-parse HEAD)
+          tag_sha=$(git rev-parse "${RELEASE_TAG}^{commit}")
+          if [[ ${checkout_sha} != "${RELEASE_SHA}" ||
+              ${tag_sha} != "${RELEASE_SHA}" ]]; then
+            printf '%s\n' \
+              'Error: checkout, tag, and triggering release SHA are not identical.' >&2
+            exit 65
+          fi
+
+          release_identity=$(
+            gh release view "${RELEASE_TAG}" \
+              -R "${GITHUB_REPOSITORY}" \
+              --json tagName,isImmutable \
+              --jq '[.tagName,.isImmutable] | @tsv'
+          )
+          IFS=$'\t' read -r release_tag release_immutable \
+            <<<"${release_identity}"
+          if [[ ${release_tag} != "${RELEASE_TAG}" ||
+              ${release_immutable} != true ]]; then
+            printf 'Error: release is absent, mismatched, or mutable: %s\n' \
+              "${RELEASE_TAG}" >&2
+            exit 65
+          fi
+          gh release verify "${RELEASE_TAG}" -R "${GITHUB_REPOSITORY}"
+
+      - name: Prepare allowlisted documentation patch
+        id: prepare
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          version=${RELEASE_TAG#v}
+          python3 -B scripts/update-published-version.py "${version}"
+
+          expected_paths=$(mktemp)
+          changed_paths=$(mktemp)
+          trap 'rm -f -- "${expected_paths}" "${changed_paths}"' EXIT
+
+          printf '%s\n' README.fr.md README.md test-static.sh \
+            | LC_ALL=C sort >"${expected_paths}"
+          git diff --name-only --no-renames \
+            | LC_ALL=C sort >"${changed_paths}"
+
+          {
+            printf 'version=%s\n' "${version}"
+            if [[ ! -s ${changed_paths} ]]; then
+              printf '%s\n' 'update=false'
+            else
+              printf '%s\n' 'update=true'
+            fi
+          } >>"${GITHUB_OUTPUT}"
+
+          if [[ ! -s ${changed_paths} ]]; then
+            python3 -B scripts/update-published-version.py \
+              --check "${version}"
+            printf '%s\n' \
+              'Published release documentation already matches the release.'
+            exit 0
+          fi
+
+          if ! cmp -s -- "${expected_paths}" "${changed_paths}"; then
+            printf '%s\n' \
+              'Error: documentation updater changed an unexpected path set.' >&2
+            diff -u -- "${expected_paths}" "${changed_paths}" >&2 || true
+            exit 65
+          fi
+          if [[ -n $(git diff --summary) ]]; then
+            printf '%s\n' \
+              'Error: documentation updater changed file identity or mode.' >&2
+            git diff --summary >&2
+            exit 65
+          fi
+
+          python3 -B scripts/update-published-version.py \
+            --check "${version}"
+          git diff --check
+          bash ./test-static.sh
+
+          handoff_dir="${RUNNER_TEMP}/release-docs-candidate"
+          mkdir -p -- "${handoff_dir}"
+          git diff --binary -- \
+            README.fr.md README.md test-static.sh \
+            >"${handoff_dir}/release-docs.patch"
+          {
+            printf 'release_tag=%s\n' "${RELEASE_TAG}"
+            printf 'release_sha=%s\n' "${RELEASE_SHA}"
+            printf 'release_version=%s\n' "${version}"
+          } >"${handoff_dir}/release-docs-metadata.txt"
+          (
+            cd -- "${handoff_dir}"
+            sha256sum \
+              release-docs.patch \
+              release-docs-metadata.txt \
+              >release-docs-handoff.sha256
+          )
+
+      - name: Upload data-only documentation candidate
+        if: steps.prepare.outputs.update == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-docs-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/release-docs-candidate/release-docs.patch
+            ${{ runner.temp }}/release-docs-candidate/release-docs-metadata.txt
+            ${{ runner.temp }}/release-docs-candidate/release-docs-handoff.sha256
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  verify-release-docs:
+    needs: prepare-release-docs
+    if: needs.prepare-release-docs.outputs.update == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download data-only documentation candidate
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: release-docs-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-docs-candidate
+
+      - name: Revalidate and apply candidate patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.prepare-release-docs.outputs.version }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          [[ ${RELEASE_TAG} == "v${RELEASE_VERSION}" ]]
+          [[ ${RELEASE_SHA} =~ ^[0-9a-f]{40}$ ]]
+          [[ $(git rev-parse HEAD) == "${RELEASE_SHA}" ]]
+          [[ $(git rev-parse "${RELEASE_TAG}^{commit}") == "${RELEASE_SHA}" ]]
+          sha256sum -- README.fr.md README.md test-static.sh \
+            >"${RUNNER_TEMP}/release-docs-base-tree.sha256"
+
+          immutable=$(
+            gh release view "${RELEASE_TAG}" \
+              -R "${GITHUB_REPOSITORY}" \
+              --json isImmutable \
+              --jq '.isImmutable'
+          )
+          [[ ${immutable} == true ]]
+          gh release verify "${RELEASE_TAG}" -R "${GITHUB_REPOSITORY}"
+
+          handoff_dir="${RUNNER_TEMP}/release-docs-candidate"
+          mapfile -t handoff_entries < <(
+            find "${handoff_dir}" \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -printf '%f\n' \
+              | LC_ALL=C sort
+          )
+          expected_entries=(
+            release-docs-handoff.sha256
+            release-docs-metadata.txt
+            release-docs.patch
+          )
+          if [[ ${handoff_entries[*]} != "${expected_entries[*]}" ]]; then
+            printf 'Error: unexpected candidate handoff entries: %s\n' \
+              "${handoff_entries[*]}" >&2
+            exit 65
+          fi
+          for handoff_entry in "${expected_entries[@]}"; do
+            if [[ ! -f ${handoff_dir}/${handoff_entry} ||
+                -L ${handoff_dir}/${handoff_entry} ]]; then
+              printf 'Error: candidate handoff path is not a regular file: %s\n' \
+                "${handoff_entry}" >&2
+              exit 65
+            fi
+          done
+          (
+            cd -- "${handoff_dir}"
+            sha256sum --check release-docs-handoff.sha256
+          )
+
+          expected_metadata=$(mktemp)
+          expected_paths=$(mktemp)
+          patch_paths=$(mktemp)
+          changed_paths=$(mktemp)
+          trap 'rm -f -- "${expected_metadata}" "${expected_paths}" "${patch_paths}" "${changed_paths}"' EXIT
+          {
+            printf 'release_tag=%s\n' "${RELEASE_TAG}"
+            printf 'release_sha=%s\n' "${RELEASE_SHA}"
+            printf 'release_version=%s\n' "${RELEASE_VERSION}"
+          } >"${expected_metadata}"
+          cmp -s -- \
+            "${expected_metadata}" \
+            "${handoff_dir}/release-docs-metadata.txt"
+
+          printf '%s\n' README.fr.md README.md test-static.sh \
+            | LC_ALL=C sort >"${expected_paths}"
+          git apply --check -- "${handoff_dir}/release-docs.patch"
+          git apply --numstat -- "${handoff_dir}/release-docs.patch" \
+            | while IFS=$'\t' read -r added removed path; do
+                if [[ ${added} == '-' || ${removed} == '-' ]]; then
+                  printf 'Error: binary documentation handoff is forbidden: %s\n' \
+                    "${path}" >&2
+                  exit 65
+                fi
+                printf '%s\n' "${path}"
+              done \
+            | LC_ALL=C sort -u >"${patch_paths}"
+          if ! cmp -s -- "${expected_paths}" "${patch_paths}"; then
+            printf '%s\n' \
+              'Error: candidate patch path set differs from the allowlist.' >&2
+            diff -u -- "${expected_paths}" "${patch_paths}" >&2 || true
+            exit 65
+          fi
+
+          git apply -- "${handoff_dir}/release-docs.patch"
+          git diff --check
+          if [[ -n $(git diff --summary) ]]; then
+            printf '%s\n' \
+              'Error: candidate patch changed file identity or mode.' >&2
+            git diff --summary >&2
+            exit 65
+          fi
+          git diff --name-only --no-renames \
+            | LC_ALL=C sort >"${changed_paths}"
+          cmp -s -- "${expected_paths}" "${changed_paths}"
+          python3 -B scripts/update-published-version.py \
+            --check "${RELEASE_VERSION}"
+
+      - name: Install complete-validation dependencies
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install --yes \
+            aria2 curl desktop-file-utils gnupg shellcheck unzip
+
+      - name: Validate exact updated documentation tree
+        shell: bash
+        run: |
+          timeout --signal=TERM --kill-after=10s 12m \
+            bash ./tests/run-all.sh --full --jobs 4
+
+      - name: Prepare verified data-only documentation handoff
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          candidate_dir="${RUNNER_TEMP}/release-docs-candidate"
+          verified_dir="${RUNNER_TEMP}/release-docs-verified"
+          mkdir -p -- "${verified_dir}"
+          cp -- \
+            "${candidate_dir}/release-docs-metadata.txt" \
+            "${RUNNER_TEMP}/release-docs-base-tree.sha256" \
+            README.fr.md \
+            README.md \
+            test-static.sh \
+            "${verified_dir}/"
+          sha256sum -- \
+            README.fr.md README.md test-static.sh \
+            >"${verified_dir}/release-docs-tested-tree.sha256"
+          (
+            cd -- "${verified_dir}"
+            sha256sum -- \
+              README.fr.md \
+              README.md \
+              release-docs-base-tree.sha256 \
+              release-docs-metadata.txt \
+              release-docs-tested-tree.sha256 \
+              test-static.sh \
+              >release-docs-handoff.sha256
+          )
+
+      - name: Upload verified data-only documentation handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-docs-verified-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/release-docs-verified/README.fr.md
+            ${{ runner.temp }}/release-docs-verified/README.md
+            ${{ runner.temp }}/release-docs-verified/release-docs-base-tree.sha256
+            ${{ runner.temp }}/release-docs-verified/release-docs-handoff.sha256
+            ${{ runner.temp }}/release-docs-verified/release-docs-metadata.txt
+            ${{ runner.temp }}/release-docs-verified/release-docs-tested-tree.sha256
+            ${{ runner.temp }}/release-docs-verified/test-static.sh
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  publish-release-docs-branch:
+    needs:
+      - prepare-release-docs
+      - verify-release-docs
+    if: needs.prepare-release-docs.outputs.update == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ needs.prepare-release-docs.outputs.version }}
+
+    steps:
+      - name: Download verified data-only documentation handoff
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: release-docs-verified-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-docs-verified
+
+      - name: Revalidate release and publish allowlisted branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          [[ ${RELEASE_VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ ${RELEASE_TAG} == "v${RELEASE_VERSION}" ]]
+          [[ ${RELEASE_SHA} =~ ^[0-9a-f]{40}$ ]]
+          release_tag_sha=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" \
+            --jq '.sha')
+          main_sha=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+            --jq '.object.sha')
+          if [[ ! ${release_tag_sha} =~ ^[0-9a-f]{40}$ ||
+              ! ${main_sha} =~ ^[0-9a-f]{40}$ ||
+              ${release_tag_sha} != "${RELEASE_SHA}" ]]; then
+            printf '%s\n' \
+              'Error: release tag or protected main identity is invalid.' >&2
+            exit 65
+          fi
+          merge_base_sha=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/compare/${RELEASE_SHA}...${main_sha}" \
+            --jq '.merge_base_commit.sha')
+          if [[ ${merge_base_sha} != "${RELEASE_SHA}" ]]; then
+            printf '%s\n' \
+              'Error: release SHA is not an ancestor of protected main.' >&2
+            exit 65
+          fi
+
+          immutable=$(
+            gh release view "${RELEASE_TAG}" \
+              -R "${GITHUB_REPOSITORY}" \
+              --json isImmutable \
+              --jq '.isImmutable'
+          )
+          [[ ${immutable} == true ]]
+          gh release verify "${RELEASE_TAG}" -R "${GITHUB_REPOSITORY}"
+
+          handoff_dir="${RUNNER_TEMP}/release-docs-verified"
+          mapfile -t handoff_entries < <(
+            find "${handoff_dir}" \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -printf '%f\n' \
+              | LC_ALL=C sort
+          )
+          expected_entries=(
+            README.fr.md
+            README.md
+            release-docs-base-tree.sha256
+            release-docs-handoff.sha256
+            release-docs-metadata.txt
+            release-docs-tested-tree.sha256
+          )
+          expected_entries+=(test-static.sh)
+          if [[ ${handoff_entries[*]} != "${expected_entries[*]}" ]]; then
+            printf 'Error: unexpected verified handoff entries: %s\n' \
+              "${handoff_entries[*]}" >&2
+            exit 65
+          fi
+          for handoff_entry in "${expected_entries[@]}"; do
+            if [[ ! -f ${handoff_dir}/${handoff_entry} ||
+                -L ${handoff_dir}/${handoff_entry} ]]; then
+              printf 'Error: verified handoff path is not a regular file: %s\n' \
+                "${handoff_entry}" >&2
+              exit 65
+            fi
+          done
+          expected_metadata=$(mktemp)
+          expected_paths=$(mktemp)
+          expected_handoff_paths=$(mktemp)
+          handoff_paths=$(mktemp)
+          base_paths=$(mktemp)
+          tested_paths=$(mktemp)
+          main_tree_dir=$(mktemp -d)
+          api_payload=$(mktemp)
+          trap 'rm -f -- "${expected_metadata}" "${expected_paths}" "${expected_handoff_paths}" "${handoff_paths}" "${base_paths}" "${tested_paths}" "${api_payload}"; rm -rf -- "${main_tree_dir}"' EXIT
+          {
+            printf 'release_tag=%s\n' "${RELEASE_TAG}"
+            printf 'release_sha=%s\n' "${RELEASE_SHA}"
+            printf 'release_version=%s\n' "${RELEASE_VERSION}"
+          } >"${expected_metadata}"
+          cmp -s -- \
+            "${expected_metadata}" \
+            "${handoff_dir}/release-docs-metadata.txt"
+
+          printf '%s\n' README.fr.md README.md test-static.sh \
+            | LC_ALL=C sort >"${expected_paths}"
+          cp -- "${expected_paths}" "${expected_handoff_paths}"
+          printf '%s\n' \
+            release-docs-base-tree.sha256 \
+            release-docs-metadata.txt \
+            release-docs-tested-tree.sha256 \
+            >>"${expected_handoff_paths}"
+          LC_ALL=C sort -o \
+            "${expected_handoff_paths}" \
+            "${expected_handoff_paths}"
+          sed -n \
+            's/^[0-9a-f]\{64\}  \(.*\)$/\1/p' \
+            "${handoff_dir}/release-docs-handoff.sha256" \
+            | LC_ALL=C sort >"${handoff_paths}"
+          sed -n \
+            's/^[0-9a-f]\{64\}  \(.*\)$/\1/p' \
+            "${handoff_dir}/release-docs-base-tree.sha256" \
+            | LC_ALL=C sort >"${base_paths}"
+          sed -n \
+            's/^[0-9a-f]\{64\}  \(.*\)$/\1/p' \
+            "${handoff_dir}/release-docs-tested-tree.sha256" \
+            | LC_ALL=C sort >"${tested_paths}"
+          handoff_line_count=$(wc -l \
+            <"${handoff_dir}/release-docs-handoff.sha256")
+          base_line_count=$(wc -l \
+            <"${handoff_dir}/release-docs-base-tree.sha256")
+          tested_line_count=$(wc -l \
+            <"${handoff_dir}/release-docs-tested-tree.sha256")
+          if ((handoff_line_count != 6 ||
+              base_line_count != 3 ||
+              tested_line_count != 3)) ||
+              ! cmp -s -- "${expected_handoff_paths}" "${handoff_paths}" ||
+              ! cmp -s -- "${expected_paths}" "${base_paths}" ||
+              ! cmp -s -- "${expected_paths}" "${tested_paths}"; then
+            printf '%s\n' \
+              'Error: verified tree manifest path set differs from the allowlist.' >&2
+            exit 65
+          fi
+          (
+            cd -- "${handoff_dir}"
+            sha256sum --check release-docs-handoff.sha256
+            sha256sum --check release-docs-tested-tree.sha256
+          )
+
+          while IFS= read -r path; do
+            gh api \
+              -H 'Accept: application/vnd.github.raw+json' \
+              "repos/${GITHUB_REPOSITORY}/contents/${path}?ref=${main_sha}" \
+              >"${main_tree_dir}/${path}"
+          done <"${expected_paths}"
+          (
+            cd -- "${main_tree_dir}"
+            sha256sum --check \
+              "${handoff_dir}/release-docs-base-tree.sha256"
+          )
+
+          main_commit=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/commits/${main_sha}")
+          main_tree_sha=$(jq -r '.tree.sha' <<<"${main_commit}")
+          [[ ${main_tree_sha} =~ ^[0-9a-f]{40}$ ]]
+          main_tree=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/trees/${main_tree_sha}")
+          while IFS= read -r path; do
+            expected_mode=100644
+            if [[ ${path} == test-static.sh ]]; then
+              expected_mode=100755
+            fi
+            current_mode=$(jq -r \
+              --arg path "${path}" \
+              '[.tree[] | select(.path == $path and .type == "blob") | .mode] | if length == 1 then .[0] else "" end' \
+              <<<"${main_tree}")
+            if [[ ${current_mode} != "${expected_mode}" ]]; then
+              printf 'Error: protected main mode differs for %s: %s\n' \
+                "${path}" "${current_mode}" >&2
+              exit 65
+            fi
+          done <"${expected_paths}"
+
+          create_blob() {
+            local path=$1
+            local blob_sha=''
+            local encoded_content=''
+
+            encoded_content=$(base64 --wrap=0 -- "${handoff_dir}/${path}")
+            jq -n \
+              --arg content "${encoded_content}" \
+              '{content: $content, encoding: "base64"}' \
+              >"${api_payload}"
+            blob_sha=$(gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/git/blobs" \
+              --input "${api_payload}" \
+              --jq '.sha')
+            [[ ${blob_sha} =~ ^[0-9a-f]{40}$ ]]
+            printf '%s\n' "${blob_sha}"
+          }
+
+          readme_fr_blob=$(create_blob README.fr.md)
+          readme_blob=$(create_blob README.md)
+          static_blob=$(create_blob test-static.sh)
+          jq -n \
+            --arg base_tree "${main_tree_sha}" \
+            --arg readme_fr "${readme_fr_blob}" \
+            --arg readme "${readme_blob}" \
+            --arg static "${static_blob}" \
+            '{
+              base_tree: $base_tree,
+              tree: [
+                {path: "README.fr.md", mode: "100644", type: "blob", sha: $readme_fr},
+                {path: "README.md", mode: "100644", type: "blob", sha: $readme},
+                {path: "test-static.sh", mode: "100755", type: "blob", sha: $static}
+              ]
+            }' >"${api_payload}"
+          candidate_tree_sha=$(gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/git/trees" \
+            --input "${api_payload}" \
+            --jq '.sha')
+          [[ ${candidate_tree_sha} =~ ^[0-9a-f]{40}$ ]]
+
+          branch="automation/release-docs-v${RELEASE_VERSION}"
+          branch_ref="refs/heads/${branch}"
+          matching_refs=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/${branch}")
+          branch_sha=$(jq -r \
+            --arg branch_ref "${branch_ref}" \
+            '[.[] | select(.ref == $branch_ref) | .object.sha] | if length == 0 then "" elif length == 1 then .[0] else error("duplicate branch ref") end' \
+            <<<"${matching_refs}")
+
+          if [[ -n ${branch_sha} ]]; then
+            [[ ${branch_sha} =~ ^[0-9a-f]{40}$ ]]
+            branch_commit=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/git/commits/${branch_sha}")
+            branch_tree_sha=$(jq -r '.tree.sha' <<<"${branch_commit}")
+            branch_parent_count=$(jq -r '.parents | length' <<<"${branch_commit}")
+            branch_parent_sha=$(jq -r '.parents[0].sha // ""' <<<"${branch_commit}")
+            if [[ ${branch_tree_sha} != "${candidate_tree_sha}" ||
+                ${branch_parent_count} != 1 ||
+                ${branch_parent_sha} != "${main_sha}" ]]; then
+              printf '%s\n' \
+                'Error: existing automation branch is not the exact verified tree.' >&2
+              exit 65
+            fi
+            candidate_commit_sha=${branch_sha}
+          else
+            current_main_sha=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+              --jq '.object.sha')
+            if [[ ${current_main_sha} != "${main_sha}" ]]; then
+              printf '%s\n' \
+                'Error: protected main changed during documentation publication.' >&2
+              exit 75
+            fi
+            jq -n \
+              --arg message "Update published documentation to v${RELEASE_VERSION}" \
+              --arg tree "${candidate_tree_sha}" \
+              --arg parent "${main_sha}" \
+              '{message: $message, tree: $tree, parents: [$parent]}' \
+              >"${api_payload}"
+            candidate_commit_sha=$(gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/git/commits" \
+              --input "${api_payload}" \
+              --jq '.sha')
+            [[ ${candidate_commit_sha} =~ ^[0-9a-f]{40}$ ]]
+            jq -n \
+              --arg ref "${branch_ref}" \
+              --arg sha "${candidate_commit_sha}" \
+              '{ref: $ref, sha: $sha}' \
+              >"${api_payload}"
+            created_branch_sha=$(gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              --input "${api_payload}" \
+              --jq '.object.sha')
+            [[ ${created_branch_sha} == "${candidate_commit_sha}" ]]
+          fi
+
+          printf 'Prepared exact release-documentation branch %s at %s.\n' \
+            "${branch}" "${candidate_commit_sha}"
+          {
+            printf '%s\n' \
+              '### Reviewed documentation branch ready' \
+              ''
+            printf 'Open a maintainer-authenticated pull request from %s to main.\n' \
+              "${branch}"
+            printf '\nVerified commit: %s\n' "${candidate_commit_sha}"
+          } >>"${GITHUB_STEP_SUMMARY}"

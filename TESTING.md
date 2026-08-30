@@ -235,7 +235,9 @@ The automated suite checks, among other things:
 - absence of forced MP3, M4A, or Opus output formats;
 - MKV video selection without forced re-encoding;
 - structured yt-dlp planning and progress records, aria2c console fallback,
-  byte-weighted progress, fragment progress, unknown-size animation, exact
+  exact byte-weighted progress, the bounded 80/20 fallback for an explicit
+  two-stream video/audio plan with incomplete totals, monotonic transition
+  between those models, fragment progress, unknown-size animation, exact
   private-direct transfer-count preallocation, and protection against
   pre-download `MetadataParser` hooks being misclassified as final post-processing;
 - separate video/audio transfers, direct audio, HLS, DASH, merge, remux,
@@ -552,6 +554,36 @@ downloads the immutable public release again, reconstructs the expected
 inventory from the tested Actions artifacts, compares every public asset
 byte-for-byte, verifies the shared checksum file, and constrains attestation
 verification to this repository, `release.yml`, and the exact tag commit.
+
+After the complete release workflow succeeds, `.github/workflows/release-docs.yml`
+revalidates that exact successful run, semantic tag, source SHA, and immutable
+release. A read-only job invokes `scripts/update-published-version.py` to update
+only the known English/French release references and
+`EXPECTED_PUBLISHED_VERSION`; exact reference counts make documentation drift
+fail closed. A fresh read-only verifier applies the data-only patch and runs
+the complete local contract. The final job alone receives repository-content
+write permission. It performs no repository checkout, resolves protected
+`main` through the GitHub API, requires the release SHA to be its ancestor,
+checks the current allowlisted bytes and file modes against the release base,
+then creates an exact Git tree and
+`automation/release-docs-vX.Y.Z` branch from the independently tested files.
+It does not execute repository code, receive pull-request permission, or write
+directly to `main`.
+
+The successful workflow summary identifies the exact branch and commit. Open
+the pull request with a maintainer-authenticated GitHub session, inspect its
+checks, and merge through the normal protected-branch path. The repository
+intentionally leaves GitHub Actions pull-request creation disabled. The
+updater's local non-mutating consistency check is:
+
+```bash
+python3 scripts/update-published-version.py --check X.Y.Z
+```
+
+GitHub only delivers this `workflow_run` trigger when the documentation
+workflow already exists on the default branch. It does not backfill a release
+that completed before the workflow was merged. Align any such missed release
+through a separate reviewed documentation change.
 
 If a newly created release unexpectedly remains mutable, the workflow attempts
 to delete it and verifies that cleanup succeeded. Failure or unconfirmed cleanup

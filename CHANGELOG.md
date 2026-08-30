@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.3.6 - 2026-08-30
+
+### Progress accuracy
+
+- Keep exact aggregate byte weighting whenever both planned stream totals are
+  known. For an explicit two-stream complete-video plan with incomplete totals,
+  use a bounded 80/20 video/audio fallback instead of the misleading equal-item
+  average, while preserving monotonic Zenity progress, the post-processing
+  range, and generic behavior for single, combined, or ambiguous plans across
+  native yt-dlp and aria2c.
+
+### Release documentation
+
+- Correct the English and French installation examples from stale v2.3.4 asset
+  names to the immutable v2.3.5 RPM, DEB, and ZIP assets.
+- Add a fail-closed post-release documentation updater and workflow that
+  independently revalidates the successful immutable release, exact data-only
+  handoffs, and the complete local suite before publishing a bounded branch for
+  a maintainer-opened, reviewable pull request.
+
 ## 2.3.5 - 2026-08-30
 
 ### Security and state robustness
