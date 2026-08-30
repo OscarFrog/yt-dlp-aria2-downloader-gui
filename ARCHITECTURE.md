@@ -185,10 +185,12 @@ to the current single native-audio profile.
    records when the GUI requested machine progress.
 8. Validate the produced media with FFprobe. The repaired YouTube HLS profile
    additionally checks duration/tail consistency and remuxes to a temporary MKV
-   with FFmpeg before no-overwrite publication. Publication first links from an
-   authenticated open descriptor; filesystems without hard links use the
-   compatible no-clobber rename only after the protected parent chain and
-   temporary pathname identity are revalidated.
+   with FFmpeg before no-overwrite publication. The temporary inode is held by
+   an authenticated open descriptor from before FFmpeg starts, preventing
+   unlink-and-recreate inode reuse from satisfying the identity checks.
+   Publication first links from that descriptor; filesystems without hard
+   links use the compatible no-clobber rename only after the protected parent
+   chain and temporary pathname identity are revalidated.
 9. Atomically publish the private result record only after the final media path
    is normalized, contained in the selected destination, and validated. Its
    canonical parent chain and inode are authenticated before use. Reads,
@@ -239,12 +241,13 @@ unsafe headers, URL user information, unrepresentable formats, and HTTPS on an
 aria2 build that lacks the required safety capability stay on yt-dlp's native
 transport. Cleanup revalidates the recorded filesystem identities of the
 transaction-owned plan, cookie jar, aria2 input, and transfer manifest
-immediately before pathname removal. The temporary HLS remux and result record
-are opened and authenticated, and their primary no-overwrite publications are
-bound to those descriptors instead of their mutable names. A replacement that
-is visible at an identity check is preserved for diagnosis. As with the
-installer transaction, a process running under the same Unix UID remains in the
-same trust domain and can race a later path-based cleanup after its final check.
+immediately before pathname removal. The temporary HLS remux is kept open from
+before FFmpeg starts, the result record is likewise opened and authenticated,
+and their primary no-overwrite publications are bound to those descriptors
+instead of their mutable names. A replacement that is visible at an identity
+check is preserved for diagnosis. As with the installer transaction, a process
+running under the same Unix UID remains in the same trust domain and can race a
+later path-based cleanup after its final check.
 If an otherwise owned staging directory must be preserved because it contains
 an unknown artifact, validated private authentication metadata is still removed
 before the directory is left for diagnosis.

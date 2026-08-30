@@ -42,6 +42,8 @@ PATH_RECORD_FD_PATH=''
 PATH_RECORD_IDENTITY=''
 HLS_REMUX_TMP=''
 HLS_REMUX_TMP_IDENTITY=''
+HLS_REMUX_FD=''
+HLS_REMUX_FD_PATH=''
 HLS_SOURCE_TO_CLEAN=''
 HLS_SOURCE_TO_CLEAN_IDENTITY=''
 YTDLP_BATCH_FILE_TMP=''
@@ -124,6 +126,9 @@ cleanup() {
             printf 'Warning: preserving an unverified temporary HLS remux: %s\n' \
                 "${HLS_REMUX_TMP}" >&2
         fi
+    fi
+    if [[ -n ${HLS_REMUX_FD} ]]; then
+        close_hls_remux_fd
     fi
     if [[ -n ${YTDLP_BATCH_FILE_TMP} ]]; then
         rm -f -- "${YTDLP_BATCH_FILE_TMP}" || true
@@ -3113,12 +3118,29 @@ validate_hls_duration_parity() {
 
 hls_remux_temp_identity_matches() {
     local current_remux_identity=''
+    local opened_remux_identity=''
 
-    [[ -n ${HLS_REMUX_TMP} && -n ${HLS_REMUX_TMP_IDENTITY} ]] || return 1
+    [[ -n ${HLS_REMUX_TMP} && -n ${HLS_REMUX_TMP_IDENTITY} &&
+        -n ${HLS_REMUX_FD} && -n ${HLS_REMUX_FD_PATH} ]] || return 1
     # shellcheck disable=SC2310 # Failure is the false identity predicate.
     get_path_identity \
         current_remux_identity "${HLS_REMUX_TMP}" regular-file || return 1
-    [[ ${current_remux_identity} == "${HLS_REMUX_TMP_IDENTITY}" ]]
+    opened_remux_identity=$(stat -Lc '%d:%i' -- \
+        "${HLS_REMUX_FD_PATH}" 2>/dev/null) || return 1
+    [[ ${opened_remux_identity} =~ ^[0-9]+:[0-9]+$ &&
+        ${current_remux_identity} == "${HLS_REMUX_TMP_IDENTITY}" &&
+        ${opened_remux_identity} == "${HLS_REMUX_TMP_IDENTITY}" ]]
+}
+
+close_hls_remux_fd() {
+    if [[ -n ${HLS_REMUX_FD} ]]; then
+        if ! { exec {HLS_REMUX_FD}>&-; } 2>/dev/null; then
+            printf 'Warning: unable to close the authenticated HLS remux descriptor.\n' >&2
+        fi
+    fi
+    HLS_REMUX_FD=''
+    HLS_REMUX_FD_PATH=''
+    return 0
 }
 
 remove_owned_hls_remux_temp() {
@@ -3126,6 +3148,7 @@ remove_owned_hls_remux_temp() {
     if [[ ! -e ${HLS_REMUX_TMP} && ! -L ${HLS_REMUX_TMP} ]]; then
         HLS_REMUX_TMP=''
         HLS_REMUX_TMP_IDENTITY=''
+        close_hls_remux_fd
         return 0
     fi
     # shellcheck disable=SC2310 # Failure preserves an identity-changed path.
@@ -3134,6 +3157,7 @@ remove_owned_hls_remux_temp() {
             "${HLS_REMUX_TMP}" >&2
         HLS_REMUX_TMP=''
         HLS_REMUX_TMP_IDENTITY=''
+        close_hls_remux_fd
         return 1
     fi
     if ! rm -f -- "${HLS_REMUX_TMP}"; then
@@ -3141,7 +3165,7 @@ remove_owned_hls_remux_temp() {
     fi
     HLS_REMUX_TMP=''
     HLS_REMUX_TMP_IDENTITY=''
-    return 0
+    close_hls_remux_fd
 }
 
 # Atomically publish a verified HLS remux and update the private path record.
@@ -3160,6 +3184,7 @@ preserve_verified_hls_remux() {
             "${retained_remux_path}" >&2
         HLS_REMUX_TMP=''
         HLS_REMUX_TMP_IDENTITY=''
+        close_hls_remux_fd
         return 0
     fi
 
@@ -3189,10 +3214,12 @@ preserve_verified_hls_remux() {
                 "${retained_remux_path}" >&2
             HLS_REMUX_TMP=''
             HLS_REMUX_TMP_IDENTITY=''
+            close_hls_remux_fd
             return 0
         fi
         HLS_REMUX_TMP=''
         HLS_REMUX_TMP_IDENTITY=''
+        close_hls_remux_fd
         printf 'The verified remuxed MKV was retained at: %s\n' \
             "${retained_remux_path}" >&2
     fi
@@ -3206,8 +3233,6 @@ publish_hls_remux_result() {
     local current_remux_identity=''
     local current_source_identity=''
     local opened_remux_identity=''
-    local remux_fd=''
-    local remux_fd_path=''
 
     # shellcheck disable=SC2310 # Failure preserves the repaired source.
     if ! get_path_identity \
@@ -3225,15 +3250,8 @@ publish_hls_remux_result() {
         preserve_verified_hls_remux
         exit 13
     fi
-    if ! exec {remux_fd}<"${HLS_REMUX_TMP}"; then
-        emit_machine_postprocess error FFmpegVideoRemuxer
-        error 'unable to open the verified HLS remux for publication.'
-        preserve_verified_hls_remux
-        exit 13
-    fi
-    remux_fd_path="/proc/${BASHPID}/fd/${remux_fd}"
-    if [[ ! -f ${remux_fd_path} ]] \
-        || ! opened_remux_identity=$(stat -Lc '%d:%i' -- "${remux_fd_path}" 2>/dev/null) \
+    if [[ ! -f ${HLS_REMUX_FD_PATH} ]] \
+        || ! opened_remux_identity=$(stat -Lc '%d:%i' -- "${HLS_REMUX_FD_PATH}" 2>/dev/null) \
         || [[ ! ${opened_remux_identity} =~ ^[0-9]+:[0-9]+$ ]] \
         || [[ ${opened_remux_identity} != "${HLS_REMUX_TMP_IDENTITY}" ]]; then
         emit_machine_postprocess error FFmpegVideoRemuxer
@@ -3245,7 +3263,7 @@ publish_hls_remux_result() {
     # after the last check cannot become the published media inode. Filesystems
     # without hard links retain the compatible no-clobber rename path only
     # after the safe directory chain and source identity are revalidated.
-    if ! ln -LT -- "${remux_fd_path}" "${final_path}"; then
+    if ! ln -LT -- "${HLS_REMUX_FD_PATH}" "${final_path}"; then
         if [[ -e ${final_path} || -L ${final_path} ]]; then
             emit_machine_postprocess error FFmpegVideoRemuxer
             error "the final MKV appeared during publication; refusing to overwrite it: ${final_path}"
@@ -3275,9 +3293,6 @@ publish_hls_remux_result() {
         error 'the final MKV identity changed during publication.'
         preserve_verified_hls_remux
         exit 13
-    fi
-    if ! exec {remux_fd}>&-; then
-        printf 'Warning: unable to close the verified HLS remux descriptor after publication.\n' >&2
     fi
     # The final name now anchors the verified inode. Remove only an unchanged
     # temporary name; an injected replacement remains external state.
@@ -3384,6 +3399,18 @@ remux_hls_result() {
             HLS_REMUX_TMP_IDENTITY "${HLS_REMUX_TMP}" regular-file; then
         emit_machine_postprocess error FFmpegVideoRemuxer
         error 'unable to secure the temporary MKV file.'
+        exit 13
+    fi
+    if ! exec {HLS_REMUX_FD}<>"${HLS_REMUX_TMP}"; then
+        emit_machine_postprocess error FFmpegVideoRemuxer
+        error 'unable to open the temporary MKV file for authenticated remuxing.'
+        exit 13
+    fi
+    HLS_REMUX_FD_PATH="/proc/${BASHPID}/fd/${HLS_REMUX_FD}"
+    # shellcheck disable=SC2310 # Failure rejects an unauthenticated remux descriptor.
+    if ! hls_remux_temp_identity_matches; then
+        emit_machine_postprocess error FFmpegVideoRemuxer
+        error 'unable to authenticate the temporary MKV descriptor.'
         exit 13
     fi
 

@@ -409,9 +409,10 @@ The automated suite checks, among other things:
   reproducible truncated-input case where FFmpeg exits 0 with both streams but
   a materially shortened MKV; that result must not be published, and the
   repaired HLS source remains available until global validation/publication
-  succeeds; mock replacement of the temporary remux inode proves that failure
-  cleanup cannot remove it and that an identity-changed publication is never
-  accepted as an application result;
+  succeeds; mock replacement of the temporary remux inode proves that the
+  creation-time descriptor prevents inode-number reuse from authorizing a
+  replacement, failure cleanup cannot remove it, and an identity-changed
+  publication is never accepted as an application result;
 - hermetic real-tool direct HTTP, AAC/M4A, Opus/WebM, combined-source audio,
   attached-cover audio, HLS and DASH transfers using generated media and loopback HTTP servers, with
   transparent shims proving that real aria2c is used for direct transfers and
