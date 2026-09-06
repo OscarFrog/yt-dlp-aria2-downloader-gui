@@ -351,6 +351,12 @@ The automated suite checks, among other things:
   dedicated hicolor icon, documentation permissions, positive inclusion of the
   native aria2 helper, and exclusion of tests, obsolete images, and the
   portable-only launcher helper;
+- Fedora RPM install/upgrade migration of every verified historical per-user
+  desktop schema that used `video-x-generic` and masks the system launcher:
+  the three strict direct-Exec comment variants (including an exact 302-byte
+  fixture) and the later stable-link variant, while preserving portable target
+  links and any current, modified, out-of-HOME, symbolic-link, mode-changed,
+  or non-regular launcher candidate observed during validation;
 - real privileged installation and removal of the generated RPM in Fedora 44
   `fresh` and `ffmpeg-free` GitHub Actions environments, including launcher and
   icon cleanup;

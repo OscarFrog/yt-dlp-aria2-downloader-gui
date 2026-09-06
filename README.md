@@ -258,6 +258,17 @@ first so it cannot override the packaged desktop entry:
 ./install-gui.sh uninstall
 ```
 
+The Fedora RPM also repairs older migration cases automatically: on install or
+upgrade it removes only exact historical project-generated per-user desktop
+entries that used the generic `video-x-generic` icon and would mask the
+packaged entry. This covers the early direct launchers only when their quoted
+absolute target is below that user's home and ends in `download-video-gui.sh`,
+plus the later stable-link launcher. The portable `launch` link and its data
+remain untouched. Current, modified, symbolic-link, non-regular, out-of-home,
+and custom-XDG launcher entries observed during migration are preserved; use
+the command above when intentionally replacing one of those portable
+launchers.
+
 ### Fedora 44
 
 Use `install-fedora.sh` from the same GitHub release as the RPM. Do not install
@@ -391,6 +402,11 @@ On Fedora, a **final RPM removal** continues to perform best-effort cleanup
 of the managed per-user runtime and exact legacy
 `yt-dlp-aria2-downloader-gui` XDG artifacts for users whose home directories
 are available. RPM upgrades do not perform this cleanup.
+
+The narrowly matched generic-icon desktop migration described above is a
+separate install/upgrade action, not this final-erase cleanup. It removes only
+recognized obsolete desktop entries and preserves portable launcher links and
+data.
 
 On Debian/Ubuntu, `apt remove` and `apt purge` remove the system package payload
 but deliberately preserve per-user managed runtimes, configuration, state, and

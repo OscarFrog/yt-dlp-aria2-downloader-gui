@@ -275,6 +275,19 @@ utilisateur afin qu'il ne masque pas l'entrée installée par le paquet :
 ./install-gui.sh uninstall
 ```
 
+Le RPM Fedora corrige aussi automatiquement d'anciens cas de migration : lors
+de l'installation ou d'une mise à niveau, il retire uniquement les fichiers
+desktop utilisateur correspondant exactement aux schémas historiques du projet
+qui employaient l'icône générique `video-x-generic` et masquaient l'entrée du
+paquet. Les premiers lanceurs directs ne sont reconnus que si leur cible
+absolue entre guillemets se trouve sous le dossier personnel de l'utilisateur
+et se termine par `download-video-gui.sh` ; le schéma ultérieur à lien stable
+est également reconnu. Le lien portable `launch` et ses données restent
+intacts. Les entrées actuelles, modifiées, symboliques, non régulières, hors du
+dossier personnel ou placées dans un XDG personnalisé qui sont observées
+pendant la migration sont préservées ; utilisez la commande ci-dessus pour
+remplacer volontairement l'un de ces lanceurs.
+
 ### Fedora 44
 
 Utilisez `install-fedora.sh` provenant de la même release GitHub que le RPM.
@@ -410,6 +423,11 @@ nettoyage best-effort du runtime géré propre à chaque utilisateur ainsi que d
 artefacts XDG historiques portant exactement le nom
 `yt-dlp-aria2-downloader-gui`, pour les utilisateurs dont le dossier personnel
 est disponible. Une mise à niveau du RPM ne déclenche pas ce nettoyage.
+
+La migration ciblée des desktops à icône générique décrite ci-dessus est une
+action distincte exécutée à l'installation ou à la mise à niveau, et non ce
+nettoyage final. Elle retire seulement les entrées obsolètes reconnues et
+conserve les liens des lanceurs portables ainsi que leurs données.
 
 Sous Debian/Ubuntu, `apt remove` et `apt purge` suppriment le payload système du
 paquet mais préservent volontairement les runtimes, la configuration, l'état et

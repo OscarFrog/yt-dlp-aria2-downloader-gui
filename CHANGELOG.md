@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.3.8 - 2026-08-30
+## 2.3.8 - 2026-09-06
 
 ### Process and transfer reliability
 
@@ -27,6 +27,15 @@
 - Reject relative temporary roots, preserve renamed launcher identity across a
   new-download restart, and use a valid folder fallback when the configured
   home directory is unavailable.
+
+### Fedora desktop integration
+
+- Retire all exactly verified historical per-user desktop schemas that used the
+  generic icon during RPM installation or upgrade, so they cannot mask the
+  packaged GNOME launcher and dedicated icon. Cover three early direct-Exec
+  comment layouts plus the later stable-link layout, while preserving portable
+  launcher links and any current, modified, out-of-HOME, symbolic-link, or
+  non-regular desktop candidate observed during validation.
 
 ### Runtime hardening
 

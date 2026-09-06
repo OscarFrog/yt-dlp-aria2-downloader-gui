@@ -24,6 +24,10 @@ Requires:       gnupg2
 Requires:       unzip
 Requires:       zenity
 Requires:       hicolor-icon-theme
+Requires(post): bash
+Requires(post): coreutils
+Requires(post): diffutils
+Requires(post): util-linux
 Requires(preun): bash
 Requires(preun): coreutils
 Requires(preun): util-linux
@@ -42,6 +46,13 @@ install -D -m 0644 LICENSE "%{buildroot}%{_licensedir}/%{name}/LICENSE"
 %check
 desktop-file-validate --no-hints "%{buildroot}%{_datadir}/applications/yt-dlp-aria2-downloader.desktop"
 test "$("%{buildroot}%{_bindir}/yt-dlp-aria2-downloader" --version)" = "yt-dlp-aria2-downloader version %{version}"
+
+%post
+helper="%{_libexecdir}/yt-dlp-aria2-downloader/package-user-cleanup.sh"
+if [ -x "${helper}" ]; then
+    "${helper}" --all-users-migrate-launcher || :
+fi
+:
 
 %preun
 if [ "$1" -eq 0 ]; then
@@ -75,10 +86,11 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
-* Sun Aug 30 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.8-1
+* Sun Sep 06 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.8-1
 - Preserve supervised command status and authenticate process-group signaling.
 - Harden private transfer cleanup and HLS no-overwrite publication.
 - Harden managed-runtime paths, locks, probes, updates, and recovery.
+- Retire only exactly verified historical per-user launchers that mask the RPM icon.
 
 * Sun Aug 30 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.7-1
 - Improve GUI profile continuity and one-click diagnostic access.

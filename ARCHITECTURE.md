@@ -328,7 +328,15 @@ builders wrap that tree:
   through the spec, and validates the produced payload;
 - `packaging/deb/build-deb.sh` writes Debian control/checksum metadata, builds
   the architecture-independent DEB, and validates its payload;
-- the RPM keeps `package-user-cleanup.sh` for its final erase scriptlet;
+- the RPM keeps `package-user-cleanup.sh` for two allowlisted lifecycle tasks:
+  its install/upgrade scriptlet retires only exact historical project desktop
+  entries that used the generic icon and would mask the system entry. The
+  recognized schemas cover the three direct-Exec comment layouts and the later
+  stable-link layout; a direct target must be a canonical quoted absolute path
+  beneath HOME ending in `download-video-gui.sh`. The final erase scriptlet
+  removes proven package-managed per-user data; migration preserves the
+  portable launcher link and any current, modified, symbolic-link, or
+  non-regular desktop candidate observed during validation;
 - the DEB deliberately removes that helper and preserves per-user data on
   remove and purge.
 

@@ -3,25 +3,28 @@
 # ==============================================================================
 # Project     : yt-dlp-aria2-downloader-gui
 # File        : packaging/package-user-cleanup.sh
-# Purpose     : Safely remove RPM-managed per-user data during final package erase.
+# Purpose     : Safely migrate launchers and remove per-user data for the RPM.
 # ==============================================================================
 
 # Security invariants:
 # - root only enumerates users;
-# - non-root home cleanup is executed under the target UID/GID;
+# - non-root home operations are executed under the target UID/GID;
 # - no recursive search of /home or the filesystem;
 # - only an explicit path allowlist is removed;
 # - marker contents are data, never sourced/eval'ed;
 # - symlinked parent components below an authorized XDG root are never crossed;
-# - cleanup failure must not break RPM package removal.
+# - launcher migration accepts only an exact legacy regular file observed under
+#   the target UID, unlinks only its fixed desktop leaf, and never recurses;
+# - helper failure must not break RPM package installation or removal.
 
-# Do not use errexit here: every cleanup failure is handled explicitly so this
-# best-effort helper cannot abort package removal.
+# Do not use errexit here: every failure is handled explicitly so this
+# best-effort helper cannot abort its package lifecycle scriptlet.
 set -u -o pipefail
 umask 077
 
 readonly APP_ID='yt-dlp-aria2-downloader'
 readonly LEGACY_GUI_ID='yt-dlp-aria2-downloader-gui'
+readonly LEGACY_PORTABLE_ICON='video-x-generic'
 readonly MARKER_NAME='.package-runtime-data-home-v1'
 readonly RUNTIME_OWNER_SENTINEL='.package-runtime-owner-v1'
 readonly MAX_METADATA_BYTES=4096
@@ -177,6 +180,35 @@ remove_exact() {
     return 0
 }
 
+remove_exact_nondirectory() {
+    local base=$1
+    local path=$2
+
+    if ! safe_xdg_base "${base}" \
+        || ! safe_absolute_path "${path}" \
+        || [[ ${path} != "${base}/"* ]]; then
+        warn "refusing unsafe cleanup path: ${path}"
+        return 64
+    fi
+
+    if path_has_symlink_parent_below_base "${base}" "${path}"; then
+        warn "refusing cleanup through a symlinked parent: ${path}"
+        return 64
+    fi
+
+    if [[ -e ${path} || -L ${path} ]]; then
+        # The launcher migration must never recurse if the leaf changes type
+        # after validation. A terminal symbolic link is unlinked, not followed.
+        if ! rm -f -- "${path}"; then
+            warn "unable to remove: ${path}"
+            return 73
+        fi
+        printf 'Removed obsolete launcher override: %s\n' "${path}"
+    fi
+
+    return 0
+}
+
 rmdir_exact_if_empty() {
     local base=$1
     local path=$2
@@ -211,6 +243,161 @@ remove_legacy_icons() {
     for path in "${icons[@]}"; do
         remove_exact "${data_home}" "${path}" || true
     done
+}
+
+serialize_stable_desktop_exec() {
+    local output_variable=$1
+    local value=$2
+
+    # Stable-link launchers use the two escaping layers required by the
+    # desktop-entry string and Exec parsers.
+    value=${value//\\/\\\\\\\\}
+    value=${value//\"/\\\\\"}
+    value=${value//\`/\\\\\`}
+    value=${value//\$/\\\\\$}
+    printf -v "${output_variable}" '"%s"' "${value}"
+}
+
+legacy_desktop_matches_template() {
+    local desktop_path=$1
+    local desktop_exec=$2
+    local comment_schema=$3
+
+    case ${comment_schema} in
+        french | english | bilingual) ;;
+        *) return 2 ;;
+    esac
+
+    LC_ALL=C cmp -s -- "${desktop_path}" <(
+        printf '%s\n' \
+            '[Desktop Entry]' \
+            'Type=Application' \
+            'Version=1.0' \
+            'Name=yt-dlp aria2 downloader'
+        case ${comment_schema} in
+            french)
+                printf '%s\n' \
+                    'Comment=Télécharger une vidéo ou extraire une piste audio'
+                ;;
+            english)
+                printf '%s\n' \
+                    'Comment=Download a video or extract an audio track'
+                ;;
+            bilingual)
+                printf '%s\n' \
+                    'Comment=Download a video or extract an audio track' \
+                    'Comment[fr]=Télécharger une vidéo ou extraire une piste audio'
+                ;;
+            *) ;;
+        esac
+        printf '%s\n' \
+            "Exec=${desktop_exec}" \
+            "Icon=${LEGACY_PORTABLE_ICON}" \
+            'Terminal=false' \
+            'Categories=AudioVideo;' \
+            'StartupNotify=true'
+    )
+}
+
+safe_direct_desktop_exec() {
+    local output_variable=$1
+    local home=$2
+    local exec_line=$3
+    local direct_path=''
+
+    [[ ${exec_line} == 'Exec="'*'"' ]] || return 1
+    direct_path=${exec_line#'Exec="'}
+    direct_path=${direct_path%'"'}
+
+    # Historical direct launchers escaped several desktop metacharacters.
+    # Conservatively migrate only a plain canonical absolute path that can be
+    # validated without interpreting or unescaping user-controlled text.
+    [[ -n ${direct_path} &&
+        ${direct_path} != *\\* &&
+        ${direct_path} != *'"'* &&
+        ${direct_path} != *'`'* &&
+        ${direct_path} != *'$'* &&
+        ${direct_path} != *'%'* ]] || return 1
+    safe_absolute_path "${direct_path}" || return 1
+    [[ ${direct_path} == "${home}/"* &&
+        ${direct_path} == */download-video-gui.sh ]] || return 1
+
+    printf -v "${output_variable}" '"%s"' "${direct_path}"
+}
+
+legacy_portable_desktop_is_exact() {
+    local home=$1
+    local data_home=$2
+    local desktop_path=$3
+    local launcher_path="${data_home}/${APP_ID}/launch"
+    local initial_identity=''
+    local final_identity=''
+    local stable_desktop_exec=''
+    local direct_desktop_exec=''
+    local matched=false
+    local -a desktop_lines=()
+
+    [[ -f ${desktop_path} && ! -L ${desktop_path} ]] || return 1
+    path_has_symlink_parent_below_base "${home}" "${desktop_path}" && return 1
+    metadata_file_is_bounded "${desktop_path}" || return 1
+
+    initial_identity=$(stat -c '%d:%i:%u:%a' -- "${desktop_path}" 2>/dev/null) \
+        || return 1
+    [[ ${initial_identity} == *":${EUID}:644" ]] || return 1
+
+    # Later generic-icon releases used one deterministic stable-link schema.
+    # Earlier releases used one of three fixed comment schemas with a direct
+    # GUI path. Every other field and the final newline remain exact.
+    if [[ ${launcher_path} != *'%'* && ${launcher_path} != *'='* ]]; then
+        serialize_stable_desktop_exec stable_desktop_exec "${launcher_path}"
+        if legacy_desktop_matches_template \
+            "${desktop_path}" "${stable_desktop_exec}" bilingual; then
+            matched=true
+        fi
+    fi
+
+    if [[ ${matched} == false ]]; then
+        mapfile -t -n 13 desktop_lines <"${desktop_path}" || return 1
+        case ${#desktop_lines[@]} in
+            10)
+                if safe_direct_desktop_exec \
+                    direct_desktop_exec "${home}" "${desktop_lines[5]}" \
+                    && { legacy_desktop_matches_template \
+                        "${desktop_path}" "${direct_desktop_exec}" french \
+                        || legacy_desktop_matches_template \
+                            "${desktop_path}" "${direct_desktop_exec}" english; }; then
+                    matched=true
+                fi
+                ;;
+            11)
+                if safe_direct_desktop_exec \
+                    direct_desktop_exec "${home}" "${desktop_lines[6]}" \
+                    && legacy_desktop_matches_template \
+                        "${desktop_path}" "${direct_desktop_exec}" bilingual; then
+                    matched=true
+                fi
+                ;;
+            *) ;;
+        esac
+    fi
+
+    [[ ${matched} == true ]] || return 1
+    final_identity=$(stat -c '%d:%i:%u:%a' -- "${desktop_path}" 2>/dev/null) \
+        || return 1
+    [[ ${final_identity} == "${initial_identity}" ]]
+}
+
+migrate_legacy_portable_launcher() {
+    local home=$1
+    local data_home="${home}/.local/share"
+    local desktop_path="${data_home}/applications/${APP_ID}.desktop"
+
+    # Only the standard path is reconstructable from the account database.
+    # A custom XDG_DATA_HOME remains untouched unless its owner removes the
+    # portable launcher explicitly with install-gui.sh.
+    legacy_portable_desktop_is_exact \
+        "${home}" "${data_home}" "${desktop_path}" || return 0
+    remove_exact_nondirectory "${home}" "${desktop_path}" || true
 }
 
 custom_runtime_root_is_owned() {
@@ -347,12 +534,39 @@ cleanup_one_home() {
     return 0
 }
 
+migrate_launcher_one_home() {
+    local home=$1
+
+    safe_home "${home}" || {
+        warn "refusing invalid HOME: ${home}"
+        return 64
+    }
+
+    if [[ ! -d ${home} ]]; then
+        warn "HOME is unavailable or not mounted; skipping: ${home}"
+        return 0
+    fi
+    if [[ -L ${home} ]]; then
+        warn "refusing launcher migration through a symbolic-link HOME: ${home}"
+        return 0
+    fi
+
+    migrate_legacy_portable_launcher "${home}"
+    return 0
+}
+
 run_as_user() {
     local uid=$1
     local gid=$2
     local home=$3
+    local helper_mode=${4:---user-home}
     local normalized_uid=''
     local normalized_gid=''
+
+    case ${helper_mode} in
+        --user-home | --user-home-migrate-launcher) ;;
+        *) return 2 ;;
+    esac
 
     if ! normalize_linux_id normalized_uid "${uid}" \
         || ! normalize_linux_id normalized_gid "${gid}"; then
@@ -379,8 +593,8 @@ run_as_user() {
             USER=root \
             LOGNAME=root \
             PATH='/usr/sbin:/usr/bin:/sbin:/bin' \
-            "${SELF}" --user-home "${home}" || {
-            warn "cleanup failed or timed out for uid=0 home=${home}; continuing"
+            "${SELF}" "${helper_mode}" "${home}" || {
+            warn "per-user operation failed or timed out for uid=0 home=${home}; continuing"
             return 0
         }
         return 0
@@ -402,9 +616,9 @@ run_as_user() {
         USER="${uid}" \
         LOGNAME="${uid}" \
         PATH='/usr/sbin:/usr/bin:/sbin:/bin' \
-        "${SELF}" --user-home "${home}" || {
+        "${SELF}" "${helper_mode}" "${home}" || {
         warn \
-            "cleanup failed or timed out for uid=${uid} home=${home}; continuing"
+            "per-user operation failed or timed out for uid=${uid} home=${home}; continuing"
         return 0
     }
 
@@ -412,6 +626,7 @@ run_as_user() {
 }
 
 enumerate_users() {
+    local helper_mode=${1:---user-home}
     local line
     local getent_output=''
     local _name _passwd uid gid _gecos home _shell key
@@ -420,6 +635,11 @@ enumerate_users() {
     local getent_source_usable=false
     local -a records=()
     local -A seen=()
+
+    case ${helper_mode} in
+        --user-home | --user-home-migrate-launcher) ;;
+        *) return 2 ;;
+    esac
 
     if [[ -r /etc/passwd ]]; then
         passwd_source_usable=true
@@ -464,7 +684,7 @@ enumerate_users() {
         [[ -z ${seen["${key}"]+x} ]] || continue
         seen["${key}"]=1
 
-        run_as_user "${uid}" "${gid}" "${home}"
+        run_as_user "${uid}" "${gid}" "${home}" "${helper_mode}"
     done
 
     return 0
@@ -474,7 +694,9 @@ usage() {
     cat >&2 <<EOF
 Usage:
   ${0##*/} --all-users
+  ${0##*/} --all-users-migrate-launcher
   ${0##*/} --user-home ABSOLUTE_HOME
+  ${0##*/} --user-home-migrate-launcher ABSOLUTE_HOME
   ${0##*/} --numeric-home UID GID ABSOLUTE_HOME
 EOF
 }
@@ -491,6 +713,18 @@ run_all_users_mode() {
     enumerate_users
 }
 
+run_all_users_migrate_launcher_mode() {
+    ((EUID == 0)) || {
+        warn '--all-users-migrate-launcher must run as root'
+        exit 77
+    }
+    (($# == 1)) || {
+        usage
+        exit 2
+    }
+    enumerate_users --user-home-migrate-launcher
+}
+
 run_user_home_mode() {
     (($# == 2)) || {
         usage
@@ -505,6 +739,22 @@ run_user_home_mode() {
         exit 77
     fi
     cleanup_one_home "$2"
+}
+
+run_user_home_migrate_launcher_mode() {
+    (($# == 2)) || {
+        usage
+        exit 2
+    }
+    safe_home "$2" || {
+        warn "refusing invalid HOME: $2"
+        exit 64
+    }
+    if [[ -d $2 ]] && ! home_owned_by_effective_user "$2"; then
+        warn "refusing --user-home-migrate-launcher for a HOME not owned by effective uid ${EUID}: $2"
+        exit 77
+    fi
+    migrate_launcher_one_home "$2"
 }
 
 run_numeric_home_mode() {
@@ -536,7 +786,9 @@ main() {
 
     case ${1:-} in
         --all-users) run_all_users_mode "$@" ;;
+        --all-users-migrate-launcher) run_all_users_migrate_launcher_mode "$@" ;;
         --user-home) run_user_home_mode "$@" ;;
+        --user-home-migrate-launcher) run_user_home_migrate_launcher_mode "$@" ;;
         --numeric-home) run_numeric_home_mode "$@" ;;
         *)
             usage
