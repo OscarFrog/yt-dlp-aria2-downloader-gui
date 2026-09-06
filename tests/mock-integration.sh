@@ -711,17 +711,45 @@ while True:
 fi
 
 if [[ ${MOCK_EXIT_WITH_LIVE_DESCENDANT:-0} == 1 ]]; then
-    bash -c '
-        set -euo pipefail
-        trap "" HUP INT
-        if [[ ${MOCK_DESCENDANT_IGNORE_TERM:-0} == 1 ]]; then
-            trap "" TERM
-        else
-            trap '\''printf terminated >"${MOCK_DESCENDANT_TERMINATION_MARKER:?}"; exit 143'\'' TERM
-        fi
-        printf "%s\n" "$$" >"${MOCK_DESCENDANT_STARTED_MARKER:?}"
-        sleep 86400
-    ' </dev/null >/dev/null 2>&1 &
+    # Keep this fixture single-process so its published PID/start time covers
+    # the complete resistant descendant rather than an untracked wait child.
+    python3 -c '
+import os
+import signal
+import sys
+
+started_marker = sys.argv[1]
+termination_marker = sys.argv[2]
+term_marker = sys.argv[3]
+resist_term = sys.argv[4] == "1"
+
+
+def write_marker(path, value):
+    if path:
+        with open(path, "w", encoding="utf-8") as marker:
+            marker.write(value)
+
+
+def terminate(signal_number, _frame):
+    write_marker(termination_marker, "terminated")
+    raise SystemExit(128 + signal_number)
+
+
+def observe_term(_signal_number, _frame):
+    write_marker(term_marker, "received")
+
+
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+signal.signal(signal.SIGTERM, observe_term if resist_term else terminate)
+write_marker(started_marker, f"{os.getpid()}\n")
+while True:
+    signal.pause()
+' "${MOCK_DESCENDANT_STARTED_MARKER:?}" \
+        "${MOCK_DESCENDANT_TERMINATION_MARKER:-}" \
+        "${MOCK_DESCENDANT_TERM_MARKER:-}" \
+        "${MOCK_DESCENDANT_IGNORE_TERM:-0}" \
+        </dev/null >/dev/null 2>&1 &
     exit "${MOCK_DESCENDANT_PARENT_STATUS:-23}"
 fi
 
@@ -1896,6 +1924,61 @@ wait_for_file() {
     done
 
     fail "${label}: file did not appear within ${timeout}s: ${path}"
+}
+
+read_mock_process_start_time() {
+    (($# == 2)) || return 2
+    local output_variable=$1
+    local pid=$2
+    local process_stat=''
+    local process_start_time=''
+    local process_state=''
+    local -a process_fields=()
+
+    [[ ${pid} =~ ^[1-9][0-9]*$ ]] || return 2
+    IFS= read -r process_stat 2>/dev/null <"/proc/${pid}/stat" || return 1
+    read -r -a process_fields <<<"${process_stat##*) }"
+    ((${#process_fields[@]} >= 20)) || return 1
+    process_state=${process_fields[0]}
+    process_start_time=${process_fields[19]}
+    [[ ${process_state} != Z && ${process_state} != X &&
+        ${process_start_time} =~ ^[1-9][0-9]*$ ]] || return 1
+    printf -v "${output_variable}" '%s' "${process_start_time}"
+}
+
+wait_for_mock_process_to_stop() {
+    (($# == 4)) || return 2
+    local pid=$1
+    local expected_start_time=$2
+    local timeout=$3
+    local label=$4
+    local deadline=$((SECONDS + timeout))
+    local observed_start_time=''
+    local process_stat=''
+    local process_state=''
+    local -a process_fields=()
+
+    while ((SECONDS < deadline)); do
+        [[ -r /proc/${pid}/stat ]] || return 0
+        process_stat=''
+        if ! { IFS= read -r process_stat <"/proc/${pid}/stat"; } 2>/dev/null; then
+            sleep 0.1
+            continue
+        fi
+        process_fields=()
+        read -r -a process_fields <<<"${process_stat##*) }"
+        if ((${#process_fields[@]} >= 20)); then
+            process_state=${process_fields[0]}
+            observed_start_time=${process_fields[19]}
+            if [[ ${observed_start_time} != "${expected_start_time}" ||
+                ${process_state} == Z || ${process_state} == X ]]; then
+                return 0
+            fi
+        fi
+        sleep 0.1
+    done
+
+    fail "${label}: process identity remained live for ${timeout}s: ${pid}"
 }
 
 wait_for_worker_registration_cleanup() {
@@ -4883,7 +4966,9 @@ test_mock_signal_cli_download() {
 
 test_mock_signal_cli_leader_exit_descendant() {
     local cli_engine_pid cli_engine_status descendant_pid descendant_signal_log
-    local descendant_started_marker descendant_termination_marker
+    local descendant_started_marker descendant_start_time descendant_term_marker
+    local descendant_termination_marker elapsed_milliseconds
+    local signal_finished_at signal_started_at
 
     # Regression guard: keep the authenticated session leader alive after the
     # primary command exits while a same-session descendant remains. The
@@ -4928,8 +5013,10 @@ test_mock_signal_cli_leader_exit_descendant() {
     # A signal-resistant descendant requires the repeated request to KILL the
     # still-authenticated group immediately; the first TERM must not destroy
     # the sentinel and leave the numeric PGID unauthenticated.
+    descendant_term_marker="${TEST_ROOT}/leader-exit-resistant-descendant-term"
     rm -f -- \
         "${descendant_started_marker}" \
+        "${descendant_term_marker}" \
         "${descendant_termination_marker}" \
         "${descendant_signal_log}"
     prepare_argument_log 'cli-leader-exit-resistant-descendant'
@@ -4937,6 +5024,7 @@ test_mock_signal_cli_leader_exit_descendant() {
         MOCK_EXIT_WITH_LIVE_DESCENDANT=1 \
         MOCK_DESCENDANT_IGNORE_TERM=1 \
         MOCK_DESCENDANT_STARTED_MARKER="${descendant_started_marker}" \
+        MOCK_DESCENDANT_TERM_MARKER="${descendant_term_marker}" \
         MOCK_DESCENDANT_TERMINATION_MARKER="${descendant_termination_marker}" \
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${OUTPUT_DIR}" --mode audio \
@@ -4948,16 +5036,25 @@ test_mock_signal_cli_leader_exit_descendant() {
     IFS= read -r descendant_pid <"${descendant_started_marker}"
     [[ ${descendant_pid} =~ ^[1-9][0-9]*$ ]] \
         || fail "Invalid resistant descendant PID: ${descendant_pid}"
+    # shellcheck disable=SC2310 # Failure is converted to a fixture diagnostic.
+    read_mock_process_start_time descendant_start_time "${descendant_pid}" \
+        || fail 'Unable to capture the resistant descendant identity.'
     kill -TERM -- "${cli_engine_pid}"
-    sleep 0.05
+    wait_for_file "${descendant_term_marker}" 10 \
+        'leader-exit resistant descendant receives first TERM'
+    signal_started_at=$(date +%s%3N)
     kill -TERM -- "${cli_engine_pid}"
     cli_engine_status=0
     wait "${cli_engine_pid}" || cli_engine_status=$?
     assert_equals 143 "${cli_engine_status}" \
         'CLI resistant descendant repeated-TERM status'
-    if kill -0 -- "${descendant_pid}" 2>/dev/null; then
-        fail 'Repeated TERM left the signal-resistant descendant alive.'
-    fi
+    wait_for_mock_process_to_stop \
+        "${descendant_pid}" "${descendant_start_time}" 5 \
+        'Repeated TERM left the signal-resistant descendant alive'
+    signal_finished_at=$(date +%s%3N)
+    elapsed_milliseconds=$((signal_finished_at - signal_started_at))
+    ((elapsed_milliseconds < 5000)) \
+        || fail "Repeated TERM escalation took ${elapsed_milliseconds}ms."
     assert_no_test_processes \
         'resistant descendant escalation left worker processes'
 }

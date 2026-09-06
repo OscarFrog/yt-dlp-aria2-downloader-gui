@@ -1205,7 +1205,13 @@ test_runtime_lock_hardening() {
             exec 9>>"${runtime_root}/update.lock"
             flock --exclusive 9
             : >"${ready}"
-            sleep 5
+            trap 'exit 0' HUP INT TERM
+            # Keep contention active until the parent completes both probes.
+            # Each wait child closes the lock descriptor so cleanup cannot
+            # leave the fixture locked after terminating this holder shell.
+            while true; do
+                sleep 1 9>&-
+            done
         ) &
         holder=$!
         HOLDER_PID=${holder}
