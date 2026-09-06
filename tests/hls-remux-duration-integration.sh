@@ -228,9 +228,24 @@ if (($# == 4)) \
             '--fragment-retries RETRIES' \
             '--extractor-retries RETRIES' \
             '--retry-sleep EXPR' \
+            '--no-playlist' \
             '--no-overwrites' \
             '--no-post-overwrites' \
             '--break-match-filters FILTER' \
+            '--embed-metadata' \
+            '--output TEMPLATE' \
+            '--continue' \
+            '--downloader [PROTO:]NAME' \
+            '--concurrent-fragments N' \
+            '--format FORMAT' \
+            '--merge-output-format FORMAT' \
+            '--remux-video FORMAT' \
+            '--extract-audio' \
+            '--audio-format FORMAT' \
+            '--audio-quality QUALITY' \
+            '--newline' \
+            '--progress' \
+            '--color STREAM:POLICY' \
             '--ignore-config' \
             '--no-plugin-dirs' \
             '--no-update' \

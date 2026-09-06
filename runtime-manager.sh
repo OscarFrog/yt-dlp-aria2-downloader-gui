@@ -18,6 +18,8 @@ readonly RUNTIME_OWNER_SENTINEL='.package-runtime-owner-v1'
 readonly DENO_RELEASE_REPOSITORY='denoland/deno'
 readonly DEFAULT_YTDLP_CHANNEL='stable'
 readonly ENGINE_RUNTIME_CONTRACT_VERSION='1'
+readonly RUNTIME_PROBE_MAX_BYTES=262144
+readonly RUNTIME_DIAGNOSTIC_MAX_CHARS=16384
 
 LOCK_FD=''
 VALIDATED_YTDLP_VERSION=''
@@ -64,6 +66,78 @@ validate_bounded_uint() {
     if [[ -n ${output_variable} ]]; then
         printf -v "${output_variable}" '%d' "${numeric_value}" || return 1
     fi
+    return 0
+}
+
+validate_runtime_path_chain() {
+    local path=$1
+    local logical_path=''
+    local physical_path=''
+    local current_path=''
+    local component=''
+    local owner=''
+    local root_owner=''
+    local mode=''
+    local mode_value=0
+    local -a components=()
+
+    root_owner=$(stat -c '%u' -- / 2>/dev/null) || return 73
+    logical_path=$(realpath -ms -- "${path}" 2>/dev/null) || return 1
+    physical_path=$(realpath -m -- "${path}" 2>/dev/null) || return 1
+    if [[ ${logical_path} != "${path}" || ${physical_path} != "${path}" ]]; then
+        error "managed-runtime path is not canonical or crosses a symbolic link: ${path}"
+        return 73
+    fi
+
+    IFS=/ read -r -a components <<<"${path#/}"
+    for component in "${components[@]}"; do
+        [[ -n ${component} ]] || continue
+        current_path+="/${component}"
+        [[ -e ${current_path} || -L ${current_path} ]] || continue
+        if [[ -L ${current_path} || ! -d ${current_path} ]]; then
+            error "managed-runtime path component is not a safe directory: ${current_path}"
+            return 73
+        fi
+        owner=$(stat -c '%u' -- "${current_path}" 2>/dev/null) || return 73
+        mode=$(stat -c '%a' -- "${current_path}" 2>/dev/null) || return 73
+        if [[ ${owner} != "${root_owner}" && ${owner} != "${EUID}" ]]; then
+            error "managed-runtime path component has an unexpected owner: ${current_path}"
+            return 73
+        fi
+        if [[ ! ${mode} =~ ^[0-7]{3,4}$ ]]; then
+            error "unable to validate managed-runtime path permissions: ${current_path}"
+            return 73
+        fi
+        mode_value=$((8#${mode}))
+        if ((mode_value & 0022)); then
+            if [[ ${owner} != "${root_owner}" ]] || ((!(mode_value & 01000))); then
+                error "managed-runtime path component is replaceable by another user: ${current_path}"
+                return 73
+            fi
+        fi
+    done
+    return 0
+}
+
+canonicalize_runtime_data_home() {
+    local candidate=$1
+    local output_variable=$2
+    local physical_path=''
+
+    physical_path=$(realpath -m -- "${candidate}" 2>/dev/null) || {
+        error 'unable to resolve XDG_DATA_HOME.'
+        return 73
+    }
+    if [[ ${physical_path} != /* || ${physical_path} == / ||
+        ${physical_path} == *$'\n'* || ${physical_path} == *$'\r'* ]]; then
+        error 'XDG_DATA_HOME did not resolve to a safe absolute non-root path.'
+        return 73
+    fi
+    # Resolve links once, validate the resulting physical chain, and use that
+    # immutable spelling for every later operation. A replaced input symlink
+    # therefore cannot redirect managed state after this point.
+    validate_runtime_path_chain "${physical_path}" || return $?
+    printf -v "${output_variable}" '%s' "${physical_path}" || return 70
     return 0
 }
 
@@ -187,7 +261,30 @@ release_runtime_lock() {
     fi
 }
 
+runtime_lock_identity_is_safe() {
+    local require_mode=$1
+    local fd_path="/proc/${BASHPID}/fd/${LOCK_FD}"
+    local fd_owner=''
+    local fd_mode=''
+    local fd_identity=''
+    local path_identity=''
+
+    [[ -n ${LOCK_FD} && -f ${fd_path} ]] || return 1
+    fd_owner=$(stat -Lc '%u' -- "${fd_path}" 2>/dev/null) || return 1
+    fd_mode=$(stat -Lc '%a' -- "${fd_path}" 2>/dev/null) || return 1
+    fd_identity=$(stat -Lc '%d:%i' -- "${fd_path}" 2>/dev/null) || return 1
+    [[ ${fd_owner} == "${EUID}" ]] || return 1
+    [[ ${require_mode} != true || ${fd_mode} == 600 ]] || return 1
+
+    [[ ! -L ${LOCK_FILE} && -f ${LOCK_FILE} ]] || return 1
+    path_identity=$(stat -Lc '%d:%i' -- "${LOCK_FILE}" 2>/dev/null) || return 1
+    [[ ${path_identity} == "${fd_identity}" ]]
+}
+
 acquire_runtime_lock() {
+    local fd_path=''
+    local lock_status=0
+
     if [[ -n ${LOCK_FD} ]]; then
         return 0
     fi
@@ -200,14 +297,34 @@ acquire_runtime_lock() {
         LOCK_FD=''
         return 73
     fi
-    if ! chmod 600 -- "${LOCK_FILE}"; then
+    fd_path="/proc/${BASHPID}/fd/${LOCK_FD}"
+    if ! runtime_lock_identity_is_safe false; then
+        release_runtime_lock
+        error 'the opened runtime update lock does not match its safe path.'
+        return 73
+    fi
+    if ! chmod 600 -- "${fd_path}"; then
         release_runtime_lock
         error 'unable to secure the runtime update lock.'
         return 73
     fi
-    if ! flock --exclusive --wait "${RUNTIME_LOCK_WAIT_SECONDS}" "${LOCK_FD}"; then
+    if ! runtime_lock_identity_is_safe true; then
         release_runtime_lock
-        return 75
+        error 'the runtime update lock changed while it was being secured.'
+        return 73
+    fi
+    if flock --exclusive --wait "${RUNTIME_LOCK_WAIT_SECONDS}" \
+        --conflict-exit-code 75 "${LOCK_FD}"; then
+        lock_status=0
+    else
+        lock_status=$?
+        release_runtime_lock
+        return "${lock_status}"
+    fi
+    if ! runtime_lock_identity_is_safe true; then
+        release_runtime_lock
+        error 'the runtime update lock path changed during acquisition.'
+        return 73
     fi
     return 0
 }
@@ -249,17 +366,93 @@ run_timed() {
     run_child timeout --signal=TERM --kill-after=5s "${seconds}s" "$@"
 }
 
+capture_bounded_timed_output() {
+    local output_variable=$1
+    local probe_name=$2
+    local seconds=$3
+    shift 3
+
+    local capture_file=''
+    local captured_output=''
+    local capture_size=''
+    local producer_status=0
+    local limiter_status=0
+    local -a pipeline_status=()
+
+    capture_file=$(run_child mktemp \
+        --tmpdir="${RUNTIME_ROOT}" '.runtime-probe.XXXXXXXX') || {
+        error "unable to create a private capture for ${probe_name}."
+        return 73
+    }
+    run_timed "${seconds}" "$@" 2>&1 \
+        | run_child head -c "$((RUNTIME_PROBE_MAX_BYTES + 1))" \
+            >"${capture_file}"
+    pipeline_status=("${PIPESTATUS[@]}")
+    producer_status=${pipeline_status[0]}
+    limiter_status=${pipeline_status[1]}
+
+    capture_size=$(run_child stat -c '%s' -- "${capture_file}" 2>/dev/null) || {
+        run_child rm -f -- "${capture_file}" || true
+        error "unable to inspect the bounded output from ${probe_name}."
+        return 70
+    }
+    if [[ ! ${capture_size} =~ ^[0-9]{1,7}$ ]]; then
+        run_child rm -f -- "${capture_file}" || true
+        error "invalid bounded-output size from ${probe_name}."
+        return 70
+    fi
+    captured_output=$(run_child head -c "${RUNTIME_PROBE_MAX_BYTES}" \
+        -- "${capture_file}") || {
+        run_child rm -f -- "${capture_file}" || true
+        error "unable to read the bounded output from ${probe_name}."
+        return 70
+    }
+    run_child rm -f -- "${capture_file}" || {
+        error "unable to remove the private capture for ${probe_name}."
+        return 70
+    }
+    printf -v "${output_variable}" '%s' "${captured_output}" || return 70
+
+    if ((capture_size > RUNTIME_PROBE_MAX_BYTES)); then
+        error "${probe_name} exceeded the ${RUNTIME_PROBE_MAX_BYTES}-byte output limit."
+        return 65
+    fi
+    ((limiter_status == 0)) || return 70
+    return "${producer_status}"
+}
+
+print_probe_diagnostic() {
+    local diagnostic=$1
+
+    [[ -n ${diagnostic} ]] || return 0
+    if ((${#diagnostic} > RUNTIME_DIAGNOSTIC_MAX_CHARS)); then
+        printf '%s\n[diagnostic truncated]\n' \
+            "${diagnostic:0:RUNTIME_DIAGNOSTIC_MAX_CHARS}" >&2
+    else
+        printf '%s\n' "${diagnostic}" >&2
+    fi
+}
+
 run_ytdlp_probe() {
     local candidate=$1
+    local probe_output=''
+    local probe_status=0
     shift
 
-    LC_ALL=C YTDLP_NO_PLUGINS=1 \
-        run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" \
+    if LC_ALL=C YTDLP_NO_PLUGINS=1 \
+        capture_bounded_timed_output probe_output 'yt-dlp runtime probe' \
+        "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" \
         "${candidate}" \
         --ignore-config \
         --no-plugin-dirs \
         --no-update \
-        "$@"
+        "$@"; then
+        probe_status=0
+    else
+        probe_status=$?
+    fi
+    printf '%s' "${probe_output}"
+    return "${probe_status}"
 }
 
 component_path() {
@@ -483,6 +676,44 @@ is_valid_ytdlp_version() {
     [[ ${1:-} =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}([.][0-9]{6})?$ ]]
 }
 
+version_is_older() {
+    local candidate=$1
+    local current=$2
+    local candidate_component=''
+    local current_component=''
+    local index=0
+    local LC_ALL=C
+    local -a candidate_components=()
+    local -a current_components=()
+
+    IFS=. read -r -a candidate_components <<<"${candidate}"
+    IFS=. read -r -a current_components <<<"${current}"
+    ((${#candidate_components[@]} == ${#current_components[@]})) || return 2
+
+    for ((index = 0; index < ${#candidate_components[@]}; index++)); do
+        candidate_component=${candidate_components[index]}
+        current_component=${current_components[index]}
+        [[ ${candidate_component} =~ ^0*([0-9]+)$ ]] || return 2
+        candidate_component=${BASH_REMATCH[1]}
+        [[ ${current_component} =~ ^0*([0-9]+)$ ]] || return 2
+        current_component=${BASH_REMATCH[1]}
+
+        if ((${#candidate_component} < ${#current_component})); then
+            return 0
+        fi
+        if ((${#candidate_component} > ${#current_component})); then
+            return 1
+        fi
+        if [[ ${candidate_component} < ${current_component} ]]; then
+            return 0
+        fi
+        if [[ ${candidate_component} > ${current_component} ]]; then
+            return 1
+        fi
+    done
+    return 1
+}
+
 validate_ytdlp() {
     local candidate=$1
     local help=''
@@ -500,7 +731,7 @@ validate_ytdlp() {
 
     if ! version_output=$(run_ytdlp_probe "${candidate}" --version 2>&1); then
         error 'yt-dlp runtime validation failed: --version could not run.'
-        printf '%s\n' "${version_output}" >&2
+        print_probe_diagnostic "${version_output}"
         return 1
     fi
     version_output=${version_output%%$'\n'*}
@@ -511,6 +742,7 @@ validate_ytdlp() {
 
     if ! help=$(run_ytdlp_probe "${candidate}" --help 2>&1); then
         error 'yt-dlp runtime validation failed: --help could not run.'
+        print_probe_diagnostic "${help}"
         return 1
     fi
 
@@ -520,27 +752,42 @@ validate_ytdlp() {
     for option in \
         --batch-file \
         --break-match-filters \
+        --color \
+        --concurrent-fragments \
+        --continue \
         --cookies \
         --cookies-from-browser \
+        --downloader \
         --dump-single-json \
+        --embed-metadata \
+        --extract-audio \
         --extractor-args \
         --extractor-retries \
+        --audio-format \
+        --audio-quality \
         --fixup \
+        --format \
         --fragment-retries \
         --ignore-config \
         --js-runtimes \
         --list-impersonate-targets \
         --load-info-json \
+        --merge-output-format \
         --no-clean-info-json \
         --no-overwrites \
+        --no-playlist \
         --no-plugin-dirs \
         --no-post-overwrites \
         --no-update \
+        --newline \
+        --output \
         --parse-metadata \
         --print \
         --print-to-file \
+        --progress \
         --progress-delta \
         --progress-template \
+        --remux-video \
         --retries \
         --retry-sleep \
         --skip-download \
@@ -555,7 +802,7 @@ validate_ytdlp() {
 
     if ! impersonation=$(run_ytdlp_probe "${candidate}" --list-impersonate-targets 2>&1); then
         error 'yt-dlp runtime validation failed: unable to enumerate impersonation targets.'
-        printf '%s\n' "${impersonation}" >&2
+        print_probe_diagnostic "${impersonation}"
         return 1
     fi
 
@@ -564,7 +811,7 @@ validate_ytdlp() {
         <<<"${impersonation}" \
         | grep -Eiv '\((unavailable|not available)\)' >/dev/null; then
         error 'yt-dlp runtime validation failed: no usable curl_cffi impersonation target.'
-        printf '%s\n' "${impersonation}" >&2
+        print_probe_diagnostic "${impersonation}"
         return 1
     fi
 
@@ -579,12 +826,26 @@ parse_deno_version() {
     local output=''
     local first_line=''
     local parsed_version=''
+    local probe_status=0
 
-    [[ -x ${candidate} ]] || return 1
-    output=$(LC_ALL=C run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" "${candidate}" --version 2>/dev/null) || return 1
+    if [[ ! -x ${candidate} ]]; then
+        error "Deno runtime validation failed: candidate is not executable: ${candidate}"
+        return 1
+    fi
+    if LC_ALL=C capture_bounded_timed_output output 'Deno runtime probe' \
+        "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" "${candidate}" --version; then
+        probe_status=0
+    else
+        probe_status=$?
+        error "Deno runtime validation failed: --version exited with status ${probe_status}."
+        print_probe_diagnostic "${output}"
+        return 1
+    fi
     first_line=${output%%$'\n'*}
 
-    if [[ ! ${first_line} =~ ^deno[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?)([[:space:]]|$) ]]; then
+    if [[ ! ${first_line} =~ ^deno[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+)([[:space:]]|$) ]]; then
+        error 'Deno runtime validation failed: --version did not report a stable X.Y.Z version.'
+        print_probe_diagnostic "${output}"
         return 1
     fi
     parsed_version=${BASH_REMATCH[1]}
@@ -767,6 +1028,7 @@ reuse_installed_deno_version() {
 latest_ytdlp_version() {
     local output_variable=$1
     local effective_url=''
+    local expected_prefix="https://github.com/${YTDLP_RELEASE_REPOSITORY}/releases/tag/"
     local resolved_version=''
 
     if ! effective_url=$(run_curl --silent --show-error \
@@ -774,7 +1036,16 @@ latest_ytdlp_version() {
         "https://github.com/${YTDLP_RELEASE_REPOSITORY}/releases/latest"); then
         return 1
     fi
-    resolved_version=${effective_url##*/}
+    if [[ ${effective_url} != "${expected_prefix}"* ]]; then
+        error 'yt-dlp latest-release lookup escaped the expected GitHub repository.'
+        return 1
+    fi
+    resolved_version=${effective_url#"${expected_prefix}"}
+    if [[ -z ${resolved_version} || ${resolved_version} == */* ||
+        ${resolved_version} == *\?* || ${resolved_version} == *\#* ]]; then
+        error 'yt-dlp latest-release lookup returned an invalid tag URL.'
+        return 1
+    fi
     [[ ${resolved_version} =~ ${YTDLP_CHANNEL_VERSION_PATTERN} ]] || return 1
     printf -v "${output_variable}" '%s' "${resolved_version}" || return 1
     return 0
@@ -783,7 +1054,7 @@ latest_ytdlp_version() {
 latest_deno_version() {
     local output_variable=$1
     local effective_url=''
-    local tag=''
+    local expected_prefix="https://github.com/${DENO_RELEASE_REPOSITORY}/releases/tag/v"
     local resolved_version=''
 
     if ! effective_url=$(run_curl --silent --show-error \
@@ -791,9 +1062,15 @@ latest_deno_version() {
         "https://github.com/${DENO_RELEASE_REPOSITORY}/releases/latest"); then
         return 1
     fi
-    tag=${effective_url##*/}
-    [[ ${tag} =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || return 1
-    resolved_version=${BASH_REMATCH[1]}
+    if [[ ${effective_url} != "${expected_prefix}"* ]]; then
+        error 'Deno latest-release lookup escaped the expected GitHub repository.'
+        return 1
+    fi
+    resolved_version=${effective_url#"${expected_prefix}"}
+    if [[ ! ${resolved_version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        error 'Deno latest-release lookup returned an invalid stable tag URL.'
+        return 1
+    fi
     printf -v "${output_variable}" '%s' "${resolved_version}" || return 1
     return 0
 }
@@ -940,6 +1217,11 @@ bootstrap_deno_version() {
         rm -rf -- "${work}" || true
         return 1
     fi
+    if [[ ! -f ${work}/deno || -L ${work}/deno ]]; then
+        error 'Deno bootstrap failed: the extracted deno member is not a regular file.'
+        rm -rf -- "${work}" || true
+        return 1
+    fi
     chmod 0755 -- "${work}/deno" || {
         rm -rf -- "${work}" || true
         return 1
@@ -971,6 +1253,11 @@ update_ytdlp() {
     is_valid_ytdlp_version "${current_version}" || return 1
     latest_ytdlp_version latest_version || return 1
     [[ ${current_version} != "${latest_version}" ]] || return 0
+    if [[ ${current_version} =~ ${YTDLP_CHANNEL_VERSION_PATTERN} ]] \
+        && version_is_older "${latest_version}" "${current_version}"; then
+        warning "refusing to downgrade the active ${YTDLP_CHANNEL} yt-dlp runtime from ${current_version} to ${latest_version}."
+        return 0
+    fi
     bootstrap_ytdlp_version "${latest_version}"
 }
 
@@ -983,6 +1270,10 @@ update_deno() {
     parse_deno_version "${current}" current_version || return 1
     latest_deno_version latest_version || return 1
     [[ ${current_version} != "${latest_version}" ]] || return 0
+    if version_is_older "${latest_version}" "${current_version}"; then
+        warning "refusing to downgrade the active Deno runtime from ${current_version} to ${latest_version}."
+        return 0
+    fi
     bootstrap_deno_version "${latest_version}"
 }
 
@@ -1084,8 +1375,23 @@ recover_invalid_active_runtime() {
     fi
 
     warning "the active ${component} runtime is invalid; attempting rollback."
-    rollback_component "${component}" || return 1
-    return 0
+    if rollback_component "${component}"; then
+        return 0
+    fi
+
+    warning "no verified previous ${component} runtime is usable; installing a fresh verified runtime."
+    case ${component} in
+        yt-dlp) bootstrap_ytdlp || return 1 ;;
+        deno) bootstrap_deno || return 1 ;;
+        *) return 2 ;;
+    esac
+
+    active=$(component_path "${component}") || return 1
+    case ${component} in
+        yt-dlp) validate_ytdlp "${active}" ;;
+        deno) validate_deno "${active}" ;;
+        *) return 2 ;;
+    esac
 }
 
 recover_invalid_active_runtimes() {
@@ -1177,6 +1483,7 @@ rollback_runtime_locked() {
 initialize_runtime_layout() {
     local output_variable=$1
     local data_home=''
+    local canonical_data_home=''
 
     if [[ -z ${HOME:-} || ${HOME} != /* || ${HOME} == / ||
         ${HOME} == *$'\n'* || ${HOME} == *$'\r'* ]]; then
@@ -1189,6 +1496,8 @@ initialize_runtime_layout() {
         ${data_home} == *$'\n'* || ${data_home} == *$'\r'* ]]; then
         data_home="${HOME}/.local/share"
     fi
+    canonicalize_runtime_data_home "${data_home}" canonical_data_home || return $?
+    data_home=${canonical_data_home}
     readonly RUNTIME_ROOT="${data_home}/${APP_ID}/runtime"
     readonly YTDLP_ROOT="${RUNTIME_ROOT}/yt-dlp"
     readonly DENO_ROOT="${RUNTIME_ROOT}/deno"
@@ -1279,7 +1588,7 @@ initialize_runtime_platform() {
     readonly DENO_ASSET="deno-${DENO_TARGET}.zip"
 
     for command_name in \
-        bash curl flock gpg gpgconf grep install ln mkdir mktemp mv readlink realpath rm \
+        bash curl flock gpg gpgconf grep head install ln mkdir mktemp mv readlink realpath rm \
         sha256sum stat timeout uname unzip; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             error "required runtime-manager command is absent: ${command_name}"
@@ -1296,6 +1605,7 @@ prepare_runtime_storage() {
     ensure_private_directory "${RUNTIME_ROOT}" || return $?
     ensure_private_directory "${YTDLP_ROOT}" || return $?
     ensure_private_directory "${DENO_ROOT}" || return $?
+    validate_runtime_path_chain "${RUNTIME_ROOT}" || return $?
     record_runtime_data_home "${data_home}"
     trap release_runtime_lock EXIT
 }
@@ -1375,7 +1685,19 @@ dispatch_runtime_command() {
             esac
             ;;
         rollback)
-            rollback_runtime_locked "${2:-}"
+            (($# == 2)) || {
+                error 'rollback requires exactly one component: yt-dlp or deno.'
+                exit 2
+            }
+            case $2 in
+                yt-dlp | deno)
+                    rollback_runtime_locked "$2"
+                    ;;
+                *)
+                    error "unknown runtime component for rollback: $2"
+                    exit 2
+                    ;;
+            esac
             ;;
         versions)
             print_runtime_versions

@@ -28,8 +28,8 @@ fi
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 # The development tree can lead the latest installable GitHub release. Keep the
 # two contracts explicit so README package names never advertise absent assets.
-readonly EXPECTED_VERSION='2.3.7'
-readonly EXPECTED_PUBLISHED_VERSION='2.3.7'
+readonly EXPECTED_VERSION='2.3.8'
+readonly EXPECTED_PUBLISHED_VERSION='2.3.8'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SOURCE_INVENTORY_FILE=''
 REPOSITORY_INVENTORY_FILE=''
@@ -2718,12 +2718,12 @@ test_static_release_contracts() {
         'final result path record normalization'
     # shellcheck disable=SC2016 # Literal shell-source assertion.
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        'normalize_path_record "${PATH_RECORD_TMP}" "${OUTPUT_DIR}"' \
+        'normalize_path_record "${PATH_RECORD_FD_PATH}" "${OUTPUT_DIR}"' \
         'final result path confinement to the destination directory'
     # shellcheck disable=SC2016 # Literal shell-source assertion.
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        'mv -nT -- "${RESULT_FILE_TMP}" "${RESULT_FILE}"' \
-        'result-file no-clobber publication'
+        'ln -LT -- "${PATH_RECORD_FD_PATH}" "${RESULT_FILE}"' \
+        'descriptor-bound result-file no-clobber publication'
     # shellcheck disable=SC2016 # Literal shell-source assertion.
     assert_file_contains "${SCRIPT_DIR}/progress-monitor.sh" \
         'RESOLVED_KEY="native:$((seen_items + 1))"' \
@@ -2739,10 +2739,12 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'flock --exclusive --nonblock "${OUTPUT_LOCK_FD}"' \
         'nonblocking destination lock acquisition'
-    # shellcheck disable=SC2016 # Literal shell-source assertion.
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
-        'kill -0 -- "-${WORKER_PGID}"' \
-        'worker group remains tracked after session-leader exit'
+        'worker_group_has_identity_token() {' \
+        'worker group remains authenticated after session-leader exit'
+    assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
+        'YTDLP_ARIA2_GUI_WORKER_TOKEN=' \
+        'worker descendants inherit the private group identity token'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'the result-file already exists; refusing to overwrite it.' \
         'existing result files are protected'
@@ -2993,20 +2995,33 @@ test_static_cleanup_and_qualification_contracts() {
         "${SCRIPT_DIR}/packaging/package-user-cleanup.sh" --user-home /
     for cleanup_phase in \
         initialize_cleanup_helper_path \
+        remove_exact_nondirectory \
+        serialize_stable_desktop_exec \
+        legacy_desktop_matches_template \
+        safe_direct_desktop_exec \
+        legacy_portable_desktop_is_exact \
+        migrate_legacy_portable_launcher \
         discover_cleanup_data_homes \
         cleanup_registered_data_home \
         cleanup_standard_user_paths \
         cleanup_one_home \
+        migrate_launcher_one_home \
         run_as_user \
         enumerate_users \
         run_all_users_mode \
+        run_all_users_migrate_launcher_mode \
         run_user_home_mode \
+        run_user_home_migrate_launcher_mode \
         run_numeric_home_mode; do
         assert_file_contains "${SCRIPT_DIR}/packaging/package-user-cleanup.sh" \
             "${cleanup_phase}() {" \
             "package cleanup phase ${cleanup_phase}"
     done
     for cleanup_scenario in \
+        test_legacy_portable_launcher_migration \
+        test_historical_direct_launcher_migration \
+        test_direct_launcher_migration_rejects_ambiguous_exec \
+        test_launcher_migration_preserves_nonlegacy_candidates \
         test_valid_custom_xdg_cleanup \
         test_forged_marker_preservation \
         test_multiline_marker_rejection \
@@ -3134,6 +3149,19 @@ test_static_packaging_signing_contracts() {
         "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
         "if [ \"\$1\" -eq 0 ]; then" \
         'RPM user cleanup runs only on final erase'
+    assert_file_contains \
+        "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+        '%post' \
+        'RPM has an installation migration scriptlet'
+    assert_file_contains \
+        "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+        'Requires(post): diffutils' \
+        'RPM install migration declares the cmp provider as a scriptlet dependency'
+    # shellcheck disable=SC2016 # Literal RPM scriptlet-source assertion.
+    assert_file_contains \
+        "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
+        '"${helper}" --all-users-migrate-launcher || :' \
+        'RPM install and upgrade retire only the recognized legacy launcher override'
     [[ ! -e ${SCRIPT_DIR}/packaging/deb/postinst &&
         ! -e ${SCRIPT_DIR}/packaging/deb/prerm &&
         ! -e ${SCRIPT_DIR}/packaging/deb/postrm ]] \
@@ -3532,7 +3560,7 @@ test_static_application_contracts() {
         'CLI signals relayed to worker group'
     # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        'candidate="${XDG_RUNTIME_DIR}/yt-dlp-aria2-downloader"' \
+        'candidate="${canonical_runtime_dir}/yt-dlp-aria2-downloader"' \
         'XDG runtime lock location'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         '%(title).160B [%(id).64B].%(ext)s' \
@@ -3600,13 +3628,16 @@ test_static_application_contracts() {
     # A worker must be protected before it is forked and remain protected until
     # its direct-child PID is registered. Reordering either boundary reopens a
     # signal window even if the individual calls remain present.
+    # shellcheck disable=SC2016 # Ordered fragments are literal shell source.
     assert_file_fragments_ordered \
         "${SCRIPT_DIR}/download-video-gui.sh" \
         'GUI worker signal-registration boundaries' \
         'start_download_worker() {' \
         '    begin_signal_registration' \
-        '    YTDLP_ARIA2_SUPERVISED_SESSION=true LC_ALL=C setsid' \
+        "        YTDLP_ARIA2_SUPERVISED_SESSION=true \\" \
+        '        LC_ALL=C setsid --wait bash -c' \
         '    WORKER_PID=$!' \
+        '        WORKER_PID_START_TIME=${worker_start_time}' \
         '    finish_signal_registration'
     for gui_phase in \
         initialize_gui_paths \

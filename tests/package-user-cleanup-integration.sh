@@ -54,13 +54,229 @@ write_valid_sentinel() {
     chmod 600 -- "${sentinel}"
 }
 
+write_historical_portable_desktop() {
+    local desktop_path=$1
+    local exec_path=$2
+    local icon_name=$3
+    local comment_schema=$4
+
+    mkdir -p -- "${desktop_path%/*}"
+    {
+        printf '%s\n' \
+            '[Desktop Entry]' \
+            'Type=Application' \
+            'Version=1.0' \
+            'Name=yt-dlp aria2 downloader'
+        case ${comment_schema} in
+            french)
+                printf '%s\n' \
+                    'Comment=Télécharger une vidéo ou extraire une piste audio'
+                ;;
+            english)
+                printf '%s\n' \
+                    'Comment=Download a video or extract an audio track'
+                ;;
+            bilingual)
+                printf '%s\n' \
+                    'Comment=Download a video or extract an audio track' \
+                    'Comment[fr]=Télécharger une vidéo ou extraire une piste audio'
+                ;;
+            *) fail "unknown historical desktop comment schema: ${comment_schema}" ;;
+        esac
+        printf '%s\n' \
+            "Exec=\"${exec_path}\"" \
+            "Icon=${icon_name}" \
+            'Terminal=false' \
+            'Categories=AudioVideo;' \
+            'StartupNotify=true'
+    } >"${desktop_path}"
+    chmod 644 -- "${desktop_path}"
+}
+
+write_portable_desktop() {
+    local desktop_path=$1
+    local data_home=$2
+    local icon_name=$3
+
+    write_historical_portable_desktop \
+        "${desktop_path}" "${data_home}/${APP_ID}/launch" \
+        "${icon_name}" bilingual
+}
+
+build_direct_target_with_byte_length() {
+    local output_variable=$1
+    local home=$2
+    local target_length=$3
+    local suffix='/download-video-gui.sh'
+    local padding_length=0
+    local padding=''
+    local target=''
+    local LC_ALL=C
+
+    padding_length=$((target_length - ${#home} - 1 - ${#suffix}))
+    ((padding_length > 0)) \
+        || fail "unable to build a ${target_length}-byte target below: ${home}"
+    printf -v padding '%*s' "${padding_length}" ''
+    padding=${padding// /x}
+    target="${home}/${padding}${suffix}"
+    ((${#target} == target_length)) \
+        || fail "direct target has ${#target} bytes instead of ${target_length}"
+    printf -v "${output_variable}" '%s' "${target}"
+}
+
 require_cleanup_test_environment() {
     local command_name=''
 
-    for command_name in bash chmod grep ln mkdir mktemp rm sed stat touch; do
+    for command_name in \
+        bash chmod cmp grep ln mkdir mktemp readlink rm sed stat touch; do
         require_test_command "${command_name}"
     done
     [[ -x ${HELPER} ]] || fail "cleanup helper is not executable: ${HELPER}"
+}
+
+test_legacy_portable_launcher_migration() {
+    local home="${root}/home-launcher-migration"
+    local data_home="${home}/.local/share"
+    local desktop_path="${data_home}/applications/${APP_ID}.desktop"
+    local launcher_dir="${data_home}/${APP_ID}"
+    local launcher_target="${home}/portable-gui.sh"
+    local retained_target=''
+
+    mkdir -p -- "${launcher_dir}"
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"${launcher_target}"
+    chmod 755 -- "${launcher_target}"
+    ln -s -- "${launcher_target}" "${launcher_dir}/launch"
+    write_portable_desktop \
+        "${desktop_path}" "${data_home}" video-x-generic
+
+    bash "${HELPER}" --user-home-migrate-launcher "${home}"
+
+    assert_absent "${desktop_path}"
+    assert_present "${launcher_dir}/launch"
+    assert_present "${launcher_target}"
+    retained_target=$(readlink -- "${launcher_dir}/launch")
+    assert_equals "${launcher_target}" "${retained_target}" \
+        'legacy launcher migration preserves the portable target link'
+}
+
+test_historical_direct_launcher_migration() {
+    local schema=''
+    local home=''
+    local data_home=''
+    local desktop_path=''
+    local direct_target=''
+    local desktop_size=''
+
+    for schema in french english bilingual; do
+        home="${root}/home-direct-${schema}"
+        data_home="${home}/.local/share"
+        desktop_path="${data_home}/applications/${APP_ID}.desktop"
+        if [[ ${schema} == french ]]; then
+            # The French-only schema contributes 221 bytes outside its Exec
+            # target, so an 81-byte path recreates the reported 302-byte file.
+            build_direct_target_with_byte_length direct_target "${home}" 81
+        else
+            direct_target="${home}/source-${schema}/download-video-gui.sh"
+        fi
+        write_historical_portable_desktop \
+            "${desktop_path}" "${direct_target}" \
+            video-x-generic "${schema}"
+
+        if [[ ${schema} == french ]]; then
+            desktop_size=$(stat -c '%s' -- "${desktop_path}")
+            assert_equals 302 "${desktop_size}" \
+                'French direct-Exec historical desktop fixture size'
+        fi
+
+        bash "${HELPER}" --user-home-migrate-launcher "${home}"
+        assert_absent "${desktop_path}"
+    done
+}
+
+test_direct_launcher_migration_rejects_ambiguous_exec() {
+    local case_name=''
+    local home=''
+    local desktop_path=''
+    local direct_target=''
+
+    for case_name in wrong-basename noncanonical escaped-metacharacter; do
+        home="${root}/home-ambiguous-direct-${case_name}"
+        desktop_path="${home}/.local/share/applications/${APP_ID}.desktop"
+        case ${case_name} in
+            wrong-basename)
+                direct_target="${home}/source/not-the-gui.sh"
+                ;;
+            noncanonical)
+                direct_target="${home}/source/../download-video-gui.sh"
+                ;;
+            escaped-metacharacter)
+                direct_target="${home}/source%%unsafe/download-video-gui.sh"
+                ;;
+            *) fail "unknown ambiguous direct-Exec case: ${case_name}" ;;
+        esac
+        write_historical_portable_desktop \
+            "${desktop_path}" "${direct_target}" video-x-generic french
+
+        bash "${HELPER}" --user-home-migrate-launcher "${home}"
+        assert_present "${desktop_path}"
+    done
+}
+
+test_launcher_migration_preserves_nonlegacy_candidates() {
+    local current_home="${root}/home-current-launcher"
+    local current_data="${current_home}/.local/share"
+    local current_desktop="${current_data}/applications/${APP_ID}.desktop"
+    local modified_home="${root}/home-modified-launcher"
+    local modified_data="${modified_home}/.local/share"
+    local modified_desktop="${modified_data}/applications/${APP_ID}.desktop"
+    local mode_home="${root}/home-mode-modified-launcher"
+    local mode_data="${mode_home}/.local/share"
+    local mode_desktop="${mode_data}/applications/${APP_ID}.desktop"
+    local symlink_home="${root}/home-symlink-launcher"
+    local symlink_data="${symlink_home}/.local/share"
+    local symlink_desktop="${symlink_data}/applications/${APP_ID}.desktop"
+    local symlink_target="${root}/symlink-launcher-target.desktop"
+    local directory_home="${root}/home-directory-launcher"
+    local directory_desktop="${directory_home}/.local/share/applications/${APP_ID}.desktop"
+    local outside_home="${root}/home-outside-direct-launcher"
+    local outside_data="${outside_home}/.local/share"
+    local outside_desktop="${outside_data}/applications/${APP_ID}.desktop"
+    local outside_target="${root}/outside-source/download-video-gui.sh"
+
+    write_portable_desktop \
+        "${current_desktop}" "${current_data}" "${APP_ID}"
+    bash "${HELPER}" --user-home-migrate-launcher "${current_home}"
+    assert_present "${current_desktop}"
+
+    write_portable_desktop \
+        "${modified_desktop}" "${modified_data}" video-x-generic
+    printf '%s\n' 'X-User-Modified=true' >>"${modified_desktop}"
+    bash "${HELPER}" --user-home-migrate-launcher "${modified_home}"
+    assert_present "${modified_desktop}"
+
+    write_portable_desktop \
+        "${mode_desktop}" "${mode_data}" video-x-generic
+    chmod 600 -- "${mode_desktop}"
+    bash "${HELPER}" --user-home-migrate-launcher "${mode_home}"
+    assert_present "${mode_desktop}"
+
+    write_portable_desktop \
+        "${symlink_target}" "${symlink_data}" video-x-generic
+    mkdir -p -- "${symlink_desktop%/*}"
+    ln -s -- "${symlink_target}" "${symlink_desktop}"
+    bash "${HELPER}" --user-home-migrate-launcher "${symlink_home}"
+    assert_present "${symlink_desktop}"
+    assert_present "${symlink_target}"
+
+    mkdir -p -- "${directory_desktop}/keep"
+    touch -- "${directory_desktop}/keep/value"
+    bash "${HELPER}" --user-home-migrate-launcher "${directory_home}"
+    assert_present "${directory_desktop}/keep/value"
+
+    write_historical_portable_desktop \
+        "${outside_desktop}" "${outside_target}" video-x-generic french
+    bash "${HELPER}" --user-home-migrate-launcher "${outside_home}"
+    assert_present "${outside_desktop}"
 }
 
 initialize_cleanup_test_workspace() {
@@ -95,12 +311,16 @@ test_valid_custom_xdg_cleanup() {
     touch \
         "${default_data}/applications/yt-dlp-aria2-downloader-gui.desktop" \
         "${default_data}/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader-gui.svg" \
+        "${default_data}/icons/hicolor/scalable/apps/${APP_ID}.svg" \
         "${home}/.config/autostart/yt-dlp-aria2-downloader-gui.desktop" \
         "${home}/yt-dlp-aria2-downloader-gui-NOTES.txt"
     printf '%s\n' "${custom_data}" >"${marker}"
     chmod 600 -- "${marker}"
     write_valid_sentinel "${custom_data}" "${home}"
     ln -s -- "${PROJECT_DIR}/download-video-gui.sh" "${app_root}/launch"
+    write_portable_desktop \
+        "${default_data}/applications/${APP_ID}.desktop" \
+        "${default_data}" video-x-generic
 
     bash "${HELPER}" --user-home "${home}"
 
@@ -121,6 +341,9 @@ test_valid_custom_xdg_cleanup() {
     done
     [[ -L ${app_root}/launch ]] \
         || fail 'portable launch link was removed unexpectedly'
+    assert_present "${default_data}/applications/${APP_ID}.desktop"
+    assert_present \
+        "${default_data}/icons/hicolor/scalable/apps/${APP_ID}.svg"
     [[ -f ${home}/yt-dlp-aria2-downloader-gui-NOTES.txt ]] \
         || fail 'similarly named unrelated file was removed unexpectedly'
 }
@@ -338,6 +561,10 @@ test_symlinked_foreign_home_rejection() {
 main() {
     require_cleanup_test_environment
     initialize_cleanup_test_workspace
+    test_legacy_portable_launcher_migration
+    test_historical_direct_launcher_migration
+    test_direct_launcher_migration_rejects_ambiguous_exec
+    test_launcher_migration_preserves_nonlegacy_candidates
     test_valid_custom_xdg_cleanup
     test_forged_marker_preservation
     test_multiline_marker_rejection
