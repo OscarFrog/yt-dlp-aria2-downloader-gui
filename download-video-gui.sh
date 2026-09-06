@@ -515,8 +515,9 @@ worker_group_is_current() {
     # shellcheck disable=SC2310 # Both branches are identity predicates.
     if process_is_session_group_leader \
         "${WORKER_PGID}" "${expected_parent}" current_start_time true; then
-        [[ ${current_start_time} == "${WORKER_PGID_START_TIME}" ]]
-        return
+        [[ ${current_start_time} == "${WORKER_PGID_START_TIME}" ]] \
+            || return 1
+        return 0
     fi
     worker_group_has_identity_token
 }
@@ -615,8 +616,9 @@ process_has_worker_group_identity() {
         ${observed_start_time} =~ ^[1-9][0-9]*$ ]] || return 1
 
     if [[ -n ${expected_start_time} ]]; then
-        [[ ${observed_start_time} == "${expected_start_time}" ]]
-        return
+        [[ ${observed_start_time} == "${expected_start_time}" ]] \
+            || return 1
+        return 0
     fi
 
     # shellcheck disable=SC2310 # Failure is this identity predicate's result.

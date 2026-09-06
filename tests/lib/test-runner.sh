@@ -544,8 +544,9 @@ test_runner_pid_has_group_identity() {
     [[ ${observed_start_time} =~ ^[1-9][0-9]*$ ]] || return 1
 
     if [[ -n ${expected_start_time} ]]; then
-        [[ ${observed_start_time} == "${expected_start_time}" ]]
-        return
+        [[ ${observed_start_time} == "${expected_start_time}" ]] \
+            || return 1
+        return 0
     fi
 
     test_runner_pid_has_token "${pid}" "${expected_token}" || return 1

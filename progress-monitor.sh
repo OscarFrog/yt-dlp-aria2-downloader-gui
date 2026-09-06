@@ -29,8 +29,8 @@ process_is_running() {
         fi
         process_state=${process_stat##*) }
         process_state=${process_state%% *}
-        [[ ${process_state} != Z && ${process_state} != X ]]
-        return
+        [[ ${process_state} != Z && ${process_state} != X ]] || return 1
+        return 0
     fi
     return 0
 }
