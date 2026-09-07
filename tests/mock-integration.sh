@@ -140,6 +140,25 @@ mkdir -p -- \
 chmod 700 -- "${RUNTIME_DIR}"
 
 install -m 0755 -- "${PROJECT_DIR}/download-video.sh" "${MANAGED_ENGINE_UNDER_TEST}"
+# Observe the first deferred handler only in the private engine fixture.
+python3 - "${MANAGED_ENGINE_UNDER_TEST}" <<'PY_DEFERRED_SIGNAL_ACK'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+needle = "            DEFERRED_SIGNAL_NAME=${signal_name}\n"
+if source.count(needle) != 1:
+    raise SystemExit("expected one deferred-signal registration in the engine fixture")
+acknowledgement = r'''            if [[ -n ${MOCK_DEFERRED_SIGNAL_MARKER:-} ]]; then
+                printf '%s\n' "${DEFERRED_SIGNAL_STATUS}" \
+                    >"${MOCK_DEFERRED_SIGNAL_MARKER}.tmp"
+                mv -Tf -- "${MOCK_DEFERRED_SIGNAL_MARKER}.tmp" \
+                    "${MOCK_DEFERRED_SIGNAL_MARKER}"
+            fi
+'''
+path.write_text(source.replace(needle, needle + acknowledgement, 1), encoding="utf-8")
+PY_DEFERRED_SIGNAL_ACK
 install -m 0644 -- \
     "${PROJECT_DIR}/private-aria2-plan.py" \
     "${MANAGED_ENGINE_DIR}/private-aria2-plan.py"
@@ -5573,7 +5592,7 @@ test_mock_signal_cli_runtime_preparation() {
 
 test_mock_signal_cli_pre_env_registration() {
     local cli_engine_pid cli_engine_status continue_marker delay_marker
-    local elapsed_milliseconds mode runtime_signal_log signal_finished_at
+    local elapsed_milliseconds first_signal_marker mode runtime_signal_log signal_finished_at
     local signal_started_at
     local -a registration_leftovers=()
     local -a session_modes=(false true)
@@ -5637,6 +5656,7 @@ test_mock_signal_cli_pre_env_registration() {
     for mode in "${session_modes[@]}"; do
         delay_marker="${TEST_ROOT}/pre-env-escalate-${mode}-delayed"
         continue_marker="${TEST_ROOT}/pre-env-escalate-${mode}-continue"
+        first_signal_marker="${TEST_ROOT}/pre-env-escalate-${mode}-first-signal"
         runtime_signal_log="${TEST_ROOT}/pre-env-escalate-${mode}.log"
 
         /usr/bin/env \
@@ -5646,6 +5666,7 @@ test_mock_signal_cli_pre_env_registration() {
             -u YTDLP_ARIA2_SKIP_RUNTIME_UPDATE \
             MOCK_ENV_DELAY_MARKER="${delay_marker}" \
             MOCK_ENV_CONTINUE_MARKER="${continue_marker}" \
+            MOCK_DEFERRED_SIGNAL_MARKER="${first_signal_marker}" \
             MOCK_RUNTIME_MANAGER_BLOCK=1 \
             MOCK_RUNTIME_STARTED_MARKER="${TEST_ROOT}/pre-env-escalate-${mode}-runtime-started" \
             MOCK_RUNTIME_TERMINATION_MARKER="${TEST_ROOT}/pre-env-escalate-${mode}-runtime-terminated" \
@@ -5657,9 +5678,15 @@ test_mock_signal_cli_pre_env_registration() {
         cli_engine_pid=$!
         wait_for_file "${delay_marker}" 10 \
             "pre-env escalation ${mode} launch delay"
-        signal_started_at=$(date +%s%3N)
         kill -INT -- "${cli_engine_pid}"
-        sleep 0.05
+        # Standard signals can coalesce while pending. Confirm that the first
+        # handler ran before sending the distinct signal that requests escalation.
+        wait_for_file "${first_signal_marker}" 10 \
+            "pre-env escalation ${mode} first SIGINT acknowledgement"
+        assert_file_has_line "${first_signal_marker}" 130 \
+            "pre-env escalation ${mode} first SIGINT is deferred"
+        # Measure escalation from its trigger, after the first-handler barrier.
+        signal_started_at=$(date +%s%3N)
         kill -INT -- "${cli_engine_pid}"
         cli_engine_status=0
         wait "${cli_engine_pid}" || cli_engine_status=$?
