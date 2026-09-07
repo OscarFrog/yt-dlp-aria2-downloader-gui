@@ -1094,6 +1094,7 @@ mutation_must_change() {
 
 docker_run_blocks_are_hardened() {
     local job_block=$1
+    local expected_run_count=${2:-2}
     local line=''
     local in_docker_run=false
     local has_network_none=false
@@ -1149,7 +1150,7 @@ docker_run_blocks_are_hardened() {
     done <<<"${job_block}"
 
     [[ ${in_docker_run} == false ]] || return 65
-    ((docker_run_count == 2 && hardened_docker_run_count == 2))
+    ((docker_run_count == expected_run_count && hardened_docker_run_count == expected_run_count))
 }
 
 publisher_job_executes_repo_shell() {
@@ -1310,6 +1311,13 @@ shfmt_verifier_job_policy() {
     [[ ${job_block} == *'verifier rejected upstream shfmt tag provenance'* ]] || return 65
     [[ ${job_block} == *'Validate verified formatter and project'* ]] || return 65
     [[ ${job_block} == *'bash ./tests/run-all.sh'* ]] || return 65
+    # Candidate execution remains untrusted after its output was verified.
+    # shellcheck disable=SC2310
+    docker_run_blocks_are_hardened "${job_block}" 1 || return 65
+    # shellcheck disable=SC2016 # Exact read-only container boundary.
+    [[ ${job_block} == *'--volume "${GITHUB_WORKSPACE}:/workspace:ro"'* ]] || return 65
+    [[ ${job_block} == *'--env SHFMT_TOOL_ROOT=/opt/shfmt'* ]] || return 65
+    [[ ${job_block} != *'run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/run-all.sh'* ]] || return 65
     [[ ${job_block} == *'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'* ]] || return 65
     # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
     [[ ${job_block} == *'shfmt-verified-${{ github.run_id }}-${{ github.run_attempt }}'* ]] || return 65
@@ -1324,7 +1332,7 @@ shfmt_publish_job_policy() {
     local permissions=''
 
     permissions=$(job_permissions_block "${job_block}")
-    [[ ${permissions} == $'    permissions:\n      contents: write\n      pull-requests: write' ]] || return 65
+    [[ ${permissions} == $'    permissions:\n      contents: write' ]] || return 65
     [[ ${job_block} == *"if: github.ref == 'refs/heads/main' && needs.prepare-shfmt-update.outputs.update == 'true'"* ]] || return 65
     [[ ${job_block} == *'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'* ]] || return 65
     # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
@@ -1350,6 +1358,8 @@ shfmt_publish_job_policy() {
     if publisher_job_executes_repo_shell "${job_block}"; then
         return 65
     fi
+    [[ ${job_block} != *'gh pr create'* ]] || return 65
+    [[ ${job_block} == *'Open a maintainer-authenticated pull request'* ]] || return 65
     return 0
 }
 
@@ -1435,6 +1445,24 @@ assert_shfmt_update_workflow_policy() {
     # shellcheck disable=SC2310
     if shfmt_verifier_job_policy "${mutated}"; then
         fail 'shfmt updater policy did not reject removal of post-verification project tests.'
+    fi
+
+    mutated=${verifier_block/--network=none/--network=host}
+    mutation_must_change "${verifier_block}" "${mutated}" 'verifier candidate network'
+    # shellcheck disable=SC2310 # This mutation must fail closed.
+    if shfmt_verifier_job_policy "${mutated}"; then
+        fail 'shfmt updater policy allowed network during candidate validation.'
+    fi
+    mutated=${verifier_block/:\/workspace:ro/:\/workspace:rw}
+    mutation_must_change "${verifier_block}" "${mutated}" 'verifier writable source'
+    # shellcheck disable=SC2310 # This mutation must fail closed.
+    if shfmt_verifier_job_policy "${mutated}"; then
+        fail 'shfmt updater policy allowed a writable source mount.'
+    fi
+    mutated="${verifier_block}"$'\n        run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/run-all.sh'
+    # shellcheck disable=SC2310 # This mutation restores unsafe host execution.
+    if shfmt_verifier_job_policy "${mutated}"; then
+        fail 'shfmt updater policy allowed candidate validation on the host.'
     fi
 
     # shellcheck disable=SC2016 # Deliberate unsafe dynamic checkout mutation.
@@ -2305,6 +2333,81 @@ test_static_python_interface_contracts() {
         --check "${EXPECTED_PUBLISHED_VERSION}"
     assert_status 2 'published-version helper requires a version' \
         python3 -B "${SCRIPT_DIR}/scripts/update-published-version.py"
+
+    # Real filesystem publication with one injected boundary failure must
+    # preserve the preceding complete documentation generation.
+    python3 -B - "${SCRIPT_DIR}" "${synthetic_version}" <<'PY_UPDATE_FAILURES'
+from contextlib import redirect_stderr
+from pathlib import Path
+from unittest.mock import patch
+import errno
+import importlib.util
+import io
+import shutil
+import sys
+import tempfile
+
+source = Path(sys.argv[1])
+version = sys.argv[2]
+spec = importlib.util.spec_from_file_location(
+    "published_update", source / "scripts/update-published-version.py"
+)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+paths = ("README.md", "README.fr.md", "test-static.sh")
+for scenario in ("rename-2", "rename-3", "staging", "interrupt", "rollback"):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        for name in paths:
+            shutil.copy2(source / name, root / name)
+        static = root / "test-static.sh"
+        static.write_text(module.EXPECTED_VERSION_RE.sub(
+            f"readonly EXPECTED_VERSION='{version}'", static.read_text()
+        ))
+        before = {name: (root / name).read_bytes() for name in paths}
+        modes = {name: (root / name).stat().st_mode for name in paths}
+        replacement = module.os.replace
+        staging = module.stage_text
+        calls = 0
+
+        def failing_replace(old, new):
+            global calls
+            calls += 1
+            failure = 3 if scenario == "rename-3" else 2
+            if calls == failure or (scenario == "rollback" and calls == 4):
+                if scenario == "interrupt":
+                    raise KeyboardInterrupt()
+                raise OSError(errno.ENOSPC, "injected publication failure")
+            return replacement(old, new)
+
+        def failing_stage(path, text):
+            global calls
+            calls += 1
+            if calls == 3:
+                raise OSError(errno.ENOSPC, "injected staging failure")
+            return staging(path, text)
+
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            with patch.object(module, "stage_text", failing_stage) if scenario == "staging" else patch.object(module.os, "replace", failing_replace):
+                try:
+                    module.update_published_version(root, version)
+                except (module.VersionUpdateError, KeyboardInterrupt):
+                    pass
+                else:
+                    raise AssertionError(f"{scenario}: failure was ignored")
+        leftovers = list(root.glob(".*"))
+        if scenario == "rollback":
+            assert "original content preserved" in errors.getvalue()
+            assert len(leftovers) == 1
+            assert leftovers[0].read_bytes() == before["README.md"]
+        else:
+            assert {name: (root / name).read_bytes() for name in paths} == before
+            assert {name: (root / name).stat().st_mode for name in paths} == modes
+            assert not leftovers, (scenario, leftovers)
+            assert module.update_published_version(root, version)
+            assert not module.update_published_version(root, version)
+PY_UPDATE_FAILURES
 
     published_update_fixture=$(mktemp -d)
     (

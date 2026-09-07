@@ -835,14 +835,14 @@ diagnostic conservés depuis plus de 15 jours sont supprimés automatiquement
 lors de la prochaine préparation d’une session de téléchargement graphique.
 
 Un verrou consultatif par utilisateur et par dossier de destination est
-conservé sous le chemin canonique
-`$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader` lorsque toute sa chaîne physique est
-sûre et que le dossier d'exécution est privé et appartient à l'utilisateur
-courant. Sinon, le moteur utilise le repli privé revalidé
-`/tmp/yt-dlp-aria2-downloader-UID`. Les fichiers de verrou ne contiennent ni
-URL, ni cookie, ni chemin de média, et le noyau libère automatiquement le
-verrou à la fin du moteur. Des téléchargements vers des dossiers différents
-peuvent s'exécuter simultanément.
+toujours conservé dans le dossier privé revalidé
+`/tmp/yt-dlp-aria2-downloader-UID`. Cet emplacement commun empêche les écritures
+concurrentes même si les lanceurs ont des valeurs `XDG_RUNTIME_DIR` différentes.
+Les fichiers de travail privés privilégient toujours le dossier privé validé
+`$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader`, avec le même dossier `/tmp` en repli.
+Les fichiers de verrou ne contiennent ni URL, ni cookie, ni chemin de média,
+et le noyau libère automatiquement le verrou à la fin du moteur. Des
+téléchargements vers des dossiers différents peuvent s'exécuter simultanément.
 
 ## Tests
 

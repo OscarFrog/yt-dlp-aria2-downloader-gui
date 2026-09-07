@@ -2439,11 +2439,11 @@ test_mock_engine_audio_downloads() {
         '--no-netrc=true' \
         'aria2 arguments omit unsupported optional netrc capability'
 
-    runtime_lock_dir="${XDG_RUNTIME_DIR}/yt-dlp-aria2-downloader"
+    runtime_lock_dir="/tmp/yt-dlp-aria2-downloader-${EUID}"
     [[ -d ${runtime_lock_dir} && ! -L ${runtime_lock_dir} ]] \
-        || fail 'The engine did not create a private XDG runtime lock directory.'
+        || fail 'The engine did not create the stable private destination lock directory.'
     assert_path_mode "${runtime_lock_dir}" 700 \
-        'XDG runtime lock-directory permissions'
+        'stable destination lock-directory permissions'
     shopt -s nullglob
     runtime_lock_files=("${runtime_lock_dir}"/*.lock)
     shopt -u nullglob
@@ -2540,6 +2540,16 @@ test_mock_engine_audio_downloads() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'the URL must not contain control characters.' \
         'private URL file control-character diagnostic'
+
+    printf 'https://example.com/\0private-control-token\n' >"${url_file}"
+    assert_status 2 'a private URL file rejects a raw NUL control byte' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio --url-file "${url_file}"
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'the URL must not contain control characters.' \
+        'private URL file NUL diagnostic'
+    assert_text_not_contains "${ASSERT_OUTPUT}" 'private-control-token' \
+        'NUL rejection does not echo private input'
 
     # Reject raw control bytes without narrowing valid Unicode or encoded URL data.
     printf '%s\n' 'https://exemple.fr/été?q=東京&encoded=%07' >"${url_file}"
@@ -3182,10 +3192,8 @@ test_mock_engine_failure_paths() {
 
     # A second engine instance targeting the same canonical destination must fail
     # before yt-dlp can manipulate shared .part, merge, or remux files.
-    # Use the exact runtime lock directory selected by the engine. Locking the
-    # historical /tmp fallback would exercise a different inode whenever the
-    # validated XDG_RUNTIME_DIR is available.
-    lock_root="${XDG_RUNTIME_DIR}/yt-dlp-aria2-downloader"
+    # Destination locks are shared across all runtime-directory environments.
+    lock_root="/tmp/yt-dlp-aria2-downloader-${EUID}"
     mkdir -p -- "${lock_root}"
     chmod 700 -- "${lock_root}"
     lock_key=$(printf '%s\0' "${OUTPUT_DIR}" | sha256sum)
@@ -3203,6 +3211,17 @@ test_mock_engine_failure_paths() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'another download is already using the destination directory:' \
         'concurrent output lock diagnostic'
+    assert_status 75 'the destination lock also excludes launches without XDG' \
+        env -u XDG_RUNTIME_DIR \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=concurrent-output-lock-no-xdg'
+    mkdir -m 700 -- "${TEST_ROOT}/alternate-runtime"
+    assert_status 75 'the destination lock excludes another valid XDG root' \
+        env XDG_RUNTIME_DIR="${TEST_ROOT}/alternate-runtime" \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=concurrent-output-lock-other-xdg'
     flock --unlock "${held_lock_fd}"
     exec {held_lock_fd}>&-
 }
@@ -4967,8 +4986,70 @@ run_mock_gui_progress_group() {
     test_mock_gui_progress_completion
 }
 
+test_mock_gui_settings_signal_cleanup() {
+    python3 - "${PROJECT_DIR}/download-video-gui.sh" <<'PY_SETTINGS_SIGNAL'
+import pathlib
+import subprocess
+import sys
+import tempfile
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+entrypoint = 'main "$@"\n'
+if not source.endswith(entrypoint):
+    raise AssertionError("GUI entrypoint changed")
+fixture = r'''
+source "$1"
+CONFIG_DIR="$2/config"
+CONFIG_FILE="${CONFIG_DIR}/gui.conf"
+LAST_OUTPUT_DIR=$2
+LAST_PROFILE=video
+SIGNAL_UNDER_TEST=$3
+trap cleanup EXIT
+trap 'handle_gui_signal 129' HUP
+trap 'handle_gui_signal 130' INT
+trap 'handle_gui_signal 143' TERM
+select_url() { printf -v "$1" '%s' 'https://example.invalid/video'; }
+select_profile() { printf -v "$1" '%s' video; }
+select_output_dir() { printf -v "$1" '%s' "${LAST_OUTPUT_DIR}"; }
+chmod() {
+    command chmod "$@" || return
+    if [[ $1 == 600 && ${*: -1} == */gui.conf.* ]]; then
+        kill -"${SIGNAL_UNDER_TEST}" "${BASHPID}"
+    fi
+}
+collect_download_request
+'''
+with tempfile.TemporaryDirectory(prefix="gui-settings-signal-") as directory:
+    root = pathlib.Path(directory)
+    functions = root / "functions.sh"
+    functions.write_text(source[:-len(entrypoint)], encoding="utf-8")
+    for signal_name, expected_status in (("HUP", 129), ("INT", 130), ("TERM", 143)):
+        case = root / signal_name
+        case.mkdir()
+        result = subprocess.run(
+            ["bash", "-c", fixture, "bash", str(functions), str(case), signal_name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != expected_status:
+            raise AssertionError(
+                f"settings signal {signal_name} returned {result.returncode}: "
+                + result.stderr.decode(errors="replace")
+            )
+        config_directory = case / "config"
+        if list(config_directory.glob("gui.conf.*")):
+            raise AssertionError(f"settings temporary leaked after {signal_name}")
+        expected = f"output_dir={case}\nprofile=video\n"
+        if (config_directory / "gui.conf").read_text(encoding="utf-8") != expected:
+            raise AssertionError(f"settings commit was incomplete after {signal_name}")
+PY_SETTINGS_SIGNAL
+}
+
 run_mock_gui_state_group() {
     test_mock_gui_config_recovery
+    test_mock_gui_settings_signal_cleanup
     test_mock_gui_file_selection
     test_mock_gui_diagnostic_logs
     test_mock_gui_state_initialization

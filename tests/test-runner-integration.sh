@@ -324,6 +324,16 @@ test_parallel_repeat_runner() {
         bash "${SCRIPT_DIR}/repeat-qualification.sh" \
         --runs 1 --jobs 1 -- bash -c 'exit 0'
 
+    assert_status 2 'repeat runner rejects run-count overflow before arithmetic' \
+        bash "${SCRIPT_DIR}/repeat-qualification.sh" \
+        --runs 18446744073709551617 --jobs 1 -- bash -c 'exit 0'
+    assert_status 2 'repeat runner rejects job-count overflow before arithmetic' \
+        bash "${SCRIPT_DIR}/repeat-qualification.sh" \
+        --runs 1 --jobs 18446744073709551617 -- bash -c 'exit 0'
+    assert_status 0 'repeat runner preserves leading-zero count support' \
+        bash "${SCRIPT_DIR}/repeat-qualification.sh" \
+        --runs 0001 --jobs 0001 -- bash -c 'exit 0'
+
     mkdir -p -- "${barrier_root}"
     # The nested Bash child, not this test shell, expands the repeat metadata.
     # shellcheck disable=SC2016
@@ -361,6 +371,86 @@ test_parallel_repeat_runner() {
     assert_text_contains "${ASSERT_STDERR}" \
         'Synthetic repeat 2/3: FAIL (status 17,' \
         'repeat runner reports the exact child failure'
+}
+
+test_ffmpeg_cancellation_group_registration() {
+    python3 - "${SCRIPT_DIR}/ffmpeg-generation-compatibility.sh" <<'PY_FFMPEG_GROUP'
+import os
+import pathlib
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+entrypoint = 'main "$@"\n'
+if not source.endswith(entrypoint):
+    raise AssertionError("FFmpeg qualification entrypoint changed")
+fixture = r'''
+source "$1"
+TEST_ROOT=$2
+trap cleanup EXIT
+trap 'exit 143' TERM
+REAL_SETSID=$3
+GATE="${TEST_ROOT}/parent-group-observed"
+
+# Fixture generation is irrelevant to group ownership; the actual session
+# launches a bounded external process through the real setsid executable.
+ffmpeg() { :; }
+setsid() {
+    for _ in {1..200}; do
+        if [[ -e ${GATE} ]]; then
+            exec "${REAL_SETSID}" "$@"
+        fi
+        sleep 0.01
+    done
+    exit 71
+}
+ps() {
+    # Publish the first real PGID observation before allowing setsid to run.
+    command ps "$@" || return
+    : >"${GATE}"
+}
+qualify_ffmpeg_cancellation
+printf 'qualified safely\n'
+'''
+with tempfile.TemporaryDirectory(prefix="ffmpeg-group-regression-") as directory:
+    root = pathlib.Path(directory)
+    functions = root / "functions.sh"
+    functions.write_text(source[:-len(entrypoint)], encoding="utf-8")
+    mock_bin = root / "bin"
+    mock_bin.mkdir()
+    mock_ffmpeg = mock_bin / "ffmpeg"
+    mock_ffmpeg.write_text("#!/bin/sh\nexec sleep 2\n", encoding="ascii")
+    mock_ffmpeg.chmod(0o700)
+    case = root / "case"
+    case.mkdir()
+    environment = dict(os.environ, PATH=f"{mock_bin}:{os.environ['PATH']}")
+    process = subprocess.Popen(
+        ["bash", "-c", fixture, "bash", str(functions), str(case),
+         shutil.which("setsid")],
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=10)
+        if process.returncode != 0 or stdout != b"qualified safely\n":
+            raise AssertionError(
+                f"qualification signaled its caller group: {process.returncode}; "
+                + stderr.decode(errors="replace")
+            )
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+PY_FFMPEG_GROUP
 }
 
 test_recycled_child_identity_guard() {
@@ -1283,7 +1373,7 @@ main() {
     local failure_completion
     local status=0
 
-    for command_name in bash cat chmod env ln mkdir mktemp python3 rm sed sleep timeout; do
+    for command_name in bash cat chmod env ln mkdir mktemp ps python3 rm sed setsid sleep timeout tr; do
         require_test_command "${command_name}"
     done
 
@@ -1378,6 +1468,7 @@ main() {
     test_startup_signal_registration_stress
     test_startup_signal_final_transition
     test_parallel_repeat_runner
+    test_ffmpeg_cancellation_group_registration
     test_recycled_child_identity_guard
     test_delayed_child_identity_handshake
     test_partial_child_identity_handshake

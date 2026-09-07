@@ -795,13 +795,14 @@ and the resulting file stays mode `0600`. Its final section gives the exact
 older than 15 days are removed automatically the next time a graphical download
 session is prepared.
 
-A same-user, per-destination advisory lock is kept under the canonical
-`$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader` when its complete physical chain is
-safe and the runtime directory is private and owned by the current user.
-Otherwise, the engine uses a revalidated private
-`/tmp/yt-dlp-aria2-downloader-UID` fallback. Lock files contain no URL, cookie,
-or media path, and the kernel releases the lock automatically when the engine
-exits. Downloads to different destination directories may run concurrently.
+A same-user, per-destination advisory lock is always kept under the revalidated
+private `/tmp/yt-dlp-aria2-downloader-UID` directory. This common location prevents
+concurrent writers even when launchers have different `XDG_RUNTIME_DIR` values.
+Private work files still prefer a validated private
+`$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader`, with the same `/tmp` directory as a
+fallback. Lock files contain no URL, cookie, or media path, and the kernel
+releases the lock automatically when the engine exits. Downloads to different
+destination directories may run concurrently.
 
 ## Tests
 

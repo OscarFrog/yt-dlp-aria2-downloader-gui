@@ -217,7 +217,7 @@ qualify_ffmpeg_cancellation() {
 
     for _ in {1..50}; do
         pgid=$(ps -o pgid= -p "${FFMPEG_PID}" 2>/dev/null | tr -d '[:space:]')
-        if [[ ${pgid} =~ ^[1-9][0-9]*$ ]] \
+        if [[ ${pgid} =~ ^[1-9][0-9]*$ && ${pgid} == "${FFMPEG_PID}" ]] \
             && kill -0 -- "-${pgid}" 2>/dev/null; then
             FFMPEG_PGID=${pgid}
             break

@@ -61,12 +61,12 @@ normalize_count() {
     local output_name=$4
     local normalized_value
 
-    if [[ ! ${raw_value} =~ ^[0-9]+$ ]]; then
+    if [[ ! ${raw_value} =~ ^0*([0-9]{1,3})$ ]]; then
         printf 'Error: %s must be an integer from 1 through %d: %s\n' \
             "${label}" "${maximum}" "${raw_value}" >&2
         return 2
     fi
-    normalized_value=$((10#${raw_value}))
+    normalized_value=$((10#${BASH_REMATCH[1]}))
     if ((normalized_value < 1 || normalized_value > maximum)); then
         printf 'Error: %s must be an integer from 1 through %d: %s\n' \
             "${label}" "${maximum}" "${raw_value}" >&2

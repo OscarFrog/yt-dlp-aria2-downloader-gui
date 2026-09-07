@@ -136,8 +136,8 @@ def replace_reference_set(
     return updated
 
 
-def atomic_write_text(path: Path, text: str) -> None:
-    """Replace one existing file atomically while preserving its mode."""
+def stage_text(path: Path, text: str) -> Path:
+    """Flush one replacement beside its target before any publication."""
 
     original_mode = stat.S_IMODE(path.stat().st_mode)
     temporary_path: Path | None = None
@@ -156,10 +156,11 @@ def atomic_write_text(path: Path, text: str) -> None:
             temporary.write(text)
             temporary.flush()
             os.fsync(temporary.fileno())
-        os.replace(temporary_path, path)
+        staged_path = temporary_path
         temporary_path = None
+        return staged_path
     except OSError as exc:
-        raise VersionUpdateError(f"unable to publish {path.name}: {exc}") from exc
+        raise VersionUpdateError(f"unable to stage {path.name}: {exc}") from exc
     finally:
         if temporary_path is not None:
             try:
@@ -249,10 +250,52 @@ def update_published_version(root: Path, requested_version: str) -> bool:
         raise VersionUpdateError("unable to update the published-version declaration")
     updated_files[STATIC_CONTRACT_PATH] = updated_static
 
-    for relative_path, updated_text in updated_files.items():
-        atomic_write_text(root / relative_path, updated_text)
-
-    check_published_version(root, requested_version)
+    staged: dict[Path, Path] = {}
+    backups: dict[Path, Path] = {}
+    attempted: list[Path] = []
+    retained: set[Path] = set()
+    try:
+        # Stage both generations before replacing any source. Rollback then
+        # requires only renames, even when staging exhausted available space.
+        for relative_path, updated_text in updated_files.items():
+            path = root / relative_path
+            backups[relative_path] = stage_text(
+                path, read_regular_text(root, relative_path)
+            )
+            staged[relative_path] = stage_text(path, updated_text)
+        for relative_path in updated_files:
+            attempted.append(relative_path)
+            os.replace(staged[relative_path], root / relative_path)
+        check_published_version(root, requested_version)
+    except BaseException as primary_error:
+        # Cleanup also covers KeyboardInterrupt; the original error propagates.
+        for relative_path in reversed(attempted):
+            backup = backups[relative_path]
+            try:
+                os.replace(backup, root / relative_path)
+            except OSError as exc:
+                retained.add(backup)
+                print(
+                    f"Warning: unable to restore {relative_path}: {exc}; "
+                    f"original content preserved in {backup}",
+                    file=sys.stderr,
+                )
+        if isinstance(primary_error, OSError):
+            raise VersionUpdateError(
+                f"unable to publish documentation: {primary_error}"
+            ) from primary_error
+        raise
+    finally:
+        for temporary_path in (*staged.values(), *backups.values()):
+            if temporary_path in retained:
+                continue
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError as exc:
+                print(
+                    f"Warning: unable to remove temporary {temporary_path}: {exc}",
+                    file=sys.stderr,
+                )
     return True
 
 

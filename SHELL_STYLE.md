@@ -395,8 +395,10 @@ boundaries:
    only a data-only patch and digest;
 2. a fresh read-only verifier checks the immutable base, handoff digest, strict
    path allowlist, upstream provenance, and canonical equivalence under the
-   previously trusted formatter, then runs the complete project validation and
-   binds the handoff to the tested tree;
+   previously trusted formatter, then runs the complete project validation in a separate container with no
+   network, a read-only source mount, and no host credentials or handoff files.
+   After destroying that container, it rechecks canonical equivalence and binds
+   the handoff to the tested tree;
 3. only the publisher has repository-write authority, and it revalidates the
    verified data without executing candidate code or modified repository code.
    Git hooks remain disabled for its privileged commit.
@@ -409,8 +411,9 @@ A newly discovered formatter candidate is therefore treated as untrusted until
 human review and merge. The project never switches formatter versions silently
 in the middle of an ordinary validation run.
 
-The new release becomes the project reference only when that update pull request
-is reviewed and merged.
+The publisher prepares a branch and records its identity. A maintainer opens
+the pull request because Actions pull-request creation is disabled. The new
+release becomes the project reference only after review and merge.
 
 This preserves reproducibility: one commit always identifies one exact `shfmt`
 version and exact asset digests.

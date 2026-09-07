@@ -676,13 +676,16 @@ require_value() {
 }
 
 resolve_lock_root() {
+    local output_variable=${1:-OUTPUT_LOCK_ROOT}
+    local prefer_runtime=${2:-true}
     local candidate=''
     local canonical_candidate=''
     local canonical_runtime_dir=''
     local owner=''
     local mode=''
 
-    if [[ -n ${XDG_RUNTIME_DIR:-} && ${XDG_RUNTIME_DIR} == /* &&
+    if [[ ${prefer_runtime} == true &&
+        -n ${XDG_RUNTIME_DIR:-} && ${XDG_RUNTIME_DIR} == /* &&
         -d ${XDG_RUNTIME_DIR} && ! -L ${XDG_RUNTIME_DIR} ]] \
         && canonical_runtime_dir=$(realpath -e -- \
             "${XDG_RUNTIME_DIR}" 2>/dev/null); then
@@ -741,17 +744,26 @@ resolve_lock_root() {
         return 73
     fi
 
-    OUTPUT_LOCK_ROOT=${canonical_candidate}
+    printf -v "${output_variable}" '%s' "${canonical_candidate}"
     return 0
 }
 
 acquire_output_lock() {
     local output_dir=$1
     local lock_key
+    local destination_lock_root=''
 
     # shellcheck disable=SC2310 # Failure is converted to a lock setup status.
     if ! resolve_lock_root || [[ -z ${OUTPUT_LOCK_ROOT} ]]; then
         error 'unable to resolve the download-lock directory.'
+        return 73
+    fi
+
+    # Every invocation must lock the same inode, including launches with
+    # different XDG_RUNTIME_DIR values. Keep private work files under the
+    # existing runtime root, but place destination locks in a stable UID root.
+    # shellcheck disable=SC2310 # Failure is converted to a lock setup status.
+    if ! resolve_lock_root destination_lock_root false; then
         return 73
     fi
 
@@ -765,7 +777,7 @@ acquire_output_lock() {
         return 73
     fi
 
-    OUTPUT_LOCK_FILE="${OUTPUT_LOCK_ROOT}/${lock_key}.lock"
+    OUTPUT_LOCK_FILE="${destination_lock_root}/${lock_key}.lock"
     if [[ -L ${OUTPUT_LOCK_FILE} ||
         (-e ${OUTPUT_LOCK_FILE} && ! -f ${OUTPUT_LOCK_FILE}) ]]; then
         error 'the destination lock exists but is not a regular file.'
@@ -2336,6 +2348,14 @@ resolve_requested_url() {
             error 'the URL file must not be accessible by group or other users.'
             exit 2
         fi
+        # Ordinary Bash read silently discards NUL bytes. Detect that delimiter
+        # first, in bounded chunks, before decoding the URL as newline text.
+        while IFS= read -r -d '' -n 65536 url_line; do
+            if ((${#url_line} < 65536)); then
+                error 'the URL must not contain control characters.'
+                exit 2
+            fi
+        done <"${URL_FILE}"
         URL=''
         url_line_count=0
         while IFS= read -r url_line || [[ -n ${url_line} ]]; do

@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import stat
 import sys
 from pathlib import Path
@@ -45,6 +46,14 @@ STAGING_NAME_RE = re.compile(r"^item-[0-9]{3}\.download$")
 
 class PlanError(Exception):
     """Expected validation failure."""
+
+
+class PublicationInterrupted(PlanError):
+    """A catchable signal requested rollback before publication committed."""
+
+    def __init__(self, signal_number: int) -> None:
+        super().__init__("component publication was interrupted")
+        self.signal_number = signal_number
 
 
 class DestinationExistsError(PlanError):
@@ -738,18 +747,42 @@ def commit_plan(args: argparse.Namespace) -> int:
         publications.append((source, destination))
 
     moved: list[tuple[Path, Path, tuple[int, int]]] = []
+    requested_signal = 0
 
+    def remember_signal(signal_number: int, _frame: object) -> None:
+        nonlocal requested_signal
+        if requested_signal == 0:
+            requested_signal = signal_number
+
+    def check_interruption() -> None:
+        if requested_signal:
+            raise PublicationInterrupted(requested_signal)
+
+    # A handler must not raise between os.link() and rollback registration.
+    # Record requests until an entire component is registered; keep recording
+    # later signals while rollback restores the transaction's original state.
+    previous_handlers = {}
     try:
-        for source, destination in publications:
-            publish_without_overwrite(source, destination, moved)
-    except Exception as exc:
-        rollback_failures = rollback_publication(moved)
-        if rollback_failures:
-            raise PlanError(
-                "publication failed and rollback could not restore "
-                f"{len(rollback_failures)} component(s)"
-            ) from exc
-        raise
+        for signal_number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signal_number] = signal.signal(
+                signal_number, remember_signal
+            )
+        try:
+            for source, destination in publications:
+                check_interruption()
+                publish_without_overwrite(source, destination, moved)
+            check_interruption()
+        except BaseException as exc:
+            rollback_failures = rollback_publication(moved)
+            if rollback_failures:
+                raise PlanError(
+                    "publication failed and rollback could not restore "
+                    f"{len(rollback_failures)} component(s)"
+                ) from exc
+            raise
+    finally:
+        for signal_number, previous_handler in previous_handlers.items():
+            signal.signal(signal_number, previous_handler)
 
     print(f"published_count={len(moved)}")
     return 0
@@ -804,6 +837,11 @@ def main() -> int:
 
     try:
         return int(args.handler(args))
+    except PublicationInterrupted as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 128 + exc.signal_number
+    except KeyboardInterrupt:
+        return 130
     except DestinationExistsError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
