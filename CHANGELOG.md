@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.3.11 - 2026-09-07
+
+This release contains the production audit fixes documented below and aligns
+the published package references with the signed `v2.3.11` release.
+
 ## 2.3.10 - 2026-09-07
 
 ### Download and desktop reliability
