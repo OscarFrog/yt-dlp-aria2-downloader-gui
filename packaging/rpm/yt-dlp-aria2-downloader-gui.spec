@@ -86,6 +86,12 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Mon Sep 07 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.9-1
+- Skip service accounts during automatic launcher migration.
+- Preserve active download files and diagnostic filters during cancellation.
+- Clean interrupted runtime staging and preserve identical verified binaries.
+- Validate runtime settings, registry paths, and private aria2 publication inputs.
+
 * Sun Sep 06 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.8-1
 - Preserve supervised command status and authenticate process-group signaling.
 - Harden private transfer cleanup and HLS no-overwrite publication.
