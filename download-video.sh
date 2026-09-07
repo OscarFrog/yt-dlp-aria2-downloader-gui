@@ -90,8 +90,19 @@ cleanup() {
 
     if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]]; then
         if declare -F stop_download_worker >/dev/null 2>&1; then
-            # shellcheck disable=SC2310 # Cleanup intentionally tolerates failure.
-            stop_download_worker || true
+            # A descendant may still be using every private file after a
+            # bounded shutdown fails. Exit without unlinking state or explicitly
+            # unlocking the open file description shared with surviving children.
+            # shellcheck disable=SC2310 # Failed quiescence selects preservation.
+            if ! stop_download_worker; then
+                printf '%s\n' \
+                    'Warning: command shutdown could not be confirmed; preserving active temporary files.' >&2
+                exit "${status}"
+            fi
+        else
+            printf '%s\n' \
+                'Warning: command shutdown helper is unavailable; preserving active temporary files.' >&2
+            exit "${status}"
         fi
     fi
     if [[ -n ${DOWNLOAD_PGID_FILE} ]]; then
@@ -1490,7 +1501,7 @@ run_supervised_ytdlp() {
             # redactor alive until the producer closes its pipe so the producer
             # cannot lose its TERM handler to a concurrent SIGPIPE.
             trap "" HUP INT TERM
-            exec sed -u -E \
+            LC_ALL=C exec sed -u -E \
                 "s/${forbidden_source_name}/[REDACTED_SOURCE]/gI"
         ) >&2
         pipeline_statuses=("${PIPESTATUS[@]}")
@@ -2291,6 +2302,7 @@ parse_arguments() {
 
 # Resolve the single URL from argv or its private file and classify its host.
 resolve_requested_url() {
+    local url_control_pattern=$'[\001-\037\177]'
     local url_file_mode=''
     local url_file_owner=''
     local url_line=''
@@ -2352,6 +2364,10 @@ resolve_requested_url() {
 
     if [[ ${URL} == *$'\n'* || ${URL} == *$'\r'* ]]; then
         error 'the URL must not contain line breaks.'
+        exit 2
+    fi
+    if [[ ${URL} =~ ${url_control_pattern} ]]; then
+        error 'the URL must not contain control characters.'
         exit 2
     fi
     if [[ ! ${URL} =~ ^https?://[^[:space:]]+$ ]]; then
@@ -2645,9 +2661,12 @@ prepare_private_work_files() {
             exit 13
         fi
 
+        # Defer signals until cleanup can identify the newly created inode.
+        begin_signal_registration
         if ! RESULT_FILE_TMP=$(mktemp \
             --tmpdir="${result_parent}" \
             '.yt-dlp-result.XXXXXXXX'); then
+            finish_signal_registration
             error 'unable to create the temporary result file.'
             exit 13
         fi
@@ -2655,9 +2674,11 @@ prepare_private_work_files() {
 
     if [[ -z ${RESULT_FILE_TMP} ]]; then
         # Always retain the final yt-dlp path internally for FFprobe validation.
+        begin_signal_registration
         if ! INTERNAL_PATH_FILE_TMP=$(mktemp \
             --tmpdir="${OUTPUT_DIR}" \
             '.yt-dlp-path.XXXXXXXX'); then
+            finish_signal_registration
             error 'unable to create the internal result-path file.'
             exit 13
         fi
@@ -2666,9 +2687,11 @@ prepare_private_work_files() {
     PATH_RECORD_TMP=${RESULT_FILE_TMP:-${INTERNAL_PATH_FILE_TMP}}
     # shellcheck disable=SC2310 # Failure is a fatal private-record trust check.
     if ! open_private_path_record "${PATH_RECORD_TMP}"; then
+        finish_signal_registration
         error 'unable to authenticate the private result-path file.'
         exit 13
     fi
+    finish_signal_registration
 
     if ! YTDLP_BATCH_FILE_TMP=$(mktemp \
         --tmpdir="${OUTPUT_LOCK_ROOT}" \
@@ -2737,7 +2760,6 @@ prepare_private_work_files() {
 
 # Build immutable aria2 arguments and the mutable yt-dlp execution option set.
 configure_download_options() {
-    local aria2_arguments
     local video_format
 
     print_human_line "${SCRIPT_NAME} version ${VERSION}"
@@ -2747,20 +2769,33 @@ configure_download_options() {
         print_human_line 'YouTube access: Firefox cookies with web_safari HLS'
     fi
 
-    aria2_arguments='-x 8 -s 8 -k 1M --file-allocation=none --no-conf=true'
+    ARIA2_DIRECT_OPTIONS=(
+        -x 8 -s 8 -k 1M
+        --file-allocation=none
+        --no-conf=true
+    )
     if [[ ${ARIA2_SUPPORTS_NO_NETRC} == true ]]; then
-        aria2_arguments+=' --no-netrc=true'
+        ARIA2_DIRECT_OPTIONS+=(--no-netrc=true)
     fi
-    aria2_arguments+=' --allow-overwrite=false --auto-file-renaming=false --max-concurrent-downloads=1'
-    aria2_arguments+=' --console-log-level=warn --enable-color=false --truncate-console-readout=false'
+    ARIA2_DIRECT_OPTIONS+=(
+        --allow-overwrite=false
+        --auto-file-renaming=false
+        --max-concurrent-downloads=1
+        --console-log-level=warn
+        --enable-color=false
+        --truncate-console-readout=false
+    )
     if [[ ${MACHINE_PROGRESS} == true ]]; then
         # aria2c's periodic readout must remain on stdout to reach the GUI log
         # during a successful transfer.
-        aria2_arguments+=' --summary-interval=1 --show-console-readout=true --stderr=false'
+        ARIA2_DIRECT_OPTIONS+=(
+            --summary-interval=1
+            --show-console-readout=true
+            --stderr=false
+        )
     else
-        aria2_arguments+=' --summary-interval=0'
+        ARIA2_DIRECT_OPTIONS+=(--summary-interval=0)
     fi
-    read -r -a ARIA2_DIRECT_OPTIONS <<<"${aria2_arguments}"
     readonly -a ARIA2_DIRECT_OPTIONS
 
     YT_DLP_OPTIONS=(
@@ -2939,6 +2974,7 @@ configure_download_reporting() {
 # Execute either the private aria2 direct path or yt-dlp's native transport.
 execute_selected_transport() {
     local aria2_status
+    local build_status=0
     local commit_status
     local -a builder_security_options=()
 
@@ -2949,14 +2985,19 @@ execute_selected_transport() {
         if [[ ${ARIA2_HTTPS_DIRECT_SAFE} == true ]]; then
             builder_security_options+=(--allow-https-direct)
         fi
-        if ! python3 "${PRIVATE_ARIA2_HELPER}" build \
+        python3 "${PRIVATE_ARIA2_HELPER}" build \
             "${builder_security_options[@]}" \
             --plan "${PRIVATE_ARIA2_PLAN}" \
             --output-dir "${OUTPUT_DIR}" \
             --staging-dir "${PRIVATE_ARIA2_STAGING}" \
             --aria2-input "${PRIVATE_ARIA2_INPUT}" \
             --manifest "${PRIVATE_ARIA2_MANIFEST}" \
-            >/dev/null; then
+            >/dev/null || build_status=$?
+        if ((build_status != 0)); then
+            if ((build_status == 1)); then
+                error 'final media destination already exists; refusing to overwrite it.'
+                exit "${build_status}"
+            fi
             error 'unable to build the private aria2 transfer plan.'
             exit 65
         fi
@@ -2981,8 +3022,17 @@ execute_selected_transport() {
         # shellcheck disable=SC2016 # Expanded by the intentionally nested shell.
         run_supervised_command bash -c '
             set -o pipefail
+            # Keep both filters alive during cooperative cancellation so the
+            # producer can finish its signal handler without a broken pipe.
+            # Bytewise matching also redacts malformed diagnostic URL tokens.
             "$@" 2>&1 |
-                stdbuf -o0 tr "\r" "\n" | sed -u -E "s#https?://[^[:space:]]+#[REDACTED_URL]#g"
+                (
+                    trap "" HUP INT TERM
+                    LC_ALL=C exec stdbuf -o0 tr "\r" "\n"
+                ) | (
+                    trap "" HUP INT TERM
+                    LC_ALL=C exec sed -u -E "s#https?://[^[:space:]]+#[REDACTED_URL]#g"
+                )
             pipeline_statuses=("${PIPESTATUS[@]}")
             producer_status=${pipeline_statuses[0]:-125}
             normalizer_status=${pipeline_statuses[1]:-125}

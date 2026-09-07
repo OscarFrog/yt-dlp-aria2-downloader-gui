@@ -560,8 +560,9 @@ PY_HEADER_TYPE
         "${OUTPUT_DIR}/final.mp4" \
         'qualification-agent'
 
-    ln -s -- 'redirected.mp4' "${OUTPUT_DIR}/final.mp4"
     assert_status 0 'destination symlink plan build' run_build
+    # The final name can become occupied after the early build check.
+    ln -s -- 'redirected.mp4' "${OUTPUT_DIR}/final.mp4"
     printf '%s\n' 'downloaded-media' \
         >"${STAGING_DIR}/item-000.download"
 
@@ -572,6 +573,99 @@ PY_HEADER_TYPE
         || fail 'Destination symlink target was unexpectedly published.'
     [[ -f ${STAGING_DIR}/item-000.download ]] \
         || fail 'Destination symlink refusal removed the staging source.'
+}
+
+test_private_plan_existing_destinations() {
+    local collision_kind=''
+    local destination=''
+
+    for collision_kind in single component symlink; do
+        new_case "preexisting-${collision_kind}"
+        if [[ ${collision_kind} == component ]]; then
+            write_double_plan
+            destination="${OUTPUT_DIR}/merged.fa1.m4a"
+        else
+            write_single_plan \
+                'https://example.invalid/media.mp4' \
+                "${OUTPUT_DIR}/final.mp4" 'qualification-agent'
+            destination="${OUTPUT_DIR}/final.mp4"
+        fi
+        if [[ ${collision_kind} == symlink ]]; then
+            ln -s -- 'absent-target.mp4' "${destination}"
+        else
+            printf 'existing destination bytes\n' >"${destination}"
+        fi
+
+        assert_status 1 "${collision_kind} collision is rejected before transfer" run_build
+        assert_text_contains "${ASSERT_OUTPUT}" 'destination already exists:' \
+            "${collision_kind} early collision diagnostic"
+        [[ ! -e ${ARIA2_INPUT} && ! -e ${MANIFEST} ]] \
+            || fail "${collision_kind} early collision created transfer artifacts."
+        if [[ ${collision_kind} == symlink ]]; then
+            [[ -L ${destination} && ! -e ${OUTPUT_DIR}/absent-target.mp4 ]] \
+                || fail 'Early collision followed or replaced the destination symlink.'
+        else
+            assert_file_has_line "${destination}" 'existing destination bytes' \
+                "${collision_kind} collision preserves existing data"
+        fi
+    done
+
+    # The helper publishes the component destinations; yt-dlp owns the separate
+    # assembled filename and its post-processing behavior remains unchanged.
+    new_case 'preexisting-assembled-output'
+    write_double_plan
+    printf 'existing assembled bytes\n' >"${OUTPUT_DIR}/merged.mkv"
+    assert_status 0 'distinct assembled name does not collide with components' run_build
+    assert_file_has_line "${OUTPUT_DIR}/merged.mkv" 'existing assembled bytes' \
+        'building component transfers preserves the assembled output'
+}
+
+test_private_plan_duplicate_staging_names() {
+    new_case 'duplicate-staging-names'
+    write_double_plan
+    assert_status 0 'duplicate staging fixture plan build' run_build
+    printf 'first component\n' >"${STAGING_DIR}/item-000.download"
+    printf 'second component\n' >"${STAGING_DIR}/item-001.download"
+
+    # Mutating a private manifest must be rejected before publication starts,
+    # not after moving a component and relying on filesystem rollback.
+    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${MANIFEST}" <<'PY_DUPLICATE_STAGING'
+import argparse
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+helper_path = Path(sys.argv[1])
+manifest_path = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("private_aria2_duplicate_staging", helper_path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+manifest["items"][1]["staging_name"] = manifest["items"][0]["staging_name"]
+manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+
+def unexpected_publication(*_args):
+    raise SystemExit("duplicate staging source reached publication")
+
+
+module.publish_without_overwrite = unexpected_publication
+try:
+    module.commit_plan(argparse.Namespace(manifest=str(manifest_path)))
+except module.PlanError as exc:
+    assert "duplicate staging filenames" in str(exc), exc
+else:
+    raise SystemExit("duplicate staging source was accepted")
+
+for item in manifest["items"]:
+    assert not Path(item["destination"]).exists()
+staging = Path(manifest["staging_dir"])
+assert (staging / "item-000.download").read_text() == "first component\n"
+assert (staging / "item-001.download").read_text() == "second component\n"
+PY_DUPLICATE_STAGING
 }
 
 test_private_plan_publication_safety() {
@@ -843,6 +937,78 @@ assert anchor.read_text(encoding="utf-8") == "original\n"
 PY_REPLACED_DEST
 }
 
+test_private_plan_ownership() {
+    printf '%s\n' 'Private aria2 plan scenario: ownership of private state'
+    new_case 'private-state-ownership'
+    write_single_plan \
+        'https://example.invalid/media.mp4' \
+        "${OUTPUT_DIR}/final.mp4" \
+        'qualification-agent'
+    PYTHONDONTWRITEBYTECODE=1 python3 - \
+        "${HELPER}" "${PLAN_FILE}" "${OUTPUT_DIR}" "${STAGING_DIR}" \
+        "${ARIA2_INPUT}" "${MANIFEST}" <<'PY_PRIVATE_OWNERSHIP'
+import argparse
+import importlib.util
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+helper_path, plan, output, staging, aria2_input, manifest = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("private_plan_ownership", helper_path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+args = argparse.Namespace(
+    plan=str(plan), output_dir=str(output), staging_dir=str(staging),
+    aria2_input=str(aria2_input), manifest=str(manifest), allow_https_direct=True,
+)
+real_lstat = Path.lstat
+foreign_path = None
+
+# Model a foreign UID without requiring chown privileges. All file operations,
+# permission bits, and the build/commit validation paths remain real.
+def foreign_owner(path, *positional, **keywords):
+    metadata = real_lstat(path, *positional, **keywords)
+    if path == foreign_path:
+        fields = list(metadata)
+        fields[4] = os.geteuid() + 1
+        return os.stat_result(fields)
+    return metadata
+
+for target in (plan, staging):
+    foreign_path = target
+    with patch.object(Path, "lstat", foreign_owner):
+        try:
+            module.build_plan(args)
+        except module.PlanError as exc:
+            assert "owned by the current user" in str(exc), str(exc)
+        else:
+            raise AssertionError(f"foreign private state accepted: {target.name}")
+    assert not aria2_input.exists() and not manifest.exists()
+    assert not (output / "final.mp4").exists()
+
+# Current-user state still builds. A foreign manifest cannot publish its source.
+assert module.build_plan(args) == 0
+source = staging / "item-000.download"
+source.write_bytes(b"downloaded media\n")
+foreign_path = manifest
+with patch.object(Path, "lstat", foreign_owner):
+    try:
+        module.commit_plan(args)
+    except module.PlanError as exc:
+        assert "owned by the current user" in str(exc), str(exc)
+    else:
+        raise AssertionError("foreign manifest was accepted")
+assert source.read_bytes() == b"downloaded media\n"
+assert not (output / "final.mp4").exists()
+
+assert module.commit_plan(args) == 0
+assert (output / "final.mp4").read_bytes() == b"downloaded media\n"
+assert not source.exists()
+PY_PRIVATE_OWNERSHIP
+}
+
 test_https_direct_requires_explicit_opt_in() {
     printf '%s\n' 'Private aria2 plan scenario: HTTPS direct opt-in'
     new_case 'https-direct-opt-in'
@@ -866,6 +1032,123 @@ test_https_direct_requires_explicit_opt_in() {
         'reviewed HTTPS opt-in permits direct transport'
 }
 
+test_private_plan_protocol_metadata() {
+    local scenario=''
+
+    for scenario in secret-protocol list-protocol object-protocol; do
+        printf 'Private aria2 plan scenario: %s\n' "${scenario}"
+        new_case "${scenario}"
+        python3 - "${PLAN_FILE}" "${OUTPUT_DIR}" "${scenario}" <<'PY_PROTOCOL_METADATA'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+output_dir = Path(sys.argv[2])
+protocols = {
+    "secret-protocol": "https://private.example/protocol-secret-token/" + "x" * 32768,
+    "list-protocol": ["https"],
+    "object-protocol": {"protocol": "https"},
+}
+payload = {
+    "requested_downloads": [{
+        "filename": str(output_dir / "final.mp4"),
+        "url": "https://example.invalid/media.mp4",
+        "protocol": protocols[sys.argv[3]],
+        "http_headers": {"User-Agent": "qualification-agent"},
+    }],
+}
+path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+os.chmod(path, 0o600)
+PY_PROTOCOL_METADATA
+        assert_status 0 "${scenario} classification selects a safe transport" run_classify
+        assert_text_contains "${ASSERT_OUTPUT}" 'transport=native' \
+            "${scenario} stays on native transport"
+        assert_text_not_contains "${ASSERT_OUTPUT}" 'protocol-secret-token' \
+            'classification never prints raw protocol metadata'
+
+        assert_status 65 "${scenario} direct build is rejected" run_build
+        assert_text_contains "${ASSERT_OUTPUT}" 'unsupported direct-transfer protocol' \
+            'protocol rejection retains useful error context'
+        assert_text_not_contains "${ASSERT_OUTPUT}" 'protocol-secret-token' \
+            'protocol rejection never prints private metadata'
+        assert_text_not_contains "${ASSERT_OUTPUT}" 'Traceback' \
+            'non-string protocol metadata never produces a traceback'
+        ((${#ASSERT_OUTPUT} < 256)) \
+            || fail 'Protocol rejection emitted an unbounded diagnostic.'
+        [[ ! -e ${ARIA2_INPUT} && ! -e ${MANIFEST} ]] \
+            || fail 'Invalid protocol metadata left private plan artifacts.'
+    done
+}
+
+test_private_plan_duplicate_headers() {
+    local scenario=''
+
+    # Duplicate field names have case-insensitive HTTP semantics. Preserve the
+    # native downloader's handling instead of replaying ambiguous aria2 fields.
+    for scenario in different-values identical-values; do
+        printf 'Private aria2 plan scenario: duplicate headers %s\n' "${scenario}"
+        new_case "duplicate-headers-${scenario}"
+        python3 - "${PLAN_FILE}" "${OUTPUT_DIR}" "${scenario}" <<'PY_DUPLICATE_HEADERS'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+output_dir = Path(sys.argv[2])
+second_value = "application/json" if sys.argv[3] == "different-values" else "text/plain"
+payload = {
+    "requested_downloads": [{
+        "filename": str(output_dir / "final.mp4"),
+        "url": "https://example.invalid/media.mp4",
+        "protocol": "https",
+        "http_headers": {"Accept": "text/plain", "accept": second_value},
+    }],
+}
+path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+os.chmod(path, 0o600)
+PY_DUPLICATE_HEADERS
+        assert_status 0 'duplicate header names classify without failing extraction' run_classify
+        assert_text_contains "${ASSERT_OUTPUT}" 'transport=native' \
+            'duplicate header names use the native downloader'
+        assert_status 65 'forced direct replay rejects duplicate header names' run_build
+        assert_text_contains "${ASSERT_OUTPUT}" 'HTTP headers require native yt-dlp transport' \
+            'duplicate header rejection explains the safe transport'
+        [[ ! -e ${ARIA2_INPUT} && ! -e ${MANIFEST} ]] \
+            || fail 'Duplicate header rejection left private plan artifacts.'
+    done
+
+    printf '%s\n' 'Private aria2 plan scenario: unique mixed-case header'
+    new_case 'unique-mixed-case-header'
+    python3 - "${PLAN_FILE}" "${OUTPUT_DIR}" <<'PY_UNIQUE_HEADER'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+output_dir = Path(sys.argv[2])
+payload = {
+    "requested_downloads": [{
+        "filename": str(output_dir / "final.mp4"),
+        "url": "https://example.invalid/media.mp4",
+        "protocol": "https",
+        "http_headers": {"aCcEpT": "application/json"},
+    }],
+}
+path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+os.chmod(path, 0o600)
+PY_UNIQUE_HEADER
+    assert_status 0 'unique mixed-case header classification' run_classify
+    assert_text_contains "${ASSERT_OUTPUT}" 'transport=direct' \
+        'unique allowlisted header remains direct regardless of case'
+    assert_status 0 'unique mixed-case header direct build' run_build
+    assert_file_has_line "${ARIA2_INPUT}" '  header=aCcEpT: application/json' \
+        'unique field spelling and value remain unchanged'
+}
+
 main() {
     require_test_command python3
     require_test_command stat
@@ -880,9 +1163,14 @@ main() {
     trap 'exit 143' TERM
 
     test_private_plan_classification
+    test_private_plan_protocol_metadata
+    test_private_plan_duplicate_headers
     test_private_plan_input_validation
+    test_private_plan_existing_destinations
+    test_private_plan_duplicate_staging_names
     test_private_plan_publication_safety
     test_private_plan_rollback_safety
+    test_private_plan_ownership
     test_https_direct_requires_explicit_opt_in
     printf '%s\n' 'Private aria2 plan integration tests passed.'
 }

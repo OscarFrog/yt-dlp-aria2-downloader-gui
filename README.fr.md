@@ -158,13 +158,24 @@ explicitement souhaité. `runtime-manager.sh rollback yt-dlp` et
 `runtime-manager.sh rollback deno` réactivent un runtime précédent après
 validation lorsqu'il existe.
 
+Les versions installées sont conservées, car un téléchargement en cours peut
+encore utiliser une ancienne version après plusieurs mises à jour. Télécharger
+à nouveau un binaire vérifié identique préserve le fichier installé ; une copie
+endommagée peut être réparée depuis la release vérifiée.
+
+Lors d'une interruption gérable, les fichiers temporaires du bootstrap sont
+nettoyés après la fin de la commande en cours et avant la libération du verrou
+de mise à jour. Un arrêt forcé par `SIGKILL` peut laisser des temporaires.
+
 Le gestionnaire résout d'abord le tag exact de la release, puis télécharge tous
 les fichiers depuis cette coordonnée immuable, ce qui élimine la course où
 `latest` changerait entre deux téléchargements. yt-dlp est authentifié avec le
 manifeste SHA-256 signé par upstream. Les archives Deno sont vérifiées avec le
 checksum SHA-256 publié à côté de la même release exacte avant extraction et
-validation. L'exécution des runtimes candidats est elle aussi bornée dans le
-temps. Les appels réseau individuels sont bornés ; un bootstrap complet en
+validation. Pour Deno, la confiance repose donc sur la source HTTPS officielle
+de la release ; son checksum n'apporte pas de signature distincte comme le
+manifeste signé de yt-dlp. L'exécution des runtimes candidats est elle aussi
+bornée dans le temps. Les appels réseau individuels sont bornés ; un bootstrap complet en
 chaîne plusieurs, il ne faut donc pas interpréter ces limites comme un délai
 global unique.
 
@@ -287,6 +298,11 @@ intacts. Les entrées actuelles, modifiées, symboliques, non régulières, hors
 dossier personnel ou placées dans un XDG personnalisé qui sont observées
 pendant la migration sont préservées ; utilisez la commande ci-dessus pour
 remplacer volontairement l'un de ces lanceurs.
+
+La migration automatique du lanceur ignore les comptes de service et de
+maintenance dont le shell de connexion est `nologin`, `false`, `sync`,
+`shutdown` ou `halt`. Les autres comptes restent pris en compte, quels que
+soient leur UID et l'emplacement de leur dossier personnel.
 
 ### Fedora 44
 
@@ -682,14 +698,20 @@ fichier `.netrc` personnel. Les builds qui n’exposent pas cette capacité
 facultative restent acceptés et ne reçoivent pas une option non prise en charge.
 Les fichiers `.part` gérés nativement par yt-dlp peuvent toujours être repris
 lorsque l'amont le permet. Le staging aria2 des transferts HTTP(S) directs gérés
-par le moteur est volontairement éphémère : une annulation utilisateur supprime
-son état partiel/contrôle privé et une exécution ultérieure redémarre le
-transfert direct proprement. Un média terminé ou post-traité déjà présent est
+par le moteur est volontairement éphémère : une fois les processus de
+téléchargement arrêtés, une annulation utilisateur supprime son état
+partiel/contrôle privé et une exécution ultérieure redémarre le transfert direct
+proprement. Si l'arrêt des processus ne peut pas être confirmé, le moteur émet
+un avertissement et conserve ses fichiers temporaires pour inspection. Un média
+terminé ou post-traité déjà présent est
 conservé et l'exécution échoue au lieu de le remplacer.
 
 Le modèle de sortie limite le titre et l'identifiant du média selon leur taille
 encodée en octets, ce qui réduit les échecs avec de longs titres Unicode sur les
 systèmes de fichiers limitant un composant de chemin à 255 octets.
+
+Les URL peuvent contenir de l'Unicode ou des données encodées avec `%`, mais les
+caractères de contrôle bruts sont refusés avant le téléchargement.
 
 ## Fonctionnement des téléchargeurs
 
@@ -712,6 +734,11 @@ aria2c --input-file=/privé/aria2.input --dir=/privé/staging ...
 Cette architecture conserve l'accélération multi-connexion d'aria2c pour les
 médias HTTP(S) directs validés sans placer l'URL média dans les arguments du
 processus aria2c.
+
+Une destination de transfert direct déjà présente est refusée avant le
+téléchargement ; la publication vérifie à nouveau l'absence de collision.
+Des en-têtes répétés avec des casses différentes maintiennent le transfert sur
+yt-dlp natif.
 
 Pour l'extraction YouTube actuelle, le moteur utilise le runtime Deno géré
 automatiquement via un chemin explicite :

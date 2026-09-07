@@ -243,6 +243,14 @@ The automated suite checks, among other things:
 - standardized Bash headers on every canonical shell script, including the canonical interpreter line, an SPDX MIT tag, project name, repository-relative file name and purpose;
 - argument validation, terminal `--`, and exactly one URL per run;
 - preservation of URLs containing shell metacharacters;
+- rejection of raw URL control bytes while preserving Unicode and percent
+  escapes; byte-oriented redaction of malformed UTF-8 diagnostic URL tokens;
+- graceful-signal deferral during private result-record creation, including
+  repeated signals and preservation of a replaced record inode;
+- preservation of active temporary files, inherited lock ownership, and the
+  original exit status when bounded worker shutdown cannot be confirmed;
+- aria2 diagnostic filters drain the producer's final cancellation message
+  before closing, while unexpected redaction failures remain fatal;
 - trimming of leading and trailing whitespace entered in the GUI;
 - exact GUI YouTube-host classification, dynamic removal of the authenticated
   HLS profile for other hosts, false-domain rejection, and compatible fallback
@@ -386,6 +394,12 @@ The automated suite checks, among other things:
   invalid-mode and cross-destination negative controls, plus active-session
   inode replacement of the plan and post-success replacement of the aria2
   input and manifest so cleanup never removes an ambiguous replacement;
+- refusal of pre-existing direct-transfer destinations before aria2 starts,
+  with a second no-overwrite check at commit; duplicate staging sources and
+  foreign-owner private state are rejected before publication;
+- malformed or secret-bearing protocol metadata produces no traceback or raw
+  protocol diagnostic, and case-insensitive duplicate header names select
+  native transport without rewriting the header values;
 - real two-origin aria2 qualification proving that replay-safe direct
   headers can stay on private aria2 while `Referer`, `Cookie`, `Authorization`,
   proxy authorization and non-allowlisted custom headers force native yt-dlp;
@@ -432,10 +446,15 @@ The automated suite checks, among other things:
   strict zero-network `require` mode, exact-tag stable/nightly/stable switching,
   isolation from personal curl/yt-dlp configuration and yt-dlp plugins, exact
   executable-version binding to the resolved yt-dlp and Deno release tags,
-  bounded runtime-probe output, same-repository release redirects,
+  bounded runtime-probe output and invalid-version diagnostics, rejection of
+  malformed timeout settings before external operations, same-repository
+  release redirects,
   single-member non-symlink Deno archive extraction, immutable attested paths
-  that survive later activation changes, canonical and non-replaceable XDG
-  path chains, descriptor/path lock identity, repair of invalid active runtimes
+  that survive later activation changes, preservation of identical cached
+  binaries after transient probes or comparison errors, and verified repair of
+  a damaged same-version binary without a rollback target, canonical and
+  non-replaceable XDG path chains, independent registry-path validation,
+  descriptor/path lock identity, repair of invalid active runtimes
   without a previous target, same-channel downgrade refusal, and a versioned
   engine attestation that avoids duplicate
   path/version/capability discovery, explicit invalid-`path` and
@@ -444,6 +463,10 @@ The automated suite checks, among other things:
   (three cycles in ordinary validation and ten per dedicated stress run),
   interrupted-activation journal recovery, explicit/automatic rollback, and
   x86_64/aarch64 asset mapping.
+- runtime bootstrap cleanup on HUP/INT/TERM, including creation/registration
+  windows, preservation of the first signal status and replaced inodes, partial
+  install recovery, and lock retention until foreground writes and GnuPG cleanup
+  finish; SIGKILL and probe-capture residue collection are outside this guarantee.
 - package reinstall plus real previous-immutable-release -> current upgrade
   validation for RPM and DEB, using the exact previously published package
   bytes rather than rebuilding the previous version from source;
@@ -454,6 +477,9 @@ The automated suite checks, among other things:
 - package-cleanup integration coverage for a custom `XDG_DATA_HOME`, exact
   legacy `-gui` paths, preservation of unrelated similarly named files, and
   preservation of a portable ZIP/Git launcher;
+- automatic launcher migration skips disabled-login and maintenance shells
+  while retaining root, low-UID users, custom homes, and empty or unknown login
+  shells; final-erase enumeration retains its existing account coverage;
 - adversarial cleanup coverage for forged, multi-line, and oversized
   custom-XDG metadata, symlinked ownership sentinels, missing homes, terminal
   runtime symlinks, overflowing UID/GID text, and refusal of direct root cleanup

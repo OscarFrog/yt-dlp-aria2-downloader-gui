@@ -144,11 +144,22 @@ when bootstrap-without-update is explicitly desired. `runtime-manager.sh rollbac
 yt-dlp` and `runtime-manager.sh rollback deno` activate a validated previous
 runtime when one is available.
 
+Installed versions are retained because a running download can still use an
+older version after several updates. Re-downloading an identical verified
+binary preserves the installed file; a damaged copy can be repaired from the
+verified release.
+
+On a graceful interruption, bootstrap temporary files are cleaned after the
+running command finishes and before the update lock is released. Forced
+termination with `SIGKILL` can leave temporary files behind.
+
 The runtime manager first resolves the exact release tag and then downloads all
 assets from that immutable coordinate, avoiding a `latest`-moving-between-files
 race. The yt-dlp runtime is authenticated with the upstream signed SHA-256
 manifest. Deno archives are checked against the SHA-256 checksum published
 alongside the same exact official release before extraction and validation.
+For Deno, trust therefore rests on the official HTTPS release source; its
+checksum does not provide a separate signature like yt-dlp's signed manifest.
 Candidate runtime executions are also time-bounded. Individual network calls
 are bounded; a complete bootstrap contains several sequential calls, so their
 limits are not a single global wall-clock deadline.
@@ -268,6 +279,10 @@ remain untouched. Current, modified, symbolic-link, non-regular, out-of-home,
 and custom-XDG launcher entries observed during migration are preserved; use
 the command above when intentionally replacing one of those portable
 launchers.
+
+Automatic launcher migration skips service and maintenance accounts whose login
+shell is `nologin`, `false`, `sync`, `shutdown`, or `halt`. Other accounts remain
+eligible regardless of UID or home location.
 
 ### Fedora 44
 
@@ -649,14 +664,19 @@ installed aria2c build advertises `--no-netrc`, the engine enables it to avoid
 loading credentials from a personal `.netrc` file. Builds that omit this
 optional capability are accepted and are not passed an unsupported option.
 yt-dlp-native `.part` files may still be resumed when supported upstream.
-Wrapper-managed direct HTTP(S) aria2 staging is deliberately ephemeral: a user
-cancellation removes its private partial/control state and a later run starts
-the direct transfer cleanly. An existing completed or post-processed media file
+Wrapper-managed direct HTTP(S) aria2 staging is deliberately ephemeral: once
+the download processes have stopped, a user cancellation removes its private
+partial/control state and a later run starts the direct transfer cleanly. If
+process termination cannot be confirmed, the engine warns and preserves its
+temporary files for inspection. An existing completed or post-processed media file
 is preserved and the run fails instead of replacing it.
 
 The output template limits the title and media identifier by encoded byte
 length, reducing filename failures with long Unicode titles on filesystems that
 limit one path component to 255 bytes.
+
+Input URLs may contain Unicode or percent-encoded data, but raw control
+characters are rejected before downloading.
 
 ## Downloader behavior
 
@@ -677,6 +697,10 @@ aria2c --input-file=/private/aria2.input --dir=/private/staging ...
 This keeps segmented media handling inside yt-dlp while retaining aria2c's
 multi-connection acceleration for validated direct HTTP(S) media without
 putting the media URL in aria2c process arguments.
+
+A direct-transfer destination that already exists is refused before downloading;
+publication checks again for a collision. Headers repeated with different casing
+keep the transfer on native yt-dlp.
 
 For current YouTube extraction, the engine uses the managed Deno runtime through
 an explicit path:
