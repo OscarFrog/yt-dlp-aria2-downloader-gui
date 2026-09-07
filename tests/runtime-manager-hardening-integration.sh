@@ -949,6 +949,8 @@ test_fresh_runtime_bootstrap() {
     local fresh_runtime_root="${fresh_data_home}/yt-dlp-aria2-downloader/runtime"
     local fresh_ytdlp_root="${fresh_runtime_root}/yt-dlp"
     local fresh_deno_root="${fresh_runtime_root}/deno"
+    local attestation=''
+    local expected_attestation=''
 
     # A completely empty managed-runtime tree must bootstrap both components.
     # This exercises the bootstrap paths, not only already-installed updates.
@@ -958,9 +960,17 @@ test_fresh_runtime_bootstrap() {
     : >"${YTDLP_EXEC_PATH_LOG}"
     rm -f -- "${FD_LEAK_MARKER}" "${NETWORK_MARKER}" "${YTDLP_NETWORK_MARKER}"
 
-    "${runtime_env[@]}" \
-        XDG_DATA_HOME="${fresh_data_home}" \
-        "${RUNTIME_MANAGER}" ensure >/dev/null
+    attestation=$(
+        "${runtime_env[@]}" \
+            XDG_DATA_HOME="${fresh_data_home}" \
+            "${RUNTIME_MANAGER}" prepare update
+    )
+    printf -v expected_attestation \
+        'runtime-contract=1\nyt-dlp-path=%s\nyt-dlp-version=2026.07.04\ndeno-path=%s\ndeno-version=2.9.5' \
+        "${fresh_ytdlp_root}/2026.07.04/${YTDLP_ASSET}" \
+        "${fresh_deno_root}/2.9.5/deno"
+    assert_equals "${expected_attestation}" "${attestation}" \
+        'fresh bootstrap emits only the engine runtime attestation on stdout'
 
     assert_link_target \
         "${fresh_ytdlp_root}/current" \

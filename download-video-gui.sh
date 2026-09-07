@@ -2362,10 +2362,12 @@ collect_download_request() {
         esac
     done
 
+    begin_signal_registration
     set +e
     save_settings "${OUTPUT_DIR}" "${PROFILE}"
     settings_status=$?
     set -e
+    finish_signal_registration
     if ((settings_status != 0)); then
         printf 'Warning: GUI settings could not be saved.\n' >&2
     fi

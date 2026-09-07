@@ -743,6 +743,76 @@ test_private_plan_publication_safety() {
         || fail 'Overwrite refusal removed the staging source.'
 }
 
+test_private_plan_signal_rollback() {
+    local checkpoint signal_number
+
+    for checkpoint in link component; do
+        for signal_number in 1 2 15; do
+            new_case "signal-${checkpoint}-${signal_number}"
+            write_double_plan
+            assert_status 0 'signal rollback fixture plan build' run_build
+            printf 'video component\n' >"${STAGING_DIR}/item-000.download"
+            printf 'audio component\n' >"${STAGING_DIR}/item-001.download"
+
+            # Use real catchable signals at both transaction boundaries. In
+            # particular, os.link has already created the destination when
+            # the first checkpoint runs, before rollback registration.
+            assert_status "$((128 + signal_number))" \
+                "signal rollback at ${checkpoint}, signal ${signal_number}" \
+                env PYTHONDONTWRITEBYTECODE=1 python3 - \
+                "${HELPER}" "${MANIFEST}" "${checkpoint}" "${signal_number}" <<'PY_SIGNAL_ROLLBACK'
+import importlib.util
+import os
+import signal
+import sys
+from pathlib import Path
+
+helper = Path(sys.argv[1])
+manifest = sys.argv[2]
+checkpoint = sys.argv[3]
+signal_number = int(sys.argv[4])
+spec = importlib.util.spec_from_file_location("private_aria2_signal", helper)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+original = module.os.link if checkpoint == "link" else module.publish_without_overwrite
+armed = True
+previous_handlers = {
+    sig: signal.getsignal(sig) for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+}
+
+
+def inject_signal(*args, **kwargs):
+    global armed
+    result = original(*args, **kwargs)
+    if armed:
+        armed = False
+        os.kill(os.getpid(), signal_number)
+    return result
+
+
+if checkpoint == "link":
+    module.os.link = inject_signal
+else:
+    module.publish_without_overwrite = inject_signal
+sys.argv = [str(helper), "commit", "--manifest", manifest]
+status = module.main()
+assert all(signal.getsignal(sig) == old for sig, old in previous_handlers.items())
+sys.exit(status)
+PY_SIGNAL_ROLLBACK
+            [[ ! -e ${OUTPUT_DIR}/merged.fv1.mp4 &&
+                ! -e ${OUTPUT_DIR}/merged.fa1.m4a ]] \
+                || fail 'Interrupted publication left a final component.'
+            assert_equals 'video component' \
+                "$(<"${STAGING_DIR}/item-000.download")" \
+                'interrupted publication restores the video source'
+            assert_equals 'audio component' \
+                "$(<"${STAGING_DIR}/item-001.download")" \
+                'interrupted publication preserves the audio source'
+        done
+    done
+}
+
 test_private_plan_rollback_safety() {
     # Rollback must never delete a destination that no longer has the inode
     # originally published by this transaction.
@@ -1170,6 +1240,7 @@ main() {
     test_private_plan_duplicate_staging_names
     test_private_plan_publication_safety
     test_private_plan_rollback_safety
+    test_private_plan_signal_rollback
     test_private_plan_ownership
     test_https_direct_requires_explicit_opt_in
     printf '%s\n' 'Private aria2 plan integration tests passed.'

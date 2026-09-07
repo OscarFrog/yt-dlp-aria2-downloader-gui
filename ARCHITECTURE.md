@@ -176,8 +176,10 @@ to the current single native-audio profile.
 4. Resolve the destination canonically and require a system/current-user-owned
    physical chain with sticky-bit protection on every shared writable
    component. Apply the same rule to the runtime lock and optional result-file
-   parents, acquire a same-user destination lock, recover abandoned owned
-   staging directories, and remove only allowlisted stale temporary files.
+   parents, acquire a same-user destination lock under the stable private
+   `/tmp/yt-dlp-aria2-downloader-UID` root regardless of `XDG_RUNTIME_DIR`, recover
+   abandoned owned staging directories, and remove only allowlisted stale
+   temporary files. Private work files may still use the validated runtime root.
 5. Create private URL, cookie, plan, manifest, staging, and result-path state.
    Defer graceful signals across result-record creation and authenticated
    descriptor registration so cleanup sees the complete record identity.

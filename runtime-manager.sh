@@ -1367,7 +1367,7 @@ bootstrap_ytdlp_version() {
         return 1
     fi
     if ! run_timed_in_dir "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" "${work}" \
-        sha256sum --check CHECKSUM; then
+        sha256sum --check CHECKSUM >&2; then
         error "yt-dlp bootstrap failed: SHA-256 verification failed for ${YTDLP_ASSET}."
         cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
         return 1

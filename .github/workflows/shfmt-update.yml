@@ -677,6 +677,71 @@ jobs:
             }
           done
 
+          # Validate verified formatter and project without exposing the host
+          # checkout, handoff files, runtime token, or network to the candidate.
+          docker_context=$(mktemp -d)
+          image="shfmt-verifier:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          container="shfmt-verifier-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup_verifier_sandbox() {
+            docker rm -f "${container}" >/dev/null 2>&1 || true
+            docker image rm -f "${image}" >/dev/null 2>&1 || true
+            rm -rf -- "${docker_context}"
+            rm -f -- "${allowed_file}" "${shell_file}" "${patch_paths}" \
+              "${unexpected_paths}" "${baseline}" "${after}" "${expected_pin}"
+          }
+          trap cleanup_verifier_sandbox EXIT
+
+          case $(uname -m) in
+            x86_64 | amd64) native_arch=amd64; native_sha=${pin_amd64} ;;
+            aarch64 | arm64) native_arch=arm64; native_sha=${pin_arm64} ;;
+            *) printf 'Error: unsupported verifier architecture.\n' >&2; exit 69 ;;
+          esac
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 120 --retry 3 \
+            --output "${docker_context}/shfmt" \
+            "https://github.com/mvdan/sh/releases/download/v${pin_version}/shfmt_v${pin_version}_linux_${native_arch}"
+          printf '%s  %s\n' "${native_sha}" "${docker_context}/shfmt" \
+            | sha256sum --check
+          chmod 0555 -- "${docker_context}/shfmt"
+          cat >"${docker_context}/Dockerfile" <<'DOCKERFILE'
+          FROM ubuntu:24.04
+          RUN apt-get -o Acquire::Retries=3 update && \
+              DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install \
+              --yes --no-install-recommends aria2 bash ca-certificates coreutils \
+              curl desktop-file-utils diffutils findutils git gnupg grep procps \
+              python3 sed shellcheck unzip util-linux && \
+              rm -rf /var/lib/apt/lists/*
+          ARG SHFMT_VERSION
+          COPY --chmod=0555 shfmt /opt/shfmt/v${SHFMT_VERSION}/shfmt
+          DOCKERFILE
+          docker build --build-arg "SHFMT_VERSION=${pin_version}" \
+            --tag "${image}" "${docker_context}"
+
+          timeout --signal=TERM --kill-after=10s 8m \
+            docker run \
+              --name "${container}" \
+              --network=none \
+              --read-only \
+              --cap-drop=ALL \
+              --security-opt=no-new-privileges \
+              --pids-limit=1024 \
+              --memory=4g \
+              --cpus=4 \
+              --user "$(id -u):$(id -g)" \
+              --tmpfs /tmp:rw,exec,nosuid,nodev,size=2g,mode=1777 \
+              --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
+              --workdir /workspace \
+              --env HOME=/tmp/validation-home \
+              --env SHFMT_TOOL_ROOT=/opt/shfmt \
+              "${image}" \
+              bash -c 'mkdir -m 700 -- "$HOME"; bash ./tests/run-all.sh --jobs 4 --full'
+          # Remove the whole container before trusting any resulting status.
+          docker rm -f "${container}" >/dev/null
+          canonical_manifest "${after}"
+          cmp -s -- "${baseline}" "${after}"
+          git diff --binary >"${docker_context}/after.patch"
+          cmp -s -- "${patch}" "${docker_context}/after.patch"
+
           cp -- "${patch}" "${verified_dir}/shfmt-update.patch"
           (
             cd "${verified_dir}"
@@ -687,10 +752,6 @@ jobs:
             scripts/dev-tools/shfmt-pin.env \
             "${verified_shell_files[@]}" \
             >"${verified_dir}/shfmt-tested-tree.sha256"
-      - name: Validate verified formatter and project
-        shell: bash
-        run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/run-all.sh --jobs 4
-
       - name: Upload verified data-only shfmt handoff
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -712,7 +773,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
-      pull-requests: write
     env:
       EXPECTED_BASE_SHA: ${{ github.sha }}
       SHFMT_VERSION: ${{ needs.prepare-shfmt-update.outputs.latest }}
@@ -912,7 +972,7 @@ jobs:
           fi
           sha256sum --check "${handoff_dir}/shfmt-tested-tree.sha256"
 
-      - name: Create or update shfmt pull request
+      - name: Create or update reviewed shfmt branch
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -974,27 +1034,12 @@ jobs:
               ;;
           esac
 
-          existing_pr=$(
-            gh pr list \
-              --state open \
-              --head "${branch}" \
-              --json number \
-              --jq '.[0].number // empty'
-          )
-
-          if [[ -n ${existing_pr} ]]; then
-            printf 'Updated existing shfmt PR #%s.\n' "${existing_pr}"
-            exit 0
-          fi
-
-          gh pr create \
-            --base main \
-            --head "${branch}" \
-            --title "Update shfmt to v${SHFMT_VERSION}" \
-            --body "Automated shfmt update to v${SHFMT_VERSION}.
-
-          The candidate formatter ran without repository write permission. A separate
-          fresh read-only verifier rechecked upstream tag/digest provenance, required
-          canonical equivalence under the previously trusted shfmt, and bound the exact
-          tested tree to the data-only handoff consumed here. Review remains required
-          before merge."
+          printf 'Prepared shfmt branch %s at %s.\n' "${branch}" "$(git rev-parse HEAD)"
+          {
+            printf '%s\n' \
+              '### Reviewed shfmt branch ready' \
+              '' \
+              'The candidate was isolated during formatting and complete validation.' \
+              'The verifier required canonical equivalence under the previously trusted shfmt.'
+            printf '\nOpen a maintainer-authenticated pull request from %s to main.\n' "${branch}"
+          } >>"${GITHUB_STEP_SUMMARY}"

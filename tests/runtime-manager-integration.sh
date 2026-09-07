@@ -23,6 +23,7 @@ MOCK_BIN=''
 CURL_LOG=''
 PROBE_LOG=''
 LOCK_LEAK_MARKER=''
+HOST_YTDLP_ASSET=''
 runtime_root=''
 ytdlp_root=''
 deno_root=''
@@ -148,13 +149,18 @@ EOF_DENO
 prepare_runtime_manager_fixture() {
     local command_name
 
-    for command_name in bash chmod env flock grep ln mkdir mktemp python3 readlink rm stat timeout; do
+    for command_name in bash chmod env flock grep ln mkdir mktemp python3 readlink rm stat timeout uname; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             printf 'Error: required test command is absent: %s\n' "${command_name}" >&2
             exit 127
         }
     done
     [[ -x ${RUNTIME_MANAGER} ]] || fail "runtime manager is not executable: ${RUNTIME_MANAGER}"
+    case $(uname -m) in
+        x86_64) HOST_YTDLP_ASSET='yt-dlp_linux' ;;
+        aarch64) HOST_YTDLP_ASSET='yt-dlp_linux_aarch64' ;;
+        *) test_error 'unsupported runtime-manager test architecture' ;;
+    esac
 
     TEST_ROOT=$(mktemp -d)
     readonly TEST_ROOT
@@ -186,8 +192,8 @@ EOF_CURL
     ytdlp_root="${runtime_root}/yt-dlp"
     deno_root="${runtime_root}/deno"
     mkdir -p -- "${ytdlp_root}" "${deno_root}"
-    make_ytdlp "${ytdlp_root}/2026.07.04/yt-dlp_linux" '2026.07.04'
-    make_ytdlp "${ytdlp_root}/2026.06.09/yt-dlp_linux" '2026.06.09'
+    make_ytdlp "${ytdlp_root}/2026.07.04/${HOST_YTDLP_ASSET}" '2026.07.04'
+    make_ytdlp "${ytdlp_root}/2026.06.09/${HOST_YTDLP_ASSET}" '2026.06.09'
     make_deno "${deno_root}/2.9.5/deno" '2.9.5'
     make_deno "${deno_root}/2.8.0/deno" '2.8.0'
     ln -s -- '2026.07.04' "${ytdlp_root}/current"
@@ -485,7 +491,7 @@ test_runtime_paths_and_locking() {
     local fallback_attestation lock_holder_pid lock_holder_ready
     local probe_count=0
 
-    expected_ytdlp="${ytdlp_root}/2026.07.04/yt-dlp_linux"
+    expected_ytdlp="${ytdlp_root}/2026.07.04/${HOST_YTDLP_ASSET}"
     actual_ytdlp=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" path yt-dlp)
     [[ ${actual_ytdlp} == "${expected_ytdlp}" ]] || fail 'managed yt-dlp path is incorrect'
     actual_deno=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" path deno)
@@ -609,8 +615,8 @@ test_runtime_offline_and_rollback() {
     ln -s -- '2026.07.04' "${ytdlp_root}/current"
     rm -f -- "${ytdlp_root}/previous"
     ln -s -- '2026.06.09' "${ytdlp_root}/previous"
-    printf '#!/usr/bin/env bash\nexit 1\n' >"${ytdlp_root}/2026.07.04/yt-dlp_linux"
-    chmod 0755 -- "${ytdlp_root}/2026.07.04/yt-dlp_linux"
+    printf '#!/usr/bin/env bash\nexit 1\n' >"${ytdlp_root}/2026.07.04/${HOST_YTDLP_ASSET}"
+    chmod 0755 -- "${ytdlp_root}/2026.07.04/${HOST_YTDLP_ASSET}"
     "${runtime_env[@]}" "${RUNTIME_MANAGER}" update >/dev/null 2>"${TEST_ROOT}/rollback.err" \
         || fail 'invalid active yt-dlp runtime was not recovered from previous'
     assert_link_target "${ytdlp_root}/current" '2026.06.09' \

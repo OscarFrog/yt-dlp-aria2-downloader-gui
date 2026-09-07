@@ -184,10 +184,13 @@ before execution.
 
 The scheduled `.github/workflows/shfmt-update.yml` workflow detects a newer
 stable upstream release, updates the pin/checksums, reformats all canonical
-shell files, runs the complete validation suite, and opens or refreshes a
-dedicated update pull request. Candidate execution has no network or repository
-write authority, verification starts from a fresh read-only checkout, and only
-the final data-only publisher receives repository write permission.
+shell files, runs the complete validation suite, and prepares a
+dedicated update branch for a maintainer-opened pull request. Both formatting
+and complete validation execute the candidate inside containers without network
+or host credentials; validation mounts the source read-only and cannot access
+the host handoff. The verifier destroys its container before rechecking the
+canonical tree and producing the data-only handoff. Only the final publisher
+receives repository content write permission; it has no pull-request permission.
 
 See `SHELL_STYLE.md` for the complete permanent shell-style contract.
 
@@ -645,7 +648,10 @@ revalidates that exact successful run, semantic tag, source SHA, and immutable
 release. A read-only job invokes `scripts/update-published-version.py` to update
 only the known English/French release references and
 `EXPECTED_PUBLISHED_VERSION`; exact reference counts make documentation drift
-fail closed. With the pre-publication tag guard, this is normally an idempotent
+fail closed. All replacement and backup files are staged before publication.
+A caught publication failure restores the previous generation with renames;
+failed restoration preserves the backup and reports its location. This does
+not claim recovery after SIGKILL or a filesystem-wide failure. With the pre-publication tag guard, this is normally an idempotent
 consistency check and no branch is needed. If a bounded patch is still produced,
 a fresh read-only verifier applies the data-only patch and runs
 the complete local contract. The final job alone receives repository-content
