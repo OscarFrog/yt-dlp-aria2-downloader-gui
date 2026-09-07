@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.3.10 - 2026-09-07
+
+### Download and desktop reliability
+
+- Share one destination lock across different runtime-directory environments
+  so a second engine cannot remove another active download's private staging.
+- Roll back private aria2 component publication on HUP, INT, and TERM, including
+  signals between hard-link creation and rollback registration.
+- Reject NUL bytes in private URL files before Bash can silently discard them,
+  while preserving Unicode and percent-encoded URLs.
+- Defer cancellation until GUI preference files are committed or cleaned up.
+- Keep runtime checksum diagnostics on stderr so fresh bootstrap preserves the
+  engine's machine-readable attestation on stdout.
+
+### Release and tooling safety
+
+- Isolate candidate shfmt execution during complete validation in a container
+  without network access or writable source, then revalidate the handoff.
+- Prepare reviewed shfmt update branches for maintainer-opened pull requests
+  without requiring GitHub Actions pull-request creation permission.
+- Stage documentation replacements and backups before publication; restore the
+  previous generation after a handled failure and retain unrecoverable backups.
+
+### Qualification reliability
+
+- Require the FFmpeg worker to establish its own process group before sending
+  cancellation; propagate failed ps observations in the regression fixture so
+  they cannot produce a false success.
+- Reject overflowing repeat and worker counts before Bash arithmetic while
+  retaining support for leading zeros.
+- Select runtime-manager fixtures for the host's x86_64 or aarch64 asset name.
+
 ## 2.3.9 - 2026-09-07
 
 ### Fedora installation

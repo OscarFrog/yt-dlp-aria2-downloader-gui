@@ -86,6 +86,12 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Mon Sep 07 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.10-1
+- Share destination locks and roll back interrupted private component publication.
+- Preserve GUI settings and runtime attestations; reject NUL-bearing URL files.
+- Isolate shfmt validation and make documentation updates recoverable.
+- Harden cancellation and count tests, reject failed ps observations, and support ARM fixtures.
+
 * Mon Sep 07 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.9-1
 - Skip service accounts during automatic launcher migration.
 - Preserve active download files and diagnostic filters during cancellation.
