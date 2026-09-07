@@ -629,7 +629,7 @@ enumerate_users() {
     local helper_mode=${1:---user-home}
     local line
     local getent_output=''
-    local _name _passwd uid gid _gecos home _shell key
+    local _name _passwd uid gid _gecos home login_shell key
     local normalized_uid normalized_gid
     local passwd_source_usable=false
     local getent_source_usable=false
@@ -667,7 +667,17 @@ enumerate_users() {
 
     for line in "${records[@]}"; do
         IFS=: read -r \
-            _name _passwd uid gid _gecos home _shell <<<"${line}"
+            _name _passwd uid gid _gecos home login_shell <<<"${line}"
+
+        # Desktop migration has no role for service or maintenance accounts.
+        # Keep UID ranges and HOME locations unrestricted for real users, and
+        # preserve the separate final-erase enumeration of managed user data.
+        if [[ ${helper_mode} == --user-home-migrate-launcher ]]; then
+            case ${login_shell:-} in
+                */nologin | */false | */sync | */shutdown | */halt) continue ;;
+                *) ;;
+            esac
+        fi
 
         [[ ${uid:-} =~ ^[0-9]+$ ]] || continue
         [[ ${gid:-} =~ ^[0-9]+$ ]] || continue

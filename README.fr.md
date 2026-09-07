@@ -43,20 +43,20 @@ FFmpeg pour fusionner, remuxer ou extraire les flux. HTTPS repasse
 automatiquement sur le transport natif de yt-dlp lorsque le backend TLS d'aria2
 n'offre pas le durcissement requis de validation des certificats. Les flux DASH
 et HLS restent eux aussi natifs.
-La version de développement actuelle est la **2.3.8**.
-La dernière release de paquets publiée est la **2.3.8**.
+La version de développement actuelle est la **2.3.9**.
+La dernière release de paquets publiée est la **2.3.9**.
 
 ## Installation recommandée
 
 Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
-Les noms exacts ci-dessous correspondent à la release v2.3.8 actuellement publiée.
+Les noms exacts ci-dessous correspondent à la release v2.3.9 actuellement publiée.
 
 Pour **Fedora 44**, téléchargez ces quatre fichiers :
 
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.3.8-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.3.9-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -64,7 +64,7 @@ Vérifiez les fichiers téléchargés puis lancez le bootstrap Fedora officiel :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.8-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.9-1.fc44.noarch.rpm
 ```
 
 Le bootstrap authentifie et active RPM Fusion Free si nécessaire, remplace `ffmpeg-free` par
@@ -74,7 +74,7 @@ runtimes yt-dlp et Deno propres à l'utilisateur.
 
 Pour **Debian ou Ubuntu**, téléchargez le DEB versionné et `SHA256SUMS`,
 vérifiez-les puis installez le paquet avec `sudo apt install
-./yt-dlp-aria2-downloader-gui_2.3.8-1_all.deb`. Pour **les autres distributions
+./yt-dlp-aria2-downloader-gui_2.3.9-1_all.deb`. Pour **les autres distributions
 GNU/Linux ou une utilisation portable**, utilisez le ZIP versionné ou un clone
 Git. Les runtimes yt-dlp et Deno gérés automatiquement prennent actuellement en
 charge Linux `x86_64` et `aarch64`.
@@ -158,13 +158,24 @@ explicitement souhaité. `runtime-manager.sh rollback yt-dlp` et
 `runtime-manager.sh rollback deno` réactivent un runtime précédent après
 validation lorsqu'il existe.
 
+Les versions installées sont conservées, car un téléchargement en cours peut
+encore utiliser une ancienne version après plusieurs mises à jour. Télécharger
+à nouveau un binaire vérifié identique préserve le fichier installé ; une copie
+endommagée peut être réparée depuis la release vérifiée.
+
+Lors d'une interruption gérable, les fichiers temporaires du bootstrap sont
+nettoyés après la fin de la commande en cours et avant la libération du verrou
+de mise à jour. Un arrêt forcé par `SIGKILL` peut laisser des temporaires.
+
 Le gestionnaire résout d'abord le tag exact de la release, puis télécharge tous
 les fichiers depuis cette coordonnée immuable, ce qui élimine la course où
 `latest` changerait entre deux téléchargements. yt-dlp est authentifié avec le
 manifeste SHA-256 signé par upstream. Les archives Deno sont vérifiées avec le
 checksum SHA-256 publié à côté de la même release exacte avant extraction et
-validation. L'exécution des runtimes candidats est elle aussi bornée dans le
-temps. Les appels réseau individuels sont bornés ; un bootstrap complet en
+validation. Pour Deno, la confiance repose donc sur la source HTTPS officielle
+de la release ; son checksum n'apporte pas de signature distincte comme le
+manifeste signé de yt-dlp. L'exécution des runtimes candidats est elle aussi
+bornée dans le temps. Les appels réseau individuels sont bornés ; un bootstrap complet en
 chaîne plusieurs, il ne faut donc pas interpréter ces limites comme un délai
 global unique.
 
@@ -188,8 +199,8 @@ l'identité de la release :
 
 ```bash
 gh attestation verify ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.3.8 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.3.8 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.3.9 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.3.9 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 `SHA256SUMS` reste utile pour un contrôle local ou hors ligne ; les attestations
@@ -241,7 +252,7 @@ de déploiement **tag** sélectionnée `v*`. La reprise manuelle reste disponibl
 mais elle doit exécuter le workflow depuis le tag exact de la release :
 
 ```bash
-gh workflow run release.yml   --ref v2.3.8   -f tag=v2.3.8   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref v2.3.9   -f tag=v2.3.9   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Le workflow refuse indépendamment toute exécution manuelle dont le type de ref,
@@ -288,6 +299,11 @@ dossier personnel ou placées dans un XDG personnalisé qui sont observées
 pendant la migration sont préservées ; utilisez la commande ci-dessus pour
 remplacer volontairement l'un de ces lanceurs.
 
+La migration automatique du lanceur ignore les comptes de service et de
+maintenance dont le shell de connexion est `nologin`, `false`, `sync`,
+`shutdown` ou `halt`. Les autres comptes restent pris en compte, quels que
+soient leur UID et l'emplacement de leur dossier personnel.
+
 ### Fedora 44
 
 Utilisez `install-fedora.sh` provenant de la même release GitHub que le RPM.
@@ -299,7 +315,7 @@ Téléchargez :
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.3.8-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.3.9-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -312,7 +328,7 @@ sha256sum --ignore-missing --check SHA256SUMS
 Puis lancez :
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.8-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.9-1.fc44.noarch.rpm
 ```
 
 Le bootstrap refuse par défaut un RPM de release non signé. Il vérifie que
@@ -364,12 +380,12 @@ de l'utilisateur et vérifiés avant activation.
 
 ### Debian et Ubuntu
 
-La dernière release publiée, la 2.3.8, fournit un DEB indépendant de
+La dernière release publiée, la 2.3.9, fournit un DEB indépendant de
 l'architecture, aligné sur le même modèle de runtimes gérés que Fedora.
 Téléchargez :
 
 ```text
-yt-dlp-aria2-downloader-gui_2.3.8-1_all.deb
+yt-dlp-aria2-downloader-gui_2.3.9-1_all.deb
 SHA256SUMS
 ```
 
@@ -377,7 +393,7 @@ Vérifiez puis installez :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.8-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.9-1_all.deb
 ```
 
 Le DEB dépend explicitement d'`aria2`, de Python 3.10+, de FFmpeg/FFprobe,
@@ -478,7 +494,7 @@ courant.
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.3.8.zip
+yt-dlp-aria2-downloader-gui-2.3.9.zip
 SHA256SUMS
 ```
 
@@ -486,8 +502,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.3.8.zip
-cd yt-dlp-aria2-downloader-gui-2.3.8
+unzip yt-dlp-aria2-downloader-gui-2.3.9.zip
+cd yt-dlp-aria2-downloader-gui-2.3.9
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -682,14 +698,20 @@ fichier `.netrc` personnel. Les builds qui n’exposent pas cette capacité
 facultative restent acceptés et ne reçoivent pas une option non prise en charge.
 Les fichiers `.part` gérés nativement par yt-dlp peuvent toujours être repris
 lorsque l'amont le permet. Le staging aria2 des transferts HTTP(S) directs gérés
-par le moteur est volontairement éphémère : une annulation utilisateur supprime
-son état partiel/contrôle privé et une exécution ultérieure redémarre le
-transfert direct proprement. Un média terminé ou post-traité déjà présent est
+par le moteur est volontairement éphémère : une fois les processus de
+téléchargement arrêtés, une annulation utilisateur supprime son état
+partiel/contrôle privé et une exécution ultérieure redémarre le transfert direct
+proprement. Si l'arrêt des processus ne peut pas être confirmé, le moteur émet
+un avertissement et conserve ses fichiers temporaires pour inspection. Un média
+terminé ou post-traité déjà présent est
 conservé et l'exécution échoue au lieu de le remplacer.
 
 Le modèle de sortie limite le titre et l'identifiant du média selon leur taille
 encodée en octets, ce qui réduit les échecs avec de longs titres Unicode sur les
 systèmes de fichiers limitant un composant de chemin à 255 octets.
+
+Les URL peuvent contenir de l'Unicode ou des données encodées avec `%`, mais les
+caractères de contrôle bruts sont refusés avant le téléchargement.
 
 ## Fonctionnement des téléchargeurs
 
@@ -712,6 +734,11 @@ aria2c --input-file=/privé/aria2.input --dir=/privé/staging ...
 Cette architecture conserve l'accélération multi-connexion d'aria2c pour les
 médias HTTP(S) directs validés sans placer l'URL média dans les arguments du
 processus aria2c.
+
+Une destination de transfert direct déjà présente est refusée avant le
+téléchargement ; la publication vérifie à nouveau l'absence de collision.
+Des en-têtes répétés avec des casses différentes maintiennent le transfert sur
+yt-dlp natif.
 
 Pour l'extraction YouTube actuelle, le moteur utilise le runtime Deno géré
 automatiquement via un chemin explicite :

@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.3.9 - 2026-09-07
+
+### Fedora installation
+
+- Skip service accounts during automatic launcher migration to avoid irrelevant
+  home-ownership warnings, while preserving the package-removal cleanup policy.
+
+### Cancellation and runtime recovery
+
+- Protect temporary path-record registration from interruption and preserve
+  active download files when worker shutdown cannot be confirmed.
+- Keep diagnostic filters draining during cancellation and make URL redaction
+  independent of the locale; reject raw control characters in requested URLs.
+- Clean up authenticated runtime bootstrap, GnuPG, and staged-install files on
+  handled signals before releasing the update lock. Preserve replacements whose
+  identity cannot be confirmed and GnuPG homes whose agent has not stopped.
+- Preserve the inode of an identical verified cached runtime after a transient
+  probe failure, validate secondary registry paths and timeout settings, and
+  bound invalid-version diagnostics.
+
+### Private direct transfers
+
+- Reject existing component destinations before starting aria2, validate private
+  state ownership, and reject duplicate staging sources before publication.
+- Route case-insensitive duplicate HTTP header names through native yt-dlp and
+  avoid exposing rejected protocol metadata in diagnostics.
+
 ## 2.3.8 - 2026-09-06
 
 ### Process and transfer reliability

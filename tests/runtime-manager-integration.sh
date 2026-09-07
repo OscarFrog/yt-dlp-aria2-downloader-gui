@@ -148,7 +148,7 @@ EOF_DENO
 prepare_runtime_manager_fixture() {
     local command_name
 
-    for command_name in bash chmod env flock grep ln mkdir mktemp readlink rm timeout; do
+    for command_name in bash chmod env flock grep ln mkdir mktemp python3 readlink rm stat timeout; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             printf 'Error: required test command is absent: %s\n' "${command_name}" >&2
             exit 127
@@ -210,6 +210,273 @@ EOF_CURL
         YTDLP_ARIA2_DENO_CHECK_TIMEOUT_SECONDS=5
         YTDLP_ARIA2_DENO_UPDATE_TIMEOUT_SECONDS=10
     )
+}
+
+test_runtime_registry_path_safety() {
+    local registry_home="${TEST_ROOT}/registry-home"
+    local physical_home="${TEST_ROOT}/registry-home-physical"
+    local safe_registry="${TEST_ROOT}/safe-registry"
+    local unsafe_registry="${TEST_ROOT}/unsafe-registry"
+    local unsafe_registry_root="${unsafe_registry}/yt-dlp-aria2-downloader"
+    local registry_marker='.package-runtime-data-home-v1'
+    local recorded_data_home=''
+    local registry_mode=''
+
+    mkdir -p -- "${physical_home}/.local" "${safe_registry}" \
+        "${unsafe_registry_root}"
+    ln -s -- "${physical_home}" "${registry_home}"
+    ln -s -- "${safe_registry}" "${physical_home}/.local/share"
+    : >"${CURL_LOG}"
+    assert_status 0 'runtime registry accepts initially safe HOME/data links' \
+        "${runtime_env[@]}" HOME="${registry_home}" \
+        "${RUNTIME_MANAGER}" prepare require
+    IFS= read -r recorded_data_home \
+        <"${safe_registry}/yt-dlp-aria2-downloader/${registry_marker}" \
+        || fail 'safe physical registry marker was not published'
+    assert_equals "${DATA_HOME}" "${recorded_data_home}" \
+        'safe registry records the selected physical runtime data root'
+
+    # A custom runtime root must not authorize writes through an independently
+    # unsafe default registry parent, even if its final directory is user-owned.
+    chmod 0777 -- "${unsafe_registry}"
+    chmod 0750 -- "${unsafe_registry_root}"
+    printf '%s\n' 'preserve unrelated registry contents' \
+        >"${unsafe_registry_root}/keep.txt"
+    rm -- "${physical_home}/.local/share"
+    ln -s -- "${unsafe_registry}" "${physical_home}/.local/share"
+    assert_status 0 'unsafe optional runtime registry does not break offline require' \
+        "${runtime_env[@]}" HOME="${registry_home}" \
+        "${RUNTIME_MANAGER}" prepare require
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'unsafe runtime-location registry parent' \
+        'unsafe runtime registry is diagnosed'
+    [[ ! -e ${unsafe_registry_root}/${registry_marker} ]] \
+        || fail 'unsafe registry parent received runtime metadata'
+    registry_mode=$(stat -c '%a' -- "${unsafe_registry_root}") \
+        || fail 'unable to inspect the preserved registry directory'
+    assert_equals 750 "${registry_mode}" \
+        'unsafe registry rejection preserves directory permissions'
+    assert_file_has_line "${unsafe_registry_root}/keep.txt" \
+        'preserve unrelated registry contents' \
+        'unsafe registry rejection preserves unrelated data'
+    [[ ! -s ${CURL_LOG} ]] || fail 'registry validation invoked the network'
+}
+
+test_runtime_signal_cleanup() {
+    # Real signals exercise the manager while a bounded foreground writer owns
+    # its files. DEBUG injection covers the smaller allocation/identity window.
+    python3 - "${RUNTIME_MANAGER}" "${TEST_ROOT}" <<'EOF_RUNTIME_SIGNAL_TEST'
+from pathlib import Path
+import fcntl
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+runtime_manager = Path(sys.argv[1])
+root = Path(tempfile.mkdtemp(prefix='runtime-signals.', dir=sys.argv[2]))
+body = r'''#!/usr/bin/env bash
+# shellcheck disable=SC1090 # The fixture passes a function-only runtime copy.
+source "${1}"
+case_root=${2}
+requested_signal=${3}
+slot=${4}
+phase=${5}
+component=${6}
+RUNTIME_ROOT="${case_root}/runtime"
+LOCK_FILE="${RUNTIME_ROOT}/update.lock"
+RUNTIME_LOCK_WAIT_SECONDS=1
+RUNTIME_VALIDATE_TIMEOUT_SECONDS=5
+YTDLP_ROOT="${RUNTIME_ROOT}/yt-dlp"
+DENO_ROOT="${RUNTIME_ROOT}/deno"
+YTDLP_ASSET='yt-dlp_linux'
+DENO_ASSET='deno-x86_64-unknown-linux-gnu.zip'
+YTDLP_CHANNEL_VERSION_PATTERN='^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$'
+YTDLP_RELEASE_REPOSITORY='yt-dlp/yt-dlp'
+mkdir -m 0700 -- "${RUNTIME_ROOT}"
+trap cleanup_runtime_manager EXIT
+trap 'request_runtime_shutdown 129' HUP
+trap 'request_runtime_shutdown 130' INT
+trap 'request_runtime_shutdown 143' TERM
+acquire_runtime_lock || exit 73
+reuse_installed_ytdlp_version() { return 1; }
+reuse_installed_deno_version() { return 1; }
+save_paths() {
+    printf '%s\n' "${work:-}" "${gpg_home:-}" "${staged:-}" >"${case_root}/paths"
+}
+run_curl() {
+    save_paths
+    if [[ ${phase} == foreground ]]; then
+        run_child bash "${case_root}/writer.sh" "${case_root}" "${2}"
+    fi
+    return 7
+}
+inject_runtime_signal() {
+    local target=''
+    local kind=''
+    [[ ${BASHPID} == "${RUNTIME_CLEANUP_OWNER_BASHPID}" ]] || return 0
+    if [[ ${phase} == creation || ${phase} == repeat ]]; then
+        [[ ${BASH_COMMAND} == "register_runtime_temporary ${slot} "* ]] || return 0
+    elif [[ ${phase} == replacement ]]; then
+        [[ ${BASH_COMMAND} == finish_runtime_temp_registration &&
+            -n ${RUNTIME_TEMP_PATHS[${slot}]:-} ]] || return 0
+    else
+        return 0
+    fi
+    trap - DEBUG
+    save_paths
+    if [[ ${phase} == replacement ]]; then
+        target=${RUNTIME_TEMP_PATHS[${slot}]}
+        kind=${RUNTIME_TEMP_KINDS[${slot}]}
+        mv -- "${target}" "${case_root}/original-${slot}"
+        if [[ ${kind} == directory ]]; then
+            mkdir -m 0700 -- "${target}"
+            printf 'foreign replacement\n' >"${target}/foreign.txt"
+        else
+            printf 'foreign replacement\n' >"${target}"
+        fi
+        printf '%s\n' "${target}" >"${case_root}/replacement"
+    fi
+    if [[ ${phase} == repeat ]]; then
+        kill -HUP -- "${BASHPID}"
+        kill -TERM -- "${BASHPID}"
+    else
+        kill -s "${requested_signal}" -- "${BASHPID}"
+    fi
+}
+if [[ ${phase} != foreground ]]; then
+    set -T
+    trap inject_runtime_signal DEBUG
+fi
+if [[ ${slot} == staged ]]; then
+    staged="${RUNTIME_ROOT}/.deno.$$.new"
+    printf 'synthetic verified candidate\n' >"${case_root}/candidate"
+    install_runtime_staged_file "${case_root}/candidate" "${staged}"
+elif [[ ${component} == deno ]]; then
+    bootstrap_deno_version '2.9.5'
+else
+    bootstrap_ytdlp_version '2026.07.04'
+fi
+printf 'FAIL: signal was not delivered\n' >&2
+exit 99
+'''
+
+def lock_is_available(path):
+    with path.open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+
+try:
+    source = root/'runtime-functions.sh'
+    source.write_text('\n'.join(runtime_manager.read_text().splitlines()[:-1])+'\n')
+    harness = root/'harness.sh'
+    harness.write_text(body)
+    cases = []
+    targets = [('yt-dlp', 'work'), ('deno', 'work'), ('yt-dlp', 'gpg'), ('deno', 'staged')]
+    for component, slot in targets:
+        cases.extend((component,slot,'creation',name) for name in ('HUP','INT','TERM'))
+        cases.extend((component,slot,phase,'TERM') for phase in ('repeat','replacement'))
+    cases.extend((component,'work','foreground',name) for component in ('yt-dlp','deno') for name in ('HUP','INT','TERM'))
+    for number,(component,slot,phase,name) in enumerate(cases):
+        case = root/f'{number}-{component}-{slot}-{phase}-{name}'
+        case.mkdir(mode=0o700)
+        bin_dir=case/'bin';bin_dir.mkdir(mode=0o700)
+        gpgconf=bin_dir/'gpgconf'
+        gpgconf.write_text(r'''#!/usr/bin/env bash
+printf 'gpg-start\n' >>"${MOCK_SIGNAL_CASE}/events"
+sleep 0.15
+printf 'gpg-done\n' >>"${MOCK_SIGNAL_CASE}/events"
+''')
+        gpgconf.chmod(0o755)
+        (case/'writer.sh').write_text(r'''#!/usr/bin/env bash
+trap '' HUP INT TERM
+printf 'ready\n' >"${1}/ready"
+sleep 0.4
+printf 'late write\n' >"${2}"
+printf 'write-complete\n' >>"${1}/events"
+exit 7
+''')
+        env=dict(os.environ,PATH=str(bin_dir)+os.pathsep+os.environ['PATH'],MOCK_SIGNAL_CASE=str(case))
+        process=subprocess.Popen(['bash',str(harness),str(source),str(case),name,slot,phase,component],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
+        try:
+            if phase == 'foreground':
+                deadline=time.monotonic()+3
+                while not (case/'ready').exists():
+                    assert process.poll() is None, (component,slot,phase,name,'exited before readiness')
+                    assert time.monotonic()<deadline, 'foreground readiness timeout'
+                    time.sleep(.005)
+                assert not lock_is_available(case/'runtime/update.lock'), 'runtime lock not held before signal'
+                os.kill(process.pid,getattr(signal,'SIG'+name))
+                time.sleep(.05)
+                assert not lock_is_available(case/'runtime/update.lock'), 'runtime lock released while child was writing'
+                if component == 'yt-dlp':
+                    deadline=time.monotonic()+3
+                    while not (case/'events').exists() or 'gpg-start' not in (case/'events').read_text():
+                        assert time.monotonic()<deadline, 'cleanup readiness timeout'
+                        time.sleep(.005)
+                    assert not lock_is_available(case/'runtime/update.lock'), 'runtime lock released before cleanup finished'
+            stdout,stderr=process.communicate(timeout=5)
+            expected=129 if phase=='repeat' else 128+getattr(signal,'SIG'+name)
+            assert process.returncode==expected, (component,slot,phase,name,process.returncode,stdout,stderr)
+            assert lock_is_available(case/'runtime/update.lock'), 'runtime lock was not released after cleanup'
+            paths=[Path(line) for line in (case/'paths').read_text().splitlines() if line]
+            replacement=Path((case/'replacement').read_text().strip()) if phase=='replacement' else None
+            for path in paths:
+                if path==replacement:
+                    content=path/'foreign.txt' if path.is_dir() else path
+                    assert content.read_text()=='foreign replacement\n'
+                    assert 'preserving an identity-changed runtime temporary path' in stderr
+                else:
+                    assert not path.exists() and not path.is_symlink(), (component,slot,phase,name,'orphan',str(path),stderr)
+            if phase=='foreground':
+                events=(case/'events').read_text().splitlines()
+                assert events[0]=='write-complete', events
+                if component=='yt-dlp':
+                    assert events==['write-complete','gpg-start','gpg-done'],events
+            print(f'PASS: {component} {slot} {phase} {name}, status {expected}')
+        finally:
+            if process.poll() is None:
+                process.kill();process.communicate(timeout=5)
+            if (case/'paths').exists():
+                for line in (case/'paths').read_text().splitlines():
+                    if line.startswith('/tmp/.yt-dlp-gpg.'):
+                        path=Path(line)
+                        if path.is_dir() and not path.is_symlink():shutil.rmtree(path)
+    partial_case = root/'partial-install'
+    partial_case.mkdir(mode=0o700)
+    partial_install = r'''source "${1}"
+RUNTIME_ROOT=${2}
+trap cleanup_runtime_manager EXIT
+install_calls=0
+install() {
+    ((install_calls += 1))
+    command install "$@" || return $?
+    ((install_calls != 1))
+}
+printf 'candidate bytes\n' >"${RUNTIME_ROOT}/candidate"
+status=0
+install_runtime_staged_file "${RUNTIME_ROOT}/candidate" \
+    "${RUNTIME_ROOT}/.first.new" || status=$?
+[[ ${status} == 1 && -z ${RUNTIME_TEMP_PATHS[staged]:-} &&
+    ! -e ${RUNTIME_ROOT}/.first.new ]] || exit 81
+install_runtime_staged_file "${RUNTIME_ROOT}/candidate" \
+    "${RUNTIME_ROOT}/.second.new" || exit 82
+remove_runtime_temporary staged || exit 83
+[[ ! -e ${RUNTIME_ROOT}/.second.new ]] || exit 84
+'''
+    completed = subprocess.run(['bash','-c',partial_install,'bash',str(source),str(partial_case)],
+                               capture_output=True,text=True,timeout=5)
+    assert completed.returncode == 0, ('partial install cleanup',completed.returncode,completed.stderr)
+    print(f'{len(cases)} runtime temporary-lifecycle cases and partial-install cleanup passed')
+finally:
+    shutil.rmtree(root)
+EOF_RUNTIME_SIGNAL_TEST
 }
 
 test_runtime_paths_and_locking() {
@@ -403,6 +670,8 @@ main() {
     trap 'exit 143' TERM
 
     prepare_runtime_manager_fixture
+    test_runtime_registry_path_safety
+    test_runtime_signal_cleanup
     test_runtime_paths_and_locking
     test_runtime_offline_and_rollback
     test_runtime_bootstrap_and_architecture

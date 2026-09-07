@@ -510,6 +510,78 @@ test_numeric_identity_bounds() {
         ' bash "${cleanup_source_copy}"
 }
 
+test_launcher_migration_account_selection() {
+    local cleanup_source_copy="${root}/package-user-enumeration-source-only.sh"
+    local fixture_root="${root}/account-selection"
+    local helper_mode=''
+    local expected=''
+
+    sed '$d' "${HELPER}" >"${cleanup_source_copy}"
+    chmod 0600 -- "${cleanup_source_copy}"
+
+    for helper_mode in --user-home-migrate-launcher --user-home; do
+        # Mock every account operation, including records from the host passwd
+        # file. Only synthetic records are logged; no home or UID is accessed.
+        # shellcheck disable=SC2016 # Variables belong to the intentionally nested shell.
+        assert_status 0 "account selection for ${helper_mode}" \
+            bash -c '
+                set -euo pipefail
+                source "$1"
+                fixture_root=$2
+
+                getent() {
+                    [[ $# == 1 && $1 == passwd ]] || return 2
+                    printf "%s\n" \
+                        "root-fixture:x:0:0::${fixture_root}/root:/bin/bash" \
+                        "legacy-user:x:051:051::${fixture_root}/srv/users/legacy:/bin/bash" \
+                        "custom-user:x:1001:1001::${fixture_root}/srv/users/custom:/opt/shells/custom" \
+                        "empty-shell:x:1002:1002::${fixture_root}/empty:" \
+                        "bin-fixture:x:1:1::${fixture_root}/bin:/usr/sbin/nologin" \
+                        "daemon-fixture:x:2:2::${fixture_root}/daemon:/sbin/nologin" \
+                        "high-service:x:2100:2100::${fixture_root}/service:/usr/bin/nologin" \
+                        "false-service:x:2101:2101::${fixture_root}/false:/bin/false" \
+                        "sync-fixture:x:5:0::${fixture_root}/sync:/bin/sync" \
+                        "shutdown-fixture:x:6:0::${fixture_root}/shutdown:/sbin/shutdown" \
+                        "halt-fixture:x:7:0::${fixture_root}/halt:/sbin/halt" \
+                        "duplicate-user:x:51:51::${fixture_root}/srv/users/legacy/:/bin/bash"
+                }
+
+                timeout() {
+                    [[ $# == 3 && $1 == 8s && $2 == getent && $3 == passwd ]] \
+                        || return 2
+                    shift
+                    "$@"
+                }
+
+                run_as_user() {
+                    [[ $3 == "${fixture_root}/"* ]] || return 0
+                    printf "%s:%s:%s:%s\n" "$1" "$2" "$3" "$4"
+                }
+
+                enumerate_users "$3"
+            ' bash "${cleanup_source_copy}" "${fixture_root}" "${helper_mode}"
+
+        expected=$(printf '%s\n' \
+            "0:0:${fixture_root}/root:${helper_mode}" \
+            "51:51:${fixture_root}/srv/users/legacy:${helper_mode}" \
+            "1001:1001:${fixture_root}/srv/users/custom:${helper_mode}" \
+            "1002:1002:${fixture_root}/empty:${helper_mode}")
+        if [[ ${helper_mode} == --user-home ]]; then
+            expected+=$'\n'
+            expected+=$(printf '%s\n' \
+                "1:1:${fixture_root}/bin:${helper_mode}" \
+                "2:2:${fixture_root}/daemon:${helper_mode}" \
+                "2100:2100:${fixture_root}/service:${helper_mode}" \
+                "2101:2101:${fixture_root}/false:${helper_mode}" \
+                "5:0:${fixture_root}/sync:${helper_mode}" \
+                "6:0:${fixture_root}/shutdown:${helper_mode}" \
+                "7:0:${fixture_root}/halt:${helper_mode}")
+        fi
+        assert_equals "${expected}" "${ASSERT_OUTPUT}" \
+            "${helper_mode} selects the intended accounts once without warnings"
+    done
+}
+
 test_foreign_owned_home_rejection() {
     local foreign_home="${root}/foreign-owned-home"
     local foreign_output=''
@@ -574,6 +646,7 @@ main() {
     test_unavailable_home
     test_oversized_marker
     test_numeric_identity_bounds
+    test_launcher_migration_account_selection
     test_foreign_owned_home_rejection
     test_symlinked_foreign_home_rejection
 

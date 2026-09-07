@@ -481,7 +481,7 @@ test_runtime_setting_bounds() {
     local setting_pair=''
     local environment_name=''
     local diagnostic_name=''
-    local overflow_value=''
+    local invalid_value=''
     local validation_error=''
     local status=0
 
@@ -504,9 +504,10 @@ EOF_VALIDATION_EXTERNAL
         'YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS:CURL_RETRY_MAX_TIME_SECONDS' \
         'YTDLP_ARIA2_RUNTIME_VALIDATE_TIMEOUT_SECONDS:RUNTIME_VALIDATE_TIMEOUT_SECONDS'; do
         IFS=: read -r environment_name diagnostic_name <<<"${setting_pair}"
-        for overflow_value in \
+        for invalid_value in \
             18446744073709551617 \
-            99999999999999999999999999999999999999; do
+            99999999999999999999999999999999999999 \
+            '300:1:1' '9999:0:99999' '15:1' $'15\nignored'; do
             rm -f -- "${validation_external_marker}"
             status=0
             validation_error=''
@@ -514,17 +515,20 @@ EOF_VALIDATION_EXTERNAL
                 "${runtime_env[@]}" \
                     PATH="${validation_bin}:${MOCK_BIN}:/usr/bin:/bin" \
                     MOCK_VALIDATION_EXTERNAL_MARKER="${validation_external_marker}" \
-                    "${environment_name}=${overflow_value}" \
+                    "${environment_name}=${invalid_value}" \
                     "${RUNTIME_MANAGER}" versions 2>&1
             ) || status=$?
             [[ ${status} == 64 ]] \
-                || fail "${environment_name} overflow ${overflow_value} returned ${status}, expected 64"
+                || fail "${environment_name} invalid value ${invalid_value} returned ${status}, expected 64"
             grep -Fq \
                 "${diagnostic_name} must be an integer between" \
                 <<<"${validation_error}" \
-                || fail "${environment_name} overflow diagnostic is missing"
+                || fail "${environment_name} invalid-value diagnostic is missing"
             [[ ! -e ${validation_external_marker} ]] \
-                || fail "${environment_name} overflow reached an external timeout/lock command"
+                || fail "${environment_name} invalid value reached an external timeout/lock command"
+            if [[ ${validation_error} == *'arithmetic syntax error'* ]]; then
+                fail "${environment_name} invalid value reached Bash arithmetic"
+            fi
         done
     done
 }
@@ -650,8 +654,10 @@ test_xdg_data_home_hardening() {
 }
 
 test_bounded_runtime_probes() {
+    local current_ytdlp_target=''
     local diagnostic=''
     local diagnostic_size=0
+    local oversized_version=''
     local status=0
 
     diagnostic=$(
@@ -667,6 +673,33 @@ test_bounded_runtime_probes() {
         || fail "oversized yt-dlp diagnostic was not bounded: ${diagnostic_size}"
     ! find "${runtime_root}" -maxdepth 1 -name '.runtime-probe.*' -print -quit \
         | grep -q . || fail 'yt-dlp probe capture was not removed'
+
+    # A successful probe can still return invalid data below the capture cap.
+    # Its diagnostic must obey the smaller display bound while failing closed.
+    current_ytdlp_target=$(readlink -- "${ytdlp_root}/current")
+    printf -v oversized_version '%32768s' 'oversized-invalid-version'
+    make_ytdlp "${ytdlp_root}/oversized-version/${YTDLP_ASSET}" \
+        "invalid-version-${oversized_version}"
+    rm -f -- "${ytdlp_root}/current"
+    ln -s oversized-version "${ytdlp_root}/current"
+    status=0
+    diagnostic=$(
+        MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" \
+            "${RUNTIME_MANAGER}" require 2>&1
+    ) || status=$?
+    assert_equals 69 "${status}" 'oversized invalid yt-dlp version is rejected'
+    assert_text_contains "${diagnostic}" \
+        'yt-dlp runtime validation failed: invalid version.' \
+        'invalid yt-dlp version retains its error context'
+    assert_text_contains "${diagnostic}" '[diagnostic truncated]' \
+        'invalid yt-dlp version diagnostic reports truncation'
+    diagnostic_size=${#diagnostic}
+    ((diagnostic_size < 20000)) \
+        || fail "invalid yt-dlp version diagnostic was not bounded: ${diagnostic_size}"
+    rm -f -- "${ytdlp_root}/current"
+    ln -s -- "${current_ytdlp_target}" "${ytdlp_root}/current"
+    MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" require \
+        >/dev/null || fail 'valid exact yt-dlp version was rejected after diagnostic validation'
 
     status=0
     diagnostic=$(
@@ -1110,6 +1143,139 @@ test_runtime_updates() {
         'reactivating Deno replaced immutable runtime bytes'
 }
 
+test_cached_runtime_file_identity() {
+    local comparison_bin="${TEST_ROOT}/runtime-file-comparison-bin"
+    local component='' case_root='' case_data='' component_root=''
+    local target='' asset='' version='' old_version='' older_version=''
+    local scenario='' log='' probe_target='' comparison_target=''
+    local identity_before='' identity_after='' expected_hash='' actual_hash=''
+    local runtime_status=0
+
+    mkdir -m 0700 -- "${comparison_bin}"
+    cat >"${comparison_bin}/timeout" <<'EOF_RUNTIME_IDENTITY_TIMEOUT'
+#!/usr/bin/env bash
+set -euo pipefail
+for argument in "$@"; do
+    if [[ -n ${MOCK_IDENTITY_PROBE_TARGET:-} &&
+        ${argument} == "${MOCK_IDENTITY_PROBE_TARGET}" &&
+        ! -e ${MOCK_IDENTITY_PROBE_MARKER} ]]; then
+        : >"${MOCK_IDENTITY_PROBE_MARKER}"
+        printf 'simulated transient executable probe failure\n' >&2
+        exit 124
+    fi
+done
+exec /usr/bin/timeout "$@"
+EOF_RUNTIME_IDENTITY_TIMEOUT
+    cat >"${comparison_bin}/cmp" <<'EOF_RUNTIME_IDENTITY_CMP'
+#!/usr/bin/env bash
+set -euo pipefail
+for argument in "$@"; do
+    if [[ -n ${MOCK_IDENTITY_COMPARISON_TARGET:-} &&
+        ${argument} == "${MOCK_IDENTITY_COMPARISON_TARGET}" ]]; then
+        : >"${MOCK_IDENTITY_COMPARISON_MARKER}"
+        exit 2
+    fi
+done
+exec /usr/bin/cmp "$@"
+EOF_RUNTIME_IDENTITY_CMP
+    chmod 0755 -- "${comparison_bin}/timeout" "${comparison_bin}/cmp"
+
+    for component in yt-dlp deno; do
+        case_root="${TEST_ROOT}/runtime-file-identity-${component}"
+        case_data="${case_root}/data"
+        mkdir -p -- "${case_root}"
+        # Bootstrap the exact mock release bytes, then leave that version outside
+        # both activation links, as can happen to a path held by an older engine.
+        "${runtime_env[@]}" XDG_DATA_HOME="${case_data}" \
+            "${RUNTIME_MANAGER}" ensure >"${case_root}/bootstrap.log" 2>&1
+        component_root="${case_data}/yt-dlp-aria2-downloader/runtime/${component}"
+        if [[ ${component} == yt-dlp ]]; then
+            asset=${YTDLP_ASSET}
+            version=2026.07.04
+            old_version=2026.06.09
+            older_version=2026.03.17
+            make_ytdlp "${component_root}/${old_version}/${asset}" "${old_version}"
+            make_ytdlp "${component_root}/${older_version}/${asset}" "${older_version}"
+        else
+            asset=deno
+            version=2.9.5
+            old_version=2.8.0
+            older_version=2.7.0
+            make_deno "${component_root}/${old_version}/${asset}" "${old_version}"
+            make_deno "${component_root}/${older_version}/${asset}" "${older_version}"
+        fi
+        target="${component_root}/${version}/${asset}"
+        expected_hash=$(sha256sum -- "${target}")
+        expected_hash=${expected_hash%% *}
+
+        for scenario in transient comparison-error permissions damaged; do
+            rm -f -- "${component_root}/current" "${component_root}/previous"
+            if [[ ${scenario} == damaged ]]; then
+                # Same-version repair must work even when no previous runtime
+                # can be selected. Deliberately change the installed bytes.
+                ln -s "${version}" "${component_root}/current"
+                printf '#!/usr/bin/env bash\nexit 93\n' >"${target}"
+            else
+                ln -s "${old_version}" "${component_root}/current"
+                ln -s "${older_version}" "${component_root}/previous"
+            fi
+            if [[ ${scenario} == permissions ]]; then
+                chmod 0600 -- "${target}"
+            fi
+            identity_before=$(stat -c '%d:%i' -- "${target}")
+            log="${case_root}/${scenario}.log"
+            probe_target=''
+            comparison_target=''
+            case ${scenario} in
+                transient | comparison-error) probe_target=${target} ;;
+                *) ;;
+            esac
+            if [[ ${scenario} == comparison-error ]]; then
+                comparison_target=${target}
+            fi
+            runtime_status=0
+            "${runtime_env[@]}" XDG_DATA_HOME="${case_data}" \
+                PATH="${comparison_bin}:${MOCK_BIN}:${PATH}" \
+                MOCK_IDENTITY_PROBE_TARGET="${probe_target}" \
+                MOCK_IDENTITY_PROBE_MARKER="${case_root}/${scenario}.probe" \
+                MOCK_IDENTITY_COMPARISON_TARGET="${comparison_target}" \
+                MOCK_IDENTITY_COMPARISON_MARKER="${case_root}/${scenario}.comparison" \
+                "${RUNTIME_MANAGER}" update >"${log}" 2>&1 || runtime_status=$?
+            assert_equals 0 "${runtime_status}" \
+                "${component} ${scenario} keeps verified runtimes usable"
+            identity_after=$(stat -c '%d:%i' -- "${target}")
+            actual_hash=$(sha256sum -- "${target}")
+            actual_hash=${actual_hash%% *}
+            assert_equals "${expected_hash}" "${actual_hash}" \
+                "${component} ${scenario} retains or restores exact release bytes"
+            if [[ -n ${probe_target} ]]; then
+                [[ -f ${case_root}/${scenario}.probe ]] \
+                    || fail "${component} ${scenario} did not exercise a transient cache probe failure"
+            fi
+            if [[ ${scenario} == damaged ]]; then
+                [[ ${identity_before} != "${identity_after}" ]] \
+                    || fail "${component} corrupted same-version runtime was not replaced"
+            else
+                assert_equals "${identity_before}" "${identity_after}" \
+                    "${component} ${scenario} preserves the installed inode"
+            fi
+            if [[ ${scenario} == comparison-error ]]; then
+                [[ -f ${case_root}/${scenario}.comparison ]] \
+                    || fail "${component} comparison error was not injected"
+                assert_file_contains "${log}" \
+                    'unable to compare the installed runtime with its verified candidate; preserving the installed file.' \
+                    "${component} comparison error diagnostic"
+                assert_link_target "${component_root}/current" "${old_version}" \
+                    "${component} comparison failure preserves the active runtime"
+            else
+                [[ -x ${target} ]] || fail "${component} runtime is not executable"
+                assert_link_target "${component_root}/current" "${version}" \
+                    "${component} ${scenario} activates the verified release"
+            fi
+        done
+    done
+}
+
 test_repeated_rollbacks() {
     local iteration=0
 
@@ -1258,6 +1424,7 @@ main() {
     test_no_network_require
     test_invalid_active_runtime_recovery
     test_runtime_updates
+    test_cached_runtime_file_identity
     test_repeated_rollbacks
     test_invalid_rollback_targets
     test_activation_journal_recovery

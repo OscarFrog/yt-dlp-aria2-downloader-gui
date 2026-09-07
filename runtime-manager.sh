@@ -27,6 +27,151 @@ VALIDATED_DENO_VERSION=''
 VALIDATED_YTDLP_PATH=''
 VALIDATED_DENO_PATH=''
 
+# Track only this invocation's temporary inodes; no startup scan can prove that
+# another runtime probe or updater has stopped using an old-looking pathname.
+RUNTIME_CLEANUP_OWNER_BASHPID=${BASHPID}
+RUNTIME_TEMP_REGISTRATION_ACTIVE=false
+RUNTIME_REQUESTED_EXIT_STATUS=''
+declare -A RUNTIME_TEMP_PATHS=()
+declare -A RUNTIME_TEMP_IDENTITIES=()
+declare -A RUNTIME_TEMP_FDS=()
+declare -A RUNTIME_TEMP_KINDS=()
+
+request_runtime_shutdown() {
+    local requested_status=$1
+
+    if [[ -z ${RUNTIME_REQUESTED_EXIT_STATUS} ]]; then
+        RUNTIME_REQUESTED_EXIT_STATUS=${requested_status}
+    fi
+    [[ ${RUNTIME_TEMP_REGISTRATION_ACTIVE} == true ]] && return 0
+    exit "${RUNTIME_REQUESTED_EXIT_STATUS}"
+}
+
+finish_runtime_temp_registration() {
+    RUNTIME_TEMP_REGISTRATION_ACTIVE=false
+    if [[ -n ${RUNTIME_REQUESTED_EXIT_STATUS} ]]; then
+        exit "${RUNTIME_REQUESTED_EXIT_STATUS}"
+    fi
+    return 0
+}
+
+register_runtime_temporary() {
+    local slot=$1
+    local path=$2
+    local kind=$3
+    local temporary_fd=''
+    local fd_path=''
+    local opened_identity=''
+    local current_identity=''
+    local owner=''
+
+    [[ -z ${RUNTIME_TEMP_PATHS[${slot}]:-} ]] || return 70
+    case ${kind} in
+        directory) [[ -d ${path} && ! -L ${path} ]] || return 73 ;;
+        regular-file) [[ -f ${path} && ! -L ${path} ]] || return 73 ;;
+        *) return 70 ;;
+    esac
+    exec {temporary_fd}<"${path}" || return 73
+    fd_path="/proc/${BASHPID}/fd/${temporary_fd}"
+    opened_identity=$(stat -Lc '%d:%i' -- "${fd_path}" 2>/dev/null) || opened_identity=''
+    current_identity=$(stat -c '%d:%i' -- "${path}" 2>/dev/null) || current_identity=''
+    owner=$(stat -Lc '%u' -- "${fd_path}" 2>/dev/null) || owner=''
+    if [[ ! ${opened_identity} =~ ^[0-9]+:[0-9]+$ ||
+        ${opened_identity} != "${current_identity}" || ${owner} != "${EUID}" ||
+        -L ${path} ]]; then
+        exec {temporary_fd}>&- || true
+        warning 'preserving an unauthenticated runtime temporary path.'
+        return 73
+    fi
+    RUNTIME_TEMP_PATHS[${slot}]=${path}
+    RUNTIME_TEMP_IDENTITIES[${slot}]=${opened_identity}
+    RUNTIME_TEMP_FDS[${slot}]=${temporary_fd}
+    RUNTIME_TEMP_KINDS[${slot}]=${kind}
+    return 0
+}
+
+remove_runtime_temporary() {
+    local slot=$1
+    local path=${RUNTIME_TEMP_PATHS[${slot}]:-}
+    local temporary_fd=${RUNTIME_TEMP_FDS[${slot}]:-}
+    local current_identity=''
+    local removal_status=0
+
+    [[ -n ${path} ]] || return 0
+    if [[ -e ${path} || -L ${path} ]]; then
+        current_identity=$(stat -c '%d:%i' -- "${path}" 2>/dev/null) || current_identity=''
+        if [[ -L ${path} ||
+            ${current_identity} != "${RUNTIME_TEMP_IDENTITIES[${slot}]}" ]]; then
+            warning "preserving an identity-changed runtime temporary path: ${path}"
+            removal_status=1
+        elif [[ ${slot} == gpg ]] \
+            && ! run_timed 5 gpgconf --homedir "${path}" --kill gpg-agent \
+                >/dev/null 2>&1; then
+            warning "preserving the temporary GnuPG home because agent shutdown failed: ${path}"
+            removal_status=1
+        else
+            # Agent shutdown is an external command: revalidate the pathname
+            # before removal while the held descriptor prevents inode reuse.
+            current_identity=$(stat -c '%d:%i' -- "${path}" 2>/dev/null) || current_identity=''
+            if [[ -L ${path} ||
+                ${current_identity} != "${RUNTIME_TEMP_IDENTITIES[${slot}]}" ]]; then
+                warning "preserving an identity-changed runtime temporary path: ${path}"
+                removal_status=1
+            elif [[ ${RUNTIME_TEMP_KINDS[${slot}]} == directory ]]; then
+                rm -rf -- "${path}" || removal_status=1
+            else
+                rm -f -- "${path}" || removal_status=1
+            fi
+        fi
+    fi
+    if [[ -n ${temporary_fd} ]]; then
+        exec {temporary_fd}>&- || removal_status=1
+    fi
+    unset 'RUNTIME_TEMP_PATHS['"${slot}"']' \
+        'RUNTIME_TEMP_IDENTITIES['"${slot}"']' \
+        'RUNTIME_TEMP_FDS['"${slot}"']' \
+        'RUNTIME_TEMP_KINDS['"${slot}"']'
+    return "${removal_status}"
+}
+
+cleanup_runtime_manager() {
+    local status=$?
+
+    # Command substitutions inherit shell state, but cannot release the parent
+    # manager's lock or remove its bootstrap files when their own probe exits.
+    [[ ${BASHPID} == "${RUNTIME_CLEANUP_OWNER_BASHPID}" ]] || return 0
+    trap - EXIT
+    trap '' HUP INT TERM
+    remove_runtime_temporary staged || true
+    remove_runtime_temporary gpg || true
+    remove_runtime_temporary work || true
+    release_runtime_lock
+    exit "${status}"
+}
+
+install_runtime_staged_file() {
+    local candidate=$1
+    local staged=$2
+    local install_status=0
+
+    [[ -z ${RUNTIME_TEMP_PATHS[staged]:-} ]] || return 70
+    # GNU install replaces its destination inode. Record only the completed or
+    # interrupted install result, before replaying any deferred signal.
+    RUNTIME_TEMP_REGISTRATION_ACTIVE=true
+    install -m 0755 -- "${candidate}" "${staged}" || install_status=$?
+    if [[ -e ${staged} || -L ${staged} ]]; then
+        register_runtime_temporary staged "${staged}" regular-file \
+            || install_status=73
+    elif ((install_status == 0)); then
+        install_status=73
+    fi
+    finish_runtime_temp_registration
+    if ((install_status != 0)); then
+        remove_runtime_temporary staged || true
+    fi
+    return "${install_status}"
+}
+
 error() {
     printf 'Error: %s\n' "$*" >&2
 }
@@ -174,9 +319,10 @@ ensure_private_directory() {
 
 record_runtime_data_home() {
     local data_home=$1
-    local registry_root="${HOME}/.local/share/${APP_ID}"
+    local registry_data_home=''
+    local registry_root=''
     local managed_data_root="${data_home}/${APP_ID}"
-    local marker="${registry_root}/.package-runtime-data-home-v1"
+    local marker=''
     local sentinel="${managed_data_root}/${RUNTIME_OWNER_SENTINEL}"
     local marker_temporary=''
     local sentinel_temporary=''
@@ -219,8 +365,22 @@ data=%s
         return 0
     fi
 
+    # The standard registry is a separate path when XDG_DATA_HOME is custom.
+    # Anchor an initially safe symlink spelling before creating any registry
+    # state, just as for the managed runtime's own data root.
+    if ! canonicalize_runtime_data_home \
+        "${HOME}/.local/share" registry_data_home; then
+        warning 'unsafe runtime-location registry parent; RPM final-erase cleanup may not discover a custom XDG_DATA_HOME.'
+        return 0
+    fi
+    registry_root="${registry_data_home}/${APP_ID}"
+    marker="${registry_root}/.package-runtime-data-home-v1"
     if ! ensure_private_directory "${registry_root}"; then
         warning 'unable to create runtime-location registry; RPM final-erase cleanup may not discover a custom XDG_DATA_HOME.'
+        return 0
+    fi
+    if ! validate_runtime_path_chain "${registry_root}"; then
+        warning 'runtime-location registry parent changed; preserving the unverified registry.'
         return 0
     fi
 
@@ -736,7 +896,8 @@ validate_ytdlp() {
     fi
     version_output=${version_output%%$'\n'*}
     if ! is_valid_ytdlp_version "${version_output}"; then
-        error "yt-dlp runtime validation failed: invalid version: ${version_output}."
+        error 'yt-dlp runtime validation failed: invalid version.'
+        print_probe_diagnostic "${version_output}"
         return 1
     fi
 
@@ -909,12 +1070,39 @@ validate_deno() {
     return 0
 }
 
+# A failed executable probe does not prove that installed bytes are damaged.
+# Compare against the authenticated, validated candidate before replacing a
+# version path that an earlier engine may still hold. Status 1 permits repair
+# of absent/different bytes; comparison or permission errors must preserve it.
+retain_identical_runtime_file() {
+    local candidate=$1
+    local installed=$2
+    local comparison_status=0
+
+    [[ -f ${installed} && ! -L ${installed} ]] || return 1
+    if cmp -s -- "${candidate}" "${installed}"; then
+        if ! chmod 0755 -- "${installed}"; then
+            error 'unable to restore installed runtime executable permissions.'
+            return 2
+        fi
+        return 0
+    else
+        comparison_status=$?
+    fi
+    if ((comparison_status == 1)); then
+        return 1
+    fi
+    error 'unable to compare the installed runtime with its verified candidate; preserving the installed file.'
+    return 2
+}
+
 install_ytdlp_candidate() {
     local candidate=$1
     local expected_version=$2
     local version=''
     local version_dir=''
     local staged=''
+    local retention_status=0
 
     validate_ytdlp "${candidate}" || return 1
     version=${VALIDATED_YTDLP_VERSION}
@@ -934,21 +1122,31 @@ install_ytdlp_candidate() {
     fi
     mkdir -p -- "${version_dir}" || return 1
     chmod 700 -- "${version_dir}" || return 1
-    staged="${version_dir}/.${YTDLP_ASSET}.$$.new"
-    install -m 0755 -- "${candidate}" "${staged}" || return 1
-    validate_ytdlp "${staged}" || {
-        rm -f -- "${staged}" || true
-        return 1
-    }
-    if [[ ${VALIDATED_YTDLP_VERSION} != "${expected_version}" ]]; then
-        rm -f -- "${staged}" || true
-        error 'staged yt-dlp runtime changed version during installation.'
+    if retain_identical_runtime_file "${candidate}" "${version_dir}/${YTDLP_ASSET}"; then
+        retention_status=0
+    else
+        retention_status=$?
+    fi
+    if ((retention_status == 1)); then
+        staged="${version_dir}/.${YTDLP_ASSET}.$$.new"
+        install_runtime_staged_file "${candidate}" "${staged}" || return 1
+        validate_ytdlp "${staged}" || {
+            remove_runtime_temporary staged || true
+            return 1
+        }
+        if [[ ${VALIDATED_YTDLP_VERSION} != "${expected_version}" ]]; then
+            remove_runtime_temporary staged || true
+            error 'staged yt-dlp runtime changed version during installation.'
+            return 1
+        fi
+        mv -Tf -- "${staged}" "${version_dir}/${YTDLP_ASSET}" || {
+            remove_runtime_temporary staged || true
+            return 1
+        }
+        remove_runtime_temporary staged || true
+    elif ((retention_status != 0)); then
         return 1
     fi
-    mv -Tf -- "${staged}" "${version_dir}/${YTDLP_ASSET}" || {
-        rm -f -- "${staged}" || true
-        return 1
-    }
     validate_ytdlp "${version_dir}/${YTDLP_ASSET}" || return 1
     if [[ ${VALIDATED_YTDLP_VERSION} != "${expected_version}" ]]; then
         error 'installed yt-dlp runtime does not match its immutable version directory.'
@@ -963,6 +1161,7 @@ install_deno_candidate() {
     local version=''
     local version_dir=''
     local staged=''
+    local retention_status=0
 
     validate_deno "${candidate}" || return 1
     version=${VALIDATED_DENO_VERSION}
@@ -978,21 +1177,31 @@ install_deno_candidate() {
     fi
     mkdir -p -- "${version_dir}" || return 1
     chmod 700 -- "${version_dir}" || return 1
-    staged="${version_dir}/.deno.$$.new"
-    install -m 0755 -- "${candidate}" "${staged}" || return 1
-    validate_deno "${staged}" || {
-        rm -f -- "${staged}" || true
-        return 1
-    }
-    if [[ ${VALIDATED_DENO_VERSION} != "${expected_version}" ]]; then
-        rm -f -- "${staged}" || true
-        error 'staged Deno runtime changed version during installation.'
+    if retain_identical_runtime_file "${candidate}" "${version_dir}/deno"; then
+        retention_status=0
+    else
+        retention_status=$?
+    fi
+    if ((retention_status == 1)); then
+        staged="${version_dir}/.deno.$$.new"
+        install_runtime_staged_file "${candidate}" "${staged}" || return 1
+        validate_deno "${staged}" || {
+            remove_runtime_temporary staged || true
+            return 1
+        }
+        if [[ ${VALIDATED_DENO_VERSION} != "${expected_version}" ]]; then
+            remove_runtime_temporary staged || true
+            error 'staged Deno runtime changed version during installation.'
+            return 1
+        fi
+        mv -Tf -- "${staged}" "${version_dir}/deno" || {
+            remove_runtime_temporary staged || true
+            return 1
+        }
+        remove_runtime_temporary staged || true
+    elif ((retention_status != 0)); then
         return 1
     fi
-    mv -Tf -- "${staged}" "${version_dir}/deno" || {
-        rm -f -- "${staged}" || true
-        return 1
-    }
     validate_deno "${version_dir}/deno" || return 1
     if [[ ${VALIDATED_DENO_VERSION} != "${expected_version}" ]]; then
         error 'installed Deno runtime does not match its immutable version directory.'
@@ -1076,19 +1285,8 @@ latest_deno_version() {
 }
 
 cleanup_ytdlp_bootstrap_work() {
-    local work=$1
-    local gpg_home=$2
-
-    if [[ -n ${gpg_home} ]]; then
-        if [[ -d ${gpg_home} && ! -L ${gpg_home} ]]; then
-            run_timed 5 gpgconf --homedir "${gpg_home}" --kill gpg-agent \
-                >/dev/null 2>&1 || true
-        fi
-        rm -rf -- "${gpg_home}" || true
-    fi
-    if [[ -n ${work} ]]; then
-        rm -rf -- "${work}" || true
-    fi
+    remove_runtime_temporary gpg || true
+    remove_runtime_temporary work || true
 }
 
 bootstrap_ytdlp_version() {
@@ -1106,11 +1304,28 @@ bootstrap_ytdlp_version() {
         return 0
     fi
     base_url="https://github.com/${YTDLP_RELEASE_REPOSITORY}/releases/download/${version}"
-    work=$(mktemp -d --tmpdir="${RUNTIME_ROOT}" '.yt-dlp-bootstrap.XXXXXXXX') || return 1
-    gpg_home=$(mktemp -d --tmpdir=/tmp '.yt-dlp-gpg.XXXXXXXX') || {
-        rm -rf -- "${work}" || true
+    RUNTIME_TEMP_REGISTRATION_ACTIVE=true
+    work=$(mktemp -d --tmpdir="${RUNTIME_ROOT}" '.yt-dlp-bootstrap.XXXXXXXX') || {
+        finish_runtime_temp_registration
         return 1
     }
+    if ! register_runtime_temporary work "${work}" directory; then
+        finish_runtime_temp_registration
+        return 1
+    fi
+    finish_runtime_temp_registration
+    RUNTIME_TEMP_REGISTRATION_ACTIVE=true
+    gpg_home=$(mktemp -d --tmpdir=/tmp '.yt-dlp-gpg.XXXXXXXX') || {
+        finish_runtime_temp_registration
+        remove_runtime_temporary work || true
+        return 1
+    }
+    if ! register_runtime_temporary gpg "${gpg_home}" directory; then
+        finish_runtime_temp_registration
+        remove_runtime_temporary work || true
+        return 1
+    fi
+    finish_runtime_temp_registration
     if ! chmod 700 -- "${gpg_home}"; then
         cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
         return 1
@@ -1189,12 +1404,21 @@ bootstrap_deno_version() {
         return 0
     fi
     base_url="https://github.com/${DENO_RELEASE_REPOSITORY}/releases/download/v${version}"
-    work=$(mktemp -d --tmpdir="${RUNTIME_ROOT}" '.deno-bootstrap.XXXXXXXX') || return 1
+    RUNTIME_TEMP_REGISTRATION_ACTIVE=true
+    work=$(mktemp -d --tmpdir="${RUNTIME_ROOT}" '.deno-bootstrap.XXXXXXXX') || {
+        finish_runtime_temp_registration
+        return 1
+    }
+    if ! register_runtime_temporary work "${work}" directory; then
+        finish_runtime_temp_registration
+        return 1
+    fi
+    finish_runtime_temp_registration
     checksum_file="${DENO_ASSET}.sha256sum"
 
     if ! run_curl -o "${work}/${DENO_ASSET}" "${base_url}/${DENO_ASSET}" \
         || ! run_curl -o "${work}/${checksum_file}" "${base_url}/${checksum_file}"; then
-        rm -rf -- "${work}" || true
+        remove_runtime_temporary work || true
         return 1
     fi
     checksum_line=$(grep -E \
@@ -1202,11 +1426,11 @@ bootstrap_deno_version() {
         "${work}/${checksum_file}" || true)
     if [[ -z ${checksum_line} ]]; then
         error 'Deno bootstrap failed: release checksum entry is missing or malformed.'
-        rm -rf -- "${work}" || true
+        remove_runtime_temporary work || true
         return 1
     fi
     printf '%s\n' "${checksum_line}" >"${work}/CHECKSUM" || {
-        rm -rf -- "${work}" || true
+        remove_runtime_temporary work || true
         return 1
     }
     if ! run_timed_in_dir "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" "${work}" \
@@ -1214,24 +1438,24 @@ bootstrap_deno_version() {
         || ! run_timed_in_dir "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" "${work}" \
             unzip -q -- "${DENO_ASSET}" deno; then
         error 'Deno bootstrap failed: checksum verification or extraction failed.'
-        rm -rf -- "${work}" || true
+        remove_runtime_temporary work || true
         return 1
     fi
     if [[ ! -f ${work}/deno || -L ${work}/deno ]]; then
         error 'Deno bootstrap failed: the extracted deno member is not a regular file.'
-        rm -rf -- "${work}" || true
+        remove_runtime_temporary work || true
         return 1
     fi
     chmod 0755 -- "${work}/deno" || {
-        rm -rf -- "${work}" || true
+        remove_runtime_temporary work || true
         return 1
     }
     if ! install_deno_candidate "${work}/deno" "${version}"; then
         error 'Deno bootstrap failed: downloaded runtime failed validation or activation.'
-        rm -rf -- "${work}" || true
+        remove_runtime_temporary work || true
         return 1
     fi
-    rm -rf -- "${work}" || return 1
+    remove_runtime_temporary work || return 1
     return 0
 }
 
@@ -1506,12 +1730,6 @@ initialize_runtime_layout() {
 }
 
 initialize_runtime_policy() {
-    local setting=''
-    local setting_name=''
-    local setting_value=''
-    local setting_min=''
-    local setting_max=''
-
     YTDLP_CHANNEL=${YTDLP_ARIA2_YTDLP_CHANNEL:-${DEFAULT_YTDLP_CHANNEL}}
     case ${YTDLP_CHANNEL} in
         stable)
@@ -1534,16 +1752,17 @@ initialize_runtime_policy() {
     CURL_MAX_TIME_SECONDS=${YTDLP_ARIA2_RUNTIME_MAX_TIME_SECONDS:-180}
     CURL_RETRY_MAX_TIME_SECONDS=${YTDLP_ARIA2_RUNTIME_RETRY_MAX_TIME_SECONDS:-300}
     RUNTIME_VALIDATE_TIMEOUT_SECONDS=${YTDLP_ARIA2_RUNTIME_VALIDATE_TIMEOUT_SECONDS:-30}
-    for setting in \
-        "RUNTIME_LOCK_WAIT_SECONDS:${RUNTIME_LOCK_WAIT_SECONDS}:1:300" \
-        "CURL_CONNECT_TIMEOUT_SECONDS:${CURL_CONNECT_TIMEOUT_SECONDS}:1:300" \
-        "CURL_MAX_TIME_SECONDS:${CURL_MAX_TIME_SECONDS}:10:1800" \
-        "CURL_RETRY_MAX_TIME_SECONDS:${CURL_RETRY_MAX_TIME_SECONDS}:10:3600" \
-        "RUNTIME_VALIDATE_TIMEOUT_SECONDS:${RUNTIME_VALIDATE_TIMEOUT_SECONDS}:5:120"; do
-        IFS=: read -r setting_name setting_value setting_min setting_max <<<"${setting}"
-        validate_bounded_uint "${setting_name}" "${setting_value}" \
-            "${setting_min}" "${setting_max}" "${setting_name}" || return 64
-    done
+    # Keep untrusted values separate from the fixed validation bounds.
+    validate_bounded_uint RUNTIME_LOCK_WAIT_SECONDS "${RUNTIME_LOCK_WAIT_SECONDS}" \
+        1 300 RUNTIME_LOCK_WAIT_SECONDS || return 64
+    validate_bounded_uint CURL_CONNECT_TIMEOUT_SECONDS "${CURL_CONNECT_TIMEOUT_SECONDS}" \
+        1 300 CURL_CONNECT_TIMEOUT_SECONDS || return 64
+    validate_bounded_uint CURL_MAX_TIME_SECONDS "${CURL_MAX_TIME_SECONDS}" \
+        10 1800 CURL_MAX_TIME_SECONDS || return 64
+    validate_bounded_uint CURL_RETRY_MAX_TIME_SECONDS "${CURL_RETRY_MAX_TIME_SECONDS}" \
+        10 3600 CURL_RETRY_MAX_TIME_SECONDS || return 64
+    validate_bounded_uint RUNTIME_VALIDATE_TIMEOUT_SECONDS "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" \
+        5 120 RUNTIME_VALIDATE_TIMEOUT_SECONDS || return 64
     readonly RUNTIME_LOCK_WAIT_SECONDS CURL_CONNECT_TIMEOUT_SECONDS
     readonly CURL_MAX_TIME_SECONDS CURL_RETRY_MAX_TIME_SECONDS
     readonly RUNTIME_VALIDATE_TIMEOUT_SECONDS
@@ -1588,7 +1807,7 @@ initialize_runtime_platform() {
     readonly DENO_ASSET="deno-${DENO_TARGET}.zip"
 
     for command_name in \
-        bash curl flock gpg gpgconf grep head install ln mkdir mktemp mv readlink realpath rm \
+        bash cmp curl flock gpg gpgconf grep head install ln mkdir mktemp mv readlink realpath rm \
         sha256sum stat timeout uname unzip; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             error "required runtime-manager command is absent: ${command_name}"
@@ -1607,7 +1826,6 @@ prepare_runtime_storage() {
     ensure_private_directory "${DENO_ROOT}" || return $?
     validate_runtime_path_chain "${RUNTIME_ROOT}" || return $?
     record_runtime_data_home "${data_home}"
-    trap release_runtime_lock EXIT
 }
 
 print_runtime_versions() {
@@ -1713,6 +1931,10 @@ dispatch_runtime_command() {
 main() {
     local runtime_data_home=''
 
+    trap cleanup_runtime_manager EXIT
+    trap 'request_runtime_shutdown 129' HUP
+    trap 'request_runtime_shutdown 130' INT
+    trap 'request_runtime_shutdown 143' TERM
     initialize_runtime_layout runtime_data_home || exit $?
     initialize_runtime_policy || exit $?
     initialize_runtime_platform || exit $?

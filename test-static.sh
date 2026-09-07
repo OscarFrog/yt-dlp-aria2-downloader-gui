@@ -28,8 +28,8 @@ fi
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 # The development tree can lead the latest installable GitHub release. Keep the
 # two contracts explicit so README package names never advertise absent assets.
-readonly EXPECTED_VERSION='2.3.8'
-readonly EXPECTED_PUBLISHED_VERSION='2.3.8'
+readonly EXPECTED_VERSION='2.3.9'
+readonly EXPECTED_PUBLISHED_VERSION='2.3.9'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SOURCE_INVENTORY_FILE=''
 REPOSITORY_INVENTORY_FILE=''
@@ -2200,6 +2200,9 @@ test_static_tooling_contracts() {
     done
     for signal_phase in \
         test_mock_signal_cli_download \
+        test_mock_signal_cli_aria2_diagnostic \
+        test_mock_signal_cleanup_requires_quiescence \
+        test_mock_signal_private_record_registration \
         test_mock_signal_cli_ffmpeg \
         test_mock_signal_gui_session \
         test_mock_signal_gui_cancellation \
@@ -3018,6 +3021,7 @@ test_static_cleanup_and_qualification_contracts() {
             "package cleanup phase ${cleanup_phase}"
     done
     for cleanup_scenario in \
+        test_launcher_migration_account_selection \
         test_legacy_portable_launcher_migration \
         test_historical_direct_launcher_migration \
         test_direct_launcher_migration_rejects_ambiguous_exec \
@@ -3679,7 +3683,12 @@ test_static_application_contracts() {
     for private_plan_test_phase in \
         test_private_plan_classification \
         test_private_plan_input_validation \
+        test_private_plan_existing_destinations \
+        test_private_plan_duplicate_staging_names \
         test_private_plan_publication_safety \
+        test_private_plan_ownership \
+        test_private_plan_protocol_metadata \
+        test_private_plan_duplicate_headers \
         test_private_plan_rollback_safety; do
         assert_file_contains \
             "${SCRIPT_DIR}/tests/private-aria2-plan-integration.sh" \
@@ -4182,6 +4191,7 @@ test_static_runtime_regression_contracts() {
         test_fresh_runtime_bootstrap \
         test_no_network_require \
         test_invalid_active_runtime_recovery \
+        test_cached_runtime_file_identity \
         test_runtime_updates \
         test_repeated_rollbacks \
         test_invalid_rollback_targets \

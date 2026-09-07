@@ -73,6 +73,9 @@ def require_private_regular_file(path: Path, label: str) -> None:
     if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
         raise PlanError(f"{label} must be a regular non-symlink file")
 
+    if file_stat.st_uid != os.geteuid():
+        raise PlanError(f"{label} must be owned by the current user")
+
     if stat.S_IMODE(file_stat.st_mode) & 0o077:
         raise PlanError(f"{label} must not be accessible by group or other users")
 
@@ -107,6 +110,9 @@ def resolve_staging_directory(raw_path: str, output_dir: Path) -> Path:
 
     if stat.S_ISLNK(staging_stat.st_mode) or not stat.S_ISDIR(staging_stat.st_mode):
         raise PlanError("staging directory must be a non-symlink directory")
+
+    if staging_stat.st_uid != os.geteuid():
+        raise PlanError("staging directory must be owned by the current user")
 
     if stat.S_IMODE(staging_stat.st_mode) != 0o700:
         raise PlanError("staging directory must have mode 0700")
@@ -236,9 +242,10 @@ def validate_headers(value: object) -> dict[str, str]:
 
 
 def direct_headers_are_replay_safe(headers: dict[str, str]) -> bool:
-    return all(
-        header_name.lower() in DIRECT_REPLAY_SAFE_HEADERS
-        for header_name in headers
+    normalized_names = [header_name.lower() for header_name in headers]
+    return len(normalized_names) == len(set(normalized_names)) and all(
+        header_name in DIRECT_REPLAY_SAFE_HEADERS
+        for header_name in normalized_names
     )
 
 
@@ -366,6 +373,14 @@ def build_plan(args: argparse.Namespace) -> int:
     if len(set(destinations)) != len(destinations):
         raise PlanError("multiple requested formats resolve to the same destination")
 
+    # Reject known collisions before downloading. Commit must still enforce
+    # no-overwrite publication against destinations created after this check.
+    for destination in destinations:
+        if os.path.lexists(destination):
+            raise DestinationExistsError(
+                f"destination already exists: {destination.name}"
+            )
+
     aria2_input_path = resolve_private_output_path(
         args.aria2_input,
         staging_dir,
@@ -390,9 +405,9 @@ def build_plan(args: argparse.Namespace) -> int:
             raise PlanError("HTTPS requires native yt-dlp transport on this aria2 build")
 
         protocol = transfer.get("protocol")
-        if protocol not in {"http", "https"}:
+        if not isinstance(protocol, str) or protocol not in {"http", "https"}:
             raise PlanError(
-                f"unsupported direct-transfer protocol: {protocol!r}"
+                "unsupported direct-transfer protocol"
             )
 
         headers = validate_headers(transfer.get("http_headers"))
@@ -501,7 +516,7 @@ def classify_plan(args: argparse.Namespace) -> int:
     for transfer in transfers:
         protocol = transfer.get("protocol")
 
-        if protocol not in {"http", "https"}:
+        if not isinstance(protocol, str) or protocol not in {"http", "https"}:
             print("transport=native")
             print(f"transfer_count={len(transfers)}")
             return 0
@@ -661,6 +676,7 @@ def commit_plan(args: argparse.Namespace) -> int:
 
     publications: list[tuple[Path, Path]] = []
     seen_destinations: set[Path] = set()
+    seen_staging_names: set[str] = set()
 
     for raw_item in raw_items:
         if not isinstance(raw_item, dict):
@@ -674,6 +690,10 @@ def commit_plan(args: argparse.Namespace) -> int:
             or not STAGING_NAME_RE.fullmatch(staging_name)
         ):
             raise PlanError("manifest staging filename is invalid")
+
+        if staging_name in seen_staging_names:
+            raise PlanError("manifest contains duplicate staging filenames")
+        seen_staging_names.add(staging_name)
 
         destination = resolve_destination(
             raw_destination,

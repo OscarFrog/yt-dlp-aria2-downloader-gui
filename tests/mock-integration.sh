@@ -901,6 +901,10 @@ case ${1:-} in
     : "${MOCK_ARIA2_ARG_LOG:?}"
     printf '%s\0' "$@" >"${MOCK_ARIA2_ARG_LOG}"
 
+    if [[ ${MOCK_ARIA2_INVALID_UTF8_DIAGNOSTIC:-0} == 1 ]]; then
+        printf 'Malformed diagnostic URL: https://secret.example/\377private-suffix-token\n' >&2
+    fi
+
     if [[ ${MOCK_ARIA2_EXIT_STATUS:-0} != 0 ]]; then
         printf '%s\n' \
             'Simulated aria2 failure for https://secret.example/private.' >&2
@@ -983,12 +987,20 @@ case ${1:-} in
         exec python3 -c '
 import signal
 import sys
+import time
 
 termination_marker = sys.argv[1]
 started_marker = sys.argv[2]
+signal_diagnostic = sys.argv[3] == "1"
 
 
 def terminate(signal_number, _frame):
+    if signal_diagnostic:
+        # Let an unprotected filter receive the group signal before writing.
+        # A successful marker proves that the diagnostic pipe stayed open.
+        time.sleep(0.1)
+        sys.stdout.buffer.write(b"Final aria2 diagnostic: https://secret.example/cancel-token\n")
+        sys.stdout.buffer.flush()
     if termination_marker:
         with open(termination_marker, "w", encoding="utf-8") as marker:
             marker.write("terminated")
@@ -1002,7 +1014,8 @@ if started_marker:
         marker.write("started")
 while True:
     signal.pause()
-' "${MOCK_TERMINATION_MARKER:-}" "${MOCK_STARTED_MARKER:-}"
+' "${MOCK_TERMINATION_MARKER:-}" "${MOCK_STARTED_MARKER:-}" \
+            "${MOCK_ARIA2_SIGNAL_DIAGNOSTIC:-0}"
     fi
 
     while IFS= read -r input_line || [[ -n ${input_line} ]]; do
@@ -2505,6 +2518,40 @@ test_mock_engine_audio_downloads() {
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${OUTPUT_DIR}" --mode audio --url-file "${url_file}"
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    assert_status 2 'a positional URL rejects a raw BEL control byte' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- $'https://example.com/\007private-control-token'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'the URL must not contain control characters.' \
+        'URL control-character diagnostic'
+    assert_text_not_contains "${ASSERT_OUTPUT}" 'private-control-token' \
+        'URL rejection does not echo private input'
+    assert_status 2 'a positional URL rejects a raw DEL control byte' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- $'https://example.com/\177private-control-token'
+
+    printf '%s\n' $'https://example.com/\033private-control-token' >"${url_file}"
+    assert_status 2 'a private URL file rejects a raw ESC control byte' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio --url-file "${url_file}"
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'the URL must not contain control characters.' \
+        'private URL file control-character diagnostic'
+
+    # Reject raw control bytes without narrowing valid Unicode or encoded URL data.
+    printf '%s\n' 'https://exemple.fr/été?q=東京&encoded=%07' >"${url_file}"
+    prepare_argument_log 'unicode-private-url-file'
+    assert_status 0 'Unicode and percent-encoded URL bytes remain accepted' \
+        env MOCK_URL_SEEN_LOG="${url_seen_log}" \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio --url-file "${url_file}"
+    assert_file_has_line "${url_seen_log}" \
+        'https://exemple.fr/été?q=東京&encoded=%07' \
+        'private URL batch preserves Unicode and percent encoding'
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 }
 
 test_mock_engine_video_downloads() {
@@ -2587,6 +2634,8 @@ test_mock_engine_video_downloads() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'final media destination already exists; refusing to overwrite it.' \
         'existing media collision engine diagnostic'
+    [[ ! -s ${MOCK_ARIA2_ARG_LOG} ]] \
+        || fail 'Existing media collision started an unnecessary aria2 transfer.'
     rm -f -- "${existing_audio_path}"
 }
 
@@ -3094,7 +3143,8 @@ test_mock_engine_failure_paths() {
 
     prepare_argument_log 'aria2-producer-status'
     assert_status 29 'aria2 pipeline preserves the transport status' \
-        env MOCK_ARIA2_EXIT_STATUS=29 \
+        env LC_ALL=C.utf8 MOCK_ARIA2_EXIT_STATUS=29 \
+        MOCK_ARIA2_INVALID_UTF8_DIAGNOSTIC=1 \
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${OUTPUT_DIR}" --mode audio \
         -- 'https://example.com/watch?v=aria2-producer-status'
@@ -3104,6 +3154,11 @@ test_mock_engine_failure_paths() {
     assert_text_not_contains "${ASSERT_OUTPUT}" \
         'https://secret.example/private' \
         'aria2 producer diagnostic remains redacted'
+    assert_text_not_contains "${ASSERT_OUTPUT}" 'private-suffix-token' \
+        'malformed UTF-8 cannot leave a private URL suffix unredacted'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'Malformed diagnostic URL: [REDACTED_URL]' \
+        'malformed UTF-8 URL is redacted under the inherited UTF-8 locale'
 
     prepare_argument_log 'pipeline-redactor-status'
     assert_status 75 'a successful producer does not mask redactor failure' \
@@ -4964,6 +5019,275 @@ test_mock_signal_cli_download() {
     assert_no_test_processes 'CLI signal forwarding left worker processes'
 }
 
+test_mock_signal_cli_aria2_diagnostic() {
+    local engine_pid engine_status signal_log started_marker termination_marker
+
+    # Cooperative cancellation must drain aria2 diagnostics until its handler
+    # completes. Closing either filter early would break the producer's pipe.
+    started_marker="${TEST_ROOT}/aria2-signal-diagnostic-started"
+    termination_marker="${TEST_ROOT}/aria2-signal-diagnostic-terminated"
+    signal_log="${TEST_ROOT}/aria2-signal-diagnostic.log"
+    prepare_argument_log 'aria2-signal-diagnostic'
+    env MOCK_LONG_DOWNLOAD=1 MOCK_ARIA2_SIGNAL_DIAGNOSTIC=1 \
+        MOCK_STARTED_MARKER="${started_marker}" \
+        MOCK_TERMINATION_MARKER="${termination_marker}" \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=aria2-signal-diagnostic' \
+        >"${signal_log}" 2>&1 &
+    engine_pid=$!
+    wait_for_file "${started_marker}" 10 'aria2 diagnostic producer startup'
+    wait_for_worker_registration_cleanup 5 'aria2 diagnostic worker readiness cleanup'
+    kill -TERM -- "${engine_pid}"
+    engine_status=0
+    wait "${engine_pid}" || engine_status=$?
+    assert_equals '143' "${engine_status}" 'aria2 diagnostic cancellation status'
+    wait_for_file "${termination_marker}" 10 'aria2 diagnostic signal handler completion'
+    assert_file_contains "${signal_log}" \
+        'Final aria2 diagnostic: [REDACTED_URL]' \
+        'aria2 signal diagnostic drains through both filters'
+    assert_file_not_contains "${signal_log}" 'cancel-token' \
+        'aria2 signal diagnostic remains private'
+    assert_no_test_processes 'aria2 signal diagnostic left worker processes'
+}
+
+test_mock_signal_cleanup_requires_quiescence() {
+    local source_copy="${TEST_ROOT}/download-video-cleanup-quiescence.sh"
+    local fixture_script="${TEST_ROOT}/cleanup-quiescence-fixture.sh"
+    local case_root diagnostic_log lock_file retained_lock_fd stop_status
+    local fixture_status relative_path
+    local -a active_paths=(
+        worker.pgid worker.pgid.tmp worker.ready worker.ready.tmp
+        runtime.attestation url.batch
+        output/path.record output/remux.mkv
+        output/.yt-dlp-aria2.AbcD1234/plan.json
+        output/.yt-dlp-aria2.AbcD1234/item-001.download
+    )
+
+    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${source_copy}"
+    chmod 0600 -- "${source_copy}"
+    cat >"${fixture_script}" <<'EOF_CLEANUP_QUIESCENCE'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Load the real cleanup and identity checks without starting a download.
+# shellcheck disable=SC1090
+source "$1"
+fixture_root=$2
+MOCK_STOP_STATUS=$3
+OUTPUT_LOCK_FD=$4
+OUTPUT_DIR="${fixture_root}/output"
+mkdir -m 700 -- "${OUTPUT_DIR}"
+DOWNLOAD_PGID_FILE="${fixture_root}/worker.pgid"
+DOWNLOAD_READY_FILE="${fixture_root}/worker.ready"
+RUNTIME_ATTESTATION_TMP="${fixture_root}/runtime.attestation"
+YTDLP_BATCH_FILE_TMP="${fixture_root}/url.batch"
+PATH_RECORD_TMP="${OUTPUT_DIR}/path.record"
+HLS_REMUX_TMP="${OUTPUT_DIR}/remux.mkv"
+PRIVATE_ARIA2_STAGING="${OUTPUT_DIR}/.yt-dlp-aria2.AbcD1234"
+mkdir -m 700 -- "${PRIVATE_ARIA2_STAGING}"
+PRIVATE_ARIA2_PLAN="${PRIVATE_ARIA2_STAGING}/plan.json"
+for active_path in \
+    "${DOWNLOAD_PGID_FILE}" "${DOWNLOAD_PGID_FILE}.tmp" \
+    "${DOWNLOAD_READY_FILE}" "${DOWNLOAD_READY_FILE}.tmp" \
+    "${RUNTIME_ATTESTATION_TMP}" "${YTDLP_BATCH_FILE_TMP}" \
+    "${PATH_RECORD_TMP}" "${HLS_REMUX_TMP}" "${PRIVATE_ARIA2_PLAN}" \
+    "${PRIVATE_ARIA2_STAGING}/item-001.download"; do
+    printf 'active state\n' >"${active_path}"
+done
+printf '%s\n' "${PRIVATE_ARIA2_STAGING_MARKER_VALUE}" \
+    >"${PRIVATE_ARIA2_STAGING}/${PRIVATE_ARIA2_STAGING_MARKER}"
+open_private_path_record "${PATH_RECORD_TMP}"
+get_path_identity HLS_REMUX_TMP_IDENTITY "${HLS_REMUX_TMP}" regular-file
+exec {HLS_REMUX_FD}<>"${HLS_REMUX_TMP}"
+HLS_REMUX_FD_PATH="/proc/${BASHPID}/fd/${HLS_REMUX_FD}"
+get_path_identity PRIVATE_ARIA2_STAGING_IDENTITY \
+    "${PRIVATE_ARIA2_STAGING}" directory
+get_path_identity PRIVATE_ARIA2_PLAN_IDENTITY \
+    "${PRIVATE_ARIA2_PLAN}" regular-file
+
+# Simulate the bounded wait result, without signaling any process or requiring
+# an uninterruptible kernel I/O operation. Every cleanup operation stays real.
+DOWNLOAD_WORKER_PID=${BASHPID}
+stop_download_worker() {
+    return "${MOCK_STOP_STATUS}"
+}
+trap cleanup EXIT
+exit 42
+EOF_CLEANUP_QUIESCENCE
+
+    printf '%s\n' 'Mock scenario: cleanup-requires-worker-quiescence'
+    for stop_status in 1 0; do
+        case_root="${TEST_ROOT}/cleanup-quiescence-${stop_status}"
+        diagnostic_log="${TEST_ROOT}/cleanup-quiescence-${stop_status}.log"
+        mkdir -m 700 -- "${case_root}"
+        lock_file="${case_root}/destination.lock"
+        # Retain the same open file description as the cleanup subprocess.
+        # Closing its copy must preserve our lock; explicit LOCK_UN clears it.
+        exec {retained_lock_fd}>"${lock_file}"
+        flock --exclusive "${retained_lock_fd}"
+        fixture_status=0
+        bash "${fixture_script}" "${source_copy}" \
+            "${case_root}" "${stop_status}" "${retained_lock_fd}" \
+            >"${diagnostic_log}" 2>&1 || fixture_status=$?
+        assert_equals 42 "${fixture_status}" \
+            "cleanup preserves exit status with stop status ${stop_status}"
+
+        for relative_path in "${active_paths[@]}"; do
+            if ((stop_status != 0)); then
+                assert_file_has_line "${case_root}/${relative_path}" \
+                    'active state' 'unconfirmed stop preserves active file bytes'
+            else
+                [[ ! -e ${case_root}/${relative_path} ]] \
+                    || fail "Confirmed stop retained active state: ${relative_path}"
+            fi
+        done
+        if ((stop_status != 0)); then
+            assert_file_contains "${diagnostic_log}" 'Warning:' \
+                'unconfirmed stop emits a warning'
+            assert_file_contains "${diagnostic_log}" 'preserv' \
+                'unconfirmed stop explains state preservation'
+            if flock --exclusive --nonblock "${lock_file}" true; then
+                fail 'Unconfirmed stop explicitly released the inherited destination lock.'
+            fi
+        else
+            [[ ! -d ${case_root}/output/.yt-dlp-aria2.AbcD1234 ]] \
+                || fail 'Confirmed stop retained the owned private staging directory.'
+            [[ ! -s ${diagnostic_log} ]] \
+                || fail 'Confirmed cleanup emitted an unexpected warning.'
+            flock --exclusive --nonblock "${lock_file}" true \
+                || fail 'Confirmed stop did not release the destination lock.'
+        fi
+        exec {retained_lock_fd}>&-
+    done
+}
+
+test_mock_signal_private_record_registration() {
+    local source_copy="${TEST_ROOT}/download-video-record-registration-source.sh"
+    local harness_path="${TEST_ROOT}/download-video-record-registration-harness.sh"
+    local record_kind=''
+    local checkpoint=''
+    local case_root=''
+    local expected_status=0
+    local record_path=''
+    local record_list=''
+    local record_count=0
+
+    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${source_copy}"
+    chmod 0600 -- "${source_copy}"
+    cat >"${harness_path}" <<'EOF_RECORD_REGISTRATION_HARNESS'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1090 # The test passes the engine function-only copy.
+source "${1}"
+OUTPUT_DIR="${2}/output"
+OUTPUT_LOCK_ROOT="${2}/lock"
+RESULT_FILE=''
+if [[ ${3} == external ]]; then
+    RESULT_FILE="${2}/result/result.txt"
+fi
+URL='https://example.invalid/review'
+mkdir -m 0700 -- "${OUTPUT_DIR}" "${OUTPUT_LOCK_ROOT}" "${2}/result"
+checkpoint=${4}
+readonly REGISTRATION_OWNER_BASHPID="${BASHPID}"
+trap cleanup EXIT
+trap 'request_shutdown HUP 129' HUP
+trap 'request_shutdown TERM 143' TERM
+set -T
+
+inject_signal() {
+    local matched=false
+    local replacement=''
+
+    [[ ${BASHPID} == "${REGISTRATION_OWNER_BASHPID}" ]] || return 0
+    case ${checkpoint} in
+        creation)
+            if [[ ${BASH_COMMAND} == 'RESULT_FILE_TMP=$(mktemp'* ||
+                ${BASH_COMMAND} == 'INTERNAL_PATH_FILE_TMP=$(mktemp'* ]]; then
+                matched=true
+            fi
+            ;;
+        alias)
+            [[ ${BASH_COMMAND} == PATH_RECORD_TMP=* ]] && matched=true
+            ;;
+        open)
+            [[ ${BASH_COMMAND} == 'open_private_path_record "${PATH_RECORD_TMP}"' ]] \
+                && matched=true
+            ;;
+        descriptor)
+            [[ ${BASH_COMMAND} == PATH_RECORD_FD_PATH=* ]] && matched=true
+            ;;
+        finish | repeat | replacement)
+            if [[ ${BASH_COMMAND} == finish_signal_registration &&
+                -n ${PATH_RECORD_IDENTITY} && -n ${PATH_RECORD_FD_PATH} ]]; then
+                matched=true
+            fi
+            ;;
+    esac
+    [[ ${matched} == true ]] || return 0
+    trap - DEBUG
+    if [[ ${checkpoint} == replacement ]]; then
+        replacement=$(mktemp --tmpdir="${PATH_RECORD_TMP%/*}" \
+            '.foreign-record.XXXXXXXX')
+        printf 'foreign replacement must survive\n' >"${replacement}"
+        mv -f -- "${replacement}" "${PATH_RECORD_TMP}"
+    fi
+    if [[ ${checkpoint} == repeat ]]; then
+        kill -HUP -- "${REGISTRATION_OWNER_BASHPID}"
+    fi
+    kill -TERM -- "${REGISTRATION_OWNER_BASHPID}"
+}
+
+trap inject_signal DEBUG
+prepare_private_work_files
+printf 'FAIL: test did not inject a signal\n' >&2
+exit 99
+EOF_RECORD_REGISTRATION_HARNESS
+    chmod 0600 -- "${harness_path}"
+
+    for record_kind in external internal; do
+        for checkpoint in creation alias open descriptor finish repeat replacement; do
+            case_root="${TEST_ROOT}/record-registration-${record_kind}-${checkpoint}"
+            mkdir -m 0700 -- "${case_root}"
+            expected_status=143
+            if [[ ${checkpoint} == repeat ]]; then
+                expected_status=129
+            fi
+            assert_status "${expected_status}" \
+                "${record_kind} result-record ${checkpoint} registration signal" \
+                bash "${harness_path}" "${source_copy}" "${case_root}" \
+                "${record_kind}" "${checkpoint}"
+            record_list="${case_root}/record-paths.bin"
+            if ! find "${case_root}" -type f \
+                \( -name '.yt-dlp-result.*' -o -name '.yt-dlp-path.*' \) \
+                -print0 >"${record_list}"; then
+                fail 'Unable to enumerate result records after initialization signal.'
+            fi
+            record_count=0
+            while IFS= read -r -d '' record_path; do
+                ((record_count += 1))
+                [[ ${checkpoint} == replacement ]] \
+                    || fail "Initialization signal stranded a result record: ${record_path}"
+                assert_file_has_line "${record_path}" \
+                    'foreign replacement must survive' \
+                    'initialization cleanup preserves the replacement inode'
+            done <"${record_list}"
+            if [[ ${checkpoint} == replacement ]]; then
+                assert_equals 1 "${record_count}" \
+                    'initialization cleanup preserves exactly one replacement'
+                assert_text_contains "${ASSERT_OUTPUT}" \
+                    'preserving a changed temporary path record' \
+                    'initialization replacement preservation diagnostic'
+            else
+                assert_equals 0 "${record_count}" \
+                    'initialization signal removes every authenticated result record'
+            fi
+            assert_directory_empty "${case_root}/lock" \
+                'initialization signal starts no private URL batch'
+        done
+    done
+}
+
 test_mock_signal_cli_leader_exit_descendant() {
     local cli_engine_pid cli_engine_status descendant_pid descendant_signal_log
     local descendant_started_marker descendant_start_time descendant_term_marker
@@ -6193,6 +6517,9 @@ test_mock_signal_zenity_status() {
 
 run_mock_signal_group() {
     test_mock_signal_cli_download
+    test_mock_signal_cli_aria2_diagnostic
+    test_mock_signal_cleanup_requires_quiescence
+    test_mock_signal_private_record_registration
     test_mock_signal_cli_leader_exit_descendant
     test_mock_signal_cli_worker_registration
     test_mock_signal_cli_runtime_preparation

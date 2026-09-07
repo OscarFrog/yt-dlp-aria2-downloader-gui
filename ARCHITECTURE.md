@@ -164,7 +164,8 @@ to the current single native-audio profile.
 `download-video.sh` owns the end-to-end download contract:
 
 1. Parse one URL from a direct argument, stdin, or a private URL file; reject
-   line breaks, non-HTTP(S) schemes, and URL user information.
+   raw control characters, line breaks, non-HTTP(S) schemes, and URL user
+   information while preserving Unicode and percent-encoded URL data.
 2. Ask `runtime-manager.sh prepare update` for an attested yt-dlp/Deno pair, or
    `prepare require` when automatic managed-runtime updates are disabled. This
    command is supervised as a signal-aware child and writes its output through
@@ -178,6 +179,8 @@ to the current single native-audio profile.
    parents, acquire a same-user destination lock, recover abandoned owned
    staging directories, and remove only allowlisted stale temporary files.
 5. Create private URL, cookie, plan, manifest, staging, and result-path state.
+   Defer graceful signals across result-record creation and authenticated
+   descriptor registration so cleanup sees the complete record identity.
 6. Run a metadata-only yt-dlp planning pass and ask
    `private-aria2-plan.py classify` whether the selected formats may use the
    direct aria2 path.
@@ -209,7 +212,11 @@ section remains active until that readiness marker or PGID is published, so the
 first signal cannot disappear in the fork/exec window; a repeated signal still
 escalates immediately to KILL while retaining the first requested status.
 Signals are relayed during runtime preparation, transfer, and post-processing,
-and cleanup removes only state owned by the current invocation. Before using a
+and cleanup removes only state owned by the current invocation after worker
+shutdown is confirmed. If bounded termination cannot confirm shutdown, cleanup
+warns and preserves active temporary files and the original exit status. It
+does not explicitly unlock the file description that surviving children may
+still hold; process exit closes the parent's descriptors. Before using a
 PID or negative process-group target, the supervisor revalidates its direct
 parent where applicable and its Linux PID, PGID, SID, and start-time identity.
 The autonomous engine keeps an authenticated session-leader sentinel alive
@@ -230,13 +237,25 @@ The initial yt-dlp pass resolves formats and filenames but does not download.
 - `classify` validates the plan and selects `direct` only for representable
   direct HTTP(S) formats whose headers can be safely replayed;
 - `build` converts the validated plan into a mode-`0600` aria2 input file and a
-  private manifest inside a mode-`0700` staging directory;
+  private manifest inside a mode-`0700` staging directory; destinations that
+  already exist are refused before transfer artifacts are written;
 - `commit` validates completed staging files and publishes every component to
   the exact yt-dlp-selected destination without overwriting an existing path,
   rolling back partial publication when possible.
 
+Private plans, manifests, and staging directories must belong to the effective
+user. Commit rejects duplicate staging sources before publishing any component,
+and still handles destination collisions that appear after the build check.
+The classifier sends unsupported transport features to native yt-dlp; malformed
+URL/header data or unsafe paths remain validation errors. Header names repeated
+with different casing are not replayed through aria2. Rejected protocol fields
+are never copied into diagnostics.
+
 URLs and replayed HTTP headers are written to private files rather than command
-arguments. aria2 diagnostics pass through URL redaction. Fragmented DASH/HLS,
+arguments. aria2 diagnostics pass through byte-oriented URL redaction, including
+malformed UTF-8 input. Diagnostic filters ignore cooperative termination signals
+until the producer closes its pipe, preserving its final cancellation messages;
+unexpected filter failures remain fatal. Fragmented DASH/HLS,
 unsafe headers, URL user information, unrepresentable formats, and HTTPS on an
 aria2 build that lacks the required safety capability stay on yt-dlp's native
 transport. Cleanup revalidates the recorded filesystem identities of the
@@ -283,8 +302,14 @@ progress model.
 ${XDG_DATA_HOME:-$HOME/.local/share}/yt-dlp-aria2-downloader/runtime/
 ```
 
-Each component has immutable version directories and a `current` activation
-link. Updates are serialized with a lock, candidates are downloaded into
+Each component has version directories and a `current` activation link.
+Activation preserves installed binaries, including when a failed probe leads
+to downloading an identical verified candidate: identical bytes retain their
+existing inode. Repair may atomically replace a damaged copy whose bytes differ
+from the verified candidate. Older version directories remain available because
+an engine can still hold an attested path after several later activations;
+keeping only `current` and `previous` would not protect those engines.
+Updates are serialized with a lock, candidates are downloaded into
 private work areas, authenticated or checksum-verified according to the
 component contract, and validated for exact version and required capabilities
 before activation. Personal curl and yt-dlp configuration and yt-dlp plugins
@@ -301,13 +326,28 @@ never follow the original XDG spelling again. Lock acquisition
 revalidates that the opened descriptor and the named mode-`0600` lock are the
 same inode before and after `flock`, and distinguishes ordinary contention from
 an operational locking failure. Runtime probe output is bounded before it is
-captured in the shell. Mutating `ensure` and `update` operations repair an
+captured in the shell, and invalid-version diagnostics use the same truncation
+limit as other probe failures. Environment timeout values are validated as whole
+decimal strings against fixed bounds before external operations.
+Mutating `ensure` and `update` operations repair an
 invalid active runtime through a verified bootstrap when no valid rollback is
 available, while `require` remains strictly offline. Automatic updates refuse
 a same-channel version downgrade; an explicit rollback remains available.
 
-The manager records an ownership sentinel for custom XDG data roots. Package
-cleanup uses that evidence to avoid deleting unrelated user data.
+The manager records an ownership sentinel for custom XDG data roots. Its
+secondary registry under HOME is resolved and checked independently, including
+after directory creation, before writing a location marker. Package cleanup
+uses that evidence to avoid deleting unrelated user data.
+
+Bootstrap work directories, temporary GnuPG homes, and staged executables are
+registered with an open descriptor and inode identity. HUP, INT, and TERM are
+deferred while each temporary is created and registered. Bash waits for the
+foreground command to finish before handling a pending signal; EXIT cleanup
+then removes authenticated temporaries before releasing the update lock.
+Changed identities and a GnuPG home whose agent cannot be stopped are preserved
+with a warning. SIGKILL cannot run this cleanup. There is no global residue scan,
+and capture files created inside probe command substitutions remain outside this
+bootstrap tracking mechanism.
 
 The other persistent paths are:
 
@@ -336,7 +376,11 @@ builders wrap that tree:
   beneath HOME ending in `download-video-gui.sh`. The final erase scriptlet
   removes proven package-managed per-user data; migration preserves the
   portable launcher link and any current, modified, symbolic-link, or
-  non-regular desktop candidate observed during validation;
+  non-regular desktop candidate observed during validation. Automatic launcher
+  migration skips accounts whose login shell ends in `/nologin`, `/false`,
+  `/sync`, `/shutdown`, or `/halt`, without imposing UID or HOME-location
+  restrictions on other accounts. This filter does not apply to final-erase
+  enumeration or explicitly requested single-home operations;
 - the DEB deliberately removes that helper and preserves per-user data on
   remove and purge.
 
