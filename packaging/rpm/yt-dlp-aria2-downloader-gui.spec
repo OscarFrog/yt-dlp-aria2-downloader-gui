@@ -86,6 +86,10 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Mon Sep 07 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.11-1
+- Publish the audited concurrency, cancellation, runtime, and formatter fixes.
+- Align package documentation and release references with v2.3.11.
+
 * Mon Sep 07 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.10-1
 - Share destination locks and roll back interrupted private component publication.
 - Preserve GUI settings and runtime attestations; reject NUL-bearing URL files.
