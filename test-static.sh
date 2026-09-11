@@ -1317,6 +1317,9 @@ shfmt_verifier_job_policy() {
     # shellcheck disable=SC2016 # Exact read-only container boundary.
     [[ ${job_block} == *'--volume "${GITHUB_WORKSPACE}:/workspace:ro"'* ]] || return 65
     [[ ${job_block} == *'--env SHFMT_TOOL_ROOT=/opt/shfmt'* ]] || return 65
+    [[ ${job_block} == *$'              --volume /var/tmp \\'* ]] || return 65
+    # shellcheck disable=SC2016 # The verifier must remove its anonymous volume.
+    [[ ${job_block} == *'docker rm -f --volumes "${container}"'* ]] || return 65
     [[ ${job_block} != *'run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/run-all.sh'* ]] || return 65
     [[ ${job_block} == *'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'* ]] || return 65
     # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
@@ -2131,7 +2134,8 @@ test_static_tooling_contracts() {
     for mock_engine_suite in \
         mock-engine-core \
         mock-engine-hls \
-        mock-engine-staging; do
+        mock-engine-staging \
+        mock-engine-network; do
         assert_text_contains "${ASSERT_OUTPUT}" "${mock_engine_suite}" \
             "run-all suite list includes ${mock_engine_suite} coverage"
     done
@@ -2160,7 +2164,7 @@ test_static_tooling_contracts() {
         "${SCRIPT_DIR}/tests/mock-integration.sh" --list-groups
     assert_text_contains "${ASSERT_OUTPUT}" 'engine' \
         'mock integration group list includes engine coverage'
-    for mock_engine_group in engine-core engine-hls engine-staging; do
+    for mock_engine_group in engine-core engine-hls engine-staging engine-network; do
         assert_text_contains "${ASSERT_OUTPUT}" "${mock_engine_group}" \
             "mock integration group list includes ${mock_engine_group} coverage"
     done
@@ -2873,6 +2877,12 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/shell.yml" \
         'cancel-in-progress: true' \
         'outdated validation runs are cancelled'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shell.yml" \
+        $'      image: registry.fedoraproject.org/fedora:44\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
+        'Fedora validation uses isolated local volumes for temporary fixtures'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
+        $'      image: fedora:44\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
+        'Fedora media qualification uses isolated local volumes'
 
     # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
@@ -3667,8 +3677,8 @@ test_static_application_contracts() {
         'CLI signals relayed to worker group'
     # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        'candidate="${canonical_runtime_dir}/yt-dlp-aria2-downloader"' \
-        'XDG runtime lock location'
+        'python3 "${PRIVATE_ARIA2_HELPER}" private-root' \
+        'engine uses the shared validated local private storage allocator'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         '%(title).160B [%(id).64B].%(ext)s' \
         'byte-bounded output filename'

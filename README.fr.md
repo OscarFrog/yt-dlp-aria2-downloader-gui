@@ -589,12 +589,14 @@ sélectionne **Complete video (MKV)** à sa place.
 
 ### 3. Choisir le dossier de destination
 
-Sélectionnez le dossier dans lequel le média téléchargé sera enregistré.
-Pour protéger le staging privé, chaque ancêtre physique doit appartenir au
-système ou à l'utilisateur courant ; tout ancêtre accessible en écriture au
-groupe ou aux autres utilisateurs doit être protégé par le sticky bit (comme
-`/tmp` normalement). L'application refuse un dossier partagé dangereux avant
-d'y écrire une URL, un cookie, un fichier partiel ou un média.
+Sélectionnez le dossier dans lequel le média terminé sera enregistré, y compris
+un partage réseau monté. Les cookies et plans de transfert restent dans un
+espace local privé validé. Si la destination ne permet pas d'héberger les
+fichiers temporaires du téléchargeur en sécurité, l'application télécharge et
+traite le média sur un disque local, puis copie le résultat validé dans le
+dossier choisi sans remplacer un fichier existant. Consultez
+[Destinations réseau et stockage privé](#destinations-réseau-et-stockage-privé)
+pour les besoins d'espace local et les limites des systèmes de fichiers.
 
 
 ### 4. Suivre la progression
@@ -834,15 +836,94 @@ basename `download-*.log` exact et son chemin absolu canonique. Les journaux de
 diagnostic conservés depuis plus de 15 jours sont supprimés automatiquement
 lors de la prochaine préparation d’une session de téléchargement graphique.
 
-Un verrou consultatif par utilisateur et par dossier de destination est
-toujours conservé dans le dossier privé revalidé
-`/tmp/yt-dlp-aria2-downloader-UID`. Cet emplacement commun empêche les écritures
-concurrentes même si les lanceurs ont des valeurs `XDG_RUNTIME_DIR` différentes.
+Un verrou consultatif par utilisateur et destination utilise le répertoire
+privé revalidé `/tmp/yt-dlp-aria2-downloader-UID`, avec repli vers le répertoire
+correspondant de `/var/tmp` si `/tmp` est inadéquat. Cet emplacement commun évite
+les écritures concurrentes même avec des `XDG_RUNTIME_DIR` différents.
 Les fichiers de travail privés privilégient toujours le dossier privé validé
-`$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader`, avec le même dossier `/tmp` en repli.
+`$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader-UID`, puis le même dossier `/tmp`
+ou `/var/tmp/yt-dlp-aria2-downloader-UID` en repli.
 Les fichiers de verrou ne contiennent ni URL, ni cookie, ni chemin de média,
 et le noyau libère automatiquement le verrou à la fin du moteur. Des
 téléchargements vers des dossiers différents peuvent s'exécuter simultanément.
+
+## Destinations réseau et stockage privé
+
+Cette section décrit l'implémentation du checkout ; les paquets publiés en
+2.3.11 n'ont pas été reconstruits avec ces changements.
+
+L'allocateur privé commun valide les composants physiques des chemins, le
+propriétaire, les permissions réellement observées, la création exclusive et
+le système de fichiers des descripteurs ouverts avant d'écrire des secrets.
+Les métadonnées utilisent un `XDG_RUNTIME_DIR` local validé, puis `/tmp`, puis
+`/var/tmp`. Aucun répertoire utilisateur préexistant n'est modifié par chmod.
+Les candidats inutilisables sont refusés. `TMPDIR`, `TMP` et `TEMP` transmis à
+yt-dlp désignent la session privée, y compris pour ses copies temporaires de
+la base Firefox. Plans, cookies, entrées aria2, manifestes, fichiers internes de
+chemins, URL et journaux actifs de la GUI restent locaux et privés.
+
+Sur un système local avec une chaîne de répertoires protégée, les médias
+conservent le téléchargement dans la destination et la reprise native
+existants. Les autres destinations, dont CIFS/SMB et les répertoires partagés
+inscriptibles, utilisent un espace disque local privé choisi parmi les
+répertoires existants `XDG_CACHE_HOME`, `$HOME/.cache`, puis `/var/tmp`. Chaque
+candidat subit les contrôles de propriétaire et de système de fichiers ; un
+nom de variable ne prouve pas qu'un emplacement est local. Les espaces disque
+acceptent actuellement ext2/3/4, XFS, Btrfs et ZFS ; les métadonnées acceptent
+aussi tmpfs. Les systèmes inconnus, FUSE et overlay ne sont pas présumés offrir
+ces garanties locales. Ils peuvent néanmoins recevoir le média final si un
+espace local adéquat et une primitive de publication sûre sont disponibles.
+Les médias complets ne sont jamais placés par défaut dans `XDG_RUNTIME_DIR`
+ou tmpfs.
+
+Le stockage local doit pouvoir contenir les pistes sélectionnées, le média
+assemblé et le remux HLS éventuel. Avant le transfert, les tailles connues sont
+comparées à l'espace disponible avec une estimation triple et une marge de
+64 Mio. Les tailles inconnues, quotas, écritures concurrentes et saturations
+ultérieures ne sont pas prévisibles ; les erreurs d'écriture restent des
+échecs. Le journal indique l'espace local. La GUI rappelle le besoin d'espace
+disque local pendant la préparation et le transfert, puis affiche l'étape de copie.
+La qualité, les formats et les règles audio restent inchangés. Pour ces sessions
+réseau isolées, l'annulation supprime les fichiers partiels après confirmation
+de l'arrêt ; une nouvelle demande recommence sans reprendre les fichiers
+natifs d'une ancienne session locale.
+
+La publication copie via des descripteurs ouverts vers un fichier de destination
+`.yt-dlp-publish.*.partial` créé exclusivement, vérifie les écritures et leur
+synchronisation, puis essaie `renameat2(RENAME_NOREPLACE)` sous Linux. Un lien
+physique atomique sert de repli si ce renommage n'est pas pris en charge. Si
+aucune primitive ne fonctionne, la publication échoue explicitement, sans
+renommage écrasant précédé d'un simple test d'existence. Le nom final complet
+n'apparaît qu'après la copie. Aucun fichier existant, même créé concurremment,
+n'est remplacé. Cette garantie porte sur un fichier, pas sur une transaction
+entre disque local et serveur. Les permissions du média volontairement partagé
+restent soumises au serveur et au montage.
+
+Si la publication échoue ou reste incertaine, la source locale validée est
+conservée et son chemin signalé. Les temporaires distants ambigus sont
+préservés. HUP, INT, TERM et l'annulation GUI supervisent les groupes de
+processus ; le nettoyage attend un arrêt confirmé. SIGKILL ne permet pas ce
+nettoyage, et une opération réseau bloquée dans le noyau peut dépasser les
+délais d'annulation. Les instances d'une même machine utilisent le verrou de
+destination commun ; entre machines, la protection repose sur la publication
+atomique sans écrasement, et non sur ce verrou local.
+
+Les anciens résidus `.yt-dlp-aria2.*`, `.yt-dlp-path.*` et de remux ne sont pas
+supprimés automatiquement selon leur nom, marqueur ou âge. Les anciens plans
+et cookies sur la destination peuvent contenir des secrets : ne pas afficher,
+transmettre ni joindre leur contenu. Arrêter les téléchargements concernés,
+inspecter le type, le propriétaire et les noms d'un seul chemin exact sans
+suivre les liens, puis établir la session d'origine. Supprimer uniquement les
+fichiers individuellement identifiés et utiliser `rmdir` sur le répertoire
+exact devenu vide ; préserver toute entrée inconnue. Ne pas utiliser de
+nettoyage récursif par motif.
+
+Les simulations de permissions et tests locaux avec vrais outils ne prouvent
+pas le fonctionnement sur CIFS réel. La procédure SMB/CIFS opt-in de
+`TESTING.md` exige un partage jetable explicitement autorisé. Les transports
+qualifiés sont HLS/DASH natifs ordinaires ; les variantes HLS live ou non prises
+en charge que yt-dlp délègue à un outil externe nécessitent une qualification
+supplémentaire de confidentialité.
 
 ## Tests
 

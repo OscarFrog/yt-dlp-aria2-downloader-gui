@@ -147,6 +147,7 @@ postprocess_message() {
         *Merger*) printf '%s' 'Merging the video and audio streams...' ;;
         *Remux*) printf '%s' 'Remuxing the media into an MKV container...' ;;
         *ExtractAudio*) printf '%s' 'Extracting the native audio track...' ;;
+        MediaPublication) printf '%s' 'Copying the validated media to the destination...' ;;
         *Metadata*) printf '%s' 'Writing media metadata...' ;;
         *EmbedSubtitle*) printf '%s' 'Embedding subtitles...' ;;
         *Fixup*) printf '%s' 'Repairing the downloaded media...' ;;
@@ -766,6 +767,9 @@ process_line() {
     last_line=${line}
 
     case ${line} in
+        'YTDLP_STORAGE|local-disk')
+            local_disk_staging=true
+            ;;
         ARIA2_PLAN\|*)
             IFS='|' read -r -a fields <<<"${line}"
             ((${#fields[@]} == 2)) || return 0
@@ -831,6 +835,7 @@ result_file_confirms_output() {
 
 render_tick() {
     local rendered=${stable_percent}
+    local rendered_message=${message}
 
     case ${phase} in
         analyzing)
@@ -865,7 +870,10 @@ render_tick() {
         rendered=${VERIFY_PERCENT}
     fi
     display_percent=${rendered}
-    emit_progress "${display_percent}" "${message}"
+    if [[ ${local_disk_staging} == true ]]; then
+        rendered_message="${message} Local disk space is used before copying to the selected destination."
+    fi
+    emit_progress "${display_percent}" "${rendered_message}"
 }
 
 consume_log_data() {
@@ -1002,6 +1010,7 @@ initialize_progress_state() {
     pending_data=''
     discarding_oversized_record=false
     video_audio_fallback_plan=false
+    local_disk_staging=false
 }
 
 open_progress_log() {

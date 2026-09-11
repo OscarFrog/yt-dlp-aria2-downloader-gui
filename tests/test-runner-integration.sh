@@ -910,6 +910,7 @@ full_suite_commands = [
     ("--", "./tests/runtime-manager-integration.sh"),
     ("--", "./tests/mock-integration.sh", "--group", "engine-hls"),
     ("--", "./tests/mock-integration.sh", "--group", "engine-staging"),
+    ("--", "./tests/mock-integration.sh", "--group", "engine-network"),
     ("--", "./tests/mock-integration.sh", "--group", "gui-state"),
     ("--", "./tests/mock-integration.sh", "--group", "gui-progress"),
     ("--", "./tests/mock-integration.sh", "--group", "runtime-compat"),
@@ -923,7 +924,7 @@ full_suite_commands = [
     ("--", "./tests/packaging-integration.sh"),
 ]
 fast_suite_commands = [
-    ("--", "./tests/test-runner-integration.sh"),
+    ("--", "./tests/mock-integration.sh", "--group", "engine-network"),    ("--", "./tests/test-runner-integration.sh"),
     ("--", "./tests/runtime-manager-integration.sh"),
     ("--", "./tests/private-aria2-plan-integration.sh"),
     ("--", "./tests/progress-monitor-integration.sh"),

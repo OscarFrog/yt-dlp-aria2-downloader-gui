@@ -31,25 +31,25 @@ The first column contains every tracked path included in this inventory.
 | `.github/ISSUE_TEMPLATE/codex-task.yml` | CI workflow | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `.github/pull_request_template.md` | Documentation/policy | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `.github/workflows/packages.yml` | CI workflow | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `.github/workflows/qualification.yml` | CI workflow | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
+| `.github/workflows/qualification.yml` | CI workflow | Qualifies supported FFmpeg generations; the Fedora download job uses disposable local storage volumes that remain subject to private-filesystem validation. | KEEP |
 | `.github/workflows/real-tools.yml` | CI workflow | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `.github/workflows/release-docs.yml` | CI workflow | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `.github/workflows/release.yml` | CI workflow | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `.github/workflows/shell.yml` | CI workflow | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `.github/workflows/shfmt-update.yml` | CI workflow | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
+| `.github/workflows/shell.yml` | CI workflow | Runs canonical Ubuntu and Fedora validation; the Fedora job gives private-state and media tests disposable local storage volumes. | KEEP |
+| `.github/workflows/shfmt-update.yml` | CI workflow | Separates formatter preparation, isolated verification and publication; verifier media tests use an anonymous disk volume removed with the container. | KEEP |
 | `.github/workflows/stress.yml` | CI workflow | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `.gitignore` | Configuration | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `AGENTS.md` | Documentation/policy | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `ARCHITECTURE.md` | Documentation/policy | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
+| `ARCHITECTURE.md` | Documentation/policy | Documents component interactions, local metadata/media separation, filesystem publication guarantees, process supervision and cleanup boundaries. | KEEP |
 | `CHANGELOG.md` | Documentation/policy | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `LICENSE` | License | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `README.fr.md` | Documentation/policy | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `README.md` | Documentation/policy | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
+| `README.fr.md` | Documentation/policy | French user guide aligned with the English guide, including network storage and privacy behavior. | KEEP |
+| `README.md` | Documentation/policy | English user guide, including network destination behavior, local disk requirements and cautious legacy-residue inspection. | KEEP |
 | `REPOSITORY_FILES.md` | Documentation/policy | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `SHELL_STYLE.md` | Documentation/policy | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `TESTING.md` | Documentation/policy | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `download-video-gui.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `download-video.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
+| `TESTING.md` | Documentation/policy | Canonical validation, regression and real-tool commands, plus explicitly opt-in disposable SMB/CIFS qualification and its limits. | KEEP |
+| `download-video-gui.sh` | Bash script | Zenity entry point: uses the shared private local allocator, passes the actual destination to the engine, and preserves active state when child shutdown cannot be confirmed. | KEEP |
+| `download-video.sh` | Bash script | CLI engine: separates local private authentication state from media, selects protected local disk staging when needed, supervises transfers/remux, validates and publishes to the requested destination without overwriting. | KEEP |
 | `install-fedora.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `install-gui.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `packaging/deb/build-deb.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
@@ -68,9 +68,9 @@ The first column contains every tracked path included in this inventory.
 | `packaging/rpm/test-package-upgrade.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `packaging/rpm/yt-dlp-aria2-downloader-gui.spec` | RPM packaging | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `packaging/yt-dlp-aria2-downloader.desktop` | Desktop integration | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `private-aria2-plan.py` | Python module/script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
+| `private-aria2-plan.py` | Python module/script | Installed Python helper: selects validated local metadata/disk roots, handles private aria2 plans, checks local space, copies and publishes media without replacement, and cleans identity-bound active workspaces. | KEEP |
 | `private-launcher-manager.py` | Python module/script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `progress-monitor.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
+| `progress-monitor.sh` | Bash script | Turns native/aria2/FFmpeg records into monotonic Zenity progress, including the final media-copy phase. | KEEP |
 | `runtime-manager.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `scripts/check-shell-format.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `scripts/dev-tools/ensure-shfmt.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
@@ -80,7 +80,7 @@ The first column contains every tracked path included in this inventory.
 | `scripts/release-evidence-qualification.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `scripts/release-preflight.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `scripts/update-published-version.py` | Python module/script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `test-static.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
+| `test-static.sh` | Bash script | Validates canonical source/package/version contracts and registration of the network regression group. | KEEP |
 | `tests/aria2-auth-headers-integration.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `tests/aria2-real-behavior-integration.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `tests/ffmpeg-generation-compatibility.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
@@ -95,19 +95,19 @@ The first column contains every tracked path included in this inventory.
 | `tests/lib/package-runtime-preservation.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `tests/lib/project-files.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `tests/lib/test-runner.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `tests/mock-integration.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
+| `tests/mock-integration.sh` | Bash script | Hermetic engine/GUI tests including permissive destination simulation, sentinel secrecy during downloads, signal cancellation, preserved old residues and unconfirmed-shutdown cleanup. | KEEP |
 | `tests/package-user-cleanup-integration.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `tests/packaging-integration.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `tests/private-aria2-plan-integration.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `tests/progress-monitor-integration.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `tests/real-tools-integration.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
+| `tests/private-aria2-plan-integration.sh` | Bash script | Behavioral Python helper tests: strict private files, staging/publication identities, root selection, unsupported primitives, copy failures, collisions, signals and cleanup preservation. | KEEP |
+| `tests/progress-monitor-integration.sh` | Bash script | Qualifies progress aggregation, phase transitions and the constant local-disk staging notice consumed by the Zenity progress interface. | KEEP |
+| `tests/real-tools-integration.sh` | Bash script | Real local HTTP media fixtures for direct/audio/HLS/DASH, optional permissive-directory simulation and explicit disposable network-share qualification. | KEEP |
 | `tests/repeat-qualification.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `tests/rpm6-multisig-integration.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `tests/run-all-signal-integration.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `tests/run-all.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
+| `tests/run-all.sh` | Bash script | Canonical doctor and fast/full test scheduler, including the network destination regressions. | KEEP |
 | `tests/runtime-manager-hardening-integration.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 | `tests/runtime-manager-integration.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
-| `tests/test-runner-integration.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
+| `tests/test-runner-integration.sh` | Bash script | Verifies process supervision and exact validation manifests including the network regression group. | KEEP |
 | `tests/zenity-real-session-qualification.sh` | Bash script | Tracked project component; retained because it is referenced by the source tree, tests, packaging, CI, or release process. | KEEP |
 
 ## Historical and compatibility files

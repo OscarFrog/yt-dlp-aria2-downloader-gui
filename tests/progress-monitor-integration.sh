@@ -480,6 +480,40 @@ test_monitor_planning_progress() {
     local metadata_capture_lines metadata_download_max metadata_preprocess_max
     local private_after_second_max private_first_max
 
+    # Storage information stays visible without advancing the transfer phase.
+    start_scenario local-disk-storage-notice video
+    printf '%s\n' 'YTDLP_STORAGE|local-disk' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" \
+        'Local disk space is used before copying to the selected destination.' \
+        'local disk requirement is visible before downloading'
+    metadata_preprocess_max=$(max_percentage "${CAPTURE_FILE}")
+    ((metadata_preprocess_max <= 3)) \
+        || fail 'storage notice advanced progress before downloading'
+    printf '%s\n' \
+        'YTDLP_PLAN|media|22|22|' \
+        'YTDLP_PROGRESS_V2|media|22|downloading|110|1000|0|0|0|11.0%|10.24MiB/s|00:31' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" \
+        'Downloading the media - 11%' 'download after storage notice'
+    assert_file_contains "${CAPTURE_FILE}" \
+        'Downloading the media - 11% - 10.24MiB/s - 00:31 remaining Local disk space is used before copying to the selected destination.' \
+        'storage notice persists during download'
+    printf '%s\n' 'YTDLP_POSTPROCESS|started|MediaPublication' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" \
+        'Copying the validated media to the destination...' \
+        'final copy phase is visible'
+    assert_percentages_never_decrease "${CAPTURE_FILE}" 'local disk storage notice'
+    finish_success '/tmp/local-disk-storage-notice.mkv'
+
+    start_scenario local-disk-storage-malformed video
+    printf '%s\n' 'YTDLP_STORAGE|local-disk|unexpected' >>"${LOG_FILE}"
+    printf '%s\n' 'YTDLP_PLAN|media|22|22|' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Preparing the selected media streams...' \
+        'malformed storage event crosses one monitor cycle'
+    assert_file_not_contains "${CAPTURE_FILE}" 'Local disk space is used' \
+        'malformed storage notice is ignored'
+    finish_success '/tmp/local-disk-storage-malformed.mkv'
+
     fallback_video_internal=$(video_audio_fallback_percent 100 0)
     fallback_video_complete=$(map_download_to_zenity \
         "${fallback_video_internal}")

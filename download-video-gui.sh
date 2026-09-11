@@ -195,27 +195,18 @@ initialize_gui_paths() {
 
 resolve_runtime_tmpdir() {
     local output_variable=$1
-    local candidate=${TMPDIR:-/tmp}
+    local helper_path="${SCRIPT_DIR}/private-aria2-plan.py"
     local resolved_candidate=''
 
-    if [[ ${candidate} != /* || ! -d ${candidate} ||
-        ! -w ${candidate} || ! -x ${candidate} ]]; then
-        candidate=/tmp
+    if [[ -L ${helper_path} || ! -f ${helper_path} || ! -r ${helper_path} ]]; then
+        printf '%s\n' 'Error: the private storage helper is missing or unsafe.' >&2
+        return 1
     fi
-    # shellcheck disable=SC2310 # An unsafe candidate deliberately selects the fallback.
-    if ! resolved_candidate=$(realpath -e -- "${candidate}" 2>/dev/null) \
-        || [[ ! -d ${resolved_candidate} || ! -w ${resolved_candidate} ||
-            ! -x ${resolved_candidate} ]] \
-        || ! private_directory_chain_is_safe "${resolved_candidate}"; then
-        candidate=/tmp
-        if ! resolved_candidate=$(realpath -e -- "${candidate}" 2>/dev/null); then
-            return 1
-        fi
-    fi
-    # shellcheck disable=SC2310 # The fallback is trusted only after the same check.
-    if [[ ! -d ${resolved_candidate} || ! -w ${resolved_candidate} ||
-        ! -x ${resolved_candidate} ]] \
-        || ! private_directory_chain_is_safe "${resolved_candidate}"; then
+    # GUI URL input and live diagnostics need the same local-filesystem and
+    # private-permission guarantees as the engine's authentication metadata.
+    if ! resolved_candidate=$(python3 "${helper_path}" private-root) \
+        || [[ ${resolved_candidate} != /* ||
+            ${resolved_candidate} =~ [[:cntrl:]] ]]; then
         return 1
     fi
 
@@ -1670,6 +1661,7 @@ remove_temporary_zenity_diagnostic() {
 
 cleanup() {
     local status=$?
+    local shutdown_confirmed=true
 
     # Cleanup is a short critical section. Ignore additional termination
     # signals so a second signal cannot interrupt worker shutdown midway.
@@ -1690,11 +1682,8 @@ cleanup() {
         # surviving process group until every descendant has exited.
         # shellcheck disable=SC2310
         if ! stop_worker; then
-            printf 'Warning: the worker group did not terminate after SIGKILL; cleanup will continue.\n' >&2
-            WORKER_PID=''
-            WORKER_PID_START_TIME=''
-            WORKER_PGID=''
-            WORKER_PGID_START_TIME=''
+            printf 'Warning: worker shutdown could not be confirmed after SIGKILL.\n' >&2
+            shutdown_confirmed=false
         fi
     fi
 
@@ -1702,7 +1691,16 @@ cleanup() {
         # shellcheck disable=SC2310 # Failure is reported after bounded KILL.
         if ! stop_gui_children; then
             printf 'Warning: a GUI child did not terminate after SIGKILL.\n' >&2
+            shutdown_confirmed=false
         fi
+    fi
+
+    if [[ ${shutdown_confirmed} != true ]]; then
+        # A network syscall can outlive bounded signal escalation. Preserve
+        # files still reachable by the engine, monitor or dialog until their
+        # shutdown is known; a failed wait never grants unlink authority.
+        printf '%s\n' 'Warning: preserving active private GUI temporary files because shutdown remains unconfirmed.' >&2
+        exit "${status}"
     fi
 
     retain_sanitized_log
@@ -2201,14 +2199,13 @@ wait_for_worker_pgid() {
 initialize_gui_environment() {
     local command_name
     local setsid_help
-    local resolve_status
     local version_output=''
     local version_value=''
 
     # Establish the minimal capture stack first. Once it is available, later
     # startup failures remain visible from a desktop launcher without creating
     # an artificial diagnostic log.
-    for command_name in mktemp realpath rm stat tail zenity; do
+    for command_name in dirname mktemp python3 realpath rm stat tail zenity; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             printf 'Error: required command "%s" was not found.\n' \
                 "${command_name}" >&2
@@ -2216,12 +2213,23 @@ initialize_gui_environment() {
         fi
     done
 
-    # shellcheck disable=SC2310 # Both preferred and fallback paths are checked.
+    # Resolve the shared storage helper before any dialog captures user input.
+    # shellcheck disable=SC2310 # The resolver explicitly checks each command.
+    if ! resolve_script_dir SCRIPT_DIR SCRIPT_PATH; then
+        printf '%s\n' 'Error: unable to determine the script directory.' >&2
+        exit 1
+    fi
+    readonly SCRIPT_DIR SCRIPT_PATH
+
+    # shellcheck disable=SC2310 # Both preferred and fallback roots are checked.
     if ! resolve_runtime_tmpdir RUNTIME_TMPDIR; then
-        printf '%s\n' 'Error: no usable temporary directory is available.' >&2
+        printf '%s\n' 'Error: no safe local private temporary directory is available.' >&2
         exit 1
     fi
     readonly RUNTIME_TMPDIR
+    # Native dialog libraries may create their own temporary files; never pass
+    # through an unvalidated ambient TMPDIR after selecting the private root.
+    export TMPDIR="${RUNTIME_TMPDIR}"
 
     initialize_gui_paths
 
@@ -2243,15 +2251,6 @@ initialize_gui_environment() {
         exit 127
     fi
 
-    set +e
-    resolve_script_dir SCRIPT_DIR SCRIPT_PATH
-    resolve_status=$?
-    set -e
-    if ((resolve_status != 0)); then
-        show_error 'Unable to determine the script directory.'
-        exit 1
-    fi
-    readonly SCRIPT_DIR SCRIPT_PATH
     readonly DOWNLOAD_SCRIPT="${SCRIPT_DIR}/download-video.sh"
     readonly PROGRESS_MONITOR="${SCRIPT_DIR}/progress-monitor.sh"
 
@@ -2516,10 +2515,6 @@ start_download_worker() {
         # shellcheck disable=SC2310
         if ! stop_worker; then
             printf 'Warning: the failed worker could not be reaped after SIGKILL.\n' >&2
-            WORKER_PID=''
-            WORKER_PID_START_TIME=''
-            WORKER_PGID=''
-            WORKER_PGID_START_TIME=''
         fi
         if ((pgid_status == 1)) \
             && [[ ${WAITED_WORKER_STATUS} =~ ^[0-9]+$ ]]; then
@@ -2547,6 +2542,9 @@ run_progress_dialog() {
     local monitor_status=0
     local zenity_status=0
     local worker_status=''
+    local shutdown_confirmed=true
+    local cancellation_text='The download was canceled.'
+    local timeout_text='The progress dialog timed out; the download was stopped.'
 
     begin_signal_registration
     zenity --progress \
@@ -2578,6 +2576,7 @@ run_progress_dialog() {
         # shellcheck disable=SC2310
         if ! stop_gui_children; then
             printf 'Warning: the progress monitor did not terminate after SIGKILL.\n' >&2
+            shutdown_confirmed=false
         fi
         monitor_status=0
     else
@@ -2603,28 +2602,30 @@ run_progress_dialog() {
         else
             printf 'Warning: the canceled worker did not terminate after SIGKILL.\n' >&2
             worker_status=143
-            WORKER_PID=''
-            WORKER_PID_START_TIME=''
-            WORKER_PGID=''
-            WORKER_PGID_START_TIME=''
+            shutdown_confirmed=false
+        fi
+        if [[ ${shutdown_confirmed} != true ]]; then
+            cancellation_text='Cancellation was requested, but process shutdown could not be confirmed. Active private temporary files will be preserved until shutdown is confirmed.'
+            timeout_text='The progress dialog timed out and process shutdown could not be confirmed. Active private temporary files will be preserved until shutdown is confirmed.'
         fi
 
         # The result file is the engine's atomic success boundary. If it was
         # published before TERM won the exit-status race, report the confirmed
         # media rather than contradicting on-disk success with "canceled".
         # shellcheck disable=SC2310 # Result validation intentionally selects the cancel-race outcome.
-        if ((zenity_status == 1)) \
+        if ((zenity_status == 1)) && [[ ${shutdown_confirmed} == true ]] \
             && resolve_confirmed_final_path confirmed_result; then
             worker_status=0
         fi
 
-        if ((zenity_status == 1 && worker_status == 0)); then
+        if ((zenity_status == 1 && worker_status == 0)) \
+            && [[ ${shutdown_confirmed} == true ]]; then
             zenity_status=0
             monitor_status=0
         elif ((zenity_status == 1)); then
             run_zenity_capture ignored_output --info \
                 --title="${APP_DIALOG_TITLE}" \
-                --text='The download was canceled.' \
+                --text="${cancellation_text}" \
                 --no-markup \
                 --ok-label='Close' \
                 --width=420
@@ -2636,7 +2637,7 @@ run_progress_dialog() {
                 'Progress dialog diagnostic:'
             show_error_with_log \
                 'Download failed' \
-                'The progress dialog timed out; the download was stopped.'
+                "${timeout_text}"
             exit 1
         else
             append_session_diagnostic \
@@ -2654,10 +2655,6 @@ run_progress_dialog() {
         # shellcheck disable=SC2310
         if ! stop_worker; then
             printf 'Warning: the worker could not be reaped after a monitor failure.\n' >&2
-            WORKER_PID=''
-            WORKER_PID_START_TIME=''
-            WORKER_PGID=''
-            WORKER_PGID_START_TIME=''
         fi
         append_session_diagnostic \
             "${PROGRESS_MONITOR_ERROR_FILE}" \
@@ -2676,10 +2673,6 @@ run_progress_dialog() {
             # shellcheck disable=SC2310
             if ! stop_worker; then
                 printf 'Warning: the worker did not terminate after the progress dialog closed.\n' >&2
-                WORKER_PID=''
-                WORKER_PID_START_TIME=''
-                WORKER_PGID=''
-                WORKER_PGID_START_TIME=''
             fi
             show_error_with_log \
                 'Download failed' \

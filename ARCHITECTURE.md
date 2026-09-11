@@ -173,16 +173,24 @@ to the current single native-audio profile.
 3. Validate the yt-dlp, Deno, aria2c, and `setsid` versions or capabilities used
    by the current option contract, and require FFmpeg, FFprobe, and the other
    host commands used later in the pipeline.
-4. Resolve the destination canonically and require a system/current-user-owned
-   physical chain with sticky-bit protection on every shared writable
-   component. Apply the same rule to the runtime lock and optional result-file
-   parents, acquire a same-user destination lock under the stable private
-   `/tmp/yt-dlp-aria2-downloader-UID` root regardless of `XDG_RUNTIME_DIR`, recover
-   abandoned owned staging directories, and remove only allowlisted stale
-   temporary files. Private work files may still use the validated runtime root.
-5. Create private URL, cookie, plan, manifest, staging, and result-path state.
-   Defer graceful signals across result-record creation and authenticated
-   descriptor registration so cleanup sees the complete record identity.
+4. Resolve and record the final destination identity, then acquire the stable
+   same-user destination lock. A shared media destination need not have private
+   permissions. `private-aria2-plan.py media-local-safe` checks the actual
+   filesystem and physical owner/write chain to decide whether external tools
+   may safely work there. Otherwise a separate private local disk workspace
+   becomes the processing directory; the chosen destination remains the final
+   publication target. Old destination residues are preserved, not deleted
+   by pattern, age or a marker alone.
+5. Use the shared `private-root` allocator for local mode-`0700` metadata
+   sessions, independent of either media directory. File creation probes verify
+   actual mode `0600` before secrets are written. The allocator opens directory
+   components without symlink traversal, validates owner/mode and filesystem
+   on descriptors, and never changes existing user-directory permissions.
+   `XDG_RUNTIME_DIR`, `/tmp`, `/var/tmp` are metadata candidates; disk workspaces
+   use existing XDG/default cache directories, then `/var/tmp`, excluding tmpfs.
+   Export the private session as yt-dlp's TMPDIR/TMP/TEMP so Firefox temporary
+   database copies also stay private. Catchable signals are deferred while
+   workspace/path-record descriptors and identities are registered.
 6. Run a metadata-only yt-dlp planning pass and ask
    `private-aria2-plan.py classify` whether the selected formats may use the
    direct aria2 path.
@@ -196,7 +204,13 @@ to the current single native-audio profile.
    Publication first links from that descriptor; filesystems without hard
    links use the compatible no-clobber rename only after the protected parent
    chain and temporary pathname identity are revalidated.
-9. Atomically publish the private result record only after the final media path
+9. For a local-disk fallback, copy the validated media through opened source
+   and destination descriptors into an exclusive destination temporary. Check
+   source identity, size and modification timestamps, all writes and fsync,
+   then use actual `renameat2(RENAME_NOREPLACE)` or atomic hard-link publication.
+   Unsupported primitives and ambiguous remote results fail closed, retaining
+   the valid local source. This is one-file atomic naming, not a multi-filesystem
+   transaction. Then atomically publish the private result record only after the final media path
    is normalized, contained in the selected destination, and validated. Its
    canonical parent chain and inode are authenticated before use. Reads,
    rewrites, and primary no-overwrite publication remain bound to the opened
@@ -234,16 +248,19 @@ so a later SIGKILL cannot strand it.
 ## Transport boundary and Python helper
 
 The initial yt-dlp pass resolves formats and filenames but does not download.
-`private-aria2-plan.py` then exposes three internal subcommands:
+`private-aria2-plan.py` provides the shared storage allocator and these transport commands:
 
 - `classify` validates the plan and selects `direct` only for representable
   direct HTTP(S) formats whose headers can be safely replayed;
 - `build` converts the validated plan into a mode-`0600` aria2 input file and a
-  private manifest inside a mode-`0700` staging directory; destinations that
-  already exist are refused before transfer artifacts are written;
+  version-2 manifest inside the separate mode-`0700` metadata directory;
+  media component staging stays in a private child of the processing directory.
+  The manifest binds output/staging identities and existing names are refused;
 - `commit` validates completed staging files and publishes every component to
   the exact yt-dlp-selected destination without overwriting an existing path,
-  rolling back partial publication when possible.
+  rolling back partial publication when possible. A real kernel no-replace
+  rename supports local filesystems without hard links; no unsafe rename
+  emulation is used.
 
 Private plans, manifests, and staging directories must belong to the effective
 user. Commit rejects duplicate staging sources before publishing any component,
@@ -278,7 +295,42 @@ inspection, and transactional manifest handling are clearer there than in
 Bash. Its SPDX-plus-module-docstring header is the project-wide Python identity
 contract; `SHELL_STYLE.md`'s Bash banner does not apply.
 
+`private-root`, `media-local-safe`, `check-space`, `publish-media` and
+`cleanup-workspace` reuse the installed helper; no additional installed module
+or dependency is introduced. Disk capability uses a conservative
+ext2/3/4/XFS/Btrfs/ZFS allowlist; metadata also permit tmpfs. Filesystem identity
+is checked on opened descriptors, not inferred from HOME/TMPDIR or a `cifs`
+name alone. The disk-space estimate is three times known component bytes plus
+64 MiB; unknown sizes and later ENOSPC remain explicit runtime limitations.
+Cleanup authenticates a live session's root identity and snapshots its tree;
+foreign ownership, links, mount boundaries or replaced entries are preserved.
+An ambiguous component stage, path record, HLS temporary or repaired source
+also prevents recursive cleanup of its parent workspace. These preservation
+decisions survive finalization even after a component clears its path variables.
+
+Native yt-dlp `.ytdl` state currently contains fragment position/count and opaque
+extra state; HLS WebVTT may add timing/deduplication state. aria2 HTTP control
+files contain binary piece/transfer state, including transient `.aria2__temp`.
+Neither extension alone establishes safety. In network sessions all of these
+remain on the local private media disk. Native partial resumption is unchanged
+for trusted local outputs; isolated network sessions restart after cancellation.
+
+No-replace rename cannot bind its source name conditionally to an open inode.
+For a shared destination, the copy remains descriptor-bound and publication
+checks the temporary before and final inode after the atomic operation. A
+concurrent replacement is an error with the local source retained; no claim
+is made against a malicious server or writers modifying deliberately shared
+media after publication. Advisory locks coordinate this user's local launches,
+not separate hosts. Normal HLS/DASH fixtures are qualified; upstream unsupported
+or live HLS delegation to an external downloader requires separate argv-privacy
+qualification.
+
 ## Progress protocol
+
+`YTDLP_STORAGE|local-disk` is a constant, path-free notice emitted when the
+engine selects local media staging. The monitor keeps the local space notice
+visible during transfer without advancing the phase or percentage. The later
+`MediaPublication` postprocessor event announces the final destination copy.
 
 The GUI captures the engine's human diagnostics and machine records in one
 private live log. `progress-monitor.sh` tails that log and maintains a monotonic
@@ -358,8 +410,11 @@ The other persistent paths are:
 | GUI preferences | `${XDG_CONFIG_HOME:-$HOME/.config}/yt-dlp-aria2-downloader/gui.conf` | Preserved across ordinary package removal; an unsafe XDG chain falls back to the validated HOME path |
 | Retained sanitized logs | `${XDG_STATE_HOME:-$HOME/.local/state}/yt-dlp-aria2-downloader/download-*.log` | Self-identify their canonical final path, are pruned by age, and use the same safe-XDG fallback |
 | Managed runtimes | `${XDG_DATA_HOME:-$HOME/.local/share}/yt-dlp-aria2-downloader/runtime/` | Preserved across upgrade/removal; eligible for proven-owned final RPM cleanup |
-| GUI live session | `${TMPDIR:-/tmp}/yt-dlp-gui.*` | Private and always removed at session end; unsafe TMPDIR chains fall back to `/tmp` |
-| Direct-transfer staging | Destination child `.yt-dlp-aria2.*` | Private, marker-owned, and allowed only below a safely shared physical destination chain |
+| GUI live session | Shared validated `private-root` / `yt-dlp-gui.*` | Local/private, removed after confirmed child shutdown; unconfirmed groups preserve active files |
+| Transfer metadata | Validated local root / `.yt-dlp-aria2.*` | Plans, cookies, input, manifest, browser copies and internal paths; remove after confirmed shutdown, preserve changed identities |
+| Direct-transfer media staging | Processing directory child `.yt-dlp-aria2.*` | Media and control files only; active directory descriptor/identity plus contents validated before cleanup |
+| Network media workspace | Validated disk cache or `/var/tmp` root / `.media-work.*` | Local downloaded streams, fragments, native sidecars and remux; cleanup after shutdown, retain identified media on validation/publication failure |
+| Network publication temporary | Selected destination / `.yt-dlp-publish.*.partial` | Copied media only; exclusive creation, no final name until copy/fsync, preserve ambiguous outcomes |
 
 ## Packaging architecture
 
@@ -406,6 +461,15 @@ architecture document. The source ZIP contains the tracked source tree.
 
 Third-party Actions are pinned by full commit SHA and checkout credentials stay
 disabled. Jobs receive only the permissions they need.
+
+Fedora jobs executing downloads use anonymous Docker volumes for `/tmp` and
+`/var/tmp`, so private-state and media-workspace tests exercise the host volume's
+actual local filesystem instead of an unqualified container overlay. The
+isolated shfmt verifier likewise gets an anonymous `/var/tmp` disk volume while
+retaining its `/tmp` tmpfs, read-only checkout, disabled network and dropped
+capabilities. Its cleanup removes the disposable volume with the container.
+No test storage volume grants access to a host home or changes publication
+permissions.
 
 The release workflow separates untrusted validation/build work from privileged
 publication. The RPM signing job receives signing secrets but does not execute

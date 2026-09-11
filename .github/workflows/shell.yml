@@ -34,7 +34,13 @@ jobs:
   validate-fedora:
     name: Fedora 44
     runs-on: ubuntu-24.04
-    container: registry.fedoraproject.org/fedora:44
+    container:
+      image: registry.fedoraproject.org/fedora:44
+      volumes:
+        - /tmp
+        - /var/tmp
+    env:
+      TMPDIR: /var/tmp
     timeout-minutes: 10
     defaults:
       run:

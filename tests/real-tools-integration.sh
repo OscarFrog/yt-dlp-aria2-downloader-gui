@@ -33,6 +33,9 @@ ARIA2_INVOCATION_LOG=''
 RUN_FINAL_FILE=''
 REAL_DIRECT_FINAL=''
 REAL_SOURCE_OPUS_CODEC=''
+NETWORK_DESTINATION=''
+SIMULATE_NETWORK=false
+MEDIA_ROOT="${TEST_ROOT}/output"
 
 cleanup() {
     trap - EXIT HUP INT TERM
@@ -186,13 +189,17 @@ run_engine() {
     local scenario=$2
     local url=$3
     local engine=${4:-"${PROJECT_DIR}/download-video.sh"}
-    local scenario_dir="${TEST_ROOT}/output/${scenario}"
+    local scenario_dir="${MEDIA_ROOT}/${scenario}"
+    local canonical_scenario_dir=''
     local result_file="${TEST_ROOT}/${scenario}.result"
     local output_file="${TEST_ROOT}/${scenario}.stdout"
     local engine_status=0
 
     RUN_FINAL_FILE=''
     mkdir -p -- "${scenario_dir}"
+    if [[ ${SIMULATE_NETWORK} == true ]]; then
+        chmod 0777 -- "${scenario_dir}"
+    fi
     rm -f -- "${result_file}" "${output_file}"
     set +e
     bash "${engine}" \
@@ -220,6 +227,24 @@ run_engine() {
         printf 'FAIL: %s published an empty result path.\n' "${scenario}" >&2
         return 65
     }
+    canonical_scenario_dir=$(realpath -e -- "${scenario_dir}") || {
+        printf 'FAIL: %s destination disappeared before final-path validation.\n' \
+            "${scenario}" >&2
+        return 65
+    }
+    [[ ${RUN_FINAL_FILE%/*} == "${canonical_scenario_dir}" &&
+        -s ${RUN_FINAL_FILE} && ! -L ${RUN_FINAL_FILE} ]] || {
+        printf 'FAIL: %s did not publish media inside its selected destination.\n' \
+            "${scenario}" >&2
+        return 65
+    }
+    if [[ ${SIMULATE_NETWORK} == true ]]; then
+        grep -Fq -- 'requires local disk staging' "${output_file}" || {
+            printf 'FAIL: %s did not exercise the local-media fallback.\n' \
+                "${scenario}" >&2
+            return 65
+        }
+    fi
 }
 
 assert_native_fragment_routing() {
@@ -843,12 +868,50 @@ PY_FORCE_MP3
     printf 'Expected mutation detected: forced MP3 was rejected by Opus preservation.\n'
 }
 
+parse_qualification_arguments() {
+    while (($# > 0)); do
+        case $1 in
+            --simulate-network)
+                SIMULATE_NETWORK=true
+                ;;
+            --network-destination)
+                (($# >= 2)) || {
+                    printf 'Error: --network-destination requires an existing test directory.\n' >&2
+                    return 64
+                }
+                NETWORK_DESTINATION=$2
+                shift
+                ;;
+            *)
+                printf 'Error: unknown qualification option: %s\n' "$1" >&2
+                return 64
+                ;;
+        esac
+        shift
+    done
+    if [[ -n ${NETWORK_DESTINATION} ]]; then
+        [[ ${NETWORK_DESTINATION} == /* && -d ${NETWORK_DESTINATION} &&
+            ! -L ${NETWORK_DESTINATION} ]] || {
+            printf 'Error: the authorized network test directory must be absolute and physical.\n' >&2
+            return 64
+        }
+        MEDIA_ROOT=$(mktemp -d --tmpdir="${NETWORK_DESTINATION}" \
+            'yt-dlp-network-qualification.XXXXXXXX')
+        printf 'Authorized network qualification media directory: %s\n' "${MEDIA_ROOT}"
+        printf '%s\n' 'The generated media directory is preserved for operator inspection.'
+    fi
+    if [[ ${SIMULATE_NETWORK} == true ]]; then
+        printf '%s\n' 'Qualification uses real tools on permissive local directories; this is not a CIFS mount test.'
+    fi
+}
+
 main() {
     trap cleanup EXIT
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
+    parse_qualification_arguments "$@"
     prepare_real_tool_fixtures
     test_real_direct_audio_scenarios
     test_real_media_validation_mutations
