@@ -41,7 +41,7 @@ direct downloads through a private aria2 input file, and FFmpeg to merge,
 remux, or extract streams. HTTPS automatically stays on yt-dlp's native
 transport when the installed aria2 TLS backend lacks the required certificate
 validation hardening. DASH and HLS streams also remain native. The current
-development version is **2.3.11**.
+development version is **2.3.12**.
 The latest published package release is **2.3.11**.
 
 ## Recommended installation
@@ -231,12 +231,13 @@ remains disabled by design; the maintainer-side preflight requires an explicit
 `--confirm-single-maintainer-self-review` acknowledgement and verifies that the
 sole reviewer matches the authenticated GitHub account. Restrict the Environment
 to a selected `v*` **tag** deployment policy. Manual recovery remains available,
-but it must execute the workflow from the exact release tag:
+but it must execute the workflow from the exact release tag. For the development
+version below, this command is applicable only after its signed tag is created:
 
 ```bash
 gh workflow run release.yml \
-  --ref v2.3.11 \
-  -f tag=v2.3.11 \
+  --ref v2.3.12 \
+  -f tag=v2.3.12 \
   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
@@ -808,8 +809,8 @@ destination directories may run concurrently.
 
 ## Network destinations and private storage
 
-This section describes the checkout implementation; the published 2.3.11
-packages have not been rebuilt with these changes.
+This section describes the unreleased 2.3.12 checkout implementation; the
+published 2.3.11 packages have not been rebuilt with these changes.
 
 The shared private-storage allocator validates physical directory components,
 ownership, actual permission modes, exclusive file creation, and the filesystem

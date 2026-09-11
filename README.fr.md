@@ -43,7 +43,7 @@ FFmpeg pour fusionner, remuxer ou extraire les flux. HTTPS repasse
 automatiquement sur le transport natif de yt-dlp lorsque le backend TLS d'aria2
 n'offre pas le durcissement requis de validation des certificats. Les flux DASH
 et HLS restent eux aussi natifs.
-La version de développement actuelle est la **2.3.11**.
+La version de développement actuelle est la **2.3.12**.
 La dernière release de paquets publiée est la **2.3.11**.
 
 ## Installation recommandée
@@ -249,10 +249,12 @@ preflight mainteneur exige alors la confirmation explicite
 `--confirm-single-maintainer-self-review` et vérifie que l'unique réviseur
 correspond au compte GitHub authentifié. Limitez l'environnement à une politique
 de déploiement **tag** sélectionnée `v*`. La reprise manuelle reste disponible,
-mais elle doit exécuter le workflow depuis le tag exact de la release :
+mais elle doit exécuter le workflow depuis le tag exact de la release. Pour la
+version de développement ci-dessous, cette commande ne s'applique qu'après la
+création de son tag signé :
 
 ```bash
-gh workflow run release.yml   --ref v2.3.11   -f tag=v2.3.11   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref v2.3.12   -f tag=v2.3.12   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Le workflow refuse indépendamment toute exécution manuelle dont le type de ref,
@@ -849,8 +851,8 @@ téléchargements vers des dossiers différents peuvent s'exécuter simultanéme
 
 ## Destinations réseau et stockage privé
 
-Cette section décrit l'implémentation du checkout ; les paquets publiés en
-2.3.11 n'ont pas été reconstruits avec ces changements.
+Cette section décrit l'implémentation non publiée du checkout 2.3.12 ; les
+paquets publiés en 2.3.11 n'ont pas été reconstruits avec ces changements.
 
 L'allocateur privé commun valide les composants physiques des chemins, le
 propriétaire, les permissions réellement observées, la création exclusive et

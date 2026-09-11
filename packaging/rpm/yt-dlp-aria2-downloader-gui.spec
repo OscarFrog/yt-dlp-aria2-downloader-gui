@@ -86,6 +86,11 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sat Sep 12 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.12-1
+- Prepare unreleased network-destination support with private local staging.
+- Preserve complete media on failed publication and refuse final-name overwrites.
+- Qualify transport, cleanup, and permissive-filesystem regression scenarios.
+
 * Mon Sep 07 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.11-1
 - Publish the audited concurrency, cancellation, runtime, and formatter fixes.
 - Align package documentation and release references with v2.3.11.

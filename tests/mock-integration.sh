@@ -4069,7 +4069,9 @@ test_mock_engine_network_failures() {
 
 test_mock_engine_network_signals() {
     local scenario output result phases marker termination protocol private_path
+    local state_home log_dir
     local -a invocation=()
+    local -a retained_logs=()
 
     for scenario in HUP INT TERM gui-direct gui-hls; do
         output="${TEST_ROOT}/network-cancel-${scenario}"
@@ -4095,10 +4097,27 @@ test_mock_engine_network_signals() {
         )
         prepare_argument_log "network-cancel-${scenario}"
         if [[ ${scenario} == gui-* ]]; then
+            # Cancellation retains a sanitized diagnostic. Keep each fixture's
+            # state separate from the later successful GUI scenarios.
+            state_home="${TEST_ROOT}/network-cancel-${scenario}.state"
+            log_dir="${state_home}/yt-dlp-aria2-downloader"
             assert_status 130 "network ${scenario} cancellation" \
-                "${invocation[@]}" MOCK_CANCEL=1 \
+                "${invocation[@]}" XDG_STATE_HOME="${state_home}" MOCK_CANCEL=1 \
                 MOCK_USE_DEFAULT_PROFILE=1 \
                 MOCK_ZENITY_WAIT_FOR_WORKER_START=1 "${GUI_UNDER_TEST}"
+            shopt -s nullglob
+            retained_logs=("${log_dir}"/download-*.log)
+            shopt -u nullglob
+            assert_equals 1 "${#retained_logs[@]}" \
+                "network ${scenario} retains one cancellation diagnostic"
+            assert_path_mode "${retained_logs[0]}" 600 \
+                "network ${scenario} cancellation diagnostic mode"
+            assert_file_not_contains "${retained_logs[0]}" 'NETWORK_FIXTURE_' \
+                "network ${scenario} cancellation diagnostic contains no secrets"
+            assert_retained_log_identity_footer "${retained_logs[0]}" \
+                "network ${scenario} cancellation diagnostic"
+            assert_no_retained_log_staging "${log_dir}" \
+                "network ${scenario} cancellation diagnostic"
         else
             assert_status 0 "network ${scenario} signal supervision" \
                 "${invocation[@]}" python3 "${MOCK_BIN}/network-signal.py" \

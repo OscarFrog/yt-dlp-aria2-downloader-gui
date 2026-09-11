@@ -878,8 +878,8 @@ the mock jitter matrix remains sharded at the workflow level.
 
 ## Network destination regression and opt-in CIFS qualification
 
-The checkout has not been published as a new release. Run its scripts explicitly;
-an installed command reporting 2.3.11 does not identify the patched checkout.
+The 2.3.12 development checkout has not been published as a new release. Run its
+scripts explicitly; an installed command reporting 2.3.11 is not this checkout.
 The network mock group uses entirely fictional URL/header/cookie sentinels and
 checks both active download phases and cleanup. It simulates permissive modes
 only on the selected destination, leaving the private local workspace protected:
@@ -958,6 +958,6 @@ remain **NOT EXECUTED** unless recorded in a separate operator qualification.
 The short user check against `/home/fred/z/Flac-Encours` is to start the patched
 checkout's absolute `download-video-gui.sh` and select that folder normally.
 No production-share mutation is performed by the development tests. Identify
-the code using the checkout path and source SHA-256, not the unchanged 2.3.11
-version alone. A successful simulated qualification does not close the real
+the code using the checkout path, its 2.3.12 development version and source
+SHA-256. A successful simulated qualification does not close the real
 CIFS qualification requirement.
