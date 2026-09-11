@@ -117,8 +117,8 @@ its token through cancellation until every same-group descendant exits or the
 authenticated KILL escalation completes, including when the direct command
 removes the token from its own environment and ignores the first signal.
 
-The complete mock contract is divided into eight isolated scheduler suites
-(`engine-core`, `engine-hls`, `engine-staging`, `gui-progress`, `gui-state`,
+The complete mock contract is divided into nine isolated scheduler suites
+(`engine-core`, `engine-hls`, `engine-staging`, `engine-network`, `gui-progress`, `gui-state`,
 `signals`, `runtime-compat`, and `runtime-validation`) so `run-all.sh --jobs N`
 can schedule its hermetic scenarios concurrently. The `engine`, `gui`, and
 `runtime` groups remain convenient aggregates of their respective subgroups,
@@ -392,9 +392,10 @@ The automated suite checks, among other things:
 
 - private GUI URL transfer through owner-only URL and yt-dlp batch files, with
   the requested URL absent from GUI, engine, and yt-dlp process arguments;
-- conservative recovery of abandoned private aria2 staging after SIGKILL,
-  including owner-marker, legacy-fingerprint, symlink, unknown-entry,
-  invalid-mode and cross-destination negative controls, plus active-session
+- conservative preservation of abandoned private aria2 staging after SIGKILL;
+  names, markers and legacy fingerprints alone do not authorize its removal.
+  Symlink, unknown-entry, invalid-mode and cross-destination negative controls,
+  plus active-session
   inode replacement of the plan and post-success replacement of the aria2
   input and manifest so cleanup never removes an ambiguous replacement;
 - refusal of pre-existing direct-transfer destinations before aria2 starts,
@@ -549,6 +550,19 @@ for pushes to `main`, in two environments:
 
 - `ubuntu-24.04`;
 - a Fedora 44 container on a GitHub-hosted runner.
+
+The Fedora shell and FFmpeg qualification containers mount anonymous Docker
+volumes at `/tmp` and `/var/tmp`, with `TMPDIR=/var/tmp` for test fixtures. These
+provide separate local storage rather than treating the container's overlay
+filesystem as a qualified private filesystem. Production checks still validate
+the actual filesystem, ownership and modes; a volume whose backing filesystem
+does not satisfy those checks fails qualification. The volumes belong to the
+disposable GitHub-hosted job and contain no host home or credential bind mounts.
+The isolated shfmt verifier retains its private `/tmp` tmpfs and adds an
+anonymous `/var/tmp` disk volume for the media workspace cases; both normal and
+failure cleanup remove that volume with the verifier container. RPM build and
+lifecycle jobs only exercise the engine's version command and do not need these
+download-workspace volumes.
 
 `.github/workflows/packages.yml` validates both package formats. Before package
 upgrade testing, a dedicated `previous-release` job resolves the immediately
@@ -861,3 +875,93 @@ requests and pushes to `main`:
 The runtime-manager and package-cleanup repetitions run with at most four
 workers and ordered logs. Their individual test workspaces are independent;
 the mock jitter matrix remains sharded at the workflow level.
+Each of its four shards runs five iterations, each still bounded by a
+five-minute timeout and a ten-second termination grace period. The overall
+thirty-minute job budget accommodates all five iterations plus checkout and
+cleanup; it does not relax any iteration's timeout or assertion.
+
+## Network destination regression and opt-in CIFS qualification
+
+The 2.3.12 development checkout has not been published as a new release. Run its
+scripts explicitly; an installed command reporting 2.3.11 is not this checkout.
+The network mock group uses entirely fictional URL/header/cookie sentinels and
+checks both active download phases and cleanup. It simulates permissive modes
+only on the selected destination, leaving the private local workspace protected:
+
+```bash
+./tests/mock-integration.sh --group engine-network
+./tests/private-aria2-plan-integration.sh
+./tests/real-tools-integration.sh
+./tests/real-tools-integration.sh --simulate-network
+```
+
+The real-tool simulation serves tiny generated media over loopback and makes
+only its disposable output directories permissive. It exercises real direct,
+audio, HLS and DASH processing followed by destination copy. It does not simulate
+SMB caching, reconnects, Unix-extension behavior or kernel-blocked syscalls.
+Helper fault injection covers unsupported hard links/rename, copy/write errors,
+collisions, signals, identities and private-root selection; simulated failures
+must not be reported as actual network failures.
+
+After focused tests, run the canonical contract:
+
+```bash
+./tests/run-all.sh --doctor
+./tests/run-all.sh --fast --jobs 4
+./tests/run-all.sh --full --jobs 4
+./scripts/check-shell-format.sh
+./scripts/git-inspect.sh diff-check
+```
+
+Preconditions: host dependencies and a local loopback socket must be available.
+A sandbox that remaps system ownership or blocks loopback is not a qualifying
+runtime; use the authorized host test environment. A failing test must be
+investigated before rerunning. The full profile runs Bash/Python syntax checks,
+ShellCheck, formatting, integration and package-tree checks; no new checker is
+required merely because the implementation is Python.
+
+### Actual SMB/CIFS test: opt-in, not part of ordinary tests
+
+Status for this change: **NOT EXECUTED on a real CIFS mount**. Use a disposable
+share explicitly authorized by its owner, never a production destination.
+An operator may prepare a Fedora 44 mount with SMB Unix extensions disabled
+and fixed `file_mode=0755,dir_mode=0755` (or an equivalent test configuration).
+A media file must be writable while `chmod 600` leaves its visible mode
+permissive. Mount credentials belong in an operator-managed private credentials
+file, not shell arguments or the test log. Mounting is an operator prerequisite;
+ordinary tests never require sudo or change fstab, SELinux or mount options.
+
+Set the exact authorized test mount path, then run:
+
+```bash
+CIFS_TEST_DIR=/absolute/path/to/disposable-test-share
+./tests/real-tools-integration.sh --network-destination "$CIFS_TEST_DIR"
+```
+
+Expected: direct video/audio and native HLS/DASH results pass FFprobe, each
+result-file points inside the chosen test share, and no plan, cookie, batch,
+manifest or browser database is written there. The harness creates and prints
+one unique `yt-dlp-network-qualification.*` subdirectory and preserves it for
+operator inspection. Inspect filenames/types without printing credentials;
+remove only the individually verified test media, then `rmdir` their exact
+empty directories. Never recursively remove a wildcard match.
+
+Use the GUI from the same physical checkout for complete video, audio and the
+YouTube profile. Automated tests never use actual Firefox cookies; a real
+YouTube-session test is an explicit operator action. During transfer and final
+copy, cancel once; then send HUP/INT/TERM in separate runs to that specific
+process. Verify no success is displayed, no preexisting file changed, and
+controlled cleanup follows confirmed termination. Preserve residues if a
+server outage leaves a syscall blocked; cancellation is not guaranteed instant.
+Test an already-existing final name and a concurrently created final name.
+Test a read-only share and a deliberately quota-limited *test* share: expect
+failure, no complete final name for a partial copy, and retained valid local
+source after a failed/ambiguous publication. These outage/quota/mount behaviors
+remain **NOT EXECUTED** unless recorded in a separate operator qualification.
+
+The short user check against `/home/fred/z/Flac-Encours` is to start the patched
+checkout's absolute `download-video-gui.sh` and select that folder normally.
+No production-share mutation is performed by the development tests. Identify
+the code using the checkout path, its 2.3.12 development version and source
+SHA-256. A successful simulated qualification does not close the real
+CIFS qualification requirement.

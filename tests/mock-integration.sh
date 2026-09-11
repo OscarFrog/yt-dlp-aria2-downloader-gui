@@ -18,6 +18,7 @@ readonly -a MOCK_GROUPS=(
     engine-core
     engine-hls
     engine-staging
+    engine-network
     gui
     gui-progress
     gui-state
@@ -38,6 +39,7 @@ Run every mock scenario by default. GROUP is one of:
   engine-core     Core audio/video, result, and failure behavior.
   engine-hls      Authenticated YouTube HLS and remux behavior.
   engine-staging  Private aria2 staging and crash recovery behavior.
+  engine-network  Media destinations with permissive simulated Unix modes.
   gui             Complete GUI aggregate, in historical scenario order.
   gui-progress    GUI progress rendering, profiles, and completion behavior.
   gui-state       GUI configuration, file selection, logs, and state behavior.
@@ -531,6 +533,18 @@ fi
 : "${MOCK_POST_CALL_LOG:?}"
 : "${MOCK_PLAN_CALL_LOG:?}"
 
+if [[ -n ${MOCK_OUTPUT_DIR:-} ]]; then
+    output_previous=''
+    for output_argument in "$@"; do
+        if [[ ${output_previous} == --output ]]; then
+            effective_template=${output_argument%/*}
+            export MOCK_OUTPUT_DIR=${effective_template//%%/%}
+            break
+        fi
+        output_previous=${output_argument}
+    done
+fi
+
 dump_single_json=false
 for argument in "$@"; do
     if [[ ${argument} == '--dump-single-json' ]]; then
@@ -616,6 +630,12 @@ if [[ ${dump_single_json} == true ]]; then
         plan_protocol=${MOCK_PLAN_PROTOCOL}
     fi
 
+    if [[ ${MOCK_NETWORK_PERMISSIONS:-0} == 1 ]]; then
+        python3 "${MOCK_NETWORK_CHECK:?}" plan \
+            "${plan_filename}" "${plan_ext}" "${plan_protocol}" "$@"
+        exit 0
+    fi
+
     printf \
         '{"requested_downloads":[{"filename":"%s","format_id":"mock","ext":"%s","protocol":"%s","url":"%s","http_headers":{"User-Agent":"mock-agent"}}]}\n' \
         "${plan_filename}" \
@@ -642,6 +662,10 @@ wait_for_marker() {
         "${label}" "${marker}" >&2
     exit 66
 }
+
+if [[ ${MOCK_NETWORK_PERMISSIONS:-0} == 1 ]]; then
+    python3 "${MOCK_NETWORK_CHECK:?}" native "$@"
+fi
 
 progress_ready_marker=''
 postprocess_ready_marker=''
@@ -860,7 +884,8 @@ if [[ -n ${result_file} && ${MOCK_SKIP_RESULT_FILE:-0} != 1 ]]; then
     printf '%s\n' "${output_path}" >>"${result_file}"
     if [[ ${MOCK_REPLACE_RESULT_RECORD_AFTER_WRITE:-0} == 1 ]]; then
         result_record_path=$(readlink -- "${result_file}")
-        if [[ ${result_record_path##*/} != .yt-dlp-result.* ]]; then
+        if [[ ${result_record_path##*/} != .yt-dlp-result.* &&
+            ${result_record_path##*/} != .yt-dlp-path.* ]]; then
             printf 'Unexpected private result-record target: %s\n' \
                 "${result_record_path}" >&2
             exit 70
@@ -968,6 +993,10 @@ case ${1:-} in
         exit 64
     fi
 
+    if [[ ${MOCK_NETWORK_PERMISSIONS:-0} == 1 ]]; then
+        python3 "${MOCK_NETWORK_CHECK:?}" aria2 "$@"
+    fi
+
     if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
         printf '\r[#a1b2c3 4.0MiB/0B CN:8 DL:1.00MiB]\r'
     else
@@ -1057,7 +1086,7 @@ while True:
         mv -Tf -- "${input_replacement}" "${input_file}"
     fi
     if [[ ${MOCK_REPLACE_ARIA2_MANIFEST_BEFORE_EXIT:-0} == 1 ]]; then
-        manifest_path="${download_dir}/manifest.json"
+        manifest_path="${input_file%/*}/manifest.json"
         manifest_replacement="${manifest_path}.replacement"
         cp -- "${manifest_path}" "${manifest_replacement}"
         rm -f -- "${manifest_path}"
@@ -1189,6 +1218,13 @@ for argument in "$@"; do
         probe_previous='-select_streams'
     fi
 done
+
+if [[ ${MOCK_NETWORK_REPLACE_AT_PROBE:-0} != 0 && ${summary_probe} == true &&
+    ! -e ${MOCK_NETWORK_MUTATION_MARKER:?} ]]; then
+    mv -- "${media_path}" "${media_path}.before-swap"
+    printf '%s\n' 'foreign media substituted during FFprobe' >"${media_path}"
+    : >"${MOCK_NETWORK_MUTATION_MARKER}"
+fi
 
 # Preserve the pre-existing oracle: the generic argument log represents the
 # structural stream probe, not the later VAL-001 timeline/tail probes.
@@ -1751,6 +1787,141 @@ esac
 EOF_ZENITY
 chmod +x "${MOCK_BIN}/zenity"
 
+cat >"${MOCK_BIN}/python3" <<'EOF_NETWORK_PYTHON'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ ${MOCK_NETWORK_PERMISSIONS:-0} == 1 &&
+    ${1##*/} == private-aria2-plan.py && ${2:-} == media-local-safe ]]; then
+    # Select the same capability fallback as a filesystem that cannot enforce
+    # local metadata semantics. This does not emulate SMB kernel I/O behavior.
+    exit 1
+fi
+exec /usr/bin/python3 "$@"
+EOF_NETWORK_PYTHON
+chmod 0755 -- "${MOCK_BIN}/python3"
+
+cat >"${MOCK_BIN}/network-check.py" <<'PY_NETWORK_CHECK'
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+
+phase, *arguments = sys.argv[1:]
+output = Path(os.environ.get("MOCK_NETWORK_DESTINATION",
+                             os.environ["MOCK_OUTPUT_DIR"])).resolve()
+tokens = (b"NETWORK_FIXTURE_COOKIE_SECRET", b"NETWORK_FIXTURE_HEADER_SECRET",
+          b"NETWORK_FIXTURE_SIGNED_SECRET")
+private_paths = []
+
+
+def option_value(option):
+    for index, argument in enumerate(arguments):
+        if argument == option and index + 1 < len(arguments):
+            return arguments[index + 1]
+        if argument.startswith(option + "="):
+            return argument.partition("=")[2]
+    return ""
+
+
+if phase == "plan":
+    filename, extension, protocol = arguments[:3]
+    cookie = option_value("--cookies")
+    if cookie:
+        cookie_path = Path(cookie)
+        cookie_path.write_text(
+            "# Netscape HTTP Cookie File\n"
+            "example.invalid\tFALSE\t/\tTRUE\t0\tsession\t"
+            + tokens[0].decode() + "\n", encoding="utf-8")
+        private_paths.append(cookie_path)
+    plan = Path(os.readlink("/proc/self/fd/1"))
+    private_paths.append(plan)
+    # Model a share that exposes permissive modes even after chmod. Only
+    # files on the simulated destination change; local private state does not.
+    for path in private_paths:
+        if path.is_relative_to(output):
+            os.chmod(path, 0o666)
+    json.dump({"requested_downloads": [{"filename": filename,
+        "format_id": "mock", "ext": extension, "protocol": protocol,
+        "url": "http://example.invalid/mock?token=" + tokens[2].decode(),
+        "http_headers": {"User-Agent": "mock-agent " + tokens[1].decode()}}]},
+        sys.stdout)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+else:
+    for name in ("--load-cookies", "--cookies", "--input-file", "--load-info-json"):
+        value = option_value(name)
+        if value:
+            private_paths.append(Path(value))
+
+leaked = False
+for path in output.rglob("*"):
+    if path.is_file() and not path.is_symlink():
+        data = path.read_bytes()
+        leaked |= any(token in data for token in tokens)
+for path in private_paths:
+    metadata = path.stat()
+    if path.is_relative_to(output) or stat.S_IMODE(metadata.st_mode) & 0o077:
+        leaked = True
+for proc in Path("/proc").glob("[0-9]*/cmdline"):
+    try:
+        data = proc.read_bytes()
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        continue
+    leaked |= any(token in data for token in tokens)
+with open(os.environ["MOCK_NETWORK_PHASE_LOG"], "a", encoding="utf-8") as log:
+    log.write(phase + (":leaked\n" if leaked else ":private\n"))
+if private_paths:
+    with open(os.environ["MOCK_NETWORK_PHASE_LOG"] + ".paths", "a", encoding="utf-8") as log:
+        for path in private_paths:
+            log.write(str(path) + "\n")
+if leaked and phase != "plan":
+    raise SystemExit("network fixture detected exposed private metadata")
+PY_NETWORK_CHECK
+
+cat >"${MOCK_BIN}/network-signal.py" <<'PY_NETWORK_SIGNAL'
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+name, engine, output, result, log_path = sys.argv[1:]
+started = Path(os.environ["MOCK_STARTED_MARKER"])
+with open(log_path, "wb") as log:
+    process = subprocess.Popen(
+        [engine, "--output-dir", output, "--mode", "video", "--result-file", result,
+         "--", "https://example.com/watch?v=network-signal"], stdout=log,
+        stderr=subprocess.STDOUT)
+    try:
+        deadline = time.monotonic() + 15
+        while not started.exists():
+            if process.poll() is not None or time.monotonic() > deadline:
+                raise RuntimeError("network signal fixture worker did not become ready")
+            time.sleep(0.05)
+        competing = subprocess.run(
+            [engine, "--output-dir", output, "--mode", "video",
+             "--", "https://example.com/watch?v=network-competing"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
+        if competing.returncode != 75:
+            raise RuntimeError("a second session acquired the active network destination")
+        signum = getattr(signal, "SIG" + name)
+        process.send_signal(signum)
+        status = process.wait(timeout=15)
+        if status != 128 + signum:
+            raise RuntimeError(f"network signal {name} returned unexpected status {status}")
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+PY_NETWORK_SIGNAL
+
 prepare_argument_log() {
     local scenario=$1
 
@@ -2021,7 +2192,7 @@ wait_for_worker_registration_cleanup() {
 
     while ((SECONDS < deadline)); do
         if ! registration_path=$(find \
-            "${RUNTIME_DIR}/yt-dlp-aria2-downloader" \
+            "${RUNTIME_DIR}/yt-dlp-aria2-downloader-${EUID}" \
             -mindepth 1 -maxdepth 1 \
             \( -name '.worker-pgid.*' -o -name '.worker-ready.*' \) \
             -print -quit); then
@@ -3035,15 +3206,16 @@ test_mock_engine_failure_paths() {
     mkdir -p -- "${unsafe_output_dir}"
     chmod 0777 -- "${unsafe_output_parent}"
     chmod 0700 -- "${unsafe_output_dir}"
-    assert_status 13 'shared non-sticky output ancestor is rejected' \
+    prepare_argument_log 'shared-output-local-staging'
+    assert_status 0 'shared non-sticky output ancestor uses local media staging' \
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${unsafe_output_dir}" \
         -- 'https://example.com/watch?v=unsafe-output-parent'
     assert_text_contains "${ASSERT_OUTPUT}" \
-        'owned by another user or is shared without sticky-bit protection' \
-        'unsafe output ancestor diagnostic'
-    assert_directory_empty "${unsafe_output_dir}" \
-        'unsafe output ancestor creates no transfer state'
+        'requires local disk staging' \
+        'shared output ancestor explicitly reports local media staging'
+    [[ -s ${unsafe_output_dir}/'Mock media [abc123].webm' ]] \
+        || fail 'Shared output ancestor did not receive the completed media.'
     rm -rf -- "${unsafe_output_parent}"
 
     unsafe_runtime_parent="${TEST_ROOT}/unsafe-runtime-parent"
@@ -3245,12 +3417,26 @@ test_mock_engine_failure_paths() {
     exec {held_lock_fd}>&-
 }
 
+mock_private_metadata_directory() {
+    local argument previous=''
+    local -a arguments=()
+    mapfile -d '' -t arguments <"${MOCK_PLAN_ARG_LOG}"
+    for argument in "${arguments[@]}"; do
+        if [[ ${previous} == --cookies ]]; then
+            printf '%s\n' "${argument%/*}"
+            return 0
+        fi
+        previous=${argument}
+    done
+    return 1
+}
+
 test_mock_engine_private_staging() {
     local active_file_log active_file_pid active_file_plan active_file_replacement
     local active_file_result active_file_staging active_file_started
     local active_file_status active_file_termination_marker
     local ambiguous_marked attempt candidate candidate_ambiguous candidate_pgid
-    local candidate_pid crash_log crash_pgid crash_pid crash_result
+    local candidate_pid crash_log crash_pgid crash_pid crash_result crash_metadata
     local crash_staging crash_started crash_started_seen cross_candidate
     local invalid_mode legacy_exact other_output owned_staging_leftover
     local replacement_log replacement_original replacement_pid
@@ -3410,9 +3596,7 @@ test_mock_engine_private_staging() {
         'private staging sensitive-file replacement worker startup'
     active_file_staging=''
     for ((attempt = 0; attempt < 100; attempt++)); do
-        active_file_staging=$(find "${OUTPUT_DIR}" \
-            -mindepth 1 -maxdepth 1 -type d \
-            -name '.yt-dlp-aria2.????????' -print -quit 2>/dev/null || true)
+        active_file_staging=$(mock_private_metadata_directory)
         [[ -n ${active_file_staging} ]] && break
         sleep 0.05
     done
@@ -3445,7 +3629,7 @@ test_mock_engine_private_staging() {
         ! -e ${active_file_staging}/manifest.json ]] \
         || fail 'Sensitive-file replacement cleanup retained transaction secrets.'
     assert_file_contains "${active_file_log}" \
-        'preserving ambiguous active private aria2 staging directory' \
+        'preserving ambiguous private aria2 authentication metadata' \
         'sensitive-file replacement preservation diagnostic'
     assert_no_test_processes \
         'private staging sensitive-file replacement left worker processes'
@@ -3484,9 +3668,7 @@ test_mock_engine_private_staging() {
         assert_text_contains "${ASSERT_OUTPUT}" \
             "${successful_mutation_diagnostic}" \
             "replaced aria2 ${successful_mutation_name} removal diagnostic"
-        successful_mutation_staging=$(find "${OUTPUT_DIR}" \
-            -mindepth 1 -maxdepth 1 -type d \
-            -name '.yt-dlp-aria2.????????' -print -quit 2>/dev/null || true)
+        successful_mutation_staging=$(mock_private_metadata_directory)
         [[ -n ${successful_mutation_staging} &&
             -f ${successful_mutation_staging}/${successful_mutation_file} ]] \
             || fail "Replaced aria2 ${successful_mutation_name} inode was removed."
@@ -3494,7 +3676,7 @@ test_mock_engine_private_staging() {
             ! -e ${successful_mutation_staging}/cookies.txt ]] \
             || fail "Replaced aria2 ${successful_mutation_name} retained other secrets."
         assert_text_contains "${ASSERT_OUTPUT}" \
-            'preserving ambiguous active private aria2 staging directory' \
+            'preserving ambiguous private aria2 authentication metadata' \
             "replaced aria2 ${successful_mutation_name} preservation diagnostic"
         rm -rf -- "${successful_mutation_staging}"
         rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
@@ -3518,9 +3700,9 @@ test_mock_engine_private_staging() {
 
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
-    # Regression guard: a non-interceptable crash must leave a recoverable
-    # owner-marked private staging directory, and the next run may remove only
-    # candidates whose ownership and structure are unambiguous.
+    # SIGKILL cannot run cleanup. A later session must preserve all legacy
+    # residues because familiar names and markers do not authenticate the
+    # previous session's identities or prove its descendants have stopped.
     crash_started="${TEST_ROOT}/private-staging-crash-started"
     crash_result="${TEST_ROOT}/private-staging-crash-result.txt"
     crash_log="${TEST_ROOT}/private-staging-crash.log"
@@ -3563,6 +3745,7 @@ test_mock_engine_private_staging() {
     [[ -f ${crash_staging}/.yt-dlp-aria2-owner-v1 ]] \
         || fail 'Crash staging ownership marker is missing.'
 
+    crash_metadata=$(mock_private_metadata_directory)
     wait_for_worker_registration_cleanup 5 \
         'Crash worker readiness cleanup'
 
@@ -3680,17 +3863,17 @@ test_mock_engine_private_staging() {
         --mode audio \
         -- 'https://example.com/watch?v=private-staging-recovery'
 
-    [[ ! -e ${crash_staging} ]] \
-        || fail 'Owner-marked crash staging was not recovered.'
-    [[ ! -e ${legacy_exact} ]] \
-        || fail 'Exact legacy staging fingerprint was not recovered.'
+    [[ -d ${crash_staging} ]] \
+        || fail 'A previous-session marker incorrectly authorized crash cleanup.'
+    [[ -d ${legacy_exact} ]] \
+        || fail 'Legacy filenames incorrectly authorized deletion.'
     [[ -d ${ambiguous_marked} ]] \
         || fail 'Ambiguous marked staging was deleted.'
-    [[ ! -e ${ambiguous_marked}/plan.json &&
-        ! -e ${ambiguous_marked}/cookies.txt &&
-        ! -e ${ambiguous_marked}/aria2.input &&
-        ! -e ${ambiguous_marked}/manifest.json ]] \
-        || fail 'Ambiguous marked staging retained authenticated transfer metadata.'
+    [[ -f ${ambiguous_marked}/plan.json &&
+        -f ${ambiguous_marked}/cookies.txt &&
+        -f ${ambiguous_marked}/aria2.input &&
+        -f ${ambiguous_marked}/manifest.json ]] \
+        || fail 'Unauthenticated previous-session metadata was deleted automatically.'
     [[ -f ${ambiguous_marked}/foreign.txt ]] \
         || fail 'Ambiguous marked staging recovery removed an unknown artifact.'
     [[ -d ${invalid_mode} ]] \
@@ -3700,16 +3883,343 @@ test_mock_engine_private_staging() {
     [[ -d ${cross_candidate} ]] \
         || fail 'A different output directory was cleaned cross-destination.'
     assert_text_contains "${ASSERT_OUTPUT}" \
-        'preserving ambiguous private aria2 staging directory' \
+        'preserving legacy staging for manual inspection' \
         'ambiguous staging preservation diagnostic'
 
     rm -rf -- \
+        "${crash_staging}" \
+        "${crash_metadata}" \
+        "${legacy_exact}" \
         "${ambiguous_marked}" \
         "${invalid_mode}" \
         "${symlink_candidate}" \
         "${staging_symlink_target}" \
         "${other_output}"
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+}
+
+test_mock_engine_network_destination() {
+    local scenario mode protocol network_output result_file phase_log final_path private_path
+    local scenario_url='https://example.com/watch?v=network-fixture'
+    local -a profile_arguments=()
+
+    for scenario in direct-video direct-audio native-hls native-dash youtube-hls; do
+        network_output="${TEST_ROOT}/network espace é % [${scenario}]"
+        result_file="${TEST_ROOT}/network-${scenario}.result"
+        phase_log="${TEST_ROOT}/network-${scenario}.phases"
+        mkdir -- "${network_output}"
+        chmod 0755 -- "${network_output}"
+        mode=video
+        protocol=http
+        profile_arguments=()
+        scenario_url='https://example.com/watch?v=network-fixture'
+        case ${scenario} in
+            direct-audio) mode=audio ;;
+            native-hls) protocol=m3u8_native ;;
+            native-dash) protocol=http_dash_segments ;;
+            youtube-hls)
+                protocol=m3u8_native
+                profile_arguments=(--youtube-hls-firefox)
+                scenario_url='https://www.youtube.com/watch?v=network-fixture'
+                ;;
+            *) ;;
+        esac
+        prepare_argument_log "network-${scenario}"
+        assert_status 0 "permissive media destination ${scenario}" \
+            env MOCK_NETWORK_PERMISSIONS=1 \
+            MOCK_NETWORK_CHECK="${MOCK_BIN}/network-check.py" \
+            MOCK_NETWORK_PHASE_LOG="${phase_log}" \
+            MOCK_OUTPUT_DIR="${network_output}" \
+            MOCK_NETWORK_DESTINATION="${network_output}" \
+            MOCK_PLAN_PROTOCOL="${protocol}" \
+            "${PROJECT_DIR}/download-video.sh" \
+            --output-dir "${network_output}" --mode "${mode}" \
+            --result-file "${result_file}" "${profile_arguments[@]}" \
+            -- "${scenario_url}"
+        [[ -s ${result_file} ]] || fail "No final result for ${scenario}."
+        IFS= read -r final_path <"${result_file}"
+        [[ ${final_path%/*} == "${network_output}" && -s ${final_path} ]] \
+            || fail "Final media was not published to the selected destination for ${scenario}."
+        while IFS= read -r private_path; do
+            [[ ! -e ${private_path} ]] \
+                || fail "Private metadata survived controlled completion for ${scenario}."
+        done <"${phase_log}.paths"
+
+        assert_file_has_line "${phase_log}" 'plan:private' \
+            "private metadata during ${scenario} extraction"
+        assert_file_not_contains "${phase_log}" 'leaked' \
+            "secrets absent from destination during ${scenario}"
+        env MOCK_NETWORK_PHASE_LOG="${phase_log}" \
+            MOCK_OUTPUT_DIR="${network_output}" \
+            python3 "${MOCK_BIN}/network-check.py" final
+        assert_text_not_contains "${ASSERT_OUTPUT}" 'NETWORK_FIXTURE_' \
+            "diagnostics contain no sentinel for ${scenario}"
+        if [[ ${protocol} == http ]]; then
+            assert_file_has_line "${phase_log}" 'aria2:private' \
+                'direct aria2 metadata remains private while in use'
+        fi
+        assert_file_has_line "${phase_log}" 'native:private' \
+            "yt-dlp transfer/postprocess metadata for ${scenario}"
+    done
+}
+
+test_mock_engine_network_failures() {
+    local scenario output result phases variable expected protocol workspace line
+    local private_path failure_value
+    local -a profile=()
+    local -a remux_temps=()
+
+    for scenario in plan aria2 native remux source-swap remux-swap; do
+        output="${TEST_ROOT}/network-failure-${scenario}"
+        result="${TEST_ROOT}/network-failure-${scenario}.result"
+        phases="${TEST_ROOT}/network-failure-${scenario}.phases"
+        mkdir -- "${output}"
+        expected=23
+        protocol=http
+        profile=()
+        case ${scenario} in
+            plan) variable=MOCK_PLAN_EXIT_STATUS ;;
+            aria2)
+                variable=MOCK_ARIA2_EXIT_STATUS
+                expected=29
+                ;;
+            native)
+                variable=MOCK_YTDLP_EXIT_STATUS
+                protocol=m3u8_native
+                ;;
+            remux)
+                variable=MOCK_FFMPEG_EXIT_STATUS
+                expected=9
+                protocol=m3u8_native
+                profile=(--youtube-hls-firefox)
+                ;;
+            source-swap)
+                variable=MOCK_NETWORK_REPLACE_AT_PROBE
+                expected=73
+                ;;
+            remux-swap)
+                variable=MOCK_REPLACE_HLS_REMUX_AFTER_WRITE
+                expected=13
+                protocol=m3u8_native
+                profile=(--youtube-hls-firefox)
+                ;;
+            *) fail "Unknown network failure scenario: ${scenario}" ;;
+        esac
+        failure_value=${expected}
+        if [[ ${scenario} == remux-swap ]]; then
+            failure_value=1
+        fi
+        prepare_argument_log "network-failure-${scenario}"
+        assert_status "${expected}" "network ${scenario} preserves failure status" \
+            env MOCK_NETWORK_PERMISSIONS=1 \
+            MOCK_NETWORK_CHECK="${MOCK_BIN}/network-check.py" \
+            MOCK_NETWORK_PHASE_LOG="${phases}" \
+            MOCK_NETWORK_DESTINATION="${output}" MOCK_OUTPUT_DIR="${output}" \
+            MOCK_PLAN_PROTOCOL="${protocol}" "${variable}=${failure_value}" \
+            MOCK_NETWORK_MUTATION_MARKER="${phases}.mutation" \
+            "${PROJECT_DIR}/download-video.sh" \
+            --output-dir "${output}" --mode video --result-file "${result}" \
+            "${profile[@]}" -- 'https://www.youtube.com/watch?v=network-failure'
+        [[ ! -e ${result} ]] || fail "Network ${scenario} published a failed result."
+        assert_directory_empty "${output}" \
+            "network ${scenario} leaves destination untouched on failure"
+        if [[ -f ${phases}.paths ]]; then
+            while IFS= read -r private_path; do
+                [[ ! -e ${private_path} ]] \
+                    || fail "Network ${scenario} retained private metadata."
+            done <"${phases}.paths"
+        fi
+        if [[ ${scenario} == remux || ${scenario} == source-swap || ${scenario} == remux-swap ]]; then
+            workspace=''
+            while IFS= read -r line; do
+                case ${line} in
+                    'Local media workspace: '*) workspace=${line#*: } ;;
+                    *) ;;
+                esac
+            done <<<"${ASSERT_OUTPUT}"
+            if [[ ${scenario} == remux || ${scenario} == remux-swap ]]; then
+                [[ -n ${workspace} && -s ${workspace}/'Mock media [abc123].mp4' ]] \
+                    || fail 'A network remux failure lost the valid repaired HLS source.'
+                if [[ ${scenario} == remux-swap ]]; then
+                    shopt -s nullglob
+                    remux_temps=("${workspace}"/.yt-dlp-remux.*.mkv)
+                    shopt -u nullglob
+                    assert_equals 1 "${#remux_temps[@]}" \
+                        'network remux cleanup preserves the replaced temporary'
+                    assert_file_has_line "${remux_temps[0]}" \
+                        'foreign HLS remux replacement' \
+                        'network parent cleanup preserves the foreign remux inode'
+                fi
+            else
+                assert_text_contains "${ASSERT_OUTPUT}" \
+                    'the validated local media changed before publication' \
+                    'source replacement during FFprobe cannot become validated'
+                assert_file_has_line "${workspace}/Mock media [abc123].webm" \
+                    'foreign media substituted during FFprobe' \
+                    'foreign replaced source is preserved after rejected publication'
+            fi
+            # This private directory was created by this exact fixture run and
+            # deliberately preserved by the engine for recovery.
+            rm -rf -- "${workspace}"
+        fi
+        assert_text_not_contains "${ASSERT_OUTPUT}" 'NETWORK_FIXTURE_' \
+            "network ${scenario} diagnostics contain no secrets"
+    done
+}
+
+test_mock_engine_network_signals() {
+    local scenario output result phases marker termination protocol private_path
+    local state_home log_dir
+    local -a invocation=()
+    local -a retained_logs=()
+
+    for scenario in HUP INT TERM gui-direct gui-hls; do
+        output="${TEST_ROOT}/network-cancel-${scenario}"
+        result="${TEST_ROOT}/network-cancel-${scenario}.result"
+        phases="${TEST_ROOT}/network-cancel-${scenario}.phases"
+        marker="${TEST_ROOT}/network-cancel-${scenario}.started"
+        termination="${TEST_ROOT}/network-cancel-${scenario}.terminated"
+        mkdir -- "${output}"
+        protocol=http
+        case ${scenario} in
+            INT | gui-hls) protocol=m3u8_native ;;
+            TERM) protocol=http_dash_segments ;;
+            *) ;;
+        esac
+        invocation=(
+            env MOCK_NETWORK_PERMISSIONS=1
+            MOCK_NETWORK_CHECK="${MOCK_BIN}/network-check.py"
+            MOCK_NETWORK_PHASE_LOG="${phases}"
+            MOCK_NETWORK_DESTINATION="${output}" MOCK_OUTPUT_DIR="${output}"
+            MOCK_PLAN_PROTOCOL="${protocol}" MOCK_LONG_DOWNLOAD=1
+            MOCK_STARTED_MARKER="${marker}"
+            MOCK_TERMINATION_MARKER="${termination}"
+        )
+        prepare_argument_log "network-cancel-${scenario}"
+        if [[ ${scenario} == gui-* ]]; then
+            # Cancellation retains a sanitized diagnostic. Keep each fixture's
+            # state separate from the later successful GUI scenarios.
+            state_home="${TEST_ROOT}/network-cancel-${scenario}.state"
+            log_dir="${state_home}/yt-dlp-aria2-downloader"
+            assert_status 130 "network ${scenario} cancellation" \
+                "${invocation[@]}" XDG_STATE_HOME="${state_home}" MOCK_CANCEL=1 \
+                MOCK_USE_DEFAULT_PROFILE=1 \
+                MOCK_ZENITY_WAIT_FOR_WORKER_START=1 "${GUI_UNDER_TEST}"
+            shopt -s nullglob
+            retained_logs=("${log_dir}"/download-*.log)
+            shopt -u nullglob
+            assert_equals 1 "${#retained_logs[@]}" \
+                "network ${scenario} retains one cancellation diagnostic"
+            assert_path_mode "${retained_logs[0]}" 600 \
+                "network ${scenario} cancellation diagnostic mode"
+            assert_file_not_contains "${retained_logs[0]}" 'NETWORK_FIXTURE_' \
+                "network ${scenario} cancellation diagnostic contains no secrets"
+            assert_retained_log_identity_footer "${retained_logs[0]}" \
+                "network ${scenario} cancellation diagnostic"
+            assert_no_retained_log_staging "${log_dir}" \
+                "network ${scenario} cancellation diagnostic"
+        else
+            assert_status 0 "network ${scenario} signal supervision" \
+                "${invocation[@]}" python3 "${MOCK_BIN}/network-signal.py" \
+                "${scenario}" "${PROJECT_DIR}/download-video.sh" \
+                "${output}" "${result}" "${TEST_ROOT}/network-cancel-${scenario}.log"
+        fi
+        [[ ! -e ${result} ]] || fail "Network ${scenario} cancellation published a result."
+        assert_directory_empty "${output}" \
+            "network ${scenario} leaves no remote partial media"
+        assert_file_not_contains "${phases}" 'leaked' \
+            "network ${scenario} private metadata during cancellation"
+        while IFS= read -r private_path; do
+            [[ ! -e ${private_path} ]] \
+                || fail "Network ${scenario} retained private metadata."
+        done <"${phases}.paths"
+        assert_no_test_processes "network ${scenario} left descendants"
+    done
+}
+
+test_mock_engine_network_cleanup_boundaries() {
+    local source_copy="${TEST_ROOT}/cleanup-boundaries-source.sh"
+    local harness="${TEST_ROOT}/cleanup-boundaries-harness.sh"
+    local case_name workspace_record workspace_path
+    local internal_record_log="${TEST_ROOT}/internal-record-replacement-path"
+    local internal_record=''
+
+    prepare_argument_log 'internal-record-replacement-after-download'
+    assert_status 0 'CLI without result-file preserves an exchanged internal path record' \
+        env MOCK_REPLACE_RESULT_RECORD_AFTER_WRITE=1 \
+        MOCK_REPLACED_RESULT_RECORD_PATH="${internal_record_log}" \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=internal-record-replacement'
+    IFS= read -r internal_record <"${internal_record_log}"
+    assert_file_has_line "${internal_record}" 'foreign result-record replacement' \
+        'parent metadata cleanup cannot erase a refused internal-record replacement'
+    [[ ! -e ${internal_record%/*}/plan.json &&
+        ! -e ${internal_record%/*}/cookies.txt &&
+        ! -e ${internal_record%/*}/aria2.input &&
+        ! -e ${internal_record%/*}/manifest.json ]] \
+        || fail 'Preserved internal-record replacement retained authentication metadata.'
+    rm -rf -- "${internal_record%/*}"
+    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${source_copy}"
+    cat >"${harness}" <<'EOF_NETWORK_CLEANUP_BOUNDARIES'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1090 # The test supplies the current engine without main.
+source "${1}"
+readonly PRIVATE_ARIA2_HELPER=${2}
+case_name=$3
+workspace_record=$4
+media_root=$(python3 "${PRIVATE_ARIA2_HELPER}" private-root --disk)
+MEDIA_WORKSPACE=$(mktemp -d --tmpdir="${media_root}" '.fixture-media.XXXXXXXX')
+OUTPUT_DIR=${MEDIA_WORKSPACE}
+get_path_identity MEDIA_WORKSPACE_IDENTITY "${MEDIA_WORKSPACE}" directory
+exec {MEDIA_WORKSPACE_FD}<"${MEDIA_WORKSPACE}"
+printf '%s\n' "${MEDIA_WORKSPACE}" >"${workspace_record}"
+case ${case_name} in
+    staging-file)
+        PRIVATE_ARIA2_STAGING="${MEDIA_WORKSPACE}/.yt-dlp-aria2.Changed1"
+        mkdir -m 700 -- "${PRIVATE_ARIA2_STAGING}"
+        get_path_identity PRIVATE_ARIA2_STAGING_IDENTITY \
+            "${PRIVATE_ARIA2_STAGING}" directory
+        mv -- "${PRIVATE_ARIA2_STAGING}" "${PRIVATE_ARIA2_STAGING}.before-swap"
+        printf '%s\n' 'foreign staging replacement' >"${PRIVATE_ARIA2_STAGING}"
+        ;;
+    repaired-source)
+        HLS_SOURCE_TO_CLEAN="${MEDIA_WORKSPACE}/source.mp4"
+        printf '%s\n' 'original repaired source' >"${HLS_SOURCE_TO_CLEAN}"
+        get_path_identity HLS_SOURCE_TO_CLEAN_IDENTITY \
+            "${HLS_SOURCE_TO_CLEAN}" regular-file
+        mv -- "${HLS_SOURCE_TO_CLEAN}" "${HLS_SOURCE_TO_CLEAN}.before-swap"
+        printf '%s\n' 'foreign repaired source' >"${HLS_SOURCE_TO_CLEAN}"
+        remove_repaired_hls_source
+        ;;
+    *) exit 64 ;;
+esac
+trap cleanup EXIT
+exit 7
+EOF_NETWORK_CLEANUP_BOUNDARIES
+    for case_name in staging-file repaired-source; do
+        workspace_record="${TEST_ROOT}/cleanup-boundary-${case_name}.path"
+        prepare_argument_log "network-cleanup-boundary-${case_name}"
+        assert_status 7 "parent workspace preserves refused ${case_name} replacement" \
+            bash "${harness}" "${source_copy}" \
+            "${PROJECT_DIR}/private-aria2-plan.py" "${case_name}" "${workspace_record}"
+        IFS= read -r workspace_path <"${workspace_record}"
+        if [[ ${case_name} == staging-file ]]; then
+            assert_file_has_line "${workspace_path}/.yt-dlp-aria2.Changed1" \
+                'foreign staging replacement' \
+                'regular-file staging replacement survives parent cleanup'
+        else
+            assert_file_has_line "${workspace_path}/source.mp4" \
+                'foreign repaired source' \
+                'cleared HLS fields cannot bypass persistent preservation'
+            assert_file_has_line "${workspace_path}/source.mp4.before-swap" \
+                'original repaired source' 'moved original source is preserved'
+        fi
+        rm -rf -- "${workspace_path}"
+    done
 }
 
 run_mock_engine_core_group() {
@@ -3732,6 +4242,10 @@ run_mock_engine_group() {
     run_mock_engine_core_group
     run_mock_engine_hls_group
     run_mock_engine_staging_group
+    test_mock_engine_network_destination
+    test_mock_engine_network_failures
+    test_mock_engine_network_signals
+    test_mock_engine_network_cleanup_boundaries
 }
 
 run_selected_mock_engine_group() {
@@ -3740,6 +4254,12 @@ run_selected_mock_engine_group() {
         engine-core) run_mock_engine_core_group ;;
         engine-hls) run_mock_engine_hls_group ;;
         engine-staging) run_mock_engine_staging_group ;;
+        engine-network)
+            test_mock_engine_network_destination
+            test_mock_engine_network_failures
+            test_mock_engine_network_signals
+            test_mock_engine_network_cleanup_boundaries
+            ;;
         *) ;;
     esac
 }
@@ -4511,6 +5031,8 @@ test_mock_gui_diagnostic_logs() {
     mkdir -p -- "${single_line_bundle}"
     install -m 0755 -- "${PROJECT_DIR}/download-video-gui.sh" \
         "${PROJECT_DIR}/progress-monitor.sh" "${single_line_bundle}/"
+    install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
+        "${single_line_bundle}/private-aria2-plan.py"
     cat >"${single_line_bundle}/download-video.sh" <<'EOF_SINGLE_LINE_ENGINE'
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
@@ -4638,6 +5160,8 @@ EOF_SINGLE_LINE_MONITOR
     mkdir -p -- "${final_result_bundle}"
     install -m 0755 -- "${PROJECT_DIR}/download-video-gui.sh" \
         "${PROJECT_DIR}/progress-monitor.sh" "${final_result_bundle}/"
+    install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
+        "${final_result_bundle}/private-aria2-plan.py"
     cat >"${final_result_bundle}/download-video.sh" <<'EOF_MISSING_FINAL_ENGINE'
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
@@ -4825,7 +5349,7 @@ EOF_RELATIVE_TMPDIR_MKTEMP
         "${GUI_UNDER_TEST}"
     cd -- "${original_directory}"
     read_arguments "${mktemp_probe_log}" mktemp_probe_arguments
-    assert_array_contains mktemp_probe_arguments '--tmpdir=/tmp' \
+    assert_array_contains mktemp_probe_arguments "--tmpdir=${RUNTIME_DIR}/yt-dlp-aria2-downloader-${EUID}" \
         'relative TMPDIR absolute fallback'
     assert_array_not_contains mktemp_probe_arguments '--tmpdir=relative-tmp' \
         'relative TMPDIR is never passed to mktemp'
@@ -4849,7 +5373,7 @@ EOF_RELATIVE_TMPDIR_MKTEMP
         MOCK_ZENITY_ENTRY_STATUS=1 \
         "${GUI_UNDER_TEST}"
     read_arguments "${mktemp_probe_log}" mktemp_probe_arguments
-    assert_array_contains mktemp_probe_arguments '--tmpdir=/tmp' \
+    assert_array_contains mktemp_probe_arguments "--tmpdir=${RUNTIME_DIR}/yt-dlp-aria2-downloader-${EUID}" \
         'unsafe TMPDIR safe fallback'
     assert_array_not_contains mktemp_probe_arguments \
         "--tmpdir=${unsafe_tmp_dir}" \
@@ -4862,7 +5386,7 @@ EOF_RELATIVE_TMPDIR_MKTEMP
     chmod 1777 -- "${sticky_tmp_dir}"
     : >"${mktemp_probe_log}"
     prepare_argument_log 'sticky-tmpdir-accepted'
-    assert_status 0 'current-user sticky TMPDIR remains supported' \
+    assert_status 0 'private local root takes precedence over sticky TMPDIR' \
         env PATH="${mktemp_probe_bin}:${PATH}" \
         TMPDIR="${sticky_tmp_dir}" \
         MOCK_REAL_MKTEMP="${real_mktemp}" \
@@ -4870,9 +5394,9 @@ EOF_RELATIVE_TMPDIR_MKTEMP
         MOCK_ZENITY_ENTRY_STATUS=1 \
         "${GUI_UNDER_TEST}"
     read_arguments "${mktemp_probe_log}" mktemp_probe_arguments
-    assert_array_contains mktemp_probe_arguments \
+    assert_array_not_contains mktemp_probe_arguments \
         "--tmpdir=${sticky_tmp_dir}" \
-        'sticky TMPDIR is passed to mktemp'
+        'TMPDIR is not used as an unqualified private metadata root'
     assert_directory_empty "${sticky_tmp_dir}" \
         'sticky TMPDIR private state is cleaned'
 
@@ -5066,7 +5590,50 @@ with tempfile.TemporaryDirectory(prefix="gui-settings-signal-") as directory:
 PY_SETTINGS_SIGNAL
 }
 
+test_mock_gui_cleanup_unconfirmed_shutdown() {
+    local source_copy="${TEST_ROOT}/gui-cleanup-source.sh"
+    local fixture="${TEST_ROOT}/gui-cleanup-fixture.sh"
+    local case_name session
+
+    sed '$d' "${PROJECT_DIR}/download-video-gui.sh" >"${source_copy}"
+    cat >"${fixture}" <<'EOF_GUI_CLEANUP_QUIESCENCE'
+#!/usr/bin/env bash
+set -euo pipefail
+# Load the real cleanup function without entering the GUI main loop.
+# shellcheck disable=SC1090
+source "${MOCK_GUI_CLEANUP_SOURCE:?}"
+signal_gui_children() { :; }
+stop_worker() { return 1; }
+stop_gui_children() { return 1; }
+retain_sanitized_log() { printf 'unsafe retention\n' >"${TEMP_DIR}/retention"; }
+TEMP_DIR=${MOCK_GUI_CLEANUP_SESSION:?}
+case ${MOCK_GUI_CLEANUP_CASE:?} in
+    worker) WORKER_PID=999999 ;;
+    gui) ZENITY_PID=999999 ;;
+esac
+trap cleanup EXIT
+exit 7
+EOF_GUI_CLEANUP_QUIESCENCE
+    for case_name in worker gui; do
+        session="${TEST_ROOT}/gui-cleanup-unconfirmed-${case_name}"
+        mkdir -- "${session}"
+        printf '%s\n' 'active private state' >"${session}/sentinel"
+        assert_status 7 "GUI preserves active private files after unconfirmed ${case_name} shutdown" \
+            env MOCK_GUI_CLEANUP_SOURCE="${source_copy}" \
+            MOCK_GUI_CLEANUP_SESSION="${session}" \
+            MOCK_GUI_CLEANUP_CASE="${case_name}" bash "${fixture}"
+        assert_file_has_line "${session}/sentinel" 'active private state' \
+            "unconfirmed ${case_name} state is preserved"
+        [[ ! -e ${session}/retention ]] \
+            || fail 'GUI read a live producer log after unconfirmed shutdown.'
+        assert_text_contains "${ASSERT_OUTPUT}" \
+            'preserving active private GUI temporary files' \
+            'unconfirmed shutdown preservation diagnostic'
+    done
+}
+
 run_mock_gui_state_group() {
+    test_mock_gui_cleanup_unconfirmed_shutdown
     test_mock_gui_config_recovery
     test_mock_gui_settings_signal_cleanup
     test_mock_gui_file_selection
@@ -5272,6 +5839,7 @@ test_mock_signal_private_record_registration() {
     local record_path=''
     local record_list=''
     local record_count=0
+    local batch_path=''
 
     sed '$d' "${PROJECT_DIR}/download-video.sh" >"${source_copy}"
     chmod 0600 -- "${source_copy}"
@@ -5280,6 +5848,7 @@ test_mock_signal_private_record_registration() {
 set -euo pipefail
 # shellcheck disable=SC1090 # The test passes the engine function-only copy.
 source "${1}"
+readonly PRIVATE_ARIA2_HELPER=${5}
 OUTPUT_DIR="${2}/output"
 OUTPUT_LOCK_ROOT="${2}/lock"
 RESULT_FILE=''
@@ -5353,10 +5922,12 @@ EOF_RECORD_REGISTRATION_HARNESS
             if [[ ${checkpoint} == repeat ]]; then
                 expected_status=129
             fi
+            printf 'Mock scenario: record-registration-%s-%s\n' \
+                "${record_kind}" "${checkpoint}"
             assert_status "${expected_status}" \
                 "${record_kind} result-record ${checkpoint} registration signal" \
                 bash "${harness_path}" "${source_copy}" "${case_root}" \
-                "${record_kind}" "${checkpoint}"
+                "${record_kind}" "${checkpoint}" "${PROJECT_DIR}/private-aria2-plan.py"
             record_list="${case_root}/record-paths.bin"
             if ! find "${case_root}" -type f \
                 \( -name '.yt-dlp-result.*' -o -name '.yt-dlp-path.*' \) \
@@ -5382,8 +5953,18 @@ EOF_RECORD_REGISTRATION_HARNESS
                 assert_equals 0 "${record_count}" \
                     'initialization signal removes every authenticated result record'
             fi
-            assert_directory_empty "${case_root}/lock" \
-                'initialization signal starts no private URL batch'
+            if [[ ${record_kind} == internal && ${checkpoint} == replacement ]]; then
+                # The internal record now lives in the private metadata tree.
+                # Its replaced inode must preserve that parent while no URL
+                # batch may have been created before deferred signal replay.
+                batch_path=$(find "${case_root}/lock" -name '.url-batch.*' -print -quit) \
+                    || fail 'Unable to inspect private state after the initialization signal.'
+                [[ -z ${batch_path} ]] \
+                    || fail 'Initialization signal proceeded to private URL creation.'
+            else
+                assert_directory_empty "${case_root}/lock" \
+                    'initialization signal cleans the authenticated metadata tree'
+            fi
         done
     done
 }
@@ -5640,8 +6221,8 @@ test_mock_signal_cli_pre_env_registration() {
             "pre-env ${mode} SIGINT left descendants"
         shopt -s nullglob
         registration_leftovers=(
-            "${RUNTIME_DIR}/yt-dlp-aria2-downloader"/.worker-pgid.*
-            "${RUNTIME_DIR}/yt-dlp-aria2-downloader"/.worker-ready.*
+            "${RUNTIME_DIR}/yt-dlp-aria2-downloader-${EUID}"/.worker-pgid.*
+            "${RUNTIME_DIR}/yt-dlp-aria2-downloader-${EUID}"/.worker-ready.*
         )
         shopt -u nullglob
         if ((${#registration_leftovers[@]} != 0)); then
@@ -5698,8 +6279,8 @@ test_mock_signal_cli_pre_env_registration() {
             || fail "Pre-env escalation ${mode} took ${elapsed_milliseconds}ms."
         shopt -s nullglob
         registration_leftovers=(
-            "${RUNTIME_DIR}/yt-dlp-aria2-downloader"/.worker-pgid.*
-            "${RUNTIME_DIR}/yt-dlp-aria2-downloader"/.worker-ready.*
+            "${RUNTIME_DIR}/yt-dlp-aria2-downloader-${EUID}"/.worker-pgid.*
+            "${RUNTIME_DIR}/yt-dlp-aria2-downloader-${EUID}"/.worker-ready.*
         )
         shopt -u nullglob
         if ((${#registration_leftovers[@]} != 0)); then
@@ -5942,9 +6523,11 @@ test_mock_signal_cli_pgid_discovery_race() {
     timeout --signal=TERM --kill-after=2s 8s \
         env MOCK_CLI_SOURCE_COPY="${cli_source_copy}" \
         MOCK_WORKER_IDENTITY="${race_identity}" \
+        MOCK_PRIVATE_ARIA2_HELPER="${PROJECT_DIR}/private-aria2-plan.py" \
         bash -c '
             set -euo pipefail
             source "${MOCK_CLI_SOURCE_COPY}"
+            readonly PRIVATE_ARIA2_HELPER=${MOCK_PRIVATE_ARIA2_HELPER}
             trap cleanup EXIT
             resolve_lock_root
             wait_for_download_pgid() {
@@ -7088,7 +7671,7 @@ test_mock_runtime_missing_zenity() {
     no_zenity_bin="${TEST_ROOT}/no-zenity-bin"
     mkdir -p -- "${no_zenity_bin}"
     for required_command in \
-        bash chmod date dirname grep mkdir mkfifo mktemp mv realpath rm sed setsid sleep \
+        bash chmod date dirname grep mkdir mkfifo mktemp mv python3 realpath rm sed setsid sleep \
         stat tail timeout flock sha256sum; do
         required_command_path=$(command -v "${required_command}") \
             || fail "Required host command was not found: ${required_command}"

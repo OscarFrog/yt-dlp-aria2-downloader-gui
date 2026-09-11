@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: MIT
 """
-Build and publish private aria2 direct-transfer plans.
+Manage local private state, direct-transfer plans and safe media publication.
 
 Project: yt-dlp-aria2-downloader-gui
 Repository path: private-aria2-plan.py
 
-The helper deliberately keeps media URLs and HTTP headers out of process
-arguments. It accepts only direct HTTP(S) formats selected by yt-dlp, writes an
-aria2 input file with mode 0600, and later publishes successfully downloaded
-staging files under the exact filenames expected by yt-dlp.
+The helper selects and validates local private storage before secret writes,
+keeps media URLs and headers in owner-only plans, and publishes completed media
+without replacing existing names. Shared destinations receive an exclusive
+media-only copy; sensitive transport and browser state remains local.
 
 This file is intentionally non-executable. Invoke it explicitly with python3.
 """
@@ -16,13 +16,17 @@ This file is intentionally non-executable. Invoke it explicitly with python3.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import json
 import os
 import re
+import secrets
 import signal
 import stat
 import sys
 from pathlib import Path
+from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 
@@ -42,6 +46,11 @@ DIRECT_REPLAY_SAFE_HEADERS = frozenset(
 FORMAT_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 EXTENSION_RE = re.compile(r"^[A-Za-z0-9]+$")
 STAGING_NAME_RE = re.compile(r"^item-[0-9]{3}\.download$")
+LOCAL_DISK_FILESYSTEMS = frozenset({0xEF53, 0x58465342, 0x9123683E, 0x2FC12FC1})
+LOCAL_MEMORY_FILESYSTEMS = frozenset({0x01021994})
+NO_REPLACE_UNSUPPORTED = frozenset(
+    {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP}
+)
 
 
 class PlanError(Exception):
@@ -58,6 +67,147 @@ class PublicationInterrupted(PlanError):
 
 class DestinationExistsError(PlanError):
     """A final destination already exists and must not be overwritten."""
+
+
+def filesystem_type(descriptor: int) -> int:
+    """Read the filesystem containing an opened inode, not a pathname guess."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = ctypes.create_string_buffer(256)
+    fstatfs = libc.fstatfs
+    fstatfs.argtypes = [ctypes.c_int, ctypes.c_void_p]
+    fstatfs.restype = ctypes.c_int
+    if fstatfs(descriptor, ctypes.byref(result)) != 0:
+        raise OSError(ctypes.get_errno(), "unable to inspect filesystem")
+    return ctypes.c_ulong.from_buffer(result).value
+
+
+def require_local_filesystem(descriptor: int, *, disk: bool = False) -> None:
+    allowed = LOCAL_DISK_FILESYSTEMS
+    if not disk:
+        allowed = allowed | LOCAL_MEMORY_FILESYSTEMS
+    if filesystem_type(descriptor) not in allowed:
+        raise PlanError("directory is not on a supported local filesystem")
+
+
+@contextmanager
+def directory_descriptor(path: Path, *, trusted_chain: bool = False):
+    """Anchor each physical path component without following symlinks."""
+    if not path.is_absolute() or ".." in path.parts:
+        raise PlanError("directory must use an absolute physical path")
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for component in path.parts[1:]:
+            child = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = child
+            if trusted_chain:
+                metadata = os.fstat(descriptor)
+                if metadata.st_uid not in {0, os.geteuid()}:
+                    raise PlanError("directory chain has an untrusted owner")
+                if metadata.st_mode & 0o022 and not metadata.st_mode & stat.S_ISVTX:
+                    raise PlanError("directory chain is writable without sticky protection")
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def require_private_directory_descriptor(descriptor: int) -> None:
+    metadata = os.fstat(descriptor)
+    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise PlanError("private directory must belong to the current user with mode 0700")
+
+
+def private_root_candidates(*, disk: bool, no_runtime: bool) -> list[tuple[Path, bool]]:
+    candidates: list[tuple[Path, bool]] = []
+    if disk:
+        cache = os.environ.get("XDG_CACHE_HOME", "")
+        home = os.environ.get("HOME", "")
+        if cache:
+            candidates.append((Path(cache), False))
+        if home:
+            candidates.append((Path(home) / ".cache", False))
+        candidates.append((Path("/var/tmp"), False))
+    else:
+        runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+        if runtime and not no_runtime:
+            candidates.append((Path(runtime), True))
+        candidates.extend(((Path("/tmp"), False), (Path("/var/tmp"), False)))
+    return candidates
+
+
+def select_private_root(*, disk: bool = False, no_runtime: bool = False) -> Path:
+    """Create only our own leaf, then prove its privacy before any secret write."""
+    leaf = f"yt-dlp-aria2-downloader-{os.geteuid()}"
+    for parent, runtime in private_root_candidates(disk=disk, no_runtime=no_runtime):
+        try:
+            reject_controls(str(parent), "private root", reject_whitespace=False)
+            with directory_descriptor(parent, trusted_chain=True) as parent_fd:
+                require_local_filesystem(parent_fd, disk=disk)
+                if runtime:
+                    require_private_directory_descriptor(parent_fd)
+                try:
+                    os.mkdir(leaf, mode=0o700, dir_fd=parent_fd)
+                except FileExistsError:
+                    pass
+                root_fd = os.open(
+                    leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=parent_fd,
+                )
+                try:
+                    require_private_directory_descriptor(root_fd)
+                    require_local_filesystem(root_fd, disk=disk)
+                    probe_name = f".probe-{secrets.token_hex(16)}"
+                    probe_fd = os.open(
+                        probe_name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        0o600, dir_fd=root_fd,
+                    )
+                    try:
+                        probe_stat = os.fstat(probe_fd)
+                        if (
+                            not stat.S_ISREG(probe_stat.st_mode)
+                            or probe_stat.st_uid != os.geteuid()
+                            or stat.S_IMODE(probe_stat.st_mode) != 0o600
+                        ):
+                            raise PlanError("filesystem does not enforce private file permissions")
+                        os.write(probe_fd, b"private storage probe\n")
+                        os.fsync(probe_fd)
+                    finally:
+                        os.close(probe_fd)
+                        os.unlink(probe_name, dir_fd=root_fd)
+                    root_stat = os.fstat(root_fd)
+                    visible = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                    if (visible.st_dev, visible.st_ino) != (root_stat.st_dev, root_stat.st_ino):
+                        raise PlanError("private directory changed during validation")
+                    if directory_identity(parent / leaf) != (root_stat.st_dev, root_stat.st_ino):
+                        raise PlanError("private directory path changed during validation")
+                    return parent / leaf
+                finally:
+                    os.close(root_fd)
+        except (OSError, PlanError):
+            # No candidate receives secrets until every privacy check passes.
+            # Existing user directories are never chmod'ed to make them usable.
+            continue
+    kind = "local disk workspace" if disk else "local private temporary directory"
+    raise PlanError(f"no safe writable {kind} is available; check local storage and permissions")
+
+
+def private_root(args: argparse.Namespace) -> int:
+    print(select_private_root(disk=args.disk, no_runtime=args.no_runtime))
+    return 0
+
+
+def media_local_safe(args: argparse.Namespace) -> int:
+    try:
+        with directory_descriptor(Path(args.output_dir), trusted_chain=True) as descriptor:
+            require_local_filesystem(descriptor)
+    except (OSError, PlanError):
+        return 1
+    return 0
 
 
 def reject_controls(value: str, label: str, *, reject_whitespace: bool) -> None:
@@ -134,6 +284,11 @@ def resolve_staging_directory(raw_path: str, output_dir: Path) -> Path:
     if resolved.parent != output_dir:
         raise PlanError("staging directory must be a direct child of output directory")
 
+    with directory_descriptor(resolved, trusted_chain=True) as descriptor:
+        require_local_filesystem(descriptor)
+        if os.fstat(descriptor).st_dev != output_dir.stat().st_dev:
+            raise PlanError("staging directory must share the output filesystem")
+
     return resolved
 
 
@@ -166,7 +321,20 @@ def read_json(path: Path, label: str) -> object:
     require_private_regular_file(path, label)
 
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        with directory_descriptor(path.parent, trusted_chain=True) as parent_fd:
+            require_local_filesystem(parent_fd)
+            descriptor = os.open(
+                path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd
+            )
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                metadata = os.fstat(handle.fileno())
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != os.geteuid()
+                    or stat.S_IMODE(metadata.st_mode) & 0o077
+                ):
+                    raise PlanError(f"{label} changed or is not private")
+                return json.load(handle)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise PlanError(f"unable to read valid JSON from {label}") from exc
 
@@ -297,15 +465,25 @@ def component_destination(
 
 
 def write_private_new(path: Path, payload: str) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 
     try:
-        descriptor = os.open(path, flags, 0o600)
+        with directory_descriptor(path.parent, trusted_chain=True) as parent_fd:
+            require_private_directory_descriptor(parent_fd)
+            require_local_filesystem(parent_fd)
+            descriptor = os.open(path.name, flags, 0o600, dir_fd=parent_fd)
     except OSError as exc:
         raise PlanError(f"unable to create private file: {path.name}") from exc
 
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            metadata = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+            ):
+                raise PlanError("new private file does not enforce owner-only permissions")
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
@@ -332,6 +510,10 @@ def write_private_new(path: Path, payload: str) -> None:
 def build_plan(args: argparse.Namespace) -> int:
     output_dir = resolve_output_directory(args.output_dir)
     staging_dir = resolve_staging_directory(args.staging_dir, output_dir)
+    private_dir = Path(args.private_dir)
+    with directory_descriptor(private_dir, trusted_chain=True) as private_fd:
+        require_private_directory_descriptor(private_fd)
+        require_local_filesystem(private_fd)
 
     plan_path = Path(args.plan)
     plan = read_json(plan_path, "yt-dlp plan")
@@ -392,12 +574,12 @@ def build_plan(args: argparse.Namespace) -> int:
 
     aria2_input_path = resolve_private_output_path(
         args.aria2_input,
-        staging_dir,
+        private_dir,
         "aria2 input file",
     )
     manifest_path = resolve_private_output_path(
         args.manifest,
-        staging_dir,
+        private_dir,
         "transfer manifest",
     )
 
@@ -443,9 +625,11 @@ def build_plan(args: argparse.Namespace) -> int:
         )
 
     manifest = {
-        "version": 1,
+        "version": 2,
         "output_dir": str(output_dir),
         "staging_dir": str(staging_dir),
+        "output_identity": list(directory_identity(output_dir)),
+        "staging_identity": list(directory_identity(staging_dir)),
         "items": manifest_items,
     }
 
@@ -556,7 +740,7 @@ def load_manifest(path: Path) -> dict[str, object]:
     if not isinstance(manifest, dict):
         raise PlanError("transfer manifest root must be a JSON object")
 
-    if manifest.get("version") != 1:
+    if manifest.get("version") != 2:
         raise PlanError("unsupported transfer manifest version")
 
     return manifest
@@ -574,6 +758,321 @@ def path_matches_identity(path: Path, identity: tuple[int, int]) -> bool:
     )
 
 
+def directory_identity(path: Path) -> tuple[int, int]:
+    with directory_descriptor(path) as descriptor:
+        metadata = os.fstat(descriptor)
+        return metadata.st_dev, metadata.st_ino
+
+
+def rename_without_overwrite(
+    source: Path, destination: Path, *, source_fd: int = -100, destination_fd: int = -100
+) -> None:
+    """Require the kernel/filesystem no-replace operation; never emulate it."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise OSError(errno.ENOSYS, "rename without replacement is unavailable")
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    if renameat2(source_fd, os.fsencode(source), destination_fd, os.fsencode(destination), 1):
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+
+
+def same_inode(metadata: os.stat_result, identity: tuple[int, int]) -> bool:
+    return stat.S_ISREG(metadata.st_mode) and (metadata.st_dev, metadata.st_ino) == identity
+
+
+def anchored_file_matches(descriptor: int, name: str, identity: tuple[int, int]) -> bool:
+    try:
+        metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return same_inode(metadata, identity)
+
+
+def parse_identity(value: str) -> tuple[int, int]:
+    if not re.fullmatch(r"[0-9]+:[0-9]+", value):
+        raise PlanError("invalid recorded filesystem identity")
+    device, inode = value.split(":")
+    return int(device), int(inode)
+
+
+def publish_media(args: argparse.Namespace) -> int:
+    """Copy local validated media to one exclusively staged destination inode."""
+    source = Path(args.source)
+    output = Path(args.output_dir)
+    reject_controls(source.name, "media filename", reject_whitespace=False)
+    expected_output = parse_identity(args.output_identity)
+    expected_source = parse_identity(args.source_identity)
+    requested_signal = 0
+
+    def remember_signal(number: int, _frame: object) -> None:
+        nonlocal requested_signal
+        if not requested_signal:
+            requested_signal = number
+
+    def checkpoint() -> None:
+        if requested_signal:
+            raise PublicationInterrupted(requested_signal)
+
+    previous_handlers = {}
+    try:
+        for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+            previous_handlers[number] = signal.signal(number, remember_signal)
+        with directory_descriptor(source.parent, trusted_chain=True) as source_dir_fd:
+            require_local_filesystem(source_dir_fd)
+            with directory_descriptor(output) as output_fd:
+                output_stat = os.fstat(output_fd)
+                if (output_stat.st_dev, output_stat.st_ino) != expected_output:
+                    raise PlanError("media destination changed before publication")
+                try:
+                    os.stat(source.name, dir_fd=output_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise DestinationExistsError("final media destination already exists")
+                source_fd = os.open(
+                    source.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=source_dir_fd,
+                )
+                try:
+                    original = os.fstat(source_fd)
+                    if (
+                        not stat.S_ISREG(original.st_mode) or original.st_size <= 0
+                        or original.st_uid != os.geteuid()
+                        or (original.st_dev, original.st_ino) != expected_source
+                    ):
+                        raise PlanError("publication source must be nonempty media owned by the current user")
+                    temporary_name = f".yt-dlp-publish.{secrets.token_hex(16)}.partial"
+                    temporary_fd = os.open(
+                        temporary_name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        0o600, dir_fd=output_fd,
+                    )
+                    temporary_identity = None
+                    publication_attempted = False
+                    published = False
+                    try:
+                        temporary_stat = os.fstat(temporary_fd)
+                        temporary_identity = temporary_stat.st_dev, temporary_stat.st_ino
+                        while True:
+                            checkpoint()
+                            block = os.read(source_fd, 1024 * 1024)
+                            if not block:
+                                break
+                            remainder = memoryview(block)
+                            while remainder:
+                                checkpoint()
+                                written = os.write(temporary_fd, remainder)
+                                if written <= 0:
+                                    raise OSError(errno.EIO, "media copy made no progress")
+                                remainder = remainder[written:]
+                        os.fsync(temporary_fd)
+                        current = os.fstat(source_fd)
+                        if (
+                            (current.st_dev, current.st_ino, current.st_size,
+                             current.st_mtime_ns, current.st_ctime_ns)
+                            != (original.st_dev, original.st_ino, original.st_size,
+                                original.st_mtime_ns, original.st_ctime_ns)
+                            or os.fstat(temporary_fd).st_size != original.st_size
+                        ):
+                            raise PlanError("local media changed during publication")
+                        if (
+                            directory_identity(output) != expected_output
+                            or not anchored_file_matches(output_fd, temporary_name, temporary_identity)
+                        ):
+                            raise PlanError("media publication directory or temporary file changed")
+                        checkpoint()
+                        publication_attempted = True
+                        try:
+                            rename_without_overwrite(
+                                Path(temporary_name), Path(source.name),
+                                source_fd=output_fd, destination_fd=output_fd,
+                            )
+                        except OSError as exc:
+                            if exc.errno == errno.EEXIST:
+                                publication_attempted = False
+                                raise DestinationExistsError("final media destination already exists") from exc
+                            if exc.errno not in NO_REPLACE_UNSUPPORTED:
+                                raise
+                            publication_attempted = False
+                            # A hard link is also atomic and cannot replace an
+                            # existing leaf. This fallback is never check+rename.
+                            try:
+                                publication_attempted = True
+                                os.link(
+                                    temporary_name, source.name,
+                                    src_dir_fd=output_fd, dst_dir_fd=output_fd,
+                                    follow_symlinks=False,
+                                )
+                            except FileExistsError as collision:
+                                publication_attempted = False
+                                raise DestinationExistsError("final media destination already exists") from collision
+                            except OSError as link_error:
+                                if link_error.errno in NO_REPLACE_UNSUPPORTED | {errno.EPERM, errno.EXDEV}:
+                                    publication_attempted = False
+                                    raise PlanError(
+                                        "destination supports neither atomic no-replace rename nor hard links"
+                                    ) from link_error
+                                raise
+                        published = True
+                        if (
+                            not anchored_file_matches(output_fd, source.name, temporary_identity)
+                            or directory_identity(output) != expected_output
+                        ):
+                            raise PlanError("media publication outcome is uncertain; local source was preserved")
+                    finally:
+                        os.close(temporary_fd)
+                        # An ambiguous network publication may have completed.
+                        # Preserve its remaining name and always retain source.
+                        if temporary_identity is None:
+                            print("Warning: preserving unconfirmed media publication temporary file", file=sys.stderr)
+                        elif not publication_attempted or published:
+                            try:
+                                if anchored_file_matches(output_fd, temporary_name, temporary_identity):
+                                    os.unlink(temporary_name, dir_fd=output_fd)
+                            except OSError:
+                                print("Warning: preserving unconfirmed media publication temporary file", file=sys.stderr)
+                finally:
+                    os.close(source_fd)
+        print(output / source.name)
+        return 0
+    finally:
+        for number, previous in previous_handlers.items():
+            signal.signal(number, previous)
+
+
+def check_space(args: argparse.Namespace) -> int:
+    plan = read_json(Path(args.plan), "yt-dlp plan")
+    if not isinstance(plan, dict):
+        raise PlanError("yt-dlp plan root must be a JSON object")
+    downloads = plan.get("requested_downloads")
+    if not isinstance(downloads, list) or len(downloads) != 1 or not isinstance(downloads[0], dict):
+        raise PlanError("yt-dlp plan must contain exactly one requested download")
+    selected = downloads[0].get("requested_formats") or downloads
+    if not isinstance(selected, list):
+        raise PlanError("requested_formats must be an array")
+    estimate = 0
+    complete = True
+    for item in selected:
+        if not isinstance(item, dict):
+            raise PlanError("requested format is not a JSON object")
+        size = item.get("filesize") or item.get("filesize_approx")
+        if isinstance(size, (int, float)) and not isinstance(size, bool) and 0 < size < 2**63:
+            estimate += int(size)
+        else:
+            complete = False
+    with directory_descriptor(Path(args.output_dir), trusted_chain=True) as descriptor:
+        require_local_filesystem(descriptor, disk=True)
+        filesystem = os.fstatvfs(descriptor)
+    available = filesystem.f_bavail * filesystem.f_frsize
+    # Selected components, an assembled file and the HLS repair can coexist.
+    required = estimate * 3 + 64 * 1024 * 1024
+    if available < required:
+        raise PlanError("insufficient local disk space for downloaded media and post-processing")
+    if not complete:
+        print("Warning: media size is unknown; local disk space cannot be guaranteed", file=sys.stderr)
+    return 0
+
+
+def cleanup_workspace(args: argparse.Namespace) -> int:
+    """Remove only a live caller-authenticated private local workspace tree."""
+    path = Path(args.path)
+    expected = parse_identity(args.identity)
+    if len(args.keep) != len(args.keep_identity):
+        raise PlanError("every retained media file requires its identity")
+    kept = {
+        Path(filename): parse_identity(identity)
+        for filename, identity in zip(args.keep, args.keep_identity, strict=True)
+    }
+    if len(kept) != len(args.keep):
+        raise PlanError("retained media paths must be unique")
+    if any(filename.parent != path for filename in kept):
+        raise PlanError("retained media must be an identified direct workspace child")
+
+    with directory_descriptor(path.parent, trusted_chain=True) as parent_fd:
+        workspace_fd = os.open(
+            path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_fd,
+        )
+        try:
+            root_stat = os.fstat(workspace_fd)
+            if (root_stat.st_dev, root_stat.st_ino) != expected:
+                raise PlanError("workspace identity changed; preserving its contents")
+            require_private_directory_descriptor(workspace_fd)
+            require_local_filesystem(workspace_fd)
+            for filename, identity in kept.items():
+                if not anchored_file_matches(workspace_fd, filename.name, identity):
+                    raise PlanError("retained media identity changed; preserving workspace")
+            entries = 0
+            snapshot: dict[tuple[str, ...], tuple[int, int, int, int, int, int]] = {}
+
+            def walk(descriptor: int, parts: tuple[str, ...], *, remove: bool) -> None:
+                nonlocal entries
+                if len(parts) > 64:
+                    raise PlanError("workspace nesting is excessive; preserving contents")
+                for name in os.listdir(descriptor):
+                    entries += 1
+                    if entries > 100000:
+                        raise PlanError("workspace contains too many entries")
+                    metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    relative = parts + (name,)
+                    identity = (
+                        metadata.st_dev, metadata.st_ino, metadata.st_mode,
+                        metadata.st_uid, metadata.st_ctime_ns, metadata.st_size,
+                    )
+                    if remove:
+                        if snapshot.get(relative) != identity:
+                            raise PlanError("workspace entry changed after inspection; preserving it")
+                    else:
+                        snapshot[relative] = identity
+                    if metadata.st_uid != os.geteuid() or metadata.st_dev != root_stat.st_dev:
+                        raise PlanError("workspace contains foreign data; preserving contents")
+                    if not parts and path / name in kept:
+                        if not same_inode(metadata, kept[path / name]):
+                            raise PlanError("retained media identity changed")
+                        continue
+                    if stat.S_ISDIR(metadata.st_mode):
+                        child_fd = os.open(
+                            name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                            dir_fd=descriptor,
+                        )
+                        try:
+                            child_stat = os.fstat(child_fd)
+                            if (child_stat.st_dev, child_stat.st_ino) != (metadata.st_dev, metadata.st_ino):
+                                raise PlanError("workspace directory changed; preserving contents")
+                            require_private_directory_descriptor(child_fd)
+                            require_local_filesystem(child_fd)
+                            walk(child_fd, relative, remove=remove)
+                            if remove:
+                                visible = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                                if (visible.st_dev, visible.st_ino) != (metadata.st_dev, metadata.st_ino):
+                                    raise PlanError("workspace directory changed during cleanup")
+                                os.rmdir(name, dir_fd=descriptor)
+                        finally:
+                            os.close(child_fd)
+                    elif stat.S_ISREG(metadata.st_mode):
+                        if remove:
+                            if not anchored_file_matches(descriptor, name, (metadata.st_dev, metadata.st_ino)):
+                                raise PlanError("workspace file changed during cleanup")
+                            os.unlink(name, dir_fd=descriptor)
+                    else:
+                        raise PlanError("workspace contains an unknown file type; preserving contents")
+
+            walk(workspace_fd, (), remove=False)
+            entries = 0
+            walk(workspace_fd, (), remove=True)
+            visible = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            if (visible.st_dev, visible.st_ino) != expected:
+                raise PlanError("workspace changed during cleanup")
+            if not kept:
+                os.rmdir(path.name, dir_fd=parent_fd)
+        finally:
+            os.close(workspace_fd)
+    return 0
+
+
 def publish_without_overwrite(
     source: Path,
     destination: Path,
@@ -587,6 +1086,7 @@ def publish_without_overwrite(
         ) from exc
 
     source_identity = (source_stat.st_dev, source_stat.st_ino)
+    renamed = False
 
     try:
         os.link(source, destination, follow_symlinks=False)
@@ -595,9 +1095,25 @@ def publish_without_overwrite(
             f"destination already exists: {destination.name}"
         ) from exc
     except OSError as exc:
-        raise PlanError(
-            f"unable to publish downloaded component: {destination.name}"
-        ) from exc
+        if exc.errno not in NO_REPLACE_UNSUPPORTED | {errno.EPERM}:
+            raise PlanError(
+                f"unable to publish downloaded component: {destination.name}"
+            ) from exc
+        # A private local staging parent protects this pathname. Verify its
+        # identity again before the filesystem's atomic no-replace operation.
+        if not path_matches_identity(source, source_identity):
+            raise PlanError("downloaded component changed before publication") from exc
+        try:
+            rename_without_overwrite(source, destination)
+            renamed = True
+        except FileExistsError as collision:
+            raise DestinationExistsError(
+                f"destination already exists: {destination.name}"
+            ) from collision
+        except OSError as rename_error:
+            raise PlanError(
+                "component filesystem does not support safe no-overwrite publication"
+            ) from rename_error
 
     # From this point the helper has created a final-directory name. Record it
     # before verification so every later exception participates in rollback.
@@ -609,7 +1125,10 @@ def publish_without_overwrite(
         )
 
     try:
-        source.unlink()
+        if not renamed:
+            if not path_matches_identity(source, source_identity):
+                raise PlanError("staging source changed after publication")
+            source.unlink()
     except OSError:
         # Never remove a path that another process replaced after publication.
         if path_matches_identity(destination, source_identity):
@@ -649,7 +1168,13 @@ def rollback_publication(
                 failures.append(destination.name)
                 continue
 
-            os.link(destination, source, follow_symlinks=False)
+            try:
+                os.link(destination, source, follow_symlinks=False)
+            except OSError as exc:
+                if exc.errno not in NO_REPLACE_UNSUPPORTED | {errno.EPERM}:
+                    raise
+                rename_without_overwrite(destination, source)
+                continue
             if path_matches_identity(destination, identity):
                 destination.unlink()
             else:
@@ -676,6 +1201,11 @@ def commit_plan(args: argparse.Namespace) -> int:
 
     output_dir = resolve_output_directory(raw_output_dir)
     staging_dir = resolve_staging_directory(raw_staging_dir, output_dir)
+    if (
+        manifest.get("output_identity") != list(directory_identity(output_dir))
+        or manifest.get("staging_identity") != list(directory_identity(staging_dir))
+    ):
+        raise PlanError("download output or staging directory identity changed")
 
     if not isinstance(raw_items, list) or not raw_items:
         raise PlanError("manifest contains no transfer items")
@@ -794,6 +1324,34 @@ def create_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    root = subparsers.add_parser("private-root", help="select a validated local private application root")
+    root.add_argument("--disk", action="store_true")
+    root.add_argument("--no-runtime", action="store_true")
+    root.set_defaults(handler=private_root)
+
+    local = subparsers.add_parser("media-local-safe", help="check whether media may stay in the selected directory")
+    local.add_argument("--output-dir", required=True)
+    local.set_defaults(handler=media_local_safe)
+
+    publish = subparsers.add_parser("publish-media", help="copy and atomically publish one completed local media file")
+    publish.add_argument("--source", required=True)
+    publish.add_argument("--source-identity", required=True)
+    publish.add_argument("--output-dir", required=True)
+    publish.add_argument("--output-identity", required=True)
+    publish.set_defaults(handler=publish_media)
+
+    space = subparsers.add_parser("check-space", help="check known media size against available local disk space")
+    space.add_argument("--plan", required=True)
+    space.add_argument("--output-dir", required=True)
+    space.set_defaults(handler=check_space)
+
+    cleanup = subparsers.add_parser("cleanup-workspace", help="remove a caller-authenticated private local workspace")
+    cleanup.add_argument("--path", required=True)
+    cleanup.add_argument("--identity", required=True)
+    cleanup.add_argument("--keep", action="append", default=[])
+    cleanup.add_argument("--keep-identity", action="append", default=[])
+    cleanup.set_defaults(handler=cleanup_workspace)
+
     classify = subparsers.add_parser(
         "classify",
         help="classify the selected yt-dlp transport as direct or native",
@@ -809,6 +1367,7 @@ def create_parser() -> argparse.ArgumentParser:
     build.add_argument("--plan", required=True)
     build.add_argument("--output-dir", required=True)
     build.add_argument("--staging-dir", required=True)
+    build.add_argument("--private-dir", required=True)
     build.add_argument("--aria2-input", required=True)
     build.add_argument("--manifest", required=True)
     build.add_argument("--allow-https-direct", action="store_true")

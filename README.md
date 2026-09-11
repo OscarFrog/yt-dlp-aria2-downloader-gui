@@ -41,7 +41,7 @@ direct downloads through a private aria2 input file, and FFmpeg to merge,
 remux, or extract streams. HTTPS automatically stays on yt-dlp's native
 transport when the installed aria2 TLS backend lacks the required certificate
 validation hardening. DASH and HLS streams also remain native. The current
-development version is **2.3.11**.
+development version is **2.3.12**.
 The latest published package release is **2.3.11**.
 
 ## Recommended installation
@@ -231,12 +231,13 @@ remains disabled by design; the maintainer-side preflight requires an explicit
 `--confirm-single-maintainer-self-review` acknowledgement and verifies that the
 sole reviewer matches the authenticated GitHub account. Restrict the Environment
 to a selected `v*` **tag** deployment policy. Manual recovery remains available,
-but it must execute the workflow from the exact release tag:
+but it must execute the workflow from the exact release tag. For the development
+version below, this command is applicable only after its signed tag is created:
 
 ```bash
 gh workflow run release.yml \
-  --ref v2.3.11 \
-  -f tag=v2.3.11 \
+  --ref v2.3.12 \
+  -f tag=v2.3.12 \
   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
@@ -563,12 +564,13 @@ request selects **Complete video (MKV)** instead.
 
 ### 3. Choose the destination folder
 
-Select the folder where the downloaded media will be saved.
-For private staging safety, every physical ancestor must be owned by the system
-or the current user; any ancestor writable by a group or by other users must
-have sticky-bit protection (as `/tmp` normally does). The application rejects
-an unsafe shared destination before writing a URL, cookie, partial file, or
-media artifact.
+Select the folder where the completed media will be saved, including a mounted
+network share. Cookies and transfer plans stay in validated local private
+storage. For destinations that cannot safely host the downloader's temporary
+files, the application downloads and processes media on a local disk, then
+copies the validated result to the chosen folder without replacing an existing
+file. See [Network destinations and private storage](#network-destinations-and-private-storage)
+for local space requirements and filesystem limits.
 
 
 ### 4. Follow the download progress
@@ -795,14 +797,85 @@ and the resulting file stays mode `0600`. Its final section gives the exact
 older than 15 days are removed automatically the next time a graphical download
 session is prepared.
 
-A same-user, per-destination advisory lock is always kept under the revalidated
-private `/tmp/yt-dlp-aria2-downloader-UID` directory. This common location prevents
+A same-user, per-destination advisory lock uses the revalidated private
+`/tmp/yt-dlp-aria2-downloader-UID` directory, falling back to the corresponding
+`/var/tmp` directory when `/tmp` is unsuitable. This common location prevents
 concurrent writers even when launchers have different `XDG_RUNTIME_DIR` values.
-Private work files still prefer a validated private
-`$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader`, with the same `/tmp` directory as a
-fallback. Lock files contain no URL, cookie, or media path, and the kernel
+Private work files prefer the validated local
+`$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader-UID` root, then the same `/tmp` root
+or `/var/tmp/yt-dlp-aria2-downloader-UID` if necessary. Lock files contain no URL, cookie, or media path, and the kernel
 releases the lock automatically when the engine exits. Downloads to different
 destination directories may run concurrently.
+
+## Network destinations and private storage
+
+This section describes the unreleased 2.3.12 checkout implementation; the
+published 2.3.11 packages have not been rebuilt with these changes.
+
+The shared private-storage allocator validates physical directory components,
+ownership, actual permission modes, exclusive file creation, and the filesystem
+of opened descriptors before writing secrets. Metadata may use validated
+`XDG_RUNTIME_DIR`, then `/tmp`, then `/var/tmp`; existing user directories are
+never chmod'ed. Unusable candidates are rejected. `TMPDIR`, `TMP`, and `TEMP`
+passed to yt-dlp point inside the private session, including its temporary
+Firefox database copies. Plans, cookie jars, aria2 input and manifests, internal
+path records, and GUI URL/live-log files remain local and private.
+
+For local filesystems with protected directory chains, media keep the existing
+destination-side download and native-resume behavior. Other destinations,
+including CIFS/SMB and shared writable directories, use a private local disk
+workspace selected from an existing `XDG_CACHE_HOME`, `$HOME/.cache`, then
+`/var/tmp`. Each candidate must pass the same ownership and filesystem checks;
+a variable name does not establish that a location is local. Disk workspaces
+currently accept ext2/3/4, XFS, Btrfs and ZFS. Metadata also accept tmpfs. Unknown
+filesystems, FUSE and overlay are not assumed to provide these local-storage
+guarantees. A destination on one of them can still receive final media if a
+suitable local workspace and a safe publication primitive are available.
+Full media are never staged in `XDG_RUNTIME_DIR` or tmpfs by default.
+
+Local staging needs space for selected streams, merged media and any HLS
+remux. Before transfer, known sizes are checked with a three-times estimate
+plus 64 MiB of headroom. Unknown sizes, quotas, simultaneous writers and later
+disk exhaustion cannot be predicted; write errors remain failures. The log
+identifies the local workspace. The GUI keeps a local-disk-space notice visible
+during preparation and transfer, then shows a destination-copy phase.
+Formats, quality selection and audio conversion rules are unchanged. For these
+isolated network sessions, cancellation removes partial state after confirmed
+shutdown; a later request starts anew rather than reusing a previous local
+session's native partial files.
+
+Publication copies through opened descriptors into an exclusively created
+`.yt-dlp-publish.*.partial` file in the selected destination, checks writes and
+file synchronization, then attempts Linux `renameat2(RENAME_NOREPLACE)`.
+An atomic hard link is the fallback when no-replace rename is unsupported.
+If neither primitive works, publication fails explicitly; there is no
+check-then-overwriting-rename fallback. The complete final filename appears
+only after copying. Existing files, including a name created concurrently,
+are never replaced. This is one-file publication, not a transaction spanning
+the local disk and server. Permissions of the deliberately shared final media
+remain subject to the server and mount policy.
+
+On a failed or uncertain publication, the validated local source is retained
+and its path is reported. Ambiguous remote temporaries are preserved. HUP,
+INT, TERM and GUI cancellation supervise the process groups; cleanup waits for
+confirmed shutdown. SIGKILL cannot run cleanup, and a kernel-blocked network
+operation can outlast the bounded cancellation waits. Concurrent instances on
+one host use the same destination lock; different hosts still rely on the
+atomic no-overwrite publication, not that local advisory lock.
+
+Old `.yt-dlp-aria2.*`, `.yt-dlp-path.*` and remux residues are not automatically
+deleted based on a name, marker or age. Old destination-side plans/cookies may
+contain secrets: do not print, upload or attach their contents. Stop all related
+downloads, inspect one exact path's type, owner and filenames without following
+symlinks, and establish which session produced it. Remove only individually
+confirmed files and use `rmdir` on the now-empty exact directory; preserve any
+unknown entry. Do not use recursive wildcard cleanup.
+
+Automated permission simulations and local real-tool tests are not a real
+CIFS qualification. The opt-in SMB/CIFS procedure in `TESTING.md` requires an
+explicitly authorized disposable test share. Ordinary native HLS/DASH are the
+qualified transports; unsupported/live HLS variants that yt-dlp delegates to
+an external downloader require separate privacy qualification.
 
 ## Tests
 

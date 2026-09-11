@@ -12,7 +12,7 @@ set -euo pipefail
 set +m
 umask 077
 
-readonly VERSION="2.3.11"
+readonly VERSION="2.3.12"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -47,8 +47,24 @@ HLS_REMUX_FD_PATH=''
 HLS_SOURCE_TO_CLEAN=''
 HLS_SOURCE_TO_CLEAN_IDENTITY=''
 YTDLP_BATCH_FILE_TMP=''
+PRIVATE_ARIA2_METADATA=''
+PRIVATE_ARIA2_METADATA_IDENTITY=''
+PRIVATE_ARIA2_METADATA_FD=''
+PRIVATE_ARIA2_METADATA_CLEANUP_SAFE=true
+MEDIA_WORKSPACE=''
+MEDIA_WORKSPACE_IDENTITY=''
+MEDIA_WORKSPACE_FD=''
+MEDIA_WORKSPACE_CLEANUP_SAFE=true
+MEDIA_RETAINED_PATH=''
+MEDIA_RETAINED_IDENTITY=''
+MEDIA_RETAINED_PATHS=()
+MEDIA_RETAINED_IDENTITIES=()
+FINAL_OUTPUT_DIR=''
+FINAL_OUTPUT_IDENTITY=''
+FINAL_OUTPUT_FD=''
 PRIVATE_ARIA2_STAGING=''
 PRIVATE_ARIA2_STAGING_IDENTITY=''
+PRIVATE_ARIA2_STAGING_FD=''
 PRIVATE_ARIA2_PLAN=''
 PRIVATE_ARIA2_PLAN_IDENTITY=''
 PRIVATE_ARIA2_COOKIE_JAR=''
@@ -84,6 +100,8 @@ esac
 cleanup() {
     local status=$?
     local active_staging_metadata_safe=true
+    local active_media_staging_safe=true
+    local current_staging_identity=''
 
     trap - EXIT HUP INT TERM
     trap '' HUP INT TERM
@@ -118,10 +136,18 @@ cleanup() {
         if declare -F remove_owned_path_record_temp >/dev/null 2>&1; then
             # shellcheck disable=SC2310 # Cleanup preserves a changed inode.
             if ! remove_owned_path_record_temp "${PATH_RECORD_TMP}"; then
+                if [[ -n ${PRIVATE_ARIA2_METADATA} &&
+                    ${PATH_RECORD_TMP%/*} == "${PRIVATE_ARIA2_METADATA}" ]]; then
+                    active_staging_metadata_safe=false
+                fi
                 printf 'Warning: preserving a changed temporary path record: %s\n' \
                     "${PATH_RECORD_TMP}" >&2
             fi
         else
+            if [[ -n ${PRIVATE_ARIA2_METADATA} &&
+                ${PATH_RECORD_TMP%/*} == "${PRIVATE_ARIA2_METADATA}" ]]; then
+                active_staging_metadata_safe=false
+            fi
             printf 'Warning: preserving an unverified temporary path record: %s\n' \
                 "${PATH_RECORD_TMP}" >&2
         fi
@@ -132,8 +158,11 @@ cleanup() {
     if [[ -n ${HLS_REMUX_TMP} ]]; then
         if declare -F remove_owned_hls_remux_temp >/dev/null 2>&1; then
             # shellcheck disable=SC2310 # Cleanup preserves a changed inode.
-            remove_owned_hls_remux_temp || true
+            if ! remove_owned_hls_remux_temp; then
+                MEDIA_WORKSPACE_CLEANUP_SAFE=false
+            fi
         else
+            MEDIA_WORKSPACE_CLEANUP_SAFE=false
             printf 'Warning: preserving an unverified temporary HLS remux: %s\n' \
                 "${HLS_REMUX_TMP}" >&2
         fi
@@ -144,26 +173,56 @@ cleanup() {
     if [[ -n ${YTDLP_BATCH_FILE_TMP} ]]; then
         rm -f -- "${YTDLP_BATCH_FILE_TMP}" || true
     fi
-    if [[ -n ${PRIVATE_ARIA2_STAGING} &&
-        (-e ${PRIVATE_ARIA2_STAGING} || -L ${PRIVATE_ARIA2_STAGING}) ]]; then
+    if [[ -n ${PRIVATE_ARIA2_METADATA} &&
+        (-e ${PRIVATE_ARIA2_METADATA} || -L ${PRIVATE_ARIA2_METADATA}) ]]; then
         if declare -F remove_active_private_aria2_sensitive_metadata \
             >/dev/null 2>&1; then
             # shellcheck disable=SC2310 # A changed identity is the preserve path.
             if ! remove_active_private_aria2_sensitive_metadata; then
                 active_staging_metadata_safe=false
                 printf 'Warning: preserving ambiguous private aria2 authentication metadata: %s\n' \
-                    "${PRIVATE_ARIA2_STAGING##*/}" >&2
+                    "${PRIVATE_ARIA2_METADATA##*/}" >&2
             fi
         fi
-        # A sensitive pathname whose recorded inode changed is external state,
-        # even when its replacement reused an otherwise allowlisted basename.
-        # Preserve the directory instead of letting structural cleanup erase it.
-        # shellcheck disable=SC2310 # Cleanup preserves staging that no longer validates.
-        if [[ ${active_staging_metadata_safe} != true ]] \
-            || ! remove_private_aria2_staging_candidate \
-                "${PRIVATE_ARIA2_STAGING}" true; then
+        # Identity changes are external state, even under a known basename.
+        if [[ ${active_staging_metadata_safe} == true &&
+            ${PRIVATE_ARIA2_METADATA_CLEANUP_SAFE} == true ]]; then
+            if ! python3 "${PRIVATE_ARIA2_HELPER}" cleanup-workspace \
+                --path "${PRIVATE_ARIA2_METADATA}" \
+                --identity "${PRIVATE_ARIA2_METADATA_IDENTITY}"; then
+                printf 'Warning: preserving ambiguous private metadata directory: %s\n' \
+                    "${PRIVATE_ARIA2_METADATA}" >&2
+            fi
+        fi
+    fi
+    if [[ -n ${PRIVATE_ARIA2_STAGING} &&
+        (-e ${PRIVATE_ARIA2_STAGING} || -L ${PRIVATE_ARIA2_STAGING}) ]]; then
+        # shellcheck disable=SC2310 # Changed or unknown staging is preserved.
+        if ! get_path_identity current_staging_identity "${PRIVATE_ARIA2_STAGING}" directory \
+            || [[ ${current_staging_identity} != "${PRIVATE_ARIA2_STAGING_IDENTITY}" ]] \
+            || ! remove_private_aria2_staging_candidate "${PRIVATE_ARIA2_STAGING}" true; then
+            active_media_staging_safe=false
             printf 'Warning: preserving ambiguous active private aria2 staging directory: %s\n' \
                 "${PRIVATE_ARIA2_STAGING##*/}" >&2
+        fi
+    fi
+    if [[ -n ${MEDIA_WORKSPACE} && ${active_media_staging_safe} == true &&
+        ${MEDIA_WORKSPACE_CLEANUP_SAFE} == true ]]; then
+        local -a retained_options=()
+        local keep_index
+        for keep_index in "${!MEDIA_RETAINED_PATHS[@]}"; do
+            retained_options+=(--keep "${MEDIA_RETAINED_PATHS[keep_index]}"
+                --keep-identity "${MEDIA_RETAINED_IDENTITIES[keep_index]}")
+        done
+        if [[ -n ${MEDIA_RETAINED_PATH} ]]; then
+            retained_options+=(--keep "${MEDIA_RETAINED_PATH}"
+                --keep-identity "${MEDIA_RETAINED_IDENTITY}")
+        fi
+        if ! python3 "${PRIVATE_ARIA2_HELPER}" cleanup-workspace \
+            --path "${MEDIA_WORKSPACE}" --identity "${MEDIA_WORKSPACE_IDENTITY}" \
+            "${retained_options[@]}"; then
+            printf 'Warning: local media workspace cleanup was incomplete: %s\n' \
+                "${MEDIA_WORKSPACE}" >&2
         fi
     fi
     if [[ -n ${OUTPUT_LOCK_FD} ]]; then
@@ -679,73 +738,20 @@ resolve_lock_root() {
     local output_variable=${1:-OUTPUT_LOCK_ROOT}
     local prefer_runtime=${2:-true}
     local candidate=''
-    local canonical_candidate=''
-    local canonical_runtime_dir=''
-    local owner=''
-    local mode=''
+    local -a root_options=()
 
-    if [[ ${prefer_runtime} == true &&
-        -n ${XDG_RUNTIME_DIR:-} && ${XDG_RUNTIME_DIR} == /* &&
-        -d ${XDG_RUNTIME_DIR} && ! -L ${XDG_RUNTIME_DIR} ]] \
-        && canonical_runtime_dir=$(realpath -e -- \
-            "${XDG_RUNTIME_DIR}" 2>/dev/null); then
-        if owner=$(stat -c '%u' -- \
-            "${canonical_runtime_dir}" 2>/dev/null) \
-            && mode=$(stat -c '%a' -- \
-                "${canonical_runtime_dir}" 2>/dev/null); then
-            # shellcheck disable=SC2310 # An unsafe runtime chain selects the private /tmp fallback.
-            if [[ ${owner} == "${EUID}" && ${mode} == 700 ]] \
-                && private_directory_chain_is_safe "${canonical_runtime_dir}"; then
-                candidate="${canonical_runtime_dir}/yt-dlp-aria2-downloader"
-            fi
-        fi
+    if [[ ${prefer_runtime} != true ]]; then
+        root_options+=(--no-runtime)
     fi
-
-    if [[ -z ${candidate} ]]; then
-        candidate="/tmp/yt-dlp-aria2-downloader-${EUID}"
-    fi
-
-    if mkdir -m 700 -- "${candidate}" 2>/dev/null; then
-        :
-    elif [[ ! -d ${candidate} || -L ${candidate} ]]; then
-        error 'the download-lock path exists but is not a safe directory.'
+    # The shared Python allocator verifies the actual local filesystem and
+    # owner-only access before any URL, cookie or subprocess temporary is written.
+    if ! candidate=$(python3 "${PRIVATE_ARIA2_HELPER}" private-root \
+        "${root_options[@]}"); then
+        error 'no safe local private directory is available for download metadata.'
         return 73
     fi
-
-    if ! owner=$(stat -c '%u' -- "${candidate}" 2>/dev/null); then
-        error 'unable to determine the download-lock directory owner.'
-        return 73
-    fi
-    if [[ ${owner} != "${EUID}" ]]; then
-        error 'the download-lock directory is not owned by the current user.'
-        return 73
-    fi
-    if ! chmod 700 -- "${candidate}"; then
-        error 'unable to secure the download-lock directory.'
-        return 73
-    fi
-
-    canonical_candidate=$(realpath -e -- "${candidate}" 2>/dev/null) || {
-        error 'unable to resolve the download-lock directory.'
-        return 73
-    }
-    if [[ ${canonical_candidate} != "${candidate}" ]]; then
-        error 'the download-lock directory changed during validation.'
-        return 73
-    fi
-    if ! mode=$(stat -c '%a' -- "${canonical_candidate}" 2>/dev/null); then
-        error 'unable to determine the download-lock directory permissions.'
-        return 73
-    fi
-    # shellcheck disable=SC2310 # Final validation precedes all private work-file creation.
-    if [[ ${mode} != 700 ]] \
-        || ! private_directory_chain_is_safe "${canonical_candidate}"; then
-        error 'the download-lock directory has an unsafe ownership or shared-write chain.'
-        return 73
-    fi
-
-    printf -v "${output_variable}" '%s' "${canonical_candidate}"
-    return 0
+    [[ ${candidate} == /* && -d ${candidate} && ! -L ${candidate} ]] || return 73
+    printf -v "${output_variable}" '%s' "${candidate}"
 }
 
 acquire_output_lock() {
@@ -1550,12 +1556,12 @@ remove_active_private_aria2_sensitive_metadata() {
     local removal_status=0
     local -a unrecorded_sensitive_names=()
 
-    [[ -n ${PRIVATE_ARIA2_STAGING_IDENTITY} ]] || return 1
+    [[ -n ${PRIVATE_ARIA2_METADATA_IDENTITY} ]] || return 1
     # shellcheck disable=SC2310 # Failure preserves the complete staging tree.
     get_path_identity \
-        current_staging_identity "${PRIVATE_ARIA2_STAGING}" directory \
+        current_staging_identity "${PRIVATE_ARIA2_METADATA}" directory \
         || return 1
-    [[ ${current_staging_identity} == "${PRIVATE_ARIA2_STAGING_IDENTITY}" ]] \
+    [[ ${current_staging_identity} == "${PRIVATE_ARIA2_METADATA_IDENTITY}" ]] \
         || return 1
 
     [[ -z ${PRIVATE_ARIA2_PLAN_IDENTITY} && -n ${PRIVATE_ARIA2_PLAN} ]] \
@@ -1591,7 +1597,7 @@ remove_active_private_aria2_sensitive_metadata() {
     # shellcheck disable=SC2310 # Marker cleanup contributes to the aggregate.
     if ((${#unrecorded_sensitive_names[@]} > 0)) \
         && ! remove_marked_private_aria2_sensitive_metadata \
-            "${PRIVATE_ARIA2_STAGING}" \
+            "${PRIVATE_ARIA2_METADATA}" \
             "${unrecorded_sensitive_names[@]}"; then
         removal_status=1
     fi
@@ -1627,7 +1633,11 @@ remove_marked_private_aria2_sensitive_metadata() {
     candidate_mode=$(stat -c '%a' -- "${candidate}" 2>/dev/null) || return 1
     [[ ${candidate_owner} == "${EUID}" && ${candidate_mode} == 700 ]] || return 1
     candidate_parent=$(realpath -e -- "${candidate}/.." 2>/dev/null) || return 1
-    [[ ${candidate_parent} == "${OUTPUT_DIR}" ]] || return 1
+    if [[ ${candidate} == "${PRIVATE_ARIA2_METADATA}" ]]; then
+        [[ ${candidate_parent} == "${OUTPUT_LOCK_ROOT}" ]] || return 1
+    else
+        [[ ${candidate_parent} == "${OUTPUT_DIR}" ]] || return 1
+    fi
 
     [[ ! -L ${marker_path} && -f ${marker_path} ]] || return 1
     marker_owner=$(stat -c '%u' -- "${marker_path}" 2>/dev/null) || return 1
@@ -1765,64 +1775,19 @@ remove_private_aria2_staging_candidate() {
 
 recover_abandoned_private_aria2_staging() {
     local candidate=''
-    local marker_path=''
-    local require_marker=false
-
-    while IFS= read -r -d '' candidate; do
-        require_marker=false
-        marker_path="${candidate}/${PRIVATE_ARIA2_STAGING_MARKER}"
-
-        if [[ -e ${marker_path} || -L ${marker_path} ]]; then
-            require_marker=true
-        fi
-
-        # shellcheck disable=SC2310 # Validation failure is the preserve path.
-        if private_aria2_staging_candidate_is_safe \
-            "${candidate}" "${require_marker}"; then
-            if ! remove_private_aria2_staging_candidate \
-                "${candidate}" "${require_marker}"; then
-                printf 'Warning: unable to remove validated private aria2 staging: %s\n' \
-                    "${candidate##*/}" >&2
-            fi
-        else
-            if [[ ${require_marker} == true ]]; then
-                # Even when an unknown transfer artifact forces preservation,
-                # remove authenticated URLs and cookies from a directory whose
-                # ownership marker and private metadata still validate.
-                # shellcheck disable=SC2310
-                if ! remove_marked_private_aria2_sensitive_metadata \
-                    "${candidate}"; then
-                    printf 'Warning: unable to remove ambiguous private aria2 authentication metadata: %s\n' \
-                        "${candidate##*/}" >&2
-                fi
-            fi
-            printf 'Warning: preserving ambiguous private aria2 staging directory: %s\n' \
-                "${candidate##*/}" >&2
-        fi
-    done < <(
-        find "${OUTPUT_DIR}" \
-            -mindepth 1 -maxdepth 1 \
-            -name '.yt-dlp-aria2.????????' \
-            -print0 2>/dev/null || true
-    )
+    # Old sessions have no retained identity or live descriptor in this process.
+    # A marker, owner and familiar basename cannot authorize deletion.
+    for candidate in "${OUTPUT_DIR}"/.yt-dlp-aria2.????????; do
+        [[ -e ${candidate} || -L ${candidate} ]] || continue
+        printf 'Warning: preserving legacy staging for manual inspection: %s\n' \
+            "${candidate##*/}" >&2
+    done
 }
 
 cleanup_stale_temporary_files() {
-    local stale_file
-    local -a stale_files=()
-
-    while IFS= read -r -d '' stale_file; do
-        stale_files+=("${stale_file}")
-    done < <(
-        # Stale-file cleanup is best-effort. An inaccessible destination must
-        # not abort an otherwise valid download session.
-        find "${OUTPUT_DIR}" -maxdepth 1 -type f -uid "${EUID}" \
-            \( -name '.yt-dlp-remux.*.mkv' -o -name '.yt-dlp-path.*' \) \
-            -mmin +1440 -print0 2>/dev/null || true
-    )
-    if ((${#stale_files[@]} > 0)); then
-        rm -f -- "${stale_files[@]}" || true
-    fi
+    # Age and filename patterns do not authenticate a previous session's files.
+    # Only active, descriptor-bound temporaries are removed by cleanup.
+    return 0
 }
 
 probe_media_summary() {
@@ -2594,6 +2559,7 @@ private_directory_chain_is_safe() {
 
 # Canonicalize and lock the destination before creating any transfer state.
 prepare_output_directory() {
+    local opened_identity=''
     if [[ -z ${OUTPUT_DIR} ]]; then
         OUTPUT_DIR=${PWD}
     fi
@@ -2612,28 +2578,62 @@ prepare_output_directory() {
         error 'unable to resolve the destination directory.'
         exit 1
     fi
-    readonly OUTPUT_DIR
-
-    # shellcheck disable=SC2310 # Failure is a fatal destination trust check.
-    if ! private_directory_chain_is_safe "${OUTPUT_DIR}"; then
-        error "destination directory or one of its ancestors is owned by another user or is shared without sticky-bit protection: ${OUTPUT_DIR}"
-        exit 13
-    fi
-
-    # --output is an yt-dlp output template. Escape literal percent signs from
-    # the real destination path.
-    OUTPUT_DIR_TEMPLATE=${OUTPUT_DIR//%/%%}
-    readonly OUTPUT_DIR_TEMPLATE
-
+    FINAL_OUTPUT_DIR=${OUTPUT_DIR}
+    readonly FINAL_OUTPUT_DIR
     if [[ ! -w ${OUTPUT_DIR} || ! -x ${OUTPUT_DIR} ]]; then
         error "destination directory is not writable: ${OUTPUT_DIR}"
         exit 13
     fi
-
-    # Keep one same-user writer per canonical destination directory.
+    # Record the chosen media directory before selecting any local workspace.
+    # shellcheck disable=SC2310 # A changed directory cannot receive a result.
+    if ! exec {FINAL_OUTPUT_FD}<"${OUTPUT_DIR}" \
+        || ! get_path_identity FINAL_OUTPUT_IDENTITY "${OUTPUT_DIR}" directory \
+        || ! opened_identity=$(stat -Lc '%d:%i' -- "/proc/${BASHPID}/fd/${FINAL_OUTPUT_FD}") \
+        || [[ ${opened_identity} != "${FINAL_OUTPUT_IDENTITY}" ]]; then
+        error 'unable to authenticate the destination directory.'
+        exit 73
+    fi
+    readonly FINAL_OUTPUT_IDENTITY
     acquire_output_lock "${OUTPUT_DIR}"
-    recover_abandoned_private_aria2_staging
-    cleanup_stale_temporary_files
+
+    if python3 "${PRIVATE_ARIA2_HELPER}" media-local-safe --output-dir "${OUTPUT_DIR}"; then
+        recover_abandoned_private_aria2_staging
+        cleanup_stale_temporary_files
+    else
+        local media_root=''
+        if ! media_root=$(python3 "${PRIVATE_ARIA2_HELPER}" private-root --disk); then
+            error 'this destination requires a private local disk workspace, but none is usable.'
+            exit 73
+        fi
+        begin_signal_registration
+        if ! MEDIA_WORKSPACE=$(mktemp -d --tmpdir="${media_root}" '.media-work.XXXXXXXX'); then
+            finish_signal_registration
+            error 'unable to create a private local media workspace.'
+            exit 73
+        fi
+        # shellcheck disable=SC2310 # Register the new exclusive directory before replaying signals.
+        if ! exec {MEDIA_WORKSPACE_FD}<"${MEDIA_WORKSPACE}" \
+            || ! get_path_identity MEDIA_WORKSPACE_IDENTITY "${MEDIA_WORKSPACE}" directory \
+            || ! opened_identity=$(stat -Lc '%d:%i' -- "/proc/${BASHPID}/fd/${MEDIA_WORKSPACE_FD}") \
+            || [[ ${opened_identity} != "${MEDIA_WORKSPACE_IDENTITY}" ]]; then
+            finish_signal_registration
+            error 'unable to authenticate the local media workspace.'
+            exit 73
+        fi
+        finish_signal_registration
+        OUTPUT_DIR=${MEDIA_WORKSPACE}
+        if [[ ${MACHINE_PROGRESS} == true ]]; then
+            printf '%s\n' 'YTDLP_STORAGE|local-disk'
+        fi
+        print_human_line 'The selected destination requires local disk staging. Media will be copied there after validation.'
+        print_human_line "Local media workspace: ${MEDIA_WORKSPACE}"
+        print_human_line 'Allow space for downloaded streams and merged/remuxed output on this local disk.'
+        # Old destination staging has no authenticated identity in this session.
+        # Never scan or delete similarly named residues on the shared filesystem.
+    fi
+    readonly OUTPUT_DIR
+    OUTPUT_DIR_TEMPLATE=${OUTPUT_DIR//%/%%}
+    readonly OUTPUT_DIR_TEMPLATE
 }
 
 # Create private path records and aria2/yt-dlp transfer metadata.
@@ -2641,6 +2641,33 @@ prepare_private_work_files() {
     local result_name
     local result_parent
     local staging_marker_path
+    local opened_identity=''
+
+    begin_signal_registration
+    if ! PRIVATE_ARIA2_METADATA=$(mktemp -d \
+        --tmpdir="${OUTPUT_LOCK_ROOT}" '.yt-dlp-aria2.XXXXXXXX'); then
+        finish_signal_registration
+        error 'unable to create the local private metadata directory.'
+        exit 73
+    fi
+    # shellcheck disable=SC2310 # Identity is registered before signal delivery.
+    if ! exec {PRIVATE_ARIA2_METADATA_FD}<"${PRIVATE_ARIA2_METADATA}" \
+        || ! get_path_identity PRIVATE_ARIA2_METADATA_IDENTITY \
+            "${PRIVATE_ARIA2_METADATA}" directory \
+        || ! opened_identity=$(stat -Lc '%d:%i' -- "/proc/${BASHPID}/fd/${PRIVATE_ARIA2_METADATA_FD}") \
+        || [[ ${opened_identity} != "${PRIVATE_ARIA2_METADATA_IDENTITY}" ]]; then
+        finish_signal_registration
+        error 'unable to authenticate the local private metadata directory.'
+        exit 73
+    fi
+    finish_signal_registration
+    staging_marker_path="${PRIVATE_ARIA2_METADATA}/${PRIVATE_ARIA2_STAGING_MARKER}"
+    printf '%s\n' "${PRIVATE_ARIA2_STAGING_MARKER_VALUE}" >"${staging_marker_path}"
+    # Firefox extraction makes its own temporary cookie database copies.
+    # Override ambient locations only after the shared allocator has validated
+    # this local private root; downstream tools inherit the same confinement.
+    export TMPDIR="${PRIVATE_ARIA2_METADATA}"
+    export TMP="${PRIVATE_ARIA2_METADATA}" TEMP="${PRIVATE_ARIA2_METADATA}"
 
     if [[ -n ${RESULT_FILE} ]]; then
         if [[ ${RESULT_FILE} == *$'\n'* || ${RESULT_FILE} == *$'\r'* ]]; then
@@ -2696,7 +2723,7 @@ prepare_private_work_files() {
         # Always retain the final yt-dlp path internally for FFprobe validation.
         begin_signal_registration
         if ! INTERNAL_PATH_FILE_TMP=$(mktemp \
-            --tmpdir="${OUTPUT_DIR}" \
+            --tmpdir="${PRIVATE_ARIA2_METADATA}" \
             '.yt-dlp-path.XXXXXXXX'); then
             finish_signal_registration
             error 'unable to create the internal result-path file.'
@@ -2714,7 +2741,7 @@ prepare_private_work_files() {
     finish_signal_registration
 
     if ! YTDLP_BATCH_FILE_TMP=$(mktemp \
-        --tmpdir="${OUTPUT_LOCK_ROOT}" \
+        --tmpdir="${PRIVATE_ARIA2_METADATA}" \
         '.url-batch.XXXXXXXX'); then
         error 'unable to create the private yt-dlp URL batch file.'
         exit 13
@@ -2737,9 +2764,12 @@ prepare_private_work_files() {
         exit 13
     fi
     # shellcheck disable=SC2310 # Failure rejects the newly created directory.
-    if ! get_path_identity \
-        PRIVATE_ARIA2_STAGING_IDENTITY \
-        "${PRIVATE_ARIA2_STAGING}" directory; then
+    if ! exec {PRIVATE_ARIA2_STAGING_FD}<"${PRIVATE_ARIA2_STAGING}" \
+        || ! get_path_identity \
+            PRIVATE_ARIA2_STAGING_IDENTITY \
+            "${PRIVATE_ARIA2_STAGING}" directory \
+        || ! opened_identity=$(stat -Lc '%d:%i' -- "/proc/${BASHPID}/fd/${PRIVATE_ARIA2_STAGING_FD}") \
+        || [[ ${opened_identity} != "${PRIVATE_ARIA2_STAGING_IDENTITY}" ]]; then
         error 'unable to identify the private aria2 staging directory.'
         exit 13
     fi
@@ -2752,10 +2782,10 @@ prepare_private_work_files() {
         exit 13
     fi
 
-    PRIVATE_ARIA2_PLAN="${PRIVATE_ARIA2_STAGING}/plan.json"
-    PRIVATE_ARIA2_COOKIE_JAR="${PRIVATE_ARIA2_STAGING}/cookies.txt"
-    PRIVATE_ARIA2_INPUT="${PRIVATE_ARIA2_STAGING}/aria2.input"
-    PRIVATE_ARIA2_MANIFEST="${PRIVATE_ARIA2_STAGING}/manifest.json"
+    PRIVATE_ARIA2_PLAN="${PRIVATE_ARIA2_METADATA}/plan.json"
+    PRIVATE_ARIA2_COOKIE_JAR="${PRIVATE_ARIA2_METADATA}/cookies.txt"
+    PRIVATE_ARIA2_INPUT="${PRIVATE_ARIA2_METADATA}/aria2.input"
+    PRIVATE_ARIA2_MANIFEST="${PRIVATE_ARIA2_METADATA}/manifest.json"
 
     # shellcheck disable=SC2310 # Failure rejects partially initialized state.
     if ! : >"${PRIVATE_ARIA2_PLAN}" \
@@ -2783,7 +2813,7 @@ configure_download_options() {
     local video_format
 
     print_human_line "${SCRIPT_NAME} version ${VERSION}"
-    print_human_line "Download directory: ${OUTPUT_DIR}"
+    print_human_line "Download directory: ${FINAL_OUTPUT_DIR}"
     print_human_line "Mode: ${MODE}"
     if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
         print_human_line 'YouTube access: Firefox cookies with web_safari HLS'
@@ -3010,6 +3040,7 @@ execute_selected_transport() {
             --plan "${PRIVATE_ARIA2_PLAN}" \
             --output-dir "${OUTPUT_DIR}" \
             --staging-dir "${PRIVATE_ARIA2_STAGING}" \
+            --private-dir "${PRIVATE_ARIA2_METADATA}" \
             --aria2-input "${PRIVATE_ARIA2_INPUT}" \
             --manifest "${PRIVATE_ARIA2_MANIFEST}" \
             >/dev/null || build_status=$?
@@ -3225,12 +3256,14 @@ remove_owned_hls_remux_temp() {
     if ! hls_remux_temp_identity_matches; then
         printf 'Warning: preserving a changed temporary HLS remux: %s\n' \
             "${HLS_REMUX_TMP}" >&2
+        MEDIA_WORKSPACE_CLEANUP_SAFE=false
         HLS_REMUX_TMP=''
         HLS_REMUX_TMP_IDENTITY=''
         close_hls_remux_fd
         return 1
     fi
     if ! rm -f -- "${HLS_REMUX_TMP}"; then
+        MEDIA_WORKSPACE_CLEANUP_SAFE=false
         return 1
     fi
     HLS_REMUX_TMP=''
@@ -3252,6 +3285,7 @@ preserve_verified_hls_remux() {
     if ! hls_remux_temp_identity_matches; then
         printf 'Warning: preserving a changed temporary HLS remux in place: %s\n' \
             "${retained_remux_path}" >&2
+        MEDIA_WORKSPACE_CLEANUP_SAFE=false
         HLS_REMUX_TMP=''
         HLS_REMUX_TMP_IDENTITY=''
         close_hls_remux_fd
@@ -3282,6 +3316,7 @@ preserve_verified_hls_remux() {
             || [[ ${current_retained_identity} != "${retained_remux_identity}" ]]; then
             printf 'Warning: preserving an identity-changed retained HLS remux: %s\n' \
                 "${retained_remux_path}" >&2
+            MEDIA_WORKSPACE_CLEANUP_SAFE=false
             HLS_REMUX_TMP=''
             HLS_REMUX_TMP_IDENTITY=''
             close_hls_remux_fd
@@ -3290,6 +3325,10 @@ preserve_verified_hls_remux() {
         HLS_REMUX_TMP=''
         HLS_REMUX_TMP_IDENTITY=''
         close_hls_remux_fd
+        if [[ -n ${MEDIA_WORKSPACE} ]]; then
+            MEDIA_RETAINED_PATHS+=("${retained_remux_path}")
+            MEDIA_RETAINED_IDENTITIES+=("${retained_remux_identity}")
+        fi
         printf 'The verified remuxed MKV was retained at: %s\n' \
             "${retained_remux_path}" >&2
     fi
@@ -3392,9 +3431,11 @@ remove_repaired_hls_source() {
         || [[ ${current_source_identity} != "${HLS_SOURCE_TO_CLEAN_IDENTITY}" ]]; then
         printf 'Warning: preserving a changed repaired HLS source: %s\n' \
             "${HLS_SOURCE_TO_CLEAN}" >&2
+        MEDIA_WORKSPACE_CLEANUP_SAFE=false
     elif ! rm -f -- "${HLS_SOURCE_TO_CLEAN}"; then
         printf 'Warning: unable to remove the repaired HLS intermediate: %s\n' \
             "${HLS_SOURCE_TO_CLEAN}" >&2
+        MEDIA_WORKSPACE_CLEANUP_SAFE=false
     fi
     HLS_SOURCE_TO_CLEAN=''
     HLS_SOURCE_TO_CLEAN_IDENTITY=''
@@ -3436,6 +3477,10 @@ remux_hls_result() {
         hls_source_identity "${hls_source_path}" regular-file; then
         error 'the repaired HLS source is missing or unsafe.'
         exit 13
+    fi
+    if [[ -n ${MEDIA_WORKSPACE} ]]; then
+        MEDIA_RETAINED_PATHS+=("${hls_source_path}")
+        MEDIA_RETAINED_IDENTITIES+=("${hls_source_identity}")
     fi
     if [[ -e ${hls_final_path} || -L ${hls_final_path} ]]; then
         error "the final MKV already exists; refusing to overwrite it: ${hls_final_path}"
@@ -3538,6 +3583,7 @@ validate_and_publish_result() {
     local final_media_path=''
     local opened_record_identity=''
     local published_record_identity=''
+    local current_source_identity=''
     local validation_status
 
     if ! { IFS= read -r final_media_path <"${PATH_RECORD_FD_PATH}"; } 2>/dev/null \
@@ -3546,6 +3592,14 @@ validate_and_publish_result() {
         exit 13
     fi
 
+    if [[ -n ${MEDIA_WORKSPACE} ]]; then
+        MEDIA_RETAINED_PATH=${final_media_path}
+        # shellcheck disable=SC2310 # Retain only the validated path's original inode.
+        if ! get_path_identity MEDIA_RETAINED_IDENTITY "${final_media_path}" regular-file; then
+            error 'the final local media identity is unavailable.'
+            exit 73
+        fi
+    fi
     emit_machine_postprocess started MediaValidation
 
     # Do not invoke validation in a conditional context: Bash would disable
@@ -3569,6 +3623,41 @@ validate_and_publish_result() {
         exit 65
     fi
     emit_machine_postprocess finished MediaValidation
+
+    if [[ -n ${MEDIA_WORKSPACE} ]]; then
+        local publication_record="${PRIVATE_ARIA2_METADATA}/published-path"
+        # Preserve the validated local source on failed/ambiguous network publication.
+        MEDIA_RETAINED_PATH=${final_media_path}
+        # shellcheck disable=SC2310 # A swapped source cannot be published or deleted.
+        if ! get_path_identity current_source_identity "${final_media_path}" regular-file \
+            || [[ ${current_source_identity} != "${MEDIA_RETAINED_IDENTITY}" ]]; then
+            error 'the validated local media changed before publication.'
+            exit 73
+        fi
+        emit_machine_postprocess started MediaPublication
+        run_supervised_command python3 "${PRIVATE_ARIA2_HELPER}" publish-media \
+            --source "${final_media_path}" --source-identity "${MEDIA_RETAINED_IDENTITY}" \
+            --output-dir "${FINAL_OUTPUT_DIR}" \
+            --output-identity "${FINAL_OUTPUT_IDENTITY}" >"${publication_record}"
+        if ((DOWNLOAD_STATUS != 0)); then
+            emit_machine_postprocess error MediaPublication
+            error "unable to publish the final media safely (status ${DOWNLOAD_STATUS})."
+            print_human_line "Validated local media retained at: ${MEDIA_RETAINED_PATH}" >&2
+            exit "${DOWNLOAD_STATUS}"
+        fi
+        if ! IFS= read -r final_media_path <"${publication_record}" \
+            || [[ -z ${final_media_path} ]] \
+            || ! printf '%s\n' "${final_media_path}" >"${PATH_RECORD_FD_PATH}"; then
+            error 'unable to record the published media destination.'
+            exit 73
+        fi
+        normalize_path_record "${PATH_RECORD_FD_PATH}" "${FINAL_OUTPUT_DIR}"
+        MEDIA_RETAINED_PATH=''
+        MEDIA_RETAINED_IDENTITY=''
+        MEDIA_RETAINED_PATHS=()
+        MEDIA_RETAINED_IDENTITIES=()
+        emit_machine_postprocess finished MediaPublication
+    fi
 
     if [[ -n ${RESULT_FILE} ]]; then
         # Reauthenticate both endpoints immediately before publication. The
@@ -3619,6 +3708,10 @@ validate_and_publish_result() {
     # the record. Never remove an injected replacement at the temporary name.
     # shellcheck disable=SC2310 # A changed pathname is deliberately preserved.
     if ! remove_owned_path_record_temp "${PATH_RECORD_TMP}"; then
+        if [[ -n ${PRIVATE_ARIA2_METADATA} &&
+            ${PATH_RECORD_TMP%/*} == "${PRIVATE_ARIA2_METADATA}" ]]; then
+            PRIVATE_ARIA2_METADATA_CLEANUP_SAFE=false
+        fi
         printf 'Warning: preserving a changed temporary path record: %s\n' \
             "${PATH_RECORD_TMP}" >&2
     fi
@@ -3673,6 +3766,13 @@ main() {
 
     configure_download_options
     plan_selected_transport
+    if [[ -n ${MEDIA_WORKSPACE} ]]; then
+        if ! python3 "${PRIVATE_ARIA2_HELPER}" check-space \
+            --plan "${PRIVATE_ARIA2_PLAN}" --output-dir "${OUTPUT_DIR}"; then
+            error 'the private local media disk cannot accommodate this download.'
+            exit 73
+        fi
+    fi
     configure_download_reporting
     execute_selected_transport
     finalize_download

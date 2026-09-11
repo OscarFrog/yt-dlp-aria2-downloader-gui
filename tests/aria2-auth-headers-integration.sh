@@ -102,6 +102,7 @@ build_plan() {
         --plan "${plan_file}" \
         --output-dir "${output_dir}" \
         --staging-dir "${staging_dir}" \
+        --private-dir "${staging_dir}" \
         --aria2-input "${staging_dir}/aria2.input" \
         --manifest "${staging_dir}/manifest.json"
 }

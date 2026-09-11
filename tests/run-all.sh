@@ -55,6 +55,7 @@ readonly -a FULL_SUITE_IDS=(
     runtime-manager
     mock-engine-hls
     mock-engine-staging
+    mock-engine-network
     mock-gui-state
     mock-gui-progress
     mock-runtime-compat
@@ -71,6 +72,7 @@ readonly -a FULL_SUITE_IDS=(
 # The fast profile is an explicit developer feedback loop. The default full
 # profile remains the release-equivalent local contract.
 readonly -a FAST_SUITE_IDS=(
+    mock-engine-network
     test-runner
     runtime-manager
     private-aria2-plan
@@ -89,6 +91,7 @@ declare -Ar SUITE_LABELS=(
     ['mock-engine-core']='Mock engine core/storage integration'
     ['mock-engine-hls']='Mock engine YouTube HLS integration'
     ['mock-engine-staging']='Mock engine private-staging integration'
+    ['mock-engine-network']='Mock network destination and privacy integration'
     ['mock-gui-progress']='Mock GUI progress/profile integration'
     ['mock-gui-state']='Mock GUI configuration/state integration'
     ['mock-signals']='Mock signal/cancellation integration'
@@ -112,6 +115,7 @@ declare -Ar SUITE_PATHS=(
     ['mock-engine-core']='./tests/mock-integration.sh'
     ['mock-engine-hls']='./tests/mock-integration.sh'
     ['mock-engine-staging']='./tests/mock-integration.sh'
+    ['mock-engine-network']='./tests/mock-integration.sh'
     ['mock-gui-progress']='./tests/mock-integration.sh'
     ['mock-gui-state']='./tests/mock-integration.sh'
     ['mock-signals']='./tests/mock-integration.sh'
@@ -132,6 +136,7 @@ declare -Ar SUITE_GROUP_ARGUMENTS=(
     ['mock-engine-core']='engine-core'
     ['mock-engine-hls']='engine-hls'
     ['mock-engine-staging']='engine-staging'
+    ['mock-engine-network']='engine-network'
     ['mock-gui-progress']='gui-progress'
     ['mock-gui-state']='gui-state'
     ['mock-signals']='signals'

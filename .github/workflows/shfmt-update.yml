@@ -683,7 +683,7 @@ jobs:
           image="shfmt-verifier:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           container="shfmt-verifier-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           cleanup_verifier_sandbox() {
-            docker rm -f "${container}" >/dev/null 2>&1 || true
+            docker rm -f --volumes "${container}" >/dev/null 2>&1 || true
             docker image rm -f "${image}" >/dev/null 2>&1 || true
             rm -rf -- "${docker_context}"
             rm -f -- "${allowed_file}" "${shell_file}" "${patch_paths}" \
@@ -717,6 +717,8 @@ jobs:
           docker build --build-arg "SHFMT_VERSION=${pin_version}" \
             --tag "${image}" "${docker_context}"
 
+          # HOME expands inside the isolated shell, never in the host command.
+          # shellcheck disable=SC2016
           timeout --signal=TERM --kill-after=10s 8m \
             docker run \
               --name "${container}" \
@@ -729,6 +731,7 @@ jobs:
               --cpus=4 \
               --user "$(id -u):$(id -g)" \
               --tmpfs /tmp:rw,exec,nosuid,nodev,size=2g,mode=1777 \
+              --volume /var/tmp \
               --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
               --workdir /workspace \
               --env HOME=/tmp/validation-home \
@@ -736,7 +739,7 @@ jobs:
               "${image}" \
               bash -c 'mkdir -m 700 -- "$HOME"; bash ./tests/run-all.sh --jobs 4 --full'
           # Remove the whole container before trusting any resulting status.
-          docker rm -f "${container}" >/dev/null
+          docker rm -f --volumes "${container}" >/dev/null
           canonical_manifest "${after}"
           cmp -s -- "${baseline}" "${after}"
           git diff --binary >"${docker_context}/after.patch"

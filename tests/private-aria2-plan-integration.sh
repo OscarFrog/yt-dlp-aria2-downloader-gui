@@ -23,6 +23,7 @@ TEST_ROOT=''
 CASE_ROOT=''
 OUTPUT_DIR=''
 STAGING_DIR=''
+PRIVATE_DIR=''
 PLAN_FILE=''
 ARIA2_INPUT=''
 MANIFEST=''
@@ -39,11 +40,12 @@ new_case() {
     CASE_ROOT="${TEST_ROOT}/${name}"
     OUTPUT_DIR="${CASE_ROOT}/output"
     STAGING_DIR="${OUTPUT_DIR}/.yt-dlp-aria2-test"
-    PLAN_FILE="${CASE_ROOT}/plan.json"
-    ARIA2_INPUT="${STAGING_DIR}/aria2.input"
-    MANIFEST="${STAGING_DIR}/manifest.json"
+    PRIVATE_DIR="${CASE_ROOT}/private"
+    PLAN_FILE="${PRIVATE_DIR}/plan.json"
+    ARIA2_INPUT="${PRIVATE_DIR}/aria2.input"
+    MANIFEST="${PRIVATE_DIR}/manifest.json"
 
-    mkdir -p -- "${STAGING_DIR}"
+    mkdir -p -- "${STAGING_DIR}" "${PRIVATE_DIR}"
     chmod 700 -- "${STAGING_DIR}"
 }
 
@@ -181,6 +183,7 @@ run_build() {
         --plan "${PLAN_FILE}" \
         --output-dir "${OUTPUT_DIR}" \
         --staging-dir "${STAGING_DIR}" \
+        --private-dir "${PRIVATE_DIR}" \
         --aria2-input "${ARIA2_INPUT}" \
         --manifest "${MANIFEST}"
 }
@@ -194,6 +197,7 @@ run_build_without_https_opt_in() {
         --plan "${PLAN_FILE}" \
         --output-dir "${OUTPUT_DIR}" \
         --staging-dir "${STAGING_DIR}" \
+        --private-dir "${PRIVATE_DIR}" \
         --aria2-input "${ARIA2_INPUT}" \
         --manifest "${MANIFEST}"
 }
@@ -743,10 +747,429 @@ test_private_plan_publication_safety() {
         || fail 'Overwrite refusal removed the staging source.'
 }
 
+test_network_media_permissions() {
+    local source_identity=''
+    local output_identity=''
+    local file_count=''
+
+    printf '%s\n' 'Private aria2 plan scenario: permissive media, private metadata'
+    new_case 'permissive-media-private-metadata'
+    mkdir -- "${CASE_ROOT}/network destination é"
+    chmod 0777 -- "${CASE_ROOT}/network destination é"
+    write_single_plan \
+        'https://example.invalid/media.mp4?token=fictitious-signed-token' \
+        "${OUTPUT_DIR}/final.mp4" 'fictitious-private-header'
+
+    assert_status 0 'private plan remains accepted beside permissive media' run_classify
+    assert_status 0 'media permissions do not impose metadata permissions' run_build
+    assert_private_file "${ARIA2_INPUT}" 'separate private aria2 input'
+    assert_private_file "${MANIFEST}" 'separate private manifest'
+    printf 'downloaded media\n' >"${STAGING_DIR}/item-000.download"
+    assert_status 0 'local staging component publication' run_commit
+    source_identity=$(stat -c '%d:%i' -- "${OUTPUT_DIR}/final.mp4")
+    output_identity=$(stat -c '%d:%i' -- "${CASE_ROOT}/network destination é")
+    assert_status 0 'permissive final media publication' \
+        python3 "${HELPER}" publish-media \
+        --source "${OUTPUT_DIR}/final.mp4" \
+        --source-identity "${source_identity}" \
+        --output-dir "${CASE_ROOT}/network destination é" \
+        --output-identity "${output_identity}"
+    assert_file_has_line "${CASE_ROOT}/network destination é/final.mp4" 'downloaded media' \
+        'permissive destination receives final media'
+    file_count=$(find "${CASE_ROOT}/network destination é" -type f | wc -l)
+    [[ ${file_count} == 1 ]] \
+        || fail 'Private metadata was created in the media destination.'
+    chmod 0777 -- "${STAGING_DIR}"
+    assert_status 65 'private local media staging remains strict' run_commit
+}
+
+test_private_roots_and_media_faults() {
+    printf '%s\n' 'Private aria2 plan scenario: private roots and publication fault boundaries'
+    new_case 'network-publication-boundaries'
+    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_NETWORK_BOUNDARIES'
+import argparse
+import errno
+import importlib.util
+import io
+import json
+import os
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+from contextlib import redirect_stderr
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location("network_publication", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = Path(sys.argv[2])
+
+
+def identity(path):
+    metadata = path.lstat()
+    return f"{metadata.st_dev}:{metadata.st_ino}"
+
+
+def mkdir(path, mode=0o700):
+    path.mkdir(mode=mode)
+    path.chmod(mode)
+    return path
+
+
+def prepare(name):
+    case = mkdir(root / name)
+    local = mkdir(case / "local")
+    output = mkdir(case / "shared output é", 0o777)
+    source = local / "media file é &.mp4"
+    source.write_bytes(b"verified media bytes\n" * 65537)
+    args = argparse.Namespace(source=str(source), source_identity=identity(source),
+                              output_dir=str(output), output_identity=identity(output))
+    return source, output, args
+
+
+def fail_with(error_number):
+    def injected(*args, **kwargs):
+        raise OSError(error_number, "injected filesystem failure")
+    return injected
+
+
+def failure(args, expected=Exception):
+    try:
+        module.publish_media(args)
+    except expected:
+        return
+    raise AssertionError("publication unexpectedly succeeded")
+
+
+# Test candidate decisions and real exclusive creation. Only the filesystem
+# identity of deliberately rejected candidates is simulated; permissions,
+# ownership, directory descriptors and file creation remain real.
+candidate = mkdir(root / "candidate")
+fallback = mkdir(root / "fallback")
+app = f"yt-dlp-aria2-downloader-{os.geteuid()}"
+for invalid in (Path("relative"), root / "absent"):
+    with patch.object(module, "private_root_candidates", return_value=[(invalid, True), (fallback, False)]):
+        assert module.select_private_root() == fallback / app
+candidate.chmod(0o755)
+with patch.object(module, "private_root_candidates", return_value=[(candidate, True), (fallback, False)]):
+    assert module.select_private_root() == fallback / app
+assert stat.S_IMODE(candidate.stat().st_mode) == 0o755
+candidate.chmod(0o700)
+with patch.object(module, "private_root_candidates", return_value=[(candidate, True)]):
+    assert module.select_private_root() == candidate / app
+    assert stat.S_IMODE((candidate / app).stat().st_mode) == 0o700
+    assert not list((candidate / app).iterdir())
+    (candidate / app).chmod(0o755)
+    try:
+        module.select_private_root()
+    except module.PlanError:
+        pass
+    else:
+        raise AssertionError("existing nonprivate application root was accepted")
+    assert stat.S_IMODE((candidate / app).stat().st_mode) == 0o755
+    (candidate / app).chmod(0o700)
+    with patch.object(module, "filesystem_type", return_value=0xFF534D42):
+        try:
+            module.select_private_root()
+        except module.PlanError:
+            pass
+        else:
+            raise AssertionError("network-backed private root was accepted")
+    with patch.object(module, "filesystem_type", return_value=0x01021994):
+        try:
+            module.select_private_root(disk=True)
+        except module.PlanError:
+            pass
+        else:
+            raise AssertionError("memory filesystem accepted for full-media disk fallback")
+with patch.dict(os.environ, {"XDG_RUNTIME_DIR": "relative", "HOME": str(root)}, clear=True):
+    assert module.private_root_candidates(disk=False, no_runtime=False)[0] == (Path("relative"), True)
+    assert all(path != Path("relative") for path, _ in module.private_root_candidates(disk=False, no_runtime=True))
+with patch.dict(os.environ, {}, clear=True):
+    assert module.private_root_candidates(disk=False, no_runtime=False)[0] == (Path("/tmp"), False)
+
+# Size estimates do not allocate real data. Simulate only the disk type and
+# available capacity; parse a real private JSON file through the production API.
+space_dir = mkdir(root / "space-estimates")
+space_plan = space_dir / "plan.json"
+space_args = argparse.Namespace(plan=str(space_plan), output_dir=str(space_dir))
+floor = 64 * 1024 * 1024
+known = {"requested_downloads": [{"requested_formats": [
+    {"filesize": 10}, {"filesize_approx": 20},
+]}]}
+mixed = {"requested_downloads": [{"requested_formats": [{"filesize": 10}, {}]}]}
+unknown = {"requested_downloads": [{}]}
+for payload, available, succeeds, warns in (
+    (known, floor + 89, False, False),
+    (known, floor + 90, True, False),
+    (mixed, floor + 29, False, False),
+    (mixed, floor + 30, True, True),
+    (unknown, floor - 1, False, False),
+    (unknown, floor, True, True),
+):
+    space_plan.write_text(json.dumps(payload), encoding="utf-8")
+    diagnostics = io.StringIO()
+    with patch.object(module, "filesystem_type", return_value=0xEF53), \
+            patch.object(module.os, "fstatvfs", return_value=SimpleNamespace(f_bavail=available, f_frsize=1)), \
+            redirect_stderr(diagnostics):
+        try:
+            status = module.check_space(space_args)
+        except module.PlanError as exc:
+            assert not succeeds and "insufficient local disk space" in str(exc)
+        else:
+            assert succeeds and status == 0
+    assert ("media size is unknown" in diagnostics.getvalue()) == warns
+for payload in ([], {}, {"requested_downloads": []}, {"requested_downloads": ["invalid"]},
+                {"requested_downloads": [{"requested_formats": "invalid"}]},
+                {"requested_downloads": [{"requested_formats": ["invalid"]}]}):
+    space_plan.write_text(json.dumps(payload), encoding="utf-8")
+    try:
+        module.check_space(space_args)
+    except module.PlanError:
+        pass
+    else:
+        raise AssertionError("space check accepted a malformed plan")
+space_plan.write_text("{invalid JSON", encoding="utf-8")
+try:
+    module.check_space(space_args)
+except module.PlanError:
+    pass
+else:
+    raise AssertionError("space check accepted invalid JSON")
+
+# A complete copy is never shown under its final name before finalization.
+source, output, args = prepare("copy-phases")
+real_write = module.os.write
+seen_copy = False
+
+
+def inspect_copy(descriptor, data):
+    global seen_copy
+    seen_copy = True
+    assert source.exists() and not (output / source.name).exists()
+    assert len(list(output.iterdir())) == 1
+    assert list(output.iterdir())[0].name.endswith(".partial")
+    return real_write(descriptor, data)
+
+
+with patch.object(module.os, "write", inspect_copy):
+    assert module.publish_media(args) == 0
+assert seen_copy and source.read_bytes() == (output / source.name).read_bytes()
+assert len(list(output.iterdir())) == 1
+
+# Exercise an actual device boundary when the host offers one. This is a real
+# filesystem copy qualification, not an SMB mount qualification.
+source, output, args = prepare("cross-device")
+cross_device_tested = False
+for parent in ("/var/tmp", "/dev/shm"):
+    try:
+        directory = tempfile.TemporaryDirectory(prefix="yt-dlp-cross-device-", dir=parent)
+    except OSError:
+        continue
+    with directory as directory_name:
+        remote = Path(directory_name)
+        if remote.stat().st_dev == source.stat().st_dev:
+            continue
+        args.output_dir = str(remote)
+        args.output_identity = identity(remote)
+        assert module.publish_media(args) == 0
+        assert source.read_bytes() == (remote / source.name).read_bytes()
+        cross_device_tested = True
+        break
+print("Real cross-device copy: passed" if cross_device_tested else "Real cross-device copy: NOT EXECUTED (one available filesystem)")
+
+source_one, output, args_one = prepare("concurrent-one")
+source_two, _, args_two = prepare("concurrent-two")
+source_two.write_bytes(b"second complete media\n" * 65537)
+args_two.output_dir, args_two.output_identity = args_one.output_dir, args_one.output_identity
+workers = []
+try:
+    for args in (args_one, args_two):
+        workers.append(subprocess.Popen(
+            [sys.executable, sys.argv[1], "publish-media", "--source", args.source,
+             "--source-identity", args.source_identity, "--output-dir", args.output_dir,
+             "--output-identity", args.output_identity],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ))
+    for worker in workers:
+        worker.communicate(timeout=30)
+    assert sorted(worker.returncode for worker in workers) == [0, 1]
+finally:
+    for worker in workers:
+        if worker.poll() is None:
+            worker.kill()
+        worker.wait()
+assert (output / source_one.name).read_bytes() in (source_one.read_bytes(), source_two.read_bytes())
+assert len(list(output.iterdir())) == 1 and source_one.exists() and source_two.exists()
+
+source, output, args = prepare("without-hard-links")
+with patch.object(module.os, "link", fail_with(errno.EOPNOTSUPP)):
+    assert module.publish_media(args) == 0
+assert source.read_bytes() == (output / source.name).read_bytes()
+
+source, output, args = prepare("without-rename-noreplace")
+with patch.object(module, "rename_without_overwrite", fail_with(errno.EOPNOTSUPP)):
+    assert module.publish_media(args) == 0
+assert source.read_bytes() == (output / source.name).read_bytes()
+assert len(list(output.iterdir())) == 1
+
+source, output, args = prepare("no-atomic-primitive")
+with patch.object(module, "rename_without_overwrite", fail_with(errno.EOPNOTSUPP)), \
+        patch.object(module.os, "link", fail_with(errno.EOPNOTSUPP)):
+    failure(args, module.PlanError)
+assert source.exists() and not list(output.iterdir())
+
+for operation, number in (("read", errno.EIO), ("write", errno.ENOSPC), ("fsync", errno.EIO)):
+    source, output, args = prepare(f"copy-failure-{operation}")
+    with patch.object(module.os, operation, fail_with(number)):
+        failure(args, OSError)
+    assert source.exists() and not list(output.iterdir())
+
+source, output, args = prepare("copy-create-permission-denied")
+unrelated = output / "preexisting user media.mp4"
+unrelated.write_bytes(b"preexisting user data")
+real_open = module.os.open
+denied_creation = False
+
+
+def deny_exclusive_copy(path, flags, *positional, **keywords):
+    global denied_creation
+    if str(path).startswith(".yt-dlp-publish.") and flags & os.O_EXCL:
+        denied_creation = True
+        raise PermissionError(errno.EACCES, "injected destination permission denial")
+    return real_open(path, flags, *positional, **keywords)
+
+
+with patch.object(module.os, "open", deny_exclusive_copy):
+    failure(args, PermissionError)
+assert denied_creation and source.exists() and not (output / source.name).exists()
+assert list(output.iterdir()) == [unrelated] and unrelated.read_bytes() == b"preexisting user data"
+
+source, output, args = prepare("late-collision")
+original_rename = module.rename_without_overwrite
+
+
+def collide(*positional, **keywords):
+    (output / source.name).write_bytes(b"foreign existing media")
+    original_rename(*positional, **keywords)
+
+
+with patch.object(module, "rename_without_overwrite", collide):
+    failure(args, module.DestinationExistsError)
+assert (output / source.name).read_bytes() == b"foreign existing media"
+assert len(list(output.iterdir())) == 1 and source.exists()
+
+for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    source, output, args = prepare(f"copy-signal-{number}")
+    signaled = False
+
+    def interrupt_copy(descriptor, data):
+        global signaled
+        result = real_write(descriptor, data)
+        if not signaled:
+            signaled = True
+            os.kill(os.getpid(), number)
+        return result
+
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)}
+    with patch.object(module.os, "write", interrupt_copy):
+        failure(args, module.PublicationInterrupted)
+    assert all(signal.getsignal(sig) == handler for sig, handler in handlers.items())
+    assert source.exists() and not list(output.iterdir())
+
+# A simulated EIO after the server applied rename remains an uncertain error.
+# It never triggers deletion of a possibly published file or of the valid source.
+source, output, args = prepare("ambiguous-rename")
+
+
+def ambiguous_rename(*positional, **keywords):
+    original_rename(*positional, **keywords)
+    raise OSError(errno.EIO, "simulated missing server acknowledgement")
+
+
+with patch.object(module, "rename_without_overwrite", ambiguous_rename):
+    failure(args, OSError)
+assert source.read_bytes() == (output / source.name).read_bytes()
+
+source, output, args = prepare("replaced-source")
+source.rename(source.with_name("original retained inode"))
+source.write_bytes(b"foreign replacement")
+failure(args, module.PlanError)
+assert source.read_bytes() == b"foreign replacement" and not list(output.iterdir())
+
+source, output, args = prepare("destination-symlink")
+other = mkdir(output.parent / "other")
+output.rename(output.parent / "renamed destination")
+output.symlink_to(other, target_is_directory=True)
+failure(args, OSError)
+assert not list(other.iterdir()) and source.exists()
+
+# Same-filesystem component publication and rollback remain available when
+# hard links are absent. Both operations use actual Linux RENAME_NOREPLACE.
+source, output, args = prepare("component-no-hard-links")
+destination = source.with_name("component-final")
+moved = []
+with patch.object(module.os, "link", fail_with(errno.EOPNOTSUPP)):
+    module.publish_without_overwrite(source, destination, moved)
+    assert destination.exists() and not source.exists()
+    assert module.rollback_publication(moved) == []
+assert source.exists() and not destination.exists()
+
+# Cleanup authenticates the caller's root, retained files, and both tree passes.
+workspace = mkdir(root / "cleanup")
+media = workspace / "keep.mp4"
+media.write_bytes(b"valid retained media")
+(workspace / "resume.ytdl").write_text('{"downloader": {}}')
+nested = mkdir(workspace / "temporary-cookies")
+(nested / "copy.sqlite").write_bytes(b"fictitious browser copy")
+cleanup_args = argparse.Namespace(path=str(workspace), identity=identity(workspace),
+                                  keep=[str(media)], keep_identity=[identity(media)])
+assert module.cleanup_workspace(cleanup_args) == 0
+assert list(workspace.iterdir()) == [media]
+(workspace / "foreign-link").symlink_to(root / "outside")
+try:
+    module.cleanup_workspace(cleanup_args)
+except module.PlanError:
+    pass
+else:
+    raise AssertionError("cleanup accepted a symbolic link")
+assert (workspace / "foreign-link").is_symlink() and media.exists()
+(workspace / "foreign-link").unlink()
+changed = workspace / "changed"
+changed.write_bytes(b"owned temporary")
+real_listdir = module.os.listdir
+calls = 0
+
+
+def substitute_between_passes(descriptor):
+    global calls
+    calls += 1
+    if calls == 2:
+        changed.rename(root / "original temp inode")
+        changed.write_bytes(b"foreign replacement")
+    return real_listdir(descriptor)
+
+
+with patch.object(module.os, "listdir", substitute_between_passes):
+    try:
+        module.cleanup_workspace(cleanup_args)
+    except module.PlanError:
+        pass
+    else:
+        raise AssertionError("cleanup removed a file replaced between inspection passes")
+assert changed.read_bytes() == b"foreign replacement" and media.exists()
+print("Private-root, copy-publication and cleanup boundaries passed.")
+PY_NETWORK_BOUNDARIES
+}
+
 test_private_plan_signal_rollback() {
     local checkpoint signal_number
 
-    for checkpoint in link component; do
+    for checkpoint in link rename component; do
         for signal_number in 1 2 15; do
             new_case "signal-${checkpoint}-${signal_number}"
             write_double_plan
@@ -762,6 +1185,7 @@ test_private_plan_signal_rollback() {
                 env PYTHONDONTWRITEBYTECODE=1 python3 - \
                 "${HELPER}" "${MANIFEST}" "${checkpoint}" "${signal_number}" <<'PY_SIGNAL_ROLLBACK'
 import importlib.util
+import errno
 import os
 import signal
 import sys
@@ -775,7 +1199,9 @@ spec = importlib.util.spec_from_file_location("private_aria2_signal", helper)
 assert spec is not None and spec.loader is not None
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-original = module.os.link if checkpoint == "link" else module.publish_without_overwrite
+original = (module.os.link if checkpoint == "link" else
+            module.rename_without_overwrite if checkpoint == "rename" else
+            module.publish_without_overwrite)
 armed = True
 previous_handlers = {
     sig: signal.getsignal(sig) for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
@@ -793,6 +1219,11 @@ def inject_signal(*args, **kwargs):
 
 if checkpoint == "link":
     module.os.link = inject_signal
+elif checkpoint == "rename":
+    def unavailable_link(*args, **kwargs):
+        raise OSError(errno.EOPNOTSUPP, "injected unavailable hard links")
+    module.os.link = unavailable_link
+    module.rename_without_overwrite = inject_signal
 else:
     module.publish_without_overwrite = inject_signal
 sys.argv = [str(helper), "commit", "--manifest", manifest]
@@ -1031,6 +1462,7 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 args = argparse.Namespace(
     plan=str(plan), output_dir=str(output), staging_dir=str(staging),
+    private_dir=str(plan.parent),
     aria2_input=str(aria2_input), manifest=str(manifest), allow_https_direct=True,
 )
 real_lstat = Path.lstat
@@ -1232,6 +1664,8 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
+    test_network_media_permissions
+    test_private_roots_and_media_faults
     test_private_plan_classification
     test_private_plan_protocol_metadata
     test_private_plan_duplicate_headers

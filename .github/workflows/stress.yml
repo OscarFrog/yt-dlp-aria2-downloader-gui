@@ -15,7 +15,9 @@ jobs:
   mock-stress:
     name: Mock process/cancellation stress shard ${{ matrix.shard }}/4
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Each shard runs five independently bounded five-minute iterations.
+    # Include all iterations plus checkout and cleanup in the job budget.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       max-parallel: 4

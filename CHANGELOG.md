@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.3.12 - Unreleased
+
+### Network destinations and private storage
+
+- Keep plans, cookies, authenticated aria2 inputs, manifests and coordination
+  files in validated local private storage, independently of the final media
+  destination and its Unix permission support.
+- Stage media on validated local disk when the selected destination cannot
+  safely hold private download state; retain direct local downloads and native
+  resume where the existing private-storage guarantees hold.
+- Publish complete media through an exclusive destination temporary file and
+  atomic no-replacement rename, with a hard-link fallback. Preserve valid local
+  media and ambiguous replacements after failed or uncertain publication.
+- Report local disk staging and publication in Zenity while preserving format,
+  audio, privacy, cancellation and process-supervision contracts.
+
+### Regression qualification
+
+- Exercise permissive destination modes, private-storage selection, direct
+  aria2 and native HLS/DASH transports, collisions, publication failures,
+  signals and cleanup using fictional authentication data.
+- Give Fedora and isolated formatter validation local storage volumes without
+  changing workflow permissions or publication trust boundaries.
+- Document opt-in CIFS qualification and conservative inspection of old
+  staging residues; simulated tests do not establish universal network support.
+- Keep the repository file inventory in English.
+
 ## 2.3.11 - 2026-09-07
 
 This release contains the production audit fixes documented below and aligns
