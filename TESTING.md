@@ -875,6 +875,10 @@ requests and pushes to `main`:
 The runtime-manager and package-cleanup repetitions run with at most four
 workers and ordered logs. Their individual test workspaces are independent;
 the mock jitter matrix remains sharded at the workflow level.
+Each of its four shards runs five iterations, each still bounded by a
+five-minute timeout and a ten-second termination grace period. The overall
+thirty-minute job budget accommodates all five iterations plus checkout and
+cleanup; it does not relax any iteration's timeout or assertion.
 
 ## Network destination regression and opt-in CIFS qualification
 
