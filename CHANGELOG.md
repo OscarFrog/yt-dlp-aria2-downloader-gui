@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.14 - Unreleased
+
+### Maintenance
+
+- Prepare v2.3.14 release
+
 ## 2.3.13 - Unreleased
 
 ### Automated source publication

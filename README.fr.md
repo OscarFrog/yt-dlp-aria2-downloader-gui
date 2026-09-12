@@ -43,20 +43,20 @@ FFmpeg pour fusionner, remuxer ou extraire les flux. HTTPS repasse
 automatiquement sur le transport natif de yt-dlp lorsque le backend TLS d'aria2
 n'offre pas le durcissement requis de validation des certificats. Les flux DASH
 et HLS restent eux aussi natifs.
-La version de développement actuelle est la **2.3.13**.
-La dernière release de paquets publiée est la **2.3.11**.
+La version de développement actuelle est la **2.3.14**.
+La dernière release de paquets publiée est la **2.3.14**.
 
 ## Installation recommandée
 
 Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
-Les noms exacts ci-dessous correspondent à la release v2.3.11 actuellement publiée.
+Les noms exacts ci-dessous correspondent à la release v2.3.14 actuellement publiée.
 
 Pour **Fedora 44**, téléchargez ces quatre fichiers :
 
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.3.11-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.3.14-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -64,7 +64,7 @@ Vérifiez les fichiers téléchargés puis lancez le bootstrap Fedora officiel :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.11-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.14-1.fc44.noarch.rpm
 ```
 
 Le bootstrap authentifie et active RPM Fusion Free si nécessaire, remplace `ffmpeg-free` par
@@ -74,7 +74,7 @@ runtimes yt-dlp et Deno propres à l'utilisateur.
 
 Pour **Debian ou Ubuntu**, téléchargez le DEB versionné et `SHA256SUMS`,
 vérifiez-les puis installez le paquet avec `sudo apt install
-./yt-dlp-aria2-downloader-gui_2.3.11-1_all.deb`. Pour **les autres distributions
+./yt-dlp-aria2-downloader-gui_2.3.14-1_all.deb`. Pour **les autres distributions
 GNU/Linux ou une utilisation portable**, utilisez le ZIP versionné ou un clone
 Git. Les runtimes yt-dlp et Deno gérés automatiquement prennent actuellement en
 charge Linux `x86_64` et `aarch64`.
@@ -199,8 +199,8 @@ l'identité de la release :
 
 ```bash
 gh attestation verify ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.3.11 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.3.11 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.3.14 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.3.14 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 `SHA256SUMS` reste utile pour un contrôle local ou hors ligne ; les attestations
@@ -254,7 +254,7 @@ version de développement ci-dessous, cette commande ne s'applique qu'après la
 création de son tag signé :
 
 ```bash
-gh workflow run release.yml   --ref v2.3.13   -f tag=v2.3.13   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref v2.3.14   -f tag=v2.3.14   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Le workflow refuse indépendamment toute exécution manuelle dont le type de ref,
@@ -317,7 +317,7 @@ Téléchargez :
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.3.11-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.3.14-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
@@ -330,7 +330,7 @@ sha256sum --ignore-missing --check SHA256SUMS
 Puis lancez :
 
 ```bash
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.11-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.3.14-1.fc44.noarch.rpm
 ```
 
 Le bootstrap refuse par défaut un RPM de release non signé. Il vérifie que
@@ -382,12 +382,12 @@ de l'utilisateur et vérifiés avant activation.
 
 ### Debian et Ubuntu
 
-La dernière release publiée, la 2.3.11, fournit un DEB indépendant de
+La dernière release publiée, la 2.3.14, fournit un DEB indépendant de
 l'architecture, aligné sur le même modèle de runtimes gérés que Fedora.
 Téléchargez :
 
 ```text
-yt-dlp-aria2-downloader-gui_2.3.11-1_all.deb
+yt-dlp-aria2-downloader-gui_2.3.14-1_all.deb
 SHA256SUMS
 ```
 
@@ -395,7 +395,7 @@ Vérifiez puis installez :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.11-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.3.14-1_all.deb
 ```
 
 Le DEB dépend explicitement d'`aria2`, de Python 3.10+, de FFmpeg/FFprobe,
@@ -496,7 +496,7 @@ courant.
 Téléchargez les fichiers suivants :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.3.11.zip
+yt-dlp-aria2-downloader-gui-2.3.14.zip
 SHA256SUMS
 ```
 
@@ -504,8 +504,8 @@ Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.3.11.zip
-cd yt-dlp-aria2-downloader-gui-2.3.11
+unzip yt-dlp-aria2-downloader-gui-2.3.14.zip
+cd yt-dlp-aria2-downloader-gui-2.3.14
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
