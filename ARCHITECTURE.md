@@ -639,6 +639,15 @@ changing PID. Group signaling additionally requires the authenticated process
 to belong to that dedicated session (SID equals PGID), not merely to the
 provisional group. A failed session transition exits 70 before starting the
 command; pending managed signals retain their original cancellation semantics.
+Terminal Ctrl-C can instead interrupt a foreground utility and take Bash
+directly to EXIT with status 130. Both runners preserve INT on that path and
+guard cleanup against repeated fatal signals. A provisional direct-child
+identity is registered before foreground handoff polling or file removal, so
+EXIT can also stop a worker whose normal identity handshake is incomplete.
+The real-tool assembled-output fixture similarly lets the standalone engine
+stop its own worker sessions on timeout or interruption; it preserves fixture
+state when bounded cooperative shutdown remains unconfirmed. Its isolated
+Python driver keeps qualification assertions active despite PYTHONOPTIMIZE.
 Tests are part of the architecture: changing a trust, cleanup, progress,
 process, packaging, or compatibility boundary requires updating or adding the
 matching regression proof.

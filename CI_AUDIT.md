@@ -988,3 +988,223 @@ Les journaux et contre-exemples de cette session sont conservés dans
 pour le pont GUI final. Le sous-répertoire `runtime.T2KJcln5` du premier chemin
 contient les bancs runtime et `RUNTIME_PHASE2.md`. Ces fichiers temporaires ne
 constituent pas un stockage durable ni une preuve de publication.
+
+## Phase 3 — red team indépendante de la qualification
+
+L'audit porte exclusivement sur le passage de
+`3c42d53a2927ed6efd1b4e048712b467c7e5f55a` à
+`a2ff3a9519dde14d4019767408c3342db9e609a6`. Les deux commits existaient
+localement, avec ce parent direct, HEAD exactement au second commit et worktree
+initial propre sur `fix/shfmt-candidate-container-permissions`. Le diff Git
+confirme les 32 chemins annoncés : 31 modifications, un ajout, aucune suppression.
+La référence Phase 2 reste immuable ; les corrections ci-dessous sont distinctes.
+Aucune opération distante ni publication n'est autorisée par cette qualification.
+
+### Défauts démontrés et corrections
+
+- **RED-001 — ÉLEVÉ, CONFIRMÉ : annulation au terminal.** Le nouveau `set -m`
+  permet à Ctrl+C de terminer un utilitaire foreground et de conduire directement
+  à EXIT/130 sans passer par le trap INT du runner. Le cleanup utilisait alors
+  TERM ; un worker Python ne déroulait pas son `finally`. Un deuxième Ctrl+C
+  pouvait interrompre ce cleanup et laisser le worker vivant. Une autre fenêtre
+  existait pendant le handshake avant l'enregistrement des tableaux PID, ainsi
+  que pendant la suppression du fichier d'identité. Les vrais entrypoints BASE
+  et HEAD ont été comparés dans des PTY privés, avec workers et descendants réels.
+  Correction : garde non réentrante dans les deux cleanups, relais INT sur statut
+  EXIT 130, enregistrement provisoire PID/start-time avant le premier utilitaire
+  foreground, suppression de l'identité après enregistrement définitif. Le
+  contrôle SID/PGID/token demeure obligatoire avant tout signal collectif.
+  Huit cas PTY permanents couvrent les deux entrypoints et les fenêtres simple,
+  double, handshake et suppression ; trois mutations retirant respectivement
+  garde, relais INT et enregistrement provisoire sont rejetées.
+- **RED-002 — MOYEN, CONFIRMÉ : timeout du nouveau scénario real-tools.**
+  `subprocess.run(timeout=60)` tuait seulement le PID du moteur autonome par
+  SIGKILL ; son worker et sa sentinelle, dans une autre session, survivaient.
+  Le cleanup extérieur supprimait alors leurs fixtures. Une reproduction avec
+  les vraies fonctions du moteur et un timeout contrôlé d'une seconde montre
+  ces deux survivants, puis les récolte. Correction : capture explicite,
+  HUP/INT/TERM enregistrés sans exception réentrante, relais coopératif au moteur,
+  deux attentes bornées de 20 secondes pour son arrêt et son escalade interne.
+  Le timeout du scénario reste 60 secondes ; statut et diagnostic initiaux sont
+  conservés. Un arrêt non confirmé conserve les fixtures au lieu de supprimer
+  l'état encore utilisé. La contre-revue a aussi démontré et corrigé trois défauts
+  du prototype local : signal pendant armement du garde, OSError pendant
+  capture du nettoyage et échec de création du marqueur de conservation.
+  Celui-ci est désormais créé avant Popen : ENOSPC empêche tout lancement.
+  Les régressions utilisent les véritables fonctions et
+  traps du moteur ; des objets inertes couvrent le timeout d'escalade et l'erreur
+  de capture sans créer de processus délibérément impossible à arrêter.
+- **RED-003 — MOYEN, CONFIRMÉ : assertions real-tools désactivables.**
+  `PYTHONOPTIMIZE=1` supprimait les dix nouvelles assertions de collision finale,
+  tout en laissant afficher le message PASS. Un moteur témoin réécrivant le
+  résultat était accepté. Le pilote utilise maintenant `python3 -I -`, qui
+  conserve ces assertions malgré l'environnement hérité. Le test permanent
+  exécute la vraie fonction shell et vérifie aussi qu'une copie privée retirant
+  `-I` retombe sur ce faux succès. Les paramètres métier via `os.environ` restent
+  disponibles ; aucun paramètre de transport utilisateur n'est changé.
+- **RED-004 — MOYEN, CONFIRMÉ pour la fragilité d'observation ; attribution
+  au FAST échoué PROBABLE.** La nouvelle assertion monitor exigeait la mort
+  instantanée des descendants après récolte du leader. Un témoin réel reproduit
+  110 fois sur 500 un enfant encore R avec SIGKILL pending après killpg et
+  communicate du leader, puis Z sans autre signal (premier cas : 5,66 ms).
+  L'assertion confondait ainsi une terminaison noyau asynchrone avec un orphelin.
+  Correction limitée au test : vérifier PID/start-time autour de la lecture de
+  SigPnd/ShdPnd, attendre au maximum une seconde seulement si KILL est déjà
+  pending, puis exiger Z ou disparition. Un enfant vivant sans KILL échoue
+  immédiatement ; aucun signal supplémentaire ni retry de suite n'est ajouté.
+  Les diagnostics incluent désormais cas, étape, signal et identité. Le journal
+  du FAST historique ne contenait pas cet instantané : son attribution précise
+  ne devient pas CONFIRMÉE par ce témoin indépendant.
+
+Aucun fichier runtime, workflow ou builder n'est modifié par ces
+corrections. Elles ne retirent aucun test et ne changent ni les profils ni le
+nombre de jobs. Les nouveaux scénarios ont un coût de qualification explicite ;
+la fiabilité prime sur la conservation exacte d'un chronométrage antérieur.
+
+### TESTS VALIDÉS COMME RÉELLEMENT REDONDANTS
+
+| Travail ancien | Propriété et remplacement | Conclusion |
+| --- | --- | --- |
+| Cinq familles Python imbriquées dans le statique | Mêmes scripts et interpréteur, une tâche explicite chacune ; manifeste et mutations de dispatch | Déplacement, aucune suppression ; confiance élevée |
+| Préparation release-docs par test | Seed inerte copiée sans hardlinks ; API, Git et mutations propres à chaque test | Préparation redondante, isolation testée |
+| Quatre attentes CI de la fin de shell | Même qualification complète exigée par le gate terminal et la preuve de promotion | Ordonnancement redondant pour l'acceptation ; travail sur PR rouge potentiellement accru |
+| Transport complet de 14 cas GUI/host | GUI et validateurs moteur réels jusqu'à la frontière PLAN, puis transports représentatifs conservés | Propriétés menu, classification et handoff préservées ; contexte E2E complet différent |
+
+FAST garde les 10 mêmes intégrations, FULL les 21 mêmes. La phase statique
+passe de 6 à 12 tâches : les cinq familles déplacées et le nouveau bootstrap
+shfmt expliquent cette différence. FAST n'est pas une qualification release ;
+`test-static.sh --source-only` n'est pas le contrôle statique autonome complet.
+Le changement d'attendu de la collision MKV de 0 à 1 est un changement de contrat
+documenté dans les deux READMEs, destiné à préserver le média existant.
+
+### TESTS À RÉTABLIR OU À CORRIGER
+
+Les tests de signaux envoyés au PID ne suffisaient pas à qualifier Ctrl+C au
+terminal : les huit nouveaux cas ferment cette lacune. Le timeout et les
+assertions du nouveau test real-tools demandaient les corrections RED-002/003.
+Aucun rétablissement des cinq familles Python ou des 14 transports GUI n'est
+justifié par un défaut démontré. L'équivalence des menus est compositionnelle,
+et ne doit pas être présentée comme identité de chaque exécution E2E antérieure.
+
+### Mesures indépendantes et dénominateur
+
+Clones locaux séparés aux deux SHA exacts, mêmes outils hôte, jobs 4 et cache
+shfmt chaud. Ces passages sont exploratoires : de petites reproductions ont
+chevauché la campagne, sans autre FULL/FAST ou qualification real-tools lourde.
+Un passage valide par case ne constitue pas une distribution statistique.
+
+| Profil | BASE déclaré Phase 2 | HEAD déclaré Phase 2 | BASE red team | HEAD red team | Gain red team |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| FAST | 135,570 s | 79,090 s | 128,675 s | 82,091 s | 36,2 % |
+| FULL | 303,760 s | 200,070 s | 264,752 s | 200,287 s | 24,3 % |
+
+Les durées utilisent le même chronomètre runner. CPU FULL : 498,00 → 419,60 s,
+soit 15,7 % économisés, proche des 16,1 % historiques. Le CPU BASE varie peu
+alors que son temps mural varie beaucoup ; les gains muraux 34,1 %/41,7 % sont
+des observations uniques, pas des constantes indépendamment confirmées.
+Un deuxième HEAD FAST a échoué à 77,887 s wrapper sur
+`monitor cancellation left an original child alive` : **FAIL exclu des gains**.
+L'absence de reproduction sur six diagnostics ciblés ne transforme pas ce
+passage en PASS ; RED-004 conserve explicitement la limite d'attribution.
+Le premier FULL en sandbox, échoué à 109,55 s avec propriétaires
+65534 et sockets EPERM, est également exclu ; les tests hôte lèvent ces
+restrictions d'environnement sans changer les sources.
+
+Microbancs alternés BASE/HEAD sans autre suite concurrente, mêmes entrées et
+sorties vérifiées ; valeurs min / médiane / max en secondes :
+
+| Mesure | n par état | BASE | HEAD | Gain médian |
+| --- | ---: | --- | --- | ---: |
+| Six assertions, même corpus | 3 | 13,235 / 13,276 / 13,486 | 0,154 / 0,157 / 0,163 | 98,8 % |
+| Scan global, 265 processus | 5 | 0,915 / 0,939 / 0,985 | 0,017 / 0,020 / 0,022 | 97,9 % |
+| Progression, 100 événements | 3 | 1,926 / 1,929 / 2,005 | 0,482 / 0,521 / 0,567 | 73,0 % |
+
+Ces gains ne s'additionnent pas. Aucune accélération du premier téléchargement,
+du packaging final, de la release ou du cycle commit → release n'est mesurée.
+Le vérificateur CI fait historiquement 35 → 36 GET : quatre lectures Git
+immuables évitées, cinq relectures de workflow ajoutées. Le 40 → 36 documenté
+compare deux variantes au même niveau de sécurité, pas BASE à HEAD. Les 826 s
+d'attente CI cumulées restent distinctes d'une durée murale PR.
+
+### Identité CI, objets et frontières non exécutées
+
+Les quatre workflows modifiés ont été intégralement relus. Les PR qualifient le
+SHA de merge synthétique, pas seulement `pull_request.head.sha`. La promotion
+du squash exige arbre entier et parents exacts ; aucun cache de succès mutable
+ni artefact PR ne devient un paquet release. Les objets release sont construits,
+puis signés/testés selon leur type, transmis par IDs immuables et digest fatal,
+et publiés sans reconstruction. Les permissions des quatre jobs identity sont
+réduites ; les checkouts restent sans credentials persistants. Aucun nouvel
+`actions/cache`, secret ou privilège n'est introduit. Les groupes de concurrence
+des workflows sont distincts ; une cohorte annulée ne satisfait pas le gate.
+
+Deux paquets natifs ont été construits et leurs inventaires/modes/liens/octets
+inspectés depuis le clone HEAD propre : RPM format 4 non signé Fedora 44 et DEB
+all, tous deux version 2.3.18. RPM transforme cinq shebangs par son BRP Fedora ;
+la comparaison exhaustive conserve cette transformation explicite. Ce sont des
+builds locaux, pas les objets finaux signés/installés de release.
+
+- **NOT TESTED / REQUIRES REMOTE CI** : cohorte réelle aux SHA exacts, dernières
+  tentatives/reruns, supersession A → B → C, timeout identity de 3 minutes,
+  matrices OS/outils et vrais rulesets/environnements. Risque de disponibilité
+  et d'intégration moyen ; aucune release sans réussite des gates distants.
+- **NOT TESTED / REQUIRES REAL NATIVE PACKAGE** : objets finaux signés,
+  installations, réinstallations, upgrades depuis release immuable, suppressions
+  sur OS jetables, attestation et téléchargement public. Les builds locaux ne
+  lèvent pas ces conditions de release.
+- **NOT TESTED / REQUIRES REAL CIFS/SMB** : aucun montage réel disponible.
+  Les vérifications locales de destination et la simulation de permissions ne
+  qualifient ni latence, ni inode, ni verrouillage/rename/fsync du serveur SMB.
+  Le préflight MKV n'est pas une réservation atomique jusqu'au POST ; cette
+  limite locale tardive était déjà documentée. Le cache shfmt privé local reste
+  distinct d'une destination réseau permissive.
+
+### Qualification finale et verdict après corrections
+
+Après la double revue indépendante et stabilisation des cinq fichiers de code,
+un FULL corrigé puis un FULL BASE ont été exécutés séquentiellement sur l'hôte,
+jobs 4, cache shfmt chaud, **sans aucun autre test concurrent**. Doctor et
+cohérence ont précédé chaque passage ; les empreintes des sources Bash/Python
+et workflows sont identiques avant/après chacun. Il s'agit d'une paire, pas
+d'une médiane de répétitions.
+
+| Mesure finale isolée | BASE | Code corrigé Phase 3 | Gain observé |
+| --- | ---: | ---: | ---: |
+| FULL, chronomètre runner | 257,830 s | 202,611 s | 21,4 % |
+| FULL, wrapper | 257,878 s | 202,674 s | 21,4 % |
+| CPU user + system | 493,16 s | 422,31 s | 14,4 % |
+
+Le FULL corrigé passe les 12 tâches statiques, 143 tests Python et 21 suites
+d'intégration. Le runner enrichi passe en 47,606 s et les signaux run-all en
+11,610 s sous concurrence. La comparaison finale conserve donc un gain utile
+avec davantage de preuves d'annulation. Les 34,1 %/41,7 % historiques ne sont
+pas reproduits comme constantes ; aucun FAST corrigé distinct n'a été relancé
+uniquement pour afficher un pourcentage, son contrat étant inclus dans FULL.
+
+Les qualifications ciblées passent : runner complet avant les derniers
+durcissements du pilote, puis régressions finales extraites des vraies fonctions,
+signaux run-all, helper private-aria2-plan avec copie réelle entre devices,
+real-tools local et simulation, puis real-tools local sur le pilote final.
+Les replays ci-validation (62 tests), bootstrap (10 tests), actionlint sur les
+9 workflows et shfmt canonique passent. FULL reprend syntaxe, compilation Python,
+ShellCheck et l'intégralité du contrat statique final. Les diagnostics attendus
+des injections d'erreur ne sont pas des échecs masqués.
+
+Les équipes adverses convergent après avoir contesté les correctifs. L'équipe
+qui a démontré RED-004 a corrigé son seul test ; l'autre équipe a contre-relu
+ce changement et vérifié indépendamment ses contrôles négatifs. Le mécanisme
+RED-004 est confirmé ; la cause exacte du FAST antérieur reste probable.
+Les journaux FAIL restent conservés et exclus des chiffres de succès.
+
+**ARCHITECTURE VALIDÉE AVEC RÉSERVES après corrections.** Le commit Phase 2
+initial nécessitait RED-001/002/003/004 ; aucun autre défaut bloquant n'est
+démontré par la revue finale. **RELEASE VERDICT = GO WITH CONDITIONS** : obtenir
+la cohorte CI réelle du code final et ses identités/protections, qualifier les
+objets natifs finaux et l'archive sur leurs environnements de release, et
+qualifier une vraie destination CIFS/SMB avant d'en annoncer la compatibilité
+sans réserve. Ces conditions n'autorisent aucune publication pendant cet audit.
+
+Les journaux, contre-exemples et paquets de cette red team sont conservés sous
+`/tmp/phase3-*`, hors inventaire suivi. Ils ne sont ni des artefacts publiés ni
+une preuve durable de release. Les résultats locaux ne doivent pas être
+substitués aux qualifications finales ci-dessus.

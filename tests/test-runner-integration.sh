@@ -828,11 +828,14 @@ PY_SIGNAL_RESISTANT
 test_monitor_runner_session_handoff() {
     python3 -B - "${SCRIPT_DIR}" <<'PY_MONITOR_HANDOFF'
 import ctypes
+import fcntl
 import os
 from pathlib import Path
+import pty
 import signal
 import subprocess
 import sys
+import termios
 import tempfile
 import time
 
@@ -863,7 +866,7 @@ if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
 def identity(pid):
     try:
         value = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return None
     fields = value[value.rfind(") ") + 2:].split()
     return (pid, int(fields[19]), fields[0], int(fields[1]),
@@ -873,6 +876,36 @@ def identity(pid):
 def still_owned(record):
     current = identity(record[0])
     return current if current and current[:2] == record[:2] else None
+
+
+def assert_stopped(record, context):
+    current = still_owned(record)
+    if not current or current[2] == "Z":
+        return
+    try:
+        status = Path(f"/proc/{record[0]}/status").read_text(encoding="ascii")
+    except (FileNotFoundError, ProcessLookupError):
+        status = ""
+    # Bind signal metadata to the same original process across the two reads.
+    current = still_owned(record)
+    if not current or current[2] == "Z":
+        return
+    pending = [line.split()[1] for line in status.splitlines()
+               if line.startswith(("SigPnd:", "ShdPnd:"))]
+    if any(int(mask, 16) & (1 << (signal.SIGKILL - 1)) for mask in pending):
+        # Reaping the leader and draining its pipes can precede a descendant's
+        # final transition to Z. Allow only an already pending, uncatchable
+        # KILL to finish; a live unsignaled descendant still fails immediately.
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            time.sleep(0.005)
+            current = still_owned(record)
+            if not current or current[2] == "Z":
+                return
+    raise AssertionError(
+        f"{context} left an original child alive: record={record}, "
+        f"current={current}, pending={pending}, status={status!r}"
+    )
 
 
 def wait_marker(path, process):
@@ -1112,17 +1145,532 @@ try:
                     if fatal and final_pgid != pid:
                         raise AssertionError("session creation replaced the authenticated supervisor PID")
                 for record in records:
-                    current = still_owned(record)
-                    if current and current[2] != "Z":
-                        raise AssertionError("monitor cancellation left an original child alive")
+                    assert_stopped(record, f"monitor case {index} stage={stage} signal={fatal}")
             finally:
                 (case / "release").touch()
                 stop(process, records)
+
+        # A terminal sends INT to the foreground utility's group, which differs
+        # from a kill(INT) directed at the monitor-mode runner itself. Exercise
+        # the resulting EXIT path with both actual executable entry points.
+        terminal_fixture = root / "terminal-fixture.py"
+        terminal_fixture.write_text('''import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+root = Path(sys.argv[1])
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+if len(sys.argv) > 2:
+    (root / "descendant").write_text(str(os.getpid()))
+    try:
+        while True:
+            time.sleep(0.01)
+    except KeyboardInterrupt:
+        (root / "descendant-int").touch()
+        raise SystemExit(130)
+
+child = subprocess.Popen([sys.executable, __file__, str(root), "child"])
+try:
+    (root / "fixture").write_text(f"{os.getpid()} {os.getpgrp()} {os.getsid(0)}")
+    while True:
+        time.sleep(0.01)
+except KeyboardInterrupt:
+    (root / "received-int").touch()
+finally:
+    (root / "finally").write_text("ready")
+    deadline = time.monotonic() + 3
+    while not (root / "release").exists() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    child.wait(timeout=1)
+''', encoding="ascii")
+        terminal_bin = root / "terminal-bin"
+        terminal_bin.mkdir()
+        terminal_bash = terminal_bin / "bash"
+        terminal_bash.write_text('''#!/bin/bash
+if [[ ${2:-} == ./scripts/check-shell-format.sh ]]; then
+    exec /usr/bin/python3 "$TERMINAL_FIXTURE" "$TERMINAL_CASE"
+fi
+exit 0
+''', encoding="ascii")
+        terminal_python = terminal_bin / "python3"
+        terminal_python.write_text('''#!/bin/bash
+if [[ ${1:-} == -B && ${2:-} == ./tests/*-integration.py ]]; then exit 0; fi
+exec /usr/bin/python3 "$@"
+''', encoding="ascii")
+        terminal_sleep = terminal_bin / "sleep"
+        terminal_sleep.write_text('''#!/bin/bash
+# Hold one selected poll, so a real terminal INT has a stable target.
+duration=0.01
+[[ $TERMINAL_STAGE != registration ]] || duration=0.001
+if [[ $TERMINAL_STAGE != removal && $# == 1 && $1 == "$duration" &&
+    ! -e $TERMINAL_CASE/foreground ]]; then
+    printf '%s' "$$" >"$TERMINAL_CASE/foreground"
+    exec /usr/bin/sleep 5
+fi
+exec /usr/bin/sleep "$@"
+''', encoding="ascii")
+        terminal_rm = terminal_bin / "rm"
+        terminal_rm.write_text('''#!/bin/bash
+if [[ $TERMINAL_STAGE == removal && $# == 3 && $1 == -f && $2 == -- &&
+    $3 == */child-*.identity && ! -e $TERMINAL_CASE/foreground ]]; then
+    printf '%s' "$$" >"$TERMINAL_CASE/foreground"
+    exec /usr/bin/sleep 5
+fi
+exec /usr/bin/rm "$@"
+''', encoding="ascii")
+        terminal_environment = root / "terminal-environment.sh"
+        terminal_environment.write_text('''source() {
+    builtin source "$@"
+    if [[ $1 == */lib/test-runner.sh && $TERMINAL_STAGE == registration ]]; then
+        # Delay only the parent's handoff observation, as a slow child-side
+        # publication would. EXIT must still own the directly launched child.
+        test_runner_read_child_identity() { return 1; }
+    fi
+}
+''', encoding="ascii")
+        for executable in (terminal_bash, terminal_python, terminal_sleep, terminal_rm):
+            executable.chmod(0o700)
+
+        for entrypoint in ("run-all.sh", "repeat-qualification.sh"):
+            for stage, repeated in (("poll", False), ("poll", True),
+                                    ("registration", False), ("removal", False)):
+                case = root / f"terminal-{entrypoint}-{stage}-{repeated}"
+                case.mkdir()
+                environment = dict(
+                    os.environ, TMPDIR=str(case),
+                    PATH=f"{terminal_bin}:{mock_bin}:/usr/bin:/bin",
+                    TERMINAL_FIXTURE=str(terminal_fixture), TERMINAL_CASE=str(case),
+                    TERMINAL_STAGE=stage, BASH_ENV=str(terminal_environment),
+                    YTDLP_ARIA2_TEST_RUNNER_TERMINATION_POLL_ATTEMPTS="20",
+                )
+                arguments = (["--fast", "--jobs", "4"] if entrypoint == "run-all.sh"
+                             else ["--runs", "1", "--jobs", "1", "--",
+                                   "/usr/bin/python3", str(terminal_fixture), str(case)])
+                process = None
+                records = []
+                master, slave = pty.openpty()
+                try:
+                    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, fatal_signals)
+                    try:
+                        def terminal_child():
+                            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+                            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+                        process = subprocess.Popen(
+                            ["/bin/bash", str(scripts / entrypoint), *arguments],
+                            env=environment, stdin=slave, stdout=subprocess.DEVNULL,
+                            # Bash uses its stderr terminal for foreground
+                            # job control; a pipe would exercise another path.
+                            stderr=slave, start_new_session=True,
+                            preexec_fn=terminal_child,
+                        )
+                    finally:
+                        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+                    command_pid, pgid, sid = map(int, wait_marker(case / "fixture", process))
+                    descendant_pid = int(wait_marker(case / "descendant", process)[0])
+                    for pid in (pgid, command_pid, descendant_pid):
+                        record = identity(pid)
+                        if record is None:
+                            raise AssertionError("terminal fixture identity disappeared")
+                        records.append(record)
+                    if pgid != sid or pgid in (command_pid, process.pid):
+                        raise AssertionError("terminal fixture lacks a private supervised session")
+                    poll_pid = int(wait_marker(case / "foreground", process)[0])
+                    deadline = time.monotonic() + 3
+                    while time.monotonic() < deadline:
+                        foreground = os.tcgetpgrp(master)
+                        record = identity(foreground)
+                        try:
+                            argv = Path(f"/proc/{foreground}/cmdline").read_bytes().split(b"\0")
+                        except (FileNotFoundError, ProcessLookupError):
+                            continue
+                        # Observe the registered poll after exec, with enough
+                        # time left that it cannot finish before terminal INT.
+                        if (record and record[3] == process.pid and
+                                foreground == poll_pid and
+                                argv[:2] == [b"/usr/bin/sleep", b"5"]):
+                            os.write(master, b"\x03")
+                            break
+                        time.sleep(0.001)
+                    else:
+                        raise AssertionError("terminal runner never exposed a foreground scheduler poll")
+                    wait_marker(case / "finally", process)
+                    if not (case / "received-int").exists():
+                        raise AssertionError("terminal Ctrl+C was not relayed as INT")
+                    if repeated:
+                        status = Path(f"/proc/{process.pid}/status").read_text(encoding="ascii")
+                        ignored = next(line.split()[1] for line in status.splitlines()
+                                       if line.startswith("SigIgn:"))
+                        required = sum(1 << (number - 1) for number in fatal_signals)
+                        if int(ignored, 16) & required != required:
+                            raise AssertionError("terminal EXIT cleanup lacks its repeated-signal guard")
+                        os.write(master, b"\x03")
+                        time.sleep(0.15)
+                        if process.poll() is not None:
+                            raise AssertionError("second terminal Ctrl+C interrupted child cleanup")
+                    (case / "release").touch()
+                    process.communicate(timeout=4)
+                    os.set_blocking(master, False)
+                    terminal_output = bytearray()
+                    while True:
+                        try:
+                            chunk = os.read(master, 4096)
+                        except BlockingIOError:
+                            break
+                        if not chunk:
+                            break
+                        terminal_output.extend(chunk)
+                    if (process.returncode != 130 or
+                            terminal_output.replace(b"^C", b"").strip()):
+                        raise AssertionError("terminal cancellation changed status or emitted diagnostics")
+                    if not (case / "descendant-int").exists():
+                        raise AssertionError("terminal INT did not reach the same-group descendant")
+                    for record in records:
+                        assert_stopped(
+                            record, f"terminal case {entrypoint} stage={stage} repeated={repeated}",
+                        )
+                finally:
+                    (case / "release").touch()
+                    stop(process, records)
+                    os.close(slave)
+                    os.close(master)
 except Interrupted as error:
     raise SystemExit(128 + error.number)
 
-print("Monitor-mode entry points, identity handoff, output and fatal signals passed.")
+print("Monitor-mode entry points, identity handoff, output, fatal signals and terminal Ctrl+C passed.")
 PY_MONITOR_HANDOFF
+}
+
+test_real_tool_engine_supervision() {
+    python3 -B - "${SCRIPT_DIR}/.." <<'PY_REAL_SUPERVISION'
+import ast
+import ctypes
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import types
+
+project = Path(sys.argv[1])
+source = (project / "tests/real-tools-integration.sh").read_text(encoding="utf-8")
+body = source.split("<<'PY_EXISTING_ASSEMBLED'\n", 1)[1].split("\nPY_EXISTING_ASSEMBLED", 1)[0]
+function = next(node for node in ast.parse(body).body
+                if isinstance(node, ast.FunctionDef) and node.name == "capture_engine")
+implementation = compile(ast.Module(body=[function], type_ignores=[]), "real-tool-supervision", "exec")
+engine_source = (project / "download-video.sh").read_text(encoding="utf-8")
+if not engine_source.endswith('main "$@"\n'):
+    raise AssertionError("engine entrypoint changed")
+engine_source = engine_source[:-len('main "$@"\n')]
+main_body = engine_source.split("\nmain() {\n", 1)[1]
+traps = main_body.split("\n\n", 1)[0]
+if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), "test subreaper unavailable")
+
+with tempfile.TemporaryDirectory(prefix="real-tool-supervision-") as directory:
+    base = Path(directory)
+    engine = base / "engine.sh"
+    engine.write_text(engine_source + "\n" + traps + '''
+OUTPUT_LOCK_ROOT=$1
+run_supervised_command python3 "$2"
+exit "${DOWNLOAD_STATUS}"
+''', encoding="utf-8")
+    worker = base / "worker.py"
+    worker.write_text('''import os, signal, time
+from pathlib import Path
+root = Path(os.environ["ENGINE_SUPERVISION_CASE"])
+def stopped(number, _frame):
+    (root / "signal").write_text(str(number))
+    raise SystemExit(128 + number)
+for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(number, stopped)
+(root / "worker").write_text(f"{os.getpid()} {os.getpgrp()} {os.getsid(0)}")
+while True:
+    time.sleep(0.01)
+''', encoding="ascii")
+
+    cases = [("timeout", None, False), ("registration-int", signal.SIGINT, True)]
+    cases += [(f"active-{number}", number, False)
+              for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)]
+    for label, fatal, at_registration in cases:
+        root = base / label
+        root.mkdir()
+        observed = []
+        active = []
+
+        class ControlledProcess:
+            def __init__(self, *arguments, **keywords):
+                self.process = subprocess.Popen(*arguments, **keywords)
+                active.append(self.process)
+                self.first_communication = True
+                deadline = time.monotonic() + 5
+                while not (root / "worker").exists():
+                    if self.process.poll() is not None or time.monotonic() >= deadline:
+                        raise AssertionError("engine worker did not become ready")
+                    time.sleep(0.005)
+                ids = tuple(map(int, (root / "worker").read_text().split()))
+                if ids[1] != ids[2] or ids[1] == self.process.pid:
+                    raise AssertionError("engine did not own a separate worker session")
+                metadata = Path(f"/proc/{ids[1]}/stat").read_text()
+                observed.append((ids, metadata.rsplit(") ", 1)[1].split()[19]))
+                if at_registration:
+                    os.kill(os.getpid(), fatal)
+
+            def communicate(self, timeout):
+                first, self.first_communication = self.first_communication, False
+                if first and fatal and not at_registration:
+                    os.kill(os.getpid(), fatal)
+                if not first and fatal:
+                    # Cleanup must retain the first signal even if another
+                    # fatal signal arrives before its child has been reaped.
+                    os.kill(os.getpid(), signal.SIGTERM)
+                return self.process.communicate(timeout=timeout)
+
+            def poll(self):
+                return self.process.poll()
+
+            def send_signal(self, number):
+                return self.process.send_signal(number)
+
+            @property
+            def returncode(self):
+                return self.process.returncode
+
+        controlled = types.SimpleNamespace(Popen=ControlledProcess, PIPE=subprocess.PIPE,
+                                           CompletedProcess=subprocess.CompletedProcess,
+                                           TimeoutExpired=subprocess.TimeoutExpired)
+        namespace = dict(signal=signal, subprocess=controlled, root=root, sys=sys, time=time)
+        exec(implementation, namespace)
+        environment = dict(os.environ, ENGINE_SUPERVISION_CASE=str(root))
+        try:
+            try:
+                namespace["capture_engine"](
+                    ["bash", str(engine), str(root), str(worker)], environment,
+                    timeout=0.05, grace=2,
+                )
+            except subprocess.TimeoutExpired as error:
+                if fatal:
+                    raise AssertionError("signal was replaced by a timeout")
+                if error.timeout != 0.05:
+                    raise AssertionError("timeout diagnostic reported the polling interval")
+            except SystemExit as error:
+                if fatal is None or error.code != 128 + fatal:
+                    raise AssertionError("capture lost its original signal status") from error
+            else:
+                raise AssertionError("interrupted qualification was accepted")
+            if (root / "signal").read_text() != str(fatal or signal.SIGTERM):
+                raise AssertionError("capture sent the wrong shutdown signal")
+            for ids, _ in observed:
+                if any(Path(f"/proc/{pid}").exists() for pid in set(ids)):
+                    raise AssertionError("capture stranded an engine worker or sentinel")
+            if (root / "preserve-active-engine").exists():
+                raise AssertionError("confirmed shutdown was treated as ambiguous")
+        finally:
+            for process in active:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=3)
+            for ids, start_time in observed:
+                try:
+                    metadata = Path(f"/proc/{ids[1]}/stat").read_text()
+                except FileNotFoundError:
+                    continue
+                fields = metadata.rsplit(") ", 1)[1].split()
+                if fields[19] == start_time and fields[2:4] == [str(ids[1])] * 2:
+                    os.killpg(ids[1], signal.SIGKILL)
+            while True:
+                try:
+                    os.waitpid(-1, 0)
+                except ChildProcessError:
+                    break
+
+    root = base / "unconfirmed"
+    root.mkdir()
+    delivered = []
+
+    class UnresponsiveProcess:
+        def __init__(self, *_arguments, **_keywords):
+            pass
+
+        def poll(self):
+            return None
+
+        def send_signal(self, number):
+            delivered.append(number)
+
+        def communicate(self, timeout):
+            raise subprocess.TimeoutExpired("inert shutdown fault", timeout)
+
+    controlled.Popen = UnresponsiveProcess
+    namespace = dict(signal=signal, subprocess=controlled, root=root, sys=sys, time=time)
+    exec(implementation, namespace)
+    try:
+        namespace["capture_engine"](["inert"], os.environ.copy(), timeout=0, grace=0)
+    except subprocess.TimeoutExpired:
+        pass
+    else:
+        raise AssertionError("unconfirmed shutdown became successful qualification")
+    if delivered != [signal.SIGTERM, signal.SIGTERM]:
+        raise AssertionError("capture skipped the engine's cooperative escalation")
+    if not (root / "preserve-active-engine").exists():
+        raise AssertionError("unconfirmed engine shutdown lost its preservation marker")
+    cleanup = source.split("\ncleanup() {\n", 1)[1].split("\n}\n", 1)[0]
+    result = subprocess.run(
+        ["bash", "-c", 'set -euo pipefail\nTEST_ROOT=$1\nSERVER_PID=\n'
+         + "cleanup() {\n" + cleanup + "\n}\ncleanup\n", "cleanup-fixture", str(root)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3,
+    )
+    if result.returncode or not (root / "preserve-active-engine").exists():
+        raise AssertionError("outer real-tool cleanup removed an unconfirmed engine's state")
+
+    class FailedCaptureProcess(UnresponsiveProcess):
+        communications = 0
+
+        def communicate(self, timeout):
+            self.communications += 1
+            if self.communications == 1:
+                raise subprocess.TimeoutExpired("initial capture timeout", timeout)
+            raise OSError(24, "controlled capture failure during shutdown")
+
+    root = base / "capture-error"
+    root.mkdir()
+    controlled.Popen = FailedCaptureProcess
+    namespace = dict(signal=signal, subprocess=controlled, root=root, sys=sys, time=time)
+    exec(implementation, namespace)
+    try:
+        namespace["capture_engine"](["inert"], os.environ.copy(), timeout=0, grace=0)
+    except subprocess.TimeoutExpired:
+        pass
+    else:
+        raise AssertionError("shutdown capture failure replaced the original timeout")
+    if not (root / "preserve-active-engine").exists():
+        raise AssertionError("shutdown capture failure discarded the live engine's state")
+
+    started_without_preservation = []
+
+    class FailedPreservation:
+        def __truediv__(self, name):
+            if name != "preserve-active-engine":
+                raise AssertionError("unexpected preservation path")
+            return self
+
+        def touch(self):
+            raise OSError(28, "controlled full filesystem")
+
+    class ObservedLaunch(UnresponsiveProcess):
+        def __init__(self, *_arguments, **_keywords):
+            started_without_preservation.append(True)
+
+    controlled.Popen = ObservedLaunch
+    namespace = dict(signal=signal, subprocess=controlled, root=FailedPreservation(), sys=sys, time=time)
+    exec(implementation, namespace)
+    try:
+        namespace["capture_engine"](["inert"], os.environ.copy(), timeout=0, grace=0)
+    except OSError as error:
+        if error.errno != 28:
+            raise
+    else:
+        raise AssertionError("qualification accepted unavailable state preservation")
+    if started_without_preservation:
+        raise AssertionError("engine launched before state preservation was established")
+
+print("Real-tool engine timeout, signal registration and separate-session shutdown passed.")
+PY_REAL_SUPERVISION
+}
+
+test_real_tool_optimization_isolation() {
+    python3 -B - "${SCRIPT_DIR}/.." <<'PY_REAL_TOOL_OPTIMIZATION'
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+source = (Path(sys.argv[1]) / "tests/real-tools-integration.sh").read_text(encoding="utf-8")
+opening = "test_real_existing_assembled_output() {\n"
+closing = "\nPY_EXISTING_ASSEMBLED\n}"
+if source.count(opening) != 1 or source.count(closing) != 1:
+    raise AssertionError("unable to extract the actual assembled-output qualification")
+start = source.index(opening)
+end = source.index(closing, start) + len(closing)
+implementation = source[start:end]
+isolated_launch = "    python3 -I - "
+if implementation.count(isolated_launch) != 1:
+    raise AssertionError("assembled-output qualification must isolate interpreter options")
+mutant = implementation.replace(isolated_launch, "    python3 - ", 1)
+
+# The command deliberately violates every repetition guarantee. The first run
+# remains valid so only the intended existing-output assertions reject it.
+engine_source = '''#!/usr/bin/env bash
+set -euo pipefail
+[[ ${ASSEMBLED_REAL_YTDLP:?} == /bin/true ]]
+[[ ${ASSEMBLED_SEED:?} == "${OPTIMIZATION_TEST_ROOT}/assembled-seed.json" ]]
+[[ ${YTDLP_ARIA2_YTDLP_BIN:?} == "${OPTIMIZATION_TEST_ROOT}/assembled-ytdlp" ]]
+while (($#)); do
+    case $1 in
+        --mode) shift 2 ;;
+        --output-dir) output=$2; shift 2 ;;
+        --result-file) result=$2; shift 2 ;;
+        *) shift ;;
+    esac
+done
+final="${output}/overwritten.mkv"
+printf '%s\\n' "${result}" >"${final}"
+printf '%s\\n' "${final}" >"${result}"
+printf '%s\\n' /audio.m4a /video-only.mp4 >>"${OPTIMIZATION_TEST_ROOT}/http-requests.log"
+'''
+prefix = '''set -euo pipefail
+PROJECT_DIR=$1
+TEST_ROOT=$2
+MEDIA_ROOT=$3
+PORT=12345
+SIMULATE_NETWORK=false
+'''
+
+with tempfile.TemporaryDirectory(prefix="real-tool-optimization-") as directory:
+    root = Path(directory)
+
+    def check(actual, label):
+        case = root / label
+        case.mkdir()
+        project = case / "project"
+        project.mkdir()
+        media = case / "media"
+        media.mkdir()
+        (project / "download-video.sh").write_text(engine_source, encoding="ascii")
+        environment = dict(os.environ, PYTHONOPTIMIZE="1",
+                           YTDLP_ARIA2_YTDLP_BIN="/bin/true",
+                           OPTIMIZATION_TEST_ROOT=str(case))
+        completed = subprocess.run(
+            ["bash", "-s", "--", str(project), str(case), str(media)],
+            input=prefix + actual + '\ntest_real_existing_assembled_output\n',
+            env=environment, capture_output=True, text=True, timeout=5,
+        )
+        if (completed.returncode != 1 or
+                "AssertionError: ('repeat', 0," not in completed.stderr):
+            raise AssertionError(
+                f"{label}: optimization bypassed the actual repeated-output checks; "
+                f"status={completed.returncode}\n{completed.stdout}{completed.stderr}"
+            )
+        if "Real two-stream repetition and metadata change preserve" in completed.stdout:
+            raise AssertionError("failed repeated-output qualification reported success")
+
+    check(implementation, "isolated")
+    try:
+        check(mutant, "without-isolation")
+    except AssertionError as error:
+        if "status=0\nReal two-stream repetition and metadata change preserve" not in str(error):
+            raise AssertionError("isolation negative control failed for an unrelated reason") from error
+    else:
+        raise AssertionError("optimization regression accepted removal of interpreter isolation")
+
+print("Real-tool assertions resist inherited optimization and reject the unisolated negative control.")
+PY_REAL_TOOL_OPTIMIZATION
 }
 
 test_mock_process_scan_contract() {
@@ -1939,6 +2487,8 @@ main() {
     test_pre_identity_stopped_launcher_signal
     test_signal_resistant_sanitized_child
     test_monitor_runner_session_handoff
+    test_real_tool_engine_supervision
+    test_real_tool_optimization_isolation
     test_mock_process_scan_contract
     test_run_all_manifest_execution
     test_run_all_doctor_contract

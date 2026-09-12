@@ -43,6 +43,11 @@ cleanup() {
         kill -TERM -- "${SERVER_PID}" 2>/dev/null || true
         wait "${SERVER_PID}" 2>/dev/null || true
     fi
+    if [[ -e ${TEST_ROOT}/preserve-active-engine ]]; then
+        printf 'Warning: preserving real-tool fixtures after unconfirmed engine shutdown: %s\n' \
+            "${TEST_ROOT}" >&2
+        return
+    fi
     rm -rf -- "${TEST_ROOT}" || true
 }
 
@@ -517,14 +522,16 @@ test_real_direct_audio_scenarios() {
 test_real_existing_assembled_output() {
     # Only extraction is seeded: real yt-dlp selects two distinct streams and
     # real aria2/FFmpeg download and assemble them before an identical rerun.
-    python3 - "${PROJECT_DIR}" "${TEST_ROOT}" "${MEDIA_ROOT}" "${PORT}" \
+    python3 -I - "${PROJECT_DIR}" "${TEST_ROOT}" "${MEDIA_ROOT}" "${PORT}" \
         "${SIMULATE_NETWORK}" <<'PY_EXISTING_ASSEMBLED'
 import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
+import time
 
 project, root, media_root = map(Path, sys.argv[1:4])
 base = f"http://127.0.0.1:{sys.argv[4]}"
@@ -562,15 +569,85 @@ environment = dict(os.environ, ASSEMBLED_SEED=str(seed),
                    YTDLP_ARIA2_YTDLP_BIN=str(shim))
 requests = root / "http-requests.log"
 
+def capture_engine(arguments, environment, *, timeout=60, grace=20):
+    # The standalone engine owns separate worker sessions. Killing only its
+    # wrapper would bypass their authenticated shutdown and strand downloads.
+    process = None
+    requested_signal = None
+    managed = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+    previous = {}
+    preservation = root / "preserve-active-engine"
+
+    def interrupted(number, _frame):
+        nonlocal requested_signal
+        requested_signal = requested_signal or number
+
+    try:
+        for number in managed:
+            previous[number] = signal.signal(number, interrupted)
+        # Establish preservation before launching anything: a full or unwritable
+        # filesystem must fail before there is a worker session to shut down.
+        preservation.touch()
+        process = subprocess.Popen(arguments, env=environment,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline = time.monotonic() + timeout
+        while True:
+            if requested_signal:
+                raise SystemExit(128 + requested_signal)
+            # Handlers only record intent, including during Popen and exception
+            # unwinding. Bounded waits observe it without a reentrant exception
+            # being able to jump over child cleanup.
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=max(0, min(0.1, deadline - time.monotonic())),
+                )
+            except subprocess.TimeoutExpired as error:
+                if requested_signal:
+                    raise SystemExit(128 + requested_signal)
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(
+                        arguments, timeout, output=error.output, stderr=error.stderr,
+                    ) from None
+                continue
+            if requested_signal:
+                raise SystemExit(128 + requested_signal)
+            preservation.unlink()
+            return subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
+    except BaseException:
+        # Keep the first failure authoritative while the engine performs its
+        # bounded cleanup. A repeated signal asks it to escalate its own groups.
+        for number in managed:
+            signal.signal(number, signal.SIG_IGN)
+        if process is not None:
+            try:
+                for _ in range(2):
+                    if process.poll() is None:
+                        process.send_signal(requested_signal or signal.SIGTERM)
+                    try:
+                        process.communicate(timeout=grace)
+                        preservation.unlink()
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
+            except Exception as error:
+                print(f"Error during engine shutdown: {error}", file=sys.stderr)
+            if preservation.exists():
+                print("Error: engine shutdown remains unconfirmed; retaining its fixtures.",
+                      file=sys.stderr)
+        raise
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
 def media_requests():
     return requests.read_text(encoding="utf-8").splitlines() if requests.exists() else []
 
 def run(label):
     result = root / f"assembled-{label}.result"
-    completed = subprocess.run(
+    completed = capture_engine(
         ["bash", str(project / "download-video.sh"), "--mode", "video",
          "--output-dir", str(output), "--result-file", str(result), base + "/controlled-page"],
-        env=environment, capture_output=True, timeout=60,
+        environment,
     )
     (root / f"assembled-{label}.log").write_bytes(completed.stdout + completed.stderr)
     return result, completed

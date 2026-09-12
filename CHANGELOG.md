@@ -16,6 +16,13 @@
   workflow state before accepting reused qualification evidence.
 - Preserve test-runner cancellation across a Bash foreground-child signal race,
   with authenticated session transitions and unchanged interruption deadlines.
+- Relay terminal Ctrl+C through guarded runner cleanup, including child
+  registration and repeated interruptions, without leaving validations active.
+- Stop real-tool engine sessions cooperatively on capture timeout or signal,
+  retain fixtures when shutdown is unconfirmed, and keep collision assertions
+  enabled when the caller exports `PYTHONOPTIMIZE`.
+- Distinguish pending SIGKILL completion from a surviving unsignaled descendant
+  in monitor cancellation tests, with bounded observation and process diagnostics.
 
 ## 2.3.17 - Unreleased
 

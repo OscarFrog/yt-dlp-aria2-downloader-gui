@@ -103,6 +103,9 @@ they improve correctness and clarity.
   monitor mode for trapped-INT reliability. Their shared supervisor handles
   the provisional process group before creating a dedicated session; this is
   not a repository-wide job-control setting for sourced or production code.
+  Their EXIT handlers also preserve terminal status 130 as INT and ignore
+  repeated fatal signals while cleaning up. Registration must establish
+  provisional child identity before any foreground external command.
 - Prefer `[[ ... ]]` over `[ ... ]` for Bash conditionals.
 - Prefer `(( ... ))` for arithmetic conditions and `$(( ... ))` for arithmetic
   expansion.

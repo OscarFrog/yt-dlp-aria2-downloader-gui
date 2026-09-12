@@ -400,10 +400,30 @@ supervisor moves from the provisional Bash process group into a dedicated
 session with managed signals blocked and the same PID. Group readiness and
 signaling require SID to equal PGID as well as the existing identity proof.
 The runner integration suite qualifies this transition, pending fatal signals,
-status/output preservation and rejection of provisional group identity. The
-full-profile signal suite retains its original time limits; diagnostics also
+status/output preservation and rejection of provisional group identity. It
+also sends real terminal Ctrl-C during scheduler polling, incomplete identity
+handoff and handoff-file removal. It verifies the worker's received INT,
+descendant shutdown and cleanup after a second Ctrl-C, including the EXIT path
+that bypasses Bash's ordinary INT trap. Provisional supervision precedes every
+foreground command in the registration window. The full-profile signal suite
+retains its original time limits; diagnostics also
 cover failure to enter the reentrant-signal guard. No debugger is required by
 either canonical profile.
+After escalation, the monitor test permits at most one second for an original
+descendant with an already pending SIGKILL to become a zombie or disappear.
+It authenticates PID/start-time around the signal snapshot and sends no extra
+signal; a live descendant without pending SIGKILL fails immediately. This
+observes the kernel's asynchronous exit, without changing runner timeouts.
+
+The assembled-output real-tool fixture keeps its 60-second execution deadline,
+then allows two bounded 20-second cooperative shutdown waits. The second signal
+requests the engine's own authenticated escalation; an unconfirmed shutdown
+preserves the fixture directory and remains a failure. Runner integration
+qualifies timeout, HUP/INT/TERM, signal registration and preservation using the
+actual engine supervision functions. Preservation is established before launch;
+a capture error during cleanup keeps both that state and the original failure.
+The fixture driver uses isolated Python
+so PYTHONOPTIMIZE cannot silently remove its no-overwrite assertions.
 
 The complete mock contract is divided into nine isolated scheduler suites
 (`engine-core`, `engine-hls`, `engine-staging`, `engine-network`, `gui-progress`, `gui-state`,

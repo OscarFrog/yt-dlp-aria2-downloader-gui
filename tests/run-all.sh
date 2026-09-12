@@ -224,6 +224,19 @@ STATIC_VALIDATION_ENDS=()
 STATIC_VALIDATION_STATUSES=()
 STATIC_VALIDATION_SLOT_INDEX=()
 
+cleanup() {
+    local status=$?
+    local signal_name=TERM
+
+    # Monitor mode can deliver terminal INT only to a foreground utility.
+    # Preserve it on the EXIT path and keep repeated Ctrl+C out of cleanup.
+    trap '' HUP INT TERM
+    trap - EXIT
+    ((status != 130)) || signal_name=INT
+    test_runner_cleanup "${signal_name}"
+    exit "${status}"
+}
+
 usage() {
     cat <<'EOF_USAGE'
 Usage: tests/run-all.sh [OPTIONS]
@@ -1478,7 +1491,7 @@ main() {
 
     cd -- "${PROJECT_DIR}"
     test_runner_initialize
-    trap test_runner_cleanup EXIT
+    trap cleanup EXIT
     trap 'test_runner_handle_signal HUP 129' HUP
     trap 'test_runner_handle_signal INT 130' INT
     trap 'test_runner_handle_signal TERM 143' TERM

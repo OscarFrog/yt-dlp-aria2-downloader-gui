@@ -316,6 +316,17 @@ _test_runner_start_child() {
     fi
 
     child_pid=$!
+    # Terminal INT can abort a monitor-mode foreground utility directly into
+    # EXIT, bypassing the deferred signal trap. Register wait ownership and
+    # same-snapshot parent/start-time authority before the first such utility.
+    test_runner_read_active_child_start_time \
+        parent_observed_start_time "${child_pid}" "${runner_pid}" || true
+    TEST_RUNNER_CHILD_PIDS[slot]=${child_pid}
+    TEST_RUNNER_CHILD_PGIDS[slot]=${child_pid}
+    TEST_RUNNER_CHILD_COMPLETIONS[slot]=${completion_file}
+    TEST_RUNNER_CHILD_TOKENS[slot]=${child_token}
+    TEST_RUNNER_CHILD_START_TIMES[slot]=${parent_observed_start_time}
+
     while :; do
         if test_runner_read_child_identity \
             child_start_time "${identity_file}" "${child_pid}"; then
@@ -341,17 +352,17 @@ _test_runner_start_child() {
     done
 
     if [[ -z ${child_start_time} ]]; then
-        wait "${child_pid}" 2>/dev/null || true
+        test_runner_wait_child "${slot}" 2>/dev/null || true
         rm -f -- "${identity_file}"
         test_runner_finish_start_transition
         return 70
     fi
-    rm -f -- "${identity_file}"
     TEST_RUNNER_CHILD_PIDS[slot]=${child_pid}
     TEST_RUNNER_CHILD_PGIDS[slot]=${child_pid}
     TEST_RUNNER_CHILD_COMPLETIONS[slot]=${completion_file}
     TEST_RUNNER_CHILD_TOKENS[slot]=${child_token}
     TEST_RUNNER_CHILD_START_TIMES[slot]=${child_start_time}
+    rm -f -- "${identity_file}"
 
     test_runner_finish_start_transition
 }
@@ -698,10 +709,13 @@ test_runner_terminate_children() {
     done
 }
 
-# Finish active supervision and remove only the runner-owned scratch directory.
+# Finish active supervision with the requested signal (TERM by default), then
+# remove only the runner-owned scratch directory.
 test_runner_cleanup() {
+    local signal_name=${1:-TERM}
+
     if ((${#TEST_RUNNER_CHILD_PIDS[@]} > 0)); then
-        test_runner_terminate_children TERM || true
+        test_runner_terminate_children "${signal_name}" || true
     fi
 
     if [[ -n ${TEST_RUNNER_LOG_DIR} && -d ${TEST_RUNNER_LOG_DIR} &&
