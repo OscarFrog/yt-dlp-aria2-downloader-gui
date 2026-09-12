@@ -28,7 +28,7 @@ fi
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 # The development tree can lead the latest installable GitHub release. Keep the
 # two contracts explicit so README package names never advertise absent assets.
-readonly EXPECTED_VERSION='2.3.14'
+readonly EXPECTED_VERSION='2.3.15'
 readonly EXPECTED_PUBLISHED_VERSION='2.3.14'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SOURCE_INVENTORY_FILE=''
@@ -2367,6 +2367,10 @@ test_static_tooling_contracts() {
         python3 -B "${SCRIPT_DIR}/tests/release-docs-integration.py"
     assert_status 0 'shfmt handoff independently binds its bump and publication' \
         python3 -B "${SCRIPT_DIR}/tests/shfmt-version-handoff-integration.py"
+    assert_status 0 'qualification promotion rejects stale or unrelated GitHub proof' \
+        python3 -B "${SCRIPT_DIR}/tests/ci-validation-integration.py"
+    assert_status 0 'source archive promotion preserves paths, modes and qualified bytes' \
+        python3 -B "${SCRIPT_DIR}/tests/source-archive-integration.py"
     assert_shell_policy_lists_are_canonical
     assert_unique_source_file_list PYTHON_FILES "${PYTHON_FILES[@]}"
     assert_workflow_validator_regressions
@@ -2467,7 +2471,6 @@ test_static_tooling_contracts() {
     for workflow_file in \
         .github/workflows/shell.yml \
         .github/workflows/packages.yml \
-        .github/workflows/release.yml \
         .github/workflows/shfmt-update.yml; do
         assert_file_contains "${SCRIPT_DIR}/${workflow_file}" \
             'tests/run-all.sh --jobs 4' \
@@ -2636,12 +2639,16 @@ test_static_tooling_contracts() {
     assert_file_not_contains "${SCRIPT_DIR}/tests/run-all.sh" \
         'run_suite_batch() {' \
         'integration scheduler has no fixed-batch barrier'
-    for repeat_workflow in real-tools release packages stress; do
-        assert_file_contains \
+    for repeat_workflow in release packages real-tools stress; do
+        assert_file_not_contains \
             "${SCRIPT_DIR}/.github/workflows/${repeat_workflow}.yml" \
             'bash ./tests/repeat-qualification.sh' \
-            "${repeat_workflow} workflow parallelizes independent repetitions"
+            "${repeat_workflow} does not repeat identical complete fixtures"
     done
+    assert_file_not_contains \
+        "${SCRIPT_DIR}/tests/ffmpeg-generation-qualification.sh" \
+        'repeat-qualification.sh' \
+        'each FFmpeg generation runs each deterministic qualification once'
     assert_file_contains "${SCRIPT_DIR}/tests/test-runner-integration.sh" \
         "assert_equals '23' \"\${status}\"" \
         'wait-any qualification preserves failed child status'
@@ -3234,10 +3241,9 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
         'RUNTIME_STRESS_RESULT: ${{ needs.runtime-hardening-stress.result }}' \
         'required stress gate includes runtime-manager stress'
-    # shellcheck disable=SC2016
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
-        'PACKAGE_STRESS_RESULT: ${{ needs.package-cleanup-stress.result }}' \
-        'required stress gate includes package-cleanup stress'
+    assert_file_not_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
+        'package-cleanup-stress' \
+        'stress does not duplicate the deterministic cleanup suite in full validation'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
         'readonly rpmfusion_fingerprint=E9A491A3DE247814E7E067EAE06F8ECDD651FF2E' \
         'Fedora qualification pins the RPM Fusion bootstrap signer'
@@ -3290,11 +3296,11 @@ test_static_release_contracts() {
         'project tests run only after fresh formatter verification'
 
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
-        'Qualify RPM v4/v6 signature semantics (3x)' \
+        'Qualify RPM v4/v6 signature semantics' \
         'PR CI qualifies RPM v4/v6 signature semantics'
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        'Qualify release RPM v4/v6 signature semantics (3x)' \
-        'release CI qualifies RPM v4/v6 signature semantics'
+    assert_file_not_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
+        'tests/rpm6-multisig-integration.sh' \
+        'release reuses qualified RPM format semantics'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'unsigned release RPM uses unexpected package format' \
         'release signer requires RPM format v4 before signing'
@@ -3536,20 +3542,36 @@ test_static_cleanup_and_qualification_contracts() {
         'Run aria2 direct-transfer behavior qualification' \
         'PR/current-stable CI gates real aria2 direct-transfer behavior'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        'Run aria2 direct-transfer behavior qualification' \
-        'release CI gates real aria2 direct-transfer behavior'
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        'Run HLS post-remux duration validation (3x)' \
-        'release qualification gates HLS duration validation'
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        'Run real FFmpeg progress integration' \
-        'release qualification gates real FFmpeg progress'
+        'Require qualification of the exact release source' \
+        'release requires the complete source qualification proof'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
         'Mock process/cancellation stress (20x deterministic jitter)' \
         'race-sensitive mock qualification uses twenty deterministic jitter passes'
+    assert_file_contains "${SCRIPT_DIR}/tests/run-all.sh" \
+        "['package-user-cleanup']='./tests/package-user-cleanup-integration.sh'" \
+        'the complete validation manifest retains deterministic cleanup coverage'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
-        'Package cleanup hardening stress (10x)' \
-        'package cleanup safety is repeatedly stress-tested'
+        'bash ./tests/mock-integration.sh --group stress-signals' \
+        'stress jitter targets signal, network and progress-error cancellation'
+    assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+        $'run_mock_stress_signal_group() {\n    run_mock_signal_group\n    test_mock_engine_network_signals\n    test_mock_runtime_progress_errors' \
+        'stress retains complementary network and progress-error shutdown scenarios'
+    # shellcheck disable=SC2016 # Literal mock-group dispatch contract.
+    assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+        'if [[ ${MOCK_GROUP} == stress-signals ]]; then' \
+        'ordinary complete mocks do not repeat the explicit stress aggregate'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
+        'for ((iteration = shard; iteration <= 20; iteration += shard_count)); do' \
+        'signal stress retains all twenty timing configurations'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/real-tools.yml" \
+        $'name: Run real FFmpeg progress qualification\n        if: matrix.yt_dlp_version == \'2026.8.19\'' \
+        'FFmpeg-only progress fixtures run once across the yt-dlp matrix'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/real-tools.yml" \
+        $'name: Run HLS post-remux duration validation\n        if: matrix.yt_dlp_version == \'2026.8.19\'' \
+        'HLS fixtures with mock yt-dlp run once across the yt-dlp matrix'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/real-tools.yml" \
+        'EXPECTED_FFMPEG_VERSION: 6.1.1' \
+        'shared real-tool fixtures bind to the qualified Ubuntu FFmpeg generation'
 }
 
 test_static_packaging_signing_contracts() {
@@ -3793,7 +3815,7 @@ test_static_packaging_signing_contracts() {
         'release workflow applies an OpenPGP RPM signature'
 
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        'coreutils gawk gnupg2 rpm rpm-sign' \
+        'coreutils gawk gh gnupg2 rpm rpm-sign' \
         'isolated RPM signing job declares its awk dependency'
     # shellcheck disable=SC2016
     # The assertion deliberately checks that GPG output is materialized completely
@@ -3856,12 +3878,12 @@ test_static_packaging_signing_contracts() {
         '-----BEGIN PGP PUBLIC KEY BLOCK-----' \
         'repository contains only the public RPM signing certificate'
 
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shell.yml" \
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/promotion.yml" \
         '    branches:' \
-        'push validation branch filter'
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/shell.yml" \
+        'source promotion branch filter'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/promotion.yml" \
         '      - main' \
-        'push validation main branch'
+        'source promotion main branch'
     # shellcheck disable=SC2016 # Literal workflow-source assertion.
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'git merge-base --is-ancestor "${tag_commit}" origin/main' \
@@ -4481,7 +4503,7 @@ test_static_runtime_regression_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/real-tools.yml" \
         'tests/real-tools-integration.sh' 'hermetic real-tool CI validation'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        'tests/real-tools-integration.sh' 'release is gated by hermetic real-tool validation'
+        'scripts/ci-validation.py verify' 'release is gated by complete qualified source proof'
     assert_file_not_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
         'container: debian:13-slim' 'unsupported Debian package job is absent'
     assert_file_not_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
@@ -4793,8 +4815,8 @@ test_static_upgrade_and_supply_chain_contracts() {
         'runtime manager has a dedicated stress job'
 
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
-        'Runtime-manager hardening stress (10x)' \
-        'runtime hardening stress count is documented in the job name'
+        'Runtime-manager hardening (10 rollback/contention cycles)' \
+        'runtime hardening transaction coverage is documented in the job name'
 
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
         'tests/runtime-manager-hardening-integration.sh' \

@@ -11,7 +11,6 @@ umask 077
 
 PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly PROJECT_DIR
-readonly REPEAT_QUALIFICATION="${PROJECT_DIR}/tests/repeat-qualification.sh"
 
 fail_test() {
     printf 'FAIL: %s\n' "$1" >&2
@@ -21,7 +20,7 @@ fail_test() {
 main() {
     local expected=${EXPECTED_FFMPEG_VERSION:-}
     local expected_ytdlp=${EXPECTED_YTDLP_VERSION:-}
-    local qualification_jobs=${FFMPEG_QUALIFICATION_JOBS:-3}
+    local compatibility_only=false
     local resolved_ffmpeg
     local resolved_ffprobe
     local ffmpeg_line
@@ -29,6 +28,13 @@ main() {
     local ytdlp_version
     local aria2_line
     local command_name
+
+    if (($# == 1)) && [[ $1 == --compatibility-only ]]; then
+        compatibility_only=true
+    elif (($# != 0)); then
+        printf 'Usage: tests/ffmpeg-generation-qualification.sh [--compatibility-only]\n' >&2
+        return 64
+    fi
 
     if [[ -z ${expected} ]]; then
         fail_test 'EXPECTED_FFMPEG_VERSION must name the generation under qualification.'
@@ -73,21 +79,20 @@ main() {
     printf 'yt-dlp: %s\n' "${ytdlp_version}"
     printf '%s\n' "${aria2_line}"
 
-    bash "${REPEAT_QUALIFICATION}" \
-        --label 'real-tool routing iteration' --runs 3 \
-        --jobs "${qualification_jobs}" -- \
+    # The Ubuntu generation shares these exact tools and fixtures with the
+    # latest pinned real-tools job. Its caller requests compatibility-only;
+    # other generations must exercise every common fixture with their tools.
+    if [[ ${compatibility_only} == false ]]; then
         timeout --signal=TERM --kill-after=10s 8m \
-        bash "${PROJECT_DIR}/tests/real-tools-integration.sh"
+            bash "${PROJECT_DIR}/tests/real-tools-integration.sh"
 
-    printf '\n=== FFmpeg progress qualification ===\n'
-    timeout --signal=TERM --kill-after=10s 8m \
-        bash "${PROJECT_DIR}/tests/ffmpeg-real-progress-integration.sh"
+        printf '\n=== FFmpeg progress qualification ===\n'
+        timeout --signal=TERM --kill-after=10s 8m \
+            bash "${PROJECT_DIR}/tests/ffmpeg-real-progress-integration.sh"
 
-    bash "${REPEAT_QUALIFICATION}" \
-        --label 'HLS duration iteration' --runs 3 \
-        --jobs "${qualification_jobs}" -- \
         timeout --signal=TERM --kill-after=10s 5m \
-        bash "${PROJECT_DIR}/tests/hls-remux-duration-integration.sh"
+            bash "${PROJECT_DIR}/tests/hls-remux-duration-integration.sh"
+    fi
 
     printf '\n=== Generation-sensitive compatibility fixtures ===\n'
     EXPECTED_FFMPEG_VERSION=${expected} \

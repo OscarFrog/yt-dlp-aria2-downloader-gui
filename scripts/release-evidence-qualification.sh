@@ -31,16 +31,15 @@ Example:
     qualification-evidence/release-v1.2.3.md
 
 The script verifies the public release assets, SHA256SUMS, GitHub artifact
-attestations, source digest, signer workflow, exact-SHA validation workflow
-runs, and recent successful scheduled runs for real-tools.yml and
-shfmt-update.yml.
+attestations, source digest, signer workflow, the exact-SHA release run,
+content-bound proof of all five PR qualification workflows, and recent
+successful scheduled runs for real-tools.yml and shfmt-update.yml.
 
 Environment controls:
   MAX_SCHEDULE_AGE_DAYS=14
-  REQUIRE_EXTENDED_QUALIFICATION=false
 
-Set REQUIRE_EXTENDED_QUALIFICATION=true for final release qualification when
-qualification.yml must also be required on the exact release SHA.
+Every source qualification, including qualification.yml, is mandatory.
+Authentication uses GH_TOKEN/GITHUB_TOKEN or the current GitHub CLI login.
 EOF_USAGE
 }
 
@@ -221,12 +220,10 @@ parse_qualification_arguments() {
     local sha_output_variable=$2
     local report_output_variable=$3
     local age_output_variable=$4
-    local extended_output_variable=$5
-    local parsed_tag=${6:-}
-    local parsed_sha=${7:-}
-    local parsed_report=${8:-}
+    local parsed_tag=${5:-}
+    local parsed_sha=${6:-}
+    local parsed_report=${7:-}
     local parsed_age=${MAX_SCHEDULE_AGE_DAYS:-${DEFAULT_MAX_SCHEDULE_AGE_DAYS}}
-    local parsed_extended=${REQUIRE_EXTENDED_QUALIFICATION:-false}
 
     if [[ ${parsed_tag} == -h || ${parsed_tag} == --help ]]; then
         usage
@@ -242,22 +239,17 @@ parse_qualification_arguments() {
     if [[ ! ${parsed_age} =~ ^[1-9][0-9]*$ ]]; then
         fail_qualification 'MAX_SCHEDULE_AGE_DAYS must be a positive integer.'
     fi
-    case ${parsed_extended} in
-        true | false) ;;
-        *) fail_qualification 'REQUIRE_EXTENDED_QUALIFICATION must be true or false.' ;;
-    esac
 
     printf -v "${tag_output_variable}" '%s' "${parsed_tag}"
     printf -v "${sha_output_variable}" '%s' "${parsed_sha}"
     printf -v "${report_output_variable}" '%s' "${parsed_report}"
     printf -v "${age_output_variable}" '%s' "${parsed_age}"
-    printf -v "${extended_output_variable}" '%s' "${parsed_extended}"
 }
 
 require_qualification_commands() {
     local command_name=''
 
-    for command_name in cat cmp date diff dirname find gh git grep jq mkdir mktemp rm sha256sum sleep sort wc; do
+    for command_name in cat cmp date diff dirname find gh git grep jq mkdir mktemp python3 rm sha256sum sleep sort wc; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             fail_qualification "required command is absent: ${command_name}."
         fi
@@ -391,36 +383,40 @@ download_and_verify_release_assets() {
 collect_exact_sha_runs() {
     local repo=$1
     local expected_sha=$2
-    local require_extended=$3
-    local release_output_variable=$4
-    local shell_output_variable=$5
-    local packages_output_variable=$6
-    local real_tools_output_variable=$7
-    local stress_output_variable=$8
-    local qualification_output_variable=$9
+    local output_variable=$3
     local release_result=''
-    local shell_result=''
-    local packages_result=''
-    local real_tools_result=''
-    local stress_result=''
-    local qualification_result=''
 
     release_result=$(successful_workflow_run_for_sha "${repo}" release.yml "${expected_sha}")
-    shell_result=$(successful_workflow_run_for_sha "${repo}" shell.yml "${expected_sha}")
-    packages_result=$(successful_workflow_run_for_sha "${repo}" packages.yml "${expected_sha}")
-    real_tools_result=$(successful_workflow_run_for_sha "${repo}" real-tools.yml "${expected_sha}")
-    stress_result=$(successful_workflow_run_for_sha "${repo}" stress.yml "${expected_sha}")
-    if [[ ${require_extended} == true ]]; then
-        qualification_result=$(successful_workflow_run_for_sha \
-            "${repo}" qualification.yml "${expected_sha}")
-    fi
+    printf -v "${output_variable}" '%s' "${release_result}"
+}
 
-    printf -v "${release_output_variable}" '%s' "${release_result}"
-    printf -v "${shell_output_variable}" '%s' "${shell_result}"
-    printf -v "${packages_output_variable}" '%s' "${packages_result}"
-    printf -v "${real_tools_output_variable}" '%s' "${real_tools_result}"
-    printf -v "${stress_output_variable}" '%s' "${stress_result}"
-    printf -v "${qualification_output_variable}" '%s' "${qualification_result}"
+collect_content_qualification() {
+    local repo=$1
+    local expected_sha=$2
+    local output_variable=$3
+    local qualification_result=''
+    local github_token=${GH_TOKEN:-${GITHUB_TOKEN:-}}
+
+    [[ ${repo} == OscarFrog/yt-dlp-aria2-downloader-gui ]] || {
+        fail_qualification 'content qualification requires the canonical repository.'
+        return 65
+    }
+    if [[ -z ${github_token} ]]; then
+        if ! github_token=$(gh auth token --hostname github.com); then
+            fail_qualification 'unable to obtain authenticated GitHub CLI access.'
+            return 65
+        fi
+    fi
+    # The shared verifier binds the actual PR merge tree, run attempts and every
+    # required job. A successful status on the branch HEAD alone is insufficient.
+    if ! qualification_result=$(
+        GH_TOKEN="${github_token}" python3 -I "${PROJECT_DIR}/scripts/ci-validation.py" \
+            verify --commit "${expected_sha}"
+    ); then
+        fail_qualification 'content-bound source qualification was refused.'
+        return 65
+    fi
+    printf -v "${output_variable}" '%s' "${qualification_result}"
 }
 
 collect_scheduled_runs() {
@@ -507,16 +503,18 @@ write_qualification_report() {
     local public_dir=$8
     local report_file=$9
     local release_run=${10}
-    local shell_run=${11}
-    local packages_run=${12}
-    local real_tools_exact_run=${13}
-    local stress_run=${14}
-    local qualification_run=${15}
-    local real_tools_run=${16}
-    local shfmt_run=${17}
+    local content_qualification=${11}
+    local real_tools_run=${12}
+    local shfmt_run=${13}
+    local qualified_tree='' qualified_pr='' qualified_runs=''
+    local workflow='' run_id='' run_attempt='' source_commit=''
     local verification_date=''
 
     verification_date=$(date --iso-8601=seconds)
+    qualified_tree=$(jq -er '.tree' <<<"${content_qualification}")
+    qualified_pr=$(jq -er '.pull_request' <<<"${content_qualification}")
+    qualified_runs=$(jq -er '.qualifications[] | [.workflow,.run_id,.run_attempt,.source_commit] | @tsv' \
+        <<<"${content_qualification}")
 
     {
         printf '# Release qualification evidence — %s\n\n' "${tag}"
@@ -526,15 +524,15 @@ write_qualification_report() {
         printf -- '- Release URL: %s\n' "${release_url}"
         printf -- "- Immutable: \`%s\`\n" "${release_immutable}"
         printf -- "- Published at: \`%s\`\n\n" "${release_published_at}"
-        printf '## Exact-SHA workflow runs\n\n'
+        printf '## Exact-SHA release run\n\n'
         write_exact_sha_run_line release.yml "${release_run}"
-        write_exact_sha_run_line shell.yml "${shell_run}"
-        write_exact_sha_run_line packages.yml "${packages_run}"
-        write_exact_sha_run_line real-tools.yml "${real_tools_exact_run}"
-        write_exact_sha_run_line stress.yml "${stress_run}"
-        if [[ -n ${qualification_run} ]]; then
-            write_exact_sha_run_line qualification.yml "${qualification_run}"
-        fi
+        printf '\n## Content-bound source qualification\n\n'
+        printf -- '- Qualified Git tree: %s\n' "${qualified_tree}"
+        printf -- '- Merged pull request: https://github.com/%s/pull/%s\n\n' "${repo}" "${qualified_pr}"
+        while IFS=$'\t' read -r workflow run_id run_attempt source_commit; do
+            printf -- '- %s: https://github.com/%s/actions/runs/%s/attempts/%s (tested merge %s)\n' \
+                "${workflow}" "${repo}" "${run_id}" "${run_attempt}" "${source_commit}"
+        done <<<"${qualified_runs}"
         printf '\n## Scheduled runs\n\n'
         write_scheduled_run_line 'Current-stable real-tools' "${real_tools_run}"
         write_scheduled_run_line 'shfmt updater' "${shfmt_run}"
@@ -555,26 +553,24 @@ write_qualification_report() {
 
 main() {
     local tag='' expected_sha='' report_file=''
-    local max_schedule_age_days='' require_extended=''
+    local max_schedule_age_days=''
     local public_dir='' inventory_file='' actual_inventory_file=''
     local repo='' release_url='' release_immutable='' release_published_at=''
-    local release_run='' shell_run='' packages_run=''
-    local real_tools_exact_run='' stress_run='' qualification_run=''
+    local release_run='' content_qualification=''
     local real_tools_run='' shfmt_run=''
 
     parse_qualification_arguments \
-        tag expected_sha report_file max_schedule_age_days require_extended "$@"
+        tag expected_sha report_file max_schedule_age_days "$@"
     require_qualification_commands
     initialize_qualification_workspace \
         public_dir inventory_file actual_inventory_file
     resolve_release_identity "${tag}" "${expected_sha}" repo
+    collect_exact_sha_runs "${repo}" "${expected_sha}" release_run
+    collect_content_qualification "${repo}" "${expected_sha}" content_qualification
     download_and_verify_release_assets \
         "${tag}" "${expected_sha}" "${repo}" \
         "${public_dir}" "${inventory_file}" "${actual_inventory_file}" \
         release_url release_immutable release_published_at
-    collect_exact_sha_runs \
-        "${repo}" "${expected_sha}" "${require_extended}" \
-        release_run shell_run packages_run real_tools_exact_run stress_run qualification_run
     collect_scheduled_runs \
         "${repo}" "${max_schedule_age_days}" real_tools_run shfmt_run
     resolve_qualification_report "${report_file}" "${tag}" report_file
@@ -582,9 +578,7 @@ main() {
         "${tag}" "${expected_sha}" "${repo}" \
         "${release_url}" "${release_immutable}" "${release_published_at}" \
         "${inventory_file}" "${public_dir}" "${report_file}" \
-        "${release_run}" "${shell_run}" "${packages_run}" \
-        "${real_tools_exact_run}" "${stress_run}" "${qualification_run}" \
-        "${real_tools_run}" "${shfmt_run}"
+        "${release_run}" "${content_qualification}" "${real_tools_run}" "${shfmt_run}"
 }
 
 main "$@"

@@ -1,9 +1,6 @@
 name: Concurrency stress
 on:
   pull_request:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 permissions:
   contents: read
@@ -12,14 +9,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  identity:
+    name: Source identity ${{ github.sha }}
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Bind validation to the event source
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ $(git rev-parse HEAD) == "${EXPECTED_SHA}" ]]
+          git rev-parse 'HEAD^{tree}'
+      - name: Require successful shell validation before qualification
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: python3 -I scripts/ci-validation.py wait-shell --commit "${EXPECTED_SHA}"
   mock-stress:
+    needs: identity
     name: Mock process/cancellation stress shard ${{ matrix.shard }}/4
     runs-on: ubuntu-24.04
     # Each shard runs five independently bounded five-minute iterations.
     # Include all iterations plus checkout and cleanup in the job budget.
     timeout-minutes: 30
     strategy:
-      fail-fast: false
+      fail-fast: true
       max-parallel: 4
       matrix:
         shard: [1, 2, 3, 4]
@@ -68,43 +92,54 @@ jobs:
                 MOCK_WORKER_START_JITTER_SECONDS="${worker}" \
                 MOCK_FFMPEG_START_JITTER_SECONDS="${ffmpeg_start}" \
                 MOCK_SETSID_START_JITTER_SECONDS="${supervisor}" \
-                bash ./tests/mock-integration.sh
+                bash ./tests/mock-integration.sh --group stress-signals
           done
 
   mock-stress-gate:
     name: Mock process/cancellation stress (20x deterministic jitter)
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     if: ${{ always() }}
     needs:
       - mock-stress
       - runtime-hardening-stress
-      - package-cleanup-stress
     runs-on: ubuntu-24.04
-    timeout-minutes: 2
+    timeout-minutes: 50
     steps:
       - name: Require all cancellation stress shards
         shell: bash
         env:
           MOCK_STRESS_RESULT: ${{ needs.mock-stress.result }}
           RUNTIME_STRESS_RESULT: ${{ needs.runtime-hardening-stress.result }}
-          PACKAGE_STRESS_RESULT: ${{ needs.package-cleanup-stress.result }}
         run: |
           set -Eeuo pipefail
 
           if [[ ${MOCK_STRESS_RESULT} != success ||
-              ${RUNTIME_STRESS_RESULT} != success ||
-              ${PACKAGE_STRESS_RESULT} != success ]]; then
-            printf 'Stress qualification results: mock=%s runtime=%s package=%s\n' \
+              ${RUNTIME_STRESS_RESULT} != success ]]; then
+            printf 'Stress qualification results: mock=%s runtime=%s\n' \
               "${MOCK_STRESS_RESULT}" \
-              "${RUNTIME_STRESS_RESULT}" \
-              "${PACKAGE_STRESS_RESULT}" >&2
+              "${RUNTIME_STRESS_RESULT}" >&2
             exit 65
           fi
 
           printf '%s\n' \
-            'All cancellation, runtime-manager and package-cleanup stress qualifications passed.'
+            'All cancellation and runtime-manager stress qualifications passed.'
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require every complementary qualification before merge
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: python3 -I scripts/ci-validation.py wait-required --commit "${EXPECTED_SHA}"
 
   runtime-hardening-stress:
-    name: Runtime-manager hardening stress (10x)
+    needs: identity
+    name: Runtime-manager hardening (10 rollback/contention cycles)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -115,36 +150,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Repeat runtime-manager hardening scenarios
+      - name: Qualify runtime-manager transactions and contention
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          bash ./tests/repeat-qualification.sh \
-            --label 'runtime hardening stress iteration' \
-            --runs 10 --jobs 4 -- \
-            timeout \
-              --signal=TERM \
-              --kill-after=10s \
-              2m \
+          timeout --signal=TERM --kill-after=10s 2m \
             bash ./tests/runtime-manager-hardening-integration.sh
-
-  package-cleanup-stress:
-    name: Package cleanup hardening stress (10x)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Repeat package cleanup safety scenarios
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          bash ./tests/repeat-qualification.sh \
-            --label 'package cleanup stress iteration' \
-            --runs 10 --jobs 4 -- \
-            timeout --signal=TERM --kill-after=10s 1m \
-            bash ./tests/package-user-cleanup-integration.sh

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.15 - Unreleased
+
+### Maintenance
+
+- Optimize CI qualification promotion.
+
 ## 2.3.14 - Unreleased
 
 ### Maintenance
