@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.16 - Unreleased
+
+### Maintenance
+
+- Bind release checkouts to the triggering commit.
+
 ## 2.3.15 - Unreleased
 
 ### Maintenance

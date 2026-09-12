@@ -530,7 +530,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn(": write", runtime)
         self.assertNotIn("secrets.", runtime)
         self.assertNotIn("continue-on-error:", runtime)
-        self.assertIn("ref: ${{ needs.validate.outputs.commit }}", runtime)
+        self.assertIn("ref: ${{ github.sha }}", runtime)
         self.assertIn("--require-hashes", runtime)
         self.assertIn("--only-binary=:all:", runtime)
         matrix = re.search(r"(?m)^        yt_dlp_version: \[([^\n]+)\]$", runtime)
@@ -614,16 +614,19 @@ class WorkflowContractTests(unittest.TestCase):
         for name, job in jobs.items():
             if "uses: actions/checkout@" not in job:
                 continue
-            source = "steps.source.outputs.commit" if name == "validate" else "needs.validate.outputs.commit"
             refs = re.findall(r"(?m)^          ref: (.+)$", job)
-            self.assertEqual(refs, ["${{ " + source + " }}"], name)
+            self.assertEqual(refs, ["${{ github.sha }}"], name)
             self.assertIn("persist-credentials: false", job)
             if name != "validate":
                 self.assertIn("validate", self.dependencies(job), name)
 
         verify = jobs["verify-source"]
         self.assertTrue({"validate", "zip", "rpm-test", "deb", "release-runtime"} <= self.dependencies(verify))
-        self.assertIn('scripts/ci-validation.py verify --commit "${SOURCE_COMMIT}"', verify)
+        proof = 'scripts/ci-validation.py verify --commit "${GITHUB_SHA}"'
+        proof_guard = '[[ ${SOURCE_COMMIT} == "${GITHUB_SHA}" ]]'
+        self.assertIn(proof, verify)
+        self.assertIn(proof_guard, verify)
+        self.assertLess(verify.index(proof_guard), verify.index(proof))
         self.assertIn("SOURCE_COMMIT: ${{ needs.validate.outputs.commit }}", verify)
         self.assertNotIn(": write", verify)
         self.assertIn("actions: read", verify)
@@ -652,12 +655,10 @@ class WorkflowContractTests(unittest.TestCase):
         text = self.workflow("release.yml")
         mutations = (
             ('[[ ${target_sha} == "${GITHUB_SHA}" ]]', "true"),
-            ("ref: ${{ steps.source.outputs.commit }}", "ref: ${{ env.RELEASE_TAG }}"),
-            ("ref: ${{ needs.validate.outputs.commit }}", "ref: ${{ env.RELEASE_TAG }}"),
             ("needs: [validate, zip, rpm-test, deb, verify-source]", "needs: [validate, zip, rpm-test, deb]"),
             ("needs: [validate, zip, rpm-test, deb, release-runtime]", "needs: validate"),
             ('[[ ${current_tag_object} == "${SOURCE_TAG_OBJECT}" ]]', "true"),
-            ('run: python3 -I scripts/ci-validation.py verify --commit "${SOURCE_COMMIT}"', "run: true"),
+            ('python3 -I scripts/ci-validation.py verify --commit "${GITHUB_SHA}"', "true"),
             ("name: Attest release artifacts", "name: Attest release artifacts\n        run: bash scripts/candidate.sh"),
         )
         for old, new in mutations:
@@ -665,6 +666,35 @@ class WorkflowContractTests(unittest.TestCase):
                 self.assertIn(old, text)
                 with self.assertRaises(AssertionError):
                     self.assert_release_identity_contract(text.replace(old, new, 1))
+
+    def test_every_release_checkout_requires_the_direct_immutable_event_identity(self):
+        text = self.workflow("release.yml")
+        for name, job in self.jobs(text).items():
+            if "uses: actions/checkout@" not in job:
+                continue
+            # Outputs can conceal a change of source from static trust analysis.
+            # Even a currently equal output must remain proof data, not a ref.
+            for source in ("steps.source.outputs.commit", "needs.validate.outputs.commit",
+                           "env.RELEASE_TAG", "inputs.tag", "github.ref"):
+                with self.subTest(job=name, source=source):
+                    changed = job.replace("ref: ${{ github.sha }}", "ref: ${{ " + source + " }}", 1)
+                    self.assertNotEqual(changed, job)
+                    with self.assertRaises(AssertionError):
+                        self.assert_release_identity_contract(text.replace(job, changed, 1))
+
+    def test_final_source_proof_requires_the_event_commit(self):
+        text = self.workflow("release.yml")
+        job = self.jobs(text)["verify-source"]
+        mutations = (
+            ('[[ ${SOURCE_COMMIT} == "${GITHUB_SHA}" ]]', "true"),
+            ('--commit "${GITHUB_SHA}"', '--commit "${SOURCE_COMMIT}"'),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                self.assertIn(old, job)
+                changed = job.replace(old, new, 1)
+                with self.assertRaises(AssertionError):
+                    self.assert_release_identity_contract(text.replace(job, changed, 1))
 
     def assert_release_artifact_contract(self, text):
         jobs = self.jobs(text)

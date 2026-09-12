@@ -87,7 +87,8 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.source.outputs.commit }}
+          # The tag guard binds its target to this immutable event identity.
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Install validation dependencies
@@ -268,7 +269,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate.outputs.commit }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Install current Ubuntu engines and pinned yt-dlp
         env:
@@ -358,7 +359,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate.outputs.commit }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -572,7 +573,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate.outputs.commit }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - run: |
@@ -608,7 +609,7 @@ jobs:
         run: dnf install --assumeyes cpio desktop-file-utils findutils gawk git gnupg2 gzip python3 rpm-build rpm-sign tar
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate.outputs.commit }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Build release RPM once
@@ -891,7 +892,7 @@ jobs:
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate.outputs.commit }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Require immutable artifact identity
@@ -1106,7 +1107,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate.outputs.commit }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Install DEB build tools
@@ -1172,13 +1173,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate.outputs.commit }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Revalidate qualification after final package testing
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_COMMIT: ${{ needs.validate.outputs.commit }}
-        run: python3 -I scripts/ci-validation.py verify --commit "${SOURCE_COMMIT}"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ ${SOURCE_COMMIT} == "${GITHUB_SHA}" ]] || {
+            printf '%s\n' 'Error: qualified source differs from the triggering immutable commit.' >&2
+            exit 65
+          }
+          python3 -I scripts/ci-validation.py verify --commit "${GITHUB_SHA}"
 
   publish:
     outputs:
@@ -1195,7 +1203,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate.outputs.commit }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Require exact tested artifact identities
         env:
@@ -1347,7 +1355,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.validate.outputs.commit }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 

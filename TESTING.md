@@ -1016,11 +1016,13 @@ downloaded and verified with the published SHA256SUMS, `gh release verify`,
 `gh release verify-asset`, and SLSA provenance constrained to the expected
 repository, release workflow, and exact source commit.
 
-The current ZIP, RPM, and DEB are built in separate jobs, each checking out the
-immutable commit exported by tag validation rather than resolving the tag again.
-Validation binds that commit to the triggering `GITHUB_SHA`. Signer and publisher
-independently refuse a tag-object change; the final read-only `verify-source`
-job rechecks all source proof after package tests and the signing-environment
+The current ZIP, RPM, and DEB are built in separate jobs. Every release checkout
+uses `${{ github.sha }}` directly, making the immutable event identity explicit
+to Actions security analysis. Tag validation requires its target to equal that
+commit before checkout; job outputs remain proof data, never checkout refs.
+Signer and publisher independently refuse a tag-object change; the final read-only `verify-source`
+job requires the validated output to equal `GITHUB_SHA` and rechecks all source
+proof for that event commit after package tests and the signing-environment
 wait. The publisher does not execute a repository verification helper. GitHub
 API checks and publication are not one transaction; the immutable-tag ruleset
 and fixed source/artifact identities remain part of the trust boundary. The release RPM is

@@ -43,7 +43,7 @@ FFmpeg pour fusionner, remuxer ou extraire les flux. HTTPS repasse
 automatiquement sur le transport natif de yt-dlp lorsque le backend TLS d'aria2
 n'offre pas le durcissement requis de validation des certificats. Les flux DASH
 et HLS restent eux aussi natifs.
-La version de développement actuelle est la **2.3.15**.
+La version de développement actuelle est la **2.3.16**.
 La dernière release de paquets publiée est la **2.3.14**.
 
 ## Installation recommandée
@@ -263,7 +263,7 @@ version de développement ci-dessous, cette commande ne s'applique qu'après la
 création de son tag signé :
 
 ```bash
-gh workflow run release.yml   --ref v2.3.15   -f tag=v2.3.15   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref v2.3.16   -f tag=v2.3.16   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Le workflow refuse indépendamment toute exécution manuelle dont le type de ref,

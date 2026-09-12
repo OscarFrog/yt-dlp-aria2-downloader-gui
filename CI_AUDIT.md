@@ -419,3 +419,48 @@ signature avec les secrets du projet, attestations ou publication. Les contrats
 correspondants sont inspectés et protégés statiquement ; leur réussite n'est pas
 présumée. La première PR autorisée devra valider le nouveau protocole avec les
 métadonnées GitHub réelles et mesurer son chemin critique.
+
+### Suivi de la PR75 : identité directement visible par CodeQL
+
+Après l'autorisation de push, la version2.3.15 (`c061888`) a été soumise dans
+[PR75](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/pull/75).
+L'analyse Actions et Python a réussi, mais le
+[check de sécurité CodeQL](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/runs/103549626215)
+a signalé cinq nouvelles alertes élevées `actions/cache-poisoning/poisonable-step`
+dans `release.yml`. Les références de checkout provenant de sorties de jobs
+masquaient à l'analyse la contrainte shell existante `target_sha == GITHUB_SHA`.
+L'inspection n'a pas démontré de contournement du garde par une PR.
+
+Le correctif2.3.16 utilise directement `${{ github.sha }}` dans les dix checkouts
+release. Les sorties restent des données de preuve ; le garde pré-checkout,
+le signer autorisé, l'objet annoté, les permissions et la provenance restent
+inchangés. Le dernier job exige lui aussi `SOURCE_COMMIT == GITHUB_SHA` avant
+de vérifier la qualification du commit de l'événement. Les tests refusent
+la réintroduction d'une référence issue d'un input, output ou tag dans chacun
+des dix jobs, ainsi que la suppression du garde final. Aucune alerte n'est
+dismissed et aucune règle CodeQL n'est désactivée.
+
+La référence distante fraîche avant ce correctif donne main `52286eb`, branche
+PR `c061888`, plancher2.3.15 et prochain PATCH2.3.16. Les48 tests de preuve/contrats
+CI, actionlint sur9 workflows et le format shell passent localement. Le doctor
+hôte confirme49 exigences satisfaites et15 capacités optionnelles disponibles.
+La disparition des alertes doit être vérifiée sur le nouveau commit poussé ;
+les tests locaux ne constituent pas une exécution du moteur CodeQL GitHub.
+
+Sur `c061888`, toutes les qualifications distantes ont finalement réussi :
+Ubuntu/Fedora/Python3.10, packages, trois versions yt-dlp, FFmpeg6/8/9, quatre
+shards stress et runtime. Le
+[dernier check requis](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/actions/runs/34692289601/job/103550665274)
+a terminé à12:06:07UTC, après un démarrage des workflows à11:55:21UTC :
+**10min46 pour la qualification PR**. Le plus long shard stress a pris5min11 ;
+[FFmpeg9](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/actions/runs/34692289606/job/103550034833)
+6min11. L'agrégat a attendu le dernier workflow puis réussi, sans deadlock.
+Cette première mesure distante remplace l'estimation17–21min pour cette PR ;
+elle ne mesure ni une release ni un parcours complet PR→publication.
+
+Le correctif2.3.16 a passé `bash ./tests/run-all.sh --full --jobs 4` sur l'hôte
+en235,007s, incluant le statique, ShellCheck et toutes les suites d'intégration
+du profil full. Journal local : `/tmp/ci-codeql-fix-full.log`. La cohérence des
+versions et le contrôle live-remote ont également réussi. Les longues matrices
+distantes du nouveau commit restent à réexécuter par la PR puisque le contenu
+et la version ont changé ; aucune release n'a été déclenchée pour ce contrôle.

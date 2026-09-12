@@ -478,9 +478,12 @@ and its own local shards/runtime. This preserves the deployed required-check
 names while covering optional matrix jobs before merge, without a circular wait.
 Only `promotion.yml` runs on main pushes. It verifies source proof; release
 independently repeats this inexpensive identity check before building and after
-final package testing. Every release checkout uses the immutable validated
-commit; signer and publisher independently reject a changed tag object. A direct
-unqualified commit, stale merge base, missing proof or new failure cannot obtain
+final package testing. Every release checkout directly uses `${{ github.sha }}`;
+tag validation requires its target to equal that immutable event commit before
+checkout. The final proof job independently checks this equality, and signer
+and publisher reject a changed tag object. Job outputs carry proof data without
+controlling checkout identity. A direct unqualified commit, stale merge base,
+missing proof or new failure cannot obtain
 release authority from a green status name. Source diagnostic dispatches and
 scheduled tool checks do not substitute for PR qualification.
 
