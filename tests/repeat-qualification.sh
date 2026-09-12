@@ -7,6 +7,8 @@
 # ==============================================================================
 
 set -Eeuo pipefail
+# Preserve trapped INT across foreground-child reaping, as in run-all.sh.
+set -m
 umask 077
 
 PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)

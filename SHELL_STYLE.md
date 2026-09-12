@@ -99,6 +99,10 @@ they improve correctness and clarity.
   rationale, an inventory update, and matching static validation.
 - Sourced libraries must not unexpectedly alter their caller's shell options,
   traps, working directory, `umask`, or process-wide state.
+- The canonical and repetition test-runner executables explicitly enable
+  monitor mode for trapped-INT reliability. Their shared supervisor handles
+  the provisional process group before creating a dedicated session; this is
+  not a repository-wide job-control setting for sourced or production code.
 - Prefer `[[ ... ]]` over `[ ... ]` for Bash conditionals.
 - Prefer `(( ... ))` for arithmetic conditions and `$(( ... ))` for arithmetic
   expansion.
@@ -287,8 +291,8 @@ Apply canonical formatting:
 ./scripts/format-shell.sh
 ```
 
-`tests/run-all.sh` runs the non-mutating formatting check before the rest of the
-validation suite.
+`tests/run-all.sh` runs the non-mutating formatting check in its bounded static
+phase; integration starts only after every static task has succeeded.
 
 Do not manually preserve a layout that conflicts with canonical `shfmt` output.
 If canonical `shfmt` produces an undesirable layout, change the formatting
@@ -302,6 +306,18 @@ execution.
 This integrity check applies to an already approved project pin; a digest
 computed from a newly discovered candidate is not, by itself, an independent
 upstream authentication root.
+
+Cold-cache provisioning uses an exclusive, bounded `flock` on a persistent
+regular lock inode inside the private version directory. The resolver checks
+lock identity around acquisition and rechecks the pinned executable after the
+lock is held. It retains an old entry until atomic replacement, so a stale miss
+cannot remove a newly published executable or download the same asset again.
+The lock file is deliberately not unlinked; a leftover unlocked inode is not
+stale work and must not create two independent locks for cooperating consumers.
+Warm-cache use still verifies the exact digest and version without downloading.
+Lock acquisition uses a registered background child and an interruptible Bash
+`wait`, so cancellation does not wait for the 360-second lock deadline. Cleanup
+checks the direct child before signaling and reaps it before further work.
 
 ## Canonical shell inventory
 

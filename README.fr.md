@@ -753,6 +753,12 @@ téléchargement ; la publication vérifie à nouveau l'absence de collision.
 Des en-têtes répétés avec des casses différentes maintiennent le transfert sur
 yt-dlp natif.
 
+Pour la vidéo directe ordinaire, le contrôle préalable vérifie aussi le MKV
+assemblé/remuxé dans la véritable destination finale, même si le traitement
+utilise un espace de travail local distinct. Une collision connue provoque un
+échec sans retélécharger les deux composants ni post-traiter un ancien fichier ;
+elle n'est pas annoncée comme un nouveau succès validé.
+
 Pour l'extraction YouTube actuelle, le moteur utilise le runtime Deno géré
 automatiquement via un chemin explicite :
 

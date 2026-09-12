@@ -7,10 +7,10 @@
 # ==============================================================================
 
 set -euo pipefail
-# Bash forces SIGINT/SIGQUIT to be ignored for asynchronous commands when job
-# control is disabled. The shared runner restores dispositions before creating
-# one dedicated session for every validation child.
-set +m
+# Keep trapped INT on Bash's ordinary signal path. Without monitor mode, its
+# foreground-child handler can lose INT as a short command is being reaped.
+# The shared supervisor preserves child identity when creating each session.
+set -m
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly SCRIPT_DIR
@@ -147,15 +147,27 @@ declare -Ar SUITE_GROUP_ARGUMENTS=(
 readonly -a STATIC_VALIDATION_IDS=(
     shfmt
     static
+    shfmt-version-handoff
+    release-docs
+    push-version
     shellcheck-production
     shellcheck-packaging
     shellcheck-tests
     shellcheck-development
+    ci-validation
+    source-archive
+    shfmt-bootstrap
 )
 
 declare -Ar STATIC_VALIDATION_LABELS=(
     ['shfmt']='shfmt validation'
     ['static']='Static validation'
+    ['shfmt-version-handoff']='shfmt version handoff integration'
+    ['release-docs']='Release documentation integration'
+    ['push-version']='Source push version integration'
+    ['ci-validation']='CI qualification proof integration'
+    ['source-archive']='Source archive integration'
+    ['shfmt-bootstrap']='shfmt bootstrap integration'
     ['shellcheck-production']='Production ShellCheck'
     ['shellcheck-packaging']='Packaging ShellCheck'
     ['shellcheck-tests']='Test-suite ShellCheck'
@@ -167,6 +179,15 @@ declare -Ar STATIC_SHELLCHECK_ARRAY_NAMES=(
     ['shellcheck-packaging']='PACKAGING_SHELL_FILES'
     ['shellcheck-tests']='TEST_SHELL_FILES'
     ['shellcheck-development']='DEVELOPMENT_SHELL_FILES'
+)
+
+declare -Ar STATIC_PYTHON_PATHS=(
+    ['shfmt-version-handoff']='./tests/shfmt-version-handoff-integration.py'
+    ['release-docs']='./tests/release-docs-integration.py'
+    ['push-version']='./tests/push-version-integration.py'
+    ['ci-validation']='./tests/ci-validation-integration.py'
+    ['source-archive']='./tests/source-archive-integration.py'
+    ['shfmt-bootstrap']='./tests/shfmt-bootstrap-integration.py'
 )
 
 PROFILE='full'
@@ -213,7 +234,7 @@ Options:
   --fast              Run static validation and the fast integration profile.
   --full              Run the complete validation profile (default).
   --jobs N            Run up to N independent validations concurrently (1..32).
-  --list              List integration suites and profile membership, then exit.
+  --list              List static/integration suites and profile membership.
   --doctor            Diagnose local validation capabilities, then exit.
   --json              Emit machine-readable JSON (requires --doctor).
   -h, --help          Show this help text.
@@ -965,6 +986,10 @@ list_suites() {
     local fast
 
     printf '%-30s %-5s %s\n' 'SUITE' 'FAST' 'DESCRIPTION'
+    for suite_id in "${STATIC_VALIDATION_IDS[@]}"; do
+        printf '%-30s %-5s %s\n' \
+            "${suite_id}" yes "${STATIC_VALIDATION_LABELS[${suite_id}]}"
+    done
     for suite_id in "${FULL_SUITE_IDS[@]}"; do
         fast='no'
         # Predicate failure means the suite belongs only to the full profile.
@@ -1112,6 +1137,23 @@ validate_suite_manifest() {
         fi
         case ${static_validation_id} in
             shfmt | static) ;;
+            shfmt-version-handoff | release-docs | push-version | \
+                ci-validation | source-archive | shfmt-bootstrap)
+                suite_path=${STATIC_PYTHON_PATHS[${static_validation_id}]:-}
+                if [[ -z ${suite_path} || ! -f ${PROJECT_DIR}/${suite_path#./} ||
+                    -L ${PROJECT_DIR}/${suite_path#./} ||
+                    ! -r ${PROJECT_DIR}/${suite_path#./} ]]; then
+                    printf 'Error: Python validation path is not a readable regular file: %s\n' \
+                        "${static_validation_id}" >&2
+                    return 66
+                fi
+                if [[ -n ${seen_executions[${suite_path}]:-} ]]; then
+                    printf 'Error: duplicate Python validation execution: %s\n' \
+                        "${static_validation_id}" >&2
+                    return 65
+                fi
+                seen_executions[${suite_path}]=1
+                ;;
             *)
                 if [[ -z ${STATIC_SHELLCHECK_ARRAY_NAMES[${static_validation_id}]:-} ]]; then
                     printf 'Error: static validation has no command mapping: %s\n' \
@@ -1122,13 +1164,14 @@ validate_suite_manifest() {
         esac
     done
     if ((${#STATIC_VALIDATION_LABELS[@]} != ${#STATIC_VALIDATION_IDS[@]} || \
-        ${#STATIC_SHELLCHECK_ARRAY_NAMES[@]} + 2 != \
+        ${#STATIC_SHELLCHECK_ARRAY_NAMES[@]} + ${#STATIC_PYTHON_PATHS[@]} + 2 != \
         ${#STATIC_VALIDATION_IDS[@]})); then
         printf 'Error: static validation labels and commands are inconsistent.\n' >&2
         return 65
     fi
     for static_validation_id in \
         "${!STATIC_VALIDATION_LABELS[@]}" \
+        "${!STATIC_PYTHON_PATHS[@]}" \
         "${!STATIC_SHELLCHECK_ARRAY_NAMES[@]}"; do
         if [[ -z ${seen_static[${static_validation_id}]:-} ]]; then
             printf 'Error: static validation mapping is outside the manifest: %s\n' \
@@ -1163,7 +1206,11 @@ start_static_validation() {
             validation_command=(bash -- ./scripts/check-shell-format.sh)
             ;;
         static)
-            validation_command=(bash -- ./test-static.sh)
+            validation_command=(bash -- ./test-static.sh --source-only)
+            ;;
+        shfmt-version-handoff | release-docs | push-version | \
+            ci-validation | source-archive | shfmt-bootstrap)
+            validation_command=(python3 -B "${STATIC_PYTHON_PATHS[${validation_id}]}")
             ;;
         *)
             shell_array_name=${STATIC_SHELLCHECK_ARRAY_NAMES[${validation_id}]:-}

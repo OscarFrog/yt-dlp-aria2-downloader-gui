@@ -93,10 +93,7 @@ ALLOWED_SKIPS = {
 
 def required_steps(job_name, filename):
     if job_name.startswith(IDENTITY_PREFIX):
-        steps = {"Bind validation to the event source"}
-        if filename != "shell.yml":
-            steps.add("Require successful shell validation before qualification")
-        return steps
+        return {"Bind validation to the event source"}
     return REQUIRED_STEPS[job_name]
 
 
@@ -198,6 +195,7 @@ class Verifier:
     def __init__(self, api, now=None):
         self.api = api
         self.now = now
+        self._commits = {}
 
     def observed_timestamp(self, value):
         observed = timestamp(value)
@@ -218,13 +216,20 @@ class Verifier:
         raise Refusal("GitHub metadata pagination limit reached; incomplete evidence is not accepted.")
 
     def commit(self, sha):
-        result = self.api.get(f"git/commits/{oid(sha)}")
-        require(result["sha"] == sha, "Git commit response does not match the requested object.")
-        oid(result["tree"]["sha"])
-        require(isinstance(result["parents"], list), "Missing Git parent identities.")
-        for parent in result["parents"]:
-            oid(parent["sha"])
-        return result
+        sha = oid(sha)
+        if sha not in self._commits:
+            result = self.api.get(f"git/commits/{sha}")
+            require(result["sha"] == sha, "Git commit response does not match the requested object.")
+            tree = oid(result["tree"]["sha"])
+            require(isinstance(result["parents"], list), "Missing Git parent identities.")
+            parents = tuple(oid(parent["sha"]) for parent in result["parents"])
+            # Only fully validated, hash-addressed Git identities are reusable.
+            # Keep immutable values internally and return fresh consumer data;
+            # run, attempt, PR and branch observations must remain live reads.
+            self._commits[sha] = tree, parents
+        tree, parents = self._commits[sha]
+        return {"sha": sha, "tree": {"sha": tree},
+                "parents": [{"sha": parent} for parent in parents]}
 
     def pull(self, number):
         result = self.api.get(f"pulls/{integer(number)}")
@@ -334,11 +339,17 @@ class Verifier:
         ))
 
     def unchanged(self, original, workflow, pull):
-        current = self.latest(workflow, pull)
+        filename = workflow["path"].rsplit("/", 1)[-1]
+        require(filename in WORKFLOWS, "Unexpected workflow at the final verification boundary.")
+        current_workflow = self.workflow(filename)
+        require((current_workflow["id"], current_workflow["path"])
+                == (workflow["id"], workflow["path"]),
+                "Qualification workflow identity changed during verification; retry explicitly.")
+        current = self.latest(current_workflow, pull)
         require(self.snapshot(current) == self.snapshot(original),
                 "Latest qualification run or attempt changed during verification; retry explicitly.")
         current = self.api.get(f"actions/runs/{original['id']}")
-        self.run_metadata(current, workflow, pull)
+        self.run_metadata(current, current_workflow, pull)
         require(self.snapshot(current) == self.snapshot(original),
                 "Qualification run changed during verification; retry explicitly.")
 
@@ -393,10 +404,6 @@ class Verifier:
         self.unchanged(run, workflow, pull)
         return workflow, run
 
-    def shell(self, sha, pull):
-        _, run = self.qualification(sha, pull, "shell.yml")
-        return run["id"]
-
     def required(self, sha, pull, verified):
         # The existing required stress check aggregates the other workflows.
         # Waiting on stress itself here would deadlock its own terminal job.
@@ -418,14 +425,14 @@ class Verifier:
 
 
 def event_pull():
-    require(os.environ.get("GITHUB_EVENT_NAME") == "pull_request", "Shell waiting requires a pull_request event.")
+    require(os.environ.get("GITHUB_EVENT_NAME") == "pull_request", "Qualification waiting requires a pull_request event.")
     path = Path(os.environ["GITHUB_EVENT_PATH"])
     with path.open("rb") as stream:
         data = stream.read(MAX_BYTES + 1)
     require(len(data) <= MAX_BYTES, "PR event metadata exceeds the supported size.")
     result = json.loads(data)["pull_request"]
     require(result["base"]["repo"]["full_name"] == REPOSITORY and result["base"]["ref"] == "main",
-            "Shell waiting requires a PR targeting the canonical main branch.")
+            "Qualification waiting requires a PR targeting the canonical main branch.")
     integer(result["number"])
     oid(result["head"]["sha"])
     oid(result["base"]["sha"])
@@ -436,7 +443,7 @@ def main():
     for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, interrupt)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("verify", "wait-shell", "wait-required"))
+    parser.add_argument("command", choices=("verify", "wait-required"))
     parser.add_argument("--commit", required=True)
     args = parser.parse_args()
     try:
@@ -448,14 +455,13 @@ def main():
             print(json.dumps(Verifier(api).verify(args.commit), sort_keys=True, indent=2))
             return 0
         pull = event_pull()
-        minutes = 13 if args.command == "wait-shell" else 45
+        minutes = 45
         deadline = time.monotonic() + minutes * 60
         verified = {}
+        verifier = Verifier(api)
         while time.monotonic() < deadline:
             try:
-                verifier = Verifier(api)
-                result = (verifier.shell(args.commit, pull) if args.command == "wait-shell"
-                          else verifier.required(args.commit, pull, verified))
+                result = verifier.required(args.commit, pull, verified)
                 print(f"PR qualification accepted: {json.dumps(result, sort_keys=True)}, source {args.commit}.")
                 return 0
             except Pending:

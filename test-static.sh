@@ -327,22 +327,30 @@ assert_main_entry_structure() {
 
 assert_file_fragments_ordered() {
     (($# >= 3)) || return 2
-    local source_file=$1
-    local assertion_label=$2
-    local fragment=''
-    local remaining_source=''
-    shift 2
+    # Consume literal fragments with a forward-only cursor. Preserve Bash's
+    # textual substitution contract: ignore NULs and strip trailing newlines.
+    python3 -B - "$@" <<'PY_ORDERED_FRAGMENTS'
+import os
+from pathlib import Path
+import sys
 
-    remaining_source=$(<"${source_file}")
-    for fragment in "$@"; do
-        if [[ ${remaining_source} != *"${fragment}"* ]]; then
-            printf 'FAIL: ordered source contract is absent (%s): %s\n' \
-                "${assertion_label}" "${fragment}" >&2
-            return 65
-        fi
-        remaining_source=${remaining_source#*"${fragment}"}
-    done
-    return 0
+try:
+    source = Path(sys.argv[1]).read_bytes().replace(b"\0", b"").rstrip(b"\n")
+except OSError:
+    print(f"FAIL: unable to read ordered source contract ({sys.argv[2]}).", file=sys.stderr)
+    raise SystemExit(66)
+cursor = 0
+for argument in sys.argv[3:]:
+    fragment = os.fsencode(argument)
+    position = source.find(fragment, cursor)
+    if position < 0:
+        sys.stderr.buffer.write(
+            b"FAIL: ordered source contract is absent (" + os.fsencode(sys.argv[2])
+            + b"): " + fragment + b"\n"
+        )
+        raise SystemExit(65)
+    cursor = position + len(fragment)
+PY_ORDERED_FRAGMENTS
 }
 
 # Permanent shell comments use durable terminology.
@@ -1028,6 +1036,7 @@ for name in (
     "cleanup_static_test",
     "assert_repository_file_inventory_is_canonical",
     "assert_standard_python_header",
+    "assert_file_fragments_ordered",
 ):
     match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", source, re.M | re.S)
     if match is None:
@@ -1071,6 +1080,89 @@ def validate(root, entrypoint, expected, *arguments, overrides=None):
             f"{entrypoint}: expected {expected}, got {completed.returncode}\n"
             f"{completed.stdout}{completed.stderr}"
         )
+    return completed
+
+
+def validate_static_dispatch(root):
+    selected = {}
+    for name in ("main", "test_static_tooling_contracts", "test_static_python_behavioral_suites"):
+        match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", source, re.M | re.S)
+        if match is None:
+            raise AssertionError(f"unable to extract actual static dispatch function: {name}")
+        selected[name] = match.group()
+
+    # Keep the actual entry parser, flag propagation and dispatcher. Only
+    # unrelated source assertions and the dispatched test bodies are inert.
+    prefix = '''set -euo pipefail
+SCRIPT_DIR=$1
+shift
+cleanup_static_test() { :; }
+assert_forbidden_source_name_absent() { :; }
+assert_source_inventory_is_canonical() { :; }
+assert_repository_file_inventory_is_canonical() { :; }
+assert_static_harness_regressions() { :; }
+assert_repository_skill_files_are_valid() { :; }
+assert_codex_rules_are_conservative() { :; }
+assert_contribution_templates_are_structured() { :; }
+python3() {
+    [[ $# == 3 && $1 == -B && $2 == "${SCRIPT_DIR}/scripts/check-push-version.py" && $3 == coherence ]]
+}
+assert_status() {
+    [[ $# == 5 && $1 == 0 && $3 == python3 && $4 == -B ]] || exit 91
+    printf '%s\\0' "$5"
+}
+assert_shell_policy_lists_are_canonical() {
+    printf 'dispatch-complete\\0'
+    exit 0
+}
+'''
+    expected = [str(root / f"tests/{name}-integration.py") for name in (
+        "push-version", "release-docs", "shfmt-version-handoff",
+        "ci-validation", "source-archive", "shfmt-bootstrap",
+    )]
+
+    def check(arguments, entries, status=0, overrides=None):
+        implementation = dict(selected)
+        implementation.update(overrides or {})
+        script = prefix + "\n".join(implementation.values()) + '\nmain "$@"\n'
+        completed = subprocess.run(
+            ["bash", "-c", script, "static-dispatch", str(root), *arguments],
+            env=environment, capture_output=True, text=True, timeout=10,
+        )
+        actual = completed.stdout.rstrip("\0").split("\0") if completed.stdout else []
+        if completed.returncode != status or actual != entries:
+            raise AssertionError(
+                f"static dispatch {arguments!r}: expected status {status} and {entries!r}, "
+                f"got {completed.returncode} and {actual!r}\n{completed.stderr}"
+            )
+
+    check([], expected + ["dispatch-complete"])
+    check(["--source-only"], ["dispatch-complete"])
+    check(["--invalid"], [], status=2)
+    check(["--source-only", "--source-only"], [], status=2)
+
+    mutations = {
+        "dropped source-only propagation": ("main", selected["main"].replace(
+            'test_static_tooling_contracts "${source_only}"', 'test_static_tooling_contracts')),
+        "source-only executes replays": ("test_static_tooling_contracts", selected["test_static_tooling_contracts"].replace(
+            '[[ ${source_only} != true ]]', '[[ true == true ]]')),
+        "standalone omits replays": ("test_static_tooling_contracts", selected["test_static_tooling_contracts"].replace(
+            '[[ ${source_only} != true ]]', '[[ false == true ]]')),
+        "duplicate replay": ("test_static_python_behavioral_suites", selected["test_static_python_behavioral_suites"].replace(
+            '\n}', '\n    assert_status 0 duplicate python3 -B "${SCRIPT_DIR}/tests/source-archive-integration.py"\n}')),
+    }
+    for label, (name, mutation) in mutations.items():
+        if mutation == selected[name]:
+            raise AssertionError(f"static dispatch negative control did not mutate: {label}")
+        try:
+            check([], expected + ["dispatch-complete"], overrides={name: mutation})
+            check(["--source-only"], ["dispatch-complete"], overrides={name: mutation})
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"static dispatch accepted negative control: {label}")
+    print("Static dispatch: standalone once, source-only zero, usage errors and four negative controls passed.")
+
 
 with tempfile.TemporaryDirectory(prefix="static-harness-") as temporary:
     root = Path(temporary)
@@ -1078,6 +1170,39 @@ with tempfile.TemporaryDirectory(prefix="static-harness-") as temporary:
     scratch = root / "scratch"
     scratch.mkdir()
     environment["TMPDIR"] = str(scratch)
+
+    validate_static_dispatch(root)
+
+    ordered_source = root / "ordered source é.txt"
+    ordered_cases = (
+        (b"first middle last", ("first", "last"), 0),
+        (b"first middle last", ("last", "first"), 65),
+        (b"first middle last", ("missing",), 65),
+        (b"twice twice", ("twice", "twice"), 0),
+        (b"twice", ("twice", "twice"), 65),
+        (b"ababa", ("aba", "ba"), 0),
+        (b"ababa", ("aba", "aba"), 65),
+        (b"[*?] \\ $(literal)", ("[*?]", "\\", "$(literal)"), 0),
+        ("début\nfin".encode(), ("début", "\n", "fin"), 0),
+        (b"first\nsecond\n\n", ("first\n", "second"), 0),
+        (b"first\nsecond\n\n", ("second\n",), 65),
+        (b"first\r\n", ("first\r",), 0),
+        (b"a\0b\n", ("ab",), 0),
+        (b"\xfftarget", ("target",), 0),
+        (b"", ("", ""), 0),
+        (b"\n\n", ("",), 0),
+        (b"\n\n", ("\n",), 65),
+        (b"first last", ("", "first", "", "last", ""), 0),
+    )
+    for contents, fragments, expected in ordered_cases:
+        ordered_source.write_bytes(contents)
+        result = validate(root, "assert_file_fragments_ordered", expected,
+                          str(ordered_source), "literal source fixture", *fragments)
+        if expected == 65 and "ordered source contract is absent (literal source fixture):" not in result.stderr:
+            raise AssertionError("missing ordered-source failure context")
+    validate(root, "assert_file_fragments_ordered", 66,
+             str(root / "absent"), "unreadable fixture", "fragment")
+    print("Ordered source: literal order, repeats, overlap, Unicode, NUL and trailing-newline contracts preserved.")
 
     python_root = root / "python"
     python_root.mkdir()
@@ -2416,11 +2541,12 @@ assert_release_docs_workflow_policy() {
 }
 
 test_static_tooling_contracts() {
+    local source_only=${1:-false}
     local doctor_phase engine_phase gui_phase mock_engine_group mock_engine_suite
     local mock_gui_group mock_gui_suite mock_phase
     local mock_runtime_group mock_runtime_suite
     local runtime_phase scheduler_phase shfmt_phase signal_phase static_phase
-    local workflow_file
+    local python_suite workflow_file
 
     assert_source_inventory_is_canonical
     assert_repository_file_inventory_is_canonical
@@ -2428,16 +2554,9 @@ test_static_tooling_contracts() {
     assert_repository_skill_files_are_valid
     assert_codex_rules_are_conservative
     assert_contribution_templates_are_structured
-    assert_status 0 'pre-push version guard rejects unchanged source pushes' \
-        python3 -B "${SCRIPT_DIR}/tests/push-version-integration.py"
-    assert_status 0 'release-docs publisher preserves bounded version and branch updates' \
-        python3 -B "${SCRIPT_DIR}/tests/release-docs-integration.py"
-    assert_status 0 'shfmt handoff independently binds its bump and publication' \
-        python3 -B "${SCRIPT_DIR}/tests/shfmt-version-handoff-integration.py"
-    assert_status 0 'qualification promotion rejects stale or unrelated GitHub proof' \
-        python3 -B "${SCRIPT_DIR}/tests/ci-validation-integration.py"
-    assert_status 0 'source archive promotion preserves paths, modes and qualified bytes' \
-        python3 -B "${SCRIPT_DIR}/tests/source-archive-integration.py"
+    if [[ ${source_only} != true ]]; then
+        test_static_python_behavioral_suites
+    fi
     assert_shell_policy_lists_are_canonical
     assert_unique_source_file_list PYTHON_FILES "${PYTHON_FILES[@]}"
     assert_workflow_validator_regressions
@@ -2545,6 +2664,11 @@ test_static_tooling_contracts() {
     done
     assert_status 0 'run-all lists its canonical integration suites' \
         "${SCRIPT_DIR}/tests/run-all.sh" --list
+    for python_suite in push-version release-docs shfmt-version-handoff \
+        ci-validation source-archive shfmt-bootstrap; do
+        assert_text_contains "${ASSERT_OUTPUT}" "${python_suite}" \
+            "run-all suite list exposes ${python_suite} coverage"
+    done
     assert_text_contains "${ASSERT_OUTPUT}" 'runtime-manager-hardening' \
         'run-all suite list includes runtime hardening'
     for mock_engine_suite in \
@@ -2735,6 +2859,21 @@ test_static_tooling_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
         'Validate verified formatter and project' \
         'automation validates the formatter update only after fresh verification'
+}
+
+test_static_python_behavioral_suites() {
+    assert_status 0 'pre-push version guard rejects unchanged source pushes' \
+        python3 -B "${SCRIPT_DIR}/tests/push-version-integration.py"
+    assert_status 0 'release-docs publisher preserves bounded version and branch updates' \
+        python3 -B "${SCRIPT_DIR}/tests/release-docs-integration.py"
+    assert_status 0 'shfmt handoff independently binds its bump and publication' \
+        python3 -B "${SCRIPT_DIR}/tests/shfmt-version-handoff-integration.py"
+    assert_status 0 'qualification promotion rejects stale or unrelated GitHub proof' \
+        python3 -B "${SCRIPT_DIR}/tests/ci-validation-integration.py"
+    assert_status 0 'source archive promotion preserves paths, modes and qualified bytes' \
+        python3 -B "${SCRIPT_DIR}/tests/source-archive-integration.py"
+    assert_status 0 'shfmt bootstrap publishes one authenticated concurrent cache entry' \
+        python3 -B "${SCRIPT_DIR}/tests/shfmt-bootstrap-integration.py"
 }
 
 test_static_python_interface_contracts() {
@@ -3481,7 +3620,7 @@ test_static_release_contracts() {
         '--confirm-tag-policy' \
         'release preflight obtains deployment policy type from the API'
     assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
-        '.can_admins_bypass' \
+        'metadata["can_admins_bypass"]' \
         'release preflight reads administrator bypass state'
     assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
         'deployment_policy_type} == tag' \
@@ -5050,6 +5189,18 @@ test_static_upgrade_and_supply_chain_contracts() {
 }
 
 main() {
+    local source_only=false
+
+    case $#:${1:-} in
+        0:) ;;
+        1:--source-only) source_only=true ;;
+        *)
+            printf 'Usage: test-static.sh [--source-only]\n' >&2
+            printf 'The partial --source-only mode excludes separately scheduled Python replays.\n' >&2
+            return 2
+            ;;
+    esac
+
     trap cleanup_static_test EXIT
     trap 'exit 129' HUP
     trap 'exit 130' INT
@@ -5057,7 +5208,7 @@ main() {
 
     python3 -B "${SCRIPT_DIR}/scripts/check-push-version.py" coherence
     assert_forbidden_source_name_absent
-    test_static_tooling_contracts
+    test_static_tooling_contracts "${source_only}"
     test_static_shell_interface_contracts
     test_static_python_interface_contracts
     test_static_release_contracts
@@ -5067,7 +5218,11 @@ main() {
     test_static_package_contracts
     test_static_runtime_regression_contracts
     test_static_upgrade_and_supply_chain_contracts
-    printf '%s\n' 'Static tests passed.'
+    if [[ ${source_only} == true ]]; then
+        printf '%s\n' 'Static source checks passed (Python replays scheduled separately).'
+    else
+        printf '%s\n' 'Static tests passed.'
+    fi
 }
 
 main "$@"

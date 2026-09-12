@@ -5,6 +5,17 @@
 ### Maintenance
 
 - Fix isolated shfmt candidate permissions
+- Shorten local validation with bounded parallel Python suites, linear source
+  assertions, process scans without per-PID subprocesses, and isolated reusable
+  test data; retain complete workflow, cancellation and URL coverage.
+- Start independent PR qualifications after their own cheap source gates while
+  retaining the complete final required check and exact-content promotion.
+- Avoid redundant direct-video downloads when the assembled final already
+  exists; reduce progress-processing and retained-log cleanup overhead.
+- Serialize concurrent formatter-cache provisioning and revalidate mutable
+  workflow state before accepting reused qualification evidence.
+- Preserve test-runner cancellation across a Bash foreground-child signal race,
+  with authenticated session transitions and unchanged interruption deadlines.
 
 ## 2.3.17 - Unreleased
 

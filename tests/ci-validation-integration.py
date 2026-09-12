@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 """yt-dlp-aria2-downloader-gui: tests/ci-validation-integration.py.
 
-Exercise content-bound CI promotion and reject stale or forged GitHub evidence.
+Exercise source promotion and signing preflight against hostile GitHub metadata.
 Fixtures replace authenticated API reads; this suite never contacts GitHub.
 """
 
@@ -107,6 +107,69 @@ class ProofTests(unittest.TestCase):
         self.assertEqual(len(result["qualifications"]), 5)
         self.assertTrue(all(item["source_commit"] == SOURCE for item in result["qualifications"]))
 
+    def test_one_validated_commit_read_serves_all_five_proofs(self):
+        self.verify()
+        self.assertEqual(self.api.calls.count(f"git/commits/{SOURCE}"), 1)
+        self.assertEqual(self.api.calls.count(f"git/commits/{TARGET}"), 1)
+        self.assertEqual(len(self.api.calls), 36)
+        for index in range(1, 6):
+            latest = f"actions/workflows/{index}/runs?event=pull_request&head_sha={HEAD}&per_page=100&page=1"
+            self.assertEqual(self.api.calls.count(latest), 2)
+            self.assertEqual(self.api.calls.count(f"actions/runs/{index * 100}"), 1)
+        self.assertEqual(self.api.calls.count("pulls/23"), 2)
+
+    def test_commit_identity_reuse_is_isolated_by_oid_consumer_and_verifier(self):
+        original = self.verifier.commit(SOURCE)
+        changed = self.verifier.commit(SOURCE)
+        changed["tree"]["sha"] = OTHER
+        changed["parents"][0]["sha"] = OTHER
+        self.assertEqual(self.verifier.commit(SOURCE), original)
+        self.assertEqual(self.api.calls.count(f"git/commits/{SOURCE}"), 1)
+        self.assertNotEqual(self.verifier.commit(TARGET)["parents"], original["parents"])
+        self.assertEqual(CHECK.Verifier(self.api, NOW).commit(SOURCE), original)
+        self.assertEqual(self.api.calls.count(f"git/commits/{SOURCE}"), 2)
+
+    def test_malformed_commit_responses_are_never_retained(self):
+        endpoint = f"git/commits/{SOURCE}"
+        original = copy.deepcopy(self.api.responses[endpoint])
+        variants = ({"sha": OTHER}, {"tree": {"sha": "refs/heads/main"}},
+                    {"parents": None}, {"parents": [{"sha": "not-an-oid"}]})
+        for changed in variants:
+            with self.subTest(changed=changed):
+                verifier = CHECK.Verifier(self.api, NOW)
+                before = self.api.calls.count(endpoint)
+                self.api.responses[endpoint] = dict(original, **changed)
+                with self.assertRaises(CHECK.Refusal):
+                    verifier.commit(SOURCE)
+                self.api.responses[endpoint] = copy.deepcopy(original)
+                self.assertEqual(verifier.commit(SOURCE), original)
+                self.assertEqual(self.api.calls.count(endpoint), before + 2)
+
+    def test_completed_other_workflows_do_not_mask_a_pending_or_failed_shell(self):
+        for status, conclusion, exception in (("in_progress", None, CHECK.Pending),
+                                               ("completed", "failure", CHECK.Refusal)):
+            with self.subTest(status=status):
+                self.run_data().update(status=status, conclusion=conclusion)
+                with self.assertRaises(exception):
+                    self.verifier.required(SOURCE, self.api.responses["pulls/23"], {})
+
+    def test_cached_commit_does_not_mask_a_new_attempt_in_any_workflow(self):
+        self.verifier.commit(SOURCE)
+        for index in range(1, 6):
+            endpoint = f"actions/runs/{index * 100}"
+            self.api.transforms[endpoint] = lambda run: dict(run, run_attempt=2)
+            with self.subTest(workflow=index), self.assertRaisesRegex(CHECK.Refusal, "changed during"):
+                self.verify()
+            del self.api.transforms[endpoint]
+
+    def test_identity_success_is_required_in_each_parallel_workflow(self):
+        for index in range(1, 6):
+            identity = next(job for job in self.jobs(index) if job["name"].startswith(CHECK.IDENTITY_PREFIX))
+            identity["steps"][0]["conclusion"] = "skipped"
+            with self.subTest(workflow=index), self.assertRaises(CHECK.Refusal):
+                self.verify()
+            identity["steps"][0]["conclusion"] = "success"
+
     def test_pr_association_may_be_empty_after_merge_and_fork_is_accepted(self):
         self.assertEqual(self.verify()["pull_request"], 23)
 
@@ -129,8 +192,36 @@ class ProofTests(unittest.TestCase):
         for parents in ([], [{"sha": BASE}, {"sha": HEAD}]):
             with self.subTest(parents=parents):
                 self.api.responses[f"git/commits/{TARGET}"]["parents"] = parents
+                # Different immutable commit fixtures need independent observers.
+                self.verifier = CHECK.Verifier(self.api, NOW)
                 with self.assertRaisesRegex(CHECK.Refusal, "squash"):
                     self.verify()
+
+    def test_withdrawn_workflow_is_rejected_after_pending_poll(self):
+        for key, value in (("state", "disabled_manually"), ("path", "other.yml"), ("id", 999)):
+            with self.subTest(field=key):
+                api = fixture()
+                verifier = CHECK.Verifier(api, NOW)
+                verified = {}
+                pending = api.responses["actions/runs/300"]
+                pending.update(status="in_progress", conclusion=None)
+                with self.assertRaises(CHECK.Pending):
+                    verifier.required(SOURCE, api.responses["pulls/23"], verified)
+                self.assertIn("shell.yml", verified)
+                api.responses["actions/workflows/shell.yml"][key] = value
+                pending.update(status="completed", conclusion="success")
+                with self.assertRaises(CHECK.Refusal):
+                    verifier.required(SOURCE, api.responses["pulls/23"], verified)
+
+    def test_withdrawn_workflow_is_rejected_at_final_verification(self):
+        def withdraw_at_final_pull(response):
+            if self.api.calls.count("pulls/23") == 2:
+                self.api.responses["actions/workflows/shell.yml"]["state"] = "disabled_manually"
+            return response
+
+        self.api.transforms["pulls/23"] = withdraw_at_final_pull
+        with self.assertRaisesRegex(CHECK.Refusal, "disabled"):
+            self.verify()
 
     def test_target_outside_main_is_rejected(self):
         self.api.responses[f"compare/{TARGET}...main"]["status"] = "diverged"
@@ -312,17 +403,17 @@ class ProofTests(unittest.TestCase):
         with self.assertRaisesRegex(CHECK.Refusal, "pagination limit"):
             self.verifier.pages("bounded")
 
-    def test_shell_gate_binds_exact_virtual_merge(self):
+    def test_complementary_qualification_binds_exact_virtual_merge(self):
         pull = self.api.responses["pulls/23"]
-        self.assertEqual(self.verifier.shell(SOURCE, pull), 100)
+        self.assertEqual(self.verifier.qualification(SOURCE, pull, "shell.yml")[1]["id"], 100)
         with self.assertRaisesRegex(CHECK.Refusal, "different virtual merge"):
-            self.verifier.shell(TARGET, pull)
+            self.verifier.qualification(TARGET, pull, "shell.yml")
 
-    def test_shell_gate_checks_event_parent_identity(self):
+    def test_complementary_qualification_checks_event_parent_identity(self):
         pull = copy.deepcopy(self.api.responses["pulls/23"])
         pull["base"]["sha"] = OTHER
         with self.assertRaisesRegex(CHECK.Refusal, "triggering PR"):
-            self.verifier.shell(SOURCE, pull)
+            self.verifier.qualification(SOURCE, pull, "shell.yml")
 
     def test_required_gate_excludes_its_own_stress_workflow(self):
         result = self.verifier.required(SOURCE, self.api.responses["pulls/23"], {})
@@ -336,11 +427,12 @@ class ProofTests(unittest.TestCase):
         with self.assertRaises(CHECK.Pending):
             self.verifier.required(SOURCE, pull, verified)
         self.assertEqual(set(verified), {"shell.yml", "packages.yml", "real-tools.yml"})
+        workflow_reads = self.api.calls.count("actions/workflows/shell.yml")
         self.run_data(3).update(status="completed", conclusion="success")
         self.run_data(1).update(status="completed", conclusion="failure")
         with self.assertRaises(CHECK.Refusal):
             self.verifier.required(SOURCE, pull, verified)
-        self.assertEqual(self.api.calls.count("actions/workflows/shell.yml"), 1)
+        self.assertEqual(self.api.calls.count("actions/workflows/shell.yml"), workflow_reads + 1)
 
     def test_required_gate_rejects_failed_or_skipped_complementary_job(self):
         for conclusion in ("failure", "skipped"):
@@ -441,6 +533,114 @@ fi
                 self.assertEqual(CHECK.GitHub().get("actions/workflows/shell.yml"), {"id": 123})
 
 
+class PreflightTests(unittest.TestCase):
+    @staticmethod
+    def metadata():
+        return {
+            "protection_rules": [{"type": "required_reviewers", "prevent_self_review": False,
+                                  "reviewers": [{"reviewer": {"login": "fixture-maintainer"}}]}],
+            "can_admins_bypass": False,
+            "deployment_branch_policy": {"custom_branch_policies": True},
+        }
+
+    def check_environment(self, metadata, *, api_failure=False, policy="v*\ttag", repeats=1):
+        text = (PROJECT / "scripts/release-preflight.sh").read_text(encoding="utf-8")
+        functions = []
+        for name in ("fail", "api_capture", "verify_signing_environment"):
+            start = text.index(name + "() {\n")
+            end = text.index("\n}\n", start) + 3
+            functions.append(text[start:end])
+        script = "\n".join(functions) + r'''
+set -Eeuo pipefail
+API_VERSION=fixture
+SIGNING_ENVIRONMENT=rpm-signing
+gh() {
+    local endpoint=${6}
+    printf '%s\n' "${endpoint}" >>"${CHECK_CALLS}"
+    case ${endpoint} in
+        repos/fixture/project/environments/rpm-signing)
+            command cat -- "${CHECK_METADATA}"
+            [[ ${CHECK_API_FAILURE} == false ]] || return 17
+            ;;
+        user) printf 'fixture-maintainer\n' ;;
+        repos/fixture/project/environments/rpm-signing/deployment-branch-policies)
+            printf '%s\n' "${CHECK_POLICY}"
+            ;;
+        *) return 99 ;;
+    esac
+}
+for ((iteration = 0; iteration < CHECK_REPEATS; iteration++)); do
+    verify_signing_environment fixture/project
+done
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "metadata.json"
+            path.write_bytes(metadata if isinstance(metadata, bytes) else json.dumps(metadata).encode())
+            trace = root / "calls"
+            environment = dict(os.environ, CHECK_METADATA=str(path), CHECK_CALLS=str(trace),
+                               CHECK_API_FAILURE=str(api_failure).lower(), CHECK_POLICY=policy,
+                               CHECK_REPEATS=str(repeats))
+            result = subprocess.run(["bash", "-c", script], env=environment,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False)
+            return result, trace.read_text().splitlines()
+
+    def test_six_environment_fields_share_one_snapshot_and_a_new_call_reads_again(self):
+        result, calls = self.check_environment(self.metadata(), repeats=2)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(calls, ["repos/fixture/project/environments/rpm-signing", "user",
+                                "repos/fixture/project/environments/rpm-signing/deployment-branch-policies"] * 2)
+
+    def test_environment_snapshot_preserves_every_policy_refusal(self):
+        changes = (
+            lambda data: data.update(protection_rules=[]),
+            lambda data: data["protection_rules"].append(copy.deepcopy(data["protection_rules"][0])),
+            lambda data: data["protection_rules"][0].update(reviewers=[]),
+            lambda data: data["protection_rules"][0]["reviewers"].append({"reviewer": {"login": "another"}}),
+            lambda data: data["protection_rules"][0]["reviewers"][0]["reviewer"].update(login="another"),
+            lambda data: data["protection_rules"][0].update(prevent_self_review=True),
+            lambda data: data.update(can_admins_bypass=True),
+            lambda data: data["deployment_branch_policy"].update(custom_branch_policies=False),
+        )
+        for index, change in enumerate(changes):
+            metadata = self.metadata()
+            change(metadata)
+            result, calls = self.check_environment(metadata)
+            with self.subTest(policy=index):
+                self.assertEqual(result.returncode, 65, result.stderr.decode(errors="replace"))
+                self.assertEqual(result.stdout, b"")
+                self.assertEqual(calls.count("repos/fixture/project/environments/rpm-signing"), 1)
+        for policy in ("v*\tbranch", "main\ttag", "v*\ttag\nmain\tbranch", ""):
+            with self.subTest(deployment_policy=policy):
+                result, _ = self.check_environment(self.metadata(), policy=policy)
+                self.assertEqual(result.returncode, 65)
+
+    def test_bounded_snapshot_refuses_malformed_types_and_failed_api_with_valid_output(self):
+        variants = [b"{", b" " * 65537, b"[" * 2000 + b"]" * 2000,
+                    dict(self.metadata(), protection_rules="invalid"),
+                    dict(self.metadata(), can_admins_bypass=0),
+                    dict(self.metadata(), deployment_branch_policy=[])]
+        for invalid in (0, "false", [], {}):
+            metadata = self.metadata()
+            metadata["protection_rules"][0]["prevent_self_review"] = invalid
+            variants.append(metadata)
+        for control in ("\n", "\r", "\0", "\t", "\x7f"):
+            metadata = self.metadata()
+            metadata["protection_rules"][0]["reviewers"][0]["reviewer"]["login"] = "fixture-" + control + "maintainer"
+            variants.append(metadata)
+        for index, metadata in enumerate(variants):
+            with self.subTest(metadata=index):
+                result, _ = self.check_environment(metadata)
+                self.assertEqual(result.returncode, 65)
+                self.assertEqual(result.stdout, b"")
+                self.assertIn(b"snapshot", result.stderr)
+                self.assertNotIn(b"Traceback", result.stderr)
+        result, _ = self.check_environment(self.metadata(), api_failure=True)
+        self.assertEqual(result.returncode, 65)
+        self.assertEqual(result.stdout, b"")
+
+
 class WorkflowContractTests(unittest.TestCase):
     @staticmethod
     def workflow(filename):
@@ -486,9 +686,12 @@ class WorkflowContractTests(unittest.TestCase):
                 triggers = text.split("permissions:", 1)[0]
                 self.assertRegex(triggers, r"(?m)^  pull_request:")
                 self.assertNotRegex(triggers, r"(?m)^  push:")
+                self.assertNotRegex(triggers, r"(?m)^  (?:pull_request_target|workflow_run):")
                 self.assertIn("name: Source identity ${{ github.sha }}", text)
                 self.assertIn("cancel-in-progress: true", text)
                 self.assertNotIn("continue-on-error:", text)
+                self.assertNotIn(": write", text)
+                self.assertNotIn("secrets.", text)
                 jobs = self.jobs(text)
                 self.assertIn("EXPECTED_SHA: ${{ github.sha }}", jobs["identity"])
                 self.assertIn('[[ $(git rev-parse HEAD) == "${EXPECTED_SHA}" ]]', jobs["identity"])
@@ -497,8 +700,54 @@ class WorkflowContractTests(unittest.TestCase):
                 for job in jobs:
                     if job not in {"identity", "current-stable-local-media"}:
                         self.assert_gate(jobs, job, "identity")
-                if filename != "shell.yml":
-                    self.assertIn("scripts/ci-validation.py wait-shell --commit", text)
+                self.assertNotIn("wait-shell", text)
+                self.assertIn("timeout-minutes: 3", jobs["identity"])
+                for retained in ("scripts/check-push-version.py coherence",
+                                 "source tests/lib/project-files.sh", 'bash -n -- "${file}"'):
+                    self.assertIn(retained, jobs["identity"])
+                for unnecessary in ("GH_TOKEN", "actions: read", "pull-requests: read", "sleep "):
+                    self.assertNotIn(unnecessary, jobs["identity"])
+
+    def test_parallel_workflow_job_and_matrix_inventories_are_unchanged(self):
+        for filename, required in CHECK.WORKFLOWS.items():
+            names = []
+            for job in self.jobs(self.workflow(filename)).values():
+                name = re.search(r"(?m)^    name: (.+)$", job).group(1)
+                if "${{ matrix." in name:
+                    variable = re.search(r"\$\{\{ matrix\.([a-z_]+) \}\}", name).group(1)
+                    declaration = re.search(r"(?m)^        " + variable + r": \[([^\n]+)\]$", job)
+                    self.assertIsNotNone(declaration, name)
+                    names.extend(name.replace("${{ matrix." + variable + " }}", value.strip(" '"))
+                                 for value in declaration.group(1).split(","))
+                else:
+                    names.append(name.replace("${{ github.sha }}", SOURCE))
+            expected = required | {CHECK.IDENTITY_PREFIX + SOURCE}
+            if filename == "real-tools.yml":
+                expected |= {CHECK.SCHEDULED_JOB}
+            with self.subTest(workflow=filename):
+                self.assertEqual(len(names), len(set(names)))
+                self.assertEqual(set(names), expected)
+
+    def test_each_cheap_identity_executes_source_coherence_and_syntax_guards(self):
+        for filename in CHECK.WORKFLOWS:
+            job = self.jobs(self.workflow(filename))["identity"]
+            body = job.split("        run: |\n", 1)[1]
+            script = "\n".join(line[10:] for line in body.splitlines() if line.strip())
+            for failure, expected in (("none", 0), ("sha", 1), ("coherence", 17), ("syntax", 23)):
+                with self.subTest(workflow=filename, failure=failure):
+                    environment = dict(os.environ, EXPECTED_SHA=SOURCE, CHECK_SOURCE=SOURCE,
+                                       CHECK_FAILURE=failure)
+                    fixture = '''
+git() {
+    if [[ ${CHECK_FAILURE} == sha ]]; then printf 'wrong-source'; else printf '%s' "${CHECK_SOURCE}"; fi
+}
+python3() { [[ ${CHECK_FAILURE} != coherence ]] || return 17; }
+source() { ALL_SHELL_FILES=(fixture.sh); }
+bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
+'''
+                    result = subprocess.run(["bash", "-c", fixture + script], env=environment,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False)
+                    self.assertEqual(result.returncode, expected, result.stderr.decode(errors="replace"))
 
     def test_required_step_inventory_tracks_the_workflow_definitions(self):
         for filename, names in CHECK.WORKFLOWS.items():
@@ -767,12 +1016,37 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("tests/run-all.sh", text)
         self.assertNotIn("contents: write", text)
 
-    def test_existing_required_stress_gate_waits_for_complementary_qualification(self):
-        jobs = self.jobs(self.workflow("stress.yml"))
+    def assert_required_stress_gate(self, text):
+        jobs = self.jobs(text)
         gate = jobs["mock-stress-gate"]
         self.assertIn("scripts/ci-validation.py wait-required --commit", gate)
         self.assertIn("Mock process/cancellation stress (20x deterministic jitter)", gate)
+        self.assertEqual(self.dependencies(gate), {"mock-stress", "runtime-hardening-stress"})
+        self.assertIn("if: ${{ always() }}", gate)
+        self.assertIn("if: github.event_name == 'pull_request'", gate)
+        self.assertIn('EXPECTED_SHA: ${{ github.sha }}', gate)
+        self.assertIn('${MOCK_STRESS_RESULT} != success', gate)
+        self.assertIn('${RUNTIME_STRESS_RESULT} != success', gate)
         self.assertNotIn("package-cleanup-stress", jobs)
+
+    def test_existing_required_stress_gate_waits_for_complementary_qualification(self):
+        self.assert_required_stress_gate(self.workflow("stress.yml"))
+
+    def test_parallel_graph_cannot_remove_or_skip_the_complete_final_gate(self):
+        text = self.workflow("stress.yml")
+        mutations = (
+            ("      - runtime-hardening-stress\n", ""),
+            ("if: ${{ always() }}", "if: false"),
+            ("if: github.event_name == 'pull_request'", "if: false"),
+            ("scripts/ci-validation.py wait-required --commit", "true"),
+            ('${MOCK_STRESS_RESULT} != success', "false"),
+            ('${RUNTIME_STRESS_RESULT} != success', "false"),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                self.assertIn(old, text)
+                with self.assertRaises(AssertionError):
+                    self.assert_required_stress_gate(text.replace(old, new, 1))
 
 
 if __name__ == "__main__":

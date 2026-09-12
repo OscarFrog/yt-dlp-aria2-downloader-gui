@@ -2062,18 +2062,32 @@ assert_no_retained_log_staging() {
 }
 
 assert_gui_profile_menu() {
-    (($# == 4)) || return 2
+    (($# == 5)) || return 2
     local scenario=$1
     local requested_url=$2
     local youtube_expected=$3
     local label=$4
+    local profile_bundle=$5
+    local url_file=''
+    local engine_arguments_log="${TEST_ROOT}/profile-engine-arguments.bin"
+    local engine_acknowledgement_log="${TEST_ROOT}/profile-engine-acknowledgement.bin"
+    local file_selection_log="${TEST_ROOT}/profile-destination.bin"
     # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
-    local -a profile_arguments=()
+    local -a engine_arguments=() profile_arguments=()
+    local -a engine_acknowledgement=()
 
     prepare_argument_log "${scenario}"
-    assert_status 0 "${label} GUI run" \
+    : >"${file_selection_log}"
+    : >"${engine_arguments_log}"
+    : >"${engine_acknowledgement_log}"
+    assert_status 73 "${label} GUI-to-engine handoff stops before PLAN" \
         env MOCK_ZENITY_ENTRY_VALUE="${requested_url}" \
         MOCK_PROFILE='Audio track (native format)' \
+        MOCK_GUI_REAL="${profile_bundle}/download-video-gui.sh" \
+        MOCK_PROFILE_ENGINE_SOURCE="${profile_bundle}/engine-source.sh" \
+        MOCK_PROFILE_ENGINE_ARGUMENTS="${engine_arguments_log}" \
+        MOCK_PROFILE_ENGINE_ACKNOWLEDGEMENT="${engine_acknowledgement_log}" \
+        MOCK_FILE_SELECTION_ARGS_LOG="${file_selection_log}" \
         "${GUI_UNDER_TEST}"
     read_arguments "${LIST_ARGS_LOG}" profile_arguments
     assert_array_contains profile_arguments 'Complete video (MKV)' \
@@ -2089,7 +2103,51 @@ assert_gui_profile_menu() {
             'YouTube video - Firefox cookies (HLS/MKV)' \
             "${label} excludes YouTube HLS"
     fi
-    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    [[ -s ${file_selection_log} ]] \
+        || fail "${label}: the real GUI did not select a destination."
+    read_arguments "${engine_arguments_log}" engine_arguments
+    read_arguments "${engine_acknowledgement_log}" engine_acknowledgement
+    assert_equals 11 "${#engine_acknowledgement[@]}" \
+        "${label} engine acknowledgement field count"
+    assert_equals "${requested_url}" "${engine_acknowledgement[0]}" \
+        "${label} real GUI URL-file transfer"
+    assert_equals "${youtube_expected}" "${engine_acknowledgement[1]}" \
+        "${label} real engine host classification"
+    assert_equals audio "${engine_acknowledgement[2]}" "${label} engine mode"
+    assert_equals "${OUTPUT_DIR}" "${engine_acknowledgement[3]}" \
+        "${label} engine destination"
+    assert_equals true "${engine_acknowledgement[4]}" "${label} machine progress"
+    assert_equals false "${engine_acknowledgement[5]}" "${label} ordinary profile"
+    url_file=${engine_acknowledgement[6]}
+    [[ ${url_file} == "${RUNTIME_DIR}/yt-dlp-aria2-downloader-${EUID}/yt-dlp-gui."*/url.txt ]] \
+        || fail "${label}: the URL file was not created in the real GUI session."
+    assert_equals "${url_file%/*}/result.txt" "${engine_acknowledgement[7]}" \
+        "${label} result-file argument"
+    assert_equals true "${engine_acknowledgement[8]}" \
+        "${label} supervised GUI worker"
+    assert_equals 600 "${engine_acknowledgement[9]}" "${label} private URL-file mode"
+    assert_equals 700 "${engine_acknowledgement[10]}" "${label} private session mode"
+    assert_equals 9 "${#engine_arguments[@]}" "${label} engine argument count"
+    assert_option_value engine_arguments --url-file "${url_file}" \
+        "${label} real GUI URL-file argument"
+    assert_option_value engine_arguments --output-dir "${OUTPUT_DIR}" \
+        "${label} real GUI destination argument"
+    assert_option_value engine_arguments --mode audio "${label} real GUI mode argument"
+    assert_option_value engine_arguments --result-file "${url_file%/*}/result.txt" \
+        "${label} real GUI result-file argument"
+    assert_array_contains engine_arguments --machine-progress \
+        "${label} real GUI machine-progress argument"
+    assert_array_not_contains engine_arguments "${requested_url}" \
+        "${label} URL absent from engine argv"
+    assert_file_has_line "${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf" \
+        'profile=audio' "${label} real GUI profile persistence"
+    [[ ! -e ${url_file%/*} && ! -L ${url_file%/*} ]] \
+        || fail "${label}: the private GUI session was not cleaned up."
+    [[ ! -s ${MOCK_PLAN_ARG_LOG} &&
+        ! -s ${MOCK_ARG_LOG} && ! -s ${MOCK_ARIA2_ARG_LOG} &&
+        ! -s ${MOCK_PLAN_CALL_LOG} && ! -s ${MOCK_POST_CALL_LOG} ]] \
+        || fail "${label}: the engine sentinel started the download pipeline."
+    assert_no_test_processes "${label}: GUI-to-engine handoff left a process"
 }
 
 assert_option_value() {
@@ -2247,6 +2305,8 @@ find_test_processes() {
     local cmdline_file
     local pid
     local cmdline
+    local IFS=' '
+    local -a cmdline_arguments=()
     TEST_PROCESS_PIDS=()
 
     for cmdline_file in /proc/[0-9]*/cmdline; do
@@ -2256,7 +2316,12 @@ find_test_processes() {
         [[ ${pid} =~ ^[1-9][0-9]*$ ]] || continue
         [[ ${pid} != "$$" && ${pid} != "${BASHPID}" ]] || continue
 
-        cmdline=$(tr '\0' ' ' 2>/dev/null <"${cmdline_file}") || continue
+        # Join argv with the same boundary spaces used by the leak-token
+        # predicate, without starting another process for every visible PID.
+        if ! { mapfile -d '' -t cmdline_arguments <"${cmdline_file}"; } 2>/dev/null; then
+            continue
+        fi
+        cmdline=${cmdline_arguments[*]}
         [[ ${cmdline} == *"${TEST_ROOT}"* ]] || continue
         TEST_PROCESS_PIDS+=("${pid}")
     done
@@ -4332,11 +4397,43 @@ test_mock_gui_aria_progress() {
 }
 
 test_mock_gui_profiles() {
+    local profile_bundle="${TEST_ROOT}/profile-engine-bundle"
     local config_file profile_case removed_profile_label requested_url scenario
     local -a false_youtube_cases incompatible_default_arguments list_arguments
     local -a video_gui_arguments youtube_cases youtube_hls_default_arguments
     local -a youtube_hls_gui_arguments
 
+    # Preserve the real GUI, private URL file and supervised worker handoff for
+    # every host case. Only the engine entrypoint stops after real validation;
+    # the adjacent E2E cases retain transport, publication and success coverage.
+    mkdir -m 700 -- "${profile_bundle}"
+    install -m 0755 -- "${PROJECT_DIR}/download-video-gui.sh" \
+        "${profile_bundle}/download-video-gui.sh"
+    install -m 0644 -- "${PROJECT_DIR}/progress-monitor.sh" \
+        "${profile_bundle}/progress-monitor.sh"
+    install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
+        "${profile_bundle}/private-aria2-plan.py"
+    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${profile_bundle}/engine-source.sh"
+    cat >"${profile_bundle}/download-video.sh" <<'EOF_PROFILE_ENGINE'
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "${MOCK_PROFILE_ENGINE_SOURCE:?}"
+parse_arguments "$@"
+resolve_requested_url
+validate_mode_selection
+printf '%s\0' "$@" >"${MOCK_PROFILE_ENGINE_ARGUMENTS:?}"
+printf '%s\0' "${URL}" "${IS_YOUTUBE_URL}" "${MODE}" "${OUTPUT_DIR}" \
+    "${MACHINE_PROGRESS}" "${YOUTUBE_HLS_FIREFOX}" "${URL_FILE}" \
+    "${RESULT_FILE}" "${YTDLP_ARIA2_SUPERVISED_SESSION:-}" \
+    "$(stat -c '%a' -- "${URL_FILE}")" "$(stat -c '%a' -- "${URL_FILE%/*}")" \
+    >"${MOCK_PROFILE_ENGINE_ACKNOWLEDGEMENT:?}"
+# A dedicated nonzero status proves the GUI reaped this deliberate pre-PLAN
+# stop without inventing a successful media publication or invoking transport.
+exit 73
+EOF_PROFILE_ENGINE
+    chmod 600 -- "${profile_bundle}/engine-source.sh"
+    chmod 755 -- "${profile_bundle}/download-video.sh"
     youtube_cases=(
         'gui-profile-youtube-root|https://youtube.com/watch?v=profile-root'
         'gui-profile-youtube-subdomain|https://media.youtube.com/watch?v=profile-subdomain'
@@ -4349,7 +4446,7 @@ test_mock_gui_profiles() {
     for profile_case in "${youtube_cases[@]}"; do
         IFS='|' read -r scenario requested_url <<<"${profile_case}"
         assert_gui_profile_menu "${scenario}" "${requested_url}" true \
-            "recognized YouTube URL ${requested_url}"
+            "recognized YouTube URL ${requested_url}" "${profile_bundle}"
     done
 
     # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
@@ -4372,7 +4469,7 @@ test_mock_gui_profiles() {
     for profile_case in "${false_youtube_cases[@]}"; do
         IFS='|' read -r scenario requested_url <<<"${profile_case}"
         assert_gui_profile_menu "${scenario}" "${requested_url}" false \
-            "non-YouTube URL ${requested_url}"
+            "non-YouTube URL ${requested_url}" "${profile_bundle}"
     done
 
     prepare_argument_log 'gui-ytdlp-progress'
@@ -4850,6 +4947,83 @@ test_mock_gui_file_selection() {
         'oversized file-chooser diagnostic redacts URL-like values'
     assert_file_not_contains "${oversized_capture}" 'secret.example' \
         'oversized file-chooser diagnostic hides the raw URL'
+}
+
+test_mock_gui_prune_metadata() {
+    local scenario
+    for scenario in old recent wide-mode symlink foreign-owner stat-failed invalid-time \
+        inode-replaced mode-changed refreshed state-replaced ancestor-writable rm-failed; do
+        assert_status 0 "GUI pruning preserves its metadata contract: ${scenario}" \
+            bash -s -- "${PROJECT_DIR}/download-video-gui.sh" \
+            "${TEST_ROOT}/gui-prune-${scenario}" "${scenario}" <<'EOF_PRUNE_METADATA'
+set -euo pipefail
+umask 077
+source <(sed '/^main "\$@"$/d' "$1")
+prune_root=$2
+prune_case=$3
+STATE_DIR="${prune_root}/state"
+mkdir -p -- "${STATE_DIR}"
+prune_leaf="${STATE_DIR}/download-fixture.log"
+printf 'original log\n' >"${prune_leaf}"
+touch -d '16 days ago' -- "${prune_leaf}"
+case ${prune_case} in
+    recent) touch -- "${prune_leaf}" ;;
+    wide-mode) chmod 644 -- "${prune_leaf}" ;;
+    symlink)
+        mv -- "${prune_leaf}" "${prune_root}/original"
+        ln -s -- "${prune_root}/original" "${prune_leaf}"
+        ;;
+esac
+stat() {
+    if [[ ${!#} != "${prune_leaf}" || -e ${prune_root}/observed ]]; then
+        command stat "$@"
+        return
+    fi
+    : >"${prune_root}/observed"
+    case ${prune_case} in
+        stat-failed) return 1 ;;
+        foreign-owner)
+            command stat -c "%d:%i:$((EUID + 1)):%a:%Y" -- "${prune_leaf}"
+            return
+            ;;
+        invalid-time)
+            command stat -c '%d:%i:%u:%a:99999999999999999999' -- "${prune_leaf}"
+            return
+            ;;
+    esac
+    command stat "$@"
+    case ${prune_case} in
+        inode-replaced)
+            mv -- "${prune_leaf}" "${prune_root}/original"
+            printf 'replacement log\n' >"${prune_leaf}"
+            touch -d '16 days ago' -- "${prune_leaf}"
+            ;;
+        mode-changed) chmod 644 -- "${prune_leaf}" ;;
+        refreshed) touch -- "${prune_leaf}" ;;
+        state-replaced)
+            mv -- "${STATE_DIR}" "${prune_root}/original-state"
+            mkdir -- "${STATE_DIR}"
+            printf 'replacement log\n' >"${prune_leaf}"
+            ;;
+        ancestor-writable) chmod 777 -- "${prune_root}" ;;
+    esac
+}
+rm() {
+    if [[ ${prune_case} == rm-failed && ${!#} == "${prune_leaf}" ]]; then
+        return 1
+    fi
+    command rm "$@"
+}
+prune_old_logs
+case ${prune_case} in
+    old) [[ ! -e ${prune_leaf} ]] ;;
+    symlink) [[ -L ${prune_leaf} && $(<"${prune_root}/original") == 'original log' ]] ;;
+    inode-replaced | state-replaced) [[ $(<"${prune_leaf}") == 'replacement log' ]] ;;
+    *) [[ -f ${prune_leaf} && $(<"${prune_leaf}") == 'original log' ]] ;;
+esac
+chmod 700 -- "${prune_root}"
+EOF_PRUNE_METADATA
+    done
 }
 
 test_mock_gui_diagnostic_logs() {
@@ -5639,6 +5813,7 @@ run_mock_gui_state_group() {
     test_mock_gui_config_recovery
     test_mock_gui_settings_signal_cleanup
     test_mock_gui_file_selection
+    test_mock_gui_prune_metadata
     test_mock_gui_diagnostic_logs
     test_mock_gui_state_initialization
     test_mock_gui_input_validation

@@ -54,6 +54,30 @@ exit 0
 EOF_SHELLCHECK
     chmod 0755 -- "${mock_bin}/shellcheck"
 
+    cat >"${mock_bin}/python3" <<'EOF_PYTHON_MOCK'
+#!/bin/bash
+set -euo pipefail
+# The process supervisor remains real; scheduled Python tests are inert.
+if [[ ${1:-} == -B && ${2:-} == ./tests/*-integration.py ]]; then
+    if [[ ${MOCK_PYTHON_SIGNAL:-0} == 1 &&
+        $2 == ./tests/release-docs-integration.py ]]; then
+        exec /usr/bin/python3 -c '
+import os
+from pathlib import Path
+import subprocess
+
+child = subprocess.Popen([os.environ["REAL_SLEEP"], "60"])
+Path(os.environ["MOCK_IMMEDIATE_MARKER"]).write_text(str(os.getpid()))
+Path(os.environ["MOCK_DESCENDANT_MARKER"]).write_text(str(child.pid))
+child.wait()
+'
+    fi
+    exit 0
+fi
+exec /usr/bin/python3 "$@"
+EOF_PYTHON_MOCK
+    chmod 0755 -- "${mock_bin}/python3"
+
     cat >"${mock_bin}/bash" <<'EOF_BASH_MOCK'
 #!/bin/bash
 set -Eeuo pipefail
@@ -118,7 +142,17 @@ def wait_runner(runner: subprocess.Popen[bytes]) -> str:
 
 def report_timeout(runner: subprocess.Popen[bytes], *pids: int) -> None:
     """Record bounded process/pipe state without arguments or environment data."""
-    for pid in dict.fromkeys((runner.pid, *pids)):
+    direct_children: list[int] = []
+    try:
+        with pathlib.Path(f"/proc/{runner.pid}/task/{runner.pid}/children").open("rb") as handle:
+            children = handle.read(4096)
+        # procfs terminates each PID with a space; omit a truncated final token.
+        for child in children.split(b" ")[:-1][:128]:
+            if re.fullmatch(rb"[1-9][0-9]{0,9}", child):
+                direct_children.append(int(child))
+    except OSError:
+        pass
+    for pid in dict.fromkeys((runner.pid, *pids, *direct_children)):
         if pid <= 0:
             continue
         process = pathlib.Path(f"/proc/{pid}")
@@ -130,7 +164,10 @@ def report_timeout(runner: subprocess.Popen[bytes], *pids: int) -> None:
                 raise ValueError("invalid process identity")
             with (process / "status").open("rb") as handle:
                 status = handle.read(16384).decode("ascii", errors="replace")
-            ignored = re.search(r"^SigIgn:\s*([0-9a-fA-F]+)$", status, re.M)
+            signal_fields = []
+            for name in ("SigIgn", "SigBlk", "SigPnd", "ShdPnd", "SigCgt"):
+                match = re.search(rf"^{name}:\s*([0-9a-fA-F]+)$", status, re.M)
+                signal_fields.append(f"{name}={match.group(1) if match else 'unavailable'}")
             with (process / "wchan").open("rb") as handle:
                 wchan = handle.read(80).decode("ascii", errors="replace").strip()
             if not re.fullmatch(r"[A-Za-z0-9_+.-]{1,80}", wchan):
@@ -139,7 +176,7 @@ def report_timeout(runner: subprocess.Popen[bytes], *pids: int) -> None:
             print(
                 f"Timeout process: pid={pid} ppid={fields[1]} pgid={fields[2]} "
                 f"sid={fields[3]} state={state} wchan={wchan} "
-                f"SigIgn={ignored.group(1) if ignored else 'unavailable'}",
+                f"{' '.join(signal_fields)}",
                 file=sys.stderr, flush=True,
             )
         except (OSError, ValueError):
@@ -218,6 +255,7 @@ def wait_signal_guard(runner: subprocess.Popen[bytes]) -> None:
             if ignored_mask & required_mask == required_mask:
                 return
         time.sleep(0.01)
+    report_timeout(runner)
     raise AssertionError("run-all did not arm its fatal-signal guard in time")
 
 
@@ -284,10 +322,13 @@ finally:
         noise_runner.stderr.close()
 
 
-for name, sig, expected in (
-    ("hup", signal.SIGHUP, 129),
-    ("int", signal.SIGINT, 130),
-    ("term", signal.SIGTERM, 143),
+for name, sig, expected, python_suite in (
+    ("hup", signal.SIGHUP, 129, False),
+    ("int", signal.SIGINT, 130, False),
+    ("term", signal.SIGTERM, 143, False),
+    ("python-hup", signal.SIGHUP, 129, True),
+    ("python-int", signal.SIGINT, 130, True),
+    ("python-term", signal.SIGTERM, 143, True),
 ):
     immediate_marker = test_root / f"{name}-immediate.pid"
     descendant_marker = test_root / f"{name}-descendant.pid"
@@ -304,6 +345,7 @@ for name, sig, expected in (
             "YTDLP_ARIA2_TEST_RUNNER_TERMINATION_POLL_ATTEMPTS": "10",
             "MOCK_IMMEDIATE_MARKER": str(immediate_marker),
             "MOCK_DESCENDANT_MARKER": str(descendant_marker),
+            "MOCK_PYTHON_SIGNAL": "1" if python_suite else "0",
             "YTDLP_ARIA2_RUN_ALL_SIGNAL_TOKEN": identity_token,
         }
     )

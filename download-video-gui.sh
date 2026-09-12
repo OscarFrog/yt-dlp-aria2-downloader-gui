@@ -1821,8 +1821,10 @@ save_settings() {
 prune_old_logs() {
     local current_time=''
     local cutoff=0
-    local file_identity=''
-    local file_identity_after=''
+    local file_device=''
+    local file_inode=''
+    local file_metadata=''
+    local file_metadata_after=''
     local file_mode=''
     local file_name=''
     local file_owner=''
@@ -1831,6 +1833,7 @@ prune_old_logs() {
     local resolved_state=''
     local state_identity=''
     local state_identity_after=''
+    local unexpected=''
 
     # shellcheck disable=SC2310 # Failure preserves all existing state.
     if ! validate_private_state_directory resolved_state; then
@@ -1871,30 +1874,23 @@ prune_old_logs() {
             *) continue ;;
         esac
 
-        file_identity=$(stat -c '%d:%i' -- "${log_file}" 2>/dev/null) \
-            || file_identity=''
-        file_owner=$(stat -c '%u' -- "${log_file}" 2>/dev/null) \
-            || file_owner=''
-        file_mode=$(stat -c '%a' -- "${log_file}" 2>/dev/null) \
-            || file_mode=''
-        if [[ -z ${file_identity} || ${file_owner} != "${EUID}" ||
-            ${file_mode} != 600 ]]; then
+        file_metadata=$(stat -c '%d:%i:%u:%a:%Y' -- "${log_file}" 2>/dev/null) \
+            || file_metadata=''
+        IFS=: read -r file_device file_inode file_owner file_mode modified_time unexpected \
+            <<<"${file_metadata}"
+        if [[ ! ${file_device} =~ ^[0-9]+$ || ! ${file_inode} =~ ^[0-9]+$ ||
+            ${file_owner} != "${EUID}" || ${file_mode} != 600 || -n ${unexpected} ]]; then
             printf 'Warning: preserving an ambiguous retained log: %s\n' \
                 "${log_file}" >&2
             continue
         fi
-        if ! modified_time=$(stat -c '%Y' -- "${log_file}" 2>/dev/null); then
-            printf 'Warning: unable to inspect retained log: %s\n' \
-                "${log_file}" >&2
-            continue
-        fi
-        if [[ ! ${modified_time} =~ ^[0-9]+$ ]]; then
+        if [[ ! ${modified_time} =~ ^[0-9]{1,16}$ ]]; then
             printf 'Warning: invalid timestamp for retained log: %s\n' \
                 "${log_file}" >&2
             continue
         fi
 
-        if ((modified_time <= cutoff)); then
+        if ((10#${modified_time} <= cutoff)); then
             # Revalidate both the containing directory and target inode after
             # the observation window. Preserve anything replaced or ambiguous.
             # shellcheck disable=SC2310 # Failure preserves external state.
@@ -1905,9 +1901,9 @@ prune_old_logs() {
                 printf 'Warning: state changed during log cleanup; stopping.\n' >&2
                 return 0
             fi
-            file_identity_after=$(stat -c '%d:%i' \
-                -- "${log_file}" 2>/dev/null) || file_identity_after=''
-            if [[ ${file_identity_after} != "${file_identity}" ]]; then
+            file_metadata_after=$(stat -c '%d:%i:%u:%a:%Y' \
+                -- "${log_file}" 2>/dev/null) || file_metadata_after=''
+            if [[ ${file_metadata_after} != "${file_metadata}" ]]; then
                 printf 'Warning: preserving a replaced retained log: %s\n' \
                     "${log_file}" >&2
                 continue

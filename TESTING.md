@@ -374,6 +374,13 @@ therefore cannot leave a worker idle while an unrelated long suite is still
 running. Reports and the first nonzero status remain selected in manifest order
 rather than completion order.
 
+The Python version, source-archive, CI-proof, automation-handoff and formatter
+bootstrap suites are explicit timed tasks in that same bounded static phase,
+not serial subprocesses hidden inside the source-assertion task. Both canonical
+profiles execute each family exactly once. Standalone `./test-static.sh` keeps
+the complete contract; `./test-static.sh --source-only` intentionally omits
+these separately scheduled behavioral suites and is not a qualification profile.
+
 Interruption still terminates every supervised validation process group. A
 descendant that deliberately creates a new session is outside that
 process-group contract. Before signaling, the runner reaps slots whose original
@@ -385,6 +392,18 @@ never sufficient signaling authority. The Python session supervisor retains
 its token through cancellation until every same-group descendant exits or the
 authenticated KILL escalation completes, including when the direct command
 removes the token from its own environment and ignores the first signal.
+
+The canonical and repetition executables enable Bash monitor mode to keep
+trapped INT on its ordinary handler during foreground-child reaping. The shared
+library leaves caller options unchanged. Before starting a command, its Python
+supervisor moves from the provisional Bash process group into a dedicated
+session with managed signals blocked and the same PID. Group readiness and
+signaling require SID to equal PGID as well as the existing identity proof.
+The runner integration suite qualifies this transition, pending fatal signals,
+status/output preservation and rejection of provisional group identity. The
+full-profile signal suite retains its original time limits; diagnostics also
+cover failure to enter the reentrant-signal guard. No debugger is required by
+either canonical profile.
 
 The complete mock contract is divided into nine isolated scheduler suites
 (`engine-core`, `engine-hls`, `engine-staging`, `engine-network`, `gui-progress`, `gui-state`,
@@ -822,13 +841,16 @@ behavioral guarantees.
 ## GitHub Actions
 
 The five qualification workflows run on pull requests, with manual dispatch
-available for diagnostics. `shell.yml` first checks event/checkout identity,
-version coherence and Bash syntax, then qualifies Ubuntu 24.04, Fedora 44 and
-actual Python 3.10. Other PR workflows wait for this complete shell validation
-before starting package, real-tool, FFmpeg and stress work. Root jobs use
-`needs: identity`; downstream jobs preserve their package/shard dependencies.
-This deliberately spends about three minutes on the shell contract first, so
-an inexpensive failure cannot waste a compiler or a long stress run.
+available for diagnostics. Each checks event/checkout identity, version
+coherence and Bash syntax before its own qualification jobs. `shell.yml`
+qualifies Ubuntu 24.04, Fedora 44 and actual Python 3.10; package, real-tool,
+FFmpeg and stress work need not wait for that complete shell contract. Root
+jobs retain `needs: identity` and downstream package/shard dependencies.
+This avoids four allocated runners polling for shell completion and overlaps
+independent qualifications. Cheap local failures still stop that workflow's
+fan-out, but a later functional failure can occur after other work has started.
+The tradeoff improves successful PR latency rather than minimizing work on
+every failing PR.
 
 The existing required check **Mock process/cancellation stress (20x deterministic
 jitter)** also waits for every complementary shell, package, real-tool and
@@ -891,9 +913,10 @@ Provide `GH_TOKEN` through the environment. Never put it in command arguments.
 The command returns the qualified tree, PR number and five run/attempt/source
 identities. There is no automatic fallback that runs tests or accepts incomplete
 evidence. If a newer attempt fails, explicitly correct the cause or rerun
-**all jobs of the original PR workflows** under the normal authority, shell
-first and then the four complementary workflows, preserving event/source
-identity. Then retry promotion or release from the exact existing tag. If
+**all jobs of the original PR workflows** under the normal authority, preserving
+event/source identity. Their independent qualifications may run concurrently;
+the final required gate still needs the complete successful cohort. Then retry
+promotion or release from the exact existing tag. If
 original runs/merge objects/fork identities are no longer available, prepare a
 new normally qualified PR and a new version/tag under the usual authority.
 An old tag predating source-identity jobs cannot use this new proof protocol.
@@ -1275,8 +1298,9 @@ parsing. Zenity windows remain in the graphical session's locale.
 
 ## Stress validation
 
-`.github/workflows/stress.yml` qualifies pull requests after the full shell
-contract, retaining twenty distinct timing tuples in four shards. Each tuple
+`.github/workflows/stress.yml` qualifies pull requests after its cheap
+identity/coherence/syntax gate, retaining twenty distinct timing tuples in four
+shards. The full shell contract is still required by the final aggregate. Each tuple
 runs `tests/mock-integration.sh --group stress-signals`: the complete signals
 group plus network cancellation and runtime error/progress scenarios that also
 consume startup/cancellation delays. It covers cancellation/late completion,

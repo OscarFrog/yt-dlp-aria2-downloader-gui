@@ -3035,6 +3035,16 @@ execute_selected_transport() {
         if [[ ${ARIA2_HTTPS_DIRECT_SAFE} == true ]]; then
             builder_security_options+=(--allow-https-direct)
         fi
+        if [[ ${MODE} == video && ${YOUTUBE_HLS_FIREFOX} != true ]]; then
+            # Ordinary video always remuxes to MKV. Check the actual final
+            # directory before transferring its components, including when the
+            # plan itself points into a private local workspace.
+            builder_security_options+=(
+                --final-output-dir "${FINAL_OUTPUT_DIR}"
+                --final-output-identity "${FINAL_OUTPUT_IDENTITY}"
+                --final-extension mkv
+            )
+        fi
         python3 "${PRIVATE_ARIA2_HELPER}" build \
             "${builder_security_options[@]}" \
             --plan "${PRIVATE_ARIA2_PLAN}" \

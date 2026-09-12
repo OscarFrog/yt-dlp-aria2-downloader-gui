@@ -101,7 +101,15 @@ managed_signals = tuple(
     if (signal_number := getattr(signal, signal_name, None)) is not None
 )
 previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, managed_signals)
-os.setsid()
+# A monitor-mode launcher already leads a group, so it cannot call setsid
+# directly. Join the still-parented group first, with managed signals blocked,
+# then create the dedicated session without replacing the authenticated PID.
+try:
+    if os.getpgrp() == os.getpid():
+        os.setpgid(0, os.getpgid(os.getppid()))
+    os.setsid()
+except OSError:
+    os._exit(70)
 
 def exec_command():
     for signal_number in managed_signals:
@@ -524,7 +532,9 @@ test_runner_pid_has_token() {
     return 1
 }
 
-# Match the original child identity to the supervised process group.
+# Match the original child identity to its dedicated session and process group.
+# Monitor mode creates a provisional group before the Python session handoff;
+# its matching PGID alone must not authorize group delivery during that move.
 test_runner_pid_has_group_identity() {
     (($# == 4)) || return 2
     local pid=$1
@@ -539,7 +549,8 @@ test_runner_pid_has_group_identity() {
     process_stat=${process_stat##*) }
     read -r -a process_fields <<<"${process_stat}"
     ((${#process_fields[@]} >= 20)) || return 1
-    [[ ${process_fields[2]} == "${pgid}" ]] || return 1
+    [[ ${process_fields[2]} == "${pgid}" &&
+        ${process_fields[3]} == "${pgid}" ]] || return 1
     observed_start_time=${process_fields[19]}
     [[ ${observed_start_time} =~ ^[1-9][0-9]*$ ]] || return 1
 
@@ -648,7 +659,7 @@ test_runner_terminate_children() {
     for slot in "${!TEST_RUNNER_CHILD_PIDS[@]}"; do
         pid=${TEST_RUNNER_CHILD_PIDS[${slot}]}
 
-        # Wait briefly for os.setsid() to publish the new process group. This
+        # Wait briefly for os.setsid() to publish the dedicated session. This
         # keeps delivery deterministic when interruption races with startup.
         for _ in {1..20}; do
             if test_runner_pid_has_group_identity \

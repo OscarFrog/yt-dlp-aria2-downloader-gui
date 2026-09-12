@@ -712,6 +712,11 @@ A direct-transfer destination that already exists is refused before downloading;
 publication checks again for a collision. Headers repeated with different casing
 keep the transfer on native yt-dlp.
 
+For ordinary direct video, the preflight also checks the assembled/remuxed MKV
+in the actual final destination, even when processing uses a separate local
+workspace. A known collision fails instead of downloading both components and
+post-processing an older file; it is not reported as a newly validated success.
+
 For current YouTube extraction, the engine uses the managed Deno runtime through
 an explicit path:
 

@@ -42,18 +42,15 @@ USAGE
 api_capture() {
     local description=$1
     shift
-    local output=''
 
-    if ! output=$(
-        gh api \
-            -H 'Accept: application/vnd.github+json' \
-            -H "X-GitHub-Api-Version: ${API_VERSION}" \
-            "$@"
-    ); then
+    # Callers use captured metadata only after their pipeline succeeds.
+    # Streaming also lets bounded consumers reject oversized metadata early.
+    if ! gh api \
+        -H 'Accept: application/vnd.github+json' \
+        -H "X-GitHub-Api-Version: ${API_VERSION}" \
+        "$@"; then
         fail "${description}"
     fi
-
-    printf '%s' "${output}"
 }
 
 cleanup() {
@@ -221,31 +218,71 @@ verify_signing_environment() {
     local deployment_policy_output=''
     local deployment_policy_name=''
     local deployment_policy_type=''
+    local environment_output=''
+    local -a environment_values=()
 
-    required_reviewer_rules=$(
+    # All six policy fields must describe one bounded observation. A later
+    # preflight invocation reads GitHub again; this is not publication proof.
+    if ! environment_output=$(
+        # shellcheck disable=SC2310 # api_capture handles gh failures explicitly; pipefail rejects either stage.
         api_capture \
-            'unable to query rpm-signing required reviewers.' \
+            'unable to query rpm-signing environment metadata.' \
             "${environment_endpoint}" \
-            --jq '[.protection_rules[]? | select(.type == "required_reviewers")] | length'
-    )
+            | python3 -c '
+import json
+import sys
+
+try:
+    raw = sys.stdin.buffer.read(65537)
+    if len(raw) > 65536:
+        raise ValueError
+    metadata = json.loads(raw)
+    rules = metadata["protection_rules"]
+    if not isinstance(rules, list) or any(not isinstance(rule, dict) for rule in rules):
+        raise ValueError
+    required = [rule for rule in rules if rule.get("type") == "required_reviewers"]
+    rule = required[0] if len(required) == 1 else {}
+    reviewers = rule.get("reviewers", [])
+    if not isinstance(reviewers, list):
+        raise ValueError
+    login = reviewers[0]["reviewer"]["login"] if len(reviewers) == 1 else ""
+    if not isinstance(login, str) or len(login) > 256:
+        raise ValueError
+    if any(ord(character) < 32 or ord(character) == 127 for character in login):
+        raise ValueError
+    prevent = rule.get("prevent_self_review")
+    prevent = False if prevent is None else prevent
+    bypass = metadata["can_admins_bypass"]
+    policy = metadata.get("deployment_branch_policy")
+    policy = {} if policy is None else policy
+    custom = policy.get("custom_branch_policies")
+    custom = False if custom is None else custom
+    if any(type(value) is not bool for value in (prevent, bypass, custom)):
+        raise ValueError
+    print(len(required), len(reviewers), login, json.dumps(prevent),
+          json.dumps(bypass), json.dumps(custom), sep="\n")
+except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+    print("Error: malformed or oversized rpm-signing environment metadata.", file=sys.stderr)
+    sys.exit(65)
+'
+    ); then
+        fail 'unable to obtain a bounded rpm-signing policy snapshot.'
+    fi
+    mapfile -t environment_values <<<"${environment_output}"
+    ((${#environment_values[@]} == 6)) \
+        || fail 'rpm-signing policy snapshot has an unexpected field count.'
+    required_reviewer_rules=${environment_values[0]}
+    reviewer_count=${environment_values[1]}
+    reviewer_login=${environment_values[2]}
+    prevent_self_review=${environment_values[3]}
+    can_admins_bypass=${environment_values[4]}
+    custom_policies=${environment_values[5]}
     [[ ${required_reviewer_rules} == 1 ]] \
         || fail "rpm-signing must have exactly one required-reviewers rule; found ${required_reviewer_rules}."
 
-    reviewer_count=$(
-        api_capture \
-            'unable to query rpm-signing reviewer count.' \
-            "${environment_endpoint}" \
-            --jq '[.protection_rules[]? | select(.type == "required_reviewers")][0].reviewers | length'
-    )
     [[ ${reviewer_count} == 1 ]] \
         || fail "single-maintainer rpm-signing must have exactly one reviewer; found ${reviewer_count}."
 
-    reviewer_login=$(
-        api_capture \
-            'unable to query rpm-signing reviewer identity.' \
-            "${environment_endpoint}" \
-            --jq '[.protection_rules[]? | select(.type == "required_reviewers")][0].reviewers[0].reviewer.login // ""'
-    )
     [[ -n ${reviewer_login} ]] \
         || fail 'unable to determine the sole rpm-signing reviewer login.'
 
@@ -258,30 +295,12 @@ verify_signing_environment() {
     [[ ${reviewer_login} == "${authenticated_login}" ]] \
         || fail "sole rpm-signing reviewer must match the authenticated maintainer: reviewer=${reviewer_login} authenticated=${authenticated_login}"
 
-    prevent_self_review=$(
-        api_capture \
-            'unable to query rpm-signing self-review policy.' \
-            "${environment_endpoint}" \
-            --jq '[.protection_rules[]? | select(.type == "required_reviewers")][0].prevent_self_review // false'
-    )
     [[ ${prevent_self_review} == false ]] \
         || fail 'single-maintainer rpm-signing must allow self-review.'
 
-    can_admins_bypass=$(
-        api_capture \
-            'unable to query rpm-signing administrator bypass policy.' \
-            "${environment_endpoint}" \
-            --jq '.can_admins_bypass'
-    )
     [[ ${can_admins_bypass} == false ]] \
         || fail 'rpm-signing must disable administrator protection-rule bypass.'
 
-    custom_policies=$(
-        api_capture \
-            'unable to query rpm-signing deployment policy.' \
-            "${environment_endpoint}" \
-            --jq '.deployment_branch_policy.custom_branch_policies // false'
-    )
     [[ ${custom_policies} == true ]] \
         || fail 'rpm-signing must use selected custom deployment branch/tag policies.'
 
