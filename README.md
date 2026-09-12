@@ -41,7 +41,7 @@ direct downloads through a private aria2 input file, and FFmpeg to merge,
 remux, or extract streams. HTTPS automatically stays on yt-dlp's native
 transport when the installed aria2 TLS backend lacks the required certificate
 validation hardening. DASH and HLS streams also remain native. The current
-development version is **2.3.18**.
+development version is **2.3.20**.
 The latest published package release is **2.3.17**.
 
 ## Recommended installation
@@ -244,8 +244,8 @@ version below, this command is applicable only after its signed tag is created:
 
 ```bash
 gh workflow run release.yml \
-  --ref v2.3.18 \
-  -f tag=v2.3.18 \
+  --ref v2.3.20 \
+  -f tag=v2.3.20 \
   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
@@ -711,6 +711,11 @@ putting the media URL in aria2c process arguments.
 A direct-transfer destination that already exists is refused before downloading;
 publication checks again for a collision. Headers repeated with different casing
 keep the transfer on native yt-dlp.
+
+For ordinary direct video, the preflight also checks the assembled/remuxed MKV
+in the actual final destination, even when processing uses a separate local
+workspace. A known collision fails instead of downloading both components and
+post-processing an older file; it is not reported as a newly validated success.
 
 For current YouTube extraction, the engine uses the managed Deno runtime through
 an explicit path:

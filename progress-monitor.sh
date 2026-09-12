@@ -35,13 +35,6 @@ process_is_running() {
     return 0
 }
 
-trim_field() {
-    local value=$1
-    value=${value#"${value%%[![:space:]]*}"}
-    value=${value%"${value##*[![:space:]]}"}
-    printf '%s' "${value}"
-}
-
 is_unknown_field() {
     case ${1:-} in
         '' | NA | N/A | Unknown | unknown | None | null) return 0 ;;
@@ -49,13 +42,15 @@ is_unknown_field() {
     esac
 }
 
+# Assign a bounded counter to the caller's named variable without a subshell.
 sanitize_integer() {
-    local value=${1:-0}
-    if [[ ${value} =~ ^[0-9]{1,16}$ ]] \
-        && ((10#${value} <= MAX_SAFE_COUNTER)); then
-        printf '%d' "$((10#${value}))"
+    local integer_output=$1
+    local integer_text=${2:-0}
+    if [[ ${integer_text} =~ ^[0-9]{1,16}$ ]] \
+        && ((10#${integer_text} <= MAX_SAFE_COUNTER)); then
+        printf -v "${integer_output}" '%d' "$((10#${integer_text}))"
     else
-        printf '0'
+        printf -v "${integer_output}" '%d' 0
     fi
 }
 
@@ -105,13 +100,15 @@ parse_aria_size() {
     printf '%d' "${bytes}"
 }
 
+# Assign a saturated sum; both inputs must already satisfy the counter bounds.
 saturating_add() {
-    local left=$1
-    local right=$2
+    local sum_output=$1
+    local left=$2
+    local right=$3
     if ((right > MAX_SAFE_COUNTER - left)); then
-        printf '%d' "${MAX_SAFE_COUNTER}"
+        printf -v "${sum_output}" '%d' "${MAX_SAFE_COUNTER}"
     else
-        printf '%d' "$((left + right))"
+        printf -v "${sum_output}" '%d' "$((left + right))"
     fi
 }
 
@@ -119,9 +116,12 @@ sanitize_percent() {
     local value
     local integer_part
 
-    value=$(trim_field "${1:-}")
+    value=${1:-}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
     value=${value%%%}
-    value=$(trim_field "${value}")
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
     if [[ ${value} =~ ^([0-9]{1,3})([.][0-9]{1,6})?$ ]]; then
         integer_part=${BASH_REMATCH[1]}
         value=$((10#${integer_part}))
@@ -363,24 +363,24 @@ calculate_download_percent() {
     if ((${#PLANNED_KEYS[@]} > 0)); then
         for key in "${PLANNED_KEYS[@]}"; do
             value=${ITEM_PERCENT[${key}]:-0}
-            sum_percent=$(saturating_add "${sum_percent}" "${value}")
+            saturating_add sum_percent "${sum_percent}" "${value}"
             value=${ITEM_TOTAL[${key}]:-0}
             if ((value <= 0)); then
                 all_totals_known=false
             else
-                sum_total=$(saturating_add "${sum_total}" "${value}")
-                sum_downloaded=$(saturating_add "${sum_downloaded}" "${ITEM_DOWNLOADED[${key}]:-0}")
+                saturating_add sum_total "${sum_total}" "${value}"
+                saturating_add sum_downloaded "${sum_downloaded}" "${ITEM_DOWNLOADED[${key}]:-0}"
             fi
         done
     else
         for key in "${!ITEM_PERCENT[@]}"; do
-            sum_percent=$(saturating_add "${sum_percent}" "${ITEM_PERCENT[${key}]}")
+            saturating_add sum_percent "${sum_percent}" "${ITEM_PERCENT[${key}]}"
             value=${ITEM_TOTAL[${key}]:-0}
             if ((value <= 0)); then
                 all_totals_known=false
             else
-                sum_total=$(saturating_add "${sum_total}" "${value}")
-                sum_downloaded=$(saturating_add "${sum_downloaded}" "${ITEM_DOWNLOADED[${key}]:-0}")
+                saturating_add sum_total "${sum_total}" "${value}"
+                saturating_add sum_downloaded "${sum_downloaded}" "${ITEM_DOWNLOADED[${key}]:-0}"
             fi
         done
     fi
@@ -505,11 +505,11 @@ handle_v2_progress() {
     key=${RESOLVED_KEY}
     register_item "${key}"
 
-    downloaded=$(sanitize_integer "${downloaded_text}")
-    total=$(sanitize_integer "${total_text}")
-    estimate=$(sanitize_integer "${estimate_text}")
-    fragment_index=$(sanitize_integer "${fragment_index_text}")
-    fragment_count=$(sanitize_integer "${fragment_count_text}")
+    sanitize_integer downloaded "${downloaded_text}"
+    sanitize_integer total "${total_text}"
+    sanitize_integer estimate "${estimate_text}"
+    sanitize_integer fragment_index "${fragment_index_text}"
+    sanitize_integer fragment_count "${fragment_count_text}"
     percent=$(sanitize_percent "${percent_text}")
 
     if ((fragment_count > 1 && fragment_index == 0)) \
@@ -701,7 +701,7 @@ handle_ffmpeg_duration() {
     local _prefix=$1
     local duration_text=${2:-0}
 
-    ffmpeg_duration_us=$(sanitize_integer "${duration_text}")
+    sanitize_integer ffmpeg_duration_us "${duration_text}"
     ffmpeg_out_time_us=0
     phase='postprocessing'
     if ((stable_percent < POSTPROCESS_START)); then
@@ -717,7 +717,7 @@ handle_ffmpeg_progress() {
 
     [[ ${phase} == postprocessing ]] || return 0
     ((ffmpeg_duration_us > 0)) || return 0
-    value=$(sanitize_integer "${value_text}")
+    sanitize_integer value "${value_text}"
     ((value > ffmpeg_out_time_us)) || return 0
     ffmpeg_out_time_us=${value}
     if ((value >= ffmpeg_duration_us)); then

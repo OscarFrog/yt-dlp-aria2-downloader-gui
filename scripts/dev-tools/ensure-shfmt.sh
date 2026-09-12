@@ -11,11 +11,52 @@ umask 077
 
 readonly SHFMT_UPSTREAM_REPOSITORY='mvdan/sh'
 SHFMT_DOWNLOAD_TMP=''
+SHFMT_LOCK_PID=''
+SHFMT_PENDING_SIGNAL=0
+
+stop_shfmt_lock_waiter() {
+    local child_metadata=''
+    local child_state=''
+    local child_parent=''
+    local -a child_fields=()
+
+    [[ -n ${SHFMT_LOCK_PID} ]] || return 0
+    # No other child is started while this PID is retained. Check the direct
+    # parent before signaling; a reaped/reused numeric PID is not authority.
+    if IFS= read -r child_metadata 2>/dev/null <"/proc/${SHFMT_LOCK_PID}/stat"; then
+        IFS=' ' read -r -a child_fields <<<"${child_metadata##*) }"
+        child_state=${child_fields[0]:-}
+        child_parent=${child_fields[1]:-}
+        if [[ ${child_parent} == "$$" && ${child_state} != Z &&
+            ${child_state} != X && ${child_state} != x ]]; then
+            if ! kill -TERM -- "${SHFMT_LOCK_PID}" 2>/dev/null; then
+                printf 'Warning: shfmt lock waiter exited or could not be signaled.\n' >&2
+            fi
+        fi
+    fi
+    # Cancellation normally yields a nonzero child status; preserve the
+    # bootstrap's original status instead of replacing it with that wait.
+    wait "${SHFMT_LOCK_PID}" 2>/dev/null || true
+    SHFMT_LOCK_PID=''
+}
 
 cleanup() {
+    trap '' HUP INT TERM
+    stop_shfmt_lock_waiter
     if [[ -n ${SHFMT_DOWNLOAD_TMP} ]]; then
         rm -f -- "${SHFMT_DOWNLOAD_TMP}" || true
     fi
+}
+
+record_shfmt_signal() {
+    if ((SHFMT_PENDING_SIGNAL == 0)); then
+        SHFMT_PENDING_SIGNAL=$1
+    fi
+}
+
+exit_on_shfmt_signal() {
+    record_shfmt_signal "$1"
+    exit "${SHFMT_PENDING_SIGNAL}"
 }
 
 fail() {
@@ -105,7 +146,7 @@ verified_binary() {
 require_shfmt_commands() {
     local command_name=''
 
-    for command_name in chmod curl dirname mkdir mktemp mv rm sha256sum uname; do
+    for command_name in chmod curl dirname flock mkdir mktemp mv rm sha256sum uname; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             fail "required command was not found: ${command_name}" 127
             exit $?
@@ -206,13 +247,34 @@ resolve_shfmt_cache() {
 
 prepare_shfmt_cache() {
     local version_dir=$1
-    local binary=$2
 
     mkdir -p -- "${version_dir}"
     chmod 0700 -- "${version_dir}"
+}
 
-    if [[ -e ${binary} ]]; then
-        rm -f -- "${binary}"
+acquire_shfmt_cache_lock() {
+    local descriptor=$1
+    local status=0
+
+    # Bash defers traps for foreground external commands. A builtin wait on
+    # this registered child remains interruptible even while another process
+    # holds the lock; only the fork/registration window defers signal handling.
+    trap 'record_shfmt_signal 129' HUP
+    trap 'record_shfmt_signal 130' INT
+    trap 'record_shfmt_signal 143' TERM
+    flock --exclusive --wait 360 "${descriptor}" &
+    SHFMT_LOCK_PID=$!
+    trap 'exit_on_shfmt_signal 129' HUP
+    trap 'exit_on_shfmt_signal 130' INT
+    trap 'exit_on_shfmt_signal 143' TERM
+    if ((SHFMT_PENDING_SIGNAL != 0)); then
+        exit "${SHFMT_PENDING_SIGNAL}"
+    fi
+    wait "${SHFMT_LOCK_PID}" || status=$?
+    SHFMT_LOCK_PID=''
+    if ((status != 0)); then
+        fail 'unable to acquire the shfmt cache lock within its deadline' 75
+        return $?
     fi
 }
 
@@ -287,11 +349,13 @@ main() {
     local expected_sha=''
     local version_dir=''
     local binary=''
+    local cache_lock=''
+    local cache_lock_fd=''
 
     trap cleanup EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    trap 'exit_on_shfmt_signal 129' HUP
+    trap 'exit_on_shfmt_signal 130' INT
+    trap 'exit_on_shfmt_signal 143' TERM
 
     require_shfmt_commands
     load_shfmt_pin version amd64_sha arm64_sha
@@ -305,7 +369,35 @@ main() {
         return 0
     fi
 
-    prepare_shfmt_cache "${version_dir}" "${binary}"
+    prepare_shfmt_cache "${version_dir}"
+    cache_lock="${version_dir}/.shfmt.lock"
+    if [[ -L ${cache_lock} || (-e ${cache_lock} && ! -f ${cache_lock}) ]]; then
+        fail 'refusing non-regular or symbolic shfmt cache lock' 65
+        return $?
+    fi
+    exec {cache_lock_fd}>>"${cache_lock}"
+    if [[ ! -f ${cache_lock} || -L ${cache_lock} || ! -O ${cache_lock} ||
+        ! ${cache_lock} -ef /proc/$$/fd/${cache_lock_fd} ]]; then
+        fail 'shfmt cache lock identity changed' 65
+        return $?
+    fi
+    # Keep the lock inode for future consumers. A stale pre-lock miss must not
+    # remove or download an asset another invocation has already published.
+    acquire_shfmt_cache_lock "${cache_lock_fd}"
+    if [[ -L ${cache_lock} || ! ${cache_lock} -ef /proc/$$/fd/${cache_lock_fd} ||
+        -L ${binary} || (-e ${binary} && ! -f ${binary}) ]]; then
+        fail 'shfmt cache entry changed while waiting for its lock' 65
+        return $?
+    fi
+    # Cache verification is a predicate with explicit command-failure handling.
+    # shellcheck disable=SC2310
+    if verified_binary "${binary}" "${expected_sha}" "${version}"; then
+        printf '%s\n' "${binary}"
+        return 0
+    fi
+
+    # Retain the old entry until a complete authenticated replacement is ready;
+    # consumers must never observe an unlink gap during a cooperating repair.
     download_shfmt_asset "${version}" "${asset_arch}" "${expected_sha}" "${version_dir}"
     publish_shfmt_binary "${binary}" "${expected_sha}" "${version}"
 }

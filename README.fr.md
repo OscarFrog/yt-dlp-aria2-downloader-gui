@@ -43,7 +43,7 @@ FFmpeg pour fusionner, remuxer ou extraire les flux. HTTPS repasse
 automatiquement sur le transport natif de yt-dlp lorsque le backend TLS d'aria2
 n'offre pas le durcissement requis de validation des certificats. Les flux DASH
 et HLS restent eux aussi natifs.
-La version de développement actuelle est la **2.3.18**.
+La version de développement actuelle est la **2.3.20**.
 La dernière release de paquets publiée est la **2.3.17**.
 
 ## Installation recommandée
@@ -263,7 +263,7 @@ version de développement ci-dessous, cette commande ne s'applique qu'après la
 création de son tag signé :
 
 ```bash
-gh workflow run release.yml   --ref v2.3.18   -f tag=v2.3.18   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref v2.3.20   -f tag=v2.3.20   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Le workflow refuse indépendamment toute exécution manuelle dont le type de ref,
@@ -752,6 +752,12 @@ Une destination de transfert direct déjà présente est refusée avant le
 téléchargement ; la publication vérifie à nouveau l'absence de collision.
 Des en-têtes répétés avec des casses différentes maintiennent le transfert sur
 yt-dlp natif.
+
+Pour la vidéo directe ordinaire, le contrôle préalable vérifie aussi le MKV
+assemblé/remuxé dans la véritable destination finale, même si le traitement
+utilise un espace de travail local distinct. Une collision connue provoque un
+échec sans retélécharger les deux composants ni post-traiter un ancien fichier ;
+elle n'est pas annoncée comme un nouveau succès validé.
 
 Pour l'extraction YouTube actuelle, le moteur utilise le runtime Deno géré
 automatiquement via un chemin explicite :

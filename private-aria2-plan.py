@@ -537,6 +537,32 @@ def build_plan(args: argparse.Namespace) -> int:
         "yt-dlp requested filename",
     )
 
+    final_output_dir = getattr(args, "final_output_dir", None)
+    final_output_identity = getattr(args, "final_output_identity", None)
+    final_extension = getattr(args, "final_extension", None)
+    if any(value is not None for value in (final_output_dir, final_output_identity, final_extension)):
+        if not all((final_output_dir, final_output_identity, final_extension)):
+            raise PlanError("final media preflight requires a directory, identity and extension")
+        expected_identity = parse_identity(final_output_identity)
+        if not extension_is_representable(final_extension):
+            raise PlanError("final media extension is unsafe")
+        # The caller supplies only a known postprocessor result extension. Its
+        # destination may differ from this plan's private processing workspace.
+        final_name = root_destination.with_suffix(f".{final_extension}").name
+        final_output = Path(final_output_dir)
+        with directory_descriptor(final_output) as final_fd:
+            final_metadata = os.fstat(final_fd)
+            if (final_metadata.st_dev, final_metadata.st_ino) != expected_identity:
+                raise PlanError("final media destination changed before transfer")
+            try:
+                os.stat(final_name, dir_fd=final_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise DestinationExistsError("final media destination already exists")
+            if directory_identity(final_output) != expected_identity:
+                raise PlanError("final media destination changed during preflight")
+
     requested_formats = root.get("requested_formats")
 
     if requested_formats is None:
@@ -566,7 +592,7 @@ def build_plan(args: argparse.Namespace) -> int:
 
     # Reject known collisions before downloading. Commit must still enforce
     # no-overwrite publication against destinations created after this check.
-    for destination in destinations:
+    for destination in dict.fromkeys([root_destination, *destinations]):
         if os.path.lexists(destination):
             raise DestinationExistsError(
                 f"destination already exists: {destination.name}"
@@ -1371,6 +1397,9 @@ def create_parser() -> argparse.ArgumentParser:
     build.add_argument("--aria2-input", required=True)
     build.add_argument("--manifest", required=True)
     build.add_argument("--allow-https-direct", action="store_true")
+    build.add_argument("--final-output-dir")
+    build.add_argument("--final-output-identity")
+    build.add_argument("--final-extension")
     build.set_defaults(handler=build_plan)
 
     commit = subparsers.add_parser(

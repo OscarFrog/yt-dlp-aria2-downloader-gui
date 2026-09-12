@@ -12,7 +12,7 @@ set -euo pipefail
 set +m
 umask 077
 
-readonly VERSION="2.3.18"
+readonly VERSION="2.3.20"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -3034,6 +3034,16 @@ execute_selected_transport() {
         fi
         if [[ ${ARIA2_HTTPS_DIRECT_SAFE} == true ]]; then
             builder_security_options+=(--allow-https-direct)
+        fi
+        if [[ ${MODE} == video && ${YOUTUBE_HLS_FIREFOX} != true ]]; then
+            # Ordinary video always remuxes to MKV. Check the actual final
+            # directory before transferring its components, including when the
+            # plan itself points into a private local workspace.
+            builder_security_options+=(
+                --final-output-dir "${FINAL_OUTPUT_DIR}"
+                --final-output-identity "${FINAL_OUTPUT_IDENTITY}"
+                --final-extension mkv
+            )
         fi
         python3 "${PRIVATE_ARIA2_HELPER}" build \
             "${builder_security_options[@]}" \

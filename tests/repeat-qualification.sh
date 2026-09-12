@@ -7,6 +7,8 @@
 # ==============================================================================
 
 set -Eeuo pipefail
+# Preserve trapped INT across foreground-child reaping, as in run-all.sh.
+set -m
 umask 077
 
 PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -147,9 +149,14 @@ parse_arguments() {
 
 cleanup() {
     local status=$?
+    local signal_name=TERM
 
-    trap - EXIT HUP INT TERM
-    test_runner_cleanup
+    # Monitor mode can deliver terminal INT only to a foreground utility.
+    # Bash then exits 130 without dispatching our INT trap.
+    trap '' HUP INT TERM
+    trap - EXIT
+    ((status != 130)) || signal_name=INT
+    test_runner_cleanup "${signal_name}"
     exit "${status}"
 }
 

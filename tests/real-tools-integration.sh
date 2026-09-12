@@ -43,6 +43,11 @@ cleanup() {
         kill -TERM -- "${SERVER_PID}" 2>/dev/null || true
         wait "${SERVER_PID}" 2>/dev/null || true
     fi
+    if [[ -e ${TEST_ROOT}/preserve-active-engine ]]; then
+        printf 'Warning: preserving real-tool fixtures after unconfirmed engine shutdown: %s\n' \
+            "${TEST_ROOT}" >&2
+        return
+    fi
     rm -rf -- "${TEST_ROOT}" || true
 }
 
@@ -340,8 +345,14 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 port_file = pathlib.Path(sys.argv[2])
+request_log = pathlib.Path(sys.argv[3])
 
 class Handler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        with request_log.open("a", encoding="utf-8") as log:
+            log.write(self.path + "\n")
+        super().do_GET()
+
     def log_message(self, _format, *args):
         return
 
@@ -361,7 +372,7 @@ with Server(
 PY_SERVER
 
     python3 "${TEST_ROOT}/server.py" \
-        "${TEST_ROOT}/web" "${TEST_ROOT}/port" &
+        "${TEST_ROOT}/web" "${TEST_ROOT}/port" "${TEST_ROOT}/http-requests.log" &
     SERVER_PID=$!
     for _ in {1..100}; do
         [[ -s ${TEST_ROOT}/port ]] && break
@@ -506,6 +517,170 @@ test_real_direct_audio_scenarios() {
         printf 'FAIL: attached-cover direct audio did not invoke real aria2c.\n' >&2
         exit 65
     }
+}
+
+test_real_existing_assembled_output() {
+    # Only extraction is seeded: real yt-dlp selects two distinct streams and
+    # real aria2/FFmpeg download and assemble them before an identical rerun.
+    python3 -I - "${PROJECT_DIR}" "${TEST_ROOT}" "${MEDIA_ROOT}" "${PORT}" \
+        "${SIMULATE_NETWORK}" <<'PY_EXISTING_ASSEMBLED'
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+project, root, media_root = map(Path, sys.argv[1:4])
+base = f"http://127.0.0.1:{sys.argv[4]}"
+output = media_root / "existing-assembled"
+output.mkdir(mode=0o700)
+if sys.argv[5] == "true":
+    output.chmod(0o777)
+seed = root / "assembled-seed.json"
+metadata = {
+    "id": "assembled", "title": "Two streams", "extractor": "generic",
+    "extractor_key": "Generic", "webpage_url": base + "/controlled-page",
+    "duration": 2.0,
+    "formats": [
+        {"format_id": "a1", "url": base + "/audio.m4a", "ext": "m4a",
+         "protocol": "http", "vcodec": "none", "acodec": "aac", "abr": 128},
+        {"format_id": "v1", "url": base + "/video-only.mp4", "ext": "mp4",
+         "protocol": "http", "vcodec": "h264", "acodec": "none", "height": 90},
+    ],
+}
+seed.write_text(json.dumps(metadata), encoding="utf-8")
+seed.chmod(0o600)
+shim = root / "assembled-ytdlp"
+shim.write_text(
+    "#!/usr/bin/python3\nimport os, sys\n"
+    "args = sys.argv[1:]\n"
+    "if '--dump-single-json' in args:\n"
+    "    index = args.index('--batch-file'); del args[index:index + 2]\n"
+    "    args += ['--load-info-json', os.environ['ASSEMBLED_SEED']]\n"
+    "os.execv(os.environ['ASSEMBLED_REAL_YTDLP'], [os.environ['ASSEMBLED_REAL_YTDLP'], *args])\n",
+    encoding="utf-8",
+)
+shim.chmod(0o700)
+environment = dict(os.environ, ASSEMBLED_SEED=str(seed),
+                   ASSEMBLED_REAL_YTDLP=os.environ["YTDLP_ARIA2_YTDLP_BIN"],
+                   YTDLP_ARIA2_YTDLP_BIN=str(shim))
+requests = root / "http-requests.log"
+
+def capture_engine(arguments, environment, *, timeout=60, grace=20):
+    # The standalone engine owns separate worker sessions. Killing only its
+    # wrapper would bypass their authenticated shutdown and strand downloads.
+    process = None
+    requested_signal = None
+    managed = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+    previous = {}
+    preservation = root / "preserve-active-engine"
+
+    def interrupted(number, _frame):
+        nonlocal requested_signal
+        requested_signal = requested_signal or number
+
+    try:
+        for number in managed:
+            previous[number] = signal.signal(number, interrupted)
+        # Establish preservation before launching anything: a full or unwritable
+        # filesystem must fail before there is a worker session to shut down.
+        preservation.touch()
+        process = subprocess.Popen(arguments, env=environment,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline = time.monotonic() + timeout
+        while True:
+            if requested_signal:
+                raise SystemExit(128 + requested_signal)
+            # Handlers only record intent, including during Popen and exception
+            # unwinding. Bounded waits observe it without a reentrant exception
+            # being able to jump over child cleanup.
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=max(0, min(0.1, deadline - time.monotonic())),
+                )
+            except subprocess.TimeoutExpired as error:
+                if requested_signal:
+                    raise SystemExit(128 + requested_signal)
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(
+                        arguments, timeout, output=error.output, stderr=error.stderr,
+                    ) from None
+                continue
+            if requested_signal:
+                raise SystemExit(128 + requested_signal)
+            preservation.unlink()
+            return subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
+    except BaseException:
+        # Keep the first failure authoritative while the engine performs its
+        # bounded cleanup. A repeated signal asks it to escalate its own groups.
+        for number in managed:
+            signal.signal(number, signal.SIG_IGN)
+        if process is not None:
+            try:
+                for _ in range(2):
+                    if process.poll() is None:
+                        process.send_signal(requested_signal or signal.SIGTERM)
+                    try:
+                        process.communicate(timeout=grace)
+                        preservation.unlink()
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
+            except Exception as error:
+                print(f"Error during engine shutdown: {error}", file=sys.stderr)
+            if preservation.exists():
+                print("Error: engine shutdown remains unconfirmed; retaining its fixtures.",
+                      file=sys.stderr)
+        raise
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+def media_requests():
+    return requests.read_text(encoding="utf-8").splitlines() if requests.exists() else []
+
+def run(label):
+    result = root / f"assembled-{label}.result"
+    completed = capture_engine(
+        ["bash", str(project / "download-video.sh"), "--mode", "video",
+         "--output-dir", str(output), "--result-file", str(result), base + "/controlled-page"],
+        environment,
+    )
+    (root / f"assembled-{label}.log").write_bytes(completed.stdout + completed.stderr)
+    return result, completed
+
+before = len(media_requests())
+first_result, first = run("first")
+assert first.returncode == 0, first.stdout + first.stderr
+assert sorted(media_requests()[before:]) == ["/audio.m4a", "/video-only.mp4"]
+final = Path(first_result.read_text().strip())
+assert final.parent == output.resolve() and final.suffix == ".mkv"
+assert not final.is_symlink()
+
+def final_snapshot():
+    info = final.stat()
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            hashlib.sha256(final.read_bytes()).hexdigest())
+
+original = final_snapshot()
+directory_entries = sorted(path.name for path in output.iterdir())
+for label in ("repeat", "changed-metadata"):
+    if label == "changed-metadata":
+        metadata["description"] = "Different metadata must not rewrite an existing final."
+        seed.write_text(json.dumps(metadata), encoding="utf-8")
+    before = len(media_requests())
+    result, completed = run(label)
+    assert completed.returncode == 1, (label, completed.returncode, completed.stdout, completed.stderr)
+    assert b"final media destination already exists" in completed.stderr
+    assert not result.exists(), "an existing final was reported as a new success"
+    assert len(media_requests()) == before, "existing final caused media GET requests"
+    assert final_snapshot() == original, "existing final identity or bytes changed"
+    assert sorted(path.name for path in output.iterdir()) == directory_entries, "unused components remain"
+print("Real two-stream repetition and metadata change preserve the existing final without media GETs.")
+PY_EXISTING_ASSEMBLED
 }
 
 test_real_media_validation_mutations() {
@@ -914,6 +1089,7 @@ main() {
     parse_qualification_arguments "$@"
     prepare_real_tool_fixtures
     test_real_direct_audio_scenarios
+    test_real_existing_assembled_output
     test_real_media_validation_mutations
     test_real_fragment_routing_and_mutations
     printf 'Real-tool direct/audio/Opus/fallback/cover/HLS/DASH integration passed.\n'
