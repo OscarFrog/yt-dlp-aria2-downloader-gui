@@ -26,11 +26,12 @@ jobs:
     outputs:
       update: ${{ steps.prepare.outputs.update }}
       version: ${{ steps.prepare.outputs.version }}
+      context: ${{ steps.prepare.outputs.context }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.RELEASE_SHA }}
+          ref: main
           fetch-depth: 0
           persist-credentials: false
 
@@ -77,13 +78,16 @@ jobs:
           fi
 
           checkout_sha=$(git rev-parse HEAD)
+          main_sha=$(git rev-parse refs/remotes/origin/main)
           tag_sha=$(git rev-parse "${RELEASE_TAG}^{commit}")
-          if [[ ${checkout_sha} != "${RELEASE_SHA}" ||
+          if [[ ${checkout_sha} != "${main_sha}" ||
               ${tag_sha} != "${RELEASE_SHA}" ]]; then
             printf '%s\n' \
-              'Error: checkout, tag, and triggering release SHA are not identical.' >&2
+              'Error: checkout main or triggering release tag identity is invalid.' >&2
             exit 65
           fi
+
+          git merge-base --is-ancestor "${RELEASE_SHA}" "${main_sha}"
 
           release_identity=$(
             gh release view "${RELEASE_TAG}" \
@@ -107,71 +111,64 @@ jobs:
         run: |
           set -Eeuo pipefail
           umask 077
-
           version=${RELEASE_TAG#v}
+          branch="automation/release-docs-v${version}"
+          git fetch --no-tags origin
+          context=$(python3 -B scripts/check-push-version.py next-version \
+            --remote origin --branch "${branch}")
+          main_sha=$(jq -er '.main_sha' <<<"${context}")
+          target_sha=$(jq -er '.target_sha' <<<"${context}")
+          base_sha=${main_sha}
+          if [[ ${target_sha} != 0000000000000000000000000000000000000000 ]]; then
+            git fetch --no-tags origin "${target_sha}"
+            git merge-base --is-ancestor "${main_sha}" "${target_sha}" || {
+              printf '%s\n' 'Error: automation branch diverged from main; maintainer reconciliation is required.' >&2
+              exit 65
+            }
+            base_sha=${target_sha}
+          fi
+          git checkout --detach "${base_sha}"
+          git merge-base --is-ancestor "${RELEASE_SHA}" "${main_sha}"
           python3 -B scripts/update-published-version.py "${version}"
-
+          printf 'version=%s\n' "${version}" >>"${GITHUB_OUTPUT}"
+          # An idempotent update produces neither a source commit nor a version increment.
+          if [[ -z $(git diff --name-only --no-renames) ]]; then
+            python3 -B scripts/update-published-version.py --check "${version}"
+            printf '%s\n' 'update=false' >>"${GITHUB_OUTPUT}"
+            printf '%s\n' 'Published release documentation already matches the release.'
+            exit 0
+          fi
+          floor_version=$(jq -er '.floor_version' <<<"${context}")
+          source_date=$(date -u --date="$(git show -s --format=%cI "${base_sha}")" +%F)
+          reason='Synchronize published release documentation.'
+          python3 -B scripts/prepare-source-version.py --root . \
+            --floor-version "${floor_version}" --date "${source_date}" --reason "${reason}"
+          context=$(jq -c --arg base_sha "${base_sha}" --arg date "${source_date}" \
+            --arg release_tag "${RELEASE_TAG}" --arg release_sha "${RELEASE_SHA}" \
+            --arg release_version "${version}" \
+            '. + {base_sha:$base_sha,date:$date,release_tag:$release_tag,release_sha:$release_sha,release_version:$release_version}' <<<"${context}")
           expected_paths=$(mktemp)
           changed_paths=$(mktemp)
           trap 'rm -f -- "${expected_paths}" "${changed_paths}"' EXIT
-
-          printf '%s\n' README.fr.md README.md test-static.sh \
-            | LC_ALL=C sort >"${expected_paths}"
-          git diff --name-only --no-renames \
-            | LC_ALL=C sort >"${changed_paths}"
-
-          {
-            printf 'version=%s\n' "${version}"
-            if [[ ! -s ${changed_paths} ]]; then
-              printf '%s\n' 'update=false'
-            else
-              printf '%s\n' 'update=true'
-            fi
-          } >>"${GITHUB_OUTPUT}"
-
-          if [[ ! -s ${changed_paths} ]]; then
-            python3 -B scripts/update-published-version.py \
-              --check "${version}"
-            printf '%s\n' \
-              'Published release documentation already matches the release.'
-            exit 0
-          fi
-
-          if ! cmp -s -- "${expected_paths}" "${changed_paths}"; then
-            printf '%s\n' \
-              'Error: documentation updater changed an unexpected path set.' >&2
-            diff -u -- "${expected_paths}" "${changed_paths}" >&2 || true
-            exit 65
-          fi
-          if [[ -n $(git diff --summary) ]]; then
-            printf '%s\n' \
-              'Error: documentation updater changed file identity or mode.' >&2
-            git diff --summary >&2
-            exit 65
-          fi
-
-          python3 -B scripts/update-published-version.py \
-            --check "${version}"
+          paths=(CHANGELOG.md README.fr.md README.md download-video.sh install-fedora.sh
+            packaging/rpm/yt-dlp-aria2-downloader-gui.spec test-static.sh)
+          printf '%s\n' "${paths[@]}" | LC_ALL=C sort >"${expected_paths}"
+          git diff --name-only --no-renames | LC_ALL=C sort >"${changed_paths}"
+          cmp -s -- "${expected_paths}" "${changed_paths}"
+          [[ -z $(git diff --summary) ]]
+          python3 -B scripts/update-published-version.py --check "${version}"
+          python3 -B scripts/check-push-version.py coherence
           git diff --check
           bash ./test-static.sh
-
           handoff_dir="${RUNNER_TEMP}/release-docs-candidate"
           mkdir -p -- "${handoff_dir}"
-          git diff --binary -- \
-            README.fr.md README.md test-static.sh \
-            >"${handoff_dir}/release-docs.patch"
-          {
-            printf 'release_tag=%s\n' "${RELEASE_TAG}"
-            printf 'release_sha=%s\n' "${RELEASE_SHA}"
-            printf 'release_version=%s\n' "${version}"
-          } >"${handoff_dir}/release-docs-metadata.txt"
+          git diff --binary -- "${paths[@]}" >"${handoff_dir}/release-docs.patch"
+          printf '%s\n' "${context}" >"${handoff_dir}/release-docs-metadata.json"
           (
             cd -- "${handoff_dir}"
-            sha256sum \
-              release-docs.patch \
-              release-docs-metadata.txt \
-              >release-docs-handoff.sha256
+            sha256sum release-docs.patch release-docs-metadata.json >release-docs-handoff.sha256
           )
+          printf 'update=true\ncontext=%s\n' "${context}" >>"${GITHUB_OUTPUT}"
 
       - name: Upload data-only documentation candidate
         if: steps.prepare.outputs.update == 'true'
@@ -180,7 +177,7 @@ jobs:
           name: release-docs-candidate-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/release-docs-candidate/release-docs.patch
-            ${{ runner.temp }}/release-docs-candidate/release-docs-metadata.txt
+            ${{ runner.temp }}/release-docs-candidate/release-docs-metadata.json
             ${{ runner.temp }}/release-docs-candidate/release-docs-handoff.sha256
           if-no-files-found: error
           retention-days: 1
@@ -193,11 +190,13 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-
+    env:
+      VERSION_CONTEXT: ${{ needs.prepare-release-docs.outputs.context }}
+      RELEASE_VERSION: ${{ needs.prepare-release-docs.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.RELEASE_SHA }}
+          ref: ${{ fromJSON(needs.prepare-release-docs.outputs.context).base_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -207,109 +206,59 @@ jobs:
           name: release-docs-candidate-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-docs-candidate
 
-      - name: Revalidate and apply candidate patch
+      - name: Revalidate and reproduce candidate patch
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ needs.prepare-release-docs.outputs.version }}
         shell: bash
         run: |
           set -Eeuo pipefail
           umask 077
-
           [[ ${RELEASE_TAG} == "v${RELEASE_VERSION}" ]]
           [[ ${RELEASE_SHA} =~ ^[0-9a-f]{40}$ ]]
-          [[ $(git rev-parse HEAD) == "${RELEASE_SHA}" ]]
           [[ $(git rev-parse "${RELEASE_TAG}^{commit}") == "${RELEASE_SHA}" ]]
-          sha256sum -- README.fr.md README.md test-static.sh \
-            >"${RUNNER_TEMP}/release-docs-base-tree.sha256"
-
-          immutable=$(
-            gh release view "${RELEASE_TAG}" \
-              -R "${GITHUB_REPOSITORY}" \
-              --json isImmutable \
-              --jq '.isImmutable'
-          )
+          base_sha=$(jq -er '.base_sha' <<<"${VERSION_CONTEXT}")
+          main_sha=$(jq -er '.main_sha' <<<"${VERSION_CONTEXT}")
+          [[ $(git rev-parse HEAD) == "${base_sha}" ]]
+          git merge-base --is-ancestor "${RELEASE_SHA}" "${main_sha}"
+          git merge-base --is-ancestor "${main_sha}" "${base_sha}"
+          branch="automation/release-docs-v${RELEASE_VERSION}"
+          current_context=$(python3 -B scripts/check-push-version.py next-version --remote origin --branch "${branch}")
+          [[ $(jq -Sc '{main_sha,target_sha,floor_version,next_version,refs_sha256}' <<<"${current_context}") == \
+            "$(jq -Sc '{main_sha,target_sha,floor_version,next_version,refs_sha256}' <<<"${VERSION_CONTEXT}")" ]]
+          immutable=$(gh release view "${RELEASE_TAG}" -R "${GITHUB_REPOSITORY}" --json isImmutable --jq '.isImmutable')
           [[ ${immutable} == true ]]
           gh release verify "${RELEASE_TAG}" -R "${GITHUB_REPOSITORY}"
-
           handoff_dir="${RUNNER_TEMP}/release-docs-candidate"
-          mapfile -t handoff_entries < <(
-            find "${handoff_dir}" \
-              -mindepth 1 \
-              -maxdepth 1 \
-              -printf '%f\n' \
-              | LC_ALL=C sort
-          )
-          expected_entries=(
-            release-docs-handoff.sha256
-            release-docs-metadata.txt
-            release-docs.patch
-          )
-          if [[ ${handoff_entries[*]} != "${expected_entries[*]}" ]]; then
-            printf 'Error: unexpected candidate handoff entries: %s\n' \
-              "${handoff_entries[*]}" >&2
-            exit 65
-          fi
-          for handoff_entry in "${expected_entries[@]}"; do
-            if [[ ! -f ${handoff_dir}/${handoff_entry} ||
-                -L ${handoff_dir}/${handoff_entry} ]]; then
-              printf 'Error: candidate handoff path is not a regular file: %s\n' \
-                "${handoff_entry}" >&2
-              exit 65
-            fi
+          expected_entries=$'release-docs-handoff.sha256\nrelease-docs-metadata.json\nrelease-docs.patch'
+          [[ $(find "${handoff_dir}" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort) == "${expected_entries}" ]]
+          for entry in release-docs-handoff.sha256 release-docs-metadata.json release-docs.patch; do
+            [[ -f ${handoff_dir}/${entry} && ! -L ${handoff_dir}/${entry} ]]
           done
-          (
-            cd -- "${handoff_dir}"
-            sha256sum --check release-docs-handoff.sha256
-          )
-
-          expected_metadata=$(mktemp)
-          expected_paths=$(mktemp)
-          patch_paths=$(mktemp)
-          changed_paths=$(mktemp)
-          trap 'rm -f -- "${expected_metadata}" "${expected_paths}" "${patch_paths}" "${changed_paths}"' EXIT
-          {
-            printf 'release_tag=%s\n' "${RELEASE_TAG}"
-            printf 'release_sha=%s\n' "${RELEASE_SHA}"
-            printf 'release_version=%s\n' "${RELEASE_VERSION}"
-          } >"${expected_metadata}"
-          cmp -s -- \
-            "${expected_metadata}" \
-            "${handoff_dir}/release-docs-metadata.txt"
-
-          printf '%s\n' README.fr.md README.md test-static.sh \
-            | LC_ALL=C sort >"${expected_paths}"
-          git apply --check -- "${handoff_dir}/release-docs.patch"
-          git apply --numstat -- "${handoff_dir}/release-docs.patch" \
-            | while IFS=$'\t' read -r added removed path; do
-                if [[ ${added} == '-' || ${removed} == '-' ]]; then
-                  printf 'Error: binary documentation handoff is forbidden: %s\n' \
-                    "${path}" >&2
-                  exit 65
-                fi
-                printf '%s\n' "${path}"
-              done \
-            | LC_ALL=C sort -u >"${patch_paths}"
-          if ! cmp -s -- "${expected_paths}" "${patch_paths}"; then
-            printf '%s\n' \
-              'Error: candidate patch path set differs from the allowlist.' >&2
-            diff -u -- "${expected_paths}" "${patch_paths}" >&2 || true
-            exit 65
-          fi
-
-          git apply -- "${handoff_dir}/release-docs.patch"
+          [[ $(cat -- "${handoff_dir}/release-docs-metadata.json") == "${VERSION_CONTEXT}" ]]
+          # Authenticate only fixed manifest paths before sha256sum may open any input.
+          manifest_paths=$(sed -n 's/^[0-9a-f]\{64\}  \(.*\)$/\1/p' "${handoff_dir}/release-docs-handoff.sha256" | LC_ALL=C sort)
+          [[ $(wc -l <"${handoff_dir}/release-docs-handoff.sha256") == 2 ]]
+          [[ ${manifest_paths} == $'release-docs-metadata.json\nrelease-docs.patch' ]]
+          (cd -- "${handoff_dir}"; sha256sum --check release-docs-handoff.sha256)
+          paths=(CHANGELOG.md README.fr.md README.md download-video.sh install-fedora.sh
+            packaging/rpm/yt-dlp-aria2-downloader-gui.spec test-static.sh)
+          sha256sum -- "${paths[@]}" >"${RUNNER_TEMP}/release-docs-base-tree.sha256"
+          # Recompute on a fresh base before applying or executing any candidate bytes.
+          python3 -B scripts/update-published-version.py "${RELEASE_VERSION}"
+          [[ -n $(git diff --name-only --no-renames) ]]
+          source_date=$(date -u --date="$(git show -s --format=%cI "${base_sha}")" +%F)
+          [[ ${source_date} == "$(jq -er '.date' <<<"${VERSION_CONTEXT}")" ]]
+          python3 -B scripts/prepare-source-version.py --root . \
+            --floor-version "$(jq -er '.floor_version' <<<"${VERSION_CONTEXT}")" \
+            --date "${source_date}" --reason 'Synchronize published release documentation.'
+          expected_patch=$(mktemp)
+          trap 'rm -f -- "${expected_patch}"' EXIT
+          git diff --binary -- "${paths[@]}" >"${expected_patch}"
+          cmp -s -- "${expected_patch}" "${handoff_dir}/release-docs.patch"
+          [[ -z $(git diff --summary) ]]
           git diff --check
-          if [[ -n $(git diff --summary) ]]; then
-            printf '%s\n' \
-              'Error: candidate patch changed file identity or mode.' >&2
-            git diff --summary >&2
-            exit 65
-          fi
-          git diff --name-only --no-renames \
-            | LC_ALL=C sort >"${changed_paths}"
-          cmp -s -- "${expected_paths}" "${changed_paths}"
-          python3 -B scripts/update-published-version.py \
-            --check "${RELEASE_VERSION}"
+          python3 -B scripts/update-published-version.py --check "${RELEASE_VERSION}"
+          python3 -B scripts/check-push-version.py coherence
 
       - name: Install complete-validation dependencies
         run: |
@@ -328,44 +277,28 @@ jobs:
         run: |
           set -Eeuo pipefail
           umask 077
-
           candidate_dir="${RUNNER_TEMP}/release-docs-candidate"
           verified_dir="${RUNNER_TEMP}/release-docs-verified"
-          mkdir -p -- "${verified_dir}"
-          cp -- \
-            "${candidate_dir}/release-docs-metadata.txt" \
-            "${RUNNER_TEMP}/release-docs-base-tree.sha256" \
-            README.fr.md \
-            README.md \
-            test-static.sh \
-            "${verified_dir}/"
-          sha256sum -- \
-            README.fr.md README.md test-static.sh \
-            >"${verified_dir}/release-docs-tested-tree.sha256"
+          mkdir -p -- "${verified_dir}/packaging/rpm"
+          paths=(CHANGELOG.md README.fr.md README.md download-video.sh install-fedora.sh
+            packaging/rpm/yt-dlp-aria2-downloader-gui.spec test-static.sh)
+          for path in "${paths[@]}"; do
+            cp -- "${path}" "${verified_dir}/${path}"
+          done
+          cp -- "${candidate_dir}/release-docs-metadata.json" \
+            "${RUNNER_TEMP}/release-docs-base-tree.sha256" "${verified_dir}/"
+          sha256sum -- "${paths[@]}" >"${verified_dir}/release-docs-tested-tree.sha256"
           (
             cd -- "${verified_dir}"
-            sha256sum -- \
-              README.fr.md \
-              README.md \
-              release-docs-base-tree.sha256 \
-              release-docs-metadata.txt \
-              release-docs-tested-tree.sha256 \
-              test-static.sh \
-              >release-docs-handoff.sha256
+            sha256sum -- "${paths[@]}" release-docs-base-tree.sha256 \
+              release-docs-metadata.json release-docs-tested-tree.sha256 >release-docs-handoff.sha256
           )
 
       - name: Upload verified data-only documentation handoff
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-docs-verified-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/release-docs-verified/README.fr.md
-            ${{ runner.temp }}/release-docs-verified/README.md
-            ${{ runner.temp }}/release-docs-verified/release-docs-base-tree.sha256
-            ${{ runner.temp }}/release-docs-verified/release-docs-handoff.sha256
-            ${{ runner.temp }}/release-docs-verified/release-docs-metadata.txt
-            ${{ runner.temp }}/release-docs-verified/release-docs-tested-tree.sha256
-            ${{ runner.temp }}/release-docs-verified/test-static.sh
+          path: ${{ runner.temp }}/release-docs-verified/
           if-no-files-found: error
           retention-days: 1
           overwrite: true
@@ -381,7 +314,7 @@ jobs:
       contents: write
     env:
       RELEASE_VERSION: ${{ needs.prepare-release-docs.outputs.version }}
-
+      VERSION_CONTEXT: ${{ needs.prepare-release-docs.outputs.context }}
     steps:
       - name: Download verified data-only documentation handoff
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
@@ -396,285 +329,325 @@ jobs:
         run: |
           set -Eeuo pipefail
           umask 077
-
           [[ ${RELEASE_VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ ${RELEASE_TAG} == "v${RELEASE_VERSION}" ]]
           [[ ${RELEASE_SHA} =~ ^[0-9a-f]{40}$ ]]
-          release_tag_sha=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" \
-            --jq '.sha')
-          main_sha=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
-            --jq '.object.sha')
-          if [[ ! ${release_tag_sha} =~ ^[0-9a-f]{40}$ ||
-              ! ${main_sha} =~ ^[0-9a-f]{40}$ ||
-              ${release_tag_sha} != "${RELEASE_SHA}" ]]; then
-            printf '%s\n' \
-              'Error: release tag or protected main identity is invalid.' >&2
-            exit 65
-          fi
-          merge_base_sha=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/compare/${RELEASE_SHA}...${main_sha}" \
-            --jq '.merge_base_commit.sha')
-          if [[ ${merge_base_sha} != "${RELEASE_SHA}" ]]; then
-            printf '%s\n' \
-              'Error: release SHA is not an ancestor of protected main.' >&2
-            exit 65
-          fi
+          branch="automation/release-docs-v${RELEASE_VERSION}"
+          branch_ref="refs/heads/${branch}"
+          handoff_dir="${RUNNER_TEMP}/release-docs-verified"
+          base_tree_dir=$(mktemp -d)
+          api_payload=$(mktemp)
+          refs_snapshot=$(mktemp)
+          current_snapshot=$(mktemp)
+          trap 'rm -f -- "${api_payload}" "${refs_snapshot}" "${current_snapshot}"; rm -rf -- "${base_tree_dir}"' EXIT
 
-          immutable=$(
-            gh release view "${RELEASE_TAG}" \
-              -R "${GITHUB_REPOSITORY}" \
-              --json isImmutable \
-              --jq '.isImmutable'
-          )
+          capture_refs() {
+            local destination=$1
+            local refs_main=''
+            local refs_target=''
+            local tags=''
+            refs_main=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')
+            refs_target=$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/${branch}" \
+              --jq "[.[] | select(.ref == \"${branch_ref}\") | .object.sha] | if length == 0 then \"0000000000000000000000000000000000000000\" elif length == 1 then .[0] else error(\"duplicate branch ref\") end")
+            [[ ${refs_main} =~ ^[0-9a-f]{40}$ && ${refs_target} =~ ^[0-9a-f]{40}$ ]] || return 65
+            tags=$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v" | jq -ce 'add')
+            {
+              printf '%s\t%s\n' "${refs_main}" refs/heads/main
+              if [[ ${refs_target} != 0000000000000000000000000000000000000000 ]]; then
+                printf '%s\t%s\n' "${refs_target}" "${branch_ref}"
+              fi
+              jq -er '.[] | [.object.sha,.ref] | @tsv' <<<"${tags}" || [[ ${tags} == '[]' ]]
+            } | LC_ALL=C sort >"${destination}"
+          }
+          capture_refs "${refs_snapshot}"
+          main_sha=$(awk -F '\t' '$2 == "refs/heads/main" { print $1 }' "${refs_snapshot}")
+          target_sha=$(awk -F '\t' -v ref="${branch_ref}" '$2 == ref { print $1 }' "${refs_snapshot}")
+          target_sha=${target_sha:-0000000000000000000000000000000000000000}
+          base_sha=${main_sha}
+          if [[ ${target_sha} != 0000000000000000000000000000000000000000 ]]; then
+            base_sha=${target_sha}
+            [[ $(gh api "repos/${GITHUB_REPOSITORY}/compare/${main_sha}...${target_sha}" --jq '.merge_base_commit.sha') == "${main_sha}" ]]
+          fi
+          [[ ${main_sha} == "$(jq -er '.main_sha' <<<"${VERSION_CONTEXT}")" ]]
+          [[ ${target_sha} == "$(jq -er '.target_sha' <<<"${VERSION_CONTEXT}")" ]]
+          [[ ${base_sha} == "$(jq -er '.base_sha' <<<"${VERSION_CONTEXT}")" ]]
+          read -r refs_digest _ < <(sha256sum -- "${refs_snapshot}")
+          [[ ${refs_digest} == "$(jq -er '.refs_sha256' <<<"${VERSION_CONTEXT}")" ]]
+          release_tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq '.sha')
+          if [[ ${release_tag_sha} != "${RELEASE_SHA}" ]]; then
+            printf '%s\n' 'Error: release tag no longer identifies the successful release.' >&2
+            exit 65
+          fi
+          merge_base_sha=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${RELEASE_SHA}...${main_sha}" --jq '.merge_base_commit.sha')
+          if [[ ${merge_base_sha} != "${RELEASE_SHA}" ]]; then
+            printf '%s\n' 'Error: release SHA is not an ancestor of protected main.' >&2
+            exit 65
+          fi
+          immutable=$(gh release view "${RELEASE_TAG}" -R "${GITHUB_REPOSITORY}" --json isImmutable --jq '.isImmutable')
           [[ ${immutable} == true ]]
           gh release verify "${RELEASE_TAG}" -R "${GITHUB_REPOSITORY}"
-
-          handoff_dir="${RUNNER_TEMP}/release-docs-verified"
-          mapfile -t handoff_entries < <(
-            find "${handoff_dir}" \
-              -mindepth 1 \
-              -maxdepth 1 \
-              -printf '%f\n' \
-              | LC_ALL=C sort
-          )
-          expected_entries=(
-            README.fr.md
-            README.md
-            release-docs-base-tree.sha256
-            release-docs-handoff.sha256
-            release-docs-metadata.txt
-            release-docs-tested-tree.sha256
-          )
-          expected_entries+=(test-static.sh)
-          if [[ ${handoff_entries[*]} != "${expected_entries[*]}" ]]; then
-            printf 'Error: unexpected verified handoff entries: %s\n' \
-              "${handoff_entries[*]}" >&2
-            exit 65
-          fi
-          for handoff_entry in "${expected_entries[@]}"; do
-            if [[ ! -f ${handoff_dir}/${handoff_entry} ||
-                -L ${handoff_dir}/${handoff_entry} ]]; then
-              printf 'Error: verified handoff path is not a regular file: %s\n' \
-                "${handoff_entry}" >&2
-              exit 65
-            fi
+          paths=(CHANGELOG.md README.fr.md README.md download-video.sh install-fedora.sh
+            packaging/rpm/yt-dlp-aria2-downloader-gui.spec test-static.sh)
+          mkdir -p -- "${base_tree_dir}/packaging/rpm"
+          for path in "${paths[@]}"; do
+            gh api -H 'Accept: application/vnd.github.raw+json' \
+              "repos/${GITHUB_REPOSITORY}/contents/${path}?ref=${base_sha}" >"${base_tree_dir}/${path}"
           done
-          expected_metadata=$(mktemp)
-          expected_paths=$(mktemp)
-          expected_handoff_paths=$(mktemp)
-          handoff_paths=$(mktemp)
-          base_paths=$(mktemp)
-          tested_paths=$(mktemp)
-          main_tree_dir=$(mktemp -d)
-          api_payload=$(mktemp)
-          trap 'rm -f -- "${expected_metadata}" "${expected_paths}" "${expected_handoff_paths}" "${handoff_paths}" "${base_paths}" "${tested_paths}" "${api_payload}"; rm -rf -- "${main_tree_dir}"' EXIT
-          {
-            printf 'release_tag=%s\n' "${RELEASE_TAG}"
-            printf 'release_sha=%s\n' "${RELEASE_SHA}"
-            printf 'release_version=%s\n' "${RELEASE_VERSION}"
-          } >"${expected_metadata}"
-          cmp -s -- \
-            "${expected_metadata}" \
-            "${handoff_dir}/release-docs-metadata.txt"
+          gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/${GITHUB_REPOSITORY}/contents/download-video.sh?ref=${main_sha}" >"${base_tree_dir}/main-engine.txt"
+          gh api "repos/${GITHUB_REPOSITORY}/git/commits/${base_sha}" >"${base_tree_dir}/base-commit.json"
+          base_tree_sha=$(jq -er '.tree.sha | select(test("^[0-9a-f]{40}$"))' "${base_tree_dir}/base-commit.json")
+          gh api "repos/${GITHUB_REPOSITORY}/git/trees/${base_tree_sha}?recursive=true" >"${base_tree_dir}/base-tree.json"
+          # Fixed workflow code reads inert bytes only. Isolated Python cannot import a
+          # module from the downloaded handoff or execute a helper from the source tree.
+          python3 -I - "${handoff_dir}" "${base_tree_dir}" "${refs_snapshot}" <<'PY'
+          import datetime
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import stat
+          import sys
 
-          printf '%s\n' README.fr.md README.md test-static.sh \
-            | LC_ALL=C sort >"${expected_paths}"
-          cp -- "${expected_paths}" "${expected_handoff_paths}"
-          printf '%s\n' \
-            release-docs-base-tree.sha256 \
-            release-docs-metadata.txt \
-            release-docs-tested-tree.sha256 \
-            >>"${expected_handoff_paths}"
-          LC_ALL=C sort -o \
-            "${expected_handoff_paths}" \
-            "${expected_handoff_paths}"
-          sed -n \
-            's/^[0-9a-f]\{64\}  \(.*\)$/\1/p' \
-            "${handoff_dir}/release-docs-handoff.sha256" \
-            | LC_ALL=C sort >"${handoff_paths}"
-          sed -n \
-            's/^[0-9a-f]\{64\}  \(.*\)$/\1/p' \
-            "${handoff_dir}/release-docs-base-tree.sha256" \
-            | LC_ALL=C sort >"${base_paths}"
-          sed -n \
-            's/^[0-9a-f]\{64\}  \(.*\)$/\1/p' \
-            "${handoff_dir}/release-docs-tested-tree.sha256" \
-            | LC_ALL=C sort >"${tested_paths}"
-          handoff_line_count=$(wc -l \
-            <"${handoff_dir}/release-docs-handoff.sha256")
-          base_line_count=$(wc -l \
-            <"${handoff_dir}/release-docs-base-tree.sha256")
-          tested_line_count=$(wc -l \
-            <"${handoff_dir}/release-docs-tested-tree.sha256")
-          if ((handoff_line_count != 6 ||
-              base_line_count != 3 ||
-              tested_line_count != 3)) ||
-              ! cmp -s -- "${expected_handoff_paths}" "${handoff_paths}" ||
-              ! cmp -s -- "${expected_paths}" "${base_paths}" ||
-              ! cmp -s -- "${expected_paths}" "${tested_paths}"; then
-            printf '%s\n' \
-              'Error: verified tree manifest path set differs from the allowlist.' >&2
-            exit 65
-          fi
-          (
-            cd -- "${handoff_dir}"
-            sha256sum --check release-docs-handoff.sha256
-            sha256sum --check release-docs-tested-tree.sha256
+          handoff, base, refs_path = map(Path, sys.argv[1:])
+          paths = (
+              "CHANGELOG.md", "README.fr.md", "README.md", "download-video.sh",
+              "install-fedora.sh", "packaging/rpm/yt-dlp-aria2-downloader-gui.spec", "test-static.sh",
           )
+          metadata_name = "release-docs-metadata.json"
+          manifests = ("release-docs-base-tree.sha256", "release-docs-tested-tree.sha256")
+          expected_files = {*paths, metadata_name, *manifests, "release-docs-handoff.sha256"}
+          expected_dirs = {"packaging", "packaging/rpm"}
+          reason = "Synchronize published release documentation."
 
-          while IFS= read -r path; do
-            gh api \
-              -H 'Accept: application/vnd.github.raw+json' \
-              "repos/${GITHUB_REPOSITORY}/contents/${path}?ref=${main_sha}" \
-              >"${main_tree_dir}/${path}"
-          done <"${expected_paths}"
-          (
-            cd -- "${main_tree_dir}"
-            sha256sum --check \
-              "${handoff_dir}/release-docs-base-tree.sha256"
-          )
+          def require(condition, message):
+              if not condition:
+                  raise ValueError(message)
 
-          main_commit=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/git/commits/${main_sha}")
-          main_tree_sha=$(jq -r '.tree.sha' <<<"${main_commit}")
-          [[ ${main_tree_sha} =~ ^[0-9a-f]{40}$ ]]
-          main_tree=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/git/trees/${main_tree_sha}")
-          while IFS= read -r path; do
-            expected_mode=100644
-            if [[ ${path} == test-static.sh ]]; then
-              expected_mode=100755
-            fi
-            current_mode=$(jq -r \
-              --arg path "${path}" \
-              '[.tree[] | select(.path == $path and .type == "blob") | .mode] | if length == 1 then .[0] else "" end' \
-              <<<"${main_tree}")
-            if [[ ${current_mode} != "${expected_mode}" ]]; then
-              printf 'Error: protected main mode differs for %s: %s\n' \
-                "${path}" "${current_mode}" >&2
-              exit 65
-            fi
-          done <"${expected_paths}"
+          def read(root, name):
+              path = root / name
+              info = path.lstat()
+              require(stat.S_ISREG(info.st_mode) and info.st_size <= 1024 * 1024,
+                      "verified handoff path is not a regular file or exceeds the size limit")
+              return path.read_bytes()
+
+          def version(value):
+              require(isinstance(value, str) and re.fullmatch(r"[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}", value),
+                      "invalid version metadata")
+              return tuple(map(int, value.split(".")))
+
+          def one(pattern, text):
+              matches = re.findall(pattern, text, re.M)
+              require(len(matches) == 1, "ambiguous source version declaration")
+              return matches[0]
+
+          def replace(text, before, after, count=1):
+              require(text.count(before) == count, "source transformation count differs")
+              return text.replace(before, after)
+
+          def manifest(name, expected):
+              raw = read(handoff, name).decode("ascii")
+              rows = raw.splitlines()
+              require(raw.endswith("\n") and len(rows) == len(expected), "manifest entry count differs")
+              result = {}
+              for row in rows:
+                  match = re.fullmatch(r"([0-9a-f]{64})  (.+)", row)
+                  require(match is not None, "invalid manifest line")
+                  digest, path = match.groups()
+                  require(path in expected and path not in result, "manifest path is not allowlisted")
+                  result[path] = digest
+              require(result.keys() == expected, "incomplete manifest")
+              return result
+
+          def verify(root, entries):
+              for path, digest in entries.items():
+                  require(hashlib.sha256(read(root, path)).hexdigest() == digest, "verified bytes differ")
+
+          try:
+              require(stat.S_ISDIR(handoff.lstat().st_mode), "handoff root must be a real directory")
+              seen_files, seen_dirs = set(), set()
+              for directory, dirs, files in os.walk(handoff, followlinks=False):
+                  for entry in dirs:
+                      path = Path(directory) / entry
+                      require(stat.S_ISDIR(path.lstat().st_mode), "handoff contains a substituted directory")
+                      seen_dirs.add(path.relative_to(handoff).as_posix())
+                  for entry in files:
+                      seen_files.add((Path(directory) / entry).relative_to(handoff).as_posix())
+              require(seen_files == expected_files and seen_dirs == expected_dirs, "unexpected handoff path set")
+              context = json.loads(os.environ["VERSION_CONTEXT"])
+              require(json.loads(read(handoff, metadata_name)) == context, "handoff metadata changed")
+              required_keys = {"schema_version", "remote", "branch", "main_sha", "target_sha", "base_sha",
+                               "floor_version", "next_version", "refs_sha256", "date", "release_tag",
+                               "release_sha", "release_version"}
+              require(context.keys() == required_keys and context["schema_version"] == 1 and
+                      context["remote"] == "origin", "unsupported source metadata")
+              require(context["release_tag"] == os.environ["RELEASE_TAG"] and
+                      context["release_sha"] == os.environ["RELEASE_SHA"] and
+                      context["release_version"] == os.environ["RELEASE_VERSION"] and
+                      context["branch"] == "automation/release-docs-v" + os.environ["RELEASE_VERSION"],
+                      "source metadata is bound to another release")
+              verify(handoff, manifest("release-docs-handoff.sha256", expected_files - {"release-docs-handoff.sha256"}))
+              verify(handoff, manifest(manifests[1], set(paths)))
+              verify(base, manifest(manifests[0], set(paths)))
+              catalog = refs_path.read_bytes()
+              require(hashlib.sha256(catalog).hexdigest() == context["refs_sha256"], "remote refs changed")
+              refs = {}
+              for line in catalog.decode("utf-8").splitlines():
+                  oid, ref = line.split("\t")
+                  require(re.fullmatch(r"[0-9a-f]{40}", oid) and ref not in refs, "invalid remote refs")
+                  require(ref in {"refs/heads/main", "refs/heads/" + context["branch"]} or
+                          ref.startswith("refs/tags/v"), "unexpected remote ref")
+                  refs[ref] = oid
+              require(refs["refs/heads/main"] == context["main_sha"] and
+                      refs.get("refs/heads/" + context["branch"], "0" * 40) == context["target_sha"],
+                      "remote branch identities differ")
+              old = {path: read(base, path).decode("utf-8") for path in paths}
+              engine_pattern = r"^readonly VERSION=[\"']([0-9]+\.[0-9]+\.[0-9]+)[\"']$"
+              old_version = one(engine_pattern, old["download-video.sh"])
+              main_version = one(engine_pattern, read(base, "main-engine.txt").decode("utf-8"))
+              floor = max([version(old_version), version(main_version), *[
+                  version(ref[11:]) for ref in refs if re.fullmatch(r"refs/tags/v[0-9]+\.[0-9]+\.[0-9]+", ref)
+              ]])
+              new_version = ".".join(map(str, (*floor[:2], floor[2] + 1)))
+              version(new_version)
+              require(version(context["floor_version"]) == floor and context["next_version"] == new_version,
+                      "candidate version is not above main, target and tags")
+              commit = json.loads(read(base, "base-commit.json"))
+              require(commit["sha"] == context["base_sha"], "base commit identity differs")
+              date = datetime.datetime.fromisoformat(commit["committer"]["date"].replace("Z", "+00:00"))
+              require(date.tzinfo is not None, "base commit date must identify its timezone")
+              day = date.astimezone(datetime.timezone.utc).date()
+              require(context["date"] == day.isoformat(), "source date differs from base commit")
+              tree = json.loads(read(base, "base-tree.json"))
+              require(tree.get("truncated") is False and tree["sha"] == commit["tree"]["sha"], "incomplete source tree")
+              for path in paths:
+                  mode = "100755" if path in {"download-video.sh", "install-fedora.sh", "test-static.sh"} else "100644"
+                  entries = [entry for entry in tree["tree"] if entry["path"] == path]
+                  require(len(entries) == 1 and entries[0]["type"] == "blob" and entries[0]["mode"] == mode,
+                          "base source mode differs")
+              published = one(r"^readonly EXPECTED_PUBLISHED_VERSION='([0-9]+\.[0-9]+\.[0-9]+)'$", old["test-static.sh"])
+              release = context["release_version"]
+              require(version(published) < version(release) <= version(old_version),
+                      "a no-op, downgrade or future release must not create a source push")
+              expected = dict(old)
+              templates = {
+                  "README.md": (
+                      ("latest published package release is **{version}**.", 1),
+                      ("currently published v{version} release.", 1),
+                      ("latest published release, {version}, provides", 1),
+                      ("yt-dlp-aria2-downloader-gui-{version}", 7),
+                      ("yt-dlp-aria2-downloader-gui_{version}", 3),
+                      ("gh release verify v{version} -R", 1),
+                      ("gh release verify-asset v{version} ./ARTIFACT", 1),
+                  ),
+                  "README.fr.md": (
+                      ("dernière release de paquets publiée est la **{version}**.", 1),
+                      ("release v{version} actuellement publiée.", 1),
+                      ("dernière release publiée, la {version}, fournit", 1),
+                      ("yt-dlp-aria2-downloader-gui-{version}", 7),
+                      ("yt-dlp-aria2-downloader-gui_{version}", 3),
+                      ("gh release verify v{version} -R", 1),
+                      ("gh release verify-asset v{version} ./ARTEFACT", 1),
+                  ),
+              }
+              for path, rules in templates.items():
+                  for template, count in rules:
+                      expected[path] = replace(expected[path], template.format(version=published),
+                                               template.format(version=release), count)
+              expected["test-static.sh"] = replace(expected["test-static.sh"],
+                  f"readonly EXPECTED_PUBLISHED_VERSION='{published}'", f"readonly EXPECTED_PUBLISHED_VERSION='{release}'")
+              expected["download-video.sh"], count = re.subn(
+                  r"^readonly VERSION=([\"'])" + re.escape(old_version) + r"\1$",
+                  lambda match: "readonly VERSION=" + match[1] + new_version + match[1], old["download-video.sh"], flags=re.M)
+              require(count == 1, "engine version replacement differs")
+              for path, declaration in (("install-fedora.sh", "APP_VERSION"), ("test-static.sh", "EXPECTED_VERSION")):
+                  expected[path] = replace(expected[path], f"readonly {declaration}='{old_version}'",
+                                           f"readonly {declaration}='{new_version}'")
+              for path, marker in (("README.md", "development version is **{version}**."),
+                                   ("README.fr.md", "développement actuelle est la **{version}**.")):
+                  expected[path] = replace(expected[path], marker.format(version=old_version), marker.format(version=new_version))
+                  for prefix in ("--ref v", "-f tag=v"):
+                      pattern = re.compile(re.escape(prefix) + r"([0-9]+\.[0-9]+\.[0-9]+)(?=\s|$)")
+                      require(pattern.findall(expected[path]) == [old_version], "manual release argument differs")
+                      expected[path] = pattern.sub(prefix + new_version, expected[path])
+              require(old["CHANGELOG.md"].startswith("# Changelog\n\n"), "unexpected changelog title")
+              expected["CHANGELOG.md"] = replace(old["CHANGELOG.md"], "# Changelog\n\n",
+                  f"# Changelog\n\n## {new_version} - Unreleased\n\n### Maintenance\n\n- {reason}\n\n")
+              weekdays = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+              months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+              rpm_date = f"{weekdays[day.weekday()]} {months[day.month - 1]} {day.day:02d} {day.year:04d}"
+              spec = "packaging/rpm/yt-dlp-aria2-downloader-gui.spec"
+              expected[spec] = replace(old[spec], "%changelog\n",
+                  f"%changelog\n* {rpm_date} OscarFrog <151366285+OscarFrog@users.noreply.github.com> - {new_version}-1\n- {reason}\n\n")
+              for path in paths:
+                  require(expected[path].encode("utf-8") == read(handoff, path), "candidate changed bytes beyond the exact transformation")
+          except (OSError, UnicodeError, ValueError, KeyError, TypeError, IndexError) as error:
+              print(f"Error: invalid release-documentation handoff: {error}", file=sys.stderr)
+              raise SystemExit(65)
+          PY
 
           create_blob() {
             local path=$1
             local blob_sha=''
-
             if ! base64 --wrap=0 -- "${handoff_dir}/${path}" \
-              | jq -Rs \
-                '{content: ., encoding: "base64"}' \
-                >"${api_payload}"; then
-              printf 'Error: unable to encode verified blob payload: %s\n' \
-                "${path}" >&2
+              | jq -Rs '{content: ., encoding: "base64"}' >"${api_payload}"; then
+              printf 'Error: unable to encode verified blob payload: %s\n' "${path}" >&2
               return 65
             fi
-            if ! blob_sha=$(gh api \
-              --method POST \
-              "repos/${GITHUB_REPOSITORY}/git/blobs" \
-              --input "${api_payload}" \
-              --jq '.sha'); then
-              printf 'Error: unable to create verified Git blob: %s\n' \
-                "${path}" >&2
+            if ! blob_sha=$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/blobs" \
+              --input "${api_payload}" --jq '.sha'); then
+              printf 'Error: unable to create verified Git blob: %s\n' "${path}" >&2
               return 65
             fi
             if [[ ! ${blob_sha} =~ ^[0-9a-f]{40}$ ]]; then
-              printf 'Error: invalid verified Git blob identity: %s\n' \
-                "${path}" >&2
+              printf 'Error: invalid verified Git blob identity: %s\n' "${path}" >&2
               return 65
             fi
             printf '%s\n' "${blob_sha}"
           }
-
-          readme_fr_blob=$(create_blob README.fr.md)
-          readme_blob=$(create_blob README.md)
-          static_blob=$(create_blob test-static.sh)
-          jq -n \
-            --arg base_tree "${main_tree_sha}" \
-            --arg readme_fr "${readme_fr_blob}" \
-            --arg readme "${readme_blob}" \
-            --arg static "${static_blob}" \
-            '{
-              base_tree: $base_tree,
-              tree: [
-                {path: "README.fr.md", mode: "100644", type: "blob", sha: $readme_fr},
-                {path: "README.md", mode: "100644", type: "blob", sha: $readme},
-                {path: "test-static.sh", mode: "100755", type: "blob", sha: $static}
-              ]
-            }' >"${api_payload}"
-          candidate_tree_sha=$(gh api \
-            --method POST \
-            "repos/${GITHUB_REPOSITORY}/git/trees" \
-            --input "${api_payload}" \
-            --jq '.sha')
+          # Recheck the complete reference advertisement before any object is written.
+          capture_refs "${current_snapshot}"
+          cmp -s -- "${refs_snapshot}" "${current_snapshot}"
+          entries='[]'
+          for path in "${paths[@]}"; do
+            blob_sha=$(create_blob "${path}")
+            mode=100644
+            case ${path} in download-video.sh | install-fedora.sh | test-static.sh) mode=100755 ;; esac
+            entries=$(jq -c --arg path "${path}" --arg mode "${mode}" --arg sha "${blob_sha}" \
+              '. + [{path:$path,mode:$mode,type:"blob",sha:$sha}]' <<<"${entries}")
+          done
+          jq -n --arg base_tree "${base_tree_sha}" --argjson tree "${entries}" \
+            '{base_tree:$base_tree,tree:$tree}' >"${api_payload}"
+          candidate_tree_sha=$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/trees" --input "${api_payload}" --jq '.sha')
           [[ ${candidate_tree_sha} =~ ^[0-9a-f]{40}$ ]]
-
-          branch="automation/release-docs-v${RELEASE_VERSION}"
-          branch_ref="refs/heads/${branch}"
-          matching_refs=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/${branch}")
-          branch_sha=$(jq -r \
-            --arg branch_ref "${branch_ref}" \
-            '[.[] | select(.ref == $branch_ref) | .object.sha] | if length == 0 then "" elif length == 1 then .[0] else error("duplicate branch ref") end' \
-            <<<"${matching_refs}")
-
-          if [[ -n ${branch_sha} ]]; then
-            [[ ${branch_sha} =~ ^[0-9a-f]{40}$ ]]
-            branch_commit=$(gh api \
-              "repos/${GITHUB_REPOSITORY}/git/commits/${branch_sha}")
-            branch_tree_sha=$(jq -r '.tree.sha' <<<"${branch_commit}")
-            branch_parent_count=$(jq -r '.parents | length' <<<"${branch_commit}")
-            branch_parent_sha=$(jq -r '.parents[0].sha // ""' <<<"${branch_commit}")
-            if [[ ${branch_tree_sha} != "${candidate_tree_sha}" ||
-                ${branch_parent_count} != 1 ||
-                ${branch_parent_sha} != "${main_sha}" ]]; then
-              printf '%s\n' \
-                'Error: existing automation branch is not the exact verified tree.' >&2
-              exit 65
-            fi
-            candidate_commit_sha=${branch_sha}
-          else
-            current_main_sha=$(gh api \
-              "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
-              --jq '.object.sha')
-            if [[ ${current_main_sha} != "${main_sha}" ]]; then
-              printf '%s\n' \
-                'Error: protected main changed during documentation publication.' >&2
-              exit 75
-            fi
-            jq -n \
-              --arg message "Update published documentation to v${RELEASE_VERSION}" \
-              --arg tree "${candidate_tree_sha}" \
-              --arg parent "${main_sha}" \
-              '{message: $message, tree: $tree, parents: [$parent]}' \
-              >"${api_payload}"
-            candidate_commit_sha=$(gh api \
-              --method POST \
-              "repos/${GITHUB_REPOSITORY}/git/commits" \
-              --input "${api_payload}" \
-              --jq '.sha')
-            [[ ${candidate_commit_sha} =~ ^[0-9a-f]{40}$ ]]
-            jq -n \
-              --arg ref "${branch_ref}" \
-              --arg sha "${candidate_commit_sha}" \
-              '{ref: $ref, sha: $sha}' \
-              >"${api_payload}"
-            created_branch_sha=$(gh api \
-              --method POST \
-              "repos/${GITHUB_REPOSITORY}/git/refs" \
-              --input "${api_payload}" \
-              --jq '.object.sha')
-            [[ ${created_branch_sha} == "${candidate_commit_sha}" ]]
+          [[ ${candidate_tree_sha} != "${base_tree_sha}" ]]
+          jq -n --arg message "Update published documentation to v${RELEASE_VERSION}" \
+            --arg tree "${candidate_tree_sha}" --arg parent "${base_sha}" \
+            '{message:$message,tree:$tree,parents:[$parent]}' >"${api_payload}"
+          candidate_commit_sha=$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/commits" --input "${api_payload}" --jq '.sha')
+          [[ ${candidate_commit_sha} =~ ^[0-9a-f]{40}$ ]]
+          # A raced main, target or tag invalidates preparation. The ref update itself
+          # remains creation-only or fast-forward-only; it never rewrites another commit.
+          capture_refs "${current_snapshot}"
+          if ! cmp -s -- "${refs_snapshot}" "${current_snapshot}"; then
+            printf '%s\n' 'Error: main, target or tags changed; rerun read-only preparation.' >&2
+            exit 75
           fi
-
-          printf 'Prepared exact release-documentation branch %s at %s.\n' \
-            "${branch}" "${candidate_commit_sha}"
+          if [[ ${target_sha} == 0000000000000000000000000000000000000000 ]]; then
+            jq -n --arg ref "${branch_ref}" --arg sha "${candidate_commit_sha}" \
+              '{ref:$ref,sha:$sha}' >"${api_payload}"
+            published_sha=$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" --input "${api_payload}" --jq '.object.sha')
+          else
+            jq -n --arg sha "${candidate_commit_sha}" '{sha:$sha,force:false}' >"${api_payload}"
+            published_sha=$(gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}" \
+              --input "${api_payload}" --jq '.object.sha')
+          fi
+          [[ ${published_sha} == "${candidate_commit_sha}" ]]
+          [[ $(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --jq '.object.sha') == "${candidate_commit_sha}" ]]
+          printf 'Prepared exact release-documentation branch %s at %s.\n' "${branch}" "${candidate_commit_sha}"
           {
-            printf '%s\n' \
-              '### Reviewed documentation branch ready' \
-              ''
-            printf 'Open a maintainer-authenticated pull request from %s to main.\n' \
-              "${branch}"
+            printf '%s\n' '### Reviewed documentation branch ready' ''
+            printf 'Open a maintainer-authenticated pull request from %s to main.\n' "${branch}"
             printf '\nVerified commit: %s\n' "${candidate_commit_sha}"
           } >>"${GITHUB_STEP_SUMMARY}"

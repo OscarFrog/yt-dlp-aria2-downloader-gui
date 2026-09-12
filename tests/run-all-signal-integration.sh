@@ -92,10 +92,15 @@ EOF_BASH_MOCK
         TEST_ROOT="${TEST_ROOT}" \
         MOCK_BIN="${mock_bin}" \
         python3 <<'PY_CONTROLLER'
+import fcntl
 import os
 import pathlib
+import re
 import signal
+import struct
 import subprocess
+import sys
+import termios
 import time
 
 project_dir = pathlib.Path(os.environ["PROJECT_DIR"])
@@ -103,6 +108,50 @@ test_root = pathlib.Path(os.environ["TEST_ROOT"])
 mock_bin = pathlib.Path(os.environ["MOCK_BIN"])
 real_bash = os.environ["REAL_BASH"]
 real_sleep = os.environ["REAL_SLEEP"]
+
+
+def wait_runner(runner: subprocess.Popen[bytes]) -> str:
+    """Drain stderr while waiting so diagnostics cannot block cancellation."""
+    _, stderr = runner.communicate(timeout=10)
+    return (stderr or b"").decode("utf-8", errors="replace")
+
+
+def report_timeout(runner: subprocess.Popen[bytes], *pids: int) -> None:
+    """Record bounded process/pipe state without arguments or environment data."""
+    for pid in dict.fromkeys((runner.pid, *pids)):
+        if pid <= 0:
+            continue
+        process = pathlib.Path(f"/proc/{pid}")
+        try:
+            with (process / "stat").open("rb") as handle:
+                value = handle.read(4096).decode("ascii", errors="replace")
+            fields = value[value.rfind(") ") + 2:].split()
+            if len(fields) < 4 or not all(field.isdigit() for field in fields[1:4]):
+                raise ValueError("invalid process identity")
+            with (process / "status").open("rb") as handle:
+                status = handle.read(16384).decode("ascii", errors="replace")
+            ignored = re.search(r"^SigIgn:\s*([0-9a-fA-F]+)$", status, re.M)
+            with (process / "wchan").open("rb") as handle:
+                wchan = handle.read(80).decode("ascii", errors="replace").strip()
+            if not re.fullmatch(r"[A-Za-z0-9_+.-]{1,80}", wchan):
+                wchan = "unavailable"
+            state = fields[0] if re.fullmatch(r"[A-Za-z]", fields[0]) else "?"
+            print(
+                f"Timeout process: pid={pid} ppid={fields[1]} pgid={fields[2]} "
+                f"sid={fields[3]} state={state} wchan={wchan} "
+                f"SigIgn={ignored.group(1) if ignored else 'unavailable'}",
+                file=sys.stderr, flush=True,
+            )
+        except (OSError, ValueError):
+            print(f"Timeout process: pid={pid} unavailable", file=sys.stderr, flush=True)
+    if runner.stderr is not None:
+        try:
+            descriptor = runner.stderr.fileno()
+            pending = struct.unpack("i", fcntl.ioctl(descriptor, termios.FIONREAD, struct.pack("i", 0)))[0]
+            capacity = fcntl.fcntl(descriptor, fcntl.F_GETPIPE_SZ)
+            print(f"Timeout stderr pipe: pending={pending} capacity={capacity}", file=sys.stderr, flush=True)
+        except (OSError, ValueError):
+            print("Timeout stderr pipe: unavailable", file=sys.stderr, flush=True)
 
 
 def running(pid: int, identity_token: str) -> bool:
@@ -181,6 +230,60 @@ def terminate_if_needed(pid: int, identity_token: str) -> None:
         pass
 
 
+# Fill the actual capture pipe before waiting: a wait-then-read controller would
+# block the signal handler before it can finish the runner's normal cleanup.
+noise_marker = test_root / "stderr-ready.pid"
+noise_size_file = test_root / "stderr-size"
+noise_fixture = r'''
+set -euo pipefail
+source "$1"
+size_file=$3
+test_runner_initialize
+trap test_runner_cleanup EXIT
+trap 'size=$(<"${size_file}"); printf "%*s" "${size}" "" >&2; test_runner_handle_signal INT 130' INT
+printf '%s\n' "$$" >"$2"
+while :; do sleep 0.01; done
+'''
+noise_runner = subprocess.Popen(
+    [real_bash, "-c", noise_fixture, "stderr-fixture",
+     str(project_dir / "tests/lib/test-runner.sh"), str(noise_marker), str(noise_size_file)],
+    env={**os.environ, "TMPDIR": str(test_root)},
+    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+)
+try:
+    wait_marker(noise_marker, noise_runner)
+    if noise_runner.stderr is None:
+        raise AssertionError("stderr fixture has no capture pipe")
+    capacity = fcntl.fcntl(noise_runner.stderr, fcntl.F_GETPIPE_SZ)
+    noise_size_file.write_text(str(capacity * 2), encoding="ascii")
+    noise_runner.send_signal(signal.SIGINT)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        pending = struct.unpack(
+            "i", fcntl.ioctl(noise_runner.stderr, termios.FIONREAD, struct.pack("i", 0))
+        )[0]
+        if pending == capacity:
+            break
+        if noise_runner.poll() is not None:
+            raise AssertionError("stderr fixture exited before filling its capture pipe")
+        time.sleep(0.01)
+    else:
+        raise AssertionError("stderr fixture did not fill its capture pipe")
+    try:
+        noise_output = wait_runner(noise_runner)
+    except subprocess.TimeoutExpired:
+        report_timeout(noise_runner)
+        raise AssertionError("stderr capture blocked runner cancellation") from None
+    if noise_runner.returncode != 130 or len(noise_output) != capacity * 2:
+        raise AssertionError("stderr draining changed signal status or lost diagnostics")
+finally:
+    if noise_runner.poll() is None:
+        noise_runner.kill()
+        noise_runner.wait(timeout=5)
+    if noise_runner.stderr is not None:
+        noise_runner.stderr.close()
+
+
 for name, sig, expected in (
     ("hup", signal.SIGHUP, 129),
     ("int", signal.SIGINT, 130),
@@ -219,13 +322,12 @@ for name, sig, expected in (
         descendant_pid = wait_marker(descendant_marker, runner)
         os.kill(runner.pid, sig)
         try:
-            return_code = runner.wait(timeout=10)
-        except subprocess.TimeoutExpired as exc:
-            raise AssertionError(f"run-all did not terminate for {name}") from exc
+            stderr = wait_runner(runner)
+        except subprocess.TimeoutExpired:
+            report_timeout(runner, immediate_pid, descendant_pid)
+            raise AssertionError(f"run-all did not terminate for {name}") from None
 
-        stderr = (runner.stderr.read() if runner.stderr else b"").decode(
-            "utf-8", errors="replace"
-        )
+        return_code = runner.returncode
         if return_code != expected:
             raise AssertionError(
                 f"run-all {name} returned {return_code}, expected {expected}: {stderr}"
@@ -246,6 +348,8 @@ for name, sig, expected in (
             terminate_if_needed(immediate_pid, identity_token)
         if descendant_pid:
             terminate_if_needed(descendant_pid, identity_token)
+        if runner.stderr is not None:
+            runner.stderr.close()
 
 # A second fatal signal during the grace period must not interrupt cleanup.
 # The synthetic child and descendant ignore TERM/INT so run-all must reach its
@@ -286,15 +390,14 @@ try:
     wait_signal_guard(runner)
     os.kill(runner.pid, signal.SIGTERM)
     try:
-        return_code = runner.wait(timeout=10)
-    except subprocess.TimeoutExpired as exc:
+        stderr = wait_runner(runner)
+    except subprocess.TimeoutExpired:
+        report_timeout(runner, immediate_pid, descendant_pid)
         raise AssertionError(
             "run-all did not finish cleanup after repeated signals"
-        ) from exc
+        ) from None
 
-    stderr = (runner.stderr.read() if runner.stderr else b"").decode(
-        "utf-8", errors="replace"
-    )
+    return_code = runner.returncode
     if return_code != 130:
         raise AssertionError(
             f"run-all repeated-signal cleanup returned {return_code}, "
@@ -318,6 +421,8 @@ finally:
         terminate_if_needed(immediate_pid, identity_token)
     if descendant_pid:
         terminate_if_needed(descendant_pid, identity_token)
+    if runner.stderr is not None:
+        runner.stderr.close()
 
 # Generic os.execvp OSError handling is defensive hardening. Do not qualify it with an ENOEXEC text fixture: POSIX execvp falls back to a shell interpreter for that case.
 

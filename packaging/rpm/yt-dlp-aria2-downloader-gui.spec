@@ -86,6 +86,10 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sat Sep 12 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.13-1
+- Enforce coherent source versions before contributor pushes and improve agent routing.
+- Qualify workflow syntax and Python 3.10; drain signal-test diagnostics safely.
+
 * Sat Sep 12 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.12-1
 - Prepare unreleased network-destination support with private local staging.
 - Preserve complete media on failed publication and refuse final-name overwrites.

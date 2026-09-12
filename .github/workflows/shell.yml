@@ -28,9 +28,62 @@ jobs:
           sudo env DEBIAN_FRONTEND=noninteractive \
             apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
             aria2 coreutils curl desktop-file-utils diffutils findutils git gnupg \
-            grep procps python3 sed shellcheck unzip util-linux
+            grep jq procps python3 sed shellcheck unzip util-linux
+      - name: Install reviewed workflow linter
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          source scripts/dev-tools/actionlint-pin.env
+          tool_dir=$(mktemp -d "${RUNNER_TEMP}/actionlint.XXXXXXXX")
+          archive=$(mktemp "${RUNNER_TEMP}/actionlint-archive.XXXXXXXX")
+          trap 'rm -f -- "${archive}"' EXIT
+          curl --fail --location --proto '=https' --proto-redir '=https' \
+            --tlsv1.2 --connect-timeout 15 --max-time 120 --retry 3 \
+            --output "${archive}" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          printf '%s  %s\n' "${ACTIONLINT_LINUX_AMD64_SHA256}" "${archive}" | sha256sum --check
+          tar --extract --gzip --file "${archive}" --directory "${tool_dir}" \
+            --no-same-owner --no-same-permissions actionlint
+          chmod 0755 -- "${tool_dir}/actionlint"
+          printf '%s\n' "${tool_dir}" >>"${GITHUB_PATH}"
+      - name: Check workflow syntax and embedded shell
+        run: bash ./scripts/check-workflows.sh
       - name: Run validation
         run: timeout --signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --jobs 4
+  validate-python-minimum:
+    name: Python 3.10 / Ubuntu
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.10'
+      - name: Install validation tools
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo env DEBIAN_FRONTEND=noninteractive \
+            apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
+            aria2 coreutils curl desktop-file-utils diffutils findutils git gnupg \
+            grep jq procps sed shellcheck unzip util-linux
+      - name: Bind every test interpreter to the minimum Python
+        run: |
+          set -Eeuo pipefail
+          # Some hermetic fixtures use /usr/bin/python3 or a restricted PATH.
+          # Bind those to setup-python only after apt, on this disposable runner.
+          python_binary=$(readlink -f "$(command -v python3)")
+          "${python_binary}" -c 'import sys; print(sys.version); assert sys.version_info[:2] == (3, 10)'
+          sudo ln -sfnT -- "${python_binary}" /usr/bin/python3
+          env PATH=/usr/bin:/bin python3 -c 'import sys; print(sys.version); assert sys.version_info[:2] == (3, 10)'
+          [[ $(readlink -f /usr/bin/python3) == "${python_binary}" ]]
+      - name: Confirm minimum Python and environment
+        run: |
+          python3 -c 'import sys; print(sys.version); assert sys.version_info[:2] == (3, 10)'
+          bash ./tests/run-all.sh --doctor
+      - name: Exercise the complete contract under Python 3.10
+        run: timeout --signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --full --jobs 4
   validate-fedora:
     name: Fedora 44
     runs-on: ubuntu-24.04
@@ -50,7 +103,7 @@ jobs:
         run: |
           dnf install --assumeyes --no-docs --setopt=install_weak_deps=False \
             aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 \
-            grep procps-ng python3 sed ShellCheck unzip util-linux
+            grep jq procps-ng python3 sed ShellCheck unzip util-linux
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

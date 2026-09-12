@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# ==============================================================================
+# Project     : yt-dlp-aria2-downloader-gui
+# File        : .githooks/pre-push
+# Purpose     : Refuse source pushes whose committed version has not increased.
+# ==============================================================================
+
+set -euo pipefail
+umask 077
+
+main() {
+    local project_dir=''
+    if (($# != 2)) || [[ ! $1 =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+        printf 'Error: version-checked pushes require a simple named remote.\n' >&2
+        return 64
+    fi
+    project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+    # Git supplies the location too; do not repeat credential-bearing URLs in
+    # Python's argv. The checker validates the named remote's fetch/push URLs.
+    exec python3 -B "${project_dir}/scripts/check-push-version.py" hook -- "$1"
+}
+
+main "$@"

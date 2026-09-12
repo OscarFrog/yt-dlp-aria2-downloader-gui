@@ -9,6 +9,8 @@ body:
       value: |
         Provide the contract Codex should satisfy. Do not include secrets,
         credentials, private media URLs, cookies, or headers.
+        Permanent conventions and validation live in AGENTS.md and TESTING.md;
+        only describe task-specific requirements here.
 
   - type: textarea
     id: objective
@@ -56,18 +58,18 @@ body:
     attributes:
       label: Out of scope
       description: State adjacent behavior or external actions that this task does not authorize.
-      placeholder: Version bumps, releases, repository settings, unrelated refactors, and so on.
+      placeholder: Releases, repository settings, unrelated refactors, and so on.
 
   - type: textarea
     id: validation
     attributes:
       label: Expected validation
-      description: List focused tests, full-suite expectations, and any manual or privileged qualification.
+      description: Optional task-specific validation beyond the permanent TESTING.md contract.
       placeholder: |
         ./tests/run-all.sh --fast --jobs 4
         ./tests/run-all.sh --full --jobs 4
     validations:
-      required: true
+      required: false
 
   - type: dropdown
     id: external_authority

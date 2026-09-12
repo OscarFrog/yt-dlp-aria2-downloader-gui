@@ -36,6 +36,7 @@ publications, workflow dispatches, repository settings, or secrets):
 
 ## Repository coherence
 
+- [ ] The development version was increased and checked before this source push; published-asset references remain accurate.
 - [ ] The diff contains no unrelated changes.
 - [ ] Focused regression coverage matches the changed contract.
 - [ ] `./tests/run-all.sh --full --jobs 4` passed, or the limitation is stated above.

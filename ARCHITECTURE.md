@@ -450,7 +450,7 @@ architecture document. The source ZIP contains the tracked source tree.
 
 | Workflow | Responsibility |
 | --- | --- |
-| `shell.yml` | Canonical local suite on Ubuntu and Fedora |
+| `shell.yml` | Pinned workflow syntax checks, canonical local suite on Ubuntu/Fedora and actual Python 3.10 qualification |
 | `packages.yml` | Git-free source archive, RPM/DEB construction, lifecycle, authentication, and previous-release upgrade |
 | `real-tools.yml` | Pinned real-tool behavior plus scheduled current-stable qualification |
 | `qualification.yml` | Supported FFmpeg/FFprobe generation matrix |
@@ -460,7 +460,11 @@ architecture document. The source ZIP contains the tracked source tree.
 | `release-docs.yml` | After a successful immutable release, prepare and independently verify a bounded published-version patch, then publish a branch for a maintainer-reviewed documentation PR |
 
 Third-party Actions are pinned by full commit SHA and checkout credentials stay
-disabled. Jobs receive only the permissions they need.
+disabled. Jobs receive only the permissions they need. The Ubuntu validation
+job verifies the pinned actionlint archive before running the shared explicit
+workflow check; ordinary local fast/full validation does not provision this
+additional tool. A separate setup-python job exercises the complete suite with
+Python 3.10 and asserts the selected interpreter before starting.
 
 Fedora jobs executing downloads use anonymous Docker volumes for `/tmp` and
 `/var/tmp`, so private-state and media-workspace tests exercise the host volume's
@@ -490,10 +494,14 @@ For releases created under the tagged-documentation guard, the updater is
 expected to be an idempotent no-op. Only the final job receives
 `contents: write`; it does not execute repository code or check out any
 repository ref. It resolves the protected `main` identity through the GitHub
-API, requires the release SHA to be its ancestor, verifies the current
-allowlisted bytes and modes against the release base, accepts only the
-independently tested two READMEs and static published-version contract, and uses
-Git database objects to create a versioned automation branch. A maintainer then
+API, requires the release SHA to be its ancestor and uses main or a target
+branch descending from it as the immutable source base. If the published
+references need updating, the read-only jobs also prepare and independently
+reproduce a source bump above main, target and numeric tags. The publisher
+validates the exact seven-file transformation, base modes, manifests and
+reference catalogue using fixed isolated code, then uses Git database objects
+to create or fast-forward a versioned automation branch. No-op updates do not
+bump or publish; divergent branches and detected reference races are refused. A maintainer then
 opens the reviewed pull request; the workflow never writes directly to `main`
 or receives pull-request permission.
 
@@ -503,9 +511,9 @@ secrets/environments is outside ordinary code-change authority.
 ## Validation architecture
 
 `tests/lib/project-files.sh` is the canonical source inventory. `test-static.sh`
-checks headers, Python module identity, repository-skill discovery metadata,
+checks headers, Python 3.10 grammar/module identity, repository-skill file metadata,
 version coherence, workflow pins and permissions, packaging contracts, and
-exact agreement between Git and the tracked-file table in
+exact agreement between tracked/non-ignored source paths and the file table in
 `REPOSITORY_FILES.md`.
 
 `tests/run-all.sh` schedules static validation and isolated integration suites.
@@ -526,7 +534,27 @@ command, global-option form, GitHub CLI command, and common environment wrapper
 interactive outside the sandbox, and forbid common force-push-to-`main` forms.
 These controls improve task
 execution but do not grant release, merge, or repository-administration
-authority.
+authority. These project controls depend on starting Codex in the trusted
+repository; a file's existence or passing structure test does not prove it was
+loaded into the active session. `TESTING.md` owns setup and task routing.
+
+For authorized source pushes, the owner's standing rule in `AGENTS.md`
+authorizes a coherent PATCH increment before validation. The contributor-only
+`scripts/check-push-version.py` first checks local source/published metadata
+coherence without Git or network access, reusing the existing published-reference
+templates. For an authorized push it additionally compares with live remote
+main/target versions and numeric tags. The tracked
+`.githooks/pre-push`, explicitly enabled per checkout, reuses that checker on
+the actual commit objects and refuses unchanged or incoherent versions before
+remote updates. Git replacement refs cannot change the inspected identities.
+It reads regular Git blobs as data and never mutates the version or creates release
+state. `tests/push-version-integration.py` qualifies this boundary with real
+local bare repositories and is called by static validation. The offline
+`scripts/prepare-source-version.py` helper stages deterministic seven-file bumps
+in isolated source trees and rolls back controlled errors. Automation prepares
+those bumps without publication authority; privileged jobs reproduce their
+permitted transforms as data without importing a repository helper. These
+controls supplement the inspection helper; they are not general Git wrappers.
 
 Tests use private temporary homes, mock binaries, fixtures, and bounded process
 supervision. The parallel runner binds cancellation to a child-published Linux

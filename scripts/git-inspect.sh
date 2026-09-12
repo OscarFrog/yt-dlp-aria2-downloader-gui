@@ -11,7 +11,7 @@ umask 077
 
 usage() {
     printf '%s\n' \
-        'Usage: scripts/git-inspect.sh status|diff|diff-staged|diff-check|inventory'
+        'Usage: scripts/git-inspect.sh status|summary|log|diff|diff-staged|diff-check|inventory'
 }
 
 main() {
@@ -25,6 +25,8 @@ main() {
     local project_dir=''
     local script_source=${BASH_SOURCE[0]}
     local script_dir=''
+    local branch_name=''
+    local branch_status=0
     local -a git_prefix=()
 
     for env_binary in /usr/bin/env /bin/env; do
@@ -57,6 +59,7 @@ main() {
         PATH=/usr/bin:/bin
         LC_ALL=C
         GIT_OPTIONAL_LOCKS=0
+        GIT_NO_REPLACE_OBJECTS=1
         GIT_PAGER=
         GIT_EXTERNAL_DIFF=
         GIT_ATTR_NOSYSTEM=1
@@ -74,6 +77,24 @@ main() {
         status)
             "${git_prefix[@]}" status \
                 --short --branch --untracked-files=all
+            ;;
+        summary)
+            if branch_name=$("${git_prefix[@]}" symbolic-ref --quiet --short HEAD); then
+                printf 'branch: %s\n' "${branch_name}"
+            else
+                branch_status=$?
+                # Only status 1 means a detached HEAD; preserve repository
+                # errors instead of reporting them as a valid detached state.
+                ((branch_status == 1)) || return "${branch_status}"
+                printf 'branch: (detached)\n'
+            fi
+            "${git_prefix[@]}" log -1 --no-show-signature --no-notes \
+                --format='commit: %H%ntree: %T' --
+            ;;
+        log)
+            # Bound history and omit author identities and free-form messages.
+            "${git_prefix[@]}" log --max-count=5 --no-show-signature --no-notes \
+                --format='%H %P %cI' --
             ;;
         diff)
             "${git_prefix[@]}" diff \

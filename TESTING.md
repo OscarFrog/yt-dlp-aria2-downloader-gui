@@ -5,9 +5,13 @@ project. It is intentionally independent of a particular release date.
 
 ## Contents
 
+- [Codex session setup and task routing](#codex-session-setup-and-task-routing)
+- [Python changes](#python-changes)
+- [Workflow syntax qualification](#workflow-syntax-qualification)
 - [Environment diagnosis](#environment-diagnosis)
 - [Complete local test suite](#complete-local-test-suite)
 - [Fast feedback, timing and concurrency](#fast-feedback-timing-and-concurrency)
+- [Version check before every source push](#version-check-before-every-source-push)
 - [Shell formatting](#shell-formatting)
 - [Bash syntax](#bash-syntax)
 - [ShellCheck](#shellcheck)
@@ -19,6 +23,269 @@ project. It is intentionally independent of a particular release date.
 - [Real-world checks on Fedora 44](#real-world-checks-on-fedora-44)
 - [Locale-stabilized probes](#locale-stabilized-probes)
 - [Stress validation](#stress-validation)
+- [Network destination qualification](#network-destination-regression-and-opt-in-cifs-qualification)
+
+## Codex session setup and task routing
+
+Open this repository itself as the Codex project, or start the CLI with
+`codex --cd /absolute/path/to/yt-dlp-aria2-downloader-gui`. Starting from a parent
+directory does not automatically discover a child repository's instructions,
+skills or trusted rules. A later shell `cd` is not proof of loading them.
+For a fresh session, confirm the checkout with `./scripts/git-inspect.sh summary`
+and inspect `status` before editing. Preserve existing changes.
+
+`AGENTS.md` supplies persistent repository guidance; the full documents it
+links are read on demand. Codex discovers global guidance first, then the
+project-to-working-directory chain, preferring `AGENTS.override.md` over
+`AGENTS.md` in each directory. The default combined budget is 32 KiB.
+Project `.codex/rules` requires a trusted, active project configuration layer.
+Skills under `.agents/skills` are discovered upward from the startup directory,
+not by scanning unrelated child repositories. Their descriptions are loaded
+before their full instructions. See the official
+[instruction discovery](https://learn.chatgpt.com/docs/agent-configuration/agents-md),
+[rules](https://learn.chatgpt.com/docs/agent-configuration/rules) and
+[skills](https://learn.chatgpt.com/docs/build-skills) documentation.
+
+The three repository skills are `shell-change`, `packaging-release` and
+`workflow-supply-chain`. Check their presence in the session's skill list; if
+absent, read the paths routed by `AGENTS.md` and correct the next session's
+startup directory. Static skill checks validate their file structure, not the
+active Codex runtime. Likewise, `codex execpolicy check --rules FILE -- ARGV...`
+tests a supplied policy without executing ARGV; it does not prove automatic
+loading. Static validation parses the repository's literal `prefix_rule` subset
+without executing it, including when the Codex CLI is absent; the optional CLI
+check additionally validates actual Codex matching semantics. Include active
+global rules when auditing combined decisions. Never
+dump configuration, historical rules or session logs without redaction.
+
+Choose focused tests from this table; `tests/run-all.sh --list` and
+`tests/mock-integration.sh --list-groups` are the authoritative accepted names.
+Paths in the first two columns are entry points: follow their actual callers
+and imports when the change crosses a boundary.
+
+| Task | Start with | Focused validation |
+| --- | --- | --- |
+| Engine, formats or transports | `ARCHITECTURE.md` engine/transport sections; `download-video.sh`, `private-aria2-plan.py` | `./tests/mock-integration.sh --group engine`; private aria2 plan and auth-header suites |
+| Network destination or private state | Same engine/helper boundary; network section below | `./tests/mock-integration.sh --group engine-network`; `./tests/private-aria2-plan-integration.sh`; opt-in real-tools/network qualification |
+| GUI, progress or cancellation | GUI/progress sections; `download-video-gui.sh`, `progress-monitor.sh` | `./tests/mock-integration.sh --group gui`; progress-monitor suite; `--group signals` when supervision changes |
+| Managed runtimes | Managed-runtimes section; `runtime-manager.sh` | Runtime-manager and runtime-manager-hardening suites; mocks `--group runtime` |
+| Launcher/install/cleanup | Entrypoints/packaging sections; `install-gui.sh`, `private-launcher-manager.py`, `packaging/` | Installer and package-user-cleanup suites; lifecycle/upgrade qualification as applicable |
+| Versioning/contributor guards | Version section below; `scripts/check-push-version.py`, `.githooks/pre-push` | `python3 -B scripts/check-push-version.py coherence`; `python3 -B tests/push-version-integration.py` |
+| Workflows, packages or release | CI/release trust zones; matching skill and full affected workflow | `./scripts/check-workflows.sh` for workflows; `./test-static.sh`; applicable packaging or release qualification below |
+| Documentation or inventories | Both READMEs, relevant source of truth, `REPOSITORY_FILES.md` | `./test-static.sh`; inspect links in installed documentation as well as GitHub |
+
+Run cheap coherence, syntax and formatting checks before focused integration.
+Use `--fast --jobs 4` for broader development feedback and `--full --jobs 4`
+for final review, after failures are diagnosed. Both profiles include the same
+static checks; running fast immediately before full is not an extra environment
+qualification. Reuse a successful doctor diagnosis while its environment stays
+unchanged. A sandbox-denied loopback bind requires an authorized environment
+change, not repeated identical test runs. External GitHub reads still need
+their own authorized network access; a hermetic full pass does not check live
+release-tag availability.
+
+A task prompt only needs the problem, current/expected behavior, observable
+acceptance criteria, task-specific constraints and the requested delivery
+authority. Repository conventions and normal tests need not be repeated:
+
+```text
+Problem: ...
+Current behavior / reproduction: ...
+Expected result and acceptance criteria: ...
+Task-specific constraints: ... (or none)
+Delivery: local changes only / commit / push a PR / other explicit authority.
+```
+
+## Python changes
+
+The production minimum is Python 3.10 with standard-library dependencies. Read
+the helper's entry point, imports and Bash callers; review stdout/stderr and
+exit-status contracts, bounded parsing, subprocess groups/timeouts, private
+paths, descriptor ownership and cleanup after exceptions/signals. Keep private
+values out of errors, process arguments and test artifacts. Choose behavioral
+tests from the route table, including the Bash side when applicable.
+
+`test-static.sh` validates every `PYTHON_FILES` module's SPDX/docstring identity
+and parses it with Python 3.10's grammar. This detects newer syntax but does not
+prove runtime/API compatibility with Python 3.10. The existing Bash integration
+suites and stdlib `unittest` tests are the test entry points; no pytest, Ruff or
+type-checker configuration is currently a project requirement. Compilation or
+typing alone cannot establish exception, subprocess or cancellation behavior.
+The `shell.yml` job **Python 3.10 / Ubuntu** selects the real minimum interpreter,
+asserts its minor version, and runs doctor plus the full contract. This job is
+additional qualification; its addition does not change remote required-check
+settings.
+
+Some Linux fixtures deliberately use `/usr/bin/python3` or a restricted system
+PATH. After installing distribution dependencies, the disposable minimum-Python
+CI runner binds that path to its selected Python 3.10 and asserts both lookup
+forms before validation. Selecting only the driver's PATH would leave those
+helpers running the distribution's newer interpreter. This adjustment belongs
+only to the disposable qualification environment; do not replace the system
+Python on a user's workstation. Equivalent local containers must expose Python
+3.10 through both paths and run as a non-root user, matching the ordinary CI
+user rather than UID 0 with its capabilities removed.
+
+## Workflow syntax qualification
+
+For workflow edits, run the explicit shared validator before full validation:
+
+```bash
+./scripts/check-workflows.sh
+```
+
+It requires installed actionlint at the exact version in
+`scripts/dev-tools/actionlint-pin.env` and ShellCheck. Missing tools or a
+mismatched version return 69; invalid workflows return the linter's failure
+status. The check never installs or downloads tools. It validates every YAML
+workflow and its embedded shell; optional Pyflakes integration stays disabled
+because it is not a project dependency.
+
+The required Ubuntu CI job provisions the reviewed Linux archive, checks its
+SHA-256 before extracting the executable, and invokes this same script before
+the canonical suite. Use that bounded bootstrap procedure when preparing a
+local tool, adjusting the reviewed architecture pin if necessary. Merely
+matching a version string is not authentication of newly downloaded bytes.
+Local fast/full profiles retain their existing dependency contract, so record
+this additional command explicitly when changing workflows. A new pin requires
+review of the upstream release and archive digests, not only a computed hash.
+
+## Version check before every source push
+
+Every push of new source commits, including automated workflow branches and
+follow-ups to an existing PR, requires a development version newer than remote
+main, the target branch's previous version and all numeric remote release tags. The owner has authorized
+the necessary PATCH increment as part of an authorized source push; it does not
+authorize a tag, release, publication or otherwise unrequested push.
+
+Distinguish that owner policy from the mechanical CI contract. A local commit
+does not inherently require a bump. `packages.yml` → `previous-release` rejects
+ordinary PRs reusing an existing version tag, and candidates older than the
+highest numeric version tag; the tag need not have a published release. Its narrow immutable post-release-documentation
+exception does not authorize arbitrary same-version changes. CI does not
+otherwise require a version newer than every preceding untagged commit. The
+owner's source-push policy remains deliberately stricter and includes the
+`shfmt-update.yml` and `release-docs.yml` workflows. They prepare coherent version
+changes before independent validation, then publish only the verified data.
+Their privileged jobs must not execute contributor bump code. An automation
+run with no update produces no bump and no new source push.
+
+| Version surface | Contract |
+| --- | --- |
+| `download-video.sh` → `VERSION` | Development source version |
+| `install-fedora.sh` → `APP_VERSION`; `test-static.sh` → `EXPECTED_VERSION` | Must equal the development version |
+| Development paragraph and manual release commands in both READMEs; leading CHANGELOG and RPM `%changelog` entries | Must identify the same development version |
+| RPM `%{project_version}`, DEB/ZIP builders | Derive/validate the requested package version against the engine; no independent fixed source version |
+| `EXPECTED_PUBLISHED_VERSION` and published README asset references | Separate published version; ordinary source changes must not advertise absent assets |
+| Signed `vX.Y.Z` tag and release preflight | Separately authorized release identity and publication prerequisites |
+
+Before any commit or expensive validation, check local coherence without Git or
+network access:
+
+```bash
+python3 -B scripts/check-push-version.py coherence
+```
+
+The same inert validation runs on actual pushed blobs in the hook. Updating
+only the engine cannot satisfy it. Release preparation remains governed by the
+maintainer preflight below: that path currently requires published-reference
+metadata to match the candidate tag before publication. Do not silently run
+the publication metadata updater during an ordinary development bump.
+
+For an authorized source push, before running the expensive suites, fetch
+current main/target branch objects from the intended remote and run:
+
+```bash
+python3 -B scripts/check-push-version.py check
+```
+
+The defaults are remote `origin` and the current local branch. For a different
+destination, supply `--remote NAME --branch DESTINATION`. The check reads live
+refs through the named remote and reads version declarations as data from Git
+objects. Missing objects require a fetch; network failure, malformed metadata
+or an unknown baseline refuses validation. A version refusal returns 65 and
+prints the next PATCH to prepare. It neither edits files nor fetches, commits,
+pushes or creates tags. Update all linked source-version surfaces, rerun the
+check, validate and commit before pushing. Keep published package references
+at the actual published version during ordinary development.
+
+For isolated automation preparation, the same checker provides a JSON plan:
+
+```bash
+python3 -B scripts/check-push-version.py next-version --branch automation/EXACT-BRANCH
+```
+
+The plan binds the current main/target identities, numeric-tag floor, next PATCH
+and SHA-256 of one remote reference advertisement. After checking that plan,
+read-only jobs call `python3 -B scripts/prepare-source-version.py --root SOURCE_TREE
+--floor-version X.Y.Z --date YYYY-MM-DD --reason REASON`. This offline helper
+updates the seven source carriers while preserving published references and
+file modes. It stages replacements and backups before writing, rolls back
+controlled failures and preserves originals when rollback is unsafe. It is
+intended for isolated source trees, not concurrent editing or a crash-atomic
+multi-file transaction. Automation uses the base commit's UTC date and a fixed
+reason so an independent verifier can reproduce exactly the same bytes.
+Privileged publishers do not run this helper: they independently validate the
+bounded transformation and remote identities as data before publication.
+
+Enable the additional Git guard once per checkout. First inspect the existing
+effective `core.hooksPath` and `pre-push` hook; do not overwrite another hook or
+redirect an existing hook setup without preserving its behavior. In a checkout
+with no custom hook configuration or pre-push hook, activate this tracked path:
+
+```bash
+git config --local core.hooksPath .githooks
+```
+
+`.githooks/pre-push` checks the actual commit IDs Git intends to send. A version
+bump that exists only in the working tree is insufficient. It refuses the whole
+push before updating remote refs if any source update fails. Pure deletions,
+tag-only pushes and no-ops do not need a source bump. Git tag/release authority
+remains separate. Do not use `--no-verify` or alternate hooks paths to skip this
+policy. Git does not automatically enable tracked hooks in a fresh clone: repeat
+the inspected setup there. This is a local guard, not a GitHub server rule;
+remote CI and branch protection remain necessary, including for concurrent
+remote changes and writes from clients without this hook.
+
+The hook requires Git, Bash and Python 3.10+, a simple configured remote name
+such as `origin`, one identical fetch/push URL and a remote main branch. Split
+URLs, multiple push URLs and raw-URL push invocations fail explicitly instead of
+checking another repository. The checker avoids copying remote URLs into its
+Git subprocess arguments or echoing raw Git errors. Remote reads have a
+twenty-second deadline; interruption stops the current Git process group.
+
+Run the behavioral qualification without contacting GitHub:
+
+```bash
+python3 -B tests/push-version-integration.py
+```
+
+It uses disposable bare repositories and real Git pushes: first/follow-up push
+refusal, committed versus uncommitted versions, numeric/live-tag comparisons,
+stale objects, remote errors, split URLs, data-only parsing, batch rejection,
+deletions, no-ops, process timeout cleanup, all seven bump carriers, deterministic
+preparation, write failures, interruption and rollback. `test-static.sh` includes it in
+both canonical profiles; it explicitly skips Git-dependent cases if Git is
+absent from a Git-free source-validation environment. Installed RPM/DEB payloads
+do not include these contributor tools; source archives contain them.
+
+The automation handoffs have separate behavioral replays, also called by static
+validation:
+
+```bash
+python3 -B tests/shfmt-version-handoff-integration.py
+python3 -B tests/release-docs-integration.py
+```
+
+The shfmt replay uses real disposable Git repositories and the pinned formatter,
+with controlled upstream and container stubs. It covers seven-file preparation,
+independent verification, altered bytes, incomplete manifests, no-op runs and
+branch creation races. The release-docs replay executes the actual publisher
+shell and inline Python against a simulated API, including large streamed blobs,
+fast-forward updates, concurrent refs, ambiguous responses and substituted
+paths; preparation no-op uses real Git. Missing Git (and jq for release-docs)
+is an explicit skip in archive environments. Canonical shell CI installs both tools.
+These tests do not dispatch workflows or establish that GitHub publication ran.
 
 ## Environment diagnosis
 
@@ -88,7 +355,9 @@ For unattended Codex inspection of repository state, use the tracked helper:
 ./scripts/git-inspect.sh diff-check
 ```
 
-Its closed action parser also provides `diff`, `diff-staged`, and `inventory`.
+Its closed action parser also provides `summary`, `log`, `diff`, `diff-staged`,
+and `inventory`. `summary` reports branch/commit/tree identity; `log` reports at
+most five commit/parent identities and dates without author or message data.
 It accepts no caller-provided Git option, revision, path, helper, or output
 filename. The helper has no explicit Codex `allow` rule: it runs under the
 ordinary sandbox or baseline policy. Direct Git remains interactive under the
@@ -183,14 +452,19 @@ bootstrap downloads the exact GitHub release asset and verifies its SHA-256
 before execution.
 
 The scheduled `.github/workflows/shfmt-update.yml` workflow detects a newer
-stable upstream release, updates the pin/checksums, reformats all canonical
-shell files, runs the complete validation suite, and prepares a
+stable upstream release, prepares the required source-version bump before
+executing the candidate formatter, updates the pin/checksums, reformats all
+canonical shell files, runs the complete validation suite, and prepares a
 dedicated update branch for a maintainer-opened pull request. Both formatting
 and complete validation execute the candidate inside containers without network
 or host credentials; validation mounts the source read-only and cannot access
 the host handoff. The verifier destroys its container before rechecking the
-canonical tree and producing the data-only handoff. Only the final publisher
-receives repository content write permission; it has no pull-request permission.
+canonical tree and producing the data-only handoff. Canonical comparison uses
+an independently reproduced bump as its baseline; the four non-shell version
+carriers must match exactly. Only the final publisher receives repository
+content write permission; it has no pull-request permission. An existing branch
+for the same base and upstream pin is preserved without another source push;
+a conflicting branch or raced reference causes refusal instead of replacement.
 
 See `SHELL_STYLE.md` for the complete permanent shell-style contract.
 
@@ -505,10 +779,9 @@ The automated suite checks, among other things:
 
 ### Final-validation scope
 
-`VAL-001` is closed by an end-to-end reproduction and regression. A controlled
-12.021-second MKV truncated to 80% retained `V:0`, `a:0` and the original
-container duration while its content-video packet count fell from 288 to 229;
-the pre-fix engine still returned success and published the result-file.
+Container duration and stream presence alone do not establish that media is
+complete: physical truncation can preserve both. The real-tool regression
+therefore checks a metadata-parseable truncated fixture at publication.
 
 Final publication still checks the expected content-video/audio streams and
 retains the HLS-specific duration guard. One bounded FFprobe JSON summary now
@@ -665,17 +938,29 @@ only the known English/French release references and
 fail closed. All replacement and backup files are staged before publication.
 A caught publication failure restores the previous generation with renames;
 failed restoration preserves the backup and reports its location. This does
-not claim recovery after SIGKILL or a filesystem-wide failure. With the pre-publication tag guard, this is normally an idempotent
-consistency check and no branch is needed. If a bounded patch is still produced,
-a fresh read-only verifier applies the data-only patch and runs
-the complete local contract. The final job alone receives repository-content
-write permission. It performs no repository checkout, resolves protected
-`main` through the GitHub API, requires the release SHA to be its ancestor,
-checks the current allowlisted bytes and file modes against the release base,
-then creates an exact Git tree and
-`automation/release-docs-vX.Y.Z` branch from the independently tested files.
-It does not execute repository code, receive pull-request permission, or write
-directly to `main`.
+not claim recovery after SIGKILL or a filesystem-wide failure. The updater
+accepts only a published version between the previous published version and the
+current development version. With the pre-publication tag guard, this is
+normally an idempotent consistency check and no branch or bump is needed.
+
+When an update is needed, preparation uses current main or an existing target
+that descends from it, preserves that base's content and bumps all seven source
+carriers above main, target and tags. Divergent branches require maintainer
+reconciliation. A fresh read-only verifier reconstructs the exact patch from
+that authenticated base, compares candidate bytes and runs the complete local
+contract. Only the final job receives content-write permission. It performs no
+checkout and executes no repository code. Fixed isolated Python verifies the
+exact published-reference and source-version transformations, file modes,
+manifest paths and digests using GitHub API data. Large blobs are streamed into
+JSON payloads, never passed through a command argument.
+
+The publisher rechecks main, target and tag identities before writing the
+`automation/release-docs-vX.Y.Z` reference. It creates an absent branch or uses
+an explicit fast-forward-only update (`force:false`) whose commit parent is the
+verified target. It never writes directly to main or receives PR permissions.
+Reference-catalogue checks and the final branch update are separate operations:
+this is not a global atomic transaction with all branches and tags. A detected
+race refuses publication; ordinary protected-branch review remains required.
 
 The successful workflow summary identifies the exact branch and commit. Open
 the pull request with a maintainer-authenticated GitHub session, inspect its
@@ -882,8 +1167,9 @@ cleanup; it does not relax any iteration's timeout or assertion.
 
 ## Network destination regression and opt-in CIFS qualification
 
-The 2.3.12 development checkout has not been published as a new release. Run its
-scripts explicitly; an installed command reporting 2.3.11 is not this checkout.
+Run the selected checkout's scripts explicitly. Record its absolute path,
+`download-video.sh --version` output and source identity; the installed command
+may refer to a different release or tree even when its version string matches.
 The network mock group uses entirely fictional URL/header/cookie sentinels and
 checks both active download phases and cleanup. It simulates permissive modes
 only on the selected destination, leaving the private local workspace protected:
@@ -959,9 +1245,9 @@ failure, no complete final name for a partial copy, and retained valid local
 source after a failed/ambiguous publication. These outage/quota/mount behaviors
 remain **NOT EXECUTED** unless recorded in a separate operator qualification.
 
-The short user check against `/home/fred/z/Flac-Encours` is to start the patched
-checkout's absolute `download-video-gui.sh` and select that folder normally.
+For an authorized manual check, start the selected checkout's absolute
+`download-video-gui.sh` and select the intended test destination normally.
 No production-share mutation is performed by the development tests. Identify
-the code using the checkout path, its 2.3.12 development version and source
+the code using the checkout path, its actual development version and source
 SHA-256. A successful simulated qualification does not close the real
 CIFS qualification requirement.
