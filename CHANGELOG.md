@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.20 - Unreleased
+
+### Maintenance
+
+- Prepare 2.3.20 development version after PR 78 merge sync
+
 ## 2.3.19 - Unreleased
 
 ### Maintenance
