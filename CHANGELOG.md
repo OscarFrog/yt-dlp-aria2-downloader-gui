@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.17 - Unreleased
+
+### Maintenance
+
+- Prepare v2.3.17 release metadata.
+
 ## 2.3.16 - Unreleased
 
 ### Maintenance
