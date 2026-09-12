@@ -438,9 +438,11 @@ jobs:
           done
 
           cp -- "${candidate_dir}/shfmt" "${docker_context}/shfmt"
+          # COPY must restore executable access for the non-root container user;
+          # the private host copy inherits umask 077 and is readable only by its owner.
           cat >"${docker_context}/Dockerfile" <<'DOCKERFILE'
           FROM scratch
-          COPY shfmt /shfmt
+          COPY --chmod=0555 shfmt /shfmt
           ENTRYPOINT ["/shfmt"]
           DOCKERFILE
 
