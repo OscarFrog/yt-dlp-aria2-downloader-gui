@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.3.13 - Unreleased
+
+### Automated source publication
+
+- Prepare and independently verify a development-version increment before shfmt and release-documentation source pushes; preserve no-op runs, existing branches and privileged data-only publication boundaries.
+
+### Contributor validation and Codex configuration
+
+- Check source and published-version coherence before expensive validation;
+  reject incoherent or unchanged source versions in the actual pushed Git
+  objects, including replacement-ref and uncommitted-repair counterexamples.
+- Route agent tasks to maintained component and test contracts, document
+  instruction discovery and hook activation, and keep installed English and
+  French contributor links usable.
+- Verify the supported Python grammar and literal Codex policy syntax, accept
+  documented unindexed source additions, and preserve Unicode inventory paths.
+- Add fixed read-only Git summary/history inspection and clarify each source
+  file's role, consumers and native installation status.
+
+### Qualification reliability
+
+- Check workflow syntax and embedded shell with a reviewed actionlint release
+  before the Ubuntu suite, and qualify the full contract under real Python 3.10.
+- Require approved yt-dlp wheel hashes in the additional FFmpeg generation jobs.
+- Drain runner stderr while awaiting signal-test completion and exercise output
+  exceeding pipe capacity; retain bounded process diagnostics on timeout.
+
 ## 2.3.12 - Unreleased
 
 ### Network destinations and private storage

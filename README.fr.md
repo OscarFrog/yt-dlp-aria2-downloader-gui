@@ -43,7 +43,7 @@ FFmpeg pour fusionner, remuxer ou extraire les flux. HTTPS repasse
 automatiquement sur le transport natif de yt-dlp lorsque le backend TLS d'aria2
 n'offre pas le durcissement requis de validation des certificats. Les flux DASH
 et HLS restent eux aussi natifs.
-La version de développement actuelle est la **2.3.12**.
+La version de développement actuelle est la **2.3.13**.
 La dernière release de paquets publiée est la **2.3.11**.
 
 ## Installation recommandée
@@ -254,7 +254,7 @@ version de développement ci-dessous, cette commande ne s'applique qu'après la
 création de son tag signé :
 
 ```bash
-gh workflow run release.yml   --ref v2.3.12   -f tag=v2.3.12   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref v2.3.13   -f tag=v2.3.13   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Le workflow refuse indépendamment toute exécution manuelle dont le type de ref,
@@ -851,8 +851,8 @@ téléchargements vers des dossiers différents peuvent s'exécuter simultanéme
 
 ## Destinations réseau et stockage privé
 
-Cette section décrit l'implémentation non publiée du checkout 2.3.12 ; les
-paquets publiés en 2.3.11 n'ont pas été reconstruits avec ces changements.
+Cette section décrit l'implémentation actuelle des sources. Les versions de
+développement et publiée indiquées plus haut permettent d'identifier le code testé.
 
 L'allocateur privé commun valide les composants physiques des chemins, le
 propriétaire, les permissions réellement observées, la création exclusive et
@@ -933,6 +933,20 @@ Consultez le
 [guide de test](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md)
 du dépôt pour les validations locales, les contrôles spécifiques à Fedora et
 les tâches GitHub Actions.
+
+Les contributeurs, agents et workflows de publication automatique doivent
+augmenter la version de développement avant chaque push des sources, y compris
+les compléments à une PR. Une demande de
+push des sources autorise l'incrément PATCH nécessaire. Exécutez le contrôle
+de version avant les tests coûteux et activez le hook Git pre-push du dépôt
+pour chaque checkout, selon
+[la procédure de contrôle](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#version-check-before-every-source-push).
+Cette opération prépare les métadonnées des sources ; créer un tag ou une
+release reste une action distincte nécessitant une autorisation explicite.
+
+Pour travailler avec Codex, ouvrez le dépôt lui-même comme projet. La
+[procédure de démarrage et de routage](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#codex-session-setup-and-task-routing)
+explique le chargement des instructions et fournit un modèle de demande minimal.
 
 ## Désinstallation d'un lanceur portable
 

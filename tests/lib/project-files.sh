@@ -68,8 +68,10 @@ TEST_SHELL_FILES=(
 # Development shell tools are part of the canonical validation surface.
 # shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
 DEVELOPMENT_SHELL_FILES=(
+    .githooks/pre-push
     scripts/dev-tools/ensure-shfmt.sh
     scripts/check-shell-format.sh
+    scripts/check-workflows.sh
     scripts/format-shell.sh
     scripts/git-inspect.sh
     scripts/release-evidence-qualification.sh
@@ -115,4 +117,9 @@ PYTHON_FILES=(
     private-aria2-plan.py
     private-launcher-manager.py
     scripts/update-published-version.py
+    scripts/check-push-version.py
+    scripts/prepare-source-version.py
+    tests/push-version-integration.py
+    tests/release-docs-integration.py
+    tests/shfmt-version-handoff-integration.py
 )

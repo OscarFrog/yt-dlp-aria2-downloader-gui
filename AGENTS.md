@@ -4,6 +4,11 @@ This file is the repository-wide router and invariant set for coding agents.
 Detailed shell, testing, architecture, and tracked-file policy lives in the
 authoritative documents linked below.
 
+Start Codex with this checkout as its project/current directory, not its parent.
+Repository instructions, skills and trusted `.codex/rules` are discovered from
+the startup context; changing a shell command's working directory does not prove
+they were loaded. See `TESTING.md` → **Codex session setup and task routing**.
+
 ## Scope and precedence
 
 These instructions apply to the complete repository: production code, tests,
@@ -17,7 +22,8 @@ If a nested `AGENTS.md` is added later, it may refine instructions for that
 subtree. It must not weaken repository-wide safety, privacy, supply-chain,
 release, or validation invariants.
 
-When requirements conflict, use this order:
+Within the repository policy, and subject to the host's system/developer
+instructions and enforced permissions, use this order:
 
 1. explicit task requirements;
 2. applicable `AGENTS.md` instructions;
@@ -44,25 +50,23 @@ Use `AGENTS.md` to decide what to read, not as a substitute for those documents.
 
 ## Route work by change type
 
-- For runtime, GUI, progress, cancellation, transfer, or helper changes, read
-  the matching sections of `ARCHITECTURE.md` and inspect the relevant focused
-  integration tests before editing.
-- For any shell source, shell library, generated shell fixture, or shell-bearing
-  workflow block, read `SHELL_STYLE.md` in full and apply it as binding policy.
-- For packaging, installation, cleanup, workflow, supply-chain, or release
-  changes, read the relevant `ARCHITECTURE.md` and `TESTING.md` sections and
-  inspect matching integration tests and static contracts.
-- For user-facing behavior or documentation, inspect both `README.md` and
-  `README.fr.md` and keep equivalent guidance aligned.
-- For a tracked-file addition, removal, move, or rename, update
-  `REPOSITORY_FILES.md` so every retained path has an explicit role and
-  consumer.
-- For a version or release-metadata change, inspect `test-static.sh`, the
-  current `CHANGELOG.md` entry, packaging metadata, both READMEs, and release
-  workflows before editing any version surface.
+Use the task-to-component/test table in `TESTING.md` before broad searches.
+Read the relevant `ARCHITECTURE.md` flow, implementation, callers and focused
+tests. Reuse already-read, unchanged policy within a task instead of repeatedly
+reading the whole repository.
 
-Repository skills under `.agents/skills/` provide task-specific reading and
-validation routes. They do not replace the policies named above.
+| Change | Required route |
+| --- | --- |
+| Bash, shell libraries or shell-bearing workflows | `.agents/skills/shell-change/SKILL.md`; read `SHELL_STYLE.md` in full |
+| Python helpers or Bash/Python interfaces | `TESTING.md` → **Python changes**; inspect both ends of the interface |
+| RPM/DEB, installation, cleanup, versions or release | `.agents/skills/packaging-release/SKILL.md` and matching workflow/static contracts |
+| GitHub Actions, pins, signatures or provenance | `.agents/skills/workflow-supply-chain/SKILL.md`; `./scripts/check-workflows.sh` for workflow changes |
+| User-facing behavior/documentation | Both READMEs; keep English/French guidance equivalent |
+| Added, removed, moved or repurposed files | `REPOSITORY_FILES.md` plus canonical source arrays in `tests/lib/project-files.sh` |
+| Authorized source push | Standing version rule below, before expensive tests |
+
+If a relevant repository skill is missing from the session's skill list, read
+its explicit path above. File-structure tests do not prove runtime discovery.
 
 When opening a task or pull request, use the repository templates to record the
 objective, acceptance criteria, preserved invariants, actual validation, and
@@ -161,6 +165,11 @@ Before review, run the complete local contract for repository changes:
 ./tests/run-all.sh --full --jobs 4
 ```
 
+Run `python3 -B scripts/check-push-version.py coherence` before those suites.
+It checks local version copies without network access or a required increment.
+Use the live-remote `check` as well when a source push is authorized. Diagnose
+cheap failures first; do not stack fast and full runs after every small edit.
+
 For shell changes, also run `./scripts/check-shell-format.sh`. For workflow,
 packaging, installation, cleanup, runtime, or release work, run the applicable
 targeted qualifications documented in `TESTING.md`. Release-only, privileged,
@@ -181,8 +190,8 @@ The protected `main` branch is updated through pull requests and required
 checks. Do not bypass branch protection or force-push `main`.
 
 For unattended repository inspection, use the tracked
-`scripts/git-inspect.sh` helper. It accepts only fixed status, inventory, diff,
-and diff-check actions, rejects caller-provided Git arguments, and runs under
+`scripts/git-inspect.sh` helper. It accepts only fixed summary, log, status,
+inventory, diff and diff-check actions, rejects caller-provided Git arguments, and runs under
 the ordinary sandbox or baseline policy rather than an explicit Codex
 `allow` rule. Its closed Git invocation trusts only the canonical physical path
 of its own checkout so container ownership mappings cannot break inspection;
@@ -194,13 +203,40 @@ force-push-to-`main` forms, including destination refspecs. These exact-argv
 checks supplement task authority; they never create it and must not be
 bypassed with another wrapper or spelling.
 
-Do not create or push release tags, publish releases or packages, alter
-repository rules, secrets, or environments, or initiate a version bump unless
-the task explicitly requests that external or release action.
+Do not create or push release tags, publish releases or packages, or alter
+repository rules, secrets, or environments unless the task explicitly requests
+that external or release action. Source-version preparation does not authorize
+any of those actions.
 
-When a version change is explicitly requested, update every mechanically linked
-version and documentation surface in one coherent change and run the release
-preflight required by `TESTING.md`.
+### Standing rule: increase the version before every source push
+
+The owner explicitly requires a new development version for every push of new
+source commits, including contributor/agent pushes, automated workflow branches
+and follow-up pushes to the same pull request. An
+authorized source push also authorizes the necessary coherent PATCH increment;
+do not ask for version-bump approval again. Honor an explicitly requested higher
+version. This does not authorize an otherwise unrequested commit or push.
+
+Follow `TESTING.md` → **Version check before every source push** for the version
+surfaces, fresh remote baseline, next PATCH, validation and hook setup. Both
+working-tree coherence and the actual pushed commits must pass. Contributor
+pushes must not bypass
+the hook with `--no-verify`, another hooks path, a wrapper or an API write.
+Resolve an unavailable baseline before pushing; do not wait for GitHub failure.
+
+This owner policy is stricter than package CI's existing-tag gate, which does
+not require a new version for each local commit. The `shfmt-update.yml` and
+`release-docs.yml` workflows prepare the bump in their read-only jobs and bind
+it to the verified tree before publication. Their privileged publishers verify
+data without executing a repository bump helper or candidate code. An unchanged
+automation result is a no-op and must not create an artificial source push.
+
+Branch deletions, tag-only pushes and true no-op pushes do not publish new source
+commits and need no source increment. Tags still require explicit authorization.
+The ordinary source-push check does not require a signed tag or the publication
+preflight; run the latter only for an explicitly authorized release, with its
+prerequisites from `TESTING.md`. No version change is needed for local-only work
+until a source push is requested.
 
 ## Completion checklist
 

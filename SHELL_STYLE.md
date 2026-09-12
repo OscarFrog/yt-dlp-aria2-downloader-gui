@@ -391,11 +391,14 @@ release every Monday and can also be run manually.
 When a newer stable release exists, the workflow preserves three durable trust
 boundaries:
 
-1. the candidate runs without network or repository-write authority and emits
-   only a data-only patch and digest;
-2. a fresh read-only verifier checks the immutable base, handoff digest, strict
-   path allowlist, upstream provenance, and canonical equivalence under the
-   previously trusted formatter, then runs the complete project validation in a separate container with no
+1. a read-only preparation job prepares the deterministic source-version bump
+   from the authenticated main/target/tag floor before candidate execution; the
+   candidate runs without network or publication authority and emits only a
+   data-only patch and digest;
+2. a fresh read-only verifier reconstructs that bump independently, checks the
+   immutable base, handoff digest, strict path allowlist, upstream provenance,
+   exact non-shell version bytes and canonical equivalence under the previously
+   trusted formatter against the bumped baseline, then runs the complete project validation in a separate container with no
    network, a read-only source mount, and no host credentials or handoff files.
    After destroying that container, it rechecks canonical equivalence and binds
    the handoff to the tested tree;

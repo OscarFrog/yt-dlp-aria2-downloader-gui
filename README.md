@@ -41,7 +41,7 @@ direct downloads through a private aria2 input file, and FFmpeg to merge,
 remux, or extract streams. HTTPS automatically stays on yt-dlp's native
 transport when the installed aria2 TLS backend lacks the required certificate
 validation hardening. DASH and HLS streams also remain native. The current
-development version is **2.3.12**.
+development version is **2.3.13**.
 The latest published package release is **2.3.11**.
 
 ## Recommended installation
@@ -236,8 +236,8 @@ version below, this command is applicable only after its signed tag is created:
 
 ```bash
 gh workflow run release.yml \
-  --ref v2.3.12 \
-  -f tag=v2.3.12 \
+  --ref v2.3.13 \
+  -f tag=v2.3.13 \
   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
@@ -809,8 +809,8 @@ destination directories may run concurrently.
 
 ## Network destinations and private storage
 
-This section describes the unreleased 2.3.12 checkout implementation; the
-published 2.3.11 packages have not been rebuilt with these changes.
+This section describes the current source implementation. Use the development
+and published version information above to identify the code you are testing.
 
 The shared private-storage allocator validates physical directory components,
 ownership, actual permission modes, exclusive file creation, and the filesystem
@@ -882,6 +882,18 @@ an external downloader require separate privacy qualification.
 See the repository's
 [testing guide](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md)
 for local validation, Fedora-specific checks, and the GitHub Actions jobs.
+
+Contributors, agents and automated workflow publishers must increase the
+development version before every source push, including PR follow-ups. The owner authorizes the necessary PATCH
+increment with a source-push request. Run the early version check before costly
+tests and enable the tracked Git pre-push guard for each checkout, following
+[the version-check procedure](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#version-check-before-every-source-push).
+This prepares source metadata; creating a tag or release remains a separate
+explicitly authorized action.
+
+For Codex work, open the repository itself as the project. The
+[session setup and task routes](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#codex-session-setup-and-task-routing)
+explain instruction loading and provide a minimal task prompt.
 
 ## Uninstalling a portable launcher
 

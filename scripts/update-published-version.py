@@ -217,9 +217,9 @@ def update_published_version(root: Path, requested_version: str) -> bool:
         "published-version",
     )
 
-    if requested_version != development_version:
+    if parse_version(requested_version) > parse_version(development_version):
         raise VersionUpdateError(
-            "release version does not match the checked-out development contract: "
+            "release version exceeds the checked-out development contract: "
             f"requested {requested_version}, found {development_version}"
         )
     if requested_version == published_version:

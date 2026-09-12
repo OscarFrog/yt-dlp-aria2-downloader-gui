@@ -28,7 +28,7 @@ fi
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 # The development tree can lead the latest installable GitHub release. Keep the
 # two contracts explicit so README package names never advertise absent assets.
-readonly EXPECTED_VERSION='2.3.12'
+readonly EXPECTED_VERSION='2.3.13'
 readonly EXPECTED_PUBLISHED_VERSION='2.3.11'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SOURCE_INVENTORY_FILE=''
@@ -157,7 +157,7 @@ relative_path = sys.argv[3]
 
 try:
     source = path.read_text(encoding="utf-8")
-    module = ast.parse(source, filename=relative_path)
+    module = ast.parse(source, filename=relative_path, feature_version=(3, 10))
 except (OSError, SyntaxError, UnicodeError) as error:
     print(f"invalid Python source {relative_path}: {error}", file=sys.stderr)
     raise SystemExit(65) from error
@@ -372,7 +372,7 @@ assert_no_historical_comment_labels() {
     esac
 }
 
-assert_repository_skills_are_discoverable() {
+assert_repository_skill_files_are_valid() {
     local skill_root="${SCRIPT_DIR}/.agents/skills"
     local skill_dir=''
     local skill_file=''
@@ -496,6 +496,35 @@ assert_codex_rules_have_explicit_decisions() {
     local justification_count=0
     local match_count=0
     local not_match_count=0
+
+    # This repository uses literal prefix_rule calls only. Validate that small
+    # syntax subset without evaluating policy code, even when Codex is absent.
+    if ! python3 -B - "${rules_file}" <<'RULE_SYNTAX'; then
+import ast
+from pathlib import Path
+import sys
+
+try:
+    module = ast.parse(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    required = {"pattern", "decision", "justification", "match", "not_match"}
+    if not module.body:
+        raise ValueError("empty policy")
+    for statement in module.body:
+        if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+            raise ValueError("expected literal prefix_rule call")
+        call = statement.value
+        if not isinstance(call.func, ast.Name) or call.func.id != "prefix_rule" or call.args:
+            raise ValueError("unexpected policy expression")
+        if len(call.keywords) != len(required) or {item.arg for item in call.keywords} != required:
+            raise ValueError("missing or duplicate policy field")
+        for item in call.keywords:
+            ast.literal_eval(item.value)
+except (OSError, SyntaxError, UnicodeError, ValueError):
+    print("Invalid literal repository execution-policy syntax.", file=sys.stderr)
+    raise SystemExit(65)
+RULE_SYNTAX
+        return 65
+    fi
 
     while IFS= read -r line || [[ -n ${line} ]]; do
         if [[ ${line} == 'prefix_rule(' ]]; then
@@ -656,7 +685,7 @@ assert_codex_rules_are_conservative() {
         'git commit -m update' \
         'Codex direct-git prompt examples contain git commit'
     assert_file_contains "${SCRIPT_DIR}/scripts/git-inspect.sh" \
-        'status|diff|diff-staged|diff-check|inventory' \
+        'status|summary|log|diff|diff-staged|diff-check|inventory' \
         'Codex inspection helper exposes only fixed actions'
     # shellcheck disable=SC2016 # The helper variable is matched as literal source.
     assert_file_contains "${SCRIPT_DIR}/scripts/git-inspect.sh" \
@@ -688,11 +717,21 @@ assert_codex_rules_are_conservative() {
             "${SCRIPT_DIR}/scripts/git-inspect.sh" diff-check
         assert_status 0 'Codex inspection helper fixed inventory action' \
             "${SCRIPT_DIR}/scripts/git-inspect.sh" inventory
+        assert_status 0 'Codex inspection helper fixed summary action' \
+            "${SCRIPT_DIR}/scripts/git-inspect.sh" summary
+        assert_text_contains "${ASSERT_OUTPUT}" 'commit: ' 'summary identifies the commit'
+        assert_text_contains "${ASSERT_OUTPUT}" 'tree: ' 'summary identifies the tree'
+        assert_status 0 'Codex inspection helper fixed log action' \
+            "${SCRIPT_DIR}/scripts/git-inspect.sh" log
     fi
     assert_status 2 'Codex inspection helper rejects an extra argument' \
         "${SCRIPT_DIR}/scripts/git-inspect.sh" status unexpected
     assert_status 2 'Codex inspection helper rejects an unknown action' \
         "${SCRIPT_DIR}/scripts/git-inspect.sh" publish
+    assert_status 2 'Codex summary rejects caller-provided Git arguments' \
+        "${SCRIPT_DIR}/scripts/git-inspect.sh" summary --output=/tmp/unused
+    assert_status 2 'Codex history rejects caller-provided Git arguments' \
+        "${SCRIPT_DIR}/scripts/git-inspect.sh" log HEAD
 
     if command -v codex >/dev/null 2>&1 \
         && codex execpolicy check --help >/dev/null 2>&1; then
@@ -750,6 +789,10 @@ assert_codex_rules_are_conservative() {
         'Codex policy validation rejects a missing explicit decision' \
         assert_codex_rules_have_explicit_decisions \
         "${CODEX_RULE_MUTATION_FILE}"
+    cp -- "${rules_file}" "${CODEX_RULE_MUTATION_FILE}"
+    printf '\ninvalid syntax !!!\n' >>"${CODEX_RULE_MUTATION_FILE}"
+    assert_status 65 'Codex policy rejects invalid trailing syntax without the CLI' \
+        assert_codex_rules_have_explicit_decisions "${CODEX_RULE_MUTATION_FILE}"
     rm -f -- "${CODEX_RULE_MUTATION_FILE}"
     CODEX_RULE_MUTATION_FILE=''
 }
@@ -938,8 +981,10 @@ assert_repository_file_inventory_is_canonical() {
     fi
 
     if [[ -e ${SCRIPT_DIR}/.git || -L ${SCRIPT_DIR}/.git ]]; then
-        if ! git -c "safe.directory=${SCRIPT_DIR}" -C "${SCRIPT_DIR}" \
-            ls-files | LC_ALL=C sort >"${REPOSITORY_INVENTORY_FILE}"; then
+        if ! git -c "safe.directory=${SCRIPT_DIR}" -c core.quotepath=false \
+            -C "${SCRIPT_DIR}" \
+            ls-files --cached --others --exclude-standard \
+            | LC_ALL=C sort -u >"${REPOSITORY_INVENTORY_FILE}"; then
             inventory_status=65
         fi
     elif ! find "${SCRIPT_DIR}" -type f -printf '%P\n' \
@@ -964,6 +1009,236 @@ assert_repository_file_inventory_is_canonical() {
     fi
 
     cleanup_static_test
+}
+
+assert_static_harness_regressions() {
+    python3 -B - "${SCRIPT_DIR}" <<'PY_STATIC_HARNESS_REGRESSIONS'
+from pathlib import Path
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+project = Path(sys.argv[1])
+source = (project / "test-static.sh").read_text(encoding="utf-8")
+functions = {}
+for name in (
+    "cleanup_static_test",
+    "assert_repository_file_inventory_is_canonical",
+    "assert_standard_python_header",
+):
+    match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", source, re.M | re.S)
+    if match is None:
+        raise AssertionError(f"unable to extract actual static validator: {name}")
+    functions[name] = match.group()
+
+# Invoke the actual functions in an isolated shell, never the complete main.
+shell_prefix = '''set -euo pipefail
+umask 077
+SCRIPT_DIR=$1
+STANDARD_HEADER_PROJECT=yt-dlp-aria2-downloader-gui
+SOURCE_INVENTORY_FILE=''
+REPOSITORY_INVENTORY_FILE=''
+DOCUMENTED_INVENTORY_FILE=''
+CODEX_RULE_MUTATION_FILE=''
+'''
+shell_suffix = '''trap cleanup_static_test EXIT
+"$2" "${@:3}"
+'''
+environment = {
+    name: value for name, value in os.environ.items()
+    if not name.startswith("GIT_")
+}
+environment.update({
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_TERMINAL_PROMPT": "0",
+    "LC_ALL": "C",
+})
+
+def validate(root, entrypoint, expected, *arguments, overrides=None):
+    selected = dict(functions)
+    selected.update(overrides or {})
+    script = shell_prefix + "\n".join(selected.values()) + shell_suffix
+    completed = subprocess.run(
+        ["bash", "-c", script, "static-contract", str(root), entrypoint, *arguments],
+        env=environment, capture_output=True, text=True, timeout=10,
+    )
+    if completed.returncode != expected:
+        raise AssertionError(
+            f"{entrypoint}: expected {expected}, got {completed.returncode}\n"
+            f"{completed.stdout}{completed.stderr}"
+        )
+
+with tempfile.TemporaryDirectory(prefix="static-harness-") as temporary:
+    root = Path(temporary)
+    environment["HOME"] = str(root)
+    scratch = root / "scratch"
+    scratch.mkdir()
+    environment["TMPDIR"] = str(scratch)
+
+    python_root = root / "python"
+    python_root.mkdir()
+    module = python_root / "example.py"
+    header = (
+        '# SPDX-License-Identifier: MIT\n'
+        '"""yt-dlp-aria2-downloader-gui example.py fixture."""\n'
+    )
+    module.write_text(header + "match 1:\n    case 1:\n        pass\n", encoding="utf-8")
+    validate(python_root, "assert_standard_python_header", 0, module.name)
+    module.write_text(header + "type Name = str\n", encoding="utf-8")
+    validate(python_root, "assert_standard_python_header", 65, module.name)
+    if sys.version_info >= (3, 12):
+        original = functions["assert_standard_python_header"]
+        mutant = original.replace(", feature_version=(3, 10)", "", 1)
+        if mutant == original:
+            raise AssertionError("Python grammar negative control did not mutate")
+        validate(
+            python_root, "assert_standard_python_header", 0, module.name,
+            overrides={"assert_standard_python_header": mutant},
+        )
+    print("Static Python grammar: 3.10 accepted; newer syntax rejected.")
+
+    if shutil.which("git", path=environment.get("PATH")) is None:
+        print("SKIP: Git inventory fixtures require Git; Python/link checks still run.")
+    else:
+        repository = root / "repository space é"
+        repository.mkdir()
+
+        def git(*arguments):
+            return subprocess.run(
+                ["git", "-c", f"safe.directory={repository}", "-C", str(repository),
+                 *arguments],
+                env=environment, capture_output=True, text=True, timeout=10, check=True,
+            ).stdout
+
+        def inventory(paths):
+            (repository / "REPOSITORY_FILES.md").write_text(
+                "# Fixture inventory\n\n" + "".join(
+                    f"| `{path}` | Fixture | Validation input. | KEEP |\n"
+                    for path in paths
+                ),
+                encoding="utf-8",
+            )
+
+        git("init", "--quiet")
+        (repository / ".gitignore").write_text("cache.tmp\n", encoding="utf-8")
+        (repository / "README.md").write_text("Fixture\n", encoding="utf-8")
+        tracked = [".gitignore", "README.md", "REPOSITORY_FILES.md"]
+        inventory(tracked)
+        git("add", "--", *tracked)
+        (repository / "cache.tmp").write_text("Ignored output\n", encoding="utf-8")
+        validate(repository, "assert_repository_file_inventory_is_canonical", 0)
+
+        new_name = "new helper é.py"
+        (repository / new_name).write_text("# New source\n", encoding="utf-8")
+        validate(repository, "assert_repository_file_inventory_is_canonical", 65)
+        inventory(tracked + [new_name])
+        if new_name in git("ls-files").splitlines():
+            raise AssertionError("new-source fixture was unexpectedly indexed")
+        validate(repository, "assert_repository_file_inventory_is_canonical", 0)
+        inventory(tracked + [new_name, "missing.py"])
+        validate(repository, "assert_repository_file_inventory_is_canonical", 65)
+        inventory(tracked + [new_name, new_name])
+        validate(repository, "assert_repository_file_inventory_is_canonical", 65)
+        inventory(tracked + [new_name])
+        (repository / new_name).unlink()
+        validate(repository, "assert_repository_file_inventory_is_canonical", 65)
+        print("Static inventory: unindexed source accepted; missing/duplicate/undocumented paths rejected.")
+
+for name in ("README.md", "README.fr.md"):
+    text = (project / name).read_text(encoding="utf-8")
+    for anchor in ("version-check-before-every-source-push", "codex-session-setup-and-task-routing"):
+        expected = (
+            "https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/"
+            f"TESTING.md#{anchor}"
+        )
+        if f"]({expected})" not in text:
+            raise AssertionError(f"{name}: missing installed-safe contributor link {anchor}")
+    if re.search(r"\]\((?:\./)?TESTING\.md(?:[)#])", text):
+        raise AssertionError(f"{name}: TESTING.md is not installed beside this README")
+print("Installed README contributor links: absolute targets in both languages.")
+PY_STATIC_HARNESS_REGRESSIONS
+}
+
+assert_workflow_validator_regressions() {
+    python3 -B - "${SCRIPT_DIR}" <<'PY_WORKFLOW_VALIDATOR_TESTS'
+from pathlib import Path
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+project = Path(sys.argv[1])
+with tempfile.TemporaryDirectory(prefix="workflow-validator-") as temporary:
+    root = Path(temporary)
+    (root / "scripts/dev-tools").mkdir(parents=True)
+    workflows = root / ".github/workflows"
+    workflows.mkdir(parents=True)
+    for relative in ("scripts/check-workflows.sh", "scripts/dev-tools/actionlint-pin.env"):
+        shutil.copy2(project / relative, root / relative)
+    pin = dict(
+        line.split("=", 1) for line in (root / "scripts/dev-tools/actionlint-pin.env").read_text().splitlines()
+        if line and not line.startswith("#")
+    )["ACTIONLINT_VERSION"]
+    fixture = workflows / "fixture.yml"
+    valid = "name: Fixture\non: push\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo checked\n"
+    fixture.write_text(valid)
+    binaries = root / "bin"
+    binaries.mkdir()
+    for command in ("bash", "dirname", "shellcheck"):
+        (binaries / command).symlink_to(shutil.which(command))
+    environment = dict(os.environ, PATH=str(binaries))
+    checker = root / "scripts/check-workflows.sh"
+
+    def run(expected, *arguments, selected_environment=environment):
+        completed = subprocess.run(
+            [shutil.which("bash"), str(checker), *arguments],
+            cwd=root, env=selected_environment, capture_output=True, text=True, timeout=10,
+        )
+        if completed.returncode != expected:
+            raise AssertionError((expected, completed.returncode, completed.stdout, completed.stderr))
+        return completed
+
+    run(69)
+    fake = binaries / "actionlint"
+    fake.write_text(
+        '#!/usr/bin/env bash\nset -euo pipefail\n'
+        'if [[ $1 == -version ]]; then printf "%s\\n" "${MOCK_LINTER_VERSION}"; '
+        'else exit "${MOCK_LINTER_STATUS:-0}"; fi\n'
+    )
+    fake.chmod(0o755)
+    environment["MOCK_LINTER_VERSION"] = "0.0.0"
+    run(69)
+    environment["MOCK_LINTER_VERSION"] = pin
+    run(0)
+    environment["MOCK_LINTER_STATUS"] = "1"
+    run(1)
+    environment.pop("MOCK_LINTER_STATUS")
+    run(64, "unexpected")
+    fixture.unlink()
+    run(66)
+    foreign = root / "foreign.yml"
+    foreign.write_text(valid)
+    fixture.symlink_to(foreign)
+    run(65)
+    fixture.unlink()
+    fixture.write_text(valid)
+    print("Workflow validator: missing/wrong tool, linter failure, extra arguments and unsafe paths refused.")
+
+    actual = shutil.which("actionlint")
+    probe = subprocess.run([actual, "-version"], capture_output=True, text=True, timeout=10) if actual else None
+    if probe and probe.returncode == 0 and probe.stdout.splitlines()[:1] == [pin]:
+        run(0, selected_environment=os.environ.copy())
+        fixture.write_text(valid.replace("runs-on:", "runs_on:"))
+        run(1, selected_environment=os.environ.copy())
+        print("Real pinned actionlint: valid workflow accepted; malformed workflow rejected.")
+    else:
+        print("SKIP: real actionlint syntax mutation needs the pinned optional developer tool.")
+PY_WORKFLOW_VALIDATOR_TESTS
 }
 
 assert_workflow_dependencies_are_hardened() {
@@ -1161,6 +1436,7 @@ publisher_job_executes_repo_shell() {
     local word=''
     local index=0
     local word_count=0
+    local inline_python_pattern="^[[:space:]]*python3 -I -([^<>&;|#]*)<<'(PY|PYCODE)'[[:space:]]*$"
     local -a words=()
 
     while IFS= read -r line; do
@@ -1229,7 +1505,11 @@ publisher_job_executes_repo_shell() {
             deno | node | perl | php | python | python3 | ruby)
                 index=$((index + 1))
                 if [[ ${command_name} == python3 &&
-                    ${words[index]:-} == - ]]; then
+                    ${words[index]:-} == -I &&
+                    ${words[index + 1]:-} == - &&
+                    ${line} =~ ${inline_python_pattern} ]]; then
+                    # Isolation prevents local imports, not execution through
+                    # stdin. Only the reviewed literal here-document is allowed.
                     continue
                 fi
                 return 0
@@ -1270,6 +1550,9 @@ shfmt_candidate_job_policy() {
     [[ ${job_block} != *'${{ secrets.'* ]] || return 65
     [[ ${job_block} == *"if: github.ref == 'refs/heads/main'"* ]] || return 65
     [[ ${job_block} == *'Reformat with candidate shfmt in a no-network sandbox'* ]] || return 65
+    [[ ${job_block} == *'scripts/check-push-version.py next-version'* ]] || return 65
+    [[ ${job_block} == *'scripts/prepare-source-version.py --root .'*'Reformat with candidate shfmt in a no-network sandbox'* ]] || return 65
+    [[ ${job_block} == *'plan.get("target_sha") != "0" * 40'* ]] || return 65
     [[ ${job_block} == *$'          docker build \\\n            --network=none \\\n            --tag '* ]] || return 65
     # Predicate failure rejects a candidate job whose Docker commands are not
     # each individually hardened.
@@ -1307,6 +1590,9 @@ shfmt_verifier_job_policy() {
     [[ ${job_block} == *"canonical_manifest \"\${baseline}\""* ]] || return 65
     [[ ${job_block} == *"canonical_manifest \"\${after}\""* ]] || return 65
     [[ ${job_block} == *"cmp -s -- \"\${baseline}\" \"\${after}\""* ]] || return 65
+    # shellcheck disable=SC2016 # Literal independently reconstructed source root.
+    [[ ${job_block} == *'scripts/prepare-source-version.py --root "${expected_tree}"'* ]] || return 65
+    [[ ${job_block} == *'candidate changed approved version document content'* ]] || return 65
     [[ ${job_block} == *'candidate shfmt pin file differs from the exact data-only schema'* ]] || return 65
     [[ ${job_block} == *'verifier rejected upstream shfmt tag provenance'* ]] || return 65
     [[ ${job_block} == *'Validate verified formatter and project'* ]] || return 65
@@ -1346,12 +1632,20 @@ shfmt_publish_job_policy() {
     # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
     [[ ${job_block} == *'shfmt-verified-${{ github.run_id }}-${{ github.run_attempt }}'* ]] || return 65
     [[ ${job_block} == *'git fetch --no-tags origin'* ]] || return 65
-    [[ ${job_block} == *'python3 - tests/lib/project-files.sh'* ]] || return 65
+    [[ ${job_block} == *'python3 -I - tests/lib/project-files.sh'* ]] || return 65
     [[ ${job_block} != *'git ls-files -z'* ]] || return 65
     [[ ${job_block} == *'git apply --check'* ]] || return 65
     [[ ${job_block} == *'comm -23'* ]] || return 65
     [[ ${job_block} == *'git diff --summary'* ]] || return 65
     [[ ${job_block} == *'core.hooksPath=/dev/null'* ]] || return 65
+    [[ ${job_block} == *'project version is not the approved next PATCH'* ]] || return 65
+    [[ ${job_block} == *'candidate document differs from the approved version increment'* ]] || return 65
+    [[ ${job_block} == *'existing shfmt branches must be preserved for maintainer review'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal catalogue guard and exact target lease.
+    [[ ${job_block} == *'${current_digest} != "${REF_CATALOG_SHA}"'* ]] || return 65
+    # shellcheck disable=SC2016 # Literal catalogue guard and exact target lease.
+    [[ ${job_block} == *'--force-with-lease="refs/heads/${branch}:${lease_sha}"'* ]] || return 65
+    [[ ${job_block} != *'scripts/prepare-source-version.py'* ]] || return 65
     [[ ${job_block} != *'scripts/format-shell.sh'* ]] || return 65
     [[ ${job_block} != *'scripts/dev-tools/ensure-shfmt.sh'* ]] || return 65
     [[ ${job_block} != *'bash ./tests/run-all.sh'* ]] || return 65
@@ -1373,6 +1667,7 @@ assert_shfmt_update_workflow_policy() {
     local publish_block=''
     local mutated=''
     local unsafe_publisher_command=''
+    local required_guard=''
     local read_only_line=$'              --read-only \\'
     local -a unsafe_publisher_commands=(
         './download-video.sh'
@@ -1380,6 +1675,9 @@ assert_shfmt_update_workflow_policy() {
         './install-gui.sh'
         'timeout 10s bash ./tests/foo.sh'
         'command bash ./scripts/foo.sh'
+        'python3 -I - < candidate.py'
+        'python3 -I - <<< candidate'
+        "python3 -I - < candidate.py # <<'PY'"
     )
 
     candidate_block=$(workflow_job_block "${workflow}" prepare-shfmt-update)
@@ -1404,6 +1702,21 @@ assert_shfmt_update_workflow_policy() {
     # shellcheck disable=SC2310
     shfmt_publish_job_policy "${publish_block}" \
         || fail 'shfmt updater publication job violates the privileged trust boundary.'
+
+    # These mutations cover the added source-version publication boundary; the
+    # workflow replay also verifies refusal with actual Git fixtures.
+    for required_guard in \
+        'project version is not the approved next PATCH' \
+        'candidate document differs from the approved version increment' \
+        'existing shfmt branches must be preserved for maintainer review' \
+        'python3 -I -'; do
+        mutated=${publish_block//"${required_guard}"/removed_guard}
+        mutation_must_change "${publish_block}" "${mutated}" 'shfmt source-version guard removal'
+        # shellcheck disable=SC2310 # Guard removal must fail closed.
+        if shfmt_publish_job_policy "${mutated}"; then
+            fail 'shfmt policy allowed removal of a source-version publication guard.'
+        fi
+    done
 
     mutated=${candidate_block//contents: read/contents: write}
     mutation_must_change "${candidate_block}" "${mutated}" 'candidate contents write'
@@ -1628,73 +1941,70 @@ assert_package_post_release_policy() {
 release_docs_prepare_job_policy() {
     local job_block=$1
     local permissions=''
+    local required=''
 
     permissions=$(job_permissions_block "${job_block}")
     [[ ${permissions} == $'    permissions:\n      contents: read' ]] || return 65
-    # shellcheck disable=SC2016 # Literal GitHub Actions expression.
+    # shellcheck disable=SC2016 # Literal workflow expressions and shell contracts.
+    for required in \
+        "if: github.event.workflow_run.conclusion == 'success'" \
+        'ref: main' \
+        'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' \
+        'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' \
+        'repos/${GITHUB_REPOSITORY}/actions/runs/${RELEASE_RUN_ID}' \
+        'gh release verify "${RELEASE_TAG}"' \
+        'tag_sha=$(git rev-parse "${RELEASE_TAG}^{commit}")' \
+        '${tag_sha} != "${RELEASE_SHA}"' \
+        'git merge-base --is-ancestor "${main_sha}" "${target_sha}"' \
+        'scripts/check-push-version.py next-version' \
+        'python3 -B scripts/update-published-version.py "${version}"' \
+        'python3 -B scripts/prepare-source-version.py --root .' \
+        'bash ./test-static.sh' \
+        'paths=(CHANGELOG.md README.fr.md README.md download-video.sh install-fedora.sh' \
+        'packaging/rpm/yt-dlp-aria2-downloader-gui.spec test-static.sh)' \
+        'release-docs-candidate-${{ github.run_id }}-${{ github.run_attempt }}'; do
+        [[ ${job_block} == *"${required}"* ]] || return 65
+    done
+    # shellcheck disable=SC2016 # Literal Actions secrets context.
     [[ ${job_block} != *'${{ secrets.'* ]] || return 65
-    [[ ${job_block} == *"if: github.event.workflow_run.conclusion == 'success'"* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal GitHub Actions checkout ref.
-    [[ ${job_block} == *'ref: ${{ env.RELEASE_SHA }}'* ]] || return 65
-    [[ ${job_block} == *'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'* ]] \
-        || return 65
-    [[ ${job_block} == *'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'* ]] \
-        || return 65
-    [[ ${job_block} == *"repos/\${GITHUB_REPOSITORY}/actions/runs/\${RELEASE_RUN_ID}"* ]] \
-        || return 65
-    [[ ${job_block} == *"gh release verify \"\${RELEASE_TAG}\""* ]] || return 65
-    # shellcheck disable=SC2016 # Literal immutable tag binding.
-    [[ ${job_block} == *'tag_sha=$(git rev-parse "${RELEASE_TAG}^{commit}")'* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal immutable tag comparison.
-    [[ ${job_block} == *'${tag_sha} != "${RELEASE_SHA}"'* ]] || return 65
-    [[ ${job_block} == *"python3 -B scripts/update-published-version.py \"\${version}\""* ]] \
-        || return 65
-    [[ ${job_block} == *'bash ./test-static.sh'* ]] || return 65
-    [[ ${job_block} == *'README.fr.md README.md test-static.sh'* ]] || return 65
-    # shellcheck disable=SC2016 # Literal run-scoped artifact name.
-    [[ ${job_block} == *'release-docs-candidate-${{ github.run_id }}-${{ github.run_attempt }}'* ]] \
-        || return 65
+    [[ ${job_block} == *'update=false'*'scripts/prepare-source-version.py'* ]] || return 65
     return 0
 }
 
 release_docs_verifier_job_policy() {
     local job_block=$1
     local permissions=''
+    local required=''
 
     permissions=$(job_permissions_block "${job_block}")
     [[ ${permissions} == $'    permissions:\n      contents: read' ]] || return 65
-    # shellcheck disable=SC2016 # Literal GitHub Actions expression.
+    # The independently refreshed main/target advertisement authenticates the
+    # source base. Candidate patch bytes are compared to a reconstruction, never
+    # applied or executed by this verifier.
+    # shellcheck disable=SC2016 # Literal workflow expressions and shell contracts.
+    for required in \
+        "if: needs.prepare-release-docs.outputs.update == 'true'" \
+        'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' \
+        'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3' \
+        '[[ $(git rev-parse "${RELEASE_TAG}^{commit}") == "${RELEASE_SHA}" ]]' \
+        'git merge-base --is-ancestor "${main_sha}" "${base_sha}"' \
+        'current_context=$(python3 -B scripts/check-push-version.py next-version' \
+        '{main_sha,target_sha,floor_version,next_version,refs_sha256}' \
+        'python3 -B scripts/update-published-version.py "${RELEASE_VERSION}"' \
+        'python3 -B scripts/prepare-source-version.py --root .' \
+        'cmp -s -- "${expected_patch}" "${handoff_dir}/release-docs.patch"' \
+        'bash ./tests/run-all.sh --full --jobs 4' \
+        'release-docs-tested-tree.sha256' \
+        'release-docs-base-tree.sha256' \
+        'paths=(CHANGELOG.md README.fr.md README.md download-video.sh install-fedora.sh' \
+        'packaging/rpm/yt-dlp-aria2-downloader-gui.spec test-static.sh)' \
+        'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' \
+        'release-docs-verified-${{ github.run_id }}-${{ github.run_attempt }}'; do
+        [[ ${job_block} == *"${required}"* ]] || return 65
+    done
+    # shellcheck disable=SC2016 # Literal Actions secrets context.
     [[ ${job_block} != *'${{ secrets.'* ]] || return 65
-    [[ ${job_block} == *"if: needs.prepare-release-docs.outputs.update == 'true'"* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal GitHub Actions checkout ref.
-    [[ ${job_block} == *'ref: ${{ env.RELEASE_SHA }}'* ]] || return 65
-    [[ ${job_block} == *'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'* ]] \
-        || return 65
-    [[ ${job_block} == *'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3'* ]] \
-        || return 65
-    [[ ${job_block} == *"git apply --check -- \"\${handoff_dir}/release-docs.patch\""* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal immutable tag binding.
-    [[ ${job_block} == *'[[ $(git rev-parse "${RELEASE_TAG}^{commit}") == "${RELEASE_SHA}" ]]'* ]] \
-        || return 65
-    [[ ${job_block} == *'README.fr.md README.md test-static.sh'* ]] || return 65
-    [[ ${job_block} == *'candidate handoff path is not a regular file'* ]] \
-        || return 65
-    [[ ${job_block} == *'python3 -B scripts/update-published-version.py'* ]] \
-        || return 65
-    [[ ${job_block} == *'bash ./tests/run-all.sh --full --jobs 4'* ]] || return 65
-    [[ ${job_block} == *'release-docs-tested-tree.sha256'* ]] || return 65
-    [[ ${job_block} == *'release-docs-base-tree.sha256'* ]] || return 65
-    [[ ${job_block} == *'release-docs-verified/README.fr.md'* ]] || return 65
-    [[ ${job_block} == *'release-docs-verified/test-static.sh'* ]] || return 65
-    [[ ${job_block} == *'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal run-scoped artifact name.
-    [[ ${job_block} == *'release-docs-verified-${{ github.run_id }}-${{ github.run_attempt }}'* ]] \
-        || return 65
+    [[ ${job_block} != *'git apply '* ]] || return 65
     return 0
 }
 
@@ -1737,76 +2047,66 @@ assert_release_docs_blob_payload_streaming() (
 release_docs_publisher_job_policy() {
     local job_block=$1
     local permissions=''
+    local required=''
 
     permissions=$(job_permissions_block "${job_block}")
     [[ ${permissions} == $'    permissions:\n      contents: write' ]] || return 65
-    [[ ${job_block} == *"if: needs.prepare-release-docs.outputs.update == 'true'"* ]] \
-        || return 65
+    # Fixed inline Python verifies inert bytes. The authenticated base and exact
+    # seven-file transformation replace the former three-file publisher; only
+    # its bounded automation ref may advance, with force:false.
+    # shellcheck disable=SC2016 # Literal workflow expressions and shell contracts.
+    for required in \
+        "if: needs.prepare-release-docs.outputs.update == 'true'" \
+        'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3' \
+        'release-docs-verified-${{ github.run_id }}-${{ github.run_attempt }}' \
+        'gh release verify "${RELEASE_TAG}"' \
+        'repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}' \
+        '${release_tag_sha} != "${RELEASE_SHA}"' \
+        'repos/${GITHUB_REPOSITORY}/compare/${RELEASE_SHA}...${main_sha}' \
+        '${merge_base_sha} != "${RELEASE_SHA}"' \
+        'paths=(CHANGELOG.md README.fr.md README.md download-video.sh install-fedora.sh' \
+        'packaging/rpm/yt-dlp-aria2-downloader-gui.spec test-static.sh)' \
+        'verified handoff path is not a regular file' \
+        'release-docs-base-tree.sha256' \
+        'release-docs-tested-tree.sha256' \
+        'manifest("release-docs-handoff.sha256", expected_files - {"release-docs-handoff.sha256"})' \
+        'manifest(manifests[1], set(paths))' \
+        'manifest(manifests[0], set(paths))' \
+        'contents/${path}?ref=${base_sha}' \
+        'mode = "100755" if path in {"download-video.sh", "install-fedora.sh", "test-static.sh"} else "100644"' \
+        'base64 --wrap=0 -- "${handoff_dir}/${path}"' \
+        '| jq -Rs' \
+        'encoding: "base64"' \
+        'unable to encode verified blob payload' \
+        'unable to create verified Git blob' \
+        'if [[ ! ${blob_sha} =~ ^[0-9a-f]{40}$ ]]; then' \
+        'repos/${GITHUB_REPOSITORY}/git/blobs' \
+        'repos/${GITHUB_REPOSITORY}/git/trees' \
+        'repos/${GITHUB_REPOSITORY}/git/commits' \
+        'repos/${GITHUB_REPOSITORY}/git/refs' \
+        'branch="automation/release-docs-v${RELEASE_VERSION}"' \
+        'capture_refs "${current_snapshot}"' \
+        'cmp -s -- "${refs_snapshot}" "${current_snapshot}"' \
+        '{sha:$sha,force:false}' \
+        'published_sha=$(gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}"' \
+        'candidate version is not above main, target and tags' \
+        'candidate changed bytes beyond the exact transformation' \
+        'Reviewed documentation branch ready'; do
+        [[ ${job_block} == *"${required}"* ]] || return 65
+    done
     [[ ${job_block} != *'actions/checkout@'* ]] || return 65
-    [[ ${job_block} == *'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3'* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal run-scoped artifact name.
-    [[ ${job_block} == *'release-docs-verified-${{ github.run_id }}-${{ github.run_attempt }}'* ]] \
-        || return 65
-    [[ ${job_block} == *"gh release verify \"\${RELEASE_TAG}\""* ]] || return 65
-    # shellcheck disable=SC2016 # Literal API tag binding.
-    [[ ${job_block} == *'repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}'* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal API tag-to-run comparison.
-    [[ ${job_block} == *'${release_tag_sha} != "${RELEASE_SHA}"'* ]] || return 65
-    # shellcheck disable=SC2016 # Literal API ancestry comparison.
-    [[ ${job_block} == *'repos/${GITHUB_REPOSITORY}/compare/${RELEASE_SHA}...${main_sha}'* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal API ancestry check.
-    [[ ${job_block} == *'${merge_base_sha} != "${RELEASE_SHA}"'* ]] \
-        || return 65
-    [[ ${job_block} == *'README.fr.md README.md test-static.sh'* ]] || return 65
-    [[ ${job_block} == *'verified handoff path is not a regular file'* ]] \
-        || return 65
-    [[ ${job_block} == *'release-docs-base-tree.sha256'* ]] || return 65
-    [[ ${job_block} == *'release-docs-tested-tree.sha256'* ]] || return 65
-    [[ ${job_block} == *'handoff_line_count != 6'* ]] || return 65
-    [[ ${job_block} == *'base_line_count != 3'* ]] || return 65
-    [[ ${job_block} == *'tested_line_count != 3'* ]] || return 65
-    # shellcheck disable=SC2016 # Literal validation-before-use ordering.
-    [[ ${job_block} == *'handoff_line_count=$(wc -l'*'sha256sum --check release-docs-handoff.sha256'* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal protected-main content binding.
-    [[ ${job_block} == *'contents/${path}?ref=${main_sha}'* ]] || return 65
-    [[ ${job_block} == *'mode: "100755"'* ]] || return 65
-    # shellcheck disable=SC2016 # Literal byte-preserving artifact encoding.
-    [[ ${job_block} == *'base64 --wrap=0 -- "${handoff_dir}/${path}"'*'| jq -Rs'* ]] \
-        || return 65
     [[ ${job_block} != *'--arg content'* ]] || return 65
-    [[ ${job_block} == *'encoding: "base64"'* ]] || return 65
-    [[ ${job_block} == *'unable to encode verified blob payload'* ]] \
-        || return 65
-    [[ ${job_block} == *'unable to create verified Git blob'* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal Git blob identity validation.
-    [[ ${job_block} == *'if [[ ! ${blob_sha} =~ ^[0-9a-f]{40}$ ]]; then'* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal Git database API boundaries.
-    [[ ${job_block} == *'repos/${GITHUB_REPOSITORY}/git/blobs'* ]] || return 65
-    # shellcheck disable=SC2016 # Literal Git database API boundaries.
-    [[ ${job_block} == *'repos/${GITHUB_REPOSITORY}/git/trees'* ]] || return 65
-    # shellcheck disable=SC2016 # Literal Git database API boundaries.
-    [[ ${job_block} == *'repos/${GITHUB_REPOSITORY}/git/commits'* ]] || return 65
-    # shellcheck disable=SC2016 # Literal Git database API boundaries.
-    [[ ${job_block} == *'repos/${GITHUB_REPOSITORY}/git/refs'* ]] || return 65
-    # shellcheck disable=SC2016 # Literal bounded automation branch.
-    [[ ${job_block} == *'branch="automation/release-docs-v${RELEASE_VERSION}"'* ]] \
-        || return 65
-    [[ ${job_block} == *'Reviewed documentation branch ready'* ]] || return 65
     [[ ${job_block} != *'gh pr '* ]] || return 65
     [[ ${job_block} != *'git '* ]] || return 65
-    [[ ${job_block} != *'refs/heads/main'* ]] || return 65
-    [[ ${job_block} != *'--method PATCH'* ]] || return 65
+    [[ ${job_block} != *'branch_ref=refs/heads/main'* ]] || return 65
+    [[ ${job_block} != *'/git/refs/heads/main'* ]] || return 65
     [[ ${job_block} != *'--method DELETE'* ]] || return 65
+    [[ ${job_block} != *'--method PATCH'*'--method PATCH'* ]] || return 65
+    [[ ${job_block} != *'force:true'* ]] || return 65
     [[ ${job_block} != *'scripts/update-published-version.py'* ]] || return 65
+    [[ ${job_block} != *'scripts/prepare-source-version.py'* ]] || return 65
     [[ ${job_block} != *'bash ./test-static.sh'* ]] || return 65
     [[ ${job_block} != *'bash ./tests/run-all.sh'* ]] || return 65
-    [[ ${job_block} != *'python3 '* ]] || return 65
     # Predicate success identifies forbidden repository-controlled execution.
     # shellcheck disable=SC2310
     if publisher_job_executes_repo_shell "${job_block}"; then
@@ -1834,6 +2134,7 @@ assert_release_docs_workflow_policy() {
     # shellcheck disable=SC2016 # Literal negative-control fragment.
     local publisher_blob_identity='if [[ ! ${blob_sha} =~ ^[0-9a-f]{40}$ ]]; then'
     local publisher_streaming_blob='| jq -Rs'
+    local required_guard=''
 
     prepare_block=$(workflow_job_block "${workflow}" prepare-release-docs)
     verifier_block=$(workflow_job_block "${workflow}" verify-release-docs)
@@ -1858,6 +2159,37 @@ assert_release_docs_workflow_policy() {
     release_docs_publisher_job_policy "${publisher_block}" \
         || fail 'release-docs publisher job violates its privileged trust boundary.'
     assert_release_docs_blob_payload_streaming
+
+    # shellcheck disable=SC2016 # Literal jq payload used as a negative control.
+    for required_guard in \
+        '{sha:$sha,force:false}' \
+        'candidate version is not above main, target and tags' \
+        'candidate changed bytes beyond the exact transformation'; do
+        mutated=${publisher_block//"${required_guard}"/removed_guard}
+        mutation_must_change "${publisher_block}" "${mutated}" 'release-docs source-version guard removal'
+        # shellcheck disable=SC2310 # Guard removal must fail closed.
+        if release_docs_publisher_job_policy "${mutated}"; then
+            fail 'release-docs policy allowed removal of a source-version publication guard.'
+        fi
+    done
+
+    mutated=${publisher_block//python3 -I -/python3 -}
+    mutation_must_change "${publisher_block}" "${mutated}" 'release-docs isolated Python removal'
+    # shellcheck disable=SC2310 # Inline Python must not import from artifact paths.
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed non-isolated Python in the publisher.'
+    fi
+
+    for required_guard in \
+        'python3 -I - < candidate.py' \
+        'python3 -I - <<< candidate' \
+        "python3 -I - < candidate.py # <<'PY'"; do
+        mutated="${publisher_block}"$'\n'"      ${required_guard}"
+        # shellcheck disable=SC2310 # Candidate stdin is execution despite -I.
+        if release_docs_publisher_job_policy "${mutated}"; then
+            fail 'release-docs policy allowed candidate Python through stdin.'
+        fi
+    done
 
     mutated=${prepare_block//contents: read/contents: write}
     mutation_must_change "${prepare_block}" "${mutated}" \
@@ -1919,10 +2251,16 @@ assert_release_docs_workflow_policy() {
     fi
 
     mutated="${publisher_block}"$'\n''      gh api --method PATCH repos/example/git/refs/heads/main'
-    # Predicate failure is expected for mutable reference updates.
+    # Predicate failure is expected for an unbounded protected-main update.
     # shellcheck disable=SC2310
     if release_docs_publisher_job_policy "${mutated}"; then
-        fail 'release-docs policy allowed a mutable Git reference update.'
+        fail 'release-docs policy allowed a protected-main Git reference update.'
+    fi
+
+    mutated="${publisher_block}"$'\n''      gh api --method PATCH repos/example/git/refs/heads/unrelated'
+    # shellcheck disable=SC2310 # Only the single bounded automation PATCH is allowed.
+    if release_docs_publisher_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed an additional mutable branch update.'
     fi
 
     mutated="${publisher_block}"$'\n''      ./candidate-tool'
@@ -1939,7 +2277,7 @@ assert_release_docs_workflow_policy() {
         fail 'release-docs policy allowed interpreted candidate execution.'
     fi
 
-    mutated=${publisher_block//README.fr.md README.md test-static.sh/README.md test-static.sh}
+    mutated=${publisher_block//README.fr.md README.md download-video.sh/README.md download-video.sh}
     mutation_must_change "${publisher_block}" "${mutated}" \
         'release-docs publisher allowlist mutation'
     # Predicate failure is expected for this negative-control mutation.
@@ -1973,7 +2311,7 @@ assert_release_docs_workflow_policy() {
         fail 'release-docs policy allowed removal of the publisher ancestry check.'
     fi
 
-    mutated=${publisher_block//mode: \"100755\"/mode: \"100644\"}
+    mutated=${publisher_block//mode = \"100755\"/mode = \"100644\"}
     mutation_must_change "${publisher_block}" "${mutated}" \
         'release-docs executable mode mutation'
     # Predicate failure is expected for this negative-control mutation.
@@ -2019,11 +2357,19 @@ test_static_tooling_contracts() {
 
     assert_source_inventory_is_canonical
     assert_repository_file_inventory_is_canonical
-    assert_repository_skills_are_discoverable
+    assert_static_harness_regressions
+    assert_repository_skill_files_are_valid
     assert_codex_rules_are_conservative
     assert_contribution_templates_are_structured
+    assert_status 0 'pre-push version guard rejects unchanged source pushes' \
+        python3 -B "${SCRIPT_DIR}/tests/push-version-integration.py"
+    assert_status 0 'release-docs publisher preserves bounded version and branch updates' \
+        python3 -B "${SCRIPT_DIR}/tests/release-docs-integration.py"
+    assert_status 0 'shfmt handoff independently binds its bump and publication' \
+        python3 -B "${SCRIPT_DIR}/tests/shfmt-version-handoff-integration.py"
     assert_shell_policy_lists_are_canonical
     assert_unique_source_file_list PYTHON_FILES "${PYTHON_FILES[@]}"
+    assert_workflow_validator_regressions
     assert_workflow_dependencies_are_hardened
     assert_shfmt_update_workflow_policy
     assert_package_post_release_policy
@@ -4620,6 +4966,7 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
+    python3 -B "${SCRIPT_DIR}/scripts/check-push-version.py" coherence
     assert_forbidden_source_name_absent
     test_static_tooling_contracts
     test_static_shell_interface_contracts
