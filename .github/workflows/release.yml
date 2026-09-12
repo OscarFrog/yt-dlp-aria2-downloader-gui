@@ -17,10 +17,18 @@ concurrency:
   cancel-in-progress: false
 jobs:
   validate:
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+      tag_object: ${{ steps.source.outputs.tag_object }}
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Validate release tag identity before checkout
+        id: source
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -71,16 +79,22 @@ jobs:
               "${reason:-<missing>}" >&2
             exit 65
           fi
+          [[ ${target_sha} == "${GITHUB_SHA}" ]] || {
+            printf '%s\n' 'Error: tag source differs from the triggering immutable commit.' >&2
+            exit 65
+          }
+          printf 'commit=%s\ntag_object=%s\n' "${target_sha}" "${tag_object_sha}" >>"${GITHUB_OUTPUT}"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          # The tag guard binds its target to this immutable event identity.
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Install validation dependencies
         run: |
           sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes aria2 curl desktop-file-utils gnupg shellcheck unzip
+          sudo apt-get -o Acquire::Retries=3 install --yes gnupg
       - name: Verify the exact authorized release-tag signer
         env:
           GH_TOKEN: ${{ github.token }}
@@ -229,8 +243,106 @@ jobs:
           grep -Fq "développement actuelle est la **${version}**." README.fr.md
           python3 -B scripts/update-published-version.py --check "${version}"
           grep -Fq "## ${version} - " CHANGELOG.md
-      - run: bash ./tests/run-all.sh --jobs 4
+      - name: Require qualification of the exact release source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -I scripts/ci-validation.py verify --commit "$(git rev-parse HEAD)"
 
+
+  release-runtime:
+    name: Current Ubuntu dependencies / yt-dlp ${{ matrix.yt_dlp_version }}
+    needs: validate
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    # Distribution dependencies are resolved anew for publication. Source-tree
+    # proof does not identify that environment, so exercise current media tools
+    # alongside the independent package builds before opening the release gate.
+    strategy:
+      fail-fast: true
+      matrix:
+        yt_dlp_version: ['2026.6.9', '2026.8.19']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install current Ubuntu engines and pinned yt-dlp
+        env:
+          YT_DLP_VERSION: ${{ matrix.yt_dlp_version }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo env DEBIAN_FRONTEND=noninteractive \
+            apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
+            aria2 ffmpeg python3-venv
+
+          case ${YT_DLP_VERSION} in
+            2026.6.9)
+              yt_dlp_sha=442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4
+              ;;
+            2026.8.19)
+              yt_dlp_sha=1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf
+              ;;
+            *)
+              printf 'Error: no approved release yt-dlp wheel digest for %s.\n' \
+                "${YT_DLP_VERSION}" >&2
+              exit 65
+              ;;
+          esac
+
+          requirements="${RUNNER_TEMP}/release-yt-dlp-requirements.txt"
+          printf 'yt-dlp==%s --hash=sha256:%s\n' \
+            "${YT_DLP_VERSION}" "${yt_dlp_sha}" >"${requirements}"
+
+          python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
+            --disable-pip-version-check \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement "${requirements}"
+          echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
+      - name: Record resolved release dependency versions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf 'yt-dlp: %s\n' "$(yt-dlp --version)"
+          aria2c --version | awk 'NR == 1 { first = $0 } END { print first }'
+          ffmpeg -hide_banner -version | awk 'NR == 1 { first = $0 } END { print first }'
+          ffprobe -hide_banner -version | awk 'NR == 1 { first = $0 } END { print first }'
+          # shellcheck disable=SC2016 # dpkg-query expands these package fields.
+          dpkg-query --show --showformat='${db:Status-Status}\t${binary:Package}\t${Version}\t${Architecture}\n' \
+            | LC_ALL=C sort
+      - name: Qualify routing with current release dependencies
+        shell: bash
+        run: |
+          timeout --signal=TERM --kill-after=10s 8m \
+            bash ./tests/real-tools-integration.sh
+      - name: Run aria2 direct-transfer behavior qualification
+        env:
+          ARIA2_BEHAVIOR_BASIC_RUNS: 3
+          ARIA2_BEHAVIOR_CANCEL_RESTART_RUNS: 10
+        shell: bash
+        run: |
+          timeout --signal=TERM --kill-after=10s 12m \
+            bash ./tests/aria2-real-behavior-integration.sh
+      - name: Qualify FFmpeg progress with current release dependencies
+        if: matrix.yt_dlp_version == '2026.8.19'
+        shell: bash
+        run: |
+          timeout --signal=TERM --kill-after=10s 8m \
+            bash ./tests/ffmpeg-real-progress-integration.sh
+      - name: Qualify HLS duration with current release dependencies
+        if: matrix.yt_dlp_version == '2026.8.19'
+        shell: bash
+        run: |
+          timeout --signal=TERM --kill-after=10s 5m \
+            bash ./tests/hls-remux-duration-integration.sh
 
   previous-release:
     needs: validate
@@ -240,13 +352,14 @@ jobs:
       contents: read
       attestations: read
     outputs:
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
       tag: ${{ steps.previous.outputs.tag }}
       version: ${{ steps.previous.outputs.version }}
       commit: ${{ steps.previous.outputs.commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -299,7 +412,7 @@ jobs:
           fi
 
           previous_commit=$(git rev-parse "${previous_tag}^{commit}")
-          current_commit=$(git rev-parse "${RELEASE_TAG}^{commit}")
+          current_commit=$(git rev-parse HEAD)
 
           if [[ ! ${previous_commit} =~ ^[0-9a-f]{40}$ ]]; then
             printf 'Error: invalid previous release commit: %s\n' \
@@ -440,6 +553,7 @@ jobs:
           )
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: artifact
         with:
           name: previous-release-packages
           path: |
@@ -450,106 +564,32 @@ jobs:
           retention-days: 1
           overwrite: true
 
-  real-tools:
-    needs: validate
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        yt_dlp_version: ['2026.6.9', '2026.8.19']
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-          persist-credentials: false
-      - name: Install real engines
-        env:
-          YT_DLP_VERSION: ${{ matrix.yt_dlp_version }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo env DEBIAN_FRONTEND=noninteractive \
-            apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
-            aria2 ffmpeg python3-venv
-
-          case ${YT_DLP_VERSION} in
-            2026.6.9)
-              yt_dlp_sha=442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4
-              ;;
-            2026.8.19)
-              yt_dlp_sha=1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf
-              ;;
-            *)
-              printf 'Error: no approved release yt-dlp wheel digest for %s.\n' \
-                "${YT_DLP_VERSION}" >&2
-              exit 65
-              ;;
-          esac
-
-          requirements="${RUNNER_TEMP}/release-yt-dlp-requirements.txt"
-          printf 'yt-dlp==%s --hash=sha256:%s\n' \
-            "${YT_DLP_VERSION}" "${yt_dlp_sha}" >"${requirements}"
-
-          python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
-          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
-            --disable-pip-version-check \
-            --only-binary=:all: \
-            --require-hashes \
-            --requirement "${requirements}"
-          echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
-      - name: Run hermetic routing integration (3x)
-        shell: bash
-        run: |
-          bash ./tests/repeat-qualification.sh \
-            --label 'release routing iteration' --runs 3 --jobs 3 -- \
-            timeout --signal=TERM --kill-after=10s 8m \
-            bash ./tests/real-tools-integration.sh
-      - name: Run aria2 direct-transfer behavior qualification
-        env:
-          ARIA2_BEHAVIOR_BASIC_RUNS: 3
-          ARIA2_BEHAVIOR_CANCEL_RESTART_RUNS: 10
-        run: |
-          timeout --signal=TERM --kill-after=10s 12m \
-            bash ./tests/aria2-real-behavior-integration.sh
-      - name: Run real FFmpeg progress integration
-        run: |
-          timeout --signal=TERM --kill-after=10s 8m \
-            bash ./tests/ffmpeg-real-progress-integration.sh
-      - name: Run HLS post-remux duration validation (3x)
-        shell: bash
-        run: |
-          bash ./tests/repeat-qualification.sh \
-            --label 'release HLS duration guard iteration' --runs 3 --jobs 3 -- \
-            timeout --signal=TERM --kill-after=10s 5m \
-            bash ./tests/hls-remux-duration-integration.sh
-
   zip:
-    needs: [validate, real-tools]
+    outputs:
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
+    needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - run: |
           sudo apt-get update
-          sudo apt-get install --yes aria2 curl desktop-file-utils findutils gnupg shellcheck unzip
-      - name: Build and retest ZIP
+          sudo apt-get install --yes unzip
+      - name: Build and verify exact source ZIP
         shell: bash
         run: |
           set -Eeuo pipefail
           version=${RELEASE_TAG#v}; package="yt-dlp-aria2-downloader-gui-${version}"
           mkdir -p dist
-          git archive --format=zip --prefix="${package}/" --output="dist/${package}.zip" "${RELEASE_TAG}^{commit}"
+          git archive --format=zip --prefix="${package}/" --output="dist/${package}.zip" HEAD
           unzip -t "dist/${package}.zip"
-          extracted=$(mktemp -d); trap 'rm -rf -- "${extracted}"' EXIT
-          unzip -q "dist/${package}.zip" -d "${extracted}"
-          (cd "${extracted}/${package}" && bash ./tests/run-all.sh --jobs 4)
+          python3 -I scripts/verify-source-archive.py "dist/${package}.zip" "${package}/" "$(git rev-parse HEAD)"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: artifact
         with:
           name: release-zip
           path: dist/*.zip
@@ -558,7 +598,9 @@ jobs:
           overwrite: true
 
   rpm-build:
-    needs: [validate, real-tools]
+    outputs:
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
+    needs: validate
     runs-on: ubuntu-24.04
     container: fedora:44
     timeout-minutes: 20
@@ -567,7 +609,7 @@ jobs:
         run: dnf install --assumeyes cpio desktop-file-utils findutils gawk git gnupg2 gzip python3 rpm-build rpm-sign tar
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Build release RPM once
@@ -576,21 +618,8 @@ jobs:
           set -Eeuo pipefail
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           bash packaging/rpm/build-rpm.sh "${RELEASE_TAG#v}" dist
-      - name: Qualify release RPM v4/v6 signature semantics (3x)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          shopt -s nullglob
-          packages=(dist/*.rpm)
-          shopt -u nullglob
-          ((${#packages[@]} == 1))
-
-          bash ./tests/repeat-qualification.sh \
-            --label 'release RPM v4/v6 qualification iteration' \
-            --runs 3 --jobs 3 -- \
-            timeout --signal=TERM --kill-after=10s 4m \
-            bash ./tests/rpm6-multisig-integration.sh "${packages[0]}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: artifact
         with:
           name: unsigned-rpm
           path: dist/*.rpm
@@ -599,7 +628,9 @@ jobs:
           overwrite: true
 
   rpm-sign:
-    needs: rpm-build
+    outputs:
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
+    needs: [validate, rpm-build]
     runs-on: ubuntu-24.04
     container: fedora:44
     timeout-minutes: 10
@@ -609,11 +640,37 @@ jobs:
       RPM_SIGNING_SUBKEY_FINGERPRINT: 1F5B769CE48A08AAC0A7D9DDECC9894B41830245
     steps:
       - name: Install isolated RPM signing tools
-        run: dnf install --assumeyes coreutils gawk gnupg2 rpm rpm-sign
+        run: dnf install --assumeyes coreutils gawk gh gnupg2 rpm rpm-sign
+      - name: Require immutable artifact identity
+        env:
+          ARTIFACT_IDS: ${{ needs.rpm-build.outputs.artifact_id }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}$ ]] || {
+            printf '%s\n' 'Error: required immutable artifact identities are missing or malformed.' >&2
+            exit 65
+          }
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
-          name: unsigned-rpm
+          artifact-ids: ${{ needs.rpm-build.outputs.artifact_id }}
           path: unsigned
+          digest-mismatch: error
+      - name: Require unchanged qualified release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ needs.validate.outputs.commit }}
+          SOURCE_TAG_OBJECT: ${{ needs.validate.outputs.tag_object }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ ${SOURCE_COMMIT} == "${GITHUB_SHA}" ]]
+          [[ ${SOURCE_TAG_OBJECT} =~ ^[0-9a-f]{40}$ ]]
+          current_tag_object=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha')
+          [[ ${current_tag_object} == "${SOURCE_TAG_OBJECT}" ]] || {
+            printf '%s\n' 'Error: release tag changed after source qualification.' >&2
+            exit 65
+          }
       - name: Sign exact release RPM with OpenPGP
         shell: bash
         env:
@@ -801,6 +858,7 @@ jobs:
             --checksig "${signed}"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: artifact
         with:
           name: release-rpm
           path: dist/*.rpm
@@ -809,14 +867,16 @@ jobs:
           overwrite: true
 
   rpm-test:
-    needs: [rpm-sign, previous-release]
+    outputs:
+      artifact_id: ${{ needs.rpm-sign.outputs.artifact_id }}
+    needs: [validate, rpm-sign, previous-release]
     runs-on: ubuntu-24.04
     container: fedora:44
     timeout-minutes: 35
     env:
       PACKAGE_TEST_HOME: /root
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         scenario: [fresh, ffmpeg-free]
     steps:
@@ -832,18 +892,41 @@ jobs:
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Require immutable artifact identity
+        env:
+          ARTIFACT_IDS: ${{ needs.rpm-sign.outputs.artifact_id }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}$ ]] || {
+            printf '%s\n' 'Error: required immutable artifact identities are missing or malformed.' >&2
+            exit 65
+          }
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
-          name: release-rpm
+          artifact-ids: ${{ needs.rpm-sign.outputs.artifact_id }}
           path: dist
+          digest-mismatch: error
+      - name: Require immutable artifact identity
+        if: matrix.scenario == 'fresh'
+        env:
+          ARTIFACT_IDS: ${{ needs.previous-release.outputs.artifact_id }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}$ ]] || {
+            printf '%s\n' 'Error: required immutable artifact identities are missing or malformed.' >&2
+            exit 65
+          }
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         if: matrix.scenario == 'fresh'
         with:
-          name: previous-release-packages
+          artifact-ids: ${{ needs.previous-release.outputs.artifact_id }}
           path: previous
+          digest-mismatch: error
       - name: Reject a different globally trusted RPM signer
         if: matrix.scenario == 'fresh'
         shell: bash
@@ -1016,23 +1099,36 @@ jobs:
           HOME="${PACKAGE_TEST_HOME}" bash packaging/rpm/test-package-upgrade.sh             "${old[0]}"             "${current[0]}"             "${{ needs.previous-release.outputs.version }}"             "${RELEASE_TAG#v}"
 
   deb:
-    needs: [validate, real-tools, previous-release]
+    outputs:
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
+    needs: [validate, previous-release]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Install DEB build tools
         run: |
           sudo apt-get -o Acquire::Retries=3 update
           sudo apt-get -o Acquire::Retries=3 install --yes desktop-file-utils
+      - name: Require immutable artifact identity
+        env:
+          ARTIFACT_IDS: ${{ needs.previous-release.outputs.artifact_id }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}$ ]] || {
+            printf '%s\n' 'Error: required immutable artifact identities are missing or malformed.' >&2
+            exit 65
+          }
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
-          name: previous-release-packages
+          artifact-ids: ${{ needs.previous-release.outputs.artifact_id }}
           path: ${{ runner.temp }}/previous-release
+          digest-mismatch: error
       - name: Build, lifecycle, reinstall, and upgrade DEB
         env:
           PREVIOUS_DIR: ${{ runner.temp }}/previous-release
@@ -1057,6 +1153,7 @@ jobs:
 
           sudo bash packaging/deb/test-package-upgrade.sh             "${old[0]}"             "${packages[0]}"             "${{ needs.previous-release.outputs.version }}"             "${RELEASE_TAG#v}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: artifact
         with:
           name: release-deb
           path: dist/*.deb
@@ -1064,8 +1161,39 @@ jobs:
           retention-days: 7
           overwrite: true
 
+  verify-source:
+    name: Revalidate qualified source before publication
+    needs: [validate, zip, rpm-test, deb, release-runtime]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Revalidate qualification after final package testing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ needs.validate.outputs.commit }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ ${SOURCE_COMMIT} == "${GITHUB_SHA}" ]] || {
+            printf '%s\n' 'Error: qualified source differs from the triggering immutable commit.' >&2
+            exit 65
+          }
+          python3 -I scripts/ci-validation.py verify --commit "${GITHUB_SHA}"
+
   publish:
-    needs: [zip, rpm-test, deb]
+    outputs:
+      zip_artifact_id: ${{ needs.zip.outputs.artifact_id }}
+      rpm_artifact_id: ${{ needs.rpm-test.outputs.artifact_id }}
+      deb_artifact_id: ${{ needs.deb.outputs.artifact_id }}
+    needs: [validate, zip, rpm-test, deb, verify-source]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -1075,13 +1203,33 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Require exact tested artifact identities
+        env:
+          ARTIFACT_IDS: ${{ needs.zip.outputs.artifact_id }},${{ needs.rpm-test.outputs.artifact_id }},${{ needs.deb.outputs.artifact_id }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}(,[1-9][0-9]{0,19}){2}$ ]] || {
+            printf '%s\n' 'Error: required immutable artifact identities are missing or malformed.' >&2
+            exit 65
+          }
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
-          pattern: release-*
+          artifact-ids: ${{ needs.zip.outputs.artifact_id }}
           path: dist
-          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          artifact-ids: ${{ needs.rpm-test.outputs.artifact_id }}
+          path: dist
+          digest-mismatch: error
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          artifact-ids: ${{ needs.deb.outputs.artifact_id }}
+          path: dist
+          digest-mismatch: error
       - name: Verify payloads and checksums
         shell: bash
         run: |
@@ -1091,6 +1239,21 @@ jobs:
           shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/*.deb dist/install-fedora.sh dist/RPM-GPG-KEY-OscarFrog); shopt -u nullglob
           ((${#payloads[@]} == 5))
           (cd dist && sha256sum -- *.zip *.rpm *.deb install-fedora.sh RPM-GPG-KEY-OscarFrog > SHA256SUMS && sha256sum --check SHA256SUMS)
+      - name: Require unchanged qualified release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ needs.validate.outputs.commit }}
+          SOURCE_TAG_OBJECT: ${{ needs.validate.outputs.tag_object }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ ${SOURCE_COMMIT} == "${GITHUB_SHA}" ]]
+          [[ ${SOURCE_TAG_OBJECT} =~ ^[0-9a-f]{40}$ ]]
+          current_tag_object=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha')
+          [[ ${current_tag_object} == "${SOURCE_TAG_OBJECT}" ]] || {
+            printf '%s\n' 'Error: release tag changed after source qualification.' >&2
+            exit 65
+          }
       - name: Attest release artifacts
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
@@ -1183,7 +1346,7 @@ jobs:
 
   verify-published:
     name: Fresh-download public release verification
-    needs: publish
+    needs: [validate, publish]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -1192,15 +1355,35 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Require exact tested artifact identities
+        env:
+          ARTIFACT_IDS: ${{ needs.publish.outputs.zip_artifact_id }},${{ needs.publish.outputs.rpm_artifact_id }},${{ needs.publish.outputs.deb_artifact_id }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}(,[1-9][0-9]{0,19}){2}$ ]] || {
+            printf '%s\n' 'Error: required immutable artifact identities are missing or malformed.' >&2
+            exit 65
+          }
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
-          pattern: release-*
+          artifact-ids: ${{ needs.publish.outputs.zip_artifact_id }}
           path: expected
-          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          artifact-ids: ${{ needs.publish.outputs.rpm_artifact_id }}
+          path: expected
+          digest-mismatch: error
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          artifact-ids: ${{ needs.publish.outputs.deb_artifact_id }}
+          path: expected
+          digest-mismatch: error
 
       - name: Reconstruct expected public payload
         shell: bash

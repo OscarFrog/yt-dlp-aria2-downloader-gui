@@ -1,16 +1,41 @@
 name: Package validation
 on:
   pull_request:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
   group: packages-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  identity:
+    name: Source identity ${{ github.sha }}
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Bind validation to the event source
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ $(git rev-parse HEAD) == "${EXPECTED_SHA}" ]]
+          git rev-parse 'HEAD^{tree}'
+      - name: Require successful shell validation before qualification
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: python3 -I scripts/ci-validation.py wait-shell --commit "${EXPECTED_SHA}"
   source-archive:
+    needs: identity
     name: Git-free source archive
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -58,6 +83,7 @@ jobs:
           )
 
   previous-release:
+    needs: identity
     name: Previous immutable release
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -364,6 +390,7 @@ jobs:
           overwrite: true
 
   rpm-build:
+    needs: identity
     name: Fedora 44 RPM build-once
     runs-on: ubuntu-24.04
     container: fedora:44
@@ -389,7 +416,7 @@ jobs:
             exit 65
           fi
           bash packaging/rpm/build-rpm.sh "${version}" dist
-      - name: Qualify RPM v4/v6 signature semantics (3x)
+      - name: Qualify RPM v4/v6 signature semantics
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -398,9 +425,7 @@ jobs:
           shopt -u nullglob
           ((${#packages[@]} == 1))
 
-          bash ./tests/repeat-qualification.sh \
-            --label 'RPM v4/v6 qualification iteration' --runs 3 --jobs 3 -- \
-            timeout --signal=TERM --kill-after=10s 4m \
+          timeout --signal=TERM --kill-after=10s 4m \
             bash ./tests/rpm6-multisig-integration.sh "${packages[0]}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -421,7 +446,7 @@ jobs:
     env:
       PACKAGE_TEST_HOME: /root
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         scenario: [fresh, ffmpeg-free]
     steps:

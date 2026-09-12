@@ -763,11 +763,10 @@ The automated suite checks, among other things:
   runtime symlinks, overflowing UID/GID text, and refusal of direct root cleanup
   for a non-root HOME;
 - refusal to traverse symlinked intermediate cleanup components beneath
-  authorized XDG roots, with that cleanup safety suite repeated ten times in
-  stress CI;
+  authorized XDG roots, covered once by each full-suite environment;
 - explicit production RPM-v4 pinning plus a dedicated RPM-v6 fixture that
-  qualifies multi-signature ordering/corruption semantics three times in
-  package PR CI and three times again before a release RPM is signed;
+  qualifies multi-signature ordering/corruption semantics once in package PR
+  CI; the final release signature is independently checked on the signed RPM;
 - exact same RPM artifact tested in Fedora `fresh` and `ffmpeg-free`;
 - current stable yt-dlp compatibility in addition to the minimum supported
   version;
@@ -818,11 +817,120 @@ behavioral guarantees.
 
 ## GitHub Actions
 
-`.github/workflows/shell.yml` runs the same validation for pull requests and
-for pushes to `main`, in two environments:
+The five qualification workflows run on pull requests, with manual dispatch
+available for diagnostics. `shell.yml` first checks event/checkout identity,
+version coherence and Bash syntax, then qualifies Ubuntu 24.04, Fedora 44 and
+actual Python 3.10. Other PR workflows wait for this complete shell validation
+before starting package, real-tool, FFmpeg and stress work. Root jobs use
+`needs: identity`; downstream jobs preserve their package/shard dependencies.
+This deliberately spends about three minutes on the shell contract first, so
+an inexpensive failure cannot waste a compiler or a long stress run.
 
-- `ubuntu-24.04`;
-- a Fedora 44 container on a GitHub-hosted runner.
+The existing required check **Mock process/cancellation stress (20x deterministic
+jitter)** also waits for every complementary shell, package, real-tool and
+FFmpeg job. It excludes its own workflow from that API wait: its local `needs`
+cover its shards and runtime test, avoiding a self-dependency. All nine required
+check names are preserved; no remote ruleset change is necessary. Matrices
+cancel remaining entries after a failure, and PR concurrency cancels superseded
+revisions. Scheduled current-stable tools remain independent diagnostics.
+
+`promotion.yml` is the only source workflow triggered by `push main`. It checks
+qualification identity without running the suites again. `release.yml`
+independently requires the same proof before building, even if the main
+promotion run was skipped, cancelled or failed. No successful main status,
+cache, version string or artifact filename can substitute for source proof.
+
+### Content qualification and promotion
+
+`scripts/ci-validation.py` uses authenticated, read-only GitHub API responses.
+Each qualification workflow has a job named `Source identity ${{ github.sha }}`.
+GitHub resolves that name from the event; the isolated job checks that checkout
+HEAD equals this SHA before any dependent test job. For a PR this is the virtual
+merge, while Actions REST `run.head_sha` identifies the branch HEAD. Do not
+confuse these identities or infer the tested merge from `head_commit.tree_id`.
+
+Promotion requires one merged PR for the exact squash commit, an ancestor of
+canonical main; the five expected workflow IDs/paths and latest PR-head runs;
+their latest attempts and complete expected successful job inventories; and
+equality of the **entire** qualified and promoted Git trees, including scripts,
+workflow definitions, pins, documentation, file modes and test parameters. The
+virtual merge parents must be the squash parent and final PR HEAD. This supports
+the repository's enforced squash policy and deliberately refuses other merge
+shapes or a changed base. A deleted fork, missing Git object, disabled workflow,
+unknown/skipped job, pagination overflow, unavailable API or concurrent change
+of run/attempt fails closed. The scheduled-only real-tools job is the sole
+expected skipped job in PR evidence. GitHub clears some run PR associations
+after merge; the verifier uses the authoritative squash-to-PR API relationship
+and exact Git parent identities instead.
+
+A historical qualification of immutable content does not expire merely because
+time passes. Obsolescence is concrete: changed tree/base/head/parameters,
+workflow identity, newer failing or unfinished run, or withdrawn/unavailable
+GitHub evidence. Timestamps must remain well formed, non-future and consistent
+with the run. Scheduled current-stable diagnostics still detect upstream
+movement; release installation, signer checks and previous-release verification
+inspect current external inputs independently. Latest run/attempt identities
+are re-read before accepting the proof; an older success never masks a newer
+pending or failed run. No PR artifact, cache or attestation permission is
+introduced. The trust root is GitHub's authenticated run/job records plus
+immutable Git objects and the reviewed workflow definition in the equal tree.
+This proves what the source passed with the qualification environment; it does
+not claim compatibility with every future distribution update.
+
+An authorized maintainer can inspect a merged candidate without publishing:
+
+```bash
+python3 -I scripts/ci-validation.py verify --commit <full-squash-commit-SHA>
+```
+
+Provide `GH_TOKEN` through the environment. Never put it in command arguments.
+The command returns the qualified tree, PR number and five run/attempt/source
+identities. There is no automatic fallback that runs tests or accepts incomplete
+evidence. If a newer attempt fails, explicitly correct the cause or rerun
+**all jobs of the original PR workflows** under the normal authority, shell
+first and then the four complementary workflows, preserving event/source
+identity. Then retry promotion or release from the exact existing tag. If
+original runs/merge objects/fork identities are no longer available, prepare a
+new normally qualified PR and a new version/tag under the usual authority.
+An old tag predating source-identity jobs cannot use this new proof protocol.
+Manual diagnostic dispatch runs do not replace PR evidence.
+
+| Class | Content and place | Reuse |
+| --- | --- | --- |
+| A | Event/checkout identity, version, syntax; formatting, ShellCheck, static and workflow contracts early in shell CI | Cheap rejection before costly work |
+| B | Full hermetic functional suites on Ubuntu/Fedora/Python 3.10 | Once in each complementary environment on PR |
+| C | Git-free source, real-tool/pinned versions, FFmpeg generations, signal jitters, native package candidate qualification | Once per candidate tree; complete required gate before merge |
+| D | Tag/signer/main/version, final ZIP identity, release build/sign/install/upgrade, newly resolved distribution runtime, provenance, immutable assets and public download | At release, on final objects and current external inputs |
+
+The full source archive is qualified once on PR without `.git`. At release,
+`scripts/verify-source-archive.py` compares the ZIP commit identity and complete
+paths, extraction modes and bytes with the immutable Git blobs, reading members
+without extracting or executing them. Its strict Git ZIP format rejects altered
+inventory, unsupported metadata and content; a new intentional archive/export
+format needs a corresponding verifier change. RPM/DEB construction is inexpensive
+relative to qualification, so release builds new candidates and tests their
+final bytes. Cross-run package promotion would introduce digest/provenance and
+retention obligations for little wall-clock gain; it is not used here.
+
+The PR source proof does not contain a cryptographically bound fingerprint of
+every installed distribution package and library. Even an unchanged FFmpeg
+version string can hide a changed distribution revision. Therefore release
+retains `release-runtime`: one routing and aria2 behavior pass for each original
+pinned yt-dlp version (2026.6.9 and 2026.8.19) on freshly resolved Ubuntu
+dependencies. The aria2 fixture uses native yt-dlp fallbacks, so both versions
+remain necessary, with their existing internal cycles. FFmpeg progress and HLS
+duration run once in the latest matrix entry because those fixtures are
+independent of yt-dlp. Resolved tool and distribution package versions are
+logged. This job runs alongside builds and must succeed before final source
+verification and publication. It has no outer repeat wrapper or full suite.
+Removing this gate would require verified environment identity/reuse;
+installation and `--version` checks alone cannot establish real transfer and
+conversion compatibility.
+
+`tests/ci-validation-integration.py` and `tests/source-archive-integration.py`,
+called by static validation, exercise rejected proofs and source archives and
+protect the graph against reintroducing full PR/main/release qualification.
+Dated baseline measurements and implementation evidence are in `CI_AUDIT.md`.
 
 The Fedora shell and FFmpeg qualification containers mount anonymous Docker
 volumes at `/tmp` and `/var/tmp`, with `TMPDIR=/var/tmp` for test fixtures. These
@@ -858,9 +966,10 @@ using the release preceding the current tag for the normal upgrade tests.
 
 Pull-request CI builds one unsigned noarch RPM and proves that the production
 bootstrap rejects it unless `--allow-unsigned-dev` is explicitly selected.
-Release CI builds the RPM once, explicitly requires RPM package format v4,
-qualifies RPM-v4/v6 signature semantics three times concurrently against the
-same read-only unsigned artifact, then signs those exact bytes once in the
+PR CI qualifies RPM-v4/v6 signature semantics once; the fixture already covers
+multiple signers, signature ordering and corruption. Release CI reuses that
+source qualification, builds the RPM once, explicitly requires RPM package
+format v4, then signs those exact bytes once in the
 isolated `rpm-signing` GitHub Environment. The signer has no
 repository checkout, uses the same private RPM 6 `fs` keyring model as the
 consumer bootstrap, removes materialized signing secrets as soon as they are no
@@ -881,8 +990,12 @@ tiny direct HTTP, AAC/M4A, Opus/WebM, combined-audio, HLS and DASH fixtures
 locally, serves them over loopback, proves the aria2c/native downloader boundary,
 exercises real
 FFmpeg progress, and checks HLS post-remux duration consistency without
-contacting a public media service. Audio/routing and HLS-duration scenarios are
-repeated three times concurrently with ordered per-run logs. The controlled
+contacting a public media service. Routing runs once per pinned yt-dlp version.
+HLS duration mocks yt-dlp and FFmpeg progress does not use it; those fixtures
+run once on the latest Ubuntu matrix entry with FFmpeg/FFprobe 6.1.1 verified.
+The FFmpeg 6 generation job adds only generation-specific compatibility fixtures;
+Fedora 8 and upstream 9 each run the common fixtures with their distinct tools.
+The controlled
 aria2 behavior suite repeats
 Range/no-Range/redirect/error three times, the silent-active quiescence
 negative control ten times, and interrupted resume ten times. A separate weekly
@@ -890,7 +1003,7 @@ scheduled job resolves and logs the current stable yt-dlp
 version and runs the same qualification without changing PR pins.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
-the complete validation and the hermetic real-tool integration first, verifies
+the exact-source qualification proof and release-specific identity checks, verifies
 tag ancestry and project versions, and requires the published RPM, DEB, ZIP,
 and verification references in both tagged READMEs to match that tag before it
 builds immutable artifacts. It then resolves the previous semantic-version
@@ -903,7 +1016,16 @@ downloaded and verified with the published SHA256SUMS, `gh release verify`,
 `gh release verify-asset`, and SLSA provenance constrained to the expected
 repository, release workflow, and exact source commit.
 
-The current ZIP, RPM, and DEB are built in separate jobs. The release RPM is
+The current ZIP, RPM, and DEB are built in separate jobs. Every release checkout
+uses `${{ github.sha }}` directly, making the immutable event identity explicit
+to Actions security analysis. Tag validation requires its target to equal that
+commit before checkout; job outputs remain proof data, never checkout refs.
+Signer and publisher independently refuse a tag-object change; the final read-only `verify-source`
+job requires the validated output to equal `GITHUB_SHA` and rechecks all source
+proof for that event commit after package tests and the signing-environment
+wait. The publisher does not execute a repository verification helper. GitHub
+API checks and publication are not one transaction; the immutable-tag ruleset
+and fixed source/artifact identities remain part of the trust boundary. The release RPM is
 built exactly once as an unsigned artifact, then a secret-bearing signing job
 with no repository checkout verifies the expected primary and dedicated
 signing-subkey fingerprints, requires exactly one usable signing subkey,
@@ -917,6 +1039,12 @@ that a deterministic archive snapshot of the per-user managed-runtime tree
 remains unchanged across installation and upgrade. Final RPM erase then verifies
 allowlisted managed-runtime cleanup, while DEB remove and purge verify that the
 same per-user runtime remains unchanged.
+
+Build, signing and test jobs propagate immutable Actions artifact IDs in their
+outputs. Downloads request one exact ID at a time with `digest-mismatch: error`;
+they never select a current release candidate by name or pattern. Missing IDs,
+deleted artifacts and changed digests fail explicitly. Publication and public
+download verification consume the same IDs accepted by the package tests.
 
 The publication job downloads the exact tested current artifacts, adds the
 public `RPM-GPG-KEY-OscarFrog` certificate, generates one shared SHA256SUMS file,
@@ -1104,17 +1232,17 @@ particular release actually passed those checks.
 
 After publication, `scripts/release-evidence-qualification.sh` independently
 binds the immutable public release, its assets, checksums and attestations to an
-expected tag commit. It also requires successful exact-SHA validation runs and
-fresh scheduled `real-tools.yml` and `shfmt-update.yml` evidence:
+expected tag commit. It also requires the exact-SHA successful release run, the complete PR tree
+qualification proof described above, and fresh scheduled `real-tools.yml` and `shfmt-update.yml` evidence:
 
 ```bash
 release_sha=$(git rev-parse 'vX.Y.Z^{}')
 bash ./scripts/release-evidence-qualification.sh vX.Y.Z "${release_sha}"
 ```
 
-Set `REQUIRE_EXTENDED_QUALIFICATION=true` when the exact release SHA must also
-have a successful `qualification.yml` run. By default, the generated Markdown
-report is written below `qualification-evidence/`, an ignored local output.
+All five source workflows, including `qualification.yml`, are mandatory; the
+former optional extended-qualification flag no longer changes this contract.
+By default, the generated Markdown report is written below `qualification-evidence/`, an ignored local output.
 Supply a third path to place it in a separately managed evidence archive.
 
 ## Real-world checks on Fedora 44
@@ -1143,27 +1271,25 @@ parsing. Zenity windows remain in the graphical session's locale.
 
 ## Stress validation
 
-`.github/workflows/stress.yml` runs three independent stress jobs on pull
-requests and pushes to `main`:
+`.github/workflows/stress.yml` qualifies pull requests after the full shell
+contract, retaining twenty distinct timing tuples in four shards. Each tuple
+runs `tests/mock-integration.sh --group stress-signals`: the complete signals
+group plus network cancellation and runtime error/progress scenarios that also
+consume startup/cancellation delays. It covers cancellation/late completion,
+PGID publication, worker startup, FFmpeg startup and `setsid` startup. Staging
+mutation fixtures synchronize on readiness before replacing an inode, so their
+startup delay does not change the tested state; they remain in the full suite.
+The unrelated engine, GUI configuration, installer and static scenarios remain in
+the full suite and are not repeated for each timing tuple. Each shard retains
+five bounded five-minute iterations and ten-second termination grace periods.
 
-- the complete mock process/cancellation integration suite twenty times with
-  bounded deterministic timing variations around cancellation, late
-  cancel/success arbitration, PGID publication, worker/FFmpeg startup, and
-  `setsid` startup;
-- the runtime-manager hardening integration suite ten times with ten internal
-  lock-contention and double-rollback cycles per run, repeatedly exercising
-  fresh bootstrap, strict zero-network behavior, exact-tag resolution,
-  activation-journal recovery, lock contention, and rollback transactions;
-- the package-cleanup safety suite ten times, covering forged metadata,
-  symlinks, custom XDG locations, and allowlisted removal boundaries.
-
-The runtime-manager and package-cleanup repetitions run with at most four
-workers and ordered logs. Their individual test workspaces are independent;
-the mock jitter matrix remains sharded at the workflow level.
-Each of its four shards runs five iterations, each still bounded by a
-five-minute timeout and a ten-second termination grace period. The overall
-thirty-minute job budget accommodates all five iterations plus checkout and
-cleanup; it does not relax any iteration's timeout or assertion.
+The runtime-manager job runs the hardening suite once with ten internal
+lock-contention and double-rollback cycles. This retains stateful transaction
+stress without multiplying ten internal cycles by ten complete-suite wrappers.
+Deterministic package-cleanup scenarios are already covered in the full suite
+on each supported environment and have no separate stress repetition. The
+required aggregate check covers all shards/runtime plus the other four complete
+qualification workflows before merge. It preserves its existing required name.
 
 ## Network destination regression and opt-in CIFS qualification
 

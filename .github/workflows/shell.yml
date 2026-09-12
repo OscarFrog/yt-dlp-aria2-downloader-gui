@@ -1,8 +1,5 @@
 name: Shell validation
 on:
-  push:
-    branches:
-      - main
   pull_request:
   workflow_dispatch:
 permissions:
@@ -14,7 +11,28 @@ defaults:
   run:
     shell: bash
 jobs:
+  identity:
+    name: Source identity ${{ github.sha }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Bind validation to the event source
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ $(git rev-parse HEAD) == "${EXPECTED_SHA}" ]]
+          git rev-parse 'HEAD^{tree}'
+          python3 -B scripts/check-push-version.py coherence
+          source tests/lib/project-files.sh
+          for file in "${ALL_SHELL_FILES[@]}"; do
+            bash -n -- "${file}"
+          done
   validate-ubuntu:
+    needs: identity
     name: Ubuntu
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -51,6 +69,7 @@ jobs:
       - name: Run validation
         run: timeout --signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --jobs 4
   validate-python-minimum:
+    needs: identity
     name: Python 3.10 / Ubuntu
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -85,6 +104,7 @@ jobs:
       - name: Exercise the complete contract under Python 3.10
         run: timeout --signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --full --jobs 4
   validate-fedora:
+    needs: identity
     name: Fedora 44
     runs-on: ubuntu-24.04
     container:

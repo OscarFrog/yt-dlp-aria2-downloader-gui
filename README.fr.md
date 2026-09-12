@@ -43,7 +43,7 @@ FFmpeg pour fusionner, remuxer ou extraire les flux. HTTPS repasse
 automatiquement sur le transport natif de yt-dlp lorsque le backend TLS d'aria2
 n'offre pas le durcissement requis de validation des certificats. Les flux DASH
 et HLS restent eux aussi natifs.
-La version de développement actuelle est la **2.3.14**.
+La version de développement actuelle est la **2.3.16**.
 La dernière release de paquets publiée est la **2.3.14**.
 
 ## Installation recommandée
@@ -186,6 +186,15 @@ Fedora/RPM Fusion activés au moment de l'installation.
 
 ## Provenance et immuabilité des releases
 
+La qualification des sources porte sur la fusion virtuelle de la pull request.
+Après le squash, la CI vérifie que le tree Git complet correspond aux
+qualifications réussies, workflows et paramètres de test compris. La release
+exige à nouveau cette preuve et conserve les contrôles du tag, des signatures,
+de l'installation et de la mise à niveau des paquets définitifs, du fonctionnement
+avec les dépendances actuelles de la distribution et des assets publics.
+Une preuve absente, différente ou invalide bloque la publication ; la
+procédure de reprise mainteneur est décrite dans `TESTING.md`.
+
 Les **Immutable Releases** GitHub doivent être activées dans les paramètres du
 dépôt avant de pousser le tag de release. Le workflow contrôle l'inventaire
 exact des noms d'assets, compare octet par octet une release déjà existante lors
@@ -254,7 +263,7 @@ version de développement ci-dessous, cette commande ne s'applique qu'après la
 création de son tag signé :
 
 ```bash
-gh workflow run release.yml   --ref v2.3.14   -f tag=v2.3.14   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref v2.3.16   -f tag=v2.3.16   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Le workflow refuse indépendamment toute exécution manuelle dont le type de ref,

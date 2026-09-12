@@ -1,0 +1,27 @@
+name: Qualified source promotion
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+concurrency:
+  group: promotion-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    name: Verify qualified source identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify qualification of the exact merged tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: python3 -I scripts/ci-validation.py verify --commit "${EXPECTED_SHA}"

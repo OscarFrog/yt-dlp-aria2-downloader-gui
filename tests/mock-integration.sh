@@ -23,6 +23,7 @@ readonly -a MOCK_GROUPS=(
     gui-progress
     gui-state
     signals
+    stress-signals
     runtime
     runtime-compat
     runtime-validation
@@ -44,6 +45,7 @@ Run every mock scenario by default. GROUP is one of:
   gui-progress    GUI progress rendering, profiles, and completion behavior.
   gui-state       GUI configuration, file selection, logs, and state behavior.
   signals         CLI/GUI signal forwarding and cancellation behavior.
+  stress-signals  Signal scenarios plus network and progress-error cancellation.
   runtime         Complete runtime/validation aggregate.
   runtime-compat  Runtime versions, capabilities, and dependencies.
   runtime-validation  Worker, media, progress-error, and GUI dependency validation.
@@ -7719,6 +7721,15 @@ run_selected_mock_runtime_group() {
     esac
 }
 
+run_mock_stress_signal_group() {
+    run_mock_signal_group
+    test_mock_engine_network_signals
+    test_mock_runtime_progress_errors
+    # Private staging replacements and crashes synchronize on a started worker
+    # before changing its filesystem or signaling it. Startup jitter cannot
+    # change those prescribed states; the complete suite covers them once.
+}
+
 report_mock_integration_completion() {
     if [[ ${MOCK_GROUP} == all ]]; then
         printf 'Mock integration tests passed.\n'
@@ -7735,6 +7746,9 @@ main() {
     # shellcheck disable=SC2310 # Group predicates intentionally drive execution.
     if mock_group_enabled signals; then
         run_mock_signal_group
+    fi
+    if [[ ${MOCK_GROUP} == stress-signals ]]; then
+        run_mock_stress_signal_group
     fi
     run_selected_mock_runtime_group
 

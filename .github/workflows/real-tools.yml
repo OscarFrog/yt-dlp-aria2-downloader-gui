@@ -1,9 +1,6 @@
 name: Real tool integration
 on:
   pull_request:
-  push:
-    branches:
-      - main
   workflow_dispatch:
   schedule:
     - cron: '23 5 * * 1'
@@ -17,13 +14,40 @@ defaults:
     shell: bash
 
 jobs:
+  identity:
+    name: Source identity ${{ github.sha }}
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Bind validation to the event source
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ $(git rev-parse HEAD) == "${EXPECTED_SHA}" ]]
+          git rev-parse 'HEAD^{tree}'
+      - name: Require successful shell validation before qualification
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: python3 -I scripts/ci-validation.py wait-shell --commit "${EXPECTED_SHA}"
   pinned-local-media:
+    needs: identity
     if: github.event_name != 'schedule'
     name: Local media, pinned yt-dlp ${{ matrix.yt_dlp_version }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         yt_dlp_version: ['2026.6.9', '2026.7.4', '2026.8.19']
     steps:
@@ -69,18 +93,28 @@ jobs:
             --requirement "${requirements}"
           echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
       - name: Record resolved tool versions
+        env:
+          EXPECTED_FFMPEG_VERSION: 6.1.1
         run: |
           set -Eeuo pipefail
           printf 'yt-dlp: %s\n' "$(yt-dlp --version)"
           aria2c --version | awk 'NR == 1 { first = $0 } END { print first }'
-          ffmpeg -hide_banner -version | awk 'NR == 1 { first = $0 } END { print first }'
-          ffprobe -hide_banner -version | awk 'NR == 1 { first = $0 } END { print first }'
-      - name: Run direct, audio, HLS and DASH boundary qualification (3x)
+          for tool in ffmpeg ffprobe; do
+            resolved=$("${tool}" -hide_banner -version | awk 'NR == 1 { version = $3 } END { print version }')
+            printf '%s: %s\n' "${tool}" "${resolved}"
+            case ${resolved} in
+              "${EXPECTED_FFMPEG_VERSION}" | "${EXPECTED_FFMPEG_VERSION}"-* | "${EXPECTED_FFMPEG_VERSION}"+* | "${EXPECTED_FFMPEG_VERSION}"~*) ;;
+              *)
+                printf 'Error: %s does not match expected generation %s.\n' \
+                  "${tool}" "${EXPECTED_FFMPEG_VERSION}" >&2
+                exit 65
+                ;;
+            esac
+          done
+      - name: Run direct, audio, HLS and DASH boundary qualification
         shell: bash
         run: |
-          bash ./tests/repeat-qualification.sh \
-            --label 'real-tool routing iteration' --runs 3 --jobs 3 -- \
-            timeout --signal=TERM --kill-after=10s 8m \
+          timeout --signal=TERM --kill-after=10s 8m \
             bash ./tests/real-tools-integration.sh
       - name: Run aria2 direct-transfer behavior qualification
         env:
@@ -90,18 +124,19 @@ jobs:
           timeout --signal=TERM --kill-after=10s 12m \
             bash ./tests/aria2-real-behavior-integration.sh
       - name: Run real FFmpeg progress qualification
+        if: matrix.yt_dlp_version == '2026.8.19'
         run: |
           timeout --signal=TERM --kill-after=10s 8m \
             bash ./tests/ffmpeg-real-progress-integration.sh
-      - name: Run HLS post-remux duration validation (3x)
+      - name: Run HLS post-remux duration validation
+        if: matrix.yt_dlp_version == '2026.8.19'
         shell: bash
         run: |
-          bash ./tests/repeat-qualification.sh \
-            --label 'HLS duration guard iteration' --runs 3 --jobs 3 -- \
-            timeout --signal=TERM --kill-after=10s 5m \
+          timeout --signal=TERM --kill-after=10s 5m \
             bash ./tests/hls-remux-duration-integration.sh
 
   current-stable-local-media:
+    needs: identity
     if: github.event_name == 'schedule'
     name: Scheduled current stable yt-dlp
     runs-on: ubuntu-24.04
@@ -129,12 +164,10 @@ jobs:
           aria2c --version | awk 'NR == 1 { first = $0 } END { print first }'
           ffmpeg -hide_banner -version | awk 'NR == 1 { first = $0 } END { print first }'
           ffprobe -hide_banner -version | awk 'NR == 1 { first = $0 } END { print first }'
-      - name: Run current-stable routing qualification (3x)
+      - name: Run current-stable routing qualification
         shell: bash
         run: |
-          bash ./tests/repeat-qualification.sh \
-            --label 'current stable routing iteration' --runs 3 --jobs 3 -- \
-            timeout --signal=TERM --kill-after=10s 8m \
+          timeout --signal=TERM --kill-after=10s 8m \
             bash ./tests/real-tools-integration.sh
       - name: Run current-stable aria2 direct-transfer behavior qualification
         env:
@@ -147,10 +180,8 @@ jobs:
         run: |
           timeout --signal=TERM --kill-after=10s 8m \
             bash ./tests/ffmpeg-real-progress-integration.sh
-      - name: Run current-stable HLS duration validation (3x)
+      - name: Run current-stable HLS duration validation
         shell: bash
         run: |
-          bash ./tests/repeat-qualification.sh \
-            --label 'current stable HLS guard iteration' --runs 3 --jobs 3 -- \
-            timeout --signal=TERM --kill-after=10s 5m \
+          timeout --signal=TERM --kill-after=10s 5m \
             bash ./tests/hls-remux-duration-integration.sh

@@ -86,6 +86,12 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sat Sep 12 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.16-1
+- Bind release checkouts to the triggering commit.
+
+* Sat Sep 12 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.15-1
+- Optimize CI qualification promotion.
+
 * Sat Sep 12 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.14-1
 - Prepare v2.3.14 release
 

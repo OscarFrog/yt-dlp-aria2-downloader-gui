@@ -119,6 +119,10 @@ PYTHON_FILES=(
     scripts/update-published-version.py
     scripts/check-push-version.py
     scripts/prepare-source-version.py
+    scripts/ci-validation.py
+    scripts/verify-source-archive.py
+    tests/ci-validation-integration.py
+    tests/source-archive-integration.py
     tests/push-version-integration.py
     tests/release-docs-integration.py
     tests/shfmt-version-handoff-integration.py

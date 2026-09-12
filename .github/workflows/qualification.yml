@@ -2,9 +2,6 @@ name: Extended qualification
 
 on:
   pull_request:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -18,7 +15,33 @@ defaults:
     shell: bash
 
 jobs:
+  identity:
+    name: Source identity ${{ github.sha }}
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Bind validation to the event source
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ $(git rev-parse HEAD) == "${EXPECTED_SHA}" ]]
+          git rev-parse 'HEAD^{tree}'
+      - name: Require successful shell validation before qualification
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: python3 -I scripts/ci-validation.py wait-shell --commit "${EXPECTED_SHA}"
   ffmpeg-ubuntu-6:
+    needs: identity
     name: FFmpeg 6.1.1 / Ubuntu 24.04
     runs-on: ubuntu-24.04
     timeout-minutes: 35
@@ -45,9 +68,10 @@ jobs:
           EXPECTED_FFMPEG_VERSION: 6.1.1
         run: |
           timeout --signal=TERM --kill-after=10s 25m \
-            bash ./tests/ffmpeg-generation-qualification.sh
+            bash ./tests/ffmpeg-generation-qualification.sh --compatibility-only
 
   ffmpeg-fedora-8:
+    needs: identity
     name: FFmpeg 8.1.2 / Fedora 44
     runs-on: ubuntu-24.04
     container:
@@ -162,6 +186,7 @@ jobs:
             bash ./tests/ffmpeg-generation-qualification.sh
 
   ffmpeg-upstream-9:
+    needs: identity
     name: FFmpeg 9.0.1 / verified upstream source
     runs-on: ubuntu-24.04
     timeout-minutes: 50

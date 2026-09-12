@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.3.16 - Unreleased
+
+### Maintenance
+
+- Bind release checkouts to the triggering commit.
+
+## 2.3.15 - Unreleased
+
+### Maintenance
+
+- Optimize CI qualification promotion.
+
 ## 2.3.14 - Unreleased
 
 ### Maintenance
