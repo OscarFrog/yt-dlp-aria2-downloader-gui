@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.19 - Unreleased
+
+### Maintenance
+
+- Prepare 2.3.19 development version for Phase 3 fixes
+
 ## 2.3.18 - Unreleased
 
 ### Maintenance

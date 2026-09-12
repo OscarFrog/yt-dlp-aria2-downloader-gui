@@ -86,6 +86,9 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sun Sep 13 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.19-1
+- Prepare 2.3.19 development version for Phase 3 fixes
+
 * Sat Sep 12 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.18-1
 - Fix isolated shfmt candidate permissions
 
