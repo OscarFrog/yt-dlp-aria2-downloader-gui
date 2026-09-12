@@ -28,7 +28,7 @@ fi
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 # The development tree can lead the latest installable GitHub release. Keep the
 # two contracts explicit so README package names never advertise absent assets.
-readonly EXPECTED_VERSION='2.3.17'
+readonly EXPECTED_VERSION='2.3.18'
 readonly EXPECTED_PUBLISHED_VERSION='2.3.17'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SOURCE_INVENTORY_FILE=''
@@ -1376,6 +1376,9 @@ docker_run_blocks_are_hardened() {
     local has_read_only=false
     local has_cap_drop=false
     local has_no_new_privileges=false
+    local has_runner_user=false
+    # shellcheck disable=SC2016 # Literal workflow shell identity, not local execution.
+    local runner_user_line=$'              --user "$(id -u):$(id -g)" \\'
     local accepts_docker_options=false
     local docker_run_count=0
     local hardened_docker_run_count=0
@@ -1388,6 +1391,7 @@ docker_run_blocks_are_hardened() {
                 has_read_only=false
                 has_cap_drop=false
                 has_no_new_privileges=false
+                has_runner_user=false
                 accepts_docker_options=true
                 docker_run_count=$((docker_run_count + 1))
             fi
@@ -1407,6 +1411,15 @@ docker_run_blocks_are_hardened() {
             ${line} =~ ^[[:space:]]+--security-opt=no-new-privileges[[:space:]]+\\[[:space:]]*$ ]]; then
             has_no_new_privileges=true
         elif [[ ${accepts_docker_options} == true &&
+            ${line} == "${runner_user_line}" ]]; then
+            [[ ${has_runner_user} == false ]] || return 65
+            has_runner_user=true
+        elif [[ ${accepts_docker_options} == true &&
+            ${line} =~ (^|[[:space:]])(--user([[:space:]=]|$)|-u) ]]; then
+            # Docker accepts repeated and short user options; a later one can
+            # override the approved identity. Accept only one exact declaration.
+            return 65
+        elif [[ ${accepts_docker_options} == true &&
             ! ${line} =~ ^[[:space:]]+--[^[:space:]]+([[:space:]]+.*)?\\[[:space:]]*$ ]]; then
             # Docker options stop at the image argument. Matching option-like
             # text after that point would validate container arguments instead.
@@ -1417,7 +1430,8 @@ docker_run_blocks_are_hardened() {
             if [[ ${has_network_none} == true &&
                 ${has_read_only} == true &&
                 ${has_cap_drop} == true &&
-                ${has_no_new_privileges} == true ]]; then
+                ${has_no_new_privileges} == true &&
+                ${has_runner_user} == true ]]; then
                 hardened_docker_run_count=$((hardened_docker_run_count + 1))
             fi
             in_docker_run=false
@@ -1553,6 +1567,9 @@ shfmt_candidate_job_policy() {
     [[ ${job_block} == *'scripts/check-push-version.py next-version'* ]] || return 65
     [[ ${job_block} == *'scripts/prepare-source-version.py --root .'*'Reformat with candidate shfmt in a no-network sandbox'* ]] || return 65
     [[ ${job_block} == *'plan.get("target_sha") != "0" * 40'* ]] || return 65
+    # The private host copy loses group/other access under umask 077. The image
+    # must restore read/execute access without granting write access or using root.
+    [[ ${job_block} == *$'          FROM scratch\n          COPY --chmod=0555 shfmt /shfmt\n          ENTRYPOINT ["/shfmt"]\n          DOCKERFILE'* ]] || return 65
     [[ ${job_block} == *$'          docker build \\\n            --network=none \\\n            --tag '* ]] || return 65
     # Predicate failure rejects a candidate job whose Docker commands are not
     # each individually hardened.
@@ -1668,7 +1685,12 @@ assert_shfmt_update_workflow_policy() {
     local mutated=''
     local unsafe_publisher_command=''
     local required_guard=''
+    local unsafe_copy=''
+    local unsafe_user=''
+    local replacement_user=''
     local read_only_line=$'              --read-only \\'
+    # shellcheck disable=SC2016 # Literal workflow shell identity, not local execution.
+    local runner_user_line=$'              --user "$(id -u):$(id -g)" \\'
     local -a unsafe_publisher_commands=(
         './download-video.sh'
         'bash ./runtime-manager.sh'
@@ -1733,6 +1755,51 @@ assert_shfmt_update_workflow_policy() {
     if shfmt_candidate_job_policy "${mutated}"; then
         fail 'shfmt updater policy did not reject candidate write-all permission.'
     fi
+
+    for unsafe_copy in \
+        'COPY shfmt /shfmt' \
+        'COPY --chmod=0500 shfmt /shfmt' \
+        'COPY --chmod=0777 shfmt /shfmt'; do
+        mutated=${candidate_block/'COPY --chmod=0555 shfmt /shfmt'/"${unsafe_copy}"}
+        mutation_must_change "${candidate_block}" "${mutated}" 'candidate image executable mode'
+        # shellcheck disable=SC2310 # Missing, inaccessible or writable modes must fail closed.
+        if shfmt_candidate_job_policy "${mutated}"; then
+            fail "shfmt updater policy allowed an unsafe candidate image mode: ${unsafe_copy}"
+        fi
+    done
+
+    mutated=${candidate_block/"${runner_user_line}"/}
+    mutation_must_change "${candidate_block}" "${mutated}" 'candidate version probe user removal'
+    # shellcheck disable=SC2310 # Both candidate commands must independently select the runner user.
+    if shfmt_candidate_job_policy "${mutated}"; then
+        fail 'shfmt updater policy allowed a candidate version probe without the runner user.'
+    fi
+
+    # Remove only the last user option, belonging to the formatting invocation.
+    mutated="${candidate_block%"${runner_user_line}"*}${candidate_block##*"${runner_user_line}"}"
+    mutation_must_change "${candidate_block}" "${mutated}" 'candidate formatting user removal'
+    # shellcheck disable=SC2310 # The version probe user cannot satisfy the formatting boundary.
+    if shfmt_candidate_job_policy "${mutated}"; then
+        fail 'shfmt updater policy allowed candidate formatting without the runner user.'
+    fi
+
+    # shellcheck disable=SC2016 # Literal workflow identity in the duplicate-user mutation.
+    for unsafe_user in \
+        '--user "0:0"' \
+        '--user=0:0' \
+        '-u 0:0' \
+        '-u0:0' \
+        '-u=0:0' \
+        '--memory=512m --user=0:0' \
+        '--user "$(id -u):$(id -g)"'; do
+        replacement_user="${runner_user_line}"$'\n'"              ${unsafe_user}"$' \\'
+        mutated=${candidate_block/"${runner_user_line}"/"${replacement_user}"}
+        mutation_must_change "${candidate_block}" "${mutated}" 'candidate user option override'
+        # shellcheck disable=SC2310 # A later option must not override the approved identity.
+        if shfmt_candidate_job_policy "${mutated}"; then
+            fail "shfmt updater policy allowed a duplicate or overriding user option: ${unsafe_user}"
+        fi
+    done
 
     mutated=${candidate_block/"${read_only_line}"/}
     mutated+=$'\n          cat <<\x27DECOY\x27\n              --read-only \\\n          DECOY'

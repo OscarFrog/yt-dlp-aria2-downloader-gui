@@ -457,7 +457,11 @@ executing the candidate formatter, updates the pin/checksums, reformats all
 canonical shell files, runs the complete validation suite, and prepares a
 dedicated update branch for a maintainer-opened pull request. Both formatting
 and complete validation execute the candidate inside containers without network
-or host credentials; validation mounts the source read-only and cannot access
+or host credentials. The candidate image sets the formatter's mode to `0555`
+explicitly: copying it into a private host build context under `umask 077`
+must not prevent the non-root container user from executing it. Static mutation
+tests protect that mode and each container's non-root execution.
+Validation mounts the source read-only and cannot access
 the host handoff. The verifier destroys its container before rechecking the
 canonical tree and producing the data-only handoff. Canonical comparison uses
 an independently reproduced bump as its baseline; the four non-shell version

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.18 - Unreleased
+
+### Maintenance
+
+- Fix isolated shfmt candidate permissions
+
 ## 2.3.17 - Unreleased
 
 ### Maintenance
