@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.26 - Unreleased
+
+### Maintenance
+
+- Prepare release candidate metadata and artifact references
+
 ## 2.3.25 - Unreleased
 
 ### Maintenance

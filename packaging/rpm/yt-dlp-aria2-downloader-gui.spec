@@ -86,6 +86,9 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sun Sep 13 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.26-1
+- Prepare release candidate metadata and artifact references
+
 * Sun Sep 13 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.25-1
 - Preserve pre-env observer diagnostics and distinguish procfs metadata from process identity
 
