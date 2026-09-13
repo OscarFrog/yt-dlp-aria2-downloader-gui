@@ -614,14 +614,98 @@ test_private_plan_existing_destinations() {
         fi
     done
 
-    # The helper publishes the component destinations; yt-dlp owns the separate
-    # assembled filename and its post-processing behavior remains unchanged.
+    # An existing assembled output must not be passed back to yt-dlp, whose
+    # metadata postprocessor can rewrite it even with no-overwrite options.
     new_case 'preexisting-assembled-output'
     write_double_plan
     printf 'existing assembled bytes\n' >"${OUTPUT_DIR}/merged.mkv"
-    assert_status 0 'distinct assembled name does not collide with components' run_build
+    assert_status 1 'existing assembled output is rejected before its components' run_build
+    [[ ! -e ${ARIA2_INPUT} && ! -e ${MANIFEST} ]] \
+        || fail 'Existing assembled output caused transfer artifacts.'
     assert_file_has_line "${OUTPUT_DIR}/merged.mkv" 'existing assembled bytes' \
         'building component transfers preserves the assembled output'
+}
+
+test_private_plan_final_destination_preflight() {
+    local scenario final_dir final_identity expected_status
+
+    for scenario in absent regular symlink directory replaced-directory directory-symlink; do
+        new_case "final-preflight-${scenario}"
+        write_double_plan
+        final_dir="${CASE_ROOT}/final"
+        mkdir -m 777 -- "${final_dir}"
+        final_identity=$(stat -c '%d:%i' -- "${final_dir}")
+        expected_status=1
+        case ${scenario} in
+            absent) expected_status=0 ;;
+            regular) printf 'existing final media\n' >"${final_dir}/merged.mkv" ;;
+            symlink) ln -s -- absent-target "${final_dir}/merged.mkv" ;;
+            directory) mkdir -- "${final_dir}/merged.mkv" ;;
+            replaced-directory)
+                mv -- "${final_dir}" "${CASE_ROOT}/original-final"
+                mkdir -- "${final_dir}"
+                expected_status=65
+                ;;
+            directory-symlink)
+                mv -- "${final_dir}" "${CASE_ROOT}/original-final"
+                ln -s -- "${CASE_ROOT}/original-final" "${final_dir}"
+                expected_status=70
+                ;;
+            *) fail "Unknown final-preflight scenario: ${scenario}" ;;
+        esac
+        assert_status "${expected_status}" "actual final destination preflight: ${scenario}" \
+            python3 "${HELPER}" build --allow-https-direct \
+            --plan "${PLAN_FILE}" --output-dir "${OUTPUT_DIR}" \
+            --staging-dir "${STAGING_DIR}" --private-dir "${PRIVATE_DIR}" \
+            --aria2-input "${ARIA2_INPUT}" --manifest "${MANIFEST}" \
+            --final-output-dir "${final_dir}" --final-output-identity "${final_identity}" \
+            --final-extension mkv
+        if ((expected_status != 0)); then
+            [[ ! -e ${ARIA2_INPUT} && ! -e ${MANIFEST} ]] \
+                || fail "${scenario} final collision created transfer artifacts."
+        fi
+        case ${scenario} in
+            regular)
+                assert_file_has_line "${final_dir}/merged.mkv" 'existing final media' \
+                    'preflight preserves a final file outside the processing directory'
+                ;;
+            symlink)
+                [[ -L ${final_dir}/merged.mkv && ! -e ${final_dir}/absent-target ]] \
+                    || fail 'Final preflight followed a destination symlink.'
+                ;;
+            *) ;;
+        esac
+    done
+
+    new_case final-remux-preflight
+    write_single_plan 'https://example.invalid/media.mp4' \
+        "${OUTPUT_DIR}/final.mp4" 'qualification-agent'
+    printf 'existing remux\n' >"${OUTPUT_DIR}/final.mkv"
+    final_identity=$(stat -c '%d:%i' -- "${OUTPUT_DIR}")
+    assert_status 1 'single-stream remux checks its MKV result before transfer' \
+        python3 "${HELPER}" build --allow-https-direct \
+        --plan "${PLAN_FILE}" --output-dir "${OUTPUT_DIR}" \
+        --staging-dir "${STAGING_DIR}" --private-dir "${PRIVATE_DIR}" \
+        --aria2-input "${ARIA2_INPUT}" --manifest "${MANIFEST}" \
+        --final-output-dir "${OUTPUT_DIR}" --final-output-identity "${final_identity}" \
+        --final-extension mkv
+    [[ ! -e ${ARIA2_INPUT} && ! -e ${MANIFEST} ]] \
+        || fail 'Existing remux caused transfer artifacts.'
+    assert_file_has_line "${OUTPUT_DIR}/final.mkv" 'existing remux' \
+        'single-stream final remux remains unchanged'
+
+    new_case incomplete-final-preflight
+    write_double_plan
+    for final_dir in '' "${OUTPUT_DIR}"; do
+        assert_status 65 'partial or empty final preflight arguments fail closed' \
+            python3 "${HELPER}" build --allow-https-direct \
+            --plan "${PLAN_FILE}" --output-dir "${OUTPUT_DIR}" \
+            --staging-dir "${STAGING_DIR}" --private-dir "${PRIVATE_DIR}" \
+            --aria2-input "${ARIA2_INPUT}" --manifest "${MANIFEST}" \
+            --final-output-dir "${final_dir}"
+        [[ ! -e ${ARIA2_INPUT} && ! -e ${MANIFEST} ]] \
+            || fail 'Incomplete final preflight created transfer artifacts.'
+    done
 }
 
 test_private_plan_duplicate_staging_names() {
@@ -1671,6 +1755,7 @@ main() {
     test_private_plan_duplicate_headers
     test_private_plan_input_validation
     test_private_plan_existing_destinations
+    test_private_plan_final_destination_preflight
     test_private_plan_duplicate_staging_names
     test_private_plan_publication_safety
     test_private_plan_rollback_safety

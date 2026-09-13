@@ -126,4 +126,5 @@ PYTHON_FILES=(
     tests/push-version-integration.py
     tests/release-docs-integration.py
     tests/shfmt-version-handoff-integration.py
+    tests/shfmt-bootstrap-integration.py
 )

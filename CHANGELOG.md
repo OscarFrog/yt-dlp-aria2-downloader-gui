@@ -1,10 +1,72 @@
 # Changelog
 
+## 2.3.25 - Unreleased
+
+### Maintenance
+
+- Preserve pre-env observer diagnostics and distinguish procfs metadata from process identity
+
+## 2.3.24 - Unreleased
+
+### Maintenance
+
+- Bound pre-env cancellation checks and retain authenticated failure diagnostics
+
+## 2.3.23 - Unreleased
+
+### Maintenance
+
+- Synchronize engine worker identity publication in qualification fixtures.
+- Make child readiness ordering deterministic in runner integration tests.
+
+## 2.3.22 - Unreleased
+
+### Maintenance
+
+- Match monitor fixtures to Bash script entry points and preserve strict stderr checks
+- Preserve monitor-mode cancellation and foreground startup errors on Bash 5.2
+
+## 2.3.21 - Unreleased
+
+### Maintenance
+
+- Support ShellCheck 0.9.0 while preserving optional cleanup signals
+
+## 2.3.20 - Unreleased
+
+### Maintenance
+
+- Prepare 2.3.20 development version after PR 78 merge sync
+
+## 2.3.19 - Unreleased
+
+### Maintenance
+
+- Prepare 2.3.19 development version for Phase 3 fixes
+
 ## 2.3.18 - Unreleased
 
 ### Maintenance
 
 - Fix isolated shfmt candidate permissions
+- Shorten local validation with bounded parallel Python suites, linear source
+  assertions, process scans without per-PID subprocesses, and isolated reusable
+  test data; retain complete workflow, cancellation and URL coverage.
+- Start independent PR qualifications after their own cheap source gates while
+  retaining the complete final required check and exact-content promotion.
+- Avoid redundant direct-video downloads when the assembled final already
+  exists; reduce progress-processing and retained-log cleanup overhead.
+- Serialize concurrent formatter-cache provisioning and revalidate mutable
+  workflow state before accepting reused qualification evidence.
+- Preserve test-runner cancellation across a Bash foreground-child signal race,
+  with authenticated session transitions and unchanged interruption deadlines.
+- Relay terminal Ctrl+C through guarded runner cleanup, including child
+  registration and repeated interruptions, without leaving validations active.
+- Stop real-tool engine sessions cooperatively on capture timeout or signal,
+  retain fixtures when shutdown is unconfirmed, and keep collision assertions
+  enabled when the caller exports `PYTHONOPTIMIZE`.
+- Distinguish pending SIGKILL completion from a surviving unsignaled descendant
+  in monitor cancellation tests, with bounded observation and process diagnostics.
 
 ## 2.3.17 - Unreleased
 

@@ -101,7 +101,15 @@ managed_signals = tuple(
     if (signal_number := getattr(signal, signal_name, None)) is not None
 )
 previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, managed_signals)
-os.setsid()
+# A monitor-mode launcher already leads a group, so it cannot call setsid
+# directly. Join the still-parented group first, with managed signals blocked,
+# then create the dedicated session without replacing the authenticated PID.
+try:
+    if os.getpgrp() == os.getpid():
+        os.setpgid(0, os.getpgid(os.getppid()))
+    os.setsid()
+except OSError:
+    os._exit(70)
 
 def exec_command():
     for signal_number in managed_signals:
@@ -274,6 +282,7 @@ _test_runner_start_child() {
     local child_start_time=''
     local identity_file=''
     local parent_observed_start_time=''
+    local command_status=0
     local runner_pid=${BASHPID}
     shift 3
 
@@ -308,6 +317,17 @@ _test_runner_start_child() {
     fi
 
     child_pid=$!
+    # Terminal INT can abort a monitor-mode foreground utility directly into
+    # EXIT, bypassing the deferred signal trap. Register wait ownership and
+    # same-snapshot parent/start-time authority before the first such utility.
+    test_runner_read_active_child_start_time \
+        parent_observed_start_time "${child_pid}" "${runner_pid}" || true
+    TEST_RUNNER_CHILD_PIDS[slot]=${child_pid}
+    TEST_RUNNER_CHILD_PGIDS[slot]=${child_pid}
+    TEST_RUNNER_CHILD_COMPLETIONS[slot]=${completion_file}
+    TEST_RUNNER_CHILD_TOKENS[slot]=${child_token}
+    TEST_RUNNER_CHILD_START_TIMES[slot]=${parent_observed_start_time}
+
     while :; do
         if test_runner_read_child_identity \
             child_start_time "${identity_file}" "${child_pid}"; then
@@ -329,21 +349,42 @@ _test_runner_start_child() {
             child_start_time=${parent_observed_start_time}
             break
         fi
-        sleep 0.001
+        # Bash 5.2 can corrupt function contexts when errexit handles a
+        # foreground INT in monitor mode. Guard only the external command;
+        # preserve its failure and replay any earlier deferred signal first.
+        if sleep 0.001; then
+            :
+        else
+            command_status=$?
+            test_runner_finish_start_transition
+            return "${command_status}"
+        fi
     done
 
     if [[ -z ${child_start_time} ]]; then
-        wait "${child_pid}" 2>/dev/null || true
-        rm -f -- "${identity_file}"
+        test_runner_wait_child "${slot}" 2>/dev/null || true
+        if rm -f -- "${identity_file}"; then
+            :
+        else
+            command_status=$?
+            test_runner_finish_start_transition
+            return "${command_status}"
+        fi
         test_runner_finish_start_transition
         return 70
     fi
-    rm -f -- "${identity_file}"
     TEST_RUNNER_CHILD_PIDS[slot]=${child_pid}
     TEST_RUNNER_CHILD_PGIDS[slot]=${child_pid}
     TEST_RUNNER_CHILD_COMPLETIONS[slot]=${completion_file}
     TEST_RUNNER_CHILD_TOKENS[slot]=${child_token}
     TEST_RUNNER_CHILD_START_TIMES[slot]=${child_start_time}
+    if rm -f -- "${identity_file}"; then
+        :
+    else
+        command_status=$?
+        test_runner_finish_start_transition
+        return "${command_status}"
+    fi
 
     test_runner_finish_start_transition
 }
@@ -524,7 +565,9 @@ test_runner_pid_has_token() {
     return 1
 }
 
-# Match the original child identity to the supervised process group.
+# Match the original child identity to its dedicated session and process group.
+# Monitor mode creates a provisional group before the Python session handoff;
+# its matching PGID alone must not authorize group delivery during that move.
 test_runner_pid_has_group_identity() {
     (($# == 4)) || return 2
     local pid=$1
@@ -539,7 +582,8 @@ test_runner_pid_has_group_identity() {
     process_stat=${process_stat##*) }
     read -r -a process_fields <<<"${process_stat}"
     ((${#process_fields[@]} >= 20)) || return 1
-    [[ ${process_fields[2]} == "${pgid}" ]] || return 1
+    [[ ${process_fields[2]} == "${pgid}" &&
+        ${process_fields[3]} == "${pgid}" ]] || return 1
     observed_start_time=${process_fields[19]}
     [[ ${observed_start_time} =~ ^[1-9][0-9]*$ ]] || return 1
 
@@ -648,7 +692,7 @@ test_runner_terminate_children() {
     for slot in "${!TEST_RUNNER_CHILD_PIDS[@]}"; do
         pid=${TEST_RUNNER_CHILD_PIDS[${slot}]}
 
-        # Wait briefly for os.setsid() to publish the new process group. This
+        # Wait briefly for os.setsid() to publish the dedicated session. This
         # keeps delivery deterministic when interruption races with startup.
         for _ in {1..20}; do
             if test_runner_pid_has_group_identity \
@@ -687,10 +731,16 @@ test_runner_terminate_children() {
     done
 }
 
-# Finish active supervision and remove only the runner-owned scratch directory.
+# Finish active supervision with the requested signal (TERM by default), then
+# remove only the runner-owned scratch directory.
+# The signal is optional: standalone callers use TERM, while runner EXIT
+# handlers pass INT to preserve terminal cancellation on status 130.
+# shellcheck disable=SC2120
 test_runner_cleanup() {
+    local signal_name=${1:-TERM}
+
     if ((${#TEST_RUNNER_CHILD_PIDS[@]} > 0)); then
-        test_runner_terminate_children TERM || true
+        test_runner_terminate_children "${signal_name}" || true
     fi
 
     if [[ -n ${TEST_RUNNER_LOG_DIR} && -d ${TEST_RUNNER_LOG_DIR} &&

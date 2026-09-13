@@ -145,31 +145,47 @@ else:
 
 @unittest.skipUnless(shutil.which("git") and shutil.which("jq"), "Git and jq are required for workflow replay")
 class ReleaseDocsReplay(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.seed_temporary = tempfile.TemporaryDirectory(prefix="release-docs-seed-")
+        cls.addClassCleanup(cls.seed_temporary.cleanup)
+        cls.seed = Path(cls.seed_temporary.name)
+        cls.populate_seed(cls.seed)
+
+    @classmethod
+    def populate_seed(cls, root):
+        # Only inert input bytes are shared within this run. API counters,
+        # manifests, mutations and Git repositories belong to each test copy.
+        base = root / "base"
+        handoff = root / "runtime/release-docs-verified"
+        for relative in PATHS:
+            destination = base / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(PROJECT / relative, destination)
+        cls.command("prepare-source-version.py", "--root", base, "--floor-version", "100.0.0", "--date", DATE, "--reason", REASON)
+        # The executable static fixture exceeds typical single-argument limits.
+        with (base / "test-static.sh").open("a") as stream:
+            stream.write("\n# " + "fixture" * 40000 + "\n")
+        shutil.copytree(base, handoff)
+        cls.command("update-published-version.py", RELEASE_VERSION, "--root", handoff)
+        cls.command("prepare-source-version.py", "--root", handoff, "--floor-version", "102.4.5", "--date", DATE, "--reason", REASON)
+        (root / "bin").mkdir()
+        gh = root / "bin/gh"
+        gh.write_text(FAKE_GH)
+        gh.chmod(0o700)
+        (root / "publisher.sh").write_text(workflow_step("Revalidate release and publish allowlisted branch"))
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="release-docs-replay-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        shutil.copytree(self.seed, self.root, dirs_exist_ok=True)
         self.base = self.root / "base"
         self.handoff = self.root / "runtime/release-docs-verified"
-        for relative in PATHS:
-            destination = self.base / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(PROJECT / relative, destination)
-        self.command("prepare-source-version.py", "--root", self.base, "--floor-version", "100.0.0", "--date", DATE, "--reason", REASON)
-        # The executable static fixture exceeds typical single-argument limits.
-        with (self.base / "test-static.sh").open("a") as stream:
-            stream.write("\n# " + "fixture" * 40000 + "\n")
-        shutil.copytree(self.base, self.handoff)
-        self.command("update-published-version.py", RELEASE_VERSION, "--root", self.handoff)
-        self.command("prepare-source-version.py", "--root", self.handoff, "--floor-version", "102.4.5", "--date", DATE, "--reason", REASON)
-        (self.root / "bin").mkdir()
-        gh = self.root / "bin/gh"
-        gh.write_text(FAKE_GH)
-        gh.chmod(0o700)
         self.script = self.root / "publisher.sh"
-        self.script.write_text(workflow_step("Revalidate release and publish allowlisted branch"))
 
-    def command(self, script, *arguments):
+    @staticmethod
+    def command(script, *arguments):
         return subprocess.run(
             ["python3", "-B", str(PROJECT / "scripts" / script), *map(str, arguments)],
             capture_output=True, text=True, timeout=15, check=True,
@@ -270,6 +286,51 @@ class ReleaseDocsReplay(unittest.TestCase):
         entries = next(entry[2]["tree"] for entry in state["writes"] if entry[1] == "git/trees")
         self.assertEqual({entry["path"] for entry in entries if entry["mode"] == "100755"},
                          {"download-video.sh", "install-fedora.sh", "test-static.sh"})
+
+    def test_fixture_copies_do_not_share_mutable_inodes_or_state(self):
+        expected = {"publisher.sh", "bin/gh", *(
+            prefix + path for prefix in ("base/", "runtime/release-docs-verified/")
+            for path in PATHS
+        )}
+        self.assertEqual({path.relative_to(self.seed).as_posix()
+                          for path in self.seed.rglob("*") if path.is_file()}, expected)
+        before = {}
+        sibling = self.root / "sibling"
+        shutil.copytree(self.seed, sibling)
+        for relative in expected:
+            original = self.seed / relative
+            copied = self.root / relative
+            other = sibling / relative
+            self.assertFalse(original.is_symlink())
+            before[relative] = original.read_bytes()
+            self.assertEqual(copied.read_bytes(), before[relative])
+            self.assertEqual(copied.stat().st_mode, original.stat().st_mode)
+            self.assertEqual(len({(path.stat().st_dev, path.stat().st_ino)
+                                  for path in (original, copied, other)}), 3)
+        (self.base / "download-video.sh").write_text("mutated private source\n")
+        self.prepare()
+        self.assertFalse((sibling / "api-state.json").exists())
+        self.assertFalse((self.seed / "api-state.json").exists())
+        for relative, contents in before.items():
+            self.assertEqual((self.seed / relative).read_bytes(), contents)
+            self.assertEqual((sibling / relative).read_bytes(), contents)
+
+    def test_seed_creation_failure_releases_its_temporary_directory(self):
+        roots = []
+
+        class BrokenSeed(ReleaseDocsReplay):
+            @classmethod
+            def populate_seed(cls, root):
+                roots.append(root)
+                (root / "partial").write_text("incomplete fixture")
+                raise RuntimeError("fixture preparation failed")
+
+        with self.assertRaisesRegex(RuntimeError, "fixture preparation failed"):
+            BrokenSeed.setUpClass()
+        # unittest invokes class cleanups even when setUpClass fails.
+        BrokenSeed.doClassCleanups()
+        self.assertEqual(len(roots), 1)
+        self.assertFalse(roots[0].exists())
 
     def test_followup_is_fast_forward_with_fresh_version(self):
         self.prepare(followup=True)

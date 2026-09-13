@@ -255,7 +255,10 @@ The initial yt-dlp pass resolves formats and filenames but does not download.
 - `build` converts the validated plan into a mode-`0600` aria2 input file and a
   version-2 manifest inside the separate mode-`0700` metadata directory;
   media component staging stays in a private child of the processing directory.
-  The manifest binds output/staging identities and existing names are refused;
+  The manifest binds output/staging identities and existing component and
+  assembled PLAN names are refused. For ordinary direct video, a preflight also
+  checks the known MKV result in the actual final directory by descriptor and
+  recorded directory identity, even when processing uses a private workspace;
 - `commit` validates completed staging files and publishes every component to
   the exact yt-dlp-selected destination without overwriting an existing path,
   rolling back partial publication when possible. A real kernel no-replace
@@ -265,6 +268,12 @@ The initial yt-dlp pass resolves formats and filenames but does not download.
 Private plans, manifests, and staging directories must belong to the effective
 user. Commit rejects duplicate staging sources before publishing any component,
 and still handles destination collisions that appear after the build check.
+The early assembled-name check prevents a known final from triggering fresh
+component downloads or metadata rewriting, and does not report existing media
+as a newly validated success. It is not an atomic publication mechanism: direct
+local yt-dlp postprocessing still has a pathname collision window after that
+preflight. A separate private POST/rebased-plan transaction would be needed to
+close it; descriptor-bound workspace publication already refuses late collisions.
 The classifier sends unsupported transport features to native yt-dlp; malformed
 URL/header data or unsafe paths remain validation errors. Header names repeated
 with different casing are not replayed through aria2. Rejected protocol fields
@@ -472,10 +481,14 @@ qualification. Historical content proof has no arbitrary calendar expiry; change
 new failure or missing evidence invalidates reuse. Current external inputs and
 explicit requalification/recovery are described in `TESTING.md`.
 
-Shell validation runs first; the other source workflows depend on its success.
-The existing required stress check waits for all four complementary workflows
-and its own local shards/runtime. This preserves the deployed required-check
-names while covering optional matrix jobs before merge, without a circular wait.
+Each source workflow first checks its own immutable checkout identity, version
+coherence and Bash syntax. The full shell contract and the complementary
+qualifications then run independently: none holds a runner merely to poll for
+shell completion. This favors the successful PR path; a late functional failure
+can occur after complementary work has already started. The existing required
+stress check still waits for all four complementary workflows and its own local
+shards/runtime. This preserves deployed required-check names and complete
+coverage before merge, without a circular wait or a partial-success shortcut.
 Only `promotion.yml` runs on main pushes. It verifies source proof; release
 independently repeats this inexpensive identity check before building and after
 final package testing. Every release checkout directly uses `${{ github.sha }}`;
@@ -563,6 +576,13 @@ exact agreement between tracked/non-ignored source paths and the file table in
 `REPOSITORY_FILES.md`.
 
 `tests/run-all.sh` schedules static validation and isolated integration suites.
+Independent Python proof/automation replays are explicit timed tasks in the
+same bounded static scheduler as formatting, source assertions and ShellCheck;
+they are not nested serial work inside one long static task. Standalone
+`test-static.sh` still runs the complete static contract, while its explicit
+`--source-only` mode is a partial building block used by the scheduler. Every
+Python family runs exactly once in either canonical profile before integration
+starts; no persistent success cache substitutes for a test result.
 The `fast` profile is a development loop; the default `full` profile is the
 complete hermetic local contract. Its separate `doctor` mode diagnoses command,
 filesystem, loopback, formatter-bootstrap, network, and repository capabilities
@@ -610,6 +630,24 @@ launcher to the runner through its state, parent PID, and start time. The Python
 session supervisor retains that identity until signal-resistant same-group
 descendants have exited or the runner reaches authenticated KILL escalation;
 inactive slots are reaped before any retained PID or process group is signaled.
+The canonical and repetition executables enable Bash monitor mode so trapped
+INT does not depend on Bash's foreground-child reaping handler. The sourced
+library does not alter its caller's options. A monitor-mode child initially
+leads a provisional process group: with managed signals blocked, the Python
+supervisor joins its parent's group, then creates its own session without
+changing PID. Group signaling additionally requires the authenticated process
+to belong to that dedicated session (SID equals PGID), not merely to the
+provisional group. A failed session transition exits 70 before starting the
+command; pending managed signals retain their original cancellation semantics.
+Terminal Ctrl-C can instead interrupt a foreground utility and take Bash
+directly to EXIT with status 130. Both runners preserve INT on that path and
+guard cleanup against repeated fatal signals. A provisional direct-child
+identity is registered before foreground handoff polling or file removal, so
+EXIT can also stop a worker whose normal identity handshake is incomplete.
+The real-tool assembled-output fixture similarly lets the standalone engine
+stop its own worker sessions on timeout or interruption; it preserves fixture
+state when bounded cooperative shutdown remains unconfirmed. Its isolated
+Python driver keeps qualification assertions active despite PYTHONOPTIMIZE.
 Tests are part of the architecture: changing a trust, cleanup, progress,
 process, packaging, or compatibility boundary requires updating or adding the
 matching regression proof.

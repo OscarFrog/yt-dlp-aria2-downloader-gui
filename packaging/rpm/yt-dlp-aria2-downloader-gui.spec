@@ -86,6 +86,29 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sun Sep 13 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.25-1
+- Preserve pre-env observer diagnostics and distinguish procfs metadata from process identity
+
+* Sun Sep 13 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.24-1
+- Bound pre-env cancellation checks and retain authenticated failure diagnostics
+
+* Sun Sep 13 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.23-1
+- Synchronize engine worker identity publication in qualification fixtures.
+- Make child readiness ordering deterministic in runner integration tests.
+
+* Sun Sep 13 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.22-1
+- Match monitor fixtures to Bash script entry points and preserve strict stderr checks
+- Preserve monitor-mode cancellation and foreground startup errors on Bash 5.2
+
+* Sun Sep 13 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.21-1
+- Support ShellCheck 0.9.0 while preserving optional cleanup signals
+
+* Sun Sep 13 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.20-1
+- Prepare 2.3.20 development version after PR 78 merge sync
+
+* Sun Sep 13 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.19-1
+- Prepare 2.3.19 development version for Phase 3 fixes
+
 * Sat Sep 12 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.18-1
 - Fix isolated shfmt candidate permissions
 
