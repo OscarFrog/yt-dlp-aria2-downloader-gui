@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.21 - Unreleased
+
+### Maintenance
+
+- Support ShellCheck 0.9.0 while preserving optional cleanup signals
+
 ## 2.3.20 - Unreleased
 
 ### Maintenance

@@ -86,6 +86,9 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sun Sep 13 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.21-1
+- Support ShellCheck 0.9.0 while preserving optional cleanup signals
+
 * Sun Sep 13 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.20-1
 - Prepare 2.3.20 development version after PR 78 merge sync
 

@@ -711,6 +711,9 @@ test_runner_terminate_children() {
 
 # Finish active supervision with the requested signal (TERM by default), then
 # remove only the runner-owned scratch directory.
+# The signal is optional: standalone callers use TERM, while runner EXIT
+# handlers pass INT to preserve terminal cancellation on status 130.
+# shellcheck disable=SC2120
 test_runner_cleanup() {
     local signal_name=${1:-TERM}
 
