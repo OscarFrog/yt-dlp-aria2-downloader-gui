@@ -1676,6 +1676,7 @@ with tempfile.TemporaryDirectory(prefix="real-tool-supervision-") as directory:
     engine = base / "engine.sh"
     engine.write_text(engine_source + "\n" + traps + '''
 OUTPUT_LOCK_ROOT=$1
+export ENGINE_FIXTURE_PID=$$
 run_supervised_command python3 "$2"
 exit "${DOWNLOAD_STATUS}"
 ''', encoding="utf-8")
@@ -1688,7 +1689,34 @@ def stopped(number, _frame):
     raise SystemExit(128 + number)
 for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
     signal.signal(number, stopped)
-(root / "worker").write_text(f"{os.getpid()} {os.getpgrp()} {os.getsid(0)}")
+mode = os.environ.get("IDENTITY_PUBLICATION_CASE", "normal")
+record = f"{os.getpid()} {os.getpgrp()} {os.getsid(0)}"
+if mode == "paused-third":
+    record = f"{os.getpid()} {os.getpgrp()} {os.getsid(0):02d}"
+invalid = {"empty": "", "truncated": "1 2", "extra": record + " 4",
+           "non-numeric": "1 2 nope", "zero": "0 0 0",
+           "oversized": "9" * 129,
+           "partial-third": f"{os.getpid()} {os.getpgrp()} 0{str(os.getsid(0))[:-1]}",
+           "inconsistent": f"{os.getpid()} {os.getpgrp()} {os.getsid(0) + 1}",
+           "foreign": f"{os.environ['ENGINE_FIXTURE_PID']} {os.getpgrp()} {os.getsid(0)}"}
+record = invalid.get(mode, record)
+# One worker owns this name in its private case directory. Closing a sibling
+# temporary before replacement makes final-name existence a publication event.
+temporary = root / ("worker" if mode == "legacy-empty" else "worker-record")
+with temporary.open("w", encoding="ascii") as stream:
+    if mode in ("paused-empty", "paused-third", "legacy-empty", "absent", "stopped"):
+        if mode == "paused-third":
+            stream.write(record[:-1])
+            stream.flush()
+        (root / "prepared").touch()
+        if mode == "stopped":
+            raise SystemExit(23)
+        if os.read(int(os.environ["IDENTITY_RELEASE_FD"]), 1) != b"G":
+            raise SystemExit(24)
+        if mode == "paused-third":
+            record = record[-1:]
+    stream.write(record)
+temporary.replace(root / "worker")
 while True:
     time.sleep(0.01)
 ''', encoding="ascii")
@@ -1697,27 +1725,92 @@ while True:
     cases += [(f"active-{number}", number, False)
               for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)]
     cases.append(("active-integer-hup", int(signal.SIGHUP), False))
+    invalid_cases = ("empty", "truncated", "extra", "non-numeric", "zero", "oversized",
+                     "partial-third", "inconsistent", "foreign", "legacy-empty")
+    cases += [(mode, signal.SIGINT, True)
+              for mode in ("paused-empty", "paused-third", *invalid_cases, "absent", "stopped")]
     for label, fatal, at_registration in cases:
         root = base / label
-        root.mkdir()
+        root.mkdir(mode=0o700)
+        if base.stat().st_mode & 0o077 or root.stat().st_mode & 0o077:
+            raise AssertionError("engine identity fixture directory is not private")
         observed = []
         active = []
+        release_read, release_write = os.pipe()
+        pending_checked = False
+
+        def identity_error(process, phase, content=b""):
+            return AssertionError(
+                f"{label}: phase={phase}; content={content[:128]!r}; "
+                f"fields={len(content.split())}; engine_status={process.poll()}")
+
+        def read_worker(process, deadline):
+            while not (root / "worker").exists():
+                if process.poll() is not None:
+                    raise identity_error(process, "producer-exited")
+                if time.monotonic() >= deadline:
+                    raise identity_error(process, "publication-timeout")
+                if label in ("paused-empty", "paused-third") and not pending_checked:
+                    release_publication()
+                time.sleep(0.005)
+            # A published record is final: inspect one bounded snapshot and
+            # reject malformed data, rather than polling until it looks valid.
+            with (root / "worker").open("rb") as stream:
+                content = stream.read(129)
+            fields = content.split()
+            if (len(content) > 128 or len(fields) != 3
+                    or any(not value.isdigit() or len(value) > 10 for value in fields)):
+                raise identity_error(process, "invalid-record", content)
+            ids = tuple(map(int, fields))
+            if (any(value <= 1 or value > 2147483647 for value in ids)
+                    or ids[0] == ids[1] or ids[1] != ids[2] or ids[1] == process.pid):
+                raise identity_error(process, "invalid-identity", content)
+            try:
+                worker_stat = Path(f"/proc/{ids[0]}/stat").read_text().rsplit(") ", 1)[1].split()
+                leader_stat = Path(f"/proc/{ids[1]}/stat").read_text().rsplit(") ", 1)[1].split()
+            except (FileNotFoundError, ProcessLookupError):
+                raise identity_error(process, "identity-disappeared", content) from None
+            if (worker_stat[0] in ("Z", "X") or leader_stat[0] in ("Z", "X")
+                    or worker_stat[1:4] != [str(ids[1])] * 3
+                    or leader_stat[1:4] != [str(process.pid), str(ids[1]), str(ids[2])]):
+                raise identity_error(process, "unauthenticated-identity", content)
+            return ids, leader_stat[19]
+
+        def release_publication():
+            global pending_checked
+            if (root / "worker").exists() or observed:
+                raise AssertionError(f"{label}: incomplete worker identity was consumed")
+            content = (root / "worker-record").read_bytes()
+            if label == "paused-empty" and content != b"":
+                raise AssertionError("empty preparation barrier was not exercised")
+            if label == "paused-third" and len(content.split()) != 3:
+                raise AssertionError("partial third field barrier was not exercised")
+            pending_checked = True
+            os.write(release_write, b"G")
 
         class ControlledProcess:
             def __init__(self, *arguments, **keywords):
+                keywords["pass_fds"] = (release_read,)
                 self.process = subprocess.Popen(*arguments, **keywords)
                 active.append(self.process)
                 self.first_communication = True
                 deadline = time.monotonic() + 5
-                while not (root / "worker").exists():
-                    if self.process.poll() is not None or time.monotonic() >= deadline:
-                        raise AssertionError("engine worker did not become ready")
-                    time.sleep(0.005)
-                ids = tuple(map(int, (root / "worker").read_text().split()))
-                if ids[1] != ids[2] or ids[1] == self.process.pid:
-                    raise AssertionError("engine did not own a separate worker session")
-                metadata = Path(f"/proc/{ids[1]}/stat").read_text()
-                observed.append((ids, metadata.rsplit(") ", 1)[1].split()[19]))
+                if label in ("paused-empty", "paused-third", "legacy-empty", "absent"):
+                    while not (root / "prepared").exists():
+                        if self.process.poll() is not None or time.monotonic() >= deadline:
+                            raise identity_error(self.process, "preparation")
+                        time.sleep(0.005)
+                if label == "legacy-empty":
+                    # The original existence-only protocol enters its reader
+                    # while write_text's final destination is still empty.
+                    old_ids = tuple(map(int, (root / "worker").read_text().split()))
+                    try:
+                        _ = old_ids[1], old_ids[2]
+                    except IndexError:
+                        pass
+                    else:
+                        raise AssertionError("legacy publication race was not exercised")
+                observed.append(read_worker(self.process, deadline))
                 if at_registration:
                     os.kill(os.getpid(), fatal)
 
@@ -1746,13 +1839,27 @@ while True:
                                            TimeoutExpired=subprocess.TimeoutExpired)
         namespace = dict(signal=signal, subprocess=controlled, root=root, sys=sys, time=time)
         exec(implementation, namespace)
-        environment = dict(os.environ, ENGINE_SUPERVISION_CASE=str(root))
+        environment = dict(os.environ, ENGINE_SUPERVISION_CASE=str(root),
+                           IDENTITY_PUBLICATION_CASE=label,
+                           IDENTITY_RELEASE_FD=str(release_read))
         try:
             try:
                 namespace["capture_engine"](
                     ["bash", str(engine), str(root), str(worker)], environment,
                     timeout=0.05, grace=2,
                 )
+            except AssertionError as error:
+                expected = ("publication-timeout" if label == "absent" else
+                            "producer-exited" if label == "stopped" else
+                            "invalid-record" if label in ("empty", "truncated", "extra",
+                                                          "non-numeric", "oversized", "legacy-empty") else
+                            "invalid-identity" if label in ("zero", "partial-third", "inconsistent") else
+                            "unauthenticated-identity" if label == "foreign" else None)
+                if expected is None or f"{label}: phase={expected};" not in str(error) or observed:
+                    raise
+                if not all(item in str(error) for item in ("content=", "fields=", "engine_status=")):
+                    raise AssertionError("invalid publication lost its diagnostic context") from error
+                continue
             except subprocess.TimeoutExpired as error:
                 if fatal:
                     raise AssertionError("signal was replaced by a timeout")
@@ -1763,6 +1870,10 @@ while True:
                     raise AssertionError("capture lost its original signal status") from error
             else:
                 raise AssertionError("interrupted qualification was accepted")
+            if label in (*invalid_cases, "absent", "stopped"):
+                raise AssertionError(f"{label}: invalid or absent publication was accepted")
+            if label in ("paused-empty", "paused-third") and not pending_checked:
+                raise AssertionError(f"{label}: publication barrier was not exercised")
             if (root / "signal").read_text() != str(int(fatal or signal.SIGTERM)):
                 raise AssertionError("capture sent the wrong shutdown signal")
             for ids, _ in observed:
@@ -1771,10 +1882,21 @@ while True:
             if (root / "preserve-active-engine").exists():
                 raise AssertionError("confirmed shutdown was treated as ambiguous")
         finally:
+            cleanup_errors = []
             for process in active:
-                if process.poll() is None:
-                    process.terminate()
-                    process.wait(timeout=3)
+                # Popen may fail inside the fixture before capture_engine or
+                # observed receives an identity. The direct engine still owns
+                # authenticated shutdown of its separate worker session.
+                for _ in range(2):
+                    if process.poll() is None:
+                        process.terminate()
+                    try:
+                        process.communicate(timeout=3)
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
+                else:
+                    cleanup_errors.append("engine cleanup did not finish")
             for ids, start_time in observed:
                 try:
                     metadata = Path(f"/proc/{ids[1]}/stat").read_text()
@@ -1782,12 +1904,27 @@ while True:
                     continue
                 fields = metadata.rsplit(") ", 1)[1].split()
                 if fields[19] == start_time and fields[2:4] == [str(ids[1])] * 2:
-                    os.killpg(ids[1], signal.SIGKILL)
+                    try:
+                        os.killpg(ids[1], signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            os.close(release_read)
+            os.close(release_write)
+            deadline = time.monotonic() + 3
             while True:
                 try:
-                    os.waitpid(-1, 0)
+                    child, _ = os.waitpid(-1, os.WNOHANG)
                 except ChildProcessError:
                     break
+                if child == 0:
+                    if time.monotonic() >= deadline:
+                        cleanup_errors.append("cleanup left a live adopted descendant")
+                        break
+                    time.sleep(0.005)
+            if cleanup_errors:
+                raise AssertionError(f"{label}: {'; '.join(cleanup_errors)}")
+
+    print("Worker identity atomic publication, strict records and failed-initialization cleanup passed.")
 
     root = base / "unconfirmed"
     root.mkdir()
@@ -2681,11 +2818,15 @@ main() {
     local first_end_ms=''
     local second_end_ms=''
     local completed_slot=''
+    local blocked_slot
+    local ready_slot
+    local release_file
+    local release_fd
     local failure_log
     local failure_completion
     local status=0
 
-    for command_name in bash cat chmod env ln mkdir mktemp ps python3 rm sed setsid sleep timeout tr; do
+    for command_name in bash cat chmod env ln mkdir mkfifo mktemp ps python3 rm sed setsid sleep timeout tr; do
         require_test_command "${command_name}"
     done
 
@@ -2729,30 +2870,50 @@ main() {
     assert_file_has_line "${failure_log}" 'expected-failure' \
         'failed child buffered output'
 
-    first_log="${TEST_RUNNER_LOG_DIR}/first.log"
-    second_log="${TEST_RUNNER_LOG_DIR}/second.log"
-    first_completion="${TEST_RUNNER_LOG_DIR}/first.completed"
-    second_completion="${TEST_RUNNER_LOG_DIR}/second.completed"
-    test_runner_start_timed_child \
-        0 "${first_log}" "${first_completion}" bash -c \
-        'sleep 0.2; printf "%s\n" first'
-    test_runner_start_timed_child \
-        1 "${second_log}" "${second_completion}" bash -c \
-        'printf "%s\n" second'
-    test_runner_wait_any completed_slot
-    assert_equals '1' "${completed_slot}" \
-        'wait-any returns the first completed child slot'
-    test_runner_wait_any completed_slot
-    assert_equals '0' "${completed_slot}" \
-        'wait-any returns the remaining child slot'
+    # Exercise both slot placements. Only the barrier determines which child
+    # can finish; wait-any need not sort children that are already both ready.
+    for blocked_slot in 0 1; do
+        ready_slot=$((1 - blocked_slot))
+        first_log="${TEST_RUNNER_LOG_DIR}/first-${blocked_slot}.log"
+        second_log="${TEST_RUNNER_LOG_DIR}/second-${blocked_slot}.log"
+        first_completion="${TEST_RUNNER_LOG_DIR}/first-${blocked_slot}.completed"
+        second_completion="${TEST_RUNNER_LOG_DIR}/second-${blocked_slot}.completed"
+        release_file="${TEST_RUNNER_LOG_DIR}/first-${blocked_slot}.release"
+        mkfifo -- "${release_file}"
+        # Opening both ends prevents an unbounded FIFO open. The child's read
+        # timeout is a failure bound, never an instruction to finish first.
+        exec {release_fd}<>"${release_file}"
+        # Expand the release argument and value inside the child shell.
+        # shellcheck disable=SC2016
+        test_runner_start_timed_child \
+            "${blocked_slot}" "${first_log}" "${first_completion}" bash -c \
+            'IFS= read -r -t 5 release <"$1" || exit 70
+             [[ ${release} == go ]] || exit 70
+             printf "%s\n" first' bash "${release_file}"
+        test_runner_start_timed_child \
+            "${ready_slot}" "${second_log}" "${second_completion}" bash -c \
+            'printf "%s\n" second'
+        test_runner_wait_any completed_slot
+        assert_equals "${ready_slot}" "${completed_slot}" \
+            'wait-any returns the only completed child slot'
+        [[ ! -e ${first_completion} ]] \
+            || fail 'blocked child completed before its explicit release'
+        printf 'go\n' >&"${release_fd}"
+        exec {release_fd}>&-
+        test_runner_wait_any completed_slot
+        assert_equals "${blocked_slot}" "${completed_slot}" \
+            'wait-any returns the released child slot'
 
-    test_runner_read_completion "${first_completion}" first_end_ms
-    test_runner_read_completion "${second_completion}" second_end_ms
-    ((second_end_ms < first_end_ms)) \
-        || fail 'parallel child completion order was not recorded accurately'
+        test_runner_read_completion "${first_completion}" first_end_ms
+        test_runner_read_completion "${second_completion}" second_end_ms
+        # Causal ordering is established above; millisecond rounding can make
+        # two distinct completion instants have the same recorded value.
+        ((second_end_ms <= first_end_ms)) \
+            || fail 'parallel child completion order was not recorded accurately'
 
-    assert_file_has_line "${first_log}" first 'first concurrent child output'
-    assert_file_has_line "${second_log}" second 'second concurrent child output'
+        assert_file_has_line "${first_log}" first 'first concurrent child output'
+        assert_file_has_line "${second_log}" second 'second concurrent child output'
+    done
 
     failure_completion="${TEST_RUNNER_LOG_DIR}/timed-failure.completed"
     test_runner_start_timed_child \

@@ -86,6 +86,10 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sun Sep 13 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.23-1
+- Synchronize engine worker identity publication in qualification fixtures.
+- Make child readiness ordering deterministic in runner integration tests.
+
 * Sun Sep 13 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.22-1
 - Match monitor fixtures to Bash script entry points and preserve strict stderr checks
 - Preserve monitor-mode cancellation and foreground startup errors on Bash 5.2

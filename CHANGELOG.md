@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.23 - Unreleased
+
+### Maintenance
+
+- Synchronize engine worker identity publication in qualification fixtures.
+- Make child readiness ordering deterministic in runner integration tests.
+
 ## 2.3.22 - Unreleased
 
 ### Maintenance
