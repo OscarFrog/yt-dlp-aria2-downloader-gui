@@ -161,7 +161,53 @@ acknowledgement = r'''            if [[ -n ${MOCK_DEFERRED_SIGNAL_MARKER:-} ]]; 
                     "${MOCK_DEFERRED_SIGNAL_MARKER}"
             fi
 '''
-path.write_text(source.replace(needle, needle + acknowledgement, 1), encoding="utf-8")
+source = source.replace(needle, needle + acknowledgement, 1)
+# Only the private pre-env fixture enables this bounded, builtin-only trace.
+# Never record argv, environment contents, or private authentication tokens.
+trace_function = r'''
+mock_trace_pre_env() {
+    [[ -n ${MOCK_PRE_ENV_TRACE:-} ]] || return 0
+    local phase=$1
+    local observed_time='' unused='' ready_state=absent pgid_state=absent
+    MOCK_PRE_ENV_TRACE_COUNT=${MOCK_PRE_ENV_TRACE_COUNT:-0}
+    ((MOCK_PRE_ENV_TRACE_COUNT < 96)) || return 0
+    MOCK_PRE_ENV_TRACE_COUNT=$((MOCK_PRE_ENV_TRACE_COUNT + 1))
+    read -r observed_time unused </proc/uptime || observed_time=unavailable
+    [[ -z ${DOWNLOAD_READY_FILE} || ! -f ${DOWNLOAD_READY_FILE} ]] || ready_state=present
+    [[ -z ${DOWNLOAD_PGID_FILE} || ! -f ${DOWNLOAD_PGID_FILE} ]] || pgid_state=present
+    printf 'phase=%s monotonic=%s parent=%s active=%s deferred=%s deferred_status=%s escalation=%s shutdown=%s requested=%s pid=%s start=%s pgid=%s pgid_start=%s ready=%s pgid_file=%s\n' \
+        "${phase}" "${observed_time}" "${BASHPID}" "${SIGNAL_REGISTRATION_ACTIVE}" \
+        "${DEFERRED_SIGNAL_NAME}" "${DEFERRED_SIGNAL_STATUS}" \
+        "${REGISTRATION_ESCALATION_REQUESTED}" "${SHUTDOWN_REQUESTED}" \
+        "${REQUESTED_EXIT_STATUS}" "${DOWNLOAD_WORKER_PID}" \
+        "${DOWNLOAD_WORKER_START_TIME}" "${DOWNLOAD_WORKER_PGID}" \
+        "${DOWNLOAD_WORKER_PGID_START_TIME}" "${ready_state}" "${pgid_state}" \
+        >>"${MOCK_PRE_ENV_TRACE}"
+}
+
+'''
+source = source.replace("request_shutdown() {\n", trace_function + "request_shutdown() {\n", 1)
+probes = (
+    ("    local exit_status=$2\n\n    if [[ ${SIGNAL_REGISTRATION_ACTIVE}",
+     "    local exit_status=$2\n\n    mock_trace_pre_env request-entry\n    if [[ ${SIGNAL_REGISTRATION_ACTIVE}", 1),
+    (needle, needle + "            mock_trace_pre_env deferred-recorded\n", 1),
+    ("    SIGNAL_REGISTRATION_ACTIVE=false\n",
+     "    mock_trace_pre_env finish-entry\n    SIGNAL_REGISTRATION_ACTIVE=false\n", 1),
+    ("            DOWNLOAD_WORKER_START_TIME true || DOWNLOAD_WORKER_START_TIME=''\n",
+     "            DOWNLOAD_WORKER_START_TIME true || DOWNLOAD_WORKER_START_TIME=''\n"
+     "        mock_trace_pre_env registered-child\n", 2),
+    ("    local wait_status=0\n\n    for ((attempt = 0; attempt < attempts; attempt++)); do\n",
+     "    local wait_status=0\n\n    mock_trace_pre_env wait-entry\n"
+     "    for ((attempt = 0; attempt < attempts; attempt++)); do\n", 1),
+    ('            wait "${DOWNLOAD_WORKER_PID}" 2>/dev/null || wait_status=$?\n',
+     '            mock_trace_pre_env before-child-wait\n'
+     '            wait "${DOWNLOAD_WORKER_PID}" 2>/dev/null || wait_status=$?\n', 1),
+)
+for before, after, expected in probes:
+    if source.count(before) != expected:
+        raise SystemExit("pre-env diagnostic probe no longer matches its engine transition")
+    source = source.replace(before, after)
+path.write_text(source, encoding="utf-8")
 PY_DEFERRED_SIGNAL_ACK
 install -m 0644 -- \
     "${PROJECT_DIR}/private-aria2-plan.py" \
@@ -6348,10 +6394,376 @@ test_mock_signal_cli_runtime_preparation() {
     done
 }
 
+# Observe this shell's child without stealing its wait status. Expiration is a
+# test failure even if authenticated diagnostic cleanup subsequently succeeds.
+wait_for_mock_pre_env_exit() {
+    local observation=exit
+    if [[ ${1:-} == --marker ]]; then
+        observation=marker
+        shift
+    fi
+    python3 - "${observation}" "$@" <<'PY_PRE_ENV_WAIT'
+import itertools
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import sys
+import time
+
+observation = sys.argv[1]
+pid, expected_start, parent = map(int, sys.argv[2:5])
+started, budget = map(float, sys.argv[5:7])
+label, log_name = sys.argv[7:9]
+marker_names = sys.argv[9:]
+clock = lambda: time.clock_gettime(time.CLOCK_BOOTTIME)
+deadline = started + budget
+
+
+def process_info(target):
+    try:
+        path = Path(f"/proc/{target}/stat")
+        if path.stat().st_uid != os.getuid():
+            print("PRE_ENV_DIAGNOSTIC " + json.dumps(dict(
+                scenario=label, phase="process-owner-rejected", pid=target)),
+                file=sys.stderr, flush=True)
+            raise SystemExit(65)
+        with path.open("r") as source:
+            fields = source.read(4096).rsplit(") ", 1)[1].split()
+        return dict(pid=target, state=fields[0], ppid=int(fields[1]),
+                    pgid=int(fields[2]), sid=int(fields[3]), start=int(fields[19]))
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+
+
+def matches(info):
+    return info is not None and info["start"] == expected_start and info["ppid"] == parent
+
+
+def report(reason, infos, limits=()):
+    details = []
+    capture_deadline = clock() + 1.0
+    limits = list(limits)
+    for info in infos[:32]:
+        if clock() >= capture_deadline:
+            limits.append("diagnostic-capture-budget-exhausted")
+            break
+        item = dict(info)
+        for name in ("status", "wchan"):
+            try:
+                with Path(f"/proc/{info['pid']}/{name}").open("r") as source:
+                    text = source.read(8192)
+                item[name] = ([line for line in text.splitlines()
+                               if line.startswith(("SigBlk:", "SigIgn:", "SigCgt:",
+                                                   "SigPnd:", "ShdPnd:"))]
+                              if name == "status" else text[:128])
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                item[name] = "unavailable"
+        details.append(item)
+    markers = {}
+    registration_root = Path(log_name).parent / "runtime" / f"yt-dlp-aria2-downloader-{os.getuid()}"
+    registration_names = list(itertools.islice(registration_root.glob(".worker-*"), 8))
+    for name in [*marker_names[:8], *registration_names]:
+        if clock() >= capture_deadline:
+            limits.append("diagnostic-marker-budget-exhausted")
+            break
+        path = Path(name)
+        try:
+            with path.open("rb") as source:
+                raw = source.read(128)
+            markers[path.name] = dict(size=path.stat().st_size,
+                                     content=raw.decode("ascii", "backslashreplace"))
+        except FileNotFoundError:
+            markers[path.name] = "absent"
+    # These fixtures use no private inputs. Still redact URL/header-like data
+    # and serialize control characters before retaining a bounded log excerpt.
+    try:
+        with open(log_name, "rb") as source:
+            source.seek(0, 2)
+            source.seek(max(0, source.tell() - 4096))
+            log = source.read(4096).decode("utf-8", "backslashreplace")
+    except FileNotFoundError:
+        log = "unavailable"
+    try:
+        with Path(log_name).with_suffix(".trace").open("rb") as source:
+            trace = source.read(16384).decode("ascii", "backslashreplace")
+    except FileNotFoundError:
+        trace = "unavailable"
+    log = re.sub(r"https?://[^\s]+", "[REDACTED_URL]", log)
+    log = re.sub(r"(?im)^.*(?:authorization|cookie|password|secret|token|header).*$",
+                 "[REDACTED_PRIVATE_DIAGNOSTIC]", log)
+    print("PRE_ENV_DIAGNOSTIC " + json.dumps(dict(
+        scenario=label, phase=reason, monotonic=clock(), elapsed=clock()-started,
+        deadline=deadline, processes=details, process_count=len(infos), limits=limits,
+        capture_budget_seconds=1, capture_overrun=max(0, clock()-capture_deadline),
+        markers=markers, log=log, engine_trace=trace, parameters={name: os.environ.get(name, "unset")[:32]
+        for name in ("MOCK_CANCEL_JITTER_SECONDS", "MOCK_CANCEL_AFTER_EOF_JITTER_SECONDS",
+                     "MOCK_PGID_PUBLISH_DELAY_SECONDS", "MOCK_WORKER_START_JITTER_SECONDS",
+                     "MOCK_FFMPEG_START_JITTER_SECONDS", "MOCK_SETSID_START_JITTER_SECONDS")})),
+        file=sys.stderr, flush=True)
+
+
+while True:
+    current = process_info(pid)
+    if current is None:
+        if observation == "marker":
+            report("engine-exited-before-marker", [])
+            raise SystemExit(66)
+        if clock() >= deadline:
+            report("functional-deadline-expired-after-exit", [])
+            raise SystemExit(124)
+        break
+    if not matches(current):
+        report("identity-rejected", [current])
+        raise SystemExit(65)
+    if current["state"] in ("Z", "X"):
+        if observation == "marker":
+            report("engine-exited-before-marker", [current])
+            raise SystemExit(66)
+        if clock() >= deadline:
+            report("functional-deadline-expired-after-exit", [current])
+            raise SystemExit(124)
+        break
+    if observation == "marker" and Path(marker_names[0]).is_file() and clock() < deadline:
+        break
+    if clock() >= deadline:
+        # Discovery has a separate one-second budget and a 32-identity cap.
+        # /proc I/O itself cannot promise a hard deadline under kernel stalls.
+        handles = []
+        limits = []
+
+        def same_identity(info, fd=None):
+            if fd is not None:
+                try:
+                    signal.pidfd_send_signal(fd, 0)
+                except ProcessLookupError:
+                    return False
+            seen = process_info(info["pid"])
+            return seen is not None and all(seen[key] == info[key]
+                                           for key in ("ppid", "start", "pgid", "sid"))
+
+        def pin(info):
+            try:
+                fd = os.pidfd_open(info["pid"])
+            except ProcessLookupError:
+                return None
+            if same_identity(info, fd):
+                return fd
+            os.close(fd)
+            return None
+
+        def discover(until):
+            index = 0
+            known = {info["pid"] for _, info in handles}
+            while index < len(handles) and len(handles) < 32 and clock() < until:
+                owner_fd, owner = handles[index]
+                index += 1
+                if not same_identity(owner, owner_fd):
+                    continue
+                try:
+                    path = Path(f"/proc/{owner['pid']}/task/{owner['pid']}/children")
+                    with path.open("r") as source:
+                        children = source.read(8193)
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                if len(children) > 8192:
+                    limits.append("children-record-truncated")
+                    continue
+                for child in children.split():
+                    if len(handles) >= 32 or clock() >= until:
+                        break
+                    if not child.isdecimal() or int(child) in known:
+                        continue
+                    # The parent must remain the pinned original identity on
+                    # both sides of this child's read and pidfd acquisition.
+                    if not same_identity(owner, owner_fd):
+                        break
+                    info = process_info(int(child))
+                    if info is None or info["ppid"] != owner["pid"]:
+                        continue
+                    fd = pin(info)
+                    if fd is None:
+                        continue
+                    if not same_identity(owner, owner_fd):
+                        os.close(fd)
+                        break
+                    handles.append((fd, info))
+                    known.add(info["pid"])
+            if index < len(handles):
+                limits.append("diagnostic-discovery-budget-or-identity-cap")
+
+        try:
+            root = process_info(pid)
+            if matches(root):
+                root_fd = pin(root)
+                if root_fd is not None:
+                    handles.append((root_fd, root))
+            discover(clock() + 1.0)
+            reason = ("publication-deadline-expired" if observation == "marker"
+                      else "functional-deadline-expired")
+            report(reason, [info for _, info in handles], limits)
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                if sig == signal.SIGKILL:
+                    # Traps may fork during TERM cleanup. Discover again only
+                    # through still-authenticated parents, never adopted PIDs.
+                    discover(clock() + 1.0)
+                for fd, info in reversed(handles):
+                    try:
+                        signal.pidfd_send_signal(fd, sig)
+                    except ProcessLookupError:
+                        pass
+                cleanup_deadline = clock() + (0.2 if sig == signal.SIGTERM else 2.0)
+                while clock() < cleanup_deadline:
+                    remaining = [info for _, info in handles
+                                 if (seen := process_info(info["pid"])) is not None
+                                 and seen["start"] == info["start"]
+                                 and seen["state"] not in ("Z", "X")]
+                    if not remaining:
+                        break
+                    time.sleep(0.01)
+            report("cleanup-incomplete" if remaining else "known-identities-stopped",
+                   remaining, [*limits, "adoptions-after-parent-exit-not-observable"])
+        finally:
+            for fd, _ in handles:
+                os.close(fd)
+        # The real parent may reap only after /proc confirms termination.
+        # Do not turn a timeout followed by status 130 into a passing test.
+        raise SystemExit(124)
+    time.sleep(min(0.01, max(0, deadline - clock())))
+
+print(int((clock() - started) * 1000))
+PY_PRE_ENV_WAIT
+}
+
+wait_for_mock_pre_env_marker() {
+    local child_pid=$1 child_start=$2 marker=$3 label=$4 log_name=$5
+    local parent_pid=${BASHPID} started='' unused='' observer_status=0 process_stat=''
+
+    read -r started unused </proc/uptime
+    # The returned duration is unused during preparation; retain diagnostics.
+    # shellcheck disable=SC2310 # Preserve the observer's explicit failure status.
+    wait_for_mock_pre_env_exit --marker \
+        "${child_pid}" "${child_start}" "${parent_pid}" \
+        "${started}" 10 "${label}" "${log_name}" "${marker}" \
+        >/dev/null || observer_status=$?
+    if ((observer_status != 0)); then
+        if [[ ! -d /proc/${child_pid} ]] \
+            || { IFS= read -r process_stat <"/proc/${child_pid}/stat" \
+                && [[ ${process_stat##*) } == [ZX]' '* ]]; }; then
+            wait "${child_pid}" || :
+        fi
+        fail "${label}: preparation observer failed with status ${observer_status}."
+    fi
+}
+
+test_mock_pre_env_observer_controls() {
+    local child_pid child_start child_status control expected_status observed_status
+    local tested_start tested_parent
+    local ready release started unused elapsed observer_log worker_log
+    local parent_pid=${BASHPID}
+    local -a observer_options=()
+    local -a controls=(success ordinary-error identity-rejection foreign-parent
+        no-publication marker-absent engine-exited-before-marker)
+
+    printf '%s\n' 'Mock scenario: pre-env-observer-negative-controls'
+    for control in "${controls[@]}"; do
+        ready="${TEST_ROOT}/observer-${control}-ready"
+        release="${TEST_ROOT}/observer-${control}-release"
+        observer_log="${TEST_ROOT}/observer-${control}.log"
+        worker_log="${TEST_ROOT}/observer-${control}-worker.log"
+        expected_status=7
+        [[ ${control} != success ]] || expected_status=0
+        python3 - "${ready}" "${release}" "${expected_status}" \
+            >"${worker_log}" 2>&1 <<'PY_PRE_ENV_CONTROL' &
+from pathlib import Path
+import signal
+import sys
+import time
+
+ready, release = map(Path, sys.argv[1:3])
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(130))
+ready.touch()
+while not release.exists():
+    time.sleep(0.01)
+raise SystemExit(int(sys.argv[3]))
+PY_PRE_ENV_CONTROL
+        child_pid=$!
+        wait_for_file "${ready}" 3 "pre-env observer ${control} startup"
+        # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
+        read_mock_process_start_time child_start "${child_pid}" \
+            || fail "Pre-env observer ${control}: child identity unavailable."
+        read -r started unused </proc/uptime
+        observed_status=0
+        if [[ ${control} == identity-rejection || ${control} == foreign-parent ]]; then
+            tested_start=${child_start}
+            tested_parent=${parent_pid}
+            if [[ ${control} == identity-rejection ]]; then
+                tested_start=$((child_start + 1))
+            else
+                tested_parent=$((parent_pid + 1))
+            fi
+            # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
+            elapsed=$(wait_for_mock_pre_env_exit \
+                "${child_pid}" "${tested_start}" "${tested_parent}" \
+                "${started}" 1 "${control}" "${worker_log}" "${ready}" \
+                2>"${observer_log}") || observed_status=$?
+            assert_equals 65 "${observed_status}" 'pre-env observer rejects unauthenticated identity'
+            # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
+            read_mock_process_start_time unused "${child_pid}" \
+                || fail 'Pre-env observer signaled an unauthenticated child.'
+            assert_equals "${child_start}" "${unused}" 'rejected identity remains alive'
+            : >"${release}"
+        elif [[ ${control} == no-publication || ${control} == marker-absent ]]; then
+            observer_options=()
+            [[ ${control} != marker-absent ]] || observer_options=(--marker)
+            # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
+            elapsed=$(wait_for_mock_pre_env_exit "${observer_options[@]}" \
+                "${child_pid}" "${child_start}" "${parent_pid}" \
+                "${started}" 0.05 "${control}" "${worker_log}" \
+                "${TEST_ROOT}/never-published" 2>"${observer_log}") || observed_status=$?
+            assert_equals 124 "${observed_status}" 'pre-env observer preserves expiration'
+            assert_file_contains "${observer_log}" deadline-expired \
+                'pre-env observer captures failure before cleanup'
+            assert_file_contains "${observer_log}" '"never-published": "absent"' \
+                'pre-env observer distinguishes absent readiness'
+            expected_status=130
+        elif [[ ${control} == engine-exited-before-marker ]]; then
+            : >"${release}"
+            # shellcheck disable=SC2310 # Premature termination must stay a failure.
+            elapsed=$(wait_for_mock_pre_env_exit --marker \
+                "${child_pid}" "${child_start}" "${parent_pid}" \
+                "${started}" 1 "${control}" "${worker_log}" \
+                "${TEST_ROOT}/never-published" 2>"${observer_log}") || observed_status=$?
+            assert_equals 66 "${observed_status}" 'pre-env observer detects premature engine exit'
+            assert_file_contains "${observer_log}" engine-exited-before-marker \
+                'pre-env observer diagnoses absent publication after exit'
+        else
+            : >"${release}"
+            # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
+            elapsed=$(wait_for_mock_pre_env_exit \
+                "${child_pid}" "${child_start}" "${parent_pid}" \
+                "${started}" 1 "${control}" "${worker_log}" "${ready}" \
+                2>"${observer_log}") || observed_status=$?
+            assert_equals 0 "${observed_status}" 'pre-env observer only observes termination'
+        fi
+        if ((observed_status == 0)); then
+            [[ ${elapsed} =~ ^[0-9]+$ ]] || fail 'Observer elapsed time is invalid.'
+        else
+            assert_equals '' "${elapsed}" 'failed observer never publishes a success duration'
+        fi
+        child_status=0
+        wait "${child_pid}" || child_status=$?
+        assert_equals "${expected_status}" "${child_status}" \
+            "pre-env observer ${control} retains the real child status"
+    done
+}
+
 test_mock_signal_cli_pre_env_registration() {
-    local cli_engine_pid cli_engine_status continue_marker delay_marker
+    local cli_engine_pid cli_engine_start_time cli_engine_status continue_marker delay_marker
     local elapsed_milliseconds first_signal_marker mode runtime_signal_log signal_finished_at
-    local signal_started_at
+    local observer_status process_stat signal_started_at
+    local parent_pid=${BASHPID}
     local -a registration_leftovers=()
     local -a session_modes=(false true)
 
@@ -6372,6 +6784,7 @@ test_mock_signal_cli_pre_env_registration() {
             -u YTDLP_ARIA2_SKIP_RUNTIME_UPDATE \
             MOCK_ENV_DELAY_MARKER="${delay_marker}" \
             MOCK_ENV_CONTINUE_MARKER="${continue_marker}" \
+            MOCK_PRE_ENV_TRACE="${runtime_signal_log%.log}.trace" \
             MOCK_RUNTIME_MANAGER_BLOCK=1 \
             MOCK_RUNTIME_STARTED_MARKER="${TEST_ROOT}/pre-env-${mode}-runtime-started" \
             MOCK_RUNTIME_TERMINATION_MARKER="${TEST_ROOT}/pre-env-${mode}-runtime-terminated" \
@@ -6381,15 +6794,41 @@ test_mock_signal_cli_pre_env_registration() {
             -- "https://example.com/watch?v=pre-env-${mode}" \
             >"${runtime_signal_log}" 2>&1 &
         cli_engine_pid=$!
-        wait_for_file "${delay_marker}" 10 \
-            "pre-env ${mode} launch delay"
-        signal_started_at=$(date +%s%3N)
+        cli_engine_start_time=''
+        # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
+        read_mock_process_start_time cli_engine_start_time "${cli_engine_pid}" \
+            || fail "Pre-env ${mode}: unable to authenticate the launched engine."
+        wait_for_mock_pre_env_marker "${cli_engine_pid}" "${cli_engine_start_time}" \
+            "${delay_marker}" "pre-env ${mode} launch delay" "${runtime_signal_log}"
+        read -r signal_finished_at process_stat </proc/uptime
+        printf 'Pre-env mode=%s phase=delay-observed monotonic=%s pid=%s start=%s\n' \
+            "${mode}" "${signal_finished_at}" "${cli_engine_pid}" "${cli_engine_start_time}"
+        read -r signal_started_at signal_finished_at </proc/uptime
         kill -INT -- "${cli_engine_pid}"
         : >"${continue_marker}"
+        printf 'Pre-env mode=%s phase=first-int-sent-continue-published monotonic=%s\n' \
+            "${mode}" "${signal_started_at}"
+        observer_status=0
+        # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
+        elapsed_milliseconds=$(wait_for_mock_pre_env_exit \
+            "${cli_engine_pid}" "${cli_engine_start_time}" "${parent_pid}" \
+            "${signal_started_at}" 5 "pre-env-${mode}" "${runtime_signal_log}" \
+            "${delay_marker}" "${continue_marker}" \
+            "${TEST_ROOT}/pre-env-${mode}-runtime-started" \
+            "${TEST_ROOT}/pre-env-${mode}-runtime-terminated") || observer_status=$?
+        if ((observer_status != 0)); then
+            # The observer has preserved its failure before authenticated cleanup.
+            # Do not wait indefinitely if even SIGKILL could not stop this child.
+            process_stat=''
+            if [[ ! -d /proc/${cli_engine_pid} ]] \
+                || { IFS= read -r process_stat <"/proc/${cli_engine_pid}/stat" \
+                    && [[ ${process_stat##*) } == [ZX]' '* ]]; }; then
+                wait "${cli_engine_pid}" || :
+            fi
+            fail "pre-env ${mode} observation failed with status ${observer_status}."
+        fi
         cli_engine_status=0
         wait "${cli_engine_pid}" || cli_engine_status=$?
-        signal_finished_at=$(date +%s%3N)
-        elapsed_milliseconds=$((signal_finished_at - signal_started_at))
         assert_equals 130 "${cli_engine_status}" \
             "pre-env ${mode} SIGINT exit status"
         ((elapsed_milliseconds < 5000)) \
@@ -6424,6 +6863,7 @@ test_mock_signal_cli_pre_env_registration() {
             -u YTDLP_ARIA2_SKIP_RUNTIME_UPDATE \
             MOCK_ENV_DELAY_MARKER="${delay_marker}" \
             MOCK_ENV_CONTINUE_MARKER="${continue_marker}" \
+            MOCK_PRE_ENV_TRACE="${runtime_signal_log%.log}.trace" \
             MOCK_DEFERRED_SIGNAL_MARKER="${first_signal_marker}" \
             MOCK_RUNTIME_MANAGER_BLOCK=1 \
             MOCK_RUNTIME_STARTED_MARKER="${TEST_ROOT}/pre-env-escalate-${mode}-runtime-started" \
@@ -6434,22 +6874,49 @@ test_mock_signal_cli_pre_env_registration() {
             -- "https://example.com/watch?v=pre-env-escalate-${mode}" \
             >"${runtime_signal_log}" 2>&1 &
         cli_engine_pid=$!
-        wait_for_file "${delay_marker}" 10 \
-            "pre-env escalation ${mode} launch delay"
+        cli_engine_start_time=''
+        # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
+        read_mock_process_start_time cli_engine_start_time "${cli_engine_pid}" \
+            || fail "Pre-env ${mode}: unable to authenticate the launched engine."
+        wait_for_mock_pre_env_marker "${cli_engine_pid}" "${cli_engine_start_time}" \
+            "${delay_marker}" "pre-env escalation ${mode} launch delay" "${runtime_signal_log}"
+        read -r signal_finished_at process_stat </proc/uptime
+        printf 'Pre-env mode=%s phase=escalation-delay-observed monotonic=%s pid=%s start=%s\n' \
+            "${mode}" "${signal_finished_at}" "${cli_engine_pid}" "${cli_engine_start_time}"
         kill -INT -- "${cli_engine_pid}"
         # Standard signals can coalesce while pending. Confirm that the first
         # handler ran before sending the distinct signal that requests escalation.
-        wait_for_file "${first_signal_marker}" 10 \
-            "pre-env escalation ${mode} first SIGINT acknowledgement"
+        wait_for_mock_pre_env_marker "${cli_engine_pid}" "${cli_engine_start_time}" \
+            "${first_signal_marker}" "pre-env escalation ${mode} first SIGINT acknowledgement" \
+            "${runtime_signal_log}"
         assert_file_has_line "${first_signal_marker}" 130 \
             "pre-env escalation ${mode} first SIGINT is deferred"
+        printf 'Pre-env mode=%s phase=first-handler-acknowledged\n' "${mode}"
         # Measure escalation from its trigger, after the first-handler barrier.
-        signal_started_at=$(date +%s%3N)
+        read -r signal_started_at signal_finished_at </proc/uptime
         kill -INT -- "${cli_engine_pid}"
+        observer_status=0
+        # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
+        elapsed_milliseconds=$(wait_for_mock_pre_env_exit \
+            "${cli_engine_pid}" "${cli_engine_start_time}" "${parent_pid}" \
+            "${signal_started_at}" 2 "pre-env-escalate-${mode}" "${runtime_signal_log}" \
+            "${delay_marker}" "${continue_marker}" \
+            "${TEST_ROOT}/pre-env-escalate-${mode}-runtime-started" \
+            "${TEST_ROOT}/pre-env-escalate-${mode}-runtime-terminated" \
+            "${first_signal_marker}") || observer_status=$?
+        if ((observer_status != 0)); then
+            # The observer has preserved its failure before authenticated cleanup.
+            # Do not wait indefinitely if even SIGKILL could not stop this child.
+            process_stat=''
+            if [[ ! -d /proc/${cli_engine_pid} ]] \
+                || { IFS= read -r process_stat <"/proc/${cli_engine_pid}/stat" \
+                    && [[ ${process_stat##*) } == [ZX]' '* ]]; }; then
+                wait "${cli_engine_pid}" || :
+            fi
+            fail "pre-env-escalate ${mode} observation failed with status ${observer_status}."
+        fi
         cli_engine_status=0
         wait "${cli_engine_pid}" || cli_engine_status=$?
-        signal_finished_at=$(date +%s%3N)
-        elapsed_milliseconds=$((signal_finished_at - signal_started_at))
         assert_equals 130 "${cli_engine_status}" \
             "pre-env escalation ${mode} preserves first SIGINT status"
         ((elapsed_milliseconds < 2000)) \
@@ -7391,6 +7858,7 @@ run_mock_signal_group() {
     test_mock_signal_cli_leader_exit_descendant
     test_mock_signal_cli_worker_registration
     test_mock_signal_cli_runtime_preparation
+    test_mock_pre_env_observer_controls
     test_mock_signal_cli_pre_env_registration
     test_mock_signal_registration_handoff
     test_mock_signal_cli_foreground_group_registration

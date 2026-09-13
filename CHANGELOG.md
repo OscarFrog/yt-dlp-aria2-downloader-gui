@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.24 - Unreleased
+
+### Maintenance
+
+- Bound pre-env cancellation checks and retain authenticated failure diagnostics
+
 ## 2.3.23 - Unreleased
 
 ### Maintenance
