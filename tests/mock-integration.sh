@@ -6422,23 +6422,50 @@ deadline = started + budget
 
 
 def process_info(target):
+    # procfs inode ownership is diagnostic metadata, not process credentials or
+    # identity: it can change on a live task and while that task is exiting.
+    path = Path(f"/proc/{target}/stat")
+    info = dict(pid=target, proc_owner="unavailable", state="unavailable",
+                ppid="unavailable", pgid="unavailable", sid="unavailable", start="unavailable")
     try:
-        path = Path(f"/proc/{target}/stat")
-        if path.stat().st_uid != os.getuid():
-            print("PRE_ENV_DIAGNOSTIC " + json.dumps(dict(
-                scenario=label, phase="process-owner-rejected", pid=target)),
-                file=sys.stderr, flush=True)
-            raise SystemExit(65)
+        info["proc_owner"] = path.stat().st_uid
+    except OSError as error:
+        info["owner_error"] = type(error).__name__
+    try:
         with path.open("r") as source:
-            fields = source.read(4096).rsplit(") ", 1)[1].split()
-        return dict(pid=target, state=fields[0], ppid=int(fields[1]),
-                    pgid=int(fields[2]), sid=int(fields[3]), start=int(fields[19]))
+            record = source.read(4097)
+        prefix, suffix = record.rsplit(") ", 1)
+        fields = suffix.split()
+        if (len(record) > 4096 or len(fields) < 20
+                or int(prefix.split(" (", 1)[0]) != target
+                or fields[0] not in ("R", "S", "D", "Z", "T", "t", "X", "x", "K", "W", "P", "I")
+                or any(not fields[index].isdecimal() for index in (1, 2, 3, 19))):
+            raise ValueError("invalid process record")
+        info.update(state=fields[0], ppid=int(fields[1]), pgid=int(fields[2]),
+                    sid=int(fields[3]), start=int(fields[19]))
+        if info["start"] <= 0:
+            raise ValueError("invalid process start time")
     except (FileNotFoundError, ProcessLookupError):
         return None
+    except (OSError, ValueError, IndexError) as error:
+        info["error"] = type(error).__name__
+    return info
 
 
 def matches(info):
-    return info is not None and info["start"] == expected_start and info["ppid"] == parent
+    return (info is not None and "error" not in info
+            and info["start"] == expected_start and info["ppid"] == parent)
+
+
+def excerpt(path, limit, tail=False):
+    try:
+        with Path(path).open("rb") as source:
+            if tail:
+                source.seek(0, 2)
+                source.seek(max(0, source.tell() - limit))
+            return source.read(limit).decode("utf-8", "backslashreplace")
+    except (OSError, ValueError) as error:
+        return f"unavailable ({type(error).__name__})"
 
 
 def report(reason, infos, limits=()):
@@ -6451,19 +6478,20 @@ def report(reason, infos, limits=()):
             break
         item = dict(info)
         for name in ("status", "wchan"):
-            try:
-                with Path(f"/proc/{info['pid']}/{name}").open("r") as source:
-                    text = source.read(8192)
-                item[name] = ([line for line in text.splitlines()
-                               if line.startswith(("SigBlk:", "SigIgn:", "SigCgt:",
-                                                   "SigPnd:", "ShdPnd:"))]
-                              if name == "status" else text[:128])
-            except (FileNotFoundError, ProcessLookupError, PermissionError):
-                item[name] = "unavailable"
+            text = excerpt(f"/proc/{info['pid']}/{name}", 8192)
+            item[name] = (text if text.startswith("unavailable (") else
+                          [line for line in text.splitlines()
+                           if line.startswith(("Uid:", "SigBlk:", "SigIgn:", "SigCgt:",
+                                               "SigPnd:", "ShdPnd:"))]
+                          if name == "status" else text[:128])
         details.append(item)
     markers = {}
     registration_root = Path(log_name).parent / "runtime" / f"yt-dlp-aria2-downloader-{os.getuid()}"
-    registration_names = list(itertools.islice(registration_root.glob(".worker-*"), 8))
+    try:
+        registration_names = list(itertools.islice(registration_root.glob(".worker-*"), 8))
+    except OSError as error:
+        registration_names = []
+        limits.append(f"registration-list-unavailable:{type(error).__name__}")
     for name in [*marker_names[:8], *registration_names]:
         if clock() >= capture_deadline:
             limits.append("diagnostic-marker-budget-exhausted")
@@ -6472,30 +6500,33 @@ def report(reason, infos, limits=()):
         try:
             with path.open("rb") as source:
                 raw = source.read(128)
-            markers[path.name] = dict(size=path.stat().st_size,
-                                     content=raw.decode("ascii", "backslashreplace"))
+            markers[path.name] = dict(content=raw.decode("ascii", "backslashreplace"))
+            try:
+                markers[path.name]["size"] = path.stat().st_size
+            except OSError as error:
+                markers[path.name]["size"] = f"unavailable ({type(error).__name__})"
         except FileNotFoundError:
             markers[path.name] = "absent"
-    # These fixtures use no private inputs. Still redact URL/header-like data
-    # and serialize control characters before retaining a bounded log excerpt.
-    try:
-        with open(log_name, "rb") as source:
-            source.seek(0, 2)
-            source.seek(max(0, source.tell() - 4096))
-            log = source.read(4096).decode("utf-8", "backslashreplace")
-    except FileNotFoundError:
-        log = "unavailable"
-    try:
-        with Path(log_name).with_suffix(".trace").open("rb") as source:
-            trace = source.read(16384).decode("ascii", "backslashreplace")
-    except FileNotFoundError:
-        trace = "unavailable"
+        except OSError as error:
+            markers[path.name] = f"unavailable ({type(error).__name__})"
+    # Capture failures remain secondary data; they must not replace the first
+    # failure or discard the other available log/trace and identity evidence.
+    log = excerpt(log_name, 4096, tail=True)
+    trace = excerpt(Path(log_name).with_suffix(".trace"), 16384)
     log = re.sub(r"https?://[^\s]+", "[REDACTED_URL]", log)
     log = re.sub(r"(?im)^.*(?:authorization|cookie|password|secret|token|header).*$",
                  "[REDACTED_PRIVATE_DIAGNOSTIC]", log)
     print("PRE_ENV_DIAGNOSTIC " + json.dumps(dict(
         scenario=label, phase=reason, monotonic=clock(), elapsed=clock()-started,
-        deadline=deadline, processes=details, process_count=len(infos), limits=limits,
+        deadline=deadline, expected=dict(pid=pid, start=expected_start, ppid=parent),
+        observer_uid=os.getuid(), kernel=os.uname().release,
+        python=sys.version.split()[0],
+        iteration=os.environ.get("MOCK_STRESS_ITERATION", "unavailable; see workflow iteration banner")[:80],
+        processes=details, process_count=len(infos), limits=limits,
+        initial_observation=current if current is not None else dict(pid=pid, state="absent"),
+        initial_termination=("process-entry-absent" if current is None else
+                     "terminal-state-observed" if current.get("state") in ("Z", "X")
+                     else "not-established"),
         capture_budget_seconds=1, capture_overrun=max(0, clock()-capture_deadline),
         markers=markers, log=log, engine_trace=trace, parameters={name: os.environ.get(name, "unset")[:32]
         for name in ("MOCK_CANCEL_JITTER_SECONDS", "MOCK_CANCEL_AFTER_EOF_JITTER_SECONDS",
@@ -6514,6 +6545,9 @@ while True:
             report("functional-deadline-expired-after-exit", [])
             raise SystemExit(124)
         break
+    if "error" in current:
+        report("process-record-unavailable-or-invalid", [current])
+        raise SystemExit(65)
     if not matches(current):
         report("identity-rejected", [current])
         raise SystemExit(65)
@@ -6537,19 +6571,24 @@ while True:
             if fd is not None:
                 try:
                     signal.pidfd_send_signal(fd, 0)
-                except ProcessLookupError:
+                except OSError as error:
+                    limits.append(f"pidfd-check:{type(error).__name__}")
                     return False
             seen = process_info(info["pid"])
-            return seen is not None and all(seen[key] == info[key]
+            if seen is not None and "error" in seen:
+                limits.append(f"process-record:{info['pid']}:{seen['error']}")
+            return seen is not None and "error" not in seen and all(seen[key] == info[key]
                                            for key in ("ppid", "start", "pgid", "sid"))
 
         def pin(info):
             try:
                 fd = os.pidfd_open(info["pid"])
-            except ProcessLookupError:
+            except OSError as error:
+                limits.append(f"pidfd-open:{type(error).__name__}")
                 return None
             if same_identity(info, fd):
                 return fd
+            limits.append(f"pidfd-identity-not-confirmed:{info['pid']}")
             os.close(fd)
             return None
 
@@ -6565,7 +6604,8 @@ while True:
                     path = Path(f"/proc/{owner['pid']}/task/{owner['pid']}/children")
                     with path.open("r") as source:
                         children = source.read(8193)
-                except (FileNotFoundError, ProcessLookupError):
+                except OSError as error:
+                    limits.append(f"children-read:{type(error).__name__}")
                     continue
                 if len(children) > 8192:
                     limits.append("children-record-truncated")
@@ -6580,7 +6620,12 @@ while True:
                     if not same_identity(owner, owner_fd):
                         break
                     info = process_info(int(child))
-                    if info is None or info["ppid"] != owner["pid"]:
+                    if info is None:
+                        continue
+                    if "error" in info:
+                        limits.append(f"child-record:{info['pid']}:{info['error']}")
+                        continue
+                    if info["ppid"] != owner["pid"]:
                         continue
                     fd = pin(info)
                     if fd is None:
@@ -6599,31 +6644,43 @@ while True:
                 root_fd = pin(root)
                 if root_fd is not None:
                     handles.append((root_fd, root))
+            if root is not None and not matches(root):
+                limits.append("root-identity-unavailable-before-cleanup")
             discover(clock() + 1.0)
             reason = ("publication-deadline-expired" if observation == "marker"
                       else "functional-deadline-expired")
-            report(reason, [info for _, info in handles], limits)
+            report(reason, [info for _, info in handles] or ([root] if root else []), limits)
+            remaining = []
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 if sig == signal.SIGKILL:
                     # Traps may fork during TERM cleanup. Discover again only
                     # through still-authenticated parents, never adopted PIDs.
                     discover(clock() + 1.0)
                 for fd, info in reversed(handles):
+                    seen = process_info(info["pid"])
+                    if seen is None or seen.get("state") in ("Z", "X"):
+                        continue
+                    if not same_identity(info, fd):
+                        limits.append(f"signal-identity-uncertain:{info['pid']}")
+                        continue
                     try:
                         signal.pidfd_send_signal(fd, sig)
-                    except ProcessLookupError:
-                        pass
+                    except OSError as error:
+                        limits.append(f"signal-{sig.name}:{info['pid']}:{type(error).__name__}")
                 cleanup_deadline = clock() + (0.2 if sig == signal.SIGTERM else 2.0)
                 while clock() < cleanup_deadline:
-                    remaining = [info for _, info in handles
-                                 if (seen := process_info(info["pid"])) is not None
-                                 and seen["start"] == info["start"]
-                                 and seen["state"] not in ("Z", "X")]
+                    remaining = []
+                    for _, info in handles:
+                        seen = process_info(info["pid"])
+                        if seen is not None and ("error" in seen or
+                                (seen["start"] == info["start"] and seen["state"] not in ("Z", "X"))):
+                            remaining.append(seen)
                     if not remaining:
                         break
                     time.sleep(0.01)
-            report("cleanup-incomplete" if remaining else "known-identities-stopped",
-                   remaining, [*limits, "adoptions-after-parent-exit-not-observable"])
+            report("cleanup-incomplete-or-uncertain" if remaining or limits
+                   else "known-identities-stopped", remaining,
+                   [*limits, "adoptions-after-parent-exit-not-observable"])
         finally:
             for fd, _ in handles:
                 os.close(fd)
@@ -6636,9 +6693,38 @@ print(int((clock() - started) * 1000))
 PY_PRE_ENV_WAIT
 }
 
+# Only the launching Bash parent can recover the real wait status. A missing
+# or replaced proc entry also means that the original child cannot still run;
+# an unreadable/incomplete record does not authorize an unbounded wait.
+reap_mock_pre_env_child() {
+    local child_pid=$1 child_start=$2 result_name=$3 label=$4 observer_status=$5
+    local process_stat='' can_reap=false
+    local -a process_fields=()
+    local -n child_result="${result_name}"
+
+    child_result=unavailable
+    if [[ ! -d /proc/${child_pid} ]]; then
+        can_reap=true
+    elif IFS= read -r process_stat <"/proc/${child_pid}/stat"; then
+        read -r -a process_fields <<<"${process_stat##*) }"
+        if ((${#process_fields[@]} >= 20)) \
+            && [[ ${process_fields[19]} =~ ^[0-9]+$ ]] \
+            && { [[ ${process_fields[19]} != "${child_start}" ]] \
+                || [[ ${process_fields[0]} == Z || ${process_fields[0]} == X ]]; }; then
+            can_reap=true
+        fi
+    fi
+    if [[ ${can_reap} == true ]]; then
+        child_result=0
+        wait "${child_pid}" || child_result=$?
+    fi
+    printf 'PRE_ENV_CHILD_STATUS scenario=%s pid=%s observer=%s child=%s wait_attempted=%s\n' \
+        "${label}" "${child_pid}" "${observer_status}" "${child_result}" "${can_reap}"
+}
+
 wait_for_mock_pre_env_marker() {
     local child_pid=$1 child_start=$2 marker=$3 label=$4 log_name=$5
-    local parent_pid=${BASHPID} started='' unused='' observer_status=0 process_stat=''
+    local parent_pid=${BASHPID} started='' unused='' observer_status=0 child_status=''
 
     read -r started unused </proc/uptime
     # The returned duration is unused during preparation; retain diagnostics.
@@ -6648,25 +6734,317 @@ wait_for_mock_pre_env_marker() {
         "${started}" 10 "${label}" "${log_name}" "${marker}" \
         >/dev/null || observer_status=$?
     if ((observer_status != 0)); then
-        if [[ ! -d /proc/${child_pid} ]] \
-            || { IFS= read -r process_stat <"/proc/${child_pid}/stat" \
-                && [[ ${process_stat##*) } == [ZX]' '* ]]; }; then
-            wait "${child_pid}" || :
-        fi
-        fail "${label}: preparation observer failed with status ${observer_status}."
+        reap_mock_pre_env_child "${child_pid}" "${child_start}" child_status \
+            "${label}" "${observer_status}"
+        fail "${label}: preparation observer failed with status ${observer_status}; child=${child_status}."
     fi
 }
 
 test_mock_pre_env_observer_controls() {
     local child_pid child_start child_status control expected_status observed_status
-    local tested_start tested_parent
+    local tested_start tested_parent release_status
     local ready release started unused elapsed observer_log worker_log
     local parent_pid=${BASHPID}
     local -a observer_options=()
-    local -a controls=(success ordinary-error identity-rejection foreign-parent
+    local -a controls=(success signal-status cached-status ordinary-error identity-rejection foreign-parent
         no-publication marker-absent engine-exited-before-marker)
 
     printf '%s\n' 'Mock scenario: pre-env-observer-negative-controls'
+    # Exercise this exact observer with real children while replacing only the
+    # procfs boundary. This covers kernel-dependent metadata without changing
+    # /proc, dumpability or the production engine.
+    python3 - "${PROJECT_DIR}/tests/mock-integration.sh" <<'PY_PRE_ENV_PROCFS'
+"""Exercise the real embedded observer; alter only selected procfs/read boundaries."""
+import builtins
+import contextlib
+import ctypes
+import json
+import io
+import os
+from pathlib import Path
+import select
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from unittest.mock import patch
+
+text = Path(sys.argv[1]).read_text()
+selected_controls = set(sys.argv[2:])
+source = text.split("<<'PY_PRE_ENV_WAIT'\n", 1)[1].split('\nPY_PRE_ENV_WAIT', 1)[0]
+program = compile(source, 'actual-PY_PRE_ENV_WAIT', 'exec')
+clock = lambda: time.clock_gettime(time.CLOCK_BOOTTIME)
+real_path_open, real_path_stat = Path.open, Path.stat
+real_open, real_pidfd_signal = builtins.open, signal.pidfd_send_signal
+real_pidfd_open = os.pidfd_open
+worker_source = '''import os,signal,sys
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(130))
+descendant = os.fork() if len(sys.argv) > 2 else -1
+if descendant == 0:
+    os.read(int(sys.argv[2]), 1)
+    os._exit(0)
+print("ready", descendant, flush=True)
+sys.stdin.readline()
+sys.exit(int(sys.argv[1]))
+'''
+
+
+def proc_fields(pid):
+    return Path('/proc/{}/stat'.format(pid)).read_text().rsplit(') ', 1)[1].split()
+
+
+def await_terminal(worker):
+    deadline = clock() + 2
+    while clock() < deadline:
+        if os.waitid(os.P_PID, worker.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT):
+            return
+        time.sleep(.005)
+    raise AssertionError('controlled child did not terminate within two seconds')
+
+
+def run_case(control, wanted, status=7):
+    with tempfile.TemporaryDirectory(prefix='observer-control-') as directory:
+        root = Path(directory)
+        log = root / 'worker.log'
+        log.write_text('bounded fixture diagnostic\n')
+        log.with_suffix('.trace').write_text('separate fixture trace\n')
+        worker_errors = (root / 'worker.stderr').open('w+')
+        pipe = os.pipe() if control == 'leader-exit-descendant' else ()
+        command = [sys.executable, '-c', worker_source, str(status)]
+        if pipe:
+            command.append(str(pipe[0]))
+        worker = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=worker_errors, text=True, pass_fds=pipe[:1])
+        if pipe:
+            os.close(pipe[0])
+        released = False
+        def release():
+            nonlocal released
+            if not released:
+                worker.stdin.write('continue\n')
+                worker.stdin.flush()
+                released = True
+        signals, reads, states = [], [], []
+        before, descendant_identity, descendant_reaped = None, None, False
+        cleanup_fault = None
+        try:
+            assert select.select([worker.stdout], [], [], 2)[0], 'child readiness absent'
+            readiness = worker.stdout.readline().split()
+            assert len(readiness) == 2 and readiness[0] == 'ready', readiness
+            if pipe:
+                descendant_pid = int(readiness[1])
+                descendant_fields = proc_fields(descendant_pid)
+                assert int(descendant_fields[1]) == worker.pid
+                descendant_identity = (descendant_pid, int(descendant_fields[19]))
+            fields = proc_fields(worker.pid)
+            expected_start, parent = int(fields[19]), os.getpid()
+            before = expected_start
+            proc_path = '/proc/{}/stat'.format(worker.pid)
+            if control.startswith('terminal-owner') or control in ('disappeared-reaped', 'leader-exit-descendant'):
+                release()
+                await_terminal(worker)
+                if control == 'disappeared-reaped':
+                    assert worker.wait(timeout=1) == status
+            if control == 'wrong-start':
+                expected_start += 1
+            if control == 'wrong-parent':
+                parent += 1
+            def owner_stat(path, *args, **kwargs):
+                if str(path) == proc_path and control == 'owner-metadata-error':
+                    raise OSError('controlled metadata error')
+                result = real_path_stat(path, *args, **kwargs)
+                if str(path) == proc_path and ('owner' in control):
+                    values = list(result)
+                    values[4] = os.getuid() + 1
+                    return os.stat_result(values)
+                return result
+            def proc_open(path, *args, **kwargs):
+                if control == 'capture-error' and str(path) == str(log):
+                    raise PermissionError('controlled diagnostic read denial')
+                if str(path) != proc_path:
+                    return real_path_open(path, *args, **kwargs)
+                reads.append(str(path))
+                if control == 'unreadable-proc' or cleanup_fault == 'read-error':
+                    raise PermissionError('controlled procfs read denial')
+                with real_path_open(path, *args, **kwargs) as handle:
+                    raw = handle.read()
+                prefix, body = raw.rsplit(') ', 1)
+                fields = body.split()
+                states.append(fields[0])
+                if control == 'truncated-proc':
+                    return io.StringIO(prefix + ') ' + ' '.join(fields[:3]))
+                if control == 'reused-start' or cleanup_fault == 'changed-start':
+                    fields[19] = str(int(fields[19]) + 1)
+                    return io.StringIO(prefix + ') ' + ' '.join(fields) + '\n')
+                if control in ('live-owner-change', 'termination-during-read', 'owner-metadata-error') and not released:
+                    release()
+                    if control == 'termination-during-read':
+                        await_terminal(worker)
+                return io.StringIO(raw)
+            def capture_open(path, *args, **kwargs):
+                if control == 'capture-error' and str(path) == str(log):
+                    raise PermissionError('controlled diagnostic read denial')
+                return real_open(path, *args, **kwargs)
+            def pin_open(target, *args, **kwargs):
+                nonlocal cleanup_fault
+                if control == 'pidfd-open-error':
+                    raise PermissionError('controlled pidfd acquisition error')
+                fd = real_pidfd_open(target, *args, **kwargs)
+                if control in ('cleanup-record-error', 'pidfd-pin-race'):
+                    cleanup_fault = 'read-error' if control == 'cleanup-record-error' else 'changed-start'
+                return fd
+            def observe_signal(fd, signum, *args, **kwargs):
+                if signum:
+                    fdinfo = Path('/proc/self/fdinfo/{}'.format(fd)).read_text()
+                    pinned = int(next(line.split(':', 1)[1] for line in fdinfo.splitlines()
+                                      if line.startswith('Pid:')))
+                    if pinned == -1:
+                        return real_pidfd_signal(fd, signum, *args, **kwargs)
+                    signals.append((pinned, int(signum)))
+                    assert control in ('expired-cleanup-130', 'capture-error'), signals
+                    assert pinned == worker.pid, 'observer signaled a foreign process'
+                return real_pidfd_signal(fd, signum, *args, **kwargs)
+            duration = .05 if control in ('expired-cleanup-130', 'capture-error',
+                'cleanup-record-error', 'pidfd-open-error', 'pidfd-pin-race') else 1
+            arguments = ['observer', 'exit', str(worker.pid), str(expected_start), str(parent),
+                         str(clock()), str(duration), control, str(log), str(root/'absent')]
+            out, err = io.StringIO(), io.StringIO()
+            observer_status, unexpected = 0, None
+            namespace = {'__name__': '__main__'}
+            with patch.object(Path, 'stat', owner_stat), patch.object(Path, 'open', proc_open), \
+                    patch.object(builtins, 'open', capture_open), \
+                    patch.object(signal, 'pidfd_send_signal', observe_signal), \
+                    patch.object(os, 'pidfd_open', pin_open), \
+                    patch.object(sys, 'argv', arguments), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    exec(program, namespace)
+                except SystemExit as exc:
+                    observer_status = int(exc.code or 0)
+                except Exception as exc:
+                    unexpected = repr(exc)
+            if control in ('expired-cleanup-130', 'capture-error'):
+                await_terminal(worker)
+                child_status = worker.wait(timeout=1)
+                assert child_status == 130, (control, child_status)
+            else:
+                if worker.returncode is None:
+                    release()
+                    await_terminal(worker)
+                child_status = worker.wait(timeout=1)
+                assert child_status == status, (control, child_status)
+                assert not signals, (control, signals)
+            assert unexpected is None, (control, unexpected, err.getvalue())
+            assert observer_status == wanted, (control, observer_status, wanted, err.getvalue())
+            if wanted:
+                assert not out.getvalue(), (control, 'failure emitted success duration')
+                reports = [json.loads(line.split(' ', 1)[1]) for line in err.getvalue().splitlines()
+                           if line.startswith('PRE_ENV_DIAGNOSTIC ')]
+                assert reports, (control, 'missing diagnostic')
+                for report in reports:
+                    assert {'expected', 'initial_observation', 'initial_termination', 'monotonic', 'deadline', 'kernel'} <= report.keys()
+                    assert report['expected'] == dict(pid=worker.pid, start=expected_start, ppid=parent)
+                    assert report['initial_observation']['proc_owner'] == os.getuid()
+                if control in ('unreadable-proc', 'truncated-proc'):
+                    assert 'error' in reports[0]['initial_observation']
+                if control == 'capture-error':
+                    assert 'PermissionError' in reports[0]['log']
+                    assert reports[0]['engine_trace'] == 'separate fixture trace\n'
+                if control in ('cleanup-record-error', 'pidfd-open-error', 'pidfd-pin-race'):
+                    assert reports[-1]['phase'] == 'cleanup-incomplete-or-uncertain'
+                    assert reports[-1]['limits']
+            else:
+                assert out.getvalue().strip().isdigit(), (control, out.getvalue())
+            if 'owner' in control and control != 'owner-metadata-error':
+                assert namespace['current']['proc_owner'] == os.getuid() + 1
+            if control == 'owner-metadata-error':
+                assert namespace['current']['proc_owner'] == 'unavailable'
+                assert namespace['current']['owner_error'] == 'OSError'
+            if descendant_identity:
+                descendant_fields = proc_fields(descendant_pid)
+                assert int(descendant_fields[19]) == descendant_identity[1]
+                assert descendant_fields[0] not in ('Z', 'X'), 'leader success hid tree state'
+                assert int(descendant_fields[1]) == os.getpid(), 'private subreaper did not adopt'
+                os.write(pipe[1], b'x')
+                until = clock() + 2
+                while clock() < until:
+                    found, child_wait = os.waitpid(descendant_pid, os.WNOHANG)
+                    if found:
+                        descendant_reaped = True
+                        assert os.waitstatus_to_exitcode(child_wait) == 0
+                        break
+                    time.sleep(.005)
+                assert descendant_reaped, 'descendant harvest deadline'
+            worker_errors.seek(0)
+            assert worker_errors.read() == '', 'unexpected child stderr'
+            if control in ('live-owner-change', 'termination-during-read'):
+                assert states and states[0] not in ('Z', 'X') and released, (control, states)
+            print('PASS {} observer={} wait={} signals={} reads={}'.format(
+                control, observer_status, child_status, len(signals), len(reads)))
+        finally:
+            if descendant_identity and not descendant_reaped:
+                try:
+                    fd = real_pidfd_open(descendant_identity[0])
+                    try:
+                        if int(proc_fields(descendant_identity[0])[19]) == descendant_identity[1]:
+                            real_pidfd_signal(fd, signal.SIGKILL)
+                    finally:
+                        os.close(fd)
+                except ProcessLookupError:
+                    pass
+            if worker.returncode is None:
+                # Independent recovery: kernel handle plus fresh known start-time.
+                try:
+                    fd = os.pidfd_open(worker.pid)
+                    try:
+                        if before is not None and int(proc_fields(worker.pid)[19]) == before:
+                            real_pidfd_signal(fd, signal.SIGKILL)
+                    finally:
+                        os.close(fd)
+                except ProcessLookupError:
+                    pass
+                worker.wait(timeout=2)
+            if descendant_identity and not descendant_reaped:
+                until = clock() + 2
+                while clock() < until:
+                    try:
+                        if os.waitpid(descendant_identity[0], os.WNOHANG)[0]:
+                            descendant_reaped = True
+                            break
+                    except ChildProcessError:
+                        break
+                    time.sleep(.005)
+                assert descendant_reaped, 'external descendant recovery not harvested'
+            if pipe:
+                os.close(pipe[1])
+            worker_errors.close()
+            worker.stdin.close()
+            worker.stdout.close()
+
+
+libc = ctypes.CDLL(None, use_errno=True)
+previous_subreaper = ctypes.c_int()
+assert libc.prctl(37, ctypes.byref(previous_subreaper), 0, 0, 0) == 0
+assert libc.prctl(36, 1, 0, 0, 0) == 0
+try:
+    cases = (
+        ('terminal-owner-130', 0, 130), ('terminal-owner-7', 0, 7),
+        ('live-owner-change', 0, 7), ('wrong-start', 65, 7),
+        ('wrong-parent', 65, 7), ('reused-start', 65, 7),
+        ('termination-during-read', 0, 7), ('disappeared-reaped', 0, 7),
+        ('unreadable-proc', 65, 7), ('truncated-proc', 65, 7),
+        ('expired-cleanup-130', 124, 7), ('capture-error', 124, 7),
+        ('owner-metadata-error', 0, 7), ('cleanup-record-error', 124, 7),
+        ('pidfd-open-error', 124, 7), ('pidfd-pin-race', 124, 7),
+        ('leader-exit-descendant', 0, 7))
+    for name, expected, status in cases:
+        if not selected_controls or name in selected_controls:
+            run_case(name, expected, status)
+finally:
+    assert libc.prctl(36, previous_subreaper.value, 0, 0, 0) == 0
+PY_PRE_ENV_PROCFS
+
     for control in "${controls[@]}"; do
         ready="${TEST_ROOT}/observer-${control}-ready"
         release="${TEST_ROOT}/observer-${control}-release"
@@ -6674,6 +7052,7 @@ test_mock_pre_env_observer_controls() {
         worker_log="${TEST_ROOT}/observer-${control}-worker.log"
         expected_status=7
         [[ ${control} != success ]] || expected_status=0
+        [[ ${control} != signal-status && ${control} != cached-status ]] || expected_status=130
         python3 - "${ready}" "${release}" "${expected_status}" \
             >"${worker_log}" 2>&1 <<'PY_PRE_ENV_CONTROL' &
 from pathlib import Path
@@ -6752,17 +7131,42 @@ PY_PRE_ENV_CONTROL
         else
             assert_equals '' "${elapsed}" 'failed observer never publishes a success duration'
         fi
-        child_status=0
-        wait "${child_pid}" || child_status=$?
+        release_status=0
+        if [[ ${control} == identity-rejection || ${control} == foreign-parent ]]; then
+            read -r started unused </proc/uptime
+            # The first observer failed while leaving this child untouched.
+            # Bound its independently requested release before the parent reaps.
+            # shellcheck disable=SC2310 # Capture secondary failure before reaping.
+            wait_for_mock_pre_env_exit "${child_pid}" "${child_start}" "${parent_pid}" \
+                "${started}" 1 "${control}-released" "${worker_log}" \
+                >/dev/null || release_status=$?
+        fi
+        if [[ ${control} == cached-status ]]; then
+            # Termination was observed above. Force a missing proc entry while
+            # this launching Bash still retains the child's real wait status.
+            child_status=0
+            wait "${child_pid}" || child_status=$?
+            assert_equals 130 "${child_status}" 'initial Bash reap preserves SIGINT status'
+            [[ ! -e /proc/${child_pid}/stat ]] || fail 'Reaped control still has a proc entry.'
+            read -r started unused </proc/uptime
+            # shellcheck disable=SC2310 # A failed observation cannot discard the saved status.
+            wait_for_mock_pre_env_exit "${child_pid}" "${child_start}" "${parent_pid}" \
+                "${started}" 1 "${control}" "${worker_log}" \
+                >/dev/null || release_status=$?
+        fi
+        reap_mock_pre_env_child "${child_pid}" "${child_start}" child_status \
+            "${control}" "${observed_status}"
         assert_equals "${expected_status}" "${child_status}" \
             "pre-env observer ${control} retains the real child status"
+        assert_equals 0 "${release_status}" \
+            "pre-env observer ${control} bounded release observation"
     done
 }
 
 test_mock_signal_cli_pre_env_registration() {
     local cli_engine_pid cli_engine_start_time cli_engine_status continue_marker delay_marker
     local elapsed_milliseconds first_signal_marker mode runtime_signal_log signal_finished_at
-    local observer_status process_stat signal_started_at
+    local observer_status process_stat signal_started_at kernel_version
     local parent_pid=${BASHPID}
     local -a registration_leftovers=()
     local -a session_modes=(false true)
@@ -6772,6 +7176,8 @@ test_mock_signal_cli_pre_env_registration() {
     # published post-env readiness, rather than being lost as an inherited
     # ignored signal and requiring the ten-second KILL escalation.
     printf '%s\n' 'Mock scenario: cli-signal-pre-env-registration'
+    kernel_version=$(uname -r)
+    printf 'Pre-env environment: kernel=%s bash=%s\n' "${kernel_version}" "${BASH_VERSION}"
     for mode in "${session_modes[@]}"; do
         delay_marker="${TEST_ROOT}/pre-env-${mode}-delayed"
         continue_marker="${TEST_ROOT}/pre-env-${mode}-continue"
@@ -6816,19 +7222,11 @@ test_mock_signal_cli_pre_env_registration() {
             "${delay_marker}" "${continue_marker}" \
             "${TEST_ROOT}/pre-env-${mode}-runtime-started" \
             "${TEST_ROOT}/pre-env-${mode}-runtime-terminated") || observer_status=$?
+        reap_mock_pre_env_child "${cli_engine_pid}" "${cli_engine_start_time}" \
+            cli_engine_status "pre-env-${mode}" "${observer_status}"
         if ((observer_status != 0)); then
-            # The observer has preserved its failure before authenticated cleanup.
-            # Do not wait indefinitely if even SIGKILL could not stop this child.
-            process_stat=''
-            if [[ ! -d /proc/${cli_engine_pid} ]] \
-                || { IFS= read -r process_stat <"/proc/${cli_engine_pid}/stat" \
-                    && [[ ${process_stat##*) } == [ZX]' '* ]]; }; then
-                wait "${cli_engine_pid}" || :
-            fi
-            fail "pre-env ${mode} observation failed with status ${observer_status}."
+            fail "pre-env ${mode} observation failed with status ${observer_status}; child=${cli_engine_status}."
         fi
-        cli_engine_status=0
-        wait "${cli_engine_pid}" || cli_engine_status=$?
         assert_equals 130 "${cli_engine_status}" \
             "pre-env ${mode} SIGINT exit status"
         ((elapsed_milliseconds < 5000)) \
@@ -6904,19 +7302,11 @@ test_mock_signal_cli_pre_env_registration() {
             "${TEST_ROOT}/pre-env-escalate-${mode}-runtime-started" \
             "${TEST_ROOT}/pre-env-escalate-${mode}-runtime-terminated" \
             "${first_signal_marker}") || observer_status=$?
+        reap_mock_pre_env_child "${cli_engine_pid}" "${cli_engine_start_time}" \
+            cli_engine_status "pre-env-escalate-${mode}" "${observer_status}"
         if ((observer_status != 0)); then
-            # The observer has preserved its failure before authenticated cleanup.
-            # Do not wait indefinitely if even SIGKILL could not stop this child.
-            process_stat=''
-            if [[ ! -d /proc/${cli_engine_pid} ]] \
-                || { IFS= read -r process_stat <"/proc/${cli_engine_pid}/stat" \
-                    && [[ ${process_stat##*) } == [ZX]' '* ]]; }; then
-                wait "${cli_engine_pid}" || :
-            fi
-            fail "pre-env-escalate ${mode} observation failed with status ${observer_status}."
+            fail "pre-env-escalate ${mode} observation failed with status ${observer_status}; child=${cli_engine_status}."
         fi
-        cli_engine_status=0
-        wait "${cli_engine_pid}" || cli_engine_status=$?
         assert_equals 130 "${cli_engine_status}" \
             "pre-env escalation ${mode} preserves first SIGINT status"
         ((elapsed_milliseconds < 2000)) \

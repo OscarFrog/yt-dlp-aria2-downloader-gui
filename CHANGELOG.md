@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.25 - Unreleased
+
+### Maintenance
+
+- Preserve pre-env observer diagnostics and distinguish procfs metadata from process identity
+
 ## 2.3.24 - Unreleased
 
 ### Maintenance
