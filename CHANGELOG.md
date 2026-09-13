@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.22 - Unreleased
+
+### Maintenance
+
+- Match monitor fixtures to Bash script entry points and preserve strict stderr checks
+- Preserve monitor-mode cancellation and foreground startup errors on Bash 5.2
+
 ## 2.3.21 - Unreleased
 
 ### Maintenance

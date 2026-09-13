@@ -825,6 +825,242 @@ with tempfile.TemporaryDirectory(prefix="runner-signal-resistant-") as temp_dir:
 PY_SIGNAL_RESISTANT
 }
 
+test_startup_foreground_statuses() {
+    python3 -B - "${SCRIPT_DIR}/lib/test-runner.sh" <<'PY_STARTUP_STATUS'
+import ctypes
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+library = Path(sys.argv[1])
+source = library.read_text(encoding="utf-8")
+opening = "test_runner_read_child_identity() {\n"
+start = source.index(opening)
+end = source.index("\n}\n", start) + 3
+original_reader = source[start:end].replace(
+    opening, "fixture_original_read_child_identity() {\n", 1,
+)
+if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), "test subreaper unavailable")
+
+
+def identity(pid):
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    fields = text[text.rfind(") ") + 2:].split()
+    return (pid, int(fields[19]), fields[0])
+
+
+runner = r'''
+set -Eeuo pipefail
+set -m
+umask 077
+source "$1"
+test_runner_initialize
+export STARTUP_RUNNER_PID=$BASHPID
+finish_fixture() {
+    local status=$?
+    local signal_name=TERM
+    trap '' HUP INT TERM
+    trap - EXIT
+    printf '%s %s\n' "$status" "$TEST_RUNNER_STARTING_CHILD" >"$STARTUP_CASE/state"
+    ((status != 130)) || signal_name=INT
+    test_runner_cleanup "$signal_name"
+    [[ -z $TEST_RUNNER_LOG_DIR && ${#TEST_RUNNER_CHILD_PIDS[@]} == 0 ]]
+    printf 'clean\n' >"$STARTUP_CASE/clean"
+    exit "$status"
+}
+trap finish_fixture EXIT
+trap 'test_runner_handle_signal HUP 129' HUP
+trap 'test_runner_handle_signal INT 130' INT
+trap 'test_runner_handle_signal TERM 143' TERM
+'''
+runner += original_reader
+runner += r'''
+test_runner_read_child_identity() {
+    if [[ $STARTUP_STAGE == sleep && ! -e $STARTUP_CASE/poll-completed ]]; then
+        return 1
+    fi
+    fixture_original_read_child_identity "$@"
+}
+if [[ $STARTUP_STAGE == rm-no-identity ]]; then
+    _test_runner_launch_child() { return 0; }
+fi
+printf '%s\n' "$TEST_RUNNER_LOG_DIR" >"$STARTUP_CASE/log-dir"
+test_runner_start_child 0 '' python3 "$STARTUP_WORKER" "$STARTUP_CASE"
+printf 'startup-ok\n'
+test_runner_terminate_children TERM
+'''
+worker = '''import os
+from pathlib import Path
+import signal
+import sys
+import time
+root = Path(sys.argv[1])
+def interrupted(number, _frame):
+    (root / "received").write_text(str(number))
+    raise SystemExit(128 + number)
+for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(number, interrupted)
+stat = Path(f"/proc/{os.getpid()}/stat").read_text()
+start = stat[stat.rfind(") ") + 2:].split()[19]
+record = root / "worker-record"
+record.write_text(f"{os.getpid()} {start} {os.getppid()} {os.getpgrp()} {os.getsid(0)}")
+record.replace(root / "worker")
+while True:
+    time.sleep(0.01)
+'''
+utility = '''import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+root = Path(os.environ["STARTUP_CASE"])
+command, *arguments = sys.argv[1:]
+stage = os.environ["STARTUP_STAGE"]
+mode = os.environ["STARTUP_MODE"]
+target = ((command == "sleep" and arguments == ["0.001"] and stage == "sleep")
+          or (command == "rm" and len(arguments) == 3 and arguments[:2] == ["-f", "--"]
+              and arguments[2].endswith(".identity") and stage.startswith("rm")))
+if not target:
+    os.execv(f"/usr/bin/{command}", [command, *arguments])
+if stage != "rm-no-identity":
+    deadline = time.monotonic() + 3
+    while not (root / "worker").exists():
+        if time.monotonic() >= deadline:
+            raise SystemExit("worker did not become ready before foreground utility")
+        time.sleep(0.001)
+(root / "poll-completed").touch()
+status = 0
+diagnostic = b""
+if mode == "absent":
+    Path(arguments[2]).unlink(missing_ok=True)
+if mode in ("ok", "absent"):
+    result = subprocess.run([f"/usr/bin/{command}", *arguments], capture_output=True)
+    status, diagnostic = result.returncode, result.stderr
+elif mode == "permission":
+    Path(arguments[2]).touch()
+    directory = Path(arguments[2]).parent
+    directory.chmod(0o500)
+    def unprivileged():
+        if os.geteuid() == 0:
+            os.setgroups([])
+            os.setgid(65534)
+            os.setuid(65534)
+    try:
+        result = subprocess.run(["/usr/bin/rm", *arguments], capture_output=True,
+                                preexec_fn=unprivileged)
+        status, diagnostic = result.returncode, result.stderr
+    finally:
+        directory.chmod(0o700)
+    if status != 1 or b"Permission denied" not in diagnostic:
+        raise SystemExit("permission negative control did not reject removal")
+elif mode == "missing":
+    result = subprocess.run(["/bin/bash", "-c", 'exec "$1"', "missing-command",
+                             str(root / "nonexistent-command")], capture_output=True)
+    status, diagnostic = result.returncode, result.stderr
+else:
+    status = 23
+    diagnostic = f"controlled {command} failure\\n".encode()
+    if mode in ("HUP", "INT", "TERM"):
+        os.kill(int(os.environ["STARTUP_RUNNER_PID"]), getattr(signal, "SIG" + mode))
+(root / "expected-stderr").write_bytes(diagnostic)
+sys.stderr.buffer.write(diagnostic)
+sys.stderr.buffer.flush()
+raise SystemExit(status)
+'''
+
+with tempfile.TemporaryDirectory(prefix="runner-foreground-status-") as directory:
+    root = Path(directory)
+    runner_path = root / "runner.sh"
+    runner_path.write_text(runner, encoding="utf-8")
+    worker_path = root / "worker.py"
+    worker_path.write_text(worker, encoding="ascii")
+    utility_path = root / "utility.py"
+    utility_path.write_text(utility, encoding="ascii")
+    binary_dir = root / "bin"
+    binary_dir.mkdir()
+    for command in ("sleep", "rm"):
+        executable = binary_dir / command
+        executable.write_text(
+            '#!/bin/bash\nexec python3 "$STARTUP_UTILITY" ' + command + ' "$@"\n',
+            encoding="ascii",
+        )
+        executable.chmod(0o700)
+    cases = [(stage, mode) for stage in ("sleep", "rm", "rm-no-identity")
+             for mode in ("ok", "failure", "missing", "HUP", "INT", "TERM")]
+    cases += [(stage, mode) for stage in ("rm", "rm-no-identity")
+              for mode in ("absent", "permission")]
+    for index, (stage, mode) in enumerate(cases):
+        case = root / str(index)
+        case.mkdir()
+        environment = dict(os.environ, LC_ALL="C", STARTUP_CASE=str(case),
+                           STARTUP_STAGE=stage, STARTUP_MODE=mode,
+                           STARTUP_WORKER=str(worker_path), STARTUP_UTILITY=str(utility_path),
+                           PATH=f"{binary_dir}:{os.environ['PATH']}")
+        process = None
+        try:
+            process = subprocess.Popen(["bash", str(runner_path), str(library)],
+                                       env=environment, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, start_new_session=True)
+            stdout, stderr = process.communicate(timeout=8)
+            expected = (128 + getattr(signal, "SIG" + mode) if mode in ("HUP", "INT", "TERM")
+                        else 23 if mode == "failure" else 127 if mode == "missing"
+                        else 1 if mode == "permission" else 70 if stage == "rm-no-identity" else 0)
+            expected_stdout = b"startup-ok\n" if expected == 0 else b""
+            expected_stderr = (case / "expected-stderr").read_bytes()
+            if (process.returncode != expected or stdout != expected_stdout
+                    or stderr != expected_stderr):
+                raise AssertionError(f"{stage}/{mode}: status={process.returncode}, expected={expected}, "
+                                     f"stdout={stdout!r}, stderr={stderr!r}, expected_stderr={expected_stderr!r}")
+            if (case / "state").read_text().split() != [str(expected), "false"]:
+                raise AssertionError(f"{stage}/{mode}: startup transition was left open")
+            if not (case / "clean").exists():
+                raise AssertionError(f"{stage}/{mode}: cleanup did not finish")
+            if Path((case / "log-dir").read_text().strip()).exists():
+                raise AssertionError(f"{stage}/{mode}: identity scratch directory survived")
+            if (case / "worker").exists():
+                pid, start_time, parent, pgid, sid = map(int, (case / "worker").read_text().split())
+                if not (parent == pgid == sid and pid != pgid):
+                    raise AssertionError(f"{stage}/{mode}: worker escaped its supervisor session")
+                current = identity(pid)
+                if current and current[:2] == (pid, start_time):
+                    raise AssertionError(f"{stage}/{mode}: original worker survived")
+                if mode in ("HUP", "INT", "TERM"):
+                    if (case / "received").read_text() != str(int(getattr(signal, "SIG" + mode))):
+                        raise AssertionError(f"{stage}/{mode}: deferred signal was replaced by utility status")
+        finally:
+            if process and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=3)
+            if (case / "worker").exists():
+                fields = list(map(int, (case / "worker").read_text().split()))
+                current = identity(fields[0])
+                if current and current[:2] == tuple(fields[:2]):
+                    try:
+                        os.killpg(fields[3], signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    child, _ = os.waitpid(-1, os.WNOHANG)
+                except ChildProcessError:
+                    break
+                if child == 0:
+                    time.sleep(0.005)
+
+print("Foreground startup statuses, removal errors, deferred signals and cleanup passed.")
+PY_STARTUP_STATUS
+}
+
 test_monitor_runner_session_handoff() {
     python3 -B - "${SCRIPT_DIR}" <<'PY_MONITOR_HANDOFF'
 import ctypes
@@ -919,6 +1155,15 @@ def wait_marker(path, process):
     raise AssertionError(f"monitor runner did not publish {path.name}")
 
 
+def assert_monitor_output(returncode, expected, stdout, expected_stdout, stderr):
+    if returncode != expected:
+        raise AssertionError(f"monitor status changed: {returncode} != {expected}")
+    if stdout != expected_stdout:
+        raise AssertionError(f"monitor stdout changed: {stdout!r}")
+    if stderr:
+        raise AssertionError(f"monitor emitted unexpected stderr: {stderr!r}")
+
+
 def stop(process, records):
     if process is None:
         return
@@ -993,6 +1238,11 @@ trap 'test_runner_handle_signal HUP 129' HUP
 trap 'test_runner_handle_signal INT 130' INT
 trap 'test_runner_handle_signal TERM 143' TERM
 test_runner_start_child 0 '' python3 "$2" "$3" "$4"
+printf '%s %s %s\n' "${TEST_RUNNER_CHILD_PIDS[0]}" \
+    "${TEST_RUNNER_CHILD_PGIDS[0]}" "${TEST_RUNNER_CHILD_START_TIMES[0]}" >"$3/supervisor"
+if [[ -f $3/parent-stderr ]]; then
+    cat -- "$3/parent-stderr" >&2
+fi
 if [[ $4 == long ]]; then
     if test_runner_pid_has_group_identity \
         "${TEST_RUNNER_CHILD_PIDS[0]}" "${TEST_RUNNER_CHILD_PGIDS[0]}" \
@@ -1012,7 +1262,16 @@ from pathlib import Path
 import sys
 import time
 root = Path(sys.argv[1])
-(root / "fixture").write_text(f"{os.getpid()} {os.getpgrp()} {os.getsid(0)}")
+stat = Path(f"/proc/{os.getpid()}/stat").read_text(encoding="ascii")
+start = stat[stat.rfind(") ") + 2:].split()[19]
+record = root / "fixture-record"
+record.write_text(
+    f"{os.getpid()} {os.getppid()} {os.getpgrp()} {os.getsid(0)} {start}"
+)
+record.replace(root / "fixture")
+if (root / "child-stderr").exists():
+    sys.stderr.buffer.write((root / "child-stderr").read_bytes())
+    sys.stderr.buffer.flush()
 if sys.argv[2] == "long":
     time.sleep(8)
 else:
@@ -1050,6 +1309,11 @@ try:
         root = Path(directory)
         fixture = root / "fixture.py"
         fixture.write_text(fixture_source, encoding="ascii")
+        # Match the real runner entry points: Bash 5.2 can print its own job
+        # notifications for a -c command string even when script files stay
+        # silent. Keep monitor mode and the strict stderr assertion unchanged.
+        runner_script = root / "monitor-runner.sh"
+        runner_script.write_text(runner, encoding="ascii")
         gated_library = root / "gated-library.sh"
         gated_library.write_text(gated_source, encoding="utf-8")
         # The actual entry points stop before initialization launches children.
@@ -1074,12 +1338,25 @@ try:
             if result.returncode != 0 or result.stdout != b"monitor active\n" or result.stderr:
                 raise AssertionError(f"{entrypoint} did not enable monitor mode before initialization")
 
-        cases = [("0", None), ("7", None)] + [
-            (stage, fatal) for stage in ("before", "after") for fatal in fatal_signals
+        cases = [("0", None, None, b""), ("7", None, None, b"")] + [
+            (stage, fatal, None, b"")
+            for stage in ("before", "after") for fatal in fatal_signals
         ]
-        for index, (stage, fatal) in enumerate(cases):
+        # Exercise the real stderr path, including a forged native-looking
+        # notification. No diagnostic is filtered or accepted as job control.
+        cases += [("0", None, "child", diagnostic) for diagnostic in (
+            b"warning: fixture diagnostic\n", b"error: fixture diagnostic\n",
+            b"Traceback (most recent call last):\n", b"permission denied\n",
+            b"bash: wait: invalid child\n", b"bash: kill: no such process\n",
+            b'[1]+  Done                    _test_runner_launch_child "${child_token}" '
+            b'"${identity_file}" "${completion_file}" "$@"\n',
+        )]
+        cases.append(("0", None, "parent", b"Error: runner diagnostic\n"))
+        for index, (stage, fatal, diagnostic_source, diagnostic) in enumerate(cases):
             case = root / str(index)
             case.mkdir()
+            if diagnostic_source:
+                (case / f"{diagnostic_source}-stderr").write_bytes(diagnostic)
             environment = dict(os.environ, TMPDIR=str(case),
                                YTDLP_ARIA2_TEST_RUNNER_TERMINATION_POLL_ATTEMPTS="10",
                                MONITOR_HANDOFF_ROOT=str(case), MONITOR_HANDOFF_STAGE=stage)
@@ -1090,7 +1367,7 @@ try:
                 previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, fatal_signals)
                 try:
                     process = subprocess.Popen(
-                        ["bash", "-c", runner, "monitor-handoff-runner",
+                        ["bash", str(runner_script),
                          str(gated_library if fatal else library), str(fixture),
                          str(case), "long" if fatal else stage],
                         env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1129,18 +1406,40 @@ try:
                 else:
                     expected = int(stage)
                 stdout, stderr = process.communicate(timeout=4)
-                if process.returncode != expected or stderr:
-                    raise AssertionError(f"monitor case {index} changed status or emitted stderr")
-                if stdout != (b"" if fatal else b"fixed-output\n"):
-                    raise AssertionError("monitor mode changed command output")
+                expected_stdout = b"" if fatal else b"fixed-output\n"
+                if diagnostic:
+                    if (process.returncode != expected or stdout != expected_stdout
+                            or stderr != diagnostic):
+                        raise AssertionError("stderr negative control lost its exact diagnostic")
+                    try:
+                        assert_monitor_output(process.returncode, expected, stdout,
+                                              expected_stdout, stderr)
+                    except AssertionError:
+                        pass
+                    else:
+                        raise AssertionError("monitor accepted a real stderr diagnostic")
+                else:
+                    assert_monitor_output(process.returncode, expected, stdout,
+                                          expected_stdout, stderr)
+                supervisor_pid, supervisor_pgid, supervisor_start = map(
+                    int, (case / "supervisor").read_text(encoding="ascii").split()
+                )
+                if supervisor_pid != supervisor_pgid or (fatal and supervisor_pid != pid):
+                    raise AssertionError("monitor replaced its authenticated supervisor")
+                records.append((supervisor_pid, supervisor_start, None, process.pid,
+                                supervisor_pgid, supervisor_pgid))
+                if not fatal and not (case / "fixture").exists():
+                    raise AssertionError("monitor command did not publish its identity")
                 if (case / "fixture").exists():
-                    command_pid, final_pgid, final_sid = map(
+                    command_pid, command_parent, final_pgid, final_sid, command_start = map(
                         int, (case / "fixture").read_text(encoding="ascii").split()
                     )
-                    command_record = identity(command_pid)
-                    if command_record:
-                        records.append(command_record)
-                    if final_pgid != final_sid or final_pgid == command_pid:
+                    if command_parent != supervisor_pid:
+                        raise AssertionError("monitor command changed its recorded identity")
+                    records.append((command_pid, command_start, None, command_parent,
+                                    final_pgid, final_sid))
+                    if (final_pgid != final_sid or final_pgid != supervisor_pid
+                            or final_pgid == command_pid):
                         raise AssertionError("command did not run in its supervisor's private session")
                     if fatal and final_pgid != pid:
                         raise AssertionError("session creation replaced the authenticated supervisor PID")
@@ -1340,7 +1639,7 @@ exec /usr/bin/rm "$@"
 except Interrupted as error:
     raise SystemExit(128 + error.number)
 
-print("Monitor-mode entry points, identity handoff, output, fatal signals and terminal Ctrl+C passed.")
+print("Monitor script entry points, identities, strict stderr controls, fatal signals and terminal Ctrl+C passed.")
 PY_MONITOR_HANDOFF
 }
 
@@ -1397,6 +1696,7 @@ while True:
     cases = [("timeout", None, False), ("registration-int", signal.SIGINT, True)]
     cases += [(f"active-{number}", number, False)
               for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)]
+    cases.append(("active-integer-hup", int(signal.SIGHUP), False))
     for label, fatal, at_registration in cases:
         root = base / label
         root.mkdir()
@@ -1463,7 +1763,7 @@ while True:
                     raise AssertionError("capture lost its original signal status") from error
             else:
                 raise AssertionError("interrupted qualification was accepted")
-            if (root / "signal").read_text() != str(fatal or signal.SIGTERM):
+            if (root / "signal").read_text() != str(int(fatal or signal.SIGTERM)):
                 raise AssertionError("capture sent the wrong shutdown signal")
             for ids, _ in observed:
                 if any(Path(f"/proc/{pid}").exists() for pid in set(ids)):
@@ -2486,6 +2786,7 @@ main() {
     test_partial_child_identity_handshake
     test_pre_identity_stopped_launcher_signal
     test_signal_resistant_sanitized_child
+    test_startup_foreground_statuses
     test_monitor_runner_session_handoff
     test_real_tool_engine_supervision
     test_real_tool_optimization_isolation

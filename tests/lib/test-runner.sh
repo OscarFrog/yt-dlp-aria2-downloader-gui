@@ -282,6 +282,7 @@ _test_runner_start_child() {
     local child_start_time=''
     local identity_file=''
     local parent_observed_start_time=''
+    local command_status=0
     local runner_pid=${BASHPID}
     shift 3
 
@@ -348,12 +349,27 @@ _test_runner_start_child() {
             child_start_time=${parent_observed_start_time}
             break
         fi
-        sleep 0.001
+        # Bash 5.2 can corrupt function contexts when errexit handles a
+        # foreground INT in monitor mode. Guard only the external command;
+        # preserve its failure and replay any earlier deferred signal first.
+        if sleep 0.001; then
+            :
+        else
+            command_status=$?
+            test_runner_finish_start_transition
+            return "${command_status}"
+        fi
     done
 
     if [[ -z ${child_start_time} ]]; then
         test_runner_wait_child "${slot}" 2>/dev/null || true
-        rm -f -- "${identity_file}"
+        if rm -f -- "${identity_file}"; then
+            :
+        else
+            command_status=$?
+            test_runner_finish_start_transition
+            return "${command_status}"
+        fi
         test_runner_finish_start_transition
         return 70
     fi
@@ -362,7 +378,13 @@ _test_runner_start_child() {
     TEST_RUNNER_CHILD_COMPLETIONS[slot]=${completion_file}
     TEST_RUNNER_CHILD_TOKENS[slot]=${child_token}
     TEST_RUNNER_CHILD_START_TIMES[slot]=${child_start_time}
-    rm -f -- "${identity_file}"
+    if rm -f -- "${identity_file}"; then
+        :
+    else
+        command_status=$?
+        test_runner_finish_start_transition
+        return "${command_status}"
+    fi
 
     test_runner_finish_start_transition
 }
