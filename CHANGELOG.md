@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Development policy
+
+- Choose versions during explicit release preparation; ordinary commits, pushes,
+  PR updates and automation retain their coherent source version. Preserve
+  signed, immutable publication boundaries and identify CI package builds by
+  source SHA, run and attempt.
+
 ## 2.3.26 - Unreleased
 
 ### Maintenance

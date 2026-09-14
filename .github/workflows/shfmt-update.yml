@@ -23,8 +23,6 @@ jobs:
       update: ${{ steps.detect.outputs.update }}
       latest: ${{ steps.detect.outputs.latest }}
       project_version: ${{ steps.source_version.outputs.project_version }}
-      version_floor: ${{ steps.source_version.outputs.version_floor }}
-      version_date: ${{ steps.source_version.outputs.version_date }}
       previous_branch_sha: ${{ steps.source_version.outputs.previous_branch_sha }}
       ref_catalog_sha: ${{ steps.source_version.outputs.ref_catalog_sha }}
 
@@ -168,7 +166,7 @@ jobs:
           printf 'update=true\n' >>"${GITHUB_OUTPUT}"
           printf 'latest=%s\n' "${latest_version}" >>"${GITHUB_OUTPUT}"
 
-      - name: Prepare a coherent source version before candidate execution
+      - name: Verify unchanged source version before candidate execution
         id: source_version
         if: steps.detect.outputs.update == 'true'
         env:
@@ -184,12 +182,8 @@ jobs:
           branch="automation/shfmt-v${SHFMT_VERSION}"
           git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
           plan="${RUNNER_TEMP}/shfmt-source-version-plan.json"
-          prepared="${RUNNER_TEMP}/shfmt-source-version-prepared.json"
-          python3 -B scripts/check-push-version.py next-version \
+          python3 -B scripts/check-push-version.py source-context \
             --remote origin --branch "${branch}" >"${plan}"
-          base_timestamp=$(git show --no-show-signature -s --format=%ct "${EXPECTED_BASE_SHA}")
-          [[ ${base_timestamp} =~ ^[0-9]+$ ]]
-          version_date=$(date -u --date="@${base_timestamp}" +%F)
           python3 - "${plan}" "${EXPECTED_BASE_SHA}" "${branch}" >"${plan}.values" <<'PYCODE'
           import json
           from pathlib import Path
@@ -201,8 +195,7 @@ jobs:
                   or plan.get("main_sha") != sys.argv[2] or plan.get("branch") != sys.argv[3]
                   or plan.get("target_sha") != "0" * 40):
               raise SystemExit("Error: stale or invalid shfmt source-version baseline.")
-          for key, pattern in (("floor_version", r"[0-9]+\.[0-9]+\.[0-9]+"),
-                               ("next_version", r"[0-9]+\.[0-9]+\.[0-9]+"),
+          for key, pattern in (("current_version", r"[0-9]+\.[0-9]+\.[0-9]+"),
                                ("target_sha", r"[0-9a-f]{40}"),
                                ("refs_sha256", r"[0-9a-f]{64}")):
               value = plan.get(key)
@@ -211,25 +204,11 @@ jobs:
               print(value)
           PYCODE
           mapfile -t version_values <"${plan}.values"
-          floor=${version_values[0]}
-          project_version=${version_values[1]}
-          python3 -B scripts/prepare-source-version.py --root . \
-            --floor-version "${floor}" --date "${version_date}" \
-            --reason "Update shfmt to v${SHFMT_VERSION}" >"${prepared}"
-          python3 - "${prepared}" "${project_version}" <<'PYCODE'
-          import json
-          from pathlib import Path
-          import sys
-
-          if json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["new_version"] != sys.argv[2]:
-              raise SystemExit("Error: prepared source version differs from its remote baseline.")
-          PYCODE
+          python3 -B scripts/check-push-version.py coherence
           {
-            printf 'project_version=%s\n' "${project_version}"
-            printf 'version_floor=%s\n' "${floor}"
-            printf 'version_date=%s\n' "${version_date}"
-            printf 'previous_branch_sha=%s\n' "${version_values[2]}"
-            printf 'ref_catalog_sha=%s\n' "${version_values[3]}"
+            printf 'project_version=%s\n' "${version_values[0]}"
+            printf 'previous_branch_sha=%s\n' "${version_values[1]}"
+            printf 'ref_catalog_sha=%s\n' "${version_values[2]}"
           } >>"${GITHUB_OUTPUT}"
 
       - name: Update pin and checksums
@@ -533,8 +512,6 @@ jobs:
       EXPECTED_BASE_SHA: ${{ github.sha }}
       SHFMT_VERSION: ${{ needs.prepare-shfmt-update.outputs.latest }}
       PROJECT_VERSION: ${{ needs.prepare-shfmt-update.outputs.project_version }}
-      VERSION_FLOOR: ${{ needs.prepare-shfmt-update.outputs.version_floor }}
-      VERSION_DATE: ${{ needs.prepare-shfmt-update.outputs.version_date }}
       EXPECTED_BRANCH_SHA: ${{ needs.prepare-shfmt-update.outputs.previous_branch_sha }}
       REF_CATALOG_SHA: ${{ needs.prepare-shfmt-update.outputs.ref_catalog_sha }}
       GIT_NO_REPLACE_OBJECTS: '1'
@@ -554,7 +531,7 @@ jobs:
         with:
           name: shfmt-candidate-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/shfmt-candidate-handoff
-      - name: Verify approved version bump, formatter semantics and upstream provenance
+      - name: Verify unchanged source version, formatter semantics and upstream provenance
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -569,6 +546,8 @@ jobs:
             printf 'Error: verifier checkout/base mismatch.\n' >&2
             exit 65
           }
+          git diff --quiet
+          git diff --cached --quiet
 
           git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
           current_main=$(git rev-parse refs/remotes/origin/main)
@@ -579,7 +558,7 @@ jobs:
           fi
 
           # Resolve the same catalogue independently, before applying candidate data.
-          python3 -B scripts/check-push-version.py next-version --remote origin \
+          python3 -B scripts/check-push-version.py source-context --remote origin \
             --branch "automation/shfmt-v${SHFMT_VERSION}" \
             >"${RUNNER_TEMP}/shfmt-verifier-version-plan.json"
           python3 - "${RUNNER_TEMP}/shfmt-verifier-version-plan.json" <<'PYCODE'
@@ -590,14 +569,12 @@ jobs:
 
           plan = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
           expected = {"main_sha": "EXPECTED_BASE_SHA", "target_sha": "EXPECTED_BRANCH_SHA",
-                      "floor_version": "VERSION_FLOOR", "next_version": "PROJECT_VERSION",
+                      "current_version": "PROJECT_VERSION",
                       "refs_sha256": "REF_CATALOG_SHA"}
           if any(plan.get(key) != os.environ[name] for key, name in expected.items()):
               raise SystemExit("Error: the source-version baseline changed before verification.")
           PYCODE
-          base_timestamp=$(git show --no-show-signature -s --format=%ct "${EXPECTED_BASE_SHA}")
-          [[ ${base_timestamp} =~ ^[0-9]+$ ]]
-          [[ $(date -u --date="@${base_timestamp}" +%F) == "${VERSION_DATE}" ]]
+          python3 -B scripts/check-push-version.py coherence
 
           candidate_dir="${RUNNER_TEMP}/shfmt-candidate-handoff"
           patch="${candidate_dir}/shfmt-update.patch"
@@ -629,18 +606,9 @@ jobs:
           baseline=$(mktemp)
           after=$(mktemp)
           expected_pin=$(mktemp)
-          expected_tree=$(mktemp -d)
           verified_dir="${RUNNER_TEMP}/shfmt-verified-handoff"
           mkdir -p -- "${verified_dir}"
-          trap 'rm -f -- "${allowed_file}" "${shell_file}" "${patch_paths}" "${unexpected_paths}" "${baseline}" "${after}" "${expected_pin}"; rm -rf -- "${expected_tree}"' EXIT
-
-          git archive "${EXPECTED_BASE_SHA}" | tar -x --directory "${expected_tree}"
-          python3 -B scripts/prepare-source-version.py --root "${expected_tree}" \
-            --floor-version "${VERSION_FLOOR}" --date "${VERSION_DATE}" \
-            --reason "Update shfmt to v${SHFMT_VERSION}" \
-            >"${RUNNER_TEMP}/shfmt-expected-version.json"
-          version_documents=(README.md README.fr.md CHANGELOG.md \
-            packaging/rpm/yt-dlp-aria2-downloader-gui.spec)
+          trap 'rm -f -- "${allowed_file}" "${shell_file}" "${patch_paths}" "${unexpected_paths}" "${baseline}" "${after}" "${expected_pin}"' EXIT
 
           python3 - tests/lib/project-files.sh >"${shell_file}" <<'PY'
           from pathlib import Path
@@ -698,7 +666,7 @@ jobs:
           fi
           [[ -s ${shell_file} ]]
           {
-            printf '%s\n' scripts/dev-tools/shfmt-pin.env "${version_documents[@]}"
+            printf '%s\n' scripts/dev-tools/shfmt-pin.env
             cat -- "${shell_file}"
           } | LC_ALL=C sort -u >"${allowed_file}"
 
@@ -723,7 +691,7 @@ jobs:
               printf '%s  %s\n' "${digest}" "${file}" >>"${output}"
             done <"${shell_file}"
           }
-          canonical_source_root=${expected_tree}
+          canonical_source_root=${GITHUB_WORKSPACE}
           canonical_manifest "${baseline}"
 
           git apply --check -- "${patch}"
@@ -760,13 +728,6 @@ jobs:
             exit 65
           fi
 
-          canonical_source_root=${GITHUB_WORKSPACE}
-          for file in "${version_documents[@]}"; do
-            if ! cmp -s -- "${expected_tree}/${file}" "${file}"; then
-              printf 'Error: candidate changed approved version document content: %s\n' "${file}" >&2
-              exit 65
-            fi
-          done
           canonical_manifest "${after}"
           if ! cmp -s -- "${baseline}" "${after}"; then
             printf 'Error: candidate shfmt changed canonical shell semantics/content under the previously trusted formatter.\n' >&2
@@ -846,7 +807,7 @@ jobs:
           cleanup_verifier_sandbox() {
             docker rm -f --volumes "${container}" >/dev/null 2>&1 || true
             docker image rm -f "${image}" >/dev/null 2>&1 || true
-            rm -rf -- "${docker_context}" "${expected_tree}"
+            rm -rf -- "${docker_context}"
             rm -f -- "${allowed_file}" "${shell_file}" "${patch_paths}" \
               "${unexpected_paths}" "${baseline}" "${after}" "${expected_pin}"
           }
@@ -915,7 +876,6 @@ jobs:
           sha256sum -- \
             scripts/dev-tools/shfmt-pin.env \
             "${verified_shell_files[@]}" \
-            "${version_documents[@]}" \
             >"${verified_dir}/shfmt-tested-tree.sha256"
       - name: Upload verified data-only shfmt handoff
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -942,8 +902,6 @@ jobs:
       EXPECTED_BASE_SHA: ${{ github.sha }}
       SHFMT_VERSION: ${{ needs.prepare-shfmt-update.outputs.latest }}
       PROJECT_VERSION: ${{ needs.prepare-shfmt-update.outputs.project_version }}
-      VERSION_FLOOR: ${{ needs.prepare-shfmt-update.outputs.version_floor }}
-      VERSION_DATE: ${{ needs.prepare-shfmt-update.outputs.version_date }}
       EXPECTED_BRANCH_SHA: ${{ needs.prepare-shfmt-update.outputs.previous_branch_sha }}
       REF_CATALOG_SHA: ${{ needs.prepare-shfmt-update.outputs.ref_catalog_sha }}
       GIT_NO_REPLACE_OBJECTS: '1'
@@ -1028,9 +986,7 @@ jobs:
           trap 'rm -f -- "${allowed_file}" "${patch_paths}" "${changed_paths}" "${unexpected_paths}"' EXIT
 
           {
-            printf '%s\n' scripts/dev-tools/shfmt-pin.env \
-              README.md README.fr.md CHANGELOG.md \
-              packaging/rpm/yt-dlp-aria2-downloader-gui.spec
+            printf '%s\n' scripts/dev-tools/shfmt-pin.env
             python3 -I - tests/lib/project-files.sh <<'PY'
           from pathlib import Path
           import shlex
@@ -1144,10 +1100,9 @@ jobs:
             exit 65
           fi
           # Read only bytes in this privileged job: never import a project helper.
-          # The verifier binds shell semantics to the immutable base plus this bump;
-          # bind every allowed path to its tested digest and recheck version metadata.
+          # The verifier binds shell semantics to the immutable base; bind every
+          # allowed path to its tested digest and require an unchanged source version.
           python3 -I - "${allowed_file}" "${handoff_dir}/shfmt-tested-tree.sha256" <<'PYCODE'
-          import datetime
           import os
           from pathlib import Path
           import re
@@ -1168,11 +1123,6 @@ jobs:
                   fail("non-regular or oversized publication metadata")
               return path.read_text(encoding="utf-8")
 
-          def once(text, old, new):
-              if text.count(old) != 1:
-                  fail("ambiguous source-version declaration")
-              return text.replace(old, new, 1)
-
           allowed = set(Path(sys.argv[1]).read_text(encoding="utf-8").splitlines())
           manifest = read_file(Path(sys.argv[2])).splitlines()
           seen = set()
@@ -1188,27 +1138,18 @@ jobs:
 
           if os.environ["EXPECTED_BRANCH_SHA"] != "0" * 40:
               fail("existing shfmt branches must be preserved for maintainer review")
-          floor = version(os.environ["VERSION_FLOOR"])
           project_text = os.environ["PROJECT_VERSION"]
-          project = version(project_text)
-          if project != (floor[0], floor[1], floor[2] + 1):
-              fail("project version is not the approved next PATCH")
+          version(project_text)
           base = os.environ["EXPECTED_BASE_SHA"]
           if not re.fullmatch(r"[0-9a-f]{40}", base):
               fail("invalid immutable source identity")
-          paths = ("download-video.sh", "install-fedora.sh", "test-static.sh", "README.md",
-                   "README.fr.md", "CHANGELOG.md", "packaging/rpm/yt-dlp-aria2-downloader-gui.spec")
-          originals = {
-              path: subprocess.check_output(["git", "show", f"{base}:{path}"]).decode("utf-8")
-              for path in paths
-          }
           source_pattern = r'(?m)^readonly VERSION=([\x22\x27])([0-9]+\.[0-9]+\.[0-9]+)\1$'
-          source_versions = re.findall(source_pattern, originals["download-video.sh"])
-          if len(source_versions) != 1:
-              fail("ambiguous base version")
-          old = source_versions[0][1]
-          if version(old) > floor:
-              fail("base version exceeds the approved remote floor")
+          original = subprocess.check_output(
+              ["git", "show", f"{base}:download-video.sh"], text=True
+          )
+          source_versions = re.findall(source_pattern, original)
+          if len(source_versions) != 1 or source_versions[0][1] != project_text:
+              fail("project version differs from the immutable base")
           declarations = {
               "download-video.sh": (source_pattern, project_text),
               "install-fedora.sh": (r"(?m)^readonly APP_VERSION='([0-9]+\.[0-9]+\.[0-9]+)'$", project_text),
@@ -1219,39 +1160,6 @@ jobs:
               values = [value[-1] if isinstance(value, tuple) else value for value in values]
               if values != [expected]:
                   fail("candidate source-version declarations disagree")
-          timestamp = subprocess.check_output(
-              ["git", "show", "--no-show-signature", "-s", "--format=%ct", base], text=True
-          ).strip()
-          date = datetime.datetime.fromtimestamp(int(timestamp), datetime.timezone.utc).date()
-          if date.isoformat() != os.environ["VERSION_DATE"]:
-              fail("source-version date differs from the immutable base commit")
-          reason = "Update shfmt to v" + os.environ["SHFMT_VERSION"]
-          expected_documents = {}
-          for path, marker in (("README.md", "development version is **{}**."),
-                               ("README.fr.md", "développement actuelle est la **{}**.")):
-              text = once(originals[path], marker.format(old), marker.format(project_text))
-              for prefix in ("--ref v", "-f tag=v"):
-                  text, count = re.subn(re.escape(prefix) + r"[0-9]+\.[0-9]+\.[0-9]+(?=\s|$)",
-                                        prefix + project_text, text)
-                  if count != 1:
-                      fail("ambiguous manual release reference")
-              expected_documents[path] = text
-          expected_documents["CHANGELOG.md"] = once(
-              originals["CHANGELOG.md"], "# Changelog\n\n",
-              f"# Changelog\n\n## {project_text} - Unreleased\n\n### Maintenance\n\n- {reason}\n\n",
-          )
-          weekdays = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-          months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
-          rpm_date = f"{weekdays[date.weekday()]} {months[date.month - 1]} {date.day:02d} {date.year:04d}"
-          rpm_path = paths[-1]
-          expected_documents[rpm_path] = once(
-              originals[rpm_path], "%changelog\n",
-              f"%changelog\n* {rpm_date} OscarFrog <151366285+OscarFrog@users.noreply.github.com> "
-              f"- {project_text}-1\n- {reason}\n\n",
-          )
-          for path, expected in expected_documents.items():
-              if read_file(Path(path)) != expected:
-                  fail("candidate document differs from the approved version increment: " + path)
           PYCODE
           sha256sum --check "${handoff_dir}/shfmt-tested-tree.sha256"
 
@@ -1287,7 +1195,7 @@ jobs:
           gh auth setup-git
           [[ ${EXPECTED_BRANCH_SHA} =~ ^[0-9a-f]{40}$ ]]
           [[ ${REF_CATALOG_SHA} =~ ^[0-9a-f]{64}$ ]]
-          # Revalidate the exact main/branch/tag advertisement used for the floor.
+          # Revalidate the exact main/branch/tag advertisement bound to the tested source.
           # Refuse stale work instead of leasing a branch value newer than the tests.
           current_catalog=$(mktemp)
           trap 'rm -f -- "${current_catalog}"' EXIT
@@ -1313,6 +1221,6 @@ jobs:
               '### Reviewed shfmt branch ready' \
               '' \
               'The candidate was isolated during formatting and complete validation.' \
-              'The verifier required canonical equivalence under the previously trusted shfmt after the approved version bump.'
+              'The verifier required canonical equivalence under the previously trusted shfmt with an unchanged project version.'
             printf '\nOpen a maintainer-authenticated pull request from %s to main.\n' "${branch}"
           } >>"${GITHUB_STEP_SUMMARY}"

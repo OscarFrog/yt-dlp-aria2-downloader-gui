@@ -23,10 +23,11 @@ import unittest
 
 
 PROJECT = Path(__file__).resolve().parents[1]
-PATHS = (
+SOURCE_PATHS = (
     "CHANGELOG.md", "README.fr.md", "README.md", "download-video.sh",
     "install-fedora.sh", "packaging/rpm/yt-dlp-aria2-downloader-gui.spec", "test-static.sh",
 )
+PATHS = ("README.fr.md", "README.md", "test-static.sh")
 MAIN, TARGET, RELEASE, TREE = (letter * 40 for letter in "abcd")
 ZERO = "0" * 40
 RELEASE_VERSION = "100.0.0"
@@ -96,7 +97,7 @@ if method != "GET":
         emit({"sha": hashlib.sha1(data).hexdigest()})
     elif route == "git/trees":
         assert payload["base_tree"] == "d" * 40
-        assert len(payload["tree"]) == 7
+        assert len(payload["tree"]) == 3
         emit({"sha": "1" * 40})
     elif route == "git/commits":
         assert payload["parents"] == [state["base_sha"]]
@@ -158,7 +159,7 @@ class ReleaseDocsReplay(unittest.TestCase):
         # manifests, mutations and Git repositories belong to each test copy.
         base = root / "base"
         handoff = root / "runtime/release-docs-verified"
-        for relative in PATHS:
+        for relative in SOURCE_PATHS:
             destination = base / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(PROJECT / relative, destination)
@@ -166,9 +167,10 @@ class ReleaseDocsReplay(unittest.TestCase):
         # The executable static fixture exceeds typical single-argument limits.
         with (base / "test-static.sh").open("a") as stream:
             stream.write("\n# " + "fixture" * 40000 + "\n")
-        shutil.copytree(base, handoff)
+        handoff.mkdir(parents=True)
+        for relative in PATHS:
+            shutil.copy2(base / relative, handoff / relative)
         cls.command("update-published-version.py", RELEASE_VERSION, "--root", handoff)
-        cls.command("prepare-source-version.py", "--root", handoff, "--floor-version", "102.4.5", "--date", DATE, "--reason", REASON)
         (root / "bin").mkdir()
         gh = root / "bin/gh"
         gh.write_text(FAKE_GH)
@@ -223,6 +225,29 @@ class ReleaseDocsReplay(unittest.TestCase):
         return subprocess.run(["bash", str(script)], cwd=self.base, env=environment,
                               capture_output=True, text=True, timeout=20)
 
+    def run_verifier(self, context, suffix):
+        checkout = self.root / ("verify-" + suffix)
+        self.git("clone", "--no-hardlinks", self.root / "remote.git", checkout, cwd=self.root)
+        self.git("checkout", "--detach", context["base_sha"], cwd=checkout)
+        fake_bin = self.root / ("verify-bin-" + suffix)
+        fake_bin.mkdir()
+        gh = fake_bin / "gh"
+        gh.write_text("#!/bin/bash\nset -eu\ncase \"$1 $2\" in\n"
+                      "'release view') printf '%s\\n' true ;;\n"
+                      "'release verify') exit 0 ;;\n*) exit 99 ;;\nesac\n")
+        gh.chmod(0o700)
+        script = self.root / "verify.sh"
+        script.write_text(workflow_step("Revalidate and reproduce candidate patch"))
+        environment = dict(os.environ, RELEASE_TAG="v" + RELEASE_VERSION,
+                           RELEASE_SHA=context["release_sha"], RELEASE_VERSION=RELEASE_VERSION,
+                           VERSION_CONTEXT=(self.root / "prepare-runtime/release-docs-candidate/release-docs-metadata.json").read_text().strip(),
+                           GITHUB_REPOSITORY="fixture/repository",
+                           PATH=str(fake_bin) + os.pathsep + os.environ["PATH"],
+                           RUNNER_TEMP=str(self.root / "prepare-runtime"),
+                           GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        return subprocess.run(["bash", str(script)], cwd=checkout, env=environment,
+                              capture_output=True, text=True, timeout=20)
+
     def manifest(self, root, output, paths):
         (root / output).write_text("".join(
             f"{hashlib.sha256((root / path).read_bytes()).hexdigest()}  {path}\n" for path in paths
@@ -237,8 +262,8 @@ class ReleaseDocsReplay(unittest.TestCase):
         catalog = b"".join(sorted(f"{oid}\t{ref}\n".encode() for ref, oid in refs.items()))
         self.context = {
             "schema_version": 1, "remote": "origin", "branch": BRANCH, "main_sha": MAIN,
-            "target_sha": target, "base_sha": base, "floor_version": "102.4.5", "next_version": "102.4.6",
-            "refs_sha256": hashlib.sha256(catalog).hexdigest(), "date": DATE,
+            "target_sha": target, "base_sha": base, "current_version": "100.0.1",
+            "refs_sha256": hashlib.sha256(catalog).hexdigest(),
             "release_tag": "v" + RELEASE_VERSION, "release_sha": RELEASE, "release_version": RELEASE_VERSION,
         }
         (self.handoff / "release-docs-metadata.json").write_text(json.dumps(self.context) + "\n")
@@ -281,17 +306,16 @@ class ReleaseDocsReplay(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(state["writes"][-1][0:2], ["POST", "git/refs"])
         blobs = [entry for entry in state["writes"] if entry[1] == "git/blobs"]
-        self.assertEqual(len(blobs), 7)
+        self.assertEqual(len(blobs), 3)
         self.assertGreater(max(len(entry[2]["content"]) for entry in blobs), 262144)
         entries = next(entry[2]["tree"] for entry in state["writes"] if entry[1] == "git/trees")
         self.assertEqual({entry["path"] for entry in entries if entry["mode"] == "100755"},
-                         {"download-video.sh", "install-fedora.sh", "test-static.sh"})
+                         {"test-static.sh"})
 
     def test_fixture_copies_do_not_share_mutable_inodes_or_state(self):
-        expected = {"publisher.sh", "bin/gh", *(
-            prefix + path for prefix in ("base/", "runtime/release-docs-verified/")
-            for path in PATHS
-        )}
+        expected = {"publisher.sh", "bin/gh",
+                    *("base/" + path for path in SOURCE_PATHS),
+                    *("runtime/release-docs-verified/" + path for path in PATHS)}
         self.assertEqual({path.relative_to(self.seed).as_posix()
                           for path in self.seed.rglob("*") if path.is_file()}, expected)
         before = {}
@@ -332,7 +356,7 @@ class ReleaseDocsReplay(unittest.TestCase):
         self.assertEqual(len(roots), 1)
         self.assertFalse(roots[0].exists())
 
-    def test_followup_is_fast_forward_with_fresh_version(self):
+    def test_followup_is_fast_forward_without_a_source_bump(self):
         self.prepare(followup=True)
         result, state = self.run_publisher()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -355,37 +379,45 @@ class ReleaseDocsReplay(unittest.TestCase):
 
     def test_rehashed_candidate_code_change_is_rejected_before_any_write(self):
         self.prepare()
-        with (self.handoff / "download-video.sh").open("a") as stream:
+        with (self.handoff / "test-static.sh").open("a") as stream:
             stream.write("\nprintf 'unreviewed candidate code'\n")
         self.rehash()
         result, state = self.run_publisher()
         self.assertEqual(result.returncode, 65, result.stderr)
         self.assertEqual(state["writes"], [])
 
-    def test_substituted_nested_directory_is_rejected(self):
+    def test_extra_nested_directory_is_rejected(self):
         self.prepare()
         original = self.handoff / "packaging"
         saved = self.root / "foreign-packaging"
-        original.rename(saved)
+        saved.mkdir()
+        (saved / "untouched").write_text("foreign fixture")
         original.symlink_to(saved, target_is_directory=True)
         result, state = self.run_publisher()
         self.assertEqual(result.returncode, 65, result.stderr)
         self.assertEqual(state["writes"], [])
-        self.assertTrue((saved / "rpm/yt-dlp-aria2-downloader-gui.spec").is_file())
+        self.assertEqual((saved / "untouched").read_text(), "foreign fixture")
 
-    def test_source_date_and_missing_bump_are_rejected(self):
-        for mutation in ("date", "version"):
-            with self.subTest(mutation=mutation):
-                self.prepare()
-                if mutation == "date":
-                    self.context["date"] = "2026-09-11"
-                else:
-                    self.context["next_version"] = "102.4.5"
-                (self.handoff / "release-docs-metadata.json").write_text(json.dumps(self.context))
-                self.rehash()
-                result, state = self.run_publisher()
-                self.assertEqual(result.returncode, 65, result.stderr)
-                self.assertEqual(state["writes"], [])
+    def test_source_version_metadata_mismatch_is_rejected(self):
+        self.prepare()
+        self.context["current_version"] = "102.4.6"
+        (self.handoff / "release-docs-metadata.json").write_text(json.dumps(self.context))
+        self.rehash()
+        result, state = self.run_publisher()
+        self.assertEqual(result.returncode, 65, result.stderr)
+        self.assertIn("main source version differs", result.stderr)
+        self.assertEqual(state["writes"], [])
+
+    def test_rehashed_artificial_source_bump_is_rejected(self):
+        self.prepare()
+        static = self.handoff / "test-static.sh"
+        static.write_text(static.read_text().replace(
+            "readonly EXPECTED_VERSION='100.0.1'", "readonly EXPECTED_VERSION='100.0.2'"))
+        self.rehash()
+        result, state = self.run_publisher()
+        self.assertEqual(result.returncode, 65, result.stderr)
+        self.assertIn("candidate changed bytes beyond the exact transformation", result.stderr)
+        self.assertEqual(state["writes"], [])
 
     def test_preparation_noop_preserves_source_version_and_creates_no_handoff(self):
         self.command("update-published-version.py", RELEASE_VERSION, "--root", self.base)
@@ -398,7 +430,7 @@ class ReleaseDocsReplay(unittest.TestCase):
         self.assertIn("update=false\n", (self.root / "prepare-output").read_text())
         self.assertFalse((self.root / "prepare-runtime/release-docs-candidate").exists())
 
-    def test_preparation_uses_target_descendant_and_bumps_before_handoff(self):
+    def test_preparation_uses_target_descendant_without_source_bump(self):
         # This fixture qualifies preparation and object binding. Its static
         # command is deliberately inert; it does not claim full-tree validation.
         static = self.base / "test-static.sh"
@@ -417,12 +449,32 @@ class ReleaseDocsReplay(unittest.TestCase):
         context = json.loads((candidate / "release-docs-metadata.json").read_text())
         self.assertEqual(context["base_sha"], target_sha)
         self.assertEqual(context["target_sha"], target_sha)
-        self.assertEqual(context["next_version"], "103.0.2")
+        self.assertEqual(context["current_version"], "100.0.1")
+        self.assertNotIn("next_version", context)
+        self.assertNotIn("floor_version", context)
         self.assertEqual(set(self.git("diff", "--name-only").stdout.splitlines()), set(PATHS))
         declarations = re.findall(r"^readonly VERSION=[\"']([0-9.]+)[\"']$",
                                   (self.base / "download-video.sh").read_text(), re.M)
-        self.assertEqual(declarations, ["103.0.2"])
+        self.assertEqual(declarations, ["103.0.1"])
         self.assertIn("update=true\n", (self.root / "prepare-output").read_text())
+        for path in set(SOURCE_PATHS) - set(PATHS):
+            self.assertEqual((self.base / path).read_bytes(),
+                             self.git("show", target_sha + ":" + path).stdout.encode())
+        verified = self.run_verifier(context, "valid")
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        # Digests alone do not authenticate an allowed path's contents: the
+        # fresh verifier must reject even a rehashed, allowlisted code edit.
+        patch = candidate / "release-docs.patch"
+        before = patch.read_bytes()
+        tampered = before.replace(
+            b"+readonly EXPECTED_PUBLISHED_VERSION='100.0.0'",
+            b"+readonly EXPECTED_PUBLISHED_VERSION='100.0.0'; exit 0")
+        self.assertNotEqual(before, tampered)
+        patch.write_bytes(tampered)
+        self.manifest(candidate, "release-docs-handoff.sha256",
+                      ("release-docs.patch", "release-docs-metadata.json"))
+        rejected = self.run_verifier(context, "tampered")
+        self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
 
     def test_published_update_accepts_older_release_but_refuses_future_or_downgrade(self):
         self.command("update-published-version.py", RELEASE_VERSION, "--root", self.base)

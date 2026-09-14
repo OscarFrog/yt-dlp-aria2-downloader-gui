@@ -555,12 +555,12 @@ expected to be an idempotent no-op. Only the final job receives
 repository ref. It resolves the protected `main` identity through the GitHub
 API, requires the release SHA to be its ancestor and uses main or a target
 branch descending from it as the immutable source base. If the published
-references need updating, the read-only jobs also prepare and independently
-reproduce a source bump above main, target and numeric tags. The publisher
-validates the exact seven-file transformation, base modes, manifests and
-reference catalogue using fixed isolated code, then uses Git database objects
-to create or fast-forward a versioned automation branch. No-op updates do not
-bump or publish; divergent branches and detected reference races are refused. A maintainer then
+references need updating, the read-only jobs independently reproduce the
+three-file README/static transformation while retaining the source version.
+The publisher validates these exact bytes, base modes, manifests and reference
+catalogue using fixed isolated code, then uses Git database objects to create
+or fast-forward a versioned automation branch. No-op updates do not publish;
+divergent branches and detected reference races are refused. A maintainer then
 opens the reviewed pull request; the workflow never writes directly to `main`
 or receives pull-request permission.
 
@@ -604,23 +604,31 @@ authority. These project controls depend on starting Codex in the trusted
 repository; a file's existence or passing structure test does not prove it was
 loaded into the active session. `TESTING.md` owns setup and task routing.
 
-For authorized source pushes, the owner's standing rule in `AGENTS.md`
-authorizes a coherent PATCH increment before validation. The contributor-only
-`scripts/check-push-version.py` first checks local source/published metadata
-coherence without Git or network access, reusing the existing published-reference
-templates. For an authorized push it additionally compares with live remote
-main/target versions and numeric tags. The tracked
-`.githooks/pre-push`, explicitly enabled per checkout, reuses that checker on
-the actual commit objects and refuses unchanged or incoherent versions before
-remote updates. Git replacement refs cannot change the inspected identities.
-It reads regular Git blobs as data and never mutates the version or creates release
-state. `tests/push-version-integration.py` qualifies this boundary with real
-local bare repositories and is called by static validation. The offline
-`scripts/prepare-source-version.py` helper stages deterministic seven-file bumps
-in isolated source trees and rolls back controlled errors. Automation prepares
-those bumps without publication authority; privileged jobs reproduce their
-permitted transforms as data without importing a repository helper. These
-controls supplement the inspection helper; they are not general Git wrappers.
+The version policy in `AGENTS.md` groups changes until explicit release
+preparation. Ordinary commits, pushes, PR updates and automation retain the
+coherent source number, including a previously published one. The helper
+`scripts/check-push-version.py` checks linked source/published metadata offline;
+its authorized-push mode additionally validates the remote snapshot. The tracked
+`.githooks/pre-push`, enabled per checkout, checks the actual pushed regular Git
+blobs as inert data, rejecting incoherence and reference races without demanding
+an increment. Replacement refs cannot substitute different checked objects.
+
+The read-only `source-context` API binds automation to main, target and tag
+identities without preparing a bump. `next-version` is an explicit release
+planning recommendation from numeric tags and an already prepared main version,
+not a mandatory version derived from working branches. The offline
+`scripts/prepare-source-version.py` retains an unpublished target or prepares an
+explicitly selected new one across seven carriers, preserving modes and
+rolling back controlled errors. Repeating the same target is a no-op.
+
+Development RPM/DEB artifact names carry the source SHA and run ID;
+Actions records bind their producing attempt and digest. Their numeric package
+version and CLI output remain compatible and need no installed Git metadata. Only the
+separate release chain can publish official signed/attested immutable objects.
+A shared development version never authorizes changing a published tag or its
+assets. `tests/push-version-integration.py` exercises same-version pushes,
+incoherence, ref races and preparation in real temporary Git repositories;
+CI integration also replays tag mismatch and changed-publication rejection.
 
 Tests use private temporary homes, mock binaries, fixtures, and bounded process
 supervision. The parallel runner binds cancellation to a child-published Linux

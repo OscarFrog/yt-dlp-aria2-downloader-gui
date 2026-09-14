@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT
 """yt-dlp-aria2-downloader-gui: scripts/prepare-source-version.py.
 
-Prepare the seven development-version surfaces in an unprivileged source tree.
-The caller supplies its verified remote floor, base-commit date and change reason;
+Prepare an explicitly selected release version in an unprivileged source tree.
+The caller supplies its verified release-tag floor, date and change reason;
 this offline helper never fetches, commits, pushes or publishes release artifacts.
 Publication workflows must independently verify the resulting bytes as data.
 """
@@ -40,11 +40,18 @@ def replace_once(text, before, after, label):
     return text.replace(before, after, 1)
 
 
-def prepare_texts(originals, floor_version, reason, date):
+def prepare_texts(originals, floor_version, reason, date, target_version=None):
     """Validate all transformations before staging or modifying any source file."""
     old = CHECK.coherent_version(lambda path: originals[path].encode("utf-8"))
     floor = CHECK.version_tuple(floor_version)
-    new = CHECK.next_patch(max(old, floor))
+    # Repeated preparation of an unpublished target is idempotent. Pushes do
+    # not call this helper; the maintainer chooses release scope explicitly.
+    new = (CHECK.version_tuple(target_version) if target_version is not None
+           else max(old, CHECK.next_patch(floor)))
+    if new <= floor:
+        raise CHECK.CheckError("The prepared release version must exceed the verified release-tag floor.")
+    if new < old:
+        raise CHECK.CheckError("Release preparation must not lower the current source version.")
     if not REASON.fullmatch(reason):
         raise CHECK.CheckError("The source-version reason must be bounded, single-line ASCII prose.")
     if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", date):
@@ -55,6 +62,8 @@ def prepare_texts(originals, floor_version, reason, date):
         raise CHECK.CheckError("The source-version date must be a valid calendar date.") from None
     old_text, new_text = CHECK.version_text(old), CHECK.version_text(new)
     updated = dict(originals)
+    if new == old:
+        return updated, {"old_version": old_text, "new_version": new_text, "date": date, "reason": reason}
     updated["download-video.sh"] = CHECK.VERSION.sub(
         lambda match: b"readonly VERSION=" + match[1] + new_text.encode("ascii") + match[1],
         originals["download-video.sh"].encode("utf-8"),
@@ -76,11 +85,28 @@ def prepare_texts(originals, floor_version, reason, date):
         updated[path] = text
     if not originals["CHANGELOG.md"].startswith("# Changelog\n\n"):
         raise CHECK.CheckError("CHANGELOG.md must begin with the canonical title.")
-    updated["CHANGELOG.md"] = replace_once(
-        originals["CHANGELOG.md"], "# Changelog\n\n",
-        f"# Changelog\n\n## {new_text} - Unreleased\n\n### Maintenance\n\n- {reason}\n\n",
-        "CHANGELOG title",
-    )
+    title = "# Changelog\n\n"
+    pending = title + "## Unreleased\n"
+    if originals["CHANGELOG.md"].startswith(pending):
+        # Ordinary development notes become part of this release, rather than
+        # remaining in an unversioned section below the newly prepared entry.
+        remainder = originals["CHANGELOG.md"][len(pending):]
+        boundary = re.search(r"^## ", remainder, re.M)
+        notes, history = remainder[:boundary.start()], remainder[boundary.start():]
+        if f"- {reason}" not in notes.splitlines():
+            maintenance = "\n### Maintenance\n"
+            if maintenance in notes:
+                notes = replace_once(notes, maintenance, maintenance + f"\n- {reason}\n",
+                                     "Unreleased maintenance section")
+            else:
+                notes = maintenance + f"\n- {reason}\n" + notes
+        updated["CHANGELOG.md"] = title + f"## {new_text} - Unreleased\n" + notes + history
+    else:
+        updated["CHANGELOG.md"] = replace_once(
+            originals["CHANGELOG.md"], title,
+            title + f"## {new_text} - Unreleased\n\n### Maintenance\n\n- {reason}\n\n",
+            "CHANGELOG title",
+        )
     rpm_date = (
         f"{WEEKDAYS[calendar_date.weekday()]} {MONTHS[calendar_date.month - 1]} "
         f"{calendar_date.day:02d} {calendar_date.year:04d}"
@@ -105,7 +131,7 @@ def read_sources(root):
     return originals
 
 
-def prepare_source_version(root, floor_version, reason, date):
+def prepare_source_version(root, floor_version, reason, date, target_version=None):
     """Stage both generations and restore controlled partial failures safely.
 
     This is not a crash-atomic multi-file transaction. Callers own an isolated
@@ -113,7 +139,9 @@ def prepare_source_version(root, floor_version, reason, date):
     """
     root = root.resolve(strict=True)
     originals = read_sources(root)
-    updated, metadata = prepare_texts(originals, floor_version, reason, date)
+    updated, metadata = prepare_texts(originals, floor_version, reason, date, target_version)
+    if updated == originals:
+        return metadata
     staged, backups = {}, {}
     attempted, retained = [], set()
     try:
@@ -156,12 +184,13 @@ def prepare_source_version(root, floor_version, reason, date):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--floor-version", required=True)
+    parser.add_argument("--floor-version", required=True, help="verified numeric release-tag floor")
+    parser.add_argument("--target-version", help="explicit MAJOR.MINOR.PATCH release target; defaults to PATCH when needed")
     parser.add_argument("--date", required=True)
     parser.add_argument("--reason", required=True)
     args = parser.parse_args(argv)
     try:
-        metadata = prepare_source_version(args.root, args.floor_version, args.reason, args.date)
+        metadata = prepare_source_version(args.root, args.floor_version, args.reason, args.date, args.target_version)
         print(json.dumps(metadata, sort_keys=True))
         return 0
     except CHECK.CheckError as error:
