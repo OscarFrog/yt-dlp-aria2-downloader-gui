@@ -896,13 +896,16 @@ See the repository's
 [testing guide](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md)
 for local validation, Fedora-specific checks, and the GitHub Actions jobs.
 
-Contributors, agents and automated workflow publishers must increase the
-development version before every source push, including PR follow-ups. The owner authorizes the necessary PATCH
-increment with a source-push request. Run the early version check before costly
-tests and enable the tracked Git pre-push guard for each checkout, following
-[the version-check procedure](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#version-check-before-every-source-push).
-This prepares source metadata; creating a tag or release remains a separate
-explicitly authorized action.
+Ordinary commits, pushes and PR merges can keep the same coherent source
+version, including the latest published number. Choose the next version when
+preparing a release from the accumulated changes; corrections to an unpublished
+candidate do not force another bump. Run the coherence check and enable the
+tracked pre-push guard using
+[the version procedure](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#version-coherence-and-release-preparation).
+Development CI artifacts are identified by source SHA and run/attempt, not by
+the package version alone. A published tag and its assets cannot be reused for
+different contents. Preparing references to future packages does not publish
+them; tagging and publication remain separately authorized operations.
 
 For Codex work, open the repository itself as the project. The
 [session setup and task routes](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#codex-session-setup-and-task-routing)

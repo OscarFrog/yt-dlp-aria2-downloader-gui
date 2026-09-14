@@ -1275,7 +1275,7 @@ with tempfile.TemporaryDirectory(prefix="static-harness-") as temporary:
 
 for name in ("README.md", "README.fr.md"):
     text = (project / name).read_text(encoding="utf-8")
-    for anchor in ("version-check-before-every-source-push", "codex-session-setup-and-task-routing"):
+    for anchor in ("version-coherence-and-release-preparation", "codex-session-setup-and-task-routing"):
         expected = (
             "https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/"
             f"TESTING.md#{anchor}"
@@ -1689,8 +1689,8 @@ shfmt_candidate_job_policy() {
     [[ ${job_block} != *'${{ secrets.'* ]] || return 65
     [[ ${job_block} == *"if: github.ref == 'refs/heads/main'"* ]] || return 65
     [[ ${job_block} == *'Reformat with candidate shfmt in a no-network sandbox'* ]] || return 65
-    [[ ${job_block} == *'scripts/check-push-version.py next-version'* ]] || return 65
-    [[ ${job_block} == *'scripts/prepare-source-version.py --root .'*'Reformat with candidate shfmt in a no-network sandbox'* ]] || return 65
+    [[ ${job_block} == *'scripts/check-push-version.py source-context'*'Reformat with candidate shfmt in a no-network sandbox'* ]] || return 65
+    [[ ${job_block} == *'scripts/check-push-version.py coherence'*'Reformat with candidate shfmt in a no-network sandbox'* ]] || return 65
     [[ ${job_block} == *'plan.get("target_sha") != "0" * 40'* ]] || return 65
     # The private host copy loses group/other access under umask 077. The image
     # must restore read/execute access without granting write access or using root.
@@ -1706,6 +1706,7 @@ shfmt_candidate_job_policy() {
     [[ ${job_block} == *"if: steps.detect.outputs.update == 'true'"* ]] || return 65
     [[ ${job_block} != *'bash ./scripts/format-shell.sh'* ]] || return 65
     [[ ${job_block} != *'bash ./tests/run-all.sh'* ]] || return 65
+    [[ ${job_block} != *'scripts/prepare-source-version.py'* ]] || return 65
     [[ ${job_block} != *'actions/cache@'* ]] || return 65
     return 0
 }
@@ -1732,9 +1733,13 @@ shfmt_verifier_job_policy() {
     [[ ${job_block} == *"canonical_manifest \"\${baseline}\""* ]] || return 65
     [[ ${job_block} == *"canonical_manifest \"\${after}\""* ]] || return 65
     [[ ${job_block} == *"cmp -s -- \"\${baseline}\" \"\${after}\""* ]] || return 65
-    # shellcheck disable=SC2016 # Literal independently reconstructed source root.
-    [[ ${job_block} == *'scripts/prepare-source-version.py --root "${expected_tree}"'* ]] || return 65
-    [[ ${job_block} == *'candidate changed approved version document content'* ]] || return 65
+    [[ ${job_block} == *'scripts/check-push-version.py source-context'* ]] || return 65
+    [[ ${job_block} == *'scripts/check-push-version.py coherence'* ]] || return 65
+    [[ ${job_block} == *'git diff --quiet'* ]] || return 65
+    [[ ${job_block} == *'git diff --cached --quiet'* ]] || return 65
+    [[ ${job_block} != *'scripts/prepare-source-version.py'* ]] || return 65
+    [[ ${job_block} != *'version_documents'* ]] || return 65
+    [[ ${job_block} == *'shfmt candidate contains paths outside the trusted allowlist'* ]] || return 65
     [[ ${job_block} == *'candidate shfmt pin file differs from the exact data-only schema'* ]] || return 65
     [[ ${job_block} == *'verifier rejected upstream shfmt tag provenance'* ]] || return 65
     [[ ${job_block} == *'Validate verified formatter and project'* ]] || return 65
@@ -1780,8 +1785,8 @@ shfmt_publish_job_policy() {
     [[ ${job_block} == *'comm -23'* ]] || return 65
     [[ ${job_block} == *'git diff --summary'* ]] || return 65
     [[ ${job_block} == *'core.hooksPath=/dev/null'* ]] || return 65
-    [[ ${job_block} == *'project version is not the approved next PATCH'* ]] || return 65
-    [[ ${job_block} == *'candidate document differs from the approved version increment'* ]] || return 65
+    [[ ${job_block} == *'project version differs from the immutable base'* ]] || return 65
+    [[ ${job_block} == *'candidate source-version declarations disagree'* ]] || return 65
     [[ ${job_block} == *'existing shfmt branches must be preserved for maintainer review'* ]] || return 65
     # shellcheck disable=SC2016 # Literal catalogue guard and exact target lease.
     [[ ${job_block} == *'${current_digest} != "${REF_CATALOG_SHA}"'* ]] || return 65
@@ -1850,11 +1855,18 @@ assert_shfmt_update_workflow_policy() {
     shfmt_publish_job_policy "${publish_block}" \
         || fail 'shfmt updater publication job violates the privileged trust boundary.'
 
-    # These mutations cover the added source-version publication boundary; the
+    mutated=${candidate_block}$'\n          python3 -B scripts/prepare-source-version.py --root .'
+    mutation_must_change "${candidate_block}" "${mutated}" 'artificial automation version increment'
+    # shellcheck disable=SC2310 # An ordinary formatter update must not prepare a release version.
+    if shfmt_candidate_job_policy "${mutated}"; then
+        fail 'shfmt updater policy allowed an artificial source-version increment.'
+    fi
+
+    # These mutations cover the unchanged-version publication boundary; the
     # workflow replay also verifies refusal with actual Git fixtures.
     for required_guard in \
-        'project version is not the approved next PATCH' \
-        'candidate document differs from the approved version increment' \
+        'project version differs from the immutable base' \
+        'candidate source-version declarations disagree' \
         'existing shfmt branches must be preserved for maintainer review' \
         'python3 -I -'; do
         mutated=${publish_block//"${required_guard}"/removed_guard}
@@ -2025,109 +2037,62 @@ assert_shfmt_update_workflow_policy() {
     fi
 }
 
-package_post_release_job_policy() {
+package_development_job_policy() {
     local job_block=$1
-    local expected_allowlist=''
+    local required=''
 
-    # shellcheck disable=SC2016 # Literal workflow allowlist block.
-    expected_allowlist=$'              case ${tagged_change_path} in\n                .github/workflows/packages.yml | \\\n                  .github/workflows/release-docs.yml | \\\n                  README.fr.md | \\\n                  README.md | \\\n                  TESTING.md | \\\n                  test-static.sh) ;;\n                *)'
-
-    # shellcheck disable=SC2016 # Literal pull-request source identity.
-    [[ ${job_block} == *'PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}'* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal same-repository binding.
-    [[ ${job_block} == *'${PR_HEAD_REPOSITORY} != "${GITHUB_REPOSITORY}"'* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal protected-base binding.
-    [[ ${job_block} == *'${GITHUB_BASE_REF} != main'* ]] || return 65
-    # shellcheck disable=SC2016 # Literal post-release branch bindings.
-    [[ ${job_block} == *'expected_automation_head="automation/release-docs-${current_tag}"'* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal post-release branch bindings.
-    [[ ${job_block} == *'expected_recovery_head="fix/release-docs-${current_tag}"'* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal tag ancestry binding.
-    [[ ${job_block} == *'current_release_commit=$(git rev-parse "${current_tag}^{commit}")'* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal tag ancestry binding.
-    [[ ${job_block} == *'git merge-base --is-ancestor'*'"${current_release_commit}" HEAD'* ]] \
-        || return 65
-    # shellcheck disable=SC2016 # Literal immutable-release lookup.
-    [[ ${job_block} == *'gh release view "${current_tag}"'* ]] || return 65
-    [[ ${job_block} == *'--json isImmutable'* ]] || return 65
-    # shellcheck disable=SC2016 # Literal immutable-release check.
-    [[ ${job_block} == *'${current_release_immutable} != true'* ]] || return 65
-    # shellcheck disable=SC2016 # Literal immutable-release verification.
-    [[ ${job_block} == *'gh release verify "${current_tag}"'* ]] || return 65
-    # shellcheck disable=SC2016 # Literal modification-only check.
-    [[ ${job_block} == *'${tagged_change_status} != M'* ]] || return 65
-    # shellcheck disable=SC2016 # Literal rename-field rejection.
-    [[ ${job_block} == *'-n ${tagged_change_extra}'* ]] || return 65
-    [[ ${job_block} == *"${expected_allowlist}"* ]] || return 65
-    [[ ${job_block} == *'--name-status'* ]] || return 65
-    [[ ${job_block} == *'--no-renames'* ]] || return 65
-    # shellcheck disable=SC2016 # Literal release-to-HEAD diff binding.
-    [[ ${job_block} == *'"${current_release_commit}"'*'HEAD'* ]] || return 65
-    [[ ${job_block} == *'tagged_change_count == 0'* ]] || return 65
-    return 0
+    # Source versions may be reused for development; immutable upgrade evidence
+    # must still be authenticated before any package is installed.
+    [[ ${job_block} != *'project version already has a release tag'* ]] || return 65
+    [[ ${job_block} != *'highest_tag='* ]] || return 65
+    # shellcheck disable=SC2016 # Literal workflow version and evidence guards.
+    for required in \
+        'found_current=false' \
+        'sort -Vr -u' \
+        'git merge-base --is-ancestor' \
+        '${immutable} != true' \
+        'gh release verify "${PREVIOUS_TAG}"' \
+        'gh release verify-asset' \
+        'gh attestation verify' \
+        '--source-digest "${PREVIOUS_COMMIT}"' \
+        '--source-ref "refs/tags/${PREVIOUS_TAG}"' \
+        'sha256sum --check PREVIOUS_SHA256SUMS'; do
+        [[ ${job_block} == *"${required}"* ]] || return 65
+    done
 }
 
-assert_package_post_release_policy() {
+assert_package_development_policy() {
     local workflow="${SCRIPT_DIR}/.github/workflows/packages.yml"
     local job_block=''
+    local required=''
     local mutated=''
-    # shellcheck disable=SC2016 # Literal negative-control fragment.
-    local immutable_check='${current_release_immutable} != true'
-    # shellcheck disable=SC2016 # Literal negative-control fragment.
-    local modification_check='${tagged_change_status} != M'
-    # shellcheck disable=SC2016 # Literal negative-control fragment.
-    local source_repository_check='${PR_HEAD_REPOSITORY} != "${GITHUB_REPOSITORY}"'
 
     job_block=$(workflow_job_block "${workflow}" previous-release)
-    [[ -n ${job_block} ]] \
-        || fail 'package previous-release job is missing.'
     # shellcheck disable=SC2310
-    package_post_release_job_policy "${job_block}" \
-        || fail 'package post-release documentation exception is not fail closed.'
+    package_development_job_policy "${job_block}" \
+        || fail 'package development policy lost its immutable upgrade evidence.'
 
-    mutated=${job_block/test-static.sh\) \;\;/download-video.sh | test-static.sh\) \;\;}
-    mutation_must_change "${job_block}" "${mutated}" \
-        'package post-release path allowlist expansion'
-    # Predicate failure is expected for a production-source allowlist expansion.
-    # shellcheck disable=SC2310
-    if package_post_release_job_policy "${mutated}"; then
-        fail 'package post-release policy allowed a production source path.'
-    fi
-
-    # shellcheck disable=SC2016 # Literal negative-control replacement.
-    mutated=${job_block/"${immutable_check}"/'${current_release_immutable} != false'}
-    mutation_must_change "${job_block}" "${mutated}" \
-        'package post-release immutability check removal'
-    # Predicate failure is expected when the tagged release may be mutable.
-    # shellcheck disable=SC2310
-    if package_post_release_job_policy "${mutated}"; then
-        fail 'package post-release policy allowed a mutable current release.'
-    fi
-
-    # shellcheck disable=SC2016 # Literal negative-control replacement.
-    mutated=${job_block/"${modification_check}"/'${tagged_change_status} != D'}
-    mutation_must_change "${job_block}" "${mutated}" \
-        'package post-release modification-only check removal'
-    # Predicate failure is expected when deletions can enter the exception.
-    # shellcheck disable=SC2310
-    if package_post_release_job_policy "${mutated}"; then
-        fail 'package post-release policy allowed non-modification changes.'
-    fi
-
-    # shellcheck disable=SC2016 # Literal negative-control replacement.
-    mutated=${job_block/"${source_repository_check}"/'${PR_HEAD_REPOSITORY} == "${GITHUB_REPOSITORY}"'}
-    mutation_must_change "${job_block}" "${mutated}" \
-        'package post-release source repository check removal'
-    # Predicate failure is expected when a fork can imitate the branch name.
-    # shellcheck disable=SC2310
-    if package_post_release_job_policy "${mutated}"; then
-        fail 'package post-release policy allowed a forked source repository.'
-    fi
+    # shellcheck disable=SC2016 # Literal negative-control identity fragments.
+    for required in \
+        'git merge-base --is-ancestor' \
+        '${immutable} != true' \
+        '--source-digest "${PREVIOUS_COMMIT}"' \
+        '--source-ref "refs/tags/${PREVIOUS_TAG}"'; do
+        mutated=${job_block/"${required}"/removed-evidence-guard}
+        mutation_must_change "${job_block}" "${mutated}" 'package upgrade evidence guard removal'
+        # shellcheck disable=SC2310
+        if package_development_job_policy "${mutated}"; then
+            fail 'package development policy allowed removal of immutable upgrade evidence.'
+        fi
+    done
+    # shellcheck disable=SC2016 # Literal workflow build identities.
+    assert_file_contains "${workflow}" \
+        'rpm-under-test-${{ github.sha }}-${{ github.run_id }}' \
+        'development RPM artifact binds source and build identity'
+    # shellcheck disable=SC2016 # Literal workflow build identities.
+    assert_file_contains "${workflow}" \
+        'deb-under-test-${{ github.sha }}-${{ github.run_id }}' \
+        'development DEB artifact binds source and build identity'
 }
 
 release_docs_prepare_job_policy() {
@@ -2148,18 +2113,18 @@ release_docs_prepare_job_policy() {
         'tag_sha=$(git rev-parse "${RELEASE_TAG}^{commit}")' \
         '${tag_sha} != "${RELEASE_SHA}"' \
         'git merge-base --is-ancestor "${main_sha}" "${target_sha}"' \
-        'scripts/check-push-version.py next-version' \
+        'scripts/check-push-version.py source-context' \
         'python3 -B scripts/update-published-version.py "${version}"' \
-        'python3 -B scripts/prepare-source-version.py --root .' \
+        'python3 -B scripts/check-push-version.py coherence' \
         'bash ./test-static.sh' \
-        'paths=(CHANGELOG.md README.fr.md README.md download-video.sh install-fedora.sh' \
-        'packaging/rpm/yt-dlp-aria2-downloader-gui.spec test-static.sh)' \
+        'paths=(README.fr.md README.md test-static.sh)' \
         'release-docs-candidate-${{ github.run_id }}-${{ github.run_attempt }}'; do
         [[ ${job_block} == *"${required}"* ]] || return 65
     done
     # shellcheck disable=SC2016 # Literal Actions secrets context.
     [[ ${job_block} != *'${{ secrets.'* ]] || return 65
-    [[ ${job_block} == *'update=false'*'scripts/prepare-source-version.py'* ]] || return 65
+    [[ ${job_block} == *'update=false'*'update=true'* ]] || return 65
+    [[ ${job_block} != *'scripts/prepare-source-version.py'* ]] || return 65
     return 0
 }
 
@@ -2180,16 +2145,15 @@ release_docs_verifier_job_policy() {
         'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3' \
         '[[ $(git rev-parse "${RELEASE_TAG}^{commit}") == "${RELEASE_SHA}" ]]' \
         'git merge-base --is-ancestor "${main_sha}" "${base_sha}"' \
-        'current_context=$(python3 -B scripts/check-push-version.py next-version' \
-        '{main_sha,target_sha,floor_version,next_version,refs_sha256}' \
+        'current_context=$(python3 -B scripts/check-push-version.py source-context' \
+        '{main_sha,target_sha,current_version,refs_sha256}' \
         'python3 -B scripts/update-published-version.py "${RELEASE_VERSION}"' \
-        'python3 -B scripts/prepare-source-version.py --root .' \
+        'python3 -B scripts/check-push-version.py coherence' \
         'cmp -s -- "${expected_patch}" "${handoff_dir}/release-docs.patch"' \
         'bash ./tests/run-all.sh --full --jobs 4' \
         'release-docs-tested-tree.sha256' \
         'release-docs-base-tree.sha256' \
-        'paths=(CHANGELOG.md README.fr.md README.md download-video.sh install-fedora.sh' \
-        'packaging/rpm/yt-dlp-aria2-downloader-gui.spec test-static.sh)' \
+        'paths=(README.fr.md README.md test-static.sh)' \
         'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' \
         'release-docs-verified-${{ github.run_id }}-${{ github.run_attempt }}'; do
         [[ ${job_block} == *"${required}"* ]] || return 65
@@ -2197,6 +2161,7 @@ release_docs_verifier_job_policy() {
     # shellcheck disable=SC2016 # Literal Actions secrets context.
     [[ ${job_block} != *'${{ secrets.'* ]] || return 65
     [[ ${job_block} != *'git apply '* ]] || return 65
+    [[ ${job_block} != *'scripts/prepare-source-version.py'* ]] || return 65
     return 0
 }
 
@@ -2244,8 +2209,8 @@ release_docs_publisher_job_policy() {
     permissions=$(job_permissions_block "${job_block}")
     [[ ${permissions} == $'    permissions:\n      contents: write' ]] || return 65
     # Fixed inline Python verifies inert bytes. The authenticated base and exact
-    # seven-file transformation replace the former three-file publisher; only
-    # its bounded automation ref may advance, with force:false.
+    # three-file published-reference transformation preserve the source version;
+    # only its bounded automation ref may advance, with force:false.
     # shellcheck disable=SC2016 # Literal workflow expressions and shell contracts.
     for required in \
         "if: needs.prepare-release-docs.outputs.update == 'true'" \
@@ -2256,8 +2221,7 @@ release_docs_publisher_job_policy() {
         '${release_tag_sha} != "${RELEASE_SHA}"' \
         'repos/${GITHUB_REPOSITORY}/compare/${RELEASE_SHA}...${main_sha}' \
         '${merge_base_sha} != "${RELEASE_SHA}"' \
-        'paths=(CHANGELOG.md README.fr.md README.md download-video.sh install-fedora.sh' \
-        'packaging/rpm/yt-dlp-aria2-downloader-gui.spec test-static.sh)' \
+        'paths=(README.fr.md README.md test-static.sh)' \
         'verified handoff path is not a regular file' \
         'release-docs-base-tree.sha256' \
         'release-docs-tested-tree.sha256' \
@@ -2265,7 +2229,7 @@ release_docs_publisher_job_policy() {
         'manifest(manifests[1], set(paths))' \
         'manifest(manifests[0], set(paths))' \
         'contents/${path}?ref=${base_sha}' \
-        'mode = "100755" if path in {"download-video.sh", "install-fedora.sh", "test-static.sh"} else "100644"' \
+        'mode = "100755" if path == "test-static.sh" else "100644"' \
         'base64 --wrap=0 -- "${handoff_dir}/${path}"' \
         '| jq -Rs' \
         'encoding: "base64"' \
@@ -2281,7 +2245,7 @@ release_docs_publisher_job_policy() {
         'cmp -s -- "${refs_snapshot}" "${current_snapshot}"' \
         '{sha:$sha,force:false}' \
         'published_sha=$(gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}"' \
-        'candidate version is not above main, target and tags' \
+        'main source version differs' \
         'candidate changed bytes beyond the exact transformation' \
         'Reviewed documentation branch ready'; do
         [[ ${job_block} == *"${required}"* ]] || return 65
@@ -2352,10 +2316,21 @@ assert_release_docs_workflow_policy() {
         || fail 'release-docs publisher job violates its privileged trust boundary.'
     assert_release_docs_blob_payload_streaming
 
+    mutated="${prepare_block}"$'\n''      python3 -B scripts/prepare-source-version.py --root .'
+    # shellcheck disable=SC2310 # Documentation automation must preserve the source version.
+    if release_docs_prepare_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed an artificial source bump during preparation.'
+    fi
+    mutated="${verifier_block}"$'\n''      python3 -B scripts/prepare-source-version.py --root .'
+    # shellcheck disable=SC2310 # Patch reproduction must preserve the source version.
+    if release_docs_verifier_job_policy "${mutated}"; then
+        fail 'release-docs policy allowed an artificial source bump during verification.'
+    fi
+
     # shellcheck disable=SC2016 # Literal jq payload used as a negative control.
     for required_guard in \
         '{sha:$sha,force:false}' \
-        'candidate version is not above main, target and tags' \
+        'main source version differs' \
         'candidate changed bytes beyond the exact transformation'; do
         mutated=${publisher_block//"${required_guard}"/removed_guard}
         mutation_must_change "${publisher_block}" "${mutated}" 'release-docs source-version guard removal'
@@ -2469,7 +2444,7 @@ assert_release_docs_workflow_policy() {
         fail 'release-docs policy allowed interpreted candidate execution.'
     fi
 
-    mutated=${publisher_block//README.fr.md README.md download-video.sh/README.md download-video.sh}
+    mutated=${publisher_block//README.fr.md README.md test-static.sh/README.md test-static.sh}
     mutation_must_change "${publisher_block}" "${mutated}" \
         'release-docs publisher allowlist mutation'
     # Predicate failure is expected for this negative-control mutation.
@@ -2562,7 +2537,7 @@ test_static_tooling_contracts() {
     assert_workflow_validator_regressions
     assert_workflow_dependencies_are_hardened
     assert_shfmt_update_workflow_policy
-    assert_package_post_release_policy
+    assert_package_development_policy
     assert_release_docs_workflow_policy
     assert_file_contains "${SCRIPT_DIR}/AGENTS.md" \
         'persist-credentials: false' \
@@ -2862,11 +2837,11 @@ test_static_tooling_contracts() {
 }
 
 test_static_python_behavioral_suites() {
-    assert_status 0 'pre-push version guard rejects unchanged source pushes' \
+    assert_status 0 'pre-push coherence guard accepts unchanged versions and rejects incoherent source pushes' \
         python3 -B "${SCRIPT_DIR}/tests/push-version-integration.py"
     assert_status 0 'release-docs publisher preserves bounded version and branch updates' \
         python3 -B "${SCRIPT_DIR}/tests/release-docs-integration.py"
-    assert_status 0 'shfmt handoff independently binds its bump and publication' \
+    assert_status 0 'shfmt handoff independently binds its unchanged version and publication' \
         python3 -B "${SCRIPT_DIR}/tests/shfmt-version-handoff-integration.py"
     assert_status 0 'qualification promotion rejects stale or unrelated GitHub proof' \
         python3 -B "${SCRIPT_DIR}/tests/ci-validation-integration.py"

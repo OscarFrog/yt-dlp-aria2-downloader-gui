@@ -30,7 +30,7 @@ PREPARE = importlib.util.module_from_spec(PREPARE_SPEC)
 PREPARE_SPEC.loader.exec_module(PREPARE)
 
 
-def write_version_sources(root, version):
+def write_version_sources(root, version, published="2.3.11"):
     """Write small source carriers and the exact maintained publication shapes."""
     (root / "download-video.sh").write_text(
         f'#!/usr/bin/env bash\nreadonly VERSION="{version}"\n', encoding="utf-8"
@@ -38,7 +38,7 @@ def write_version_sources(root, version):
     (root / "install-fedora.sh").write_text(f"readonly APP_VERSION='{version}'\n")
     (root / "test-static.sh").write_text(
         f"readonly EXPECTED_VERSION='{version}'\n"
-        "readonly EXPECTED_PUBLISHED_VERSION='2.3.11'\n"
+        f"readonly EXPECTED_PUBLISHED_VERSION='{published}'\n"
     )
     (root / "CHANGELOG.md").write_text(f"# Changelog\n\n## {version} - Unreleased\n")
     markers = {
@@ -48,7 +48,7 @@ def write_version_sources(root, version):
     for name, marker in markers.items():
         text = marker + f"gh workflow run release.yml --ref v{version} -f tag=v{version}\n"
         for template, count in CHECK.PUBLISHED.README_REFERENCE_TEMPLATES[Path(name)]:
-            text += (template.format(version="2.3.11") + "\n") * count
+            text += (template.format(version=published) + "\n") * count
         (root / name).write_text(text, encoding="utf-8")
     spec = root / PREPARE.RPM_PATH
     spec.parent.mkdir(parents=True, exist_ok=True)
@@ -93,8 +93,8 @@ class PushVersionTests(unittest.TestCase):
             self.assertEqual(result.returncode, expected, result.stderr.decode(errors="replace"))
         return result
 
-    def commit(self, version, marker):
-        write_version_sources(self.repo, version)
+    def commit(self, version, marker, published="2.3.11"):
+        write_version_sources(self.repo, version, published)
         (self.repo / "change.txt").write_text(marker, encoding="utf-8")
         self.git("add", ".")
         self.git("commit", "--no-gpg-sign", "-m", marker)
@@ -112,43 +112,44 @@ class PushVersionTests(unittest.TestCase):
     def remote_ref(self, ref="refs/heads/feature"):
         return self.git("ls-remote", "--refs", "origin", ref).stdout
 
-    def test_first_push_without_bump_is_rejected_before_remote_changes(self):
-        self.commit("2.3.12", "forgot version")
-        result = self.git("push", "origin", "feature", expected=1)
-        self.assertIn(b"Prepare 2.3.13", result.stderr)
-        self.assertEqual(self.remote_ref(), b"")
+    def test_two_new_commits_push_with_the_same_published_version(self):
+        self.git("tag", "v2.3.12", "main")
+        self.git("push", "origin", "v2.3.12")
+        for marker in ("first source change", "second source change"):
+            with self.subTest(marker=marker):
+                accepted = self.commit("2.3.12", marker, published="2.3.12")
+                self.check("check")
+                self.git("push", "origin", "feature")
+                self.assertIn(accepted.encode(), self.remote_ref())
+        self.git("push", "origin", "feature")  # A genuine no-op still works.
 
-    def test_each_followup_push_requires_a_committed_increase(self):
-        accepted = self.commit("2.3.13", "first push")
+    def test_followup_to_the_same_pr_branch_needs_no_new_version(self):
+        self.commit("2.3.13", "prepared release candidate")
         self.git("push", "origin", "feature")
-        self.git("push", "origin", "feature")  # A genuine no-op needs no bump.
-        self.commit("2.3.13", "followup without bump")
-        self.git("push", "origin", "feature", expected=1)
-        self.assertIn(accepted.encode(), self.remote_ref())
-        write_version_sources(self.repo, "2.3.14")
-        self.check("check")  # Early feedback uses the working tree.
-        self.git("push", "origin", "feature", expected=1)  # The hook uses the commit.
-        updated = self.commit("2.3.14", "committed version")
+        updated = self.commit("2.3.13", "correction on the same PR")
+        self.check("check")
         self.git("push", "origin", "feature")
         self.assertIn(updated.encode(), self.remote_ref())
-        self.git("push", "origin", "--delete", "feature")  # Cleanup is not a source push.
+        self.git("push", "origin", "--delete", "feature")
         self.assertEqual(self.remote_ref(), b"")
 
-    def test_remote_tags_are_read_live_and_compared_numerically(self):
+    def test_live_numeric_tags_inform_release_planning_not_push_admissibility(self):
         self.git("tag", "v2.3.9")
         self.git("push", "origin", "v2.3.9")
         self.commit("2.3.13", "numeric ordering")
         self.check("check")
         # Add a tag directly to the disposable bare fixture: local tags stay stale.
         self.git("tag", "v2.3.20", "main", cwd=self.remote)
-        result = self.check("check", expected=65)
-        self.assertIn(b"Prepare 2.3.21", result.stderr)
-        self.git("push", "origin", "feature", expected=1)
+        self.check("check")
+        self.git("push", "origin", "feature")
+        plan = json.loads(self.check("next-version", "--branch", "feature").stdout)
+        self.assertEqual(plan["floor_version"], "2.3.20")
+        self.assertEqual(plan["next_version"], "2.3.21")
 
     def test_next_version_binds_live_main_target_and_tags_to_one_catalog(self):
         initial = json.loads(self.check("next-version", "--branch", "feature").stdout)
         self.assertEqual(initial["target_sha"], "0" * 40)
-        self.assertEqual(initial["next_version"], "2.3.13")
+        self.assertEqual(initial["next_version"], "2.3.12")
         self.commit("2.3.15", "existing target")
         target = self.git("rev-parse", "HEAD").stdout.strip().decode()
         self.git("push", "origin", "feature")
@@ -166,22 +167,42 @@ class PushVersionTests(unittest.TestCase):
         ).hexdigest())
         self.assertEqual(metadata["main_sha"], self.git("rev-parse", "main").stdout.strip().decode())
 
-    def test_stale_remote_objects_fail_closed_until_fetched(self):
+    def test_automation_context_preserves_version_and_binds_live_identities(self):
+        self.commit("9.9.9", "unrelated high version on target")
+        target = self.git("rev-parse", "HEAD").stdout.strip().decode()
+        self.git("push", "origin", "feature")
+        self.git("tag", "v2.3.11", "main", cwd=self.remote)
+        context = json.loads(self.check("source-context", "--branch", "feature").stdout)
+        self.assertEqual(context["current_version"], "2.3.12")
+        self.assertEqual(context["target_sha"], target)
+        self.assertNotIn("floor_version", context)
+        self.assertNotIn("next_version", context)
+        plan = json.loads(self.check("next-version", "--branch", "feature").stdout)
+        self.assertEqual(plan["floor_version"], "2.3.11")
+        self.assertEqual(plan["next_version"], "2.3.12")
+        self.assertEqual(plan["refs_sha256"], context["refs_sha256"])
+
+    def test_ordinary_push_needs_no_remote_version_objects_but_context_does(self):
         other = self.root / "other checkout"
         self.git("clone", str(self.remote), str(other))
         (other / "download-video.sh").write_text('readonly VERSION="2.3.13"\n')
         self.git("add", ".", cwd=other)
         self.git("commit", "--no-gpg-sign", "-m", "remote advance", cwd=other)
         self.git("push", "origin", "main", cwd=other)
-        self.commit("2.3.14", "new candidate")
-        self.check("check", expected=65)
-        self.git("fetch", "origin")
+        self.commit("2.3.12", "same version, new source")
         self.check("check")
+        self.git("push", "origin", "feature")
+        self.check("source-context", "--branch", "feature", expected=65)
+        self.git("fetch", "origin")
+        self.check("source-context", "--branch", "feature")
 
     def test_batch_rejection_prevents_even_valid_branch_publication(self):
         self.commit("2.3.13", "valid branch")
         self.git("switch", "-c", "invalid", "main")
         self.commit("2.3.12", "invalid branch")
+        (self.repo / "install-fedora.sh").write_text("readonly APP_VERSION='2.3.11'\n")
+        self.git("add", ".")
+        self.git("commit", "--no-gpg-sign", "-m", "incoherent source")
         self.git("push", "origin", "feature", "invalid", expected=1)
         self.assertEqual(self.remote_ref(), b"")
         self.assertEqual(self.remote_ref("refs/heads/invalid"), b"")
@@ -220,11 +241,15 @@ class PushVersionTests(unittest.TestCase):
         self.assertEqual(self.remote_ref(), b"")
 
     def test_local_replace_refs_cannot_disguise_the_pushed_commit(self):
-        unchanged = self.commit("2.3.12", "unchanged version")
-        replacement = self.commit("2.3.13", "replacement version")
-        self.git("replace", unchanged, replacement)
-        result = self.git("push", "origin", f"{unchanged}:refs/heads/feature", expected=1)
-        self.assertIn(b"version 2.3.12 must be newer", result.stderr)
+        self.commit("2.3.12", "source before corruption")
+        (self.repo / "install-fedora.sh").write_text("readonly APP_VERSION='2.3.11'\n")
+        self.git("add", ".")
+        self.git("commit", "--no-gpg-sign", "-m", "incoherent source")
+        invalid = self.git("rev-parse", "HEAD").stdout.strip().decode()
+        replacement = self.commit("2.3.12", "coherent replacement")
+        self.git("replace", invalid, replacement)
+        result = self.git("push", "origin", f"{invalid}:refs/heads/feature", expected=1)
+        self.assertIn(b"install-fedora.sh APP_VERSION", result.stderr)
         self.assertEqual(self.remote_ref(), b"")
 
     def test_version_source_is_data_and_cannot_run_commands(self):
@@ -395,8 +420,8 @@ class SourceVersionPreparationTests(unittest.TestCase):
     def snapshot(self):
         return {path: (self.root / path).read_bytes() for path in PREPARE.SOURCE_PATHS}
 
-    def prepare(self, floor="2.3.20", reason="Synchronize published release documentation.", date="2026-09-02"):
-        return PREPARE.prepare_source_version(self.root, floor, reason, date)
+    def prepare(self, floor="2.3.20", reason="Prepare the next release.", date="2026-09-02", target=None):
+        return PREPARE.prepare_source_version(self.root, floor, reason, date, target)
 
     def test_offline_preparation_changes_seven_surfaces_preserving_publication_and_modes(self):
         before = self.snapshot()
@@ -405,13 +430,13 @@ class SourceVersionPreparationTests(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, "-B", str(PROJECT / "scripts/prepare-source-version.py"),
              "--root", str(self.root), "--floor-version", "2.3.20", "--date", "2026-09-02",
-             "--reason", "Synchronize published release documentation."],
+             "--reason", "Prepare the next release."],
             env=environment, capture_output=True, timeout=5,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {
             "old_version": "2.3.13", "new_version": "2.3.21", "date": "2026-09-02",
-            "reason": "Synchronize published release documentation.",
+            "reason": "Prepare the next release.",
         })
         self.assertEqual(CHECK.worktree_version(self.root), (2, 3, 21))
         after = self.snapshot()
@@ -422,12 +447,57 @@ class SourceVersionPreparationTests(unittest.TestCase):
         self.assertEqual((self.root / "download-video.sh").stat().st_mode & 0o777, 0o755)
         self.assertFalse(list(self.root.rglob(".*")))
 
-    def test_source_version_is_also_a_floor_and_results_are_deterministic(self):
+    def test_unpublished_target_is_retained_and_results_are_deterministic(self):
         originals = PREPARE.read_sources(self.root)
-        first = PREPARE.prepare_texts(originals, "2.3.12", "Update shfmt to v3.12.0", "2026-09-12")
-        second = PREPARE.prepare_texts(originals, "2.3.12", "Update shfmt to v3.12.0", "2026-09-12")
+        first = PREPARE.prepare_texts(originals, "2.3.12", "Prepare accumulated corrections.", "2026-09-12")
+        second = PREPARE.prepare_texts(originals, "2.3.12", "Prepare accumulated corrections.", "2026-09-12")
         self.assertEqual(first, second)
-        self.assertEqual(first[1]["new_version"], "2.3.14")
+        self.assertEqual(first[1]["new_version"], "2.3.13")
+        self.assertEqual(first[0], originals)
+
+    def test_repeated_explicit_release_preparation_is_a_noop_without_writes(self):
+        self.prepare(target="2.4.0")
+        before = self.snapshot()
+        with patch.object(PREPARE.CHECK.PUBLISHED, "stage_text", side_effect=AssertionError("no write expected")):
+            result = self.prepare(target="2.4.0")
+        self.assertEqual(result["new_version"], "2.4.0")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_release_preparation_promotes_accumulated_unreleased_notes_once(self):
+        reason = "Prepare the next release."
+        for maintenance, existing_reason in ((False, False), (True, False), (True, True)):
+            with self.subTest(maintenance=maintenance, existing_reason=existing_reason):
+                write_version_sources(self.root, "2.3.13")
+                changelog = self.root / "CHANGELOG.md"
+                history = changelog.read_text().removeprefix("# Changelog\n\n")
+                notes = "\n### Features\n\n- Accumulated feature.\n\n"
+                if maintenance:
+                    notes += "### Maintenance\n\n"
+                notes += "- Accumulated correction.\n\n"
+                if existing_reason:
+                    notes += f"- {reason}\n\n"
+                changelog.write_text("# Changelog\n\n## Unreleased\n" + notes + history)
+                self.prepare(target="2.4.0", reason=reason)
+                prepared = changelog.read_text()
+                self.assertTrue(prepared.startswith("# Changelog\n\n## 2.4.0 - Unreleased\n"))
+                self.assertTrue(prepared.endswith(history))
+                self.assertNotIn("\n## Unreleased\n", prepared)
+                promoted = prepared.removesuffix(history)
+                self.assertEqual(promoted.count("### Maintenance\n"), 1)
+                for entry in ("Accumulated feature.", "Accumulated correction.", reason):
+                    self.assertEqual(promoted.count(f"- {entry}\n"), 1)
+                snapshot = self.snapshot()
+                with patch.object(PREPARE.CHECK.PUBLISHED, "stage_text", side_effect=AssertionError("no write expected")):
+                    self.prepare(target="2.4.0", reason=reason)
+                self.assertEqual(self.snapshot(), snapshot)
+
+    def test_release_target_cannot_reuse_a_tag_or_lower_the_prepared_version(self):
+        before = self.snapshot()
+        for arguments in ({"target": "2.3.20"}, {"target": "2.3.19"},
+                          {"floor": "2.3.11", "target": "2.3.12"}):
+            with self.subTest(arguments=arguments), self.assertRaises(PREPARE.CHECK.CheckError):
+                self.prepare(**arguments)
+            self.assertEqual(self.snapshot(), before)
 
     def test_invalid_reason_date_floor_or_source_causes_no_mutation(self):
         before = self.snapshot()

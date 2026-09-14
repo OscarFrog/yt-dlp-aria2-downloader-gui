@@ -208,35 +208,36 @@ repository rules, secrets, or environments unless the task explicitly requests
 that external or release action. Source-version preparation does not authorize
 any of those actions.
 
-### Standing rule: increase the version before every source push
+### Standing rule: choose the version during release preparation
 
-The owner explicitly requires a new development version for every push of new
-source commits, including contributor/agent pushes, automated workflow branches
-and follow-up pushes to the same pull request. An
-authorized source push also authorizes the necessary coherent PATCH increment;
-do not ask for version-bump approval again. Honor an explicitly requested higher
-version. This does not authorize an otherwise unrequested commit or push.
+Ordinary commits, source pushes and PR merges do not require a version bump,
+including follow-ups and automation branches. They may retain the last published
+version. All source and published-reference carriers must remain coherent; the
+hook validates the actual pushed objects, not only the working tree.
 
-Follow `TESTING.md` → **Version check before every source push** for the version
-surfaces, fresh remote baseline, next PATCH, validation and hook setup. Both
-working-tree coherence and the actual pushed commits must pass. Contributor
-pushes must not bypass
-the hook with `--no-verify`, another hooks path, a wrapper or an API write.
-Resolve an unavailable baseline before pushing; do not wait for GitHub failure.
+An explicit release preparation selects the target version from the accumulated
+changes since the relevant release. Corrections to that unpublished candidate
+may keep the same target unless the scope warrants another version. Freeze the
+version before qualifying the candidate to tag; subsequent content changes
+require the applicable validation of the new tree. A published version, its tag
+and its assets must never be reused to distribute different contents.
 
-This owner policy is stricter than package CI's existing-tag gate, which does
-not require a new version for each local commit. The `shfmt-update.yml` and
-`release-docs.yml` workflows prepare the bump in their read-only jobs and bind
-it to the verified tree before publication. Their privileged publishers verify
-data without executing a repository bump helper or candidate code. An unchanged
-automation result is a no-op and must not create an artificial source push.
+Follow `TESTING.md` → **Version coherence and release preparation** for ordinary
+push checks, explicit preparation and hook setup. Do not bypass the hook with
+`--no-verify`, another hooks path, a wrapper or an API write. These checks grant
+no authority to commit, push, merge, tag or publish.
 
-Branch deletions, tag-only pushes and true no-op pushes do not publish new source
-commits and need no source increment. Tags still require explicit authorization.
-The ordinary source-push check does not require a signed tag or the publication
-preflight; run the latter only for an explicitly authorized release, with its
-prerequisites from `TESTING.md`. No version change is needed for local-only work
-until a source push is requested.
+Development artifacts are identified by their source SHA and CI run/attempt,
+not by the shared numeric version alone. They are not official release assets.
+The `shfmt-update.yml` and `release-docs.yml` automations retain the source
+version and independently verify only their permitted transformations. Their
+privileged publishers still validate data without executing candidate code.
+An unchanged automation result produces no source push.
+
+Tag-only pushes, deletions and no-ops are outside the source-coherence hook.
+Tags and releases retain their separate explicit authorization, signed-tag
+preflight and immutable-publication requirements. Source-push authorization
+does not authorize an automatic version increment or publication.
 
 ## Completion checklist
 

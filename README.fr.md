@@ -949,15 +949,17 @@ Consultez le
 du dépôt pour les validations locales, les contrôles spécifiques à Fedora et
 les tâches GitHub Actions.
 
-Les contributeurs, agents et workflows de publication automatique doivent
-augmenter la version de développement avant chaque push des sources, y compris
-les compléments à une PR. Une demande de
-push des sources autorise l'incrément PATCH nécessaire. Exécutez le contrôle
-de version avant les tests coûteux et activez le hook Git pre-push du dépôt
-pour chaque checkout, selon
-[la procédure de contrôle](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#version-check-before-every-source-push).
-Cette opération prépare les métadonnées des sources ; créer un tag ou une
-release reste une action distincte nécessitant une autorisation explicite.
+Les commits, pushs et fusions de PR ordinaires peuvent conserver la même
+version source cohérente, y compris le dernier numéro publié. La préparation
+d'une release choisit la prochaine version d'après les changements regroupés ;
+les corrections d'un candidat non publié n'imposent pas un nouvel incrément.
+Exécutez le contrôle de cohérence et activez le hook pre-push selon
+[la procédure de versionnement](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#version-coherence-and-release-preparation).
+Les artefacts CI de développement sont identifiés par leur SHA source et leur
+run/tentative, pas uniquement par leur version de paquet. Un tag publié et ses
+assets ne peuvent pas servir à distribuer un contenu différent. Préparer les
+références de futurs paquets ne les publie pas ; tag et publication restent
+des opérations autorisées séparément.
 
 Pour travailler avec Codex, ouvrez le dépôt lui-même comme projet. La
 [procédure de démarrage et de routage](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#codex-session-setup-and-task-routing)
