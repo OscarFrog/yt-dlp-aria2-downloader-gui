@@ -28,7 +28,7 @@ fi
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 # The development tree can lead the latest installable GitHub release. Keep the
 # two contracts explicit so README package names never advertise absent assets.
-readonly EXPECTED_VERSION='2.3.26'
+readonly EXPECTED_VERSION='2.3.27'
 readonly EXPECTED_PUBLISHED_VERSION='2.3.26'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SOURCE_INVENTORY_FILE=''
@@ -146,7 +146,7 @@ assert_standard_python_header() {
     fi
 
     if ! python3 - "${absolute_path}" "${STANDARD_HEADER_PROJECT}" \
-        "${relative_path}" <<'PYTHON_HEADER_VALIDATION'; then
+        "${relative_path}" <<'PYTHON_HEADER_VALIDATION'
 import ast
 import pathlib
 import sys
@@ -173,6 +173,7 @@ if relative_path not in docstring:
     print(f"module docstring does not identify repository path in {relative_path}", file=sys.stderr)
     raise SystemExit(65)
 PYTHON_HEADER_VALIDATION
+    then
         printf 'FAIL: non-standard Python module identity in %s.\n' \
             "${relative_path}" >&2
         return 65
@@ -507,7 +508,7 @@ assert_codex_rules_have_explicit_decisions() {
 
     # This repository uses literal prefix_rule calls only. Validate that small
     # syntax subset without evaluating policy code, even when Codex is absent.
-    if ! python3 -B - "${rules_file}" <<'RULE_SYNTAX'; then
+    if ! python3 -B - "${rules_file}" <<'RULE_SYNTAX'
 import ast
 from pathlib import Path
 import sys
@@ -531,6 +532,7 @@ except (OSError, SyntaxError, UnicodeError, ValueError):
     print("Invalid literal repository execution-policy syntax.", file=sys.stderr)
     raise SystemExit(65)
 RULE_SYNTAX
+    then
         return 65
     fi
 

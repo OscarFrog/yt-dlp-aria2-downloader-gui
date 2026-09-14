@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.27 - Unreleased
+
+### Maintenance
+
+- Update shfmt to v3.14.1
+
 ## 2.3.26 - Unreleased
 
 ### Maintenance

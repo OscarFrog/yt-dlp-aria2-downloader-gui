@@ -1052,7 +1052,7 @@ retained_log_identity_matches() {
         && ((identity_size > 0 && identity_size < LOG_MAX_BYTES)) \
         && tail -c "${identity_size}" -- "${candidate_file}" \
             >"${actual_identity}" 2>/dev/null; then
-        if python3 -I -S - "${expected_identity}" "${actual_identity}" <<'PY_LOG_IDENTITY_COMPARE'; then
+        if python3 -I -S - "${expected_identity}" "${actual_identity}" <<'PY_LOG_IDENTITY_COMPARE'
 import sys
 
 try:
@@ -1064,6 +1064,7 @@ except OSError:
     raise SystemExit(1) from None
 raise SystemExit(0 if expected_identity == actual_identity else 1)
 PY_LOG_IDENTITY_COMPARE
+        then
             identities_match=true
         fi
     fi
