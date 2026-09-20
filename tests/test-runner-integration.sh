@@ -2056,9 +2056,10 @@ while (($#)); do
         *) shift ;;
     esac
 done
-final="${output}/overwritten.mkv"
+final="${output}/"'overwritten $F1_TEMPLATE_SENTINEL.mkv'
 printf '%s\\n' "${result}" >"${final}"
 printf '%s\\n' "${final}" >"${result}"
+printf '%s\\0' repeated-transfer >>"${ARIA2_INVOCATION_LOG:?}"
 printf '%s\\n' /audio.m4a /video-only.mp4 >>"${OPTIMIZATION_TEST_ROOT}/http-requests.log"
 '''
 prefix = '''set -euo pipefail
@@ -2079,9 +2080,17 @@ with tempfile.TemporaryDirectory(prefix="real-tool-optimization-") as directory:
         project.mkdir()
         media = case / "media"
         media.mkdir()
+        # The extracted qualification constructs its complete scenario matrix
+        # before running the first case; only file existence is needed here.
+        dash = case / "web" / "dash"
+        dash.mkdir(parents=True)
+        for index in (0, 1):
+            (dash / f"init-stream{index}.m4s").touch()
+            (dash / f"chunk-stream{index}-00001.m4s").touch()
         (project / "download-video.sh").write_text(engine_source, encoding="ascii")
         environment = dict(os.environ, PYTHONOPTIMIZE="1",
                            YTDLP_ARIA2_YTDLP_BIN="/bin/true",
+                           ARIA2_INVOCATION_LOG=str(case / "aria2-invocations.bin"),
                            OPTIMIZATION_TEST_ROOT=str(case))
         completed = subprocess.run(
             ["bash", "-s", "--", str(project), str(case), str(media)],
@@ -2089,19 +2098,19 @@ with tempfile.TemporaryDirectory(prefix="real-tool-optimization-") as directory:
             env=environment, capture_output=True, text=True, timeout=5,
         )
         if (completed.returncode != 1 or
-                "AssertionError: ('repeat', 0," not in completed.stderr):
+                "AssertionError: ('direct-two-streams', 'repeat', 0," not in completed.stderr):
             raise AssertionError(
                 f"{label}: optimization bypassed the actual repeated-output checks; "
                 f"status={completed.returncode}\n{completed.stdout}{completed.stderr}"
             )
-        if "Real two-stream repetition and metadata change preserve" in completed.stdout:
+        if "Real direct-two-streams repetition and metadata change preserve" in completed.stdout:
             raise AssertionError("failed repeated-output qualification reported success")
 
     check(implementation, "isolated")
     try:
         check(mutant, "without-isolation")
     except AssertionError as error:
-        if "status=0\nReal two-stream repetition and metadata change preserve" not in str(error):
+        if "status=0\nReal direct-two-streams repetition and metadata change preserve" not in str(error):
             raise AssertionError("isolation negative control failed for an unrelated reason") from error
     else:
         raise AssertionError("optimization regression accepted removal of interpreter isolation")
