@@ -2108,19 +2108,45 @@ assert_no_retained_log_staging() {
 }
 
 assert_gui_profile_menu() {
-    (($# == 5)) || return 2
+    (($# == 5 || $# == 7)) || return 2
     local scenario=$1
     local requested_url=$2
     local youtube_expected=$3
     local label=$4
     local profile_bundle=$5
+    local remembered_profile=${6:-audio}
+    local expected_profile=${7:-audio}
+    local expected_mode=${expected_profile}
+    local expected_hls=false
+    local expected_argument_count=9
+    local video_label='Complete video (MKV)'
+    local selected_label=''
+    local row_start=-1 row_index selected_count=0
+    local config_file="${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf"
     local url_file=''
     local engine_arguments_log="${TEST_ROOT}/profile-engine-arguments.bin"
     local engine_acknowledgement_log="${TEST_ROOT}/profile-engine-acknowledgement.bin"
     local file_selection_log="${TEST_ROOT}/profile-destination.bin"
     # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
     local -a engine_arguments=() profile_arguments=()
-    local -a engine_acknowledgement=()
+    local -a engine_acknowledgement=() profile_rows=()
+
+    if [[ ${youtube_expected} == true ]]; then
+        video_label='YouTube video - Firefox cookies (HLS/MKV)'
+    fi
+    if [[ ${expected_profile} == youtube-hls ]]; then
+        expected_mode=video
+        expected_hls=true
+        expected_argument_count=10
+    fi
+    mkdir -p -- "${config_file%/*}"
+    if [[ ${remembered_profile} == missing ]]; then
+        rm -f -- "${config_file}"
+    else
+        printf 'output_dir=%s\nprofile=%s\n' "${OUTPUT_DIR}" "${remembered_profile}" \
+            >"${config_file}"
+        chmod 600 -- "${config_file}"
+    fi
 
     prepare_argument_log "${scenario}"
     : >"${file_selection_log}"
@@ -2128,7 +2154,7 @@ assert_gui_profile_menu() {
     : >"${engine_acknowledgement_log}"
     assert_status 73 "${label} GUI-to-engine handoff stops before PLAN" \
         env MOCK_ZENITY_ENTRY_VALUE="${requested_url}" \
-        MOCK_PROFILE='Audio track (native format)' \
+        MOCK_USE_DEFAULT_PROFILE=1 \
         MOCK_GUI_REAL="${profile_bundle}/download-video-gui.sh" \
         MOCK_PROFILE_ENGINE_SOURCE="${profile_bundle}/engine-source.sh" \
         MOCK_PROFILE_ENGINE_ARGUMENTS="${engine_arguments_log}" \
@@ -2136,14 +2162,39 @@ assert_gui_profile_menu() {
         MOCK_FILE_SELECTION_ARGS_LOG="${file_selection_log}" \
         "${GUI_UNDER_TEST}"
     read_arguments "${LIST_ARGS_LOG}" profile_arguments
-    assert_array_contains profile_arguments 'Complete video (MKV)' \
-        "${label} complete-video profile"
-    assert_array_contains profile_arguments 'Audio track (native format)' \
-        "${label} audio profile"
+    for row_index in "${!profile_arguments[@]}"; do
+        if [[ ${profile_arguments[row_index]} == TRUE ||
+            ${profile_arguments[row_index]} == FALSE ]]; then
+            row_start=${row_index}
+            break
+        fi
+    done
+    ((row_start >= 0)) || fail "${label}: no radiolist rows."
+    profile_rows=("${profile_arguments[@]:row_start}")
+    assert_equals 4 "${#profile_rows[@]}" "${label} exactly two radiolist rows"
+    assert_equals "${video_label}" "${profile_rows[1]}" "${label} video profile"
+    assert_equals 'Audio track (native format)' "${profile_rows[3]}" "${label} audio profile"
+    for row_index in 0 2; do
+        case ${profile_rows[row_index]} in
+            TRUE)
+                ((selected_count += 1))
+                selected_label=${profile_rows[row_index + 1]}
+                ;;
+            FALSE) ;;
+            *) fail "${label}: invalid radiolist selection state." ;;
+        esac
+    done
+    assert_equals 1 "${selected_count}" "${label} exactly one default selection"
+    if [[ ${expected_profile} == audio ]]; then
+        assert_equals 'Audio track (native format)' "${selected_label}" \
+            "${label} remembered audio selection"
+    else
+        assert_equals "${video_label}" "${selected_label}" \
+            "${label} compatible video selection"
+    fi
     if [[ ${youtube_expected} == true ]]; then
-        assert_array_contains profile_arguments \
-            'YouTube video - Firefox cookies (HLS/MKV)' \
-            "${label} YouTube HLS profile"
+        assert_array_not_contains profile_arguments 'Complete video (MKV)' \
+            "${label} excludes generic complete video"
     else
         assert_array_not_contains profile_arguments \
             'YouTube video - Firefox cookies (HLS/MKV)' \
@@ -2159,11 +2210,11 @@ assert_gui_profile_menu() {
         "${label} real GUI URL-file transfer"
     assert_equals "${youtube_expected}" "${engine_acknowledgement[1]}" \
         "${label} real engine host classification"
-    assert_equals audio "${engine_acknowledgement[2]}" "${label} engine mode"
+    assert_equals "${expected_mode}" "${engine_acknowledgement[2]}" "${label} engine mode"
     assert_equals "${OUTPUT_DIR}" "${engine_acknowledgement[3]}" \
         "${label} engine destination"
     assert_equals true "${engine_acknowledgement[4]}" "${label} machine progress"
-    assert_equals false "${engine_acknowledgement[5]}" "${label} ordinary profile"
+    assert_equals "${expected_hls}" "${engine_acknowledgement[5]}" "${label} HLS profile"
     url_file=${engine_acknowledgement[6]}
     [[ ${url_file} == "${RUNTIME_DIR}/yt-dlp-aria2-downloader-${EUID}/yt-dlp-gui."*/url.txt ]] \
         || fail "${label}: the URL file was not created in the real GUI session."
@@ -2173,20 +2224,28 @@ assert_gui_profile_menu() {
         "${label} supervised GUI worker"
     assert_equals 600 "${engine_acknowledgement[9]}" "${label} private URL-file mode"
     assert_equals 700 "${engine_acknowledgement[10]}" "${label} private session mode"
-    assert_equals 9 "${#engine_arguments[@]}" "${label} engine argument count"
+    assert_equals "${expected_argument_count}" "${#engine_arguments[@]}" \
+        "${label} engine argument count"
     assert_option_value engine_arguments --url-file "${url_file}" \
         "${label} real GUI URL-file argument"
     assert_option_value engine_arguments --output-dir "${OUTPUT_DIR}" \
         "${label} real GUI destination argument"
-    assert_option_value engine_arguments --mode audio "${label} real GUI mode argument"
+    assert_option_value engine_arguments --mode "${expected_mode}" "${label} real GUI mode argument"
+    if [[ ${expected_hls} == true ]]; then
+        assert_array_contains engine_arguments --youtube-hls-firefox \
+            "${label} real GUI HLS argument"
+    else
+        assert_array_not_contains engine_arguments --youtube-hls-firefox \
+            "${label} excludes the HLS argument"
+    fi
     assert_option_value engine_arguments --result-file "${url_file%/*}/result.txt" \
         "${label} real GUI result-file argument"
     assert_array_contains engine_arguments --machine-progress \
         "${label} real GUI machine-progress argument"
     assert_array_not_contains engine_arguments "${requested_url}" \
         "${label} URL absent from engine argv"
-    assert_file_has_line "${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf" \
-        'profile=audio' "${label} real GUI profile persistence"
+    assert_file_has_line "${config_file}" \
+        "profile=${expected_profile}" "${label} real GUI profile persistence"
     [[ ! -e ${url_file%/*} && ! -L ${url_file%/*} ]] \
         || fail "${label}: the private GUI session was not cleaned up."
     [[ ! -s ${MOCK_PLAN_ARG_LOG} &&
@@ -4445,6 +4504,7 @@ test_mock_gui_aria_progress() {
 test_mock_gui_profiles() {
     local profile_bundle="${TEST_ROOT}/profile-engine-bundle"
     local config_file profile_case removed_profile_label requested_url scenario
+    local remembered_profile expected_profile youtube_expected
     local -a false_youtube_cases incompatible_default_arguments list_arguments
     local -a video_gui_arguments youtube_cases youtube_hls_default_arguments
     local -a youtube_hls_gui_arguments
@@ -4482,8 +4542,9 @@ EOF_PROFILE_ENGINE
     chmod 755 -- "${profile_bundle}/download-video.sh"
     youtube_cases=(
         'gui-profile-youtube-root|https://youtube.com/watch?v=profile-root'
+        'gui-profile-youtube-watch|https://www.youtube.com/watch?v=yqS_lW770e8'
         'gui-profile-youtube-subdomain|https://media.youtube.com/watch?v=profile-subdomain'
-        'gui-profile-youtu-be|https://youtu.be/profile-short'
+        'gui-profile-youtu-be|https://youtu.be/yqS_lW770e8?si=Y-P-vV5geLxBUoCc'
         'gui-profile-youtu-be-subdomain|https://media.youtu.be/profile-short-subdomain'
         'gui-profile-nocookie|https://youtube-nocookie.com/embed/profile-nocookie'
         'gui-profile-nocookie-subdomain|https://media.youtube-nocookie.com/embed/profile-nocookie-subdomain'
@@ -4507,7 +4568,7 @@ EOF_PROFILE_ENGINE
         'gui-profile-generic|https://example.com/video'
         'gui-profile-false-name|https://notyoutube.com/video'
         'gui-profile-false-prefix|https://youtube.example.com/video'
-        'gui-profile-false-suffix|https://youtube.com.example.org/video'
+        'gui-profile-false-suffix|https://youtube.com.example.org/watch?v=test'
         'gui-profile-false-short-suffix|https://youtu.be.example.org/video'
         'gui-profile-false-nocookie-suffix|https://youtube-nocookie.com.example.org/video'
         'gui-profile-false-path|https://example.org/youtube.com/video'
@@ -4516,6 +4577,21 @@ EOF_PROFILE_ENGINE
         IFS='|' read -r scenario requested_url <<<"${profile_case}"
         assert_gui_profile_menu "${scenario}" "${requested_url}" false \
             "non-YouTube URL ${requested_url}" "${profile_bundle}"
+    done
+
+    for youtube_expected in true false; do
+        requested_url='https://www.youtube.com/watch?v=yqS_lW770e8'
+        [[ ${youtube_expected} == true ]] || requested_url='https://example.com/video'
+        for remembered_profile in video youtube-hls audio invalid missing; do
+            expected_profile=video
+            [[ ${youtube_expected} == false ]] || expected_profile=youtube-hls
+            [[ ${remembered_profile} != audio ]] || expected_profile=audio
+            assert_gui_profile_menu \
+                "gui-profile-default-${youtube_expected}-${remembered_profile}" \
+                "${requested_url}" "${youtube_expected}" \
+                "YouTube=${youtube_expected} remembered=${remembered_profile}" \
+                "${profile_bundle}" "${remembered_profile}" "${expected_profile}"
+        done
     done
 
     prepare_argument_log 'gui-ytdlp-progress'

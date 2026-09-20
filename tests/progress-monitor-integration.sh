@@ -479,31 +479,56 @@ test_monitor_planning_progress() {
     local generic_three_expected generic_three_max
     local metadata_capture_lines metadata_download_max metadata_preprocess_max
     local private_after_second_max private_first_max
+    local storage_kind
 
-    # Storage information stays visible without advancing the transfer phase.
-    start_scenario local-disk-storage-notice video
-    printf '%s\n' 'YTDLP_STORAGE|local-disk' >>"${LOG_FILE}"
-    wait_for_text "${CAPTURE_FILE}" \
-        'Local disk space is used before copying to the selected destination.' \
-        'local disk requirement is visible before downloading'
-    metadata_preprocess_max=$(max_percentage "${CAPTURE_FILE}")
-    ((metadata_preprocess_max <= 3)) \
-        || fail 'storage notice advanced progress before downloading'
-    printf '%s\n' \
-        'YTDLP_PLAN|media|22|22|' \
-        'YTDLP_PROGRESS_V2|media|22|downloading|110|1000|0|0|0|11.0%|10.24MiB/s|00:31' \
-        >>"${LOG_FILE}"
-    wait_for_text "${CAPTURE_FILE}" \
-        'Downloading the media - 11%' 'download after storage notice'
-    assert_file_contains "${CAPTURE_FILE}" \
-        'Downloading the media - 11% - 10.24MiB/s - 00:31 remaining Local disk space is used before copying to the selected destination.' \
-        'storage notice persists during download'
-    printf '%s\n' 'YTDLP_POSTPROCESS|started|MediaPublication' >>"${LOG_FILE}"
-    wait_for_text "${CAPTURE_FILE}" \
-        'Copying the validated media to the destination...' \
-        'final copy phase is visible'
-    assert_percentages_never_decrease "${CAPTURE_FILE}" 'local disk storage notice'
-    finish_success '/tmp/local-disk-storage-notice.mkv'
+    # Storage diagnostics must not alter the visible phases, speed or ETA.
+    for storage_kind in local network; do
+        start_scenario "${storage_kind}-storage-presentation" video
+        if [[ ${storage_kind} == network ]]; then
+            printf '%s\n' \
+                'YTDLP_STORAGE|local-disk' \
+                'The selected destination requires local disk staging. Media will be copied there after validation.' \
+                'Local media workspace: /tmp/private-workspace-fixture' \
+                'Allow space for downloaded streams and merged/remuxed output on this local disk.' \
+                >>"${LOG_FILE}"
+        fi
+        metadata_capture_lines=$(wc -l <"${CAPTURE_FILE}")
+        wait_for_line_count_at_least "${CAPTURE_FILE}" "$((metadata_capture_lines + 4))" \
+            'storage diagnostics cross monitor cycles without changing the phase'
+        assert_file_has_line "${CAPTURE_FILE}" '# Analyzing the webpage...' \
+            'analysis message stays unchanged'
+        metadata_preprocess_max=$(max_percentage "${CAPTURE_FILE}")
+        ((metadata_preprocess_max <= 3)) \
+            || fail 'storage notice advanced progress before downloading'
+        printf '%s\n' \
+            'YTDLP_PLAN|media|22|22|' \
+            'YTDLP_PROGRESS_V2|media|22|downloading|400|1000|0|0|0|40.0%|21.83MiB/s|00:02' \
+            >>"${LOG_FILE}"
+        wait_for_text "${CAPTURE_FILE}" \
+            'Downloading the media - 40%' 'download after storage diagnostics'
+        assert_file_has_line "${CAPTURE_FILE}" \
+            '# Downloading the media - 40% - 21.83MiB/s - 00:02 remaining' \
+            'percentage, speed and ETA stay intact without a storage suffix'
+        printf '%s\n' 'YTDLP_POSTPROCESS|started|MediaPublication' >>"${LOG_FILE}"
+        wait_for_text "${CAPTURE_FILE}" \
+            'Copying the validated media to the destination...' \
+            'final copy phase is visible'
+        finish_success "/tmp/${storage_kind}-storage-presentation.mkv"
+        assert_file_not_contains "${CAPTURE_FILE}" 'Local disk' \
+            'progress excludes the local disk explanation'
+        assert_file_not_contains "${CAPTURE_FILE}" 'local disk' \
+            'progress excludes staging and space diagnostics'
+        assert_file_not_contains "${CAPTURE_FILE}" 'Local media workspace' \
+            'progress excludes the workspace diagnostic'
+        assert_file_not_contains "${CAPTURE_FILE}" 'YTDLP_STORAGE|' \
+            'storage events are not displayed as text'
+        if [[ ${storage_kind} == network ]]; then
+            assert_file_has_line "${LOG_FILE}" 'YTDLP_STORAGE|local-disk' \
+                'the storage event remains in the diagnostic log'
+            assert_file_contains "${LOG_FILE}" 'requires local disk staging' \
+                'technical storage diagnostics remain in the log'
+        fi
+    done
 
     start_scenario local-disk-storage-malformed video
     printf '%s\n' 'YTDLP_STORAGE|local-disk|unexpected' >>"${LOG_FILE}"

@@ -2022,25 +2022,21 @@ select_profile() {
 
     [[ ${is_youtube} == true || ${is_youtube} == false ]] || return 2
 
-    case ${LAST_PROFILE} in
-        video) default_video=TRUE ;;
-        youtube-hls)
-            if [[ ${is_youtube} == true ]]; then
-                default_youtube_hls=TRUE
-            else
-                default_video=TRUE
-            fi
-            ;;
-        audio) default_audio=TRUE ;;
-        *) default_video=TRUE ;;
-    esac
+    if [[ ${LAST_PROFILE:-} == audio ]]; then
+        default_audio=TRUE
+    elif [[ ${is_youtube} == true ]]; then
+        default_youtube_hls=TRUE
+    else
+        default_video=TRUE
+    fi
 
-    profile_rows=(
-        "${default_video}" "${PROFILE_LABEL_VIDEO}"
-    )
     if [[ ${is_youtube} == true ]]; then
-        profile_rows+=(
+        profile_rows=(
             "${default_youtube_hls}" "${PROFILE_LABEL_YOUTUBE_HLS}"
+        )
+    else
+        profile_rows=(
+            "${default_video}" "${PROFILE_LABEL_VIDEO}"
         )
     fi
     profile_rows+=(
@@ -2067,7 +2063,10 @@ select_profile() {
     fi
 
     case ${selected} in
-        "${PROFILE_LABEL_VIDEO}") selected_profile='video' ;;
+        "${PROFILE_LABEL_VIDEO}")
+            [[ ${is_youtube} == false ]] || return 2
+            selected_profile='video'
+            ;;
         "${PROFILE_LABEL_YOUTUBE_HLS}")
             [[ ${is_youtube} == true ]] || return 2
             selected_profile='youtube-hls'

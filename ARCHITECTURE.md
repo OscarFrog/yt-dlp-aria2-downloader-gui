@@ -121,9 +121,11 @@ claiming post-return immutability.
    independently validated standard locations.
 2. Load `gui.conf` only when it is a regular non-symbolic-link file within the
    64 KiB and 128-line limits. Collect the URL, classify its normalized host
-   with the engine's exact YouTube host set, and omit the authenticated HLS
-   profile for every other host. An incompatible remembered HLS profile falls
-   back to complete video for the current request. Collect the destination,
+   with the engine's exact YouTube host set, and offer exactly two profiles:
+   authenticated Firefox HLS video and native audio for YouTube, complete MKV
+   video and native audio for every other host. A remembered audio profile stays
+   selected; every other saved value, including absent or invalid preferences,
+   selects the compatible video profile for the current URL. Collect the destination,
    then persist only the destination and selected compatible profile; never
    persist the URL.
 3. Create a private temporary session containing a mode-`0600` URL file, live
@@ -336,9 +338,10 @@ qualification.
 
 ## Progress protocol
 
-`YTDLP_STORAGE|local-disk` is a constant, path-free notice emitted when the
-engine selects local media staging. The monitor keeps the local space notice
-visible during transfer without advancing the phase or percentage. The later
+`YTDLP_STORAGE|local-disk` is a constant, path-free diagnostic emitted when the
+engine selects local media staging. It remains in the log; the monitor consumes
+it without changing the visible message, phase or percentage. Storage details
+are not appended to progress messages, which retain speed and ETA. The later
 `MediaPublication` postprocessor event announces the final destination copy.
 
 The GUI captures the engine's human diagnostics and machine records in one

@@ -86,7 +86,7 @@ For an RPM installation, the graphical launcher and application icon are install
 - completed media and post-processed outputs are never overwritten silently;
 - destination-folder selection and preference persistence;
 - MKV video download without re-encoding when the streams are compatible;
-- optional authenticated YouTube HLS fallback using Firefox cookies;
+- authenticated YouTube HLS video profile using Firefox cookies;
 - extraction of the best audio track while preserving its source format when possible;
 - yt-dlp-native interrupted-download resumption when supported by the website;
 - privacy-first cancellation for wrapper-managed direct HTTP(S) aria2
@@ -555,19 +555,24 @@ the graphical interface.
 ### 2. Choose the download mode
 
 The interface classifies the normalized URL host before displaying this menu.
-It always offers:
+For `youtube.com`, `youtu.be`, `youtube-nocookie.com`, and their subdomains,
+it offers exactly:
 
-- **Complete video (MKV)** downloads the best available video and audio streams
-  and combines them in an MKV container;
-- **Audio track (native format)** downloads the best available audio track while
-  preserving its native format whenever possible.
+- **YouTube video - Firefox cookies (HLS/MKV)**, which reads the local Firefox
+  session, downloads an HLS stream and remuxes it to MKV;
+- **Audio track (native format)**, which downloads the best available audio
+  track while preserving its native format whenever possible.
 
-For `youtube.com`, `youtu.be`, `youtube-nocookie.com`, and their subdomains, it
-also offers **YouTube video - Firefox cookies (HLS/MKV)**. This explicit
-authenticated fallback reads the local Firefox session before downloading an
-HLS stream and remuxing it to MKV. It is never shown for another host. If this
-profile was remembered from a previous YouTube download, a later non-YouTube
-request selects **Complete video (MKV)** instead.
+For every other host, it offers exactly:
+
+- **Complete video (MKV)**, which downloads the best available video and audio
+  streams and combines them in an MKV container;
+- **Audio track (native format)**.
+
+A remembered audio selection remains selected. Otherwise the matching video
+profile is selected: YouTube HLS for YouTube, complete video for other sites.
+This also applies to missing, invalid or incompatible saved preferences. The
+CLI engine still supports ordinary `--mode video` for YouTube URLs.
 
 
 ### 3. Choose the destination folder
@@ -738,9 +743,8 @@ compatible.
 
 ### Authenticated YouTube HLS video
 
-The graphical profile `YouTube video - Firefox cookies (HLS/MKV)` is an
-explicit fallback for YouTube sessions that require sign-in and whose ordinary
-HTTPS media URLs return HTTP 403. It adds:
+The graphical profile `YouTube video - Firefox cookies (HLS/MKV)` is the video
+option for recognized YouTube URLs. It uses authenticated HLS and adds:
 
 ```text
 --cookies-from-browser firefox
@@ -850,8 +854,9 @@ Local staging needs space for selected streams, merged media and any HLS
 remux. Before transfer, known sizes are checked with a three-times estimate
 plus 64 MiB of headroom. Unknown sizes, quotas, simultaneous writers and later
 disk exhaustion cannot be predicted; write errors remain failures. The log
-identifies the local workspace. The GUI keeps a local-disk-space notice visible
-during preparation and transfer, then shows a destination-copy phase.
+identifies the local workspace. The progress dialog shows the current phase,
+percentage, speed and estimated time remaining when available, including the
+final destination-copy phase. Local-storage details stay in the diagnostic log.
 Formats, quality selection and audio conversion rules are unchanged. For these
 isolated network sessions, cancellation removes partial state after confirmed
 shutdown; a later request starts anew rather than reusing a previous local

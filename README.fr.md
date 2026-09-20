@@ -90,7 +90,7 @@ Avec le RPM, le lanceur graphique et son icône sont installés automatiquement 
 - médias terminés et sorties de post-traitement jamais écrasés silencieusement ;
 - sélection du dossier de destination et mémorisation des préférences ;
 - vidéo MKV sans réencodage lorsque les flux sont compatibles ;
-- solution de repli YouTube HLS authentifiée facultative avec les cookies Firefox ;
+- profil vidéo YouTube HLS authentifié avec les cookies Firefox ;
 - extraction de la meilleure piste audio avec conservation du format source lorsque possible ;
 - reprise des téléchargements interrompus gérés nativement par yt-dlp lorsque le site le permet ;
 - annulation orientée confidentialité pour les transferts HTTP(S) directs gérés
@@ -582,20 +582,26 @@ l'interface graphique.
 
 ### 2. Choisir le mode de téléchargement
 
-L'interface classe l'hôte normalisé de l'URL avant d'afficher ce menu. Elle
-propose toujours :
-
-- **Complete video (MKV)** télécharge les meilleures pistes vidéo et audio
-  disponibles, puis les rassemble dans un conteneur MKV ;
-- **Audio track (native format)** télécharge la meilleure piste audio disponible
-  en conservant son format natif chaque fois que cela est possible.
-
+L'interface classe l'hôte normalisé de l'URL avant d'afficher ce menu.
 Pour `youtube.com`, `youtu.be`, `youtube-nocookie.com` et leurs sous-domaines,
-elle propose aussi **YouTube video - Firefox cookies (HLS/MKV)**. Ce mode de
-repli authentifié lit la session Firefox locale, télécharge un flux HLS puis le
-remuxe en MKV. Il n'apparaît jamais pour un autre hôte. Si ce profil a été
-mémorisé lors d'un téléchargement YouTube, une requête non-YouTube suivante
-sélectionne **Complete video (MKV)** à sa place.
+elle propose exactement :
+
+- **YouTube video - Firefox cookies (HLS/MKV)**, qui lit la session Firefox
+  locale, télécharge un flux HLS puis le remuxe en MKV ;
+- **Audio track (native format)**, qui télécharge la meilleure piste audio
+  disponible en conservant son format natif chaque fois que cela est possible.
+
+Pour tous les autres hôtes, elle propose exactement :
+
+- **Complete video (MKV)**, qui télécharge les meilleures pistes vidéo et audio
+  disponibles, puis les rassemble dans un conteneur MKV ;
+- **Audio track (native format)**.
+
+Une sélection audio mémorisée reste sélectionnée. Sinon, le profil vidéo
+correspondant est sélectionné : YouTube HLS pour YouTube, vidéo complète pour
+les autres sites. Cette règle vaut aussi pour une préférence absente, invalide
+ou incompatible. Le moteur CLI conserve le mode vidéo ordinaire `--mode video`
+pour les URL YouTube.
 
 
 ### 3. Choisir le dossier de destination
@@ -779,10 +785,9 @@ compatibles.
 
 ### Vidéo YouTube HLS authentifiée
 
-Le profil graphique `YouTube video - Firefox cookies (HLS/MKV)` est un mode de
-repli explicite pour les sessions YouTube nécessitant une authentification,
-notamment lorsque les URL média HTTPS ordinaires retournent une erreur HTTP
-403. Il ajoute les options suivantes :
+Le profil graphique `YouTube video - Firefox cookies (HLS/MKV)` est l'option
+vidéo proposée pour les URL YouTube reconnues. Il utilise HLS authentifié et
+ajoute les options suivantes :
 
     --cookies-from-browser firefox
     --extractor-args youtube:player_client=web_safari
@@ -898,8 +903,10 @@ assemblé et le remux HLS éventuel. Avant le transfert, les tailles connues son
 comparées à l'espace disponible avec une estimation triple et une marge de
 64 Mio. Les tailles inconnues, quotas, écritures concurrentes et saturations
 ultérieures ne sont pas prévisibles ; les erreurs d'écriture restent des
-échecs. Le journal indique l'espace local. La GUI rappelle le besoin d'espace
-disque local pendant la préparation et le transfert, puis affiche l'étape de copie.
+échecs. Le journal indique l'espace local. La fenêtre de progression affiche
+l'étape actuelle, le pourcentage, la vitesse et le temps restant estimé lorsque
+disponibles, y compris l'étape de copie finale vers la destination. Les détails
+du stockage local restent dans le journal de diagnostic.
 La qualité, les formats et les règles audio restent inchangés. Pour ces sessions
 réseau isolées, l'annulation supprime les fichiers partiels après confirmation
 de l'arrêt ; une nouvelle demande recommence sans reprendre les fichiers

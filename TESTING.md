@@ -572,9 +572,13 @@ The automated suite checks, among other things:
 - aria2 diagnostic filters drain the producer's final cancellation message
   before closing, while unexpected redaction failures remain fatal;
 - trimming of leading and trailing whitespace entered in the GUI;
-- exact GUI YouTube-host classification, dynamic removal of the authenticated
-  HLS profile for other hosts, false-domain rejection, and compatible fallback
-  from a remembered YouTube-only profile;
+- exact GUI YouTube-host classification and false-domain rejection, with exactly
+  HLS/Firefox video plus audio for YouTube and complete video plus audio for
+  other hosts; one compatible default selection and persistence for each saved
+  profile, including missing or invalid preferences;
+- unchanged progress messages, percentage, speed and ETA with or without the
+  local-storage event; storage diagnostics remain in the log, while the final
+  destination-copy phase stays visible;
 - native-audio selection with `ba/b`, `best`, and quality `0`;
 - absence of forced MP3, M4A, or Opus output formats;
 - MKV video selection without forced re-encoding;
