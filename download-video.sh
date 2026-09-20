@@ -2661,6 +2661,9 @@ prepare_output_directory() {
             || ! get_path_identity MEDIA_WORKSPACE_IDENTITY "${MEDIA_WORKSPACE}" directory \
             || ! opened_identity=$(stat -Lc '%d:%i' -- "/proc/${BASHPID}/fd/${MEDIA_WORKSPACE_FD}") \
             || [[ ${opened_identity} != "${MEDIA_WORKSPACE_IDENTITY}" ]]; then
+            # A pathname observed after open may identify a replacement, not
+            # the allocated directory. It must not grant cleanup authority.
+            MEDIA_WORKSPACE_IDENTITY=''
             finish_signal_registration
             error 'unable to authenticate the local media workspace.'
             exit 73
@@ -2701,6 +2704,7 @@ prepare_private_work_files() {
             "${PRIVATE_ARIA2_METADATA}" directory \
         || ! opened_identity=$(stat -Lc '%d:%i' -- "/proc/${BASHPID}/fd/${PRIVATE_ARIA2_METADATA_FD}") \
         || [[ ${opened_identity} != "${PRIVATE_ARIA2_METADATA_IDENTITY}" ]]; then
+        PRIVATE_ARIA2_METADATA_IDENTITY=''
         finish_signal_registration
         error 'unable to authenticate the local private metadata directory.'
         exit 73
@@ -2798,13 +2802,18 @@ prepare_private_work_files() {
     fi
     unset URL
 
+    # Replay catchable signals only after cleanup can authenticate both the
+    # allocated staging directory and its complete ownership marker.
+    begin_signal_registration
     if ! PRIVATE_ARIA2_STAGING=$(mktemp -d \
         --tmpdir="${OUTPUT_DIR}" \
         '.yt-dlp-aria2.XXXXXXXX'); then
+        finish_signal_registration
         error 'unable to create the private aria2 staging directory.'
         exit 13
     fi
     if ! chmod 700 -- "${PRIVATE_ARIA2_STAGING}"; then
+        finish_signal_registration
         error 'unable to secure the private aria2 staging directory.'
         exit 13
     fi
@@ -2815,6 +2824,8 @@ prepare_private_work_files() {
             "${PRIVATE_ARIA2_STAGING}" directory \
         || ! opened_identity=$(stat -Lc '%d:%i' -- "/proc/${BASHPID}/fd/${PRIVATE_ARIA2_STAGING_FD}") \
         || [[ ${opened_identity} != "${PRIVATE_ARIA2_STAGING_IDENTITY}" ]]; then
+        PRIVATE_ARIA2_STAGING_IDENTITY=''
+        finish_signal_registration
         error 'unable to identify the private aria2 staging directory.'
         exit 13
     fi
@@ -2823,9 +2834,11 @@ prepare_private_work_files() {
     if ! printf '%s\n' "${PRIVATE_ARIA2_STAGING_MARKER_VALUE}" \
         >"${staging_marker_path}" \
         || ! chmod 600 -- "${staging_marker_path}"; then
+        finish_signal_registration
         error 'unable to initialize private aria2 staging ownership metadata.'
         exit 13
     fi
+    finish_signal_registration
 
     PRIVATE_ARIA2_PLAN="${PRIVATE_ARIA2_METADATA}/plan.json"
     PRIVATE_ARIA2_COOKIE_JAR="${PRIVATE_ARIA2_METADATA}/cookies.txt"
@@ -3588,10 +3601,14 @@ remux_hls_result() {
     if [[ ${MACHINE_PROGRESS} == true ]]; then
         printf 'FFMPEG_PROGRESS_DURATION|%s\n' "${hls_source_duration_us}"
     fi
+    # Keep the temporary pathname, identity and open descriptor one registered
+    # resource before a deferred signal can invoke cleanup.
+    begin_signal_registration
     if ! HLS_REMUX_TMP=$(mktemp \
         --tmpdir="${hls_source_dir}" \
         --suffix='.mkv' \
         '.yt-dlp-remux.XXXXXXXX'); then
+        finish_signal_registration
         emit_machine_postprocess error FFmpegVideoRemuxer
         error 'unable to create the temporary MKV file.'
         exit 13
@@ -3600,11 +3617,13 @@ remux_hls_result() {
     if ! chmod 600 -- "${HLS_REMUX_TMP}" \
         || ! get_path_identity \
             HLS_REMUX_TMP_IDENTITY "${HLS_REMUX_TMP}" regular-file; then
+        finish_signal_registration
         emit_machine_postprocess error FFmpegVideoRemuxer
         error 'unable to secure the temporary MKV file.'
         exit 13
     fi
     if ! exec {HLS_REMUX_FD}<>"${HLS_REMUX_TMP}"; then
+        finish_signal_registration
         emit_machine_postprocess error FFmpegVideoRemuxer
         error 'unable to open the temporary MKV file for authenticated remuxing.'
         exit 13
@@ -3612,10 +3631,12 @@ remux_hls_result() {
     HLS_REMUX_FD_PATH="/proc/${BASHPID}/fd/${HLS_REMUX_FD}"
     # shellcheck disable=SC2310 # Failure rejects an unauthenticated remux descriptor.
     if ! hls_remux_temp_identity_matches; then
+        finish_signal_registration
         emit_machine_postprocess error FFmpegVideoRemuxer
         error 'unable to authenticate the temporary MKV descriptor.'
         exit 13
     fi
+    finish_signal_registration
 
     run_supervised_command \
         ffmpeg \

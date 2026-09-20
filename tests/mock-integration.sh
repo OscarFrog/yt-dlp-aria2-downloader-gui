@@ -6384,6 +6384,360 @@ EOF_CLEANUP_QUIESCENCE
     done
 }
 
+test_mock_signal_unbound_directory_registration() {
+    local source_copy="${TEST_ROOT}/download-video-unbound-directory-source.sh"
+    local harness_path="${TEST_ROOT}/download-video-unbound-directory-harness.sh"
+    local resource case_root expected_status created_path
+    local -a deleted_replacements=()
+
+    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${source_copy}"
+    cat >"${harness_path}" <<'EOF_UNBOUND_DIRECTORY_HARNESS'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1090 # The test passes the engine function-only copy.
+source "$1"
+readonly REGISTRATION_CASE_ROOT=$2
+readonly REGISTRATION_RESOURCE=$3
+readonly PRIVATE_ARIA2_HELPER=$4
+readonly REGISTRATION_OWNER_BASHPID=${BASHPID}
+OUTPUT_DIR="${REGISTRATION_CASE_ROOT}/output"
+OUTPUT_LOCK_ROOT="${REGISTRATION_CASE_ROOT}/lock"
+RESULT_FILE=''
+MACHINE_PROGRESS=false
+URL='https://example.invalid/registration'
+mkdir -m 0700 -- "${OUTPUT_DIR}" "${OUTPUT_LOCK_ROOT}" \
+    "${REGISTRATION_CASE_ROOT}/media-root"
+trap cleanup EXIT
+
+# Force only workspace selection; acquisition and cleanup use real descriptors
+# and the production Python helper. The destination lock has no role here.
+acquire_output_lock() { :; }
+python3() {
+    if [[ $1 == "${PRIVATE_ARIA2_HELPER}" ]]; then
+        case ${2:-} in
+            media-local-safe) return 1 ;;
+            private-root)
+                printf '%s\n' "${REGISTRATION_CASE_ROOT}/media-root"
+                return 0
+                ;;
+        esac
+    fi
+    command python3 "$@"
+}
+
+replace_unbound_directory() {
+    local candidate=''
+    [[ ${BASHPID} == "${REGISTRATION_OWNER_BASHPID}" ]] || return 0
+    case ${REGISTRATION_RESOURCE} in
+        metadata)
+            [[ -n ${PRIVATE_ARIA2_METADATA_FD} && -z ${PRIVATE_ARIA2_METADATA_IDENTITY} ]] \
+                && candidate=${PRIVATE_ARIA2_METADATA}
+            ;;
+        staging)
+            [[ -n ${PRIVATE_ARIA2_STAGING_FD} && -z ${PRIVATE_ARIA2_STAGING_IDENTITY} ]] \
+                && candidate=${PRIVATE_ARIA2_STAGING}
+            ;;
+        workspace)
+            [[ -n ${MEDIA_WORKSPACE_FD} && -z ${MEDIA_WORKSPACE_IDENTITY} ]] \
+                && candidate=${MEDIA_WORKSPACE}
+            ;;
+    esac
+    [[ -n ${candidate} ]] || return 0
+    trap - DEBUG
+    printf '%s\n' "${candidate}" >"${REGISTRATION_CASE_ROOT}/created-path"
+    mv -- "${candidate}" "${REGISTRATION_CASE_ROOT}/original-directory"
+    mkdir -m 0700 -- "${candidate}"
+    printf '%s\n' "${PRIVATE_ARIA2_STAGING_MARKER_VALUE}" \
+        >"${candidate}/${PRIVATE_ARIA2_STAGING_MARKER}"
+    printf 'foreign replacement must survive\n' >"${candidate}/plan.json"
+    # Do not interrupt here: the real path probe must first observe the new
+    # inode, then reject its mismatch with the descriptor of the old inode.
+}
+
+set -T
+trap replace_unbound_directory DEBUG
+if [[ ${REGISTRATION_RESOURCE} == workspace ]]; then
+    prepare_output_directory
+else
+    prepare_private_work_files
+fi
+printf 'FAIL: descriptor/path identity mismatch was accepted\n' >&2
+exit 99
+EOF_UNBOUND_DIRECTORY_HARNESS
+
+    for resource in metadata workspace staging; do
+        case_root="${TEST_ROOT}/unbound-directory-${resource}"
+        mkdir -m 0700 -- "${case_root}"
+        expected_status=73
+        [[ ${resource} != staging ]] || expected_status=13
+        printf 'Mock scenario: unbound-directory-%s\n' "${resource}"
+        assert_status "${expected_status}" \
+            "${resource} acquisition rejects mismatched descriptor and pathname" \
+            timeout 10 bash "${harness_path}" "${source_copy}" "${case_root}" \
+            "${resource}" "${PROJECT_DIR}/private-aria2-plan.py"
+        IFS= read -r created_path <"${case_root}/created-path"
+        if [[ ! -f ${created_path}/plan.json ]] \
+            || [[ $(<"${created_path}/plan.json") != 'foreign replacement must survive' ]]; then
+            printf 'Observed deletion of unbound %s replacement during cleanup.\n' "${resource}" >&2
+            deleted_replacements+=("${resource}")
+        fi
+        [[ -d ${case_root}/original-directory ]] \
+            || fail "The original ${resource} descriptor's directory was removed."
+    done
+    ((${#deleted_replacements[@]} == 0)) \
+        || fail "Failed acquisition deleted unbound replacement directories: ${deleted_replacements[*]}"
+}
+
+test_mock_signal_private_media_registration() {
+    local source_copy="${TEST_ROOT}/download-video-media-registration-source.sh"
+    local harness_path="${TEST_ROOT}/download-video-media-registration-harness.sh"
+    local resource checkpoint signal_name case_root created_path expected_status
+    local -a checkpoints=()
+
+    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${source_copy}"
+    chmod 0600 -- "${source_copy}"
+    cat >"${harness_path}" <<'EOF_MEDIA_REGISTRATION_HARNESS'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1090 # The test passes the engine function-only copy.
+source "$1"
+readonly REGISTRATION_CASE_ROOT=$2
+readonly REGISTRATION_RESOURCE=$3
+readonly REGISTRATION_CHECKPOINT=$4
+readonly REGISTRATION_SIGNAL=$5
+readonly PRIVATE_ARIA2_HELPER=$6
+readonly REGISTRATION_OWNER_BASHPID=${BASHPID}
+OUTPUT_DIR="${REGISTRATION_CASE_ROOT}/output"
+OUTPUT_LOCK_ROOT="${REGISTRATION_CASE_ROOT}/lock"
+RESULT_FILE=''
+MACHINE_PROGRESS=false
+mkdir -m 0700 -- "${OUTPUT_DIR}" "${OUTPUT_LOCK_ROOT}"
+URL='https://example.invalid/registration'
+
+if [[ ${REGISTRATION_RESOURCE} == remux ]]; then
+    printf 'repaired source must survive\n' >"${OUTPUT_DIR}/source.ts"
+    PATH_RECORD_TMP="${REGISTRATION_CASE_ROOT}/path-record"
+    printf '%s\n' "${OUTPUT_DIR}/source.ts" >"${PATH_RECORD_TMP}"
+    open_private_path_record "${PATH_RECORD_TMP}"
+fi
+
+trap cleanup EXIT
+trap 'request_shutdown HUP 129' HUP
+trap 'request_shutdown INT 130' INT
+trap 'request_shutdown TERM 143' TERM
+
+inject_media_signal() {
+    [[ ! -e ${REGISTRATION_CASE_ROOT}/injected ]] || return 0
+    printf '%s\n' "${REGISTRATION_SIGNAL}" >"${REGISTRATION_CASE_ROOT}/injected"
+    kill "-${REGISTRATION_SIGNAL}" -- "${REGISTRATION_OWNER_BASHPID}"
+}
+
+mktemp() {
+    local created=''
+    created=$(command mktemp "$@") || return
+    if [[ ${created%/*} == "${OUTPUT_DIR}" &&
+        (${created##*/} == .yt-dlp-aria2.* ||
+            ${created##*/} == .yt-dlp-remux.*.mkv) ]]; then
+        printf '%s\n' "${created}" >"${REGISTRATION_CASE_ROOT}/created-path"
+        if [[ ${REGISTRATION_CHECKPOINT} == create ]]; then
+            # Deliver after creation but before the command substitution has
+            # returned the path to the engine's registration variable.
+            inject_media_signal
+        fi
+    fi
+    printf '%s\n' "${created}"
+}
+
+chmod() {
+    local candidate=${!#}
+    if [[ ${REGISTRATION_CHECKPOINT} == chmod-failure &&
+        -f ${REGISTRATION_CASE_ROOT}/created-path &&
+        ${candidate} == "$(<"${REGISTRATION_CASE_ROOT}/created-path")" ]]; then
+        inject_media_signal
+        return 1
+    fi
+    command chmod "$@"
+}
+
+stat() {
+    local candidate=${!#}
+    if [[ ${REGISTRATION_CHECKPOINT} == fd-failure && $1 == -Lc &&
+        ((${REGISTRATION_RESOURCE} == staging &&
+            -n ${PRIVATE_ARIA2_STAGING_FD} &&
+            ${candidate} == "/proc/${BASHPID}/fd/${PRIVATE_ARIA2_STAGING_FD}") ||
+            (${REGISTRATION_RESOURCE} == remux &&
+                -n ${HLS_REMUX_FD_PATH} && ${candidate} == "${HLS_REMUX_FD_PATH}")) ]]; then
+        inject_media_signal
+        return 1
+    fi
+    command stat "$@"
+}
+
+replace_media_path() {
+    if [[ ${REGISTRATION_RESOURCE} == staging ]]; then
+        mv -- "${PRIVATE_ARIA2_STAGING}" "${REGISTRATION_CASE_ROOT}/original-staging"
+        mkdir -m 0700 -- "${PRIVATE_ARIA2_STAGING}"
+        # A plausible marker and allowed child cannot authenticate a changed
+        # directory, even when its identity is observed after the FD opened.
+        printf '%s\n' "${PRIVATE_ARIA2_STAGING_MARKER_VALUE}" \
+            >"${PRIVATE_ARIA2_STAGING}/${PRIVATE_ARIA2_STAGING_MARKER}"
+        printf 'foreign replacement must survive\n' \
+            >"${PRIVATE_ARIA2_STAGING}/item-001.download"
+    else
+        mv -- "${HLS_REMUX_TMP}" "${REGISTRATION_CASE_ROOT}/original-remux"
+        printf 'foreign replacement must survive\n' >"${HLS_REMUX_TMP}"
+    fi
+}
+
+inject_media_checkpoint() {
+    local command_under_test=$1
+    local matched=false
+    local complete=false
+
+    [[ ${BASHPID} == "${REGISTRATION_OWNER_BASHPID}" &&
+        ! -e ${REGISTRATION_CASE_ROOT}/injected ]] || return 0
+    if [[ ${REGISTRATION_RESOURCE} == staging ]]; then
+        if [[ -n ${PRIVATE_ARIA2_STAGING_IDENTITY} &&
+            -n ${PRIVATE_ARIA2_STAGING_FD} &&
+            -f ${PRIVATE_ARIA2_STAGING}/${PRIVATE_ARIA2_STAGING_MARKER} ]]; then
+            complete=true
+        fi
+        case ${REGISTRATION_CHECKPOINT} in
+            chmod)
+                [[ ${command_under_test} == 'exec {PRIVATE_ARIA2_STAGING_FD}'* ]] \
+                    && matched=true
+                ;;
+            fd | replacement-before-identity)
+                [[ -n ${PRIVATE_ARIA2_STAGING_FD} &&
+                    -z ${PRIVATE_ARIA2_STAGING_IDENTITY} ]] && matched=true
+                ;;
+            identity)
+                [[ -n ${PRIVATE_ARIA2_STAGING_IDENTITY} ]] && matched=true
+                ;;
+            marker)
+                [[ ${command_under_test} == 'chmod 600 -- "${staging_marker_path}"' &&
+                    ${staging_marker_path:-} == "${PRIVATE_ARIA2_STAGING}/${PRIVATE_ARIA2_STAGING_MARKER}" ]] \
+                    && matched=true
+                ;;
+            finish | replacement)
+                [[ ${complete} == true &&
+                    (${command_under_test} == finish_signal_registration ||
+                        ${command_under_test} == PRIVATE_ARIA2_PLAN=*) ]] && matched=true
+                ;;
+        esac
+    else
+        [[ -n ${HLS_REMUX_TMP_IDENTITY} && -n ${HLS_REMUX_FD_PATH} ]] \
+            && complete=true
+        case ${REGISTRATION_CHECKPOINT} in
+            chmod)
+                [[ ${command_under_test} == 'get_path_identity HLS_REMUX_TMP_IDENTITY '* ]] \
+                    && matched=true
+                ;;
+            identity)
+                [[ -n ${HLS_REMUX_TMP_IDENTITY} && -z ${HLS_REMUX_FD} ]] && matched=true
+                ;;
+            fd)
+                [[ -n ${HLS_REMUX_FD} && -z ${HLS_REMUX_FD_PATH} ]] && matched=true
+                ;;
+            replacement-before-fd)
+                [[ ${command_under_test} == 'exec {HLS_REMUX_FD}'* ]] && matched=true
+                ;;
+            finish | replacement)
+                [[ ${complete} == true &&
+                    (${command_under_test} == finish_signal_registration ||
+                        ${command_under_test} == run_supervised_command*) ]] && matched=true
+                ;;
+        esac
+    fi
+    [[ ${matched} == true ]] || return 0
+    trap - DEBUG
+    if [[ ${REGISTRATION_CHECKPOINT} == replacement* ]]; then
+        replace_media_path
+    fi
+    inject_media_signal
+}
+
+# Only the duration probe is a stand-in. Acquisition, authentication, signal
+# handlers and cleanup are loaded unchanged from the production engine.
+probe_duration_microseconds() { printf -v "$1" '%s' 1000000; }
+run_supervised_command() {
+    printf 'FAIL: remux command started before signal replay\n' >&2
+    exit 99
+}
+set -T
+trap 'inject_media_checkpoint "${BASH_COMMAND}"' DEBUG
+if [[ ${REGISTRATION_RESOURCE} == staging ]]; then
+    prepare_private_work_files
+else
+    remux_hls_result
+fi
+printf 'FAIL: test did not inject a signal\n' >&2
+exit 99
+EOF_MEDIA_REGISTRATION_HARNESS
+    chmod 0600 -- "${harness_path}"
+
+    for resource in staging remux; do
+        checkpoints=(create chmod identity fd finish replacement chmod-failure fd-failure)
+        if [[ ${resource} == staging ]]; then
+            checkpoints+=(marker replacement-before-identity)
+        else
+            checkpoints+=(replacement-before-fd)
+        fi
+        for checkpoint in "${checkpoints[@]}"; do
+            for signal_name in HUP INT TERM; do
+                case_root="${TEST_ROOT}/media-registration-${resource}-${checkpoint}-${signal_name}"
+                mkdir -m 0700 -- "${case_root}"
+                case ${signal_name} in
+                    HUP) expected_status=129 ;;
+                    INT) expected_status=130 ;;
+                    TERM) expected_status=143 ;;
+                    *) fail "Unsupported media-registration signal: ${signal_name}" ;;
+                esac
+                printf 'Mock scenario: media-registration-%s-%s-%s\n' \
+                    "${resource}" "${checkpoint}" "${signal_name}"
+                assert_status "${expected_status}" \
+                    "${resource} ${checkpoint} acquisition preserves ${signal_name} status" \
+                    timeout 10 bash "${harness_path}" "${source_copy}" "${case_root}" \
+                    "${resource}" "${checkpoint}" "${signal_name}" \
+                    "${PROJECT_DIR}/private-aria2-plan.py"
+                assert_file_has_line "${case_root}/injected" "${signal_name}" \
+                    'the requested acquisition signal was actually delivered'
+                IFS= read -r created_path <"${case_root}/created-path"
+                case ${checkpoint} in
+                    replacement*)
+                        if [[ ${resource} == staging ]]; then
+                            assert_file_has_line "${created_path}/item-001.download" \
+                                'foreign replacement must survive' \
+                                'acquisition cleanup preserves a replaced staging directory'
+                        else
+                            assert_file_has_line "${created_path}" \
+                                'foreign replacement must survive' \
+                                'acquisition cleanup preserves a replaced remux inode'
+                        fi
+                        ;;
+                    chmod-failure | fd-failure)
+                        [[ -e ${created_path} ]] \
+                            || fail "Failed authentication deleted ambiguous ${resource}: ${created_path}"
+                        assert_text_contains "${ASSERT_OUTPUT}" 'preserving' \
+                            'failed authentication reports conservative preservation'
+                        ;;
+                    *)
+                        [[ ! -e ${created_path} && ! -L ${created_path} ]] \
+                            || fail "Acquisition ${signal_name} stranded authenticated ${resource}: ${created_path}"
+                        ;;
+                esac
+                assert_directory_empty "${case_root}/lock" \
+                    'media acquisition signal cleans the authenticated metadata parent'
+                if [[ ${resource} == remux ]]; then
+                    assert_file_has_line "${case_root}/output/source.ts" \
+                        'repaired source must survive' \
+                        'remux acquisition cancellation preserves the repaired source'
+                fi
+            done
+        done
+    done
+}
+
 test_mock_signal_private_record_registration() {
     local source_copy="${TEST_ROOT}/download-video-record-registration-source.sh"
     local harness_path="${TEST_ROOT}/download-video-record-registration-harness.sh"
@@ -8981,6 +9335,8 @@ test_mock_signal_zenity_status() {
 }
 
 run_mock_signal_group() {
+    test_mock_signal_unbound_directory_registration
+    test_mock_signal_private_media_registration
     test_mock_signal_cli_lost_group_leader
     test_mock_signal_transport_preserves_active_input
     test_mock_signal_cli_download

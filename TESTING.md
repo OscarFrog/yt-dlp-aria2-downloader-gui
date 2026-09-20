@@ -566,6 +566,11 @@ The automated suite checks, among other things:
   escapes; byte-oriented redaction of malformed UTF-8 diagnostic URL tokens;
 - graceful-signal deferral during private result-record creation, including
   repeated signals and preservation of a replaced record inode;
+- HUP/INT/TERM during staging/remux allocation, permissions, identity, descriptor
+  and marker registration, with authenticated cleanup before transport starts
+  and conservative preservation after acquisition failures or replacement;
+  directory replacement between descriptor open and path-identity capture must
+  not grant deletion authority for metadata, media workspaces or aria2 staging;
 - preservation of active temporary files, inherited lock ownership, and the
   original exit status when bounded worker shutdown cannot be confirmed;
 - aria2 diagnostic filters drain the producer's final cancellation message

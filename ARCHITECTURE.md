@@ -210,7 +210,14 @@ to the current single native-audio profile.
    use existing XDG/default cache directories, then `/var/tmp`, excluding tmpfs.
    Export the private session as yt-dlp's TMPDIR/TMP/TEMP so Firefox temporary
    database copies also stay private. Catchable signals are deferred while
-   workspace/path-record descriptors and identities are registered.
+   workspace/path-record descriptors and identities are registered. The media
+   staging acquisition also registers its complete ownership marker before
+   replaying a signal; the HLS remux acquisition registers and cross-checks its
+   pathname, inode and open descriptor before replay or FFmpeg launch. Failed
+   directory descriptor/path bindings discard the observed pathname identity
+   before cleanup: an inode seen after replacement is not deletion authority.
+   Acquisition failures preserve ambiguous resources rather than weakening
+   cleanup checks, and deferred signals keep their original exit status.
 6. Run a metadata-only yt-dlp planning pass and ask
    `private-aria2-plan.py classify` whether the selected formats may use the
    direct aria2 path.
