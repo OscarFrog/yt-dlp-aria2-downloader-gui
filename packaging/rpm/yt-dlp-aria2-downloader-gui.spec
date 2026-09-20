@@ -86,6 +86,9 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sun Sep 20 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.28-1
+- Harden production invariants after full code audit
+
 * Sun Sep 20 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.27-1
 - Simplify GUI progress and cover CIFS workspace cleanup
 

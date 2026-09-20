@@ -41,7 +41,7 @@ direct downloads through a private aria2 input file, and FFmpeg to merge,
 remux, or extract streams. HTTPS automatically stays on yt-dlp's native
 transport when the installed aria2 TLS backend lacks the required certificate
 validation hardening. DASH and HLS streams also remain native. The current
-development version is **2.3.27**.
+development version is **2.3.28**.
 The latest published package release is **2.3.27**.
 
 ## Recommended installation
@@ -245,8 +245,8 @@ version below, this command is applicable only after its signed tag is created:
 
 ```bash
 gh workflow run release.yml \
-  --ref v2.3.27 \
-  -f tag=v2.3.27 \
+  --ref v2.3.28 \
+  -f tag=v2.3.28 \
   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
@@ -929,8 +929,8 @@ tracked pre-push guard using
 [the version procedure](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#version-coherence-and-release-preparation).
 Development CI artifacts are identified by source SHA and run/attempt, not by
 the package version alone. A published tag and its assets cannot be reused for
-different contents. Preparing references to future packages does not publish
-them; tagging and publication remain separately authorized operations.
+different contents. Preparing candidate source metadata does not publish
+packages; tagging and publication remain separately authorized operations.
 
 For Codex work, open the repository itself as the project. The
 [session setup and task routes](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#codex-session-setup-and-task-routing)

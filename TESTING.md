@@ -169,7 +169,7 @@ new validation. Never reuse a published tag/version/assets for different bytes.
 | `install-fedora.sh` → `APP_VERSION`; `test-static.sh` → `EXPECTED_VERSION` | Must equal the source version |
 | Development paragraph and manual release commands in both READMEs; leading versioned CHANGELOG and RPM `%changelog` entries | Must identify the same source version |
 | RPM `%{project_version}`, DEB/ZIP builders | Derive/validate the requested package version against the engine |
-| `EXPECTED_PUBLISHED_VERSION` and README asset references | Describe the actual published version during ordinary development; alignment with a future target is an explicit release-preparation operation |
+| `EXPECTED_PUBLISHED_VERSION` and README asset references | Describe the latest immutable published version; advance them only after that release exists and has passed the post-publication verification |
 | Signed `vX.Y.Z` tag and release preflight | Separately authorized identity, qualified contents and publication prerequisites |
 
 Check local coherence before expensive validation, without Git or network:
@@ -221,10 +221,12 @@ of the same unpublished target is a no-op. A leading `## Unreleased` changelog
 section is promoted into the chosen target with its accumulated notes. The helper preserves published
 references and file modes, stages replacements and backups, and rolls back
 controlled failures. It is for isolated source trees, not concurrent writers
-or a crash-atomic multi-file transaction. Then explicitly align future package
-references with `scripts/update-published-version.py` when preparing the exact
-commit to tag, and qualify that tree. Prepared references do not assert that
-assets already exist. The signed-tag release preflight remains mandatory.
+or a crash-atomic multi-file transaction. It deliberately preserves
+`EXPECTED_PUBLISHED_VERSION` and the README asset references: until immutable
+publication completes, they continue to describe the previous published
+release. After the complete release workflow succeeds,
+`scripts/update-published-version.py` performs the separately reviewed
+post-publication alignment. The signed-tag release preflight remains mandatory.
 
 Enable the additional Git guard once per checkout. First inspect the existing
 effective `core.hooksPath` and `pre-push` hook; do not overwrite another hook or
@@ -1100,12 +1102,12 @@ version and runs the same qualification without changing PR pins.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the exact-source qualification proof and release-specific identity checks, verifies
-tag ancestry and project versions, and requires the published RPM, DEB, ZIP,
-and verification references in both tagged READMEs to match that tag before it
-builds immutable artifacts. It then resolves the previous semantic-version
-release. This guard is intentionally pre-publication: the Fedora bootstrap is
-version locked, and post-release documentation cannot repair README bytes
-already embedded in a package or source archive.
+tag ancestry, project versions, and coherent source/published-release metadata
+before it builds immutable artifacts. It then resolves the previous
+semantic-version release. This guard is intentionally pre-publication: the
+candidate source version must match the tag, while README asset references
+continue to identify the latest immutable release until post-publication
+documentation alignment has completed.
 
 That previous release must be immutable. Its exact published RPM and DEB are
 downloaded and verified with the published SHA256SUMS, `gh release verify`,
@@ -1252,9 +1254,8 @@ is a **tag** policy. It also verifies Immutable Releases, exactly one required
 reviewer, that the reviewer matches the authenticated GitHub account, that
 self-review remains allowed for this single-maintainer mode, secret scope, the
 pinned public certificate, the dedicated signing subkey,
-signed-tag/HEAD/version identity, and exact alignment between the tag version
-and the published-asset references that will be embedded in the ZIP, RPM, and
-DEB. It warns when the signing subkey is within 90 days of expiry.
+signed-tag/HEAD/version identity, and source/published-release metadata
+coherence. It warns when the signing subkey is within 90 days of expiry.
 
 For manual workflow recovery, invoke the workflow from the exact same tag:
 

@@ -28,7 +28,7 @@ fi
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 # The development tree can lead the latest installable GitHub release. Keep the
 # two contracts explicit so README package names never advertise absent assets.
-readonly EXPECTED_VERSION='2.3.27'
+readonly EXPECTED_VERSION='2.3.28'
 readonly EXPECTED_PUBLISHED_VERSION='2.3.27'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SOURCE_INVENTORY_FILE=''
@@ -3296,8 +3296,8 @@ test_static_release_contracts() {
         'release validates French README development version'
     # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        'python3 -B scripts/update-published-version.py --check "${version}"' \
-        'release binds packaged documentation to the release tag'
+        'python3 -B scripts/check-push-version.py coherence' \
+        'release preserves coherent source and published-release documentation'
     for release_workflow in \
         "${SCRIPT_DIR}/.github/workflows/packages.yml" \
         "${SCRIPT_DIR}/.github/workflows/release.yml"; do
@@ -3624,8 +3624,8 @@ test_static_release_contracts() {
         'unable to query the project version.' \
         'release preflight diagnoses project-version lookup failure'
     assert_file_contains "${SCRIPT_DIR}/scripts/release-preflight.sh" \
-        "--check \"\${version}\"" \
-        'release preflight binds packaged documentation to the release tag'
+        'scripts/check-push-version.py coherence' \
+        'release preflight validates source and published-release coherence'
 }
 
 test_static_cleanup_and_qualification_contracts() {

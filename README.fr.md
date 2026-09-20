@@ -43,7 +43,7 @@ FFmpeg pour fusionner, remuxer ou extraire les flux. HTTPS repasse
 automatiquement sur le transport natif de yt-dlp lorsque le backend TLS d'aria2
 n'offre pas le durcissement requis de validation des certificats. Les flux DASH
 et HLS restent eux aussi natifs.
-La version de développement actuelle est la **2.3.27**.
+La version de développement actuelle est la **2.3.28**.
 La dernière release de paquets publiée est la **2.3.27**.
 
 ## Installation recommandée
@@ -264,7 +264,7 @@ version de développement ci-dessous, cette commande ne s'applique qu'après la
 création de son tag signé :
 
 ```bash
-gh workflow run release.yml   --ref v2.3.27   -f tag=v2.3.27   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref v2.3.28   -f tag=v2.3.28   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Le workflow refuse indépendamment toute exécution manuelle dont le type de ref,
@@ -990,7 +990,7 @@ Exécutez le contrôle de cohérence et activez le hook pre-push selon
 Les artefacts CI de développement sont identifiés par leur SHA source et leur
 run/tentative, pas uniquement par leur version de paquet. Un tag publié et ses
 assets ne peuvent pas servir à distribuer un contenu différent. Préparer les
-références de futurs paquets ne les publie pas ; tag et publication restent
+métadonnées source d'un candidat ne publie pas de paquets ; tag et publication restent
 des opérations autorisées séparément.
 
 Pour travailler avec Codex, ouvrez le dépôt lui-même comme projet. La
