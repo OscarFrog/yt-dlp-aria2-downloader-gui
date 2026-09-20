@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 """yt-dlp-aria2-downloader-gui: scripts/check-push-version.py.
 
-Check development versions before validation and in the Git pre-push hook.
+Check version coherence for source pushes and plan explicit release preparation.
 Read version declarations as data; never execute a candidate or remote tree.
 This check neither edits versions nor fetches objects, pushes refs or makes tags.
 """
@@ -84,8 +84,8 @@ def git(*arguments):
         process.stderr.close()
     if process.returncode:
         raise CheckError(
-            "Git could not read the version baseline. Check the remote connection "
-            "and fetch its main/target branch objects before retrying."
+            "Git could not read version-check metadata. Check the remote connection "
+            "and fetch main objects if requesting source or release preparation context."
         )
     if len(output) > MAX_BYTES:
         raise CheckError("Git version metadata exceeds the supported size.")
@@ -242,40 +242,47 @@ def remote_catalog(remote, branches):
         if ref.startswith("refs/tags/v") and SEMVER.fullmatch(ref[11:]):
             tags.append(version_tuple(ref[11:]))
     if "refs/heads/main" not in refs:
-        raise CheckError("The destination remote must have a main branch to establish its version.")
-    baseline = max([object_version(refs["refs/heads/main"]), *tags])
-    return refs, baseline
+        raise CheckError("The destination remote must have a main branch to establish its source identity.")
+    # Ordinary pushes need remote identities, not remote version objects.
+    # Numeric tags are a conservative release-preparation floor only.
+    return refs, max(tags, default=(0, 0, 0))
 
 
-def next_version_metadata(remote, branch):
-    """Bind the next PATCH to one fresh main/target/tag advertisement."""
+def source_context_metadata(remote, branch):
+    """Bind automation to one live main/target/tag advertisement, without a bump."""
     ref = f"refs/heads/{branch}"
     git("check-ref-format", ref)
-    refs, floor = remote_catalog(remote, {ref})
-    if ref in refs:
-        floor = max(floor, object_version(refs[ref]))
+    refs, published_floor = remote_catalog(remote, {ref})
     catalog = b"".join(sorted(
         f"{oid}\t{name}\n".encode("utf-8") for name, oid in refs.items()
     ))
-    return {
+    metadata = {
         "schema_version": 1,
         "remote": remote,
         "branch": branch,
         "main_sha": refs["refs/heads/main"],
         "target_sha": refs.get(ref, "0" * len(refs["refs/heads/main"])),
-        "floor_version": version_text(floor),
-        "next_version": version_text(next_patch(floor)),
+        "current_version": version_text(object_version(refs["refs/heads/main"])),
         "refs_sha256": hashlib.sha256(catalog).hexdigest(),
     }
+    return metadata, published_floor
 
 
-def require_increase(candidate, baseline):
-    if candidate <= baseline:
-        raise CheckError(
-            f"Source push refused: version {version_text(candidate)} must be newer than "
-            f"{version_text(baseline)}. Prepare {version_text(next_patch(baseline))} (or the requested "
-            "higher version), update all linked metadata, validate and commit before pushing."
-        )
+def next_version_metadata(remote, branch):
+    """Recommend a release PATCH, retaining an already prepared unpublished version.
+
+    This is an explicit preparation aid, not push admissibility or authority to
+    publish. Working-branch versions do not raise the release floor. A maintainer
+    still selects MAJOR/MINOR/PATCH for the accumulated changes and verifies the
+    release's immutable identity and publication prerequisites separately.
+    """
+    metadata, floor = source_context_metadata(remote, branch)
+    current = version_tuple(metadata["current_version"])
+    metadata.update(
+        floor_version=version_text(floor),
+        next_version=version_text(max(current, next_patch(floor))),
+    )
+    return metadata
 
 
 def parse_updates(data):
@@ -298,23 +305,14 @@ def check_hook(remote, data):
     updates = parse_updates(data)
     if not updates:
         return  # Deletions, tags and no-op pushes do not publish new source commits.
-    candidates = {
-        oid: coherent_version(lambda path, oid=oid: object_source(oid, path))
-        for oid in {oid for oid, _, _ in updates}
-    }
-    refs, baseline = remote_catalog(remote, {ref for _, ref, _ in updates})
-    versions = {}
-    for local_oid, remote_ref, remote_oid in updates:
+    for oid in {oid for oid, _, _ in updates}:
+        coherent_version(lambda path, oid=oid: object_source(oid, path))
+    refs, _ = remote_catalog(remote, {ref for _, ref, _ in updates})
+    for _, remote_ref, remote_oid in updates:
         advertised = refs.get(remote_ref, "0" * len(remote_oid))
         if advertised != remote_oid:
             raise CheckError("The destination branch changed during the check; retry against its fresh state.")
-        floor = baseline
-        if set(remote_oid) != {"0"}:
-            if remote_oid not in versions:
-                versions[remote_oid] = object_version(remote_oid)
-            floor = max(floor, versions[remote_oid])
-        require_increase(candidates[local_oid], floor)
-    print("Pre-push version check passed for all source updates.", file=sys.stderr)
+    print("Pre-push version coherence passed for all source updates; no bump is required.", file=sys.stderr)
 
 
 def main(argv=None):
@@ -322,12 +320,15 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     coherence = commands.add_parser("coherence", help="check all linked version metadata offline")
     coherence.add_argument("--root", type=Path, help="alternate source tree for isolated qualification")
-    check = commands.add_parser("check", help="check the working version before running validation")
+    check = commands.add_parser("check", help="check working version coherence and the intended remote")
     check.add_argument("--remote", default="origin")
     check.add_argument("--branch", help="destination branch; defaults to the current local branch")
-    next_version = commands.add_parser("next-version", help="read a fresh automation version baseline as JSON")
+    context = commands.add_parser("source-context", help="read fresh automation source identities as JSON")
+    context.add_argument("--remote", default="origin")
+    context.add_argument("--branch", required=True, help="destination automation branch")
+    next_version = commands.add_parser("next-version", help="recommend a version for explicit release preparation")
     next_version.add_argument("--remote", default="origin")
-    next_version.add_argument("--branch", required=True, help="destination automation branch")
+    next_version.add_argument("--branch", required=True, help="release preparation branch identity")
     hook = commands.add_parser("hook", help="Git pre-push protocol; validates committed objects")
     hook.add_argument("remote")
     args = parser.parse_args(argv)
@@ -337,21 +338,21 @@ def main(argv=None):
             print(f"Source and published version metadata are coherent (development {version_text(version)}).")
         elif args.command == "hook":
             check_hook(args.remote, sys.stdin.buffer.read(MAX_BYTES + 1))
+        elif args.command == "source-context":
+            metadata, _ = source_context_metadata(args.remote, args.branch)
+            print(json.dumps(metadata, sort_keys=True))
         elif args.command == "next-version":
             print(json.dumps(next_version_metadata(args.remote, args.branch), sort_keys=True))
         else:
             root = Path(git("rev-parse", "--show-toplevel").decode("utf-8").removesuffix("\n"))
-            candidate = worktree_version(root)
+            worktree_version(root)
             branch = args.branch
             if branch is None:
                 branch = git("symbolic-ref", "--quiet", "--short", "HEAD").decode("utf-8").strip()
             ref = f"refs/heads/{branch}"
             git("check-ref-format", ref)
-            refs, floor = remote_catalog(args.remote, {ref})
-            if ref in refs:
-                floor = max(floor, object_version(refs[ref]))
-            require_increase(candidate, floor)
-            print("Working version passes; validate and commit this tree before pushing.")
+            remote_catalog(args.remote, {ref})
+            print("Working version coherence and remote checks pass; ordinary source pushes need no bump.")
         return 0
     except CheckError as error:
         print(f"Error: {error}", file=sys.stderr)

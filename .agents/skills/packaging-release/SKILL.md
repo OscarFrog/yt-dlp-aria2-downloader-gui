@@ -29,11 +29,12 @@ A code or documentation task does not authorize creating a tag, signing or
 publishing packages, publishing a release, or changing secrets, environments,
 or repository rules. Stop for explicit authorization at that boundary.
 
-For an authorized source push, follow the standing version-before-push rule in
-`AGENTS.md`: prepare the coherent PATCH increment before expensive tests without
-asking for separate version approval. Use `scripts/check-push-version.py check`
-for that early check and the tracked pre-push hook for the committed objects.
-The signed-tag publication preflight is a separate release-only boundary.
+For an authorized source push, follow the release-preparation version policy in
+`AGENTS.md`: preserve coherent versions without an automatic increment. Use
+`scripts/check-push-version.py check` for that early check and the tracked
+pre-push hook for the committed objects. Choose a new version only during
+explicit release preparation. The signed-tag publication preflight remains a
+separate release-only boundary.
 
 ## Validate
 

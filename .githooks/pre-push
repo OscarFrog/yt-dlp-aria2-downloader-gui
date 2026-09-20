@@ -3,7 +3,7 @@
 # ==============================================================================
 # Project     : yt-dlp-aria2-downloader-gui
 # File        : .githooks/pre-push
-# Purpose     : Refuse source pushes whose committed version has not increased.
+# Purpose     : Validate coherent committed version metadata before source pushes.
 # ==============================================================================
 
 set -euo pipefail

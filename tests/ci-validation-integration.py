@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1047,6 +1048,133 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
                 self.assertIn(old, text)
                 with self.assertRaises(AssertionError):
                     self.assert_required_stress_gate(text.replace(old, new, 1))
+
+
+class VersionBoundaryTests(unittest.TestCase):
+    """Replay real workflow scripts with inert remote-read fixtures, never GitHub."""
+
+    @staticmethod
+    def step(workflow, name):
+        text = (PROJECT / ".github/workflows" / workflow).read_text()
+        block = text.split("      - name: " + name + "\n", 1)[1]
+        block = block.split("\n      - ", 1)[0].split("        run: |\n", 1)[1]
+        return "\n".join(line[10:] for line in block.splitlines()
+                         if line.startswith("          ")) + "\n"
+
+    def test_development_artifact_names_bind_source_and_run_across_consumer_reruns(self):
+        text = (PROJECT / ".github/workflows/packages.yml").read_text()
+        rpm_names = re.findall(r"(?m)^          name: (rpm-under-test-.+)$", text)
+        # Producer and consumer share a run-scoped identity even if only the
+        # consumer is rerun. Attempt metadata belongs to the artifact producer.
+        self.assertEqual(rpm_names, [
+            "rpm-under-test-${{ github.sha }}-${{ github.run_id }}",
+            "rpm-under-test-${{ github.sha }}-${{ github.run_id }}",
+        ])
+        self.assertIn("name: deb-under-test-${{ github.sha }}-${{ github.run_id }}", text)
+
+    def test_ordinary_same_version_package_candidate_keeps_real_upgrade_baseline(self):
+        script = self.step("packages.yml", "Resolve previous semantic-version release")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            engine = root / "download-video.sh"
+            engine.write_text('#!/bin/bash\nprintf "download-video.sh version 2.3.26\\n"\n')
+            engine.chmod(0o755)
+            fixture = r'''
+git() {
+    case $1 in
+        rev-parse) printf '%s\n' "${CHECK_COMMIT}" ;;
+        merge-base) [[ ${CHECK_ANCESTRY} == yes ]] ;;
+        *) printf 'Unexpected Git operation\n' >&2; return 99 ;;
+    esac
+}
+gh() {
+    [[ $1 == api ]] || return 99
+    [[ ${CHECK_API_FAILURE} == no ]] || return 17
+    printf '%s\n' "${CHECK_RELEASES}"
+}
+'''
+            for releases, ancestry, api_failure, expected in (
+                    ("v99.0.0\nv2.3.26\nv2.3.17", "yes", "no", 0),
+                    ("v2.3.26\nv2.3.17", "no", "no", 65),
+                    ("v2.3.26", "yes", "no", 65),
+                    ("v2.3.26\nv2.3.17", "yes", "yes", 17)):
+                with self.subTest(releases=releases, ancestry=ancestry, api_failure=api_failure):
+                    output = root / "output"
+                    output.unlink(missing_ok=True)
+                    env = dict(os.environ, GITHUB_OUTPUT=str(output), CHECK_COMMIT=SOURCE,
+                               GITHUB_EVENT_NAME="pull_request", GITHUB_HEAD_REF="ordinary-change",
+                               GITHUB_REPOSITORY="fixture/project", CHECK_RELEASES=releases,
+                               CHECK_ANCESTRY=ancestry, CHECK_API_FAILURE=api_failure)
+                    result = subprocess.run(["bash", "-c", fixture + script], cwd=root, env=env,
+                                            capture_output=True, timeout=10, check=False)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    if expected == 0:
+                        self.assertEqual(output.read_text(),
+                                         f"tag=v2.3.17\nversion=2.3.17\ncommit={SOURCE}\n")
+                    else:
+                        self.assertFalse(output.exists())
+
+    def test_release_still_refuses_tag_version_mismatch(self):
+        script = self.step("release.yml", "Verify tag and versions")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            # The actual candidate carriers and updater retain their real checks.
+            for path in ("download-video.sh", "install-fedora.sh", "README.md", "README.fr.md",
+                         "test-static.sh", "CHANGELOG.md", "scripts/update-published-version.py"):
+                destination = root / path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(PROJECT / path, destination)
+            version = subprocess.check_output([str(root / "download-video.sh"), "--version"], text=True).split()[-1]
+            fixture = 'git() { if [[ $1 == rev-parse ]]; then printf "%s\\n" "${GITHUB_SHA}"; fi; }\n'
+            for tag, expected in (("v" + version, 0), ("v999.9.9", 65)):
+                with self.subTest(tag=tag):
+                    result = subprocess.run(["bash", "-c", fixture + script], cwd=root,
+                                            env=dict(os.environ, RELEASE_TAG=tag, GITHUB_SHA=SOURCE,
+                                                     GITHUB_EVENT_NAME="push"), capture_output=True,
+                                            timeout=10, check=False)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    if expected:
+                        self.assertIn(b"release executable version mismatch", result.stderr)
+
+    def test_existing_publication_accepts_only_identical_bytes(self):
+        script = self.step("release.yml", "Publish and verify immutable release")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "dist").mkdir()
+            (root / "published").mkdir()
+            names = ("fixture.zip", "fixture.rpm", "fixture.deb", "install-fedora.sh",
+                     "RPM-GPG-KEY-OscarFrog", "SHA256SUMS")
+            for name in names:
+                (root / "dist" / name).write_text("tested bytes\n")
+                (root / "published" / name).write_text("tested bytes\n")
+            fixture = r'''
+gh() {
+    [[ $1 == release ]] || return 99
+    case $2 in
+        view)
+            if [[ $# == 3 ]]; then return 0; fi
+            case $5 in
+                assets) printf '%s\n' fixture.zip fixture.rpm fixture.deb install-fedora.sh RPM-GPG-KEY-OscarFrog SHA256SUMS ;;
+                isImmutable) printf 'true\n' ;;
+                *) return 99 ;;
+            esac ;;
+        download) cp -- "published/${7}" "${5}/${7}" ;;
+        verify|verify-asset) return 0 ;;
+        *) printf 'Forbidden publication mutation: %s\n' "$2" >&2; return 99 ;;
+    esac
+}
+'''
+            for changed in (False, True):
+                with self.subTest(changed=changed):
+                    if changed:
+                        (root / "dist/fixture.rpm").write_text("different source payload\n")
+                    result = subprocess.run(["bash", "-c", fixture + script], cwd=root,
+                                            env=dict(os.environ, RELEASE_TAG="v2.3.26",
+                                                     GITHUB_REPOSITORY="fixture/project"),
+                                            capture_output=True, timeout=10, check=False)
+                    self.assertEqual(result.returncode, 65 if changed else 0, result.stderr)
+                    if changed:
+                        self.assertIn(b"differs byte-for-byte", result.stderr)
 
 
 if __name__ == "__main__":

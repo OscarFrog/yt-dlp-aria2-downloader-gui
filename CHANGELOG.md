@@ -1,10 +1,13 @@
 # Changelog
 
-## 2.3.25 - Unreleased
+## Unreleased
 
-### Maintenance
+### Development policy
 
-- Preserve pre-env observer diagnostics and distinguish procfs metadata from process identity
+- Choose versions during explicit release preparation; ordinary commits, pushes,
+  PR updates and automation retain their coherent source version. Preserve
+  signed, immutable publication boundaries and identify CI package builds by
+  source SHA, run and attempt.
 
 ### Graphical interface
 
@@ -12,6 +15,18 @@
   MKV video and native audio for other sites, with one compatible saved default.
 - Keep local-storage details in diagnostic logs without appending them to
   progress messages; preserve percentage, speed, ETA and final-copy progress.
+
+## 2.3.26 - Unreleased
+
+### Maintenance
+
+- Prepare release candidate metadata and artifact references
+
+## 2.3.25 - Unreleased
+
+### Maintenance
+
+- Preserve pre-env observer diagnostics and distinguish procfs metadata from process identity
 
 ## 2.3.24 - Unreleased
 

@@ -11,7 +11,7 @@ project. It is intentionally independent of a particular release date.
 - [Environment diagnosis](#environment-diagnosis)
 - [Complete local test suite](#complete-local-test-suite)
 - [Fast feedback, timing and concurrency](#fast-feedback-timing-and-concurrency)
-- [Version check before every source push](#version-check-before-every-source-push)
+- [Version coherence and release preparation](#version-coherence-and-release-preparation)
 - [Shell formatting](#shell-formatting)
 - [Bash syntax](#bash-syntax)
 - [ShellCheck](#shellcheck)
@@ -150,83 +150,81 @@ Local fast/full profiles retain their existing dependency contract, so record
 this additional command explicitly when changing workflows. A new pin requires
 review of the upstream release and archive digests, not only a computed hash.
 
-## Version check before every source push
+## Version coherence and release preparation
 
-Every push of new source commits, including automated workflow branches and
-follow-ups to an existing PR, requires a development version newer than remote
-main, the target branch's previous version and all numeric remote release tags. The owner has authorized
-the necessary PATCH increment as part of an authorized source push; it does not
-authorize a tag, release, publication or otherwise unrequested push.
+Ordinary commits, source pushes and PR merges may keep the same coherent
+version, including the latest published version. Contributor follow-ups and
+formatter/documentation automation do not force a PATCH increment. Source
+qualification identifies an exact tree and commit, not just a version number.
 
-Distinguish that owner policy from the mechanical CI contract. A local commit
-does not inherently require a bump. `packages.yml` → `previous-release` rejects
-ordinary PRs reusing an existing version tag, and candidates older than the
-highest numeric version tag; the tag need not have a published release. Its narrow immutable post-release-documentation
-exception does not authorize arbitrary same-version changes. CI does not
-otherwise require a version newer than every preceding untagged commit. The
-owner's source-push policy remains deliberately stricter and includes the
-`shfmt-update.yml` and `release-docs.yml` workflows. They prepare coherent version
-changes before independent validation, then publish only the verified data.
-Their privileged jobs must not execute contributor bump code. An automation
-run with no update produces no bump and no new source push.
+Explicit release preparation chooses the target for the changes grouped since
+the relevant release. Keep an unpublished target through follow-up corrections
+unless the scope calls for a different version. Freeze the final version before
+qualifying the candidate to tag; changed contents require the corresponding
+new validation. Never reuse a published tag/version/assets for different bytes.
 
 | Version surface | Contract |
 | --- | --- |
-| `download-video.sh` → `VERSION` | Development source version |
-| `install-fedora.sh` → `APP_VERSION`; `test-static.sh` → `EXPECTED_VERSION` | Must equal the development version |
-| Development paragraph and manual release commands in both READMEs; leading CHANGELOG and RPM `%changelog` entries | Must identify the same development version |
-| RPM `%{project_version}`, DEB/ZIP builders | Derive/validate the requested package version against the engine; no independent fixed source version |
-| `EXPECTED_PUBLISHED_VERSION` and published README asset references | Separate published version; ordinary source changes must not advertise absent assets |
-| Signed `vX.Y.Z` tag and release preflight | Separately authorized release identity and publication prerequisites |
+| `download-video.sh` → `VERSION` | Coherent source version; ordinary development may retain a published number |
+| `install-fedora.sh` → `APP_VERSION`; `test-static.sh` → `EXPECTED_VERSION` | Must equal the source version |
+| Development paragraph and manual release commands in both READMEs; leading versioned CHANGELOG and RPM `%changelog` entries | Must identify the same source version |
+| RPM `%{project_version}`, DEB/ZIP builders | Derive/validate the requested package version against the engine |
+| `EXPECTED_PUBLISHED_VERSION` and README asset references | Describe the actual published version during ordinary development; alignment with a future target is an explicit release-preparation operation |
+| Signed `vX.Y.Z` tag and release preflight | Separately authorized identity, qualified contents and publication prerequisites |
 
-Before any commit or expensive validation, check local coherence without Git or
-network access:
+Check local coherence before expensive validation, without Git or network:
 
 ```bash
 python3 -B scripts/check-push-version.py coherence
 ```
 
-The same inert validation runs on actual pushed blobs in the hook. Updating
-only the engine cannot satisfy it. Release preparation remains governed by the
-maintainer preflight below: that path currently requires published-reference
-metadata to match the candidate tag before publication. Do not silently run
-the publication metadata updater during an ordinary development bump.
-
-For an authorized source push, before running the expensive suites, fetch
-current main/target branch objects from the intended remote and run:
+For an authorized source push, also use the live remote check:
 
 ```bash
 python3 -B scripts/check-push-version.py check
 ```
 
-The defaults are remote `origin` and the current local branch. For a different
-destination, supply `--remote NAME --branch DESTINATION`. The check reads live
-refs through the named remote and reads version declarations as data from Git
-objects. Missing objects require a fetch; network failure, malformed metadata
-or an unknown baseline refuses validation. A version refusal returns 65 and
-prints the next PATCH to prepare. It neither edits files nor fetches, commits,
-pushes or creates tags. Update all linked source-version surfaces, rerun the
-check, validate and commit before pushing. Keep published package references
-at the actual published version during ordinary development.
+Defaults are `origin` and the current branch; `--remote NAME --branch DESTINATION`
+selects another named destination. The check validates coherence and the remote
+reference snapshot; no larger version than main, a working branch or a published
+tag is required. It neither edits files nor fetches, commits, pushes or tags.
+Connection or malformed-reference failures remain failures. The hook inspects
+regular Git blobs of the actual pushed commits as data, never candidate code.
 
-For isolated automation preparation, the same checker provides a JSON plan:
+Automation uses the following read-only context command:
 
 ```bash
-python3 -B scripts/check-push-version.py next-version --branch automation/EXACT-BRANCH
+python3 -B scripts/check-push-version.py source-context --branch automation/EXACT-BRANCH
 ```
 
-The plan binds the current main/target identities, numeric-tag floor, next PATCH
-and SHA-256 of one remote reference advertisement. After checking that plan,
-read-only jobs call `python3 -B scripts/prepare-source-version.py --root SOURCE_TREE
---floor-version X.Y.Z --date YYYY-MM-DD --reason REASON`. This offline helper
-updates the seven source carriers while preserving published references and
-file modes. It stages replacements and backups before writing, rolls back
-controlled failures and preserves originals when rollback is unsafe. It is
-intended for isolated source trees, not concurrent editing or a crash-atomic
-multi-file transaction. Automation uses the base commit's UTC date and a fixed
-reason so an independent verifier can reproduce exactly the same bytes.
-Privileged publishers do not run this helper: they independently validate the
-bounded transformation and remote identities as data before publication.
+It binds main, target, current source version and the reference-catalogue SHA-256. Prepare and independent
+verify jobs retain this source version. Privileged publishers revalidate the
+allowlisted patch and remote identities as data; they execute no candidate
+helper. No-op updates create no branch or artificial version entry.
+
+For explicit release planning only:
+
+```bash
+python3 -B scripts/check-push-version.py next-version --branch PREPARATION-BRANCH
+```
+
+This suggests a PATCH from numeric release tags while
+retaining an already newer main version. A working branch's largest version is
+not a mandatory increment. This recommendation does not determine the change
+scope or authorize publication. The maintainer chooses PATCH/MINOR/MAJOR for
+the accumulated changes and verifies the relevant release baseline.
+
+The offline `scripts/prepare-source-version.py` helper prepares the seven
+source carriers from an explicitly verified published-version floor, date and
+reason, with `--target-version` for an explicit choice. Repeating preparation
+of the same unpublished target is a no-op. A leading `## Unreleased` changelog
+section is promoted into the chosen target with its accumulated notes. The helper preserves published
+references and file modes, stages replacements and backups, and rolls back
+controlled failures. It is for isolated source trees, not concurrent writers
+or a crash-atomic multi-file transaction. Then explicitly align future package
+references with `scripts/update-published-version.py` when preparing the exact
+commit to tag, and qualify that tree. Prepared references do not assert that
+assets already exist. The signed-tag release preflight remains mandatory.
 
 Enable the additional Git guard once per checkout. First inspect the existing
 effective `core.hooksPath` and `pre-push` hook; do not overwrite another hook or
@@ -237,10 +235,10 @@ with no custom hook configuration or pre-push hook, activate this tracked path:
 git config --local core.hooksPath .githooks
 ```
 
-`.githooks/pre-push` checks the actual commit IDs Git intends to send. A version
-bump that exists only in the working tree is insufficient. It refuses the whole
+`.githooks/pre-push` checks the actual commit IDs Git intends to send. Coherent
+working-tree edits cannot repair incoherent committed version carriers. It refuses the whole
 push before updating remote refs if any source update fails. Pure deletions,
-tag-only pushes and no-ops do not need a source bump. Git tag/release authority
+tag-only pushes and no-ops require no source-coherence check. Git tag/release authority
 remains separate. Do not use `--no-verify` or alternate hooks paths to skip this
 policy. Git does not automatically enable tracked hooks in a fresh clone: repeat
 the inspected setup there. This is a local guard, not a GitHub server rule;
@@ -260,11 +258,12 @@ Run the behavioral qualification without contacting GitHub:
 python3 -B tests/push-version-integration.py
 ```
 
-It uses disposable bare repositories and real Git pushes: first/follow-up push
-refusal, committed versus uncommitted versions, numeric/live-tag comparisons,
-stale objects, remote errors, split URLs, data-only parsing, batch rejection,
-deletions, no-ops, process timeout cleanup, all seven bump carriers, deterministic
-preparation, write failures, interruption and rollback. `test-static.sh` includes it in
+It uses disposable bare repositories and real Git pushes: successive same-version
+pushes, unchanged unpublished PR targets, incoherent committed metadata despite
+uncommitted repairs, release-tag planning, remote errors and races, split URLs,
+data-only parsing, batch rejection, deletions, no-ops, process timeout cleanup,
+all seven source carriers, idempotent release preparation, write failures,
+interruption and rollback. `test-static.sh` includes it in
 both canonical profiles; it explicitly skips Git-dependent cases if Git is
 absent from a Git-free source-validation environment. Installed RPM/DEB payloads
 do not include these contributor tools; source archives contain them.
@@ -278,7 +277,7 @@ python3 -B tests/release-docs-integration.py
 ```
 
 The shfmt replay uses real disposable Git repositories and the pinned formatter,
-with controlled upstream and container stubs. It covers seven-file preparation,
+with controlled upstream and container stubs. It covers unchanged-version preparation,
 independent verification, altered bytes, incomplete manifests, no-op runs and
 branch creation races. The release-docs replay executes the actual publisher
 shell and inline Python against a simulated API, including large streamed blobs,
@@ -491,7 +490,7 @@ bootstrap downloads the exact GitHub release asset and verifies its SHA-256
 before execution.
 
 The scheduled `.github/workflows/shfmt-update.yml` workflow detects a newer
-stable upstream release, prepares the required source-version bump before
+stable upstream release, preserves the source version while
 executing the candidate formatter, updates the pin/checksums, reformats all
 canonical shell files, runs the complete validation suite, and prepares a
 dedicated update branch for a maintainer-opened pull request. Both formatting
@@ -503,8 +502,8 @@ tests protect that mode and each container's non-root execution.
 Validation mounts the source read-only and cannot access
 the host handoff. The verifier destroys its container before rechecking the
 canonical tree and producing the data-only handoff. Canonical comparison uses
-an independently reproduced bump as its baseline; the four non-shell version
-carriers must match exactly. Only the final publisher receives repository
+the clean immutable source as its baseline; only the pin and canonical shell
+files may change, and their source-version declarations must remain unchanged. Only the final publisher receives repository
 content write permission; it has no pull-request permission. An existing branch
 for the same base and upstream pin is preserved without another source push;
 a conflicting branch or raced reference causes refusal instead of replacement.
@@ -1005,15 +1004,22 @@ repository, release workflow, and exact source commit. The RPM and DEB upgrade
 jobs consume those verified bytes through a short-lived Actions artifact and
 recheck their transferred SHA-256 digests before installation.
 
-A pull request whose development version already has a tag normally fails this
-job. The narrow post-release documentation exception accepts only
-`automation/release-docs-vX.Y.Z` or `fix/release-docs-vX.Y.Z`, with the branch
-version equal to the current immutable release. That release commit must remain
-an ancestor, and every change since it must be a simple modification of the two
-READMEs, `TESTING.md`, `test-static.sh`, or the package/release-documentation
-workflow contracts. Runtime, packaging, installer, key, and release payload
-changes therefore still require a new development version. The exception keeps
-using the release preceding the current tag for the normal upgrade tests.
+Ordinary PRs retain their source version even when its release tag exists or a
+working branch has a higher number. Upgrade qualification still selects the
+immediately preceding published semantic version strictly below the candidate,
+and requires its exact immutable assets and ancestry. This tests a real version
+upgrade rather than substituting a same-version reinstall. Missing compatible
+release evidence fails qualification. It does not authorize re-publication.
+
+The development RPM and DEB Actions artifacts include the full source SHA,
+and `github.run_id` in their names. Their Actions records
+also identify the producing attempt and digest. A consumer-only rerun can
+still download the successful producer artifact from the same run. Keep this identity when downloading or
+sharing a CI build: its plain package filename and numeric `--version` alone
+are not release identity. RPM/DEB version comparison and Git-free installed
+payloads are unchanged. Official releases remain separately signed/attested,
+immutable and bound to their authorized tag; CI packages are never promoted as
+those final objects.
 
 Pull-request CI builds one unsigned noarch RPM and proves that the production
 bootstrap rejects it unless `--allow-unsigned-dev` is explicitly selected.
@@ -1123,13 +1129,13 @@ current development version. With the pre-publication tag guard, this is
 normally an idempotent consistency check and no branch or bump is needed.
 
 When an update is needed, preparation uses current main or an existing target
-that descends from it, preserves that base's content and bumps all seven source
-carriers above main, target and tags. Divergent branches require maintainer
+that descends from it, preserves that base's source version and changes only
+the two READMEs and the static published-reference assertion. Divergent branches require maintainer
 reconciliation. A fresh read-only verifier reconstructs the exact patch from
 that authenticated base, compares candidate bytes and runs the complete local
 contract. Only the final job receives content-write permission. It performs no
 checkout and executes no repository code. Fixed isolated Python verifies the
-exact published-reference and source-version transformations, file modes,
+exact published-reference transformations, unchanged source version, file modes,
 manifest paths and digests using GitHub API data. Large blobs are streamed into
 JSON payloads, never passed through a command argument.
 

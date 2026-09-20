@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 """yt-dlp-aria2-downloader-gui: tests/shfmt-version-handoff-integration.py.
 
-Replay the actual shfmt workflow's version/handoff/publication shell on local Git
+Replay the actual shfmt workflow's unchanged-version/handoff shell on local Git
 fixtures. Network, upstream assets and Docker are controlled stubs: these tests
 validate data boundaries and leases, not candidate execution or real GitHub CI.
 """
@@ -95,7 +95,7 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
             self.env.pop(key, None)
         self.env["PATH"] = str(self.bin) + os.pathsep + os.environ["PATH"]
         for relative in (*VERSION_PATHS, PIN_PATH, "scripts/check-push-version.py",
-                         "scripts/prepare-source-version.py", "scripts/update-published-version.py"):
+                         "scripts/update-published-version.py"):
             path = self.seed / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, path)
@@ -178,10 +178,10 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
         return result
 
     def prepare(self):
-        self.run_step("Prepare a coherent source version before candidate execution", self.seed)
+        self.run_step("Verify unchanged source version before candidate execution", self.seed)
         outputs = dict(line.split("=", 1) for line in (self.runtime / "output").read_text().splitlines())
-        self.env.update(PROJECT_VERSION=outputs["project_version"], VERSION_FLOOR=outputs["version_floor"],
-                        VERSION_DATE=outputs["version_date"], EXPECTED_BRANCH_SHA=outputs["previous_branch_sha"],
+        self.env.update(PROJECT_VERSION=outputs["project_version"],
+                        EXPECTED_BRANCH_SHA=outputs["previous_branch_sha"],
                         REF_CATALOG_SHA=outputs["ref_catalog_sha"])
         (self.seed / PIN_PATH).write_text(
             "# Managed by .github/workflows/shfmt-update.yml.\n"
@@ -198,7 +198,7 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
     def verify(self, success=True):
         self.candidate_handoff()
         verifier = self.clone("verifier")
-        return self.run_step("Verify approved version bump, formatter semantics and upstream provenance",
+        return self.run_step("Verify unchanged source version, formatter semantics and upstream provenance",
                              verifier, success=success)
 
     def publish_checkout(self, success=True):
@@ -209,10 +209,19 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
         self.run_step("Verify base and apply allowlisted patch", publisher, success=success)
         return publisher
 
-    def test_valid_bump_handoff_and_actual_local_branch_push(self):
+    def test_unchanged_published_version_handoff_and_actual_local_branch_push(self):
+        originals = {path: (self.seed / path).read_bytes() for path in VERSION_PATHS}
+        source = originals["download-video.sh"].decode("utf-8")
+        version = next(line.split("=", 1)[1].strip("\"'") for line in source.splitlines()
+                       if line.startswith("readonly VERSION="))
+        self.git(self.seed, "tag", "v" + version)
+        self.git(self.seed, "push", "origin", "refs/tags/v" + version)
         self.prepare()
+        self.assertEqual(self.env["PROJECT_VERSION"], version)
         self.verify()
         publisher = self.publish_checkout()
+        for path, original in originals.items():
+            self.assertEqual((publisher / path).read_bytes(), original, path)
         self.run_step("Create or update reviewed shfmt branch", publisher)
         target = self.git(self.seed, "ls-remote", "--heads", "origin", f"refs/heads/automation/shfmt-v{UPSTREAM}")
         self.assertIn(self.git(publisher, "rev-parse", "HEAD").stdout.strip(), target.stdout)
@@ -231,13 +240,33 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
         self.prepare()
         with (self.seed / "README.md").open("a") as output:
             output.write("\nUnapproved prose.\n")
-        self.assertIn("approved version document", self.verify(success=False).stderr)
+        self.assertIn("outside the trusted allowlist", self.verify(success=False).stderr)
 
-    def test_candidate_missing_rpm_bump_is_rejected(self):
+    def test_candidate_rpm_version_change_is_rejected(self):
         self.prepare()
-        (self.seed / VERSION_PATHS[-1]).write_text(
-            self.git(self.seed, "show", "HEAD:" + VERSION_PATHS[-1]).stdout, encoding="utf-8")
-        self.assertIn("approved version document", self.verify(success=False).stderr)
+        path = self.seed / VERSION_PATHS[-1]
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace("- " + self.env["PROJECT_VERSION"] + "-1\n",
+                                     "- 999.0.0-1\n", 1), encoding="utf-8")
+        self.assertIn("outside the trusted allowlist", self.verify(success=False).stderr)
+
+    def test_candidate_source_version_change_is_rejected(self):
+        self.prepare()
+        path = self.seed / "download-video.sh"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace(self.env["PROJECT_VERSION"], "999.0.0", 1), encoding="utf-8")
+        self.assertIn("canonical shell semantics/content", self.verify(success=False).stderr)
+        self.assertFalse((self.runtime / "tools.log").exists())
+
+    def test_dirty_verifier_checkout_cannot_redefine_the_base(self):
+        self.prepare()
+        self.candidate_handoff()
+        verifier = self.clone("verifier")
+        with (verifier / "download-video.sh").open("a") as output:
+            output.write("\nprintf 'unapproved baseline change'\n")
+        self.run_step("Verify unchanged source version, formatter semantics and upstream provenance",
+                      verifier, success=False)
+        self.assertFalse((self.runtime / "tools.log").exists())
 
     def test_failed_isolated_validation_produces_no_verified_patch(self):
         self.prepare()
@@ -258,6 +287,22 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
         self.env["PROJECT_VERSION"] = "999.0.0"
         self.publish_checkout(success=False)
 
+    def test_publisher_rejects_version_change_even_with_matching_tested_digests(self):
+        self.prepare()
+        self.verify()
+        path = self.seed / "download-video.sh"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace(self.env["PROJECT_VERSION"], "999.0.0", 1), encoding="utf-8")
+        handoff = self.runtime / "shfmt-verified-handoff"
+        patch = self.git(self.seed, "diff", "--binary").stdout.encode("utf-8")
+        (handoff / "shfmt-update.patch").write_bytes(patch)
+        (handoff / "shfmt-update.patch.sha256").write_text(
+            hashlib.sha256(patch).hexdigest() + "  shfmt-update.patch\n", encoding="utf-8")
+        (handoff / "shfmt-tested-tree.sha256").write_text("".join(
+            hashlib.sha256((self.seed / path).read_bytes()).hexdigest() + "  " + path + "\n"
+            for path in (PIN_PATH, *SHELL_PATHS)), encoding="utf-8")
+        self.publish_checkout(success=False)
+
     def test_changed_remote_catalogue_is_rejected_before_push(self):
         self.prepare()
         self.verify()
@@ -272,7 +317,7 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
     def test_branch_created_before_preparation_is_preserved(self):
         branch = f"refs/heads/automation/shfmt-v{UPSTREAM}"
         self.git(self.seed, "push", "origin", f"HEAD:{branch}")
-        result = self.run_step("Prepare a coherent source version before candidate execution",
+        result = self.run_step("Verify unchanged source version before candidate execution",
                                self.seed, success=False)
         self.assertIn("stale or invalid", result.stderr)
         self.assertEqual(self.git(self.seed, "diff", "--name-only").stdout, "")
@@ -311,12 +356,12 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
         self.assertEqual((self.runtime / "output").read_text(), "update=false\n")
         self.assertEqual(self.git(self.seed, "diff", "--name-only").stdout, "")
 
-    def test_numeric_release_tags_raise_the_version_floor(self):
+    def test_unrelated_numeric_release_tag_does_not_bump_automation(self):
         self.git(self.seed, "tag", "v999.2.8")
         self.git(self.seed, "push", "origin", "refs/tags/v999.2.8")
         self.prepare()
-        self.assertEqual(self.env["VERSION_FLOOR"], "999.2.8")
-        self.assertEqual(self.env["PROJECT_VERSION"], "999.2.9")
+        self.assertNotEqual(self.env["PROJECT_VERSION"], "999.2.9")
+        self.assertEqual(self.git(self.seed, "diff", "--name-only").stdout.splitlines(), [PIN_PATH])
         self.verify()
         self.publish_checkout()
 
