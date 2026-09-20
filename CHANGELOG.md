@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 2.3.27 - Unreleased
+
+### Maintenance
+
+- Simplify GUI progress and cover CIFS workspace cleanup
 
 ### Development policy
 
