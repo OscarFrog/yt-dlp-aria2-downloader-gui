@@ -332,6 +332,327 @@ test_installer_failure_modes() {
         'missing validator note'
 }
 
+test_installer_ancestor_directory_policy() {
+    assert_status 0 'launcher ancestor trust and strict leaf policy' \
+        python3 - \
+        "${COPIED_PROJECT}/private-launcher-manager.py" \
+        "${TEST_ROOT}/ancestor-directory-policy" \
+        "${COPIED_PROJECT}/download-video-gui.sh" <<'PYTHON_ANCESTOR_POLICY'
+import contextlib
+import importlib.util
+import io
+import os
+import pathlib
+import sys
+
+helper_path, test_root_raw, launcher_target = sys.argv[1:]
+test_root = pathlib.Path(test_root_raw)
+test_root.mkdir(mode=0o700)
+spec = importlib.util.spec_from_file_location("private_launcher_manager", helper_path)
+if spec is None or spec.loader is None:
+    raise SystemExit(70)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+failures = []
+case_count = 0
+foreign_uid = max(1, os.geteuid() + 1)
+ancestors = ("parent", "icons", "hicolor", "scalable")
+strict_leaves = ("data", "applications", "launcher", "apps")
+
+
+def identity(path):
+    metadata = path.stat()
+    return metadata.st_dev, metadata.st_ino
+
+
+@contextlib.contextmanager
+def directory_owners(overrides):
+    # Only metadata for selected real directory inodes is mocked. UID, access
+    # checks, symlink resolution and directory permissions remain unchanged.
+    original_fstat = module.os.fstat
+
+    def fstat(descriptor):
+        metadata = original_fstat(descriptor)
+        owner = overrides.get((metadata.st_dev, metadata.st_ino))
+        if owner is None:
+            return metadata
+        fields = list(metadata)
+        fields[4] = owner
+        return os.stat_result(fields)
+
+    module.os.fstat = fstat
+    try:
+        yield
+    finally:
+        module.os.fstat = original_fstat
+
+
+def layout(label):
+    parent = test_root / label / "parent"
+    data = parent / "data"
+    paths = {
+        "parent": parent,
+        "data": data,
+        "applications": data / "applications",
+        "launcher": data / module.APP_ID,
+        "icons": data / "icons",
+        "hicolor": data / "icons/hicolor",
+        "scalable": data / "icons/hicolor/scalable",
+        "apps": data / "icons/hicolor/scalable/apps",
+    }
+    for path in paths.values():
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.chmod(0o700)
+    sentinel = data / "unrelated-user-file"
+    sentinel.write_bytes(b"preserve unrelated user data\n")
+    return data, paths, sentinel
+
+
+def leaves(data):
+    return [
+        data / "applications" / module.DESKTOP_NAME,
+        data / module.APP_ID / "launch",
+        data / "icons/hicolor/scalable/apps" / module.ICON_NAME,
+    ]
+
+
+def snapshot(paths):
+    result = []
+    for path in paths:
+        if not path.exists() and not path.is_symlink():
+            result.append(None)
+            continue
+        metadata = path.lstat()
+        content = os.readlink(path) if path.is_symlink() else path.read_bytes()
+        result.append((metadata.st_dev, metadata.st_ino, metadata.st_mode, content))
+    return result
+
+
+def transaction(operation, data, after_anchor=None):
+    with contextlib.redirect_stdout(io.StringIO()):
+        if operation == "install":
+            module.install_launcher(
+                str(data), launcher_target, str(test_root / "missing-icon.svg"),
+                after_anchor=after_anchor,
+            )
+        else:
+            module.uninstall_launcher(str(data), after_anchor=after_anchor)
+
+
+def check(label, action):
+    global case_count
+    case_count += 1
+    descriptor_count = len(os.listdir("/proc/self/fd"))
+    try:
+        action()
+    except (AssertionError, module.LauncherError) as error:
+        failures.append(f"{label}: {error}")
+    if len(os.listdir("/proc/self/fd")) != descriptor_count:
+        failures.append(f"{label}: transaction leaked a descriptor")
+
+
+def static_policy(operation, branch, mode, owner, accepted):
+    label = f"{operation}-{branch}-{mode:o}-{owner}"
+    data, paths, sentinel = layout(label)
+    if operation == "uninstall":
+        transaction("install", data)
+    before = snapshot(leaves(data) + [sentinel])
+    paths[branch].chmod(mode)
+    overrides = {} if owner is None else {identity(paths[branch]): owner}
+    rejected = False
+    with directory_owners(overrides):
+        try:
+            transaction(operation, data)
+        except module.LauncherError:
+            rejected = True
+    assert rejected != accepted, (
+        "unexpected acceptance of unsafe chain" if not accepted else "safe chain rejected"
+    )
+    if rejected:
+        assert snapshot(leaves(data) + [sentinel]) == before, (
+            "rejection changed managed leaves or user data"
+        )
+    else:
+        assert sentinel.read_bytes() == b"preserve unrelated user data\n"
+        present = [path.exists() or path.is_symlink() for path in leaves(data)]
+        assert present == [operation == "install"] * 3, "transaction did not complete"
+
+
+for operation in ("install", "uninstall"):
+    for branch in ancestors:
+        for mode, owner, accepted in (
+            (0o755, None, True),
+            (0o755, 0, True),
+            (0o1777, None, True),
+            (0o1777, 0, True),
+            (0o777, None, False),
+            (0o775, None, False),
+            (0o755, foreign_uid, False),
+        ):
+            label = f"{operation}/{branch}/{mode:o}/owner={owner}"
+            check(label, lambda: static_policy(operation, branch, mode, owner, accepted))
+    for branch in strict_leaves:
+        policies = [(0o1777, None), (0o755, foreign_uid)]
+        if os.geteuid() != 0:
+            policies.append((0o755, 0))
+        for mode, owner in policies:
+            label = f"strict-{operation}/{branch}/{mode:o}/owner={owner}"
+            check(label, lambda: static_policy(operation, branch, mode, owner, False))
+
+
+def missing_child(branch):
+    data, paths, _sentinel = layout(f"missing-child-{branch}")
+    paths[branch].chmod(0o777)
+    absent = paths[branch] / "must-not-be-created"
+    parent_fd = os.open(paths[branch], module.directory_open_flags())
+    try:
+        try:
+            if branch == "parent":
+                descriptor = module.open_data_home(str(absent), create=True)
+            else:
+                descriptor = module.open_directory_branch(
+                    parent_fd, str(paths[branch]), (absent.name,), create=True,
+                )
+        except module.LauncherError:
+            pass
+        else:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise AssertionError("unsafe parent accepted before creating child")
+        assert not absent.exists(), "directory created below rejected parent"
+    finally:
+        os.close(parent_fd)
+
+
+for branch in ancestors:
+    check(f"missing-child/{branch}", lambda: missing_child(branch))
+
+
+def changed_policy(operation, branch, timing):
+    data, paths, sentinel = layout(f"changed-{operation}-{branch}-{timing}")
+    transaction("install", data)
+    managed = leaves(data)
+    before = snapshot(managed + [sentinel])
+    managed_parents = {identity(path.parent) for path in managed}
+    publications = []
+    original_replace = module.os.replace
+    original_unlink = module.os.unlink
+    original_backup = module.create_backup_link
+    changed = False
+
+    def change():
+        nonlocal changed
+        paths[branch].chmod(0o1777 if branch in strict_leaves else 0o777)
+        changed = True
+
+    def replace(source, destination, *args, **kwargs):
+        descriptor = kwargs.get("dst_dir_fd")
+        if descriptor is not None:
+            metadata = os.fstat(descriptor)
+            if (metadata.st_dev, metadata.st_ino) in managed_parents:
+                publications.append(("replace", destination))
+        return original_replace(source, destination, *args, **kwargs)
+
+    def unlink(path, *args, **kwargs):
+        descriptor = kwargs.get("dir_fd")
+        if descriptor is not None and path in {
+            module.DESKTOP_NAME, module.ICON_NAME, "launch"
+        }:
+            metadata = os.fstat(descriptor)
+            if (metadata.st_dev, metadata.st_ino) in managed_parents:
+                publications.append(("unlink", path))
+        return original_unlink(path, *args, **kwargs)
+
+    def backup(*args, **kwargs):
+        result = original_backup(*args, **kwargs)
+        if not changed:
+            change()
+        return result
+
+    module.os.replace = replace
+    module.os.unlink = unlink
+    if timing == "backup":
+        module.create_backup_link = backup
+    rejected = False
+    try:
+        try:
+            transaction(operation, data, change if timing == "anchor" else None)
+        except module.LauncherError:
+            rejected = True
+    finally:
+        module.os.replace = original_replace
+        module.os.unlink = original_unlink
+        module.create_backup_link = original_backup
+    assert changed, "race hook did not run"
+    assert rejected, "directory became unsafe but transaction succeeded"
+    assert not publications, f"managed leaves changed before refusal: {publications}"
+    assert snapshot(managed + [sentinel]) == before, (
+        "previous installation or unrelated data changed"
+    )
+
+
+for operation in ("install", "uninstall"):
+    for branch in ancestors + strict_leaves:
+        for timing in ("anchor", "backup"):
+            check(
+                f"changed-{operation}/{branch}/{timing}",
+                lambda: changed_policy(operation, branch, timing),
+            )
+
+
+def replaced_ancestor(operation, branch, symbolic):
+    data, paths, sentinel = layout(f"replaced-{operation}-{branch}-{symbolic}")
+    transaction("install", data)
+    original_leaves = leaves(data) + [sentinel]
+    before = snapshot(original_leaves)
+    original = paths[branch]
+    saved = original.with_name(original.name + "-saved")
+    replacement_sentinel = original / "preserve-replacement"
+
+    def change():
+        original.rename(saved)
+        if symbolic:
+            original.symlink_to(saved, target_is_directory=True)
+        else:
+            original.mkdir(mode=0o700)
+            replacement_sentinel.write_bytes(b"replacement user data\n")
+
+    try:
+        transaction(operation, data, change)
+    except module.LauncherError:
+        pass
+    else:
+        raise AssertionError("replaced ancestor accepted")
+    anchored_leaves = [
+        saved / path.relative_to(original) if path.is_relative_to(original) else path
+        for path in original_leaves
+    ]
+    assert snapshot(anchored_leaves) == before, (
+        "anchored installation changed after replacement"
+    )
+    if not symbolic:
+        assert replacement_sentinel.read_bytes() == b"replacement user data\n"
+        assert list(original.iterdir()) == [replacement_sentinel], (
+            "replacement directory modified"
+        )
+
+
+for operation in ("install", "uninstall"):
+    for branch in ("parent", "hicolor"):
+        for symbolic in (False, True):
+            check(
+                f"replaced-{operation}/{branch}/symlink={symbolic}",
+                lambda: replaced_ancestor(operation, branch, symbolic),
+            )
+
+if failures:
+    print(f"{len(failures)} failures across {case_count} ancestor-policy cases:")
+    print("\n".join(failures))
+    raise SystemExit(1)
+print(f"Launcher ancestor policy: {case_count} cases passed.")
+PYTHON_ANCESTOR_POLICY
+}
+
 test_installer_uninstall_symlink_boundaries() {
     local applications_data="${TEST_ROOT}/uninstall-applications-link"
     local applications_victim="${TEST_ROOT}/uninstall-applications-victim"
@@ -487,6 +808,23 @@ if spec is None or spec.loader is None:
     raise SystemExit(70)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+staging_relative = pathlib.Path(
+    "yt-dlp-aria2-downloader/.install.0123456789abcdef01234567"
+)
+
+
+def staging_snapshot(root: pathlib.Path) -> tuple:
+    directory = root / staging_relative
+    link = directory / "launch"
+    directory_stat = directory.lstat()
+    link_stat = link.lstat()
+    return (
+        directory_stat.st_dev, directory_stat.st_ino, directory_stat.st_mode,
+        link_stat.st_dev, link_stat.st_ino, link_stat.st_mode, os.readlink(link),
+    )
+
+
+staging_before = staging_snapshot(pathlib.Path(data_home))
 
 
 def replace_data_home() -> None:
@@ -507,11 +845,15 @@ if not (saved_root / "applications/yt-dlp-aria2-downloader.desktop").is_file():
     raise SystemExit(1)
 if not (saved_root / "yt-dlp-aria2-downloader/launch").is_file():
     raise SystemExit(1)
-if (
+# Root replacement is rejected before stale cleanup, so even an eligible
+# staging directory on the old anchored root must remain untouched.
+if not (
     saved_root
-    / "yt-dlp-aria2-downloader/.install.0123456789abcdef01234567"
-).exists():
+    / "yt-dlp-aria2-downloader/.install.0123456789abcdef01234567/launch"
+).is_symlink():
     raise SystemExit(1)
+if staging_snapshot(saved_root) != staging_before:
+    raise RuntimeError("root replacement changed the pre-existing staging directory")
 if not (
     saved_root / "icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg"
 ).is_file():
@@ -1715,16 +2057,25 @@ write_target(launcher_target)
 data_home = test_root / "late-root"
 saved_home = test_root / "late-root-saved"
 original_validate_root = module.validate_data_home_path_identity
-validation_count = 0
+root_replaced = False
+uninstalling = False
 
 
 def replace_after_first_final_root_check(path: str, descriptor: int) -> None:
-    global validation_count
+    global root_replaced
     original_validate_root(path, descriptor)
-    validation_count += 1
-    if validation_count == 2:
+    managed_leaves = (
+        data_home / "applications" / module.DESKTOP_NAME,
+        data_home / module.APP_ID / "launch",
+        data_home / "icons/hicolor/scalable/apps" / module.ICON_NAME,
+    )
+    present = [leaf.exists() or leaf.is_symlink() for leaf in managed_leaves]
+    # Observe completed publication/removal, not a count of validation calls:
+    # adding an earlier revalidation must not move this final-window race.
+    if not root_replaced and present == [not uninstalling] * 3:
         os.rename(path, saved_home)
         os.mkdir(path, mode=0o700)
+        root_replaced = True
 
 
 module.validate_data_home_path_identity = replace_after_first_final_root_check
@@ -1739,6 +2090,8 @@ else:
     raise SystemExit(1)
 finally:
     module.validate_data_home_path_identity = original_validate_root
+if not root_replaced:
+    raise RuntimeError("late installation root-replacement hook did not run")
 assert_no_launcher(saved_home)
 assert_no_launcher(data_home)
 
@@ -1747,7 +2100,8 @@ saved_home = test_root / "late-uninstall-root-saved"
 module.install_launcher(
     str(data_home), str(launcher_target), str(test_root / "missing-icon.svg")
 )
-validation_count = 0
+root_replaced = False
+uninstalling = True
 module.validate_data_home_path_identity = replace_after_first_final_root_check
 try:
     module.uninstall_launcher(str(data_home))
@@ -1758,6 +2112,8 @@ else:
     raise SystemExit(1)
 finally:
     module.validate_data_home_path_identity = original_validate_root
+if not root_replaced:
+    raise RuntimeError("late uninstall root-replacement hook did not run")
 if not (
     (saved_home / "applications" / module.DESKTOP_NAME).is_file()
     and (saved_home / module.APP_ID / "launch").is_symlink()
@@ -1799,11 +2155,22 @@ data_home = test_root / "late-removed-target"
 launcher_target = test_root / "late-removed-target-gui.sh"
 write_target(launcher_target)
 original_validate_managed = module.validate_managed_path_identities
+late_target_removed = False
 
 
 def remove_target_after_managed_validation(*args: object, **kwargs: object) -> None:
+    global late_target_removed
     original_validate_managed(*args, **kwargs)
-    launcher_target.unlink()
+    if all(
+        leaf.exists() or leaf.is_symlink()
+        for leaf in (
+            data_home / "applications" / module.DESKTOP_NAME,
+            data_home / module.APP_ID / "launch",
+            data_home / "icons/hicolor/scalable/apps" / module.ICON_NAME,
+        )
+    ):
+        launcher_target.unlink()
+        late_target_removed = True
 
 
 module.validate_managed_path_identities = remove_target_after_managed_validation
@@ -1818,6 +2185,8 @@ else:
     raise SystemExit(1)
 finally:
     module.validate_managed_path_identities = original_validate_managed
+if not late_target_removed:
+    raise RuntimeError("post-publication target-removal hook did not run")
 assert_no_launcher(data_home)
 
 missing_target_data = test_root / "missing-target-data"
@@ -1850,14 +2219,24 @@ if not (directory_decoy_cwd / "launch").is_dir():
 
 rollback_decoy_data = test_root / "rollback-decoy-data"
 rollback_decoy_data.mkdir(mode=0o700)
+# Keep the launcher branch absent, but remove a real desktop leaf so the hook
+# can observe the final rollback window independently of earlier validations.
+(rollback_decoy_data / "applications").mkdir(mode=0o700)
+rollback_desktop = rollback_decoy_data / "applications" / module.DESKTOP_NAME
+rollback_desktop.write_text("preserve desktop\n", encoding="utf-8")
 rollback_decoy_cwd = test_root / "rollback-decoy-cwd"
 rollback_decoy_cwd.mkdir(mode=0o700)
 original_validate_managed = module.validate_managed_path_identities
+decoy_injected = False
 
 
-def create_cwd_decoy_then_fail(*_args: object, **_kwargs: object) -> None:
-    pathlib.Path("launch").write_text("preserve\n", encoding="utf-8")
-    raise module.LauncherError("injected final validation failure")
+def create_cwd_decoy_then_fail(*args: object, **kwargs: object) -> None:
+    global decoy_injected
+    original_validate_managed(*args, **kwargs)
+    if not rollback_desktop.exists():
+        pathlib.Path("launch").write_text("preserve\n", encoding="utf-8")
+        decoy_injected = True
+        raise module.LauncherError("injected final validation failure")
 
 
 module.validate_managed_path_identities = create_cwd_decoy_then_fail
@@ -1873,6 +2252,10 @@ try:
 finally:
     os.chdir(original_cwd)
     module.validate_managed_path_identities = original_validate_managed
+if not decoy_injected:
+    raise RuntimeError("post-removal CWD-decoy hook did not run")
+if rollback_desktop.read_text(encoding="utf-8") != "preserve desktop\n":
+    raise SystemExit(1)
 if (rollback_decoy_cwd / "launch").read_text(encoding="utf-8") != "preserve\n":
     raise SystemExit(1)
 if any(rollback_decoy_cwd.glob(".launch.*.backup")):
@@ -2368,6 +2751,7 @@ main() {
     test_installer_initial_installation
     test_installer_reinstallation
     test_installer_failure_modes
+    test_installer_ancestor_directory_policy
     test_installer_uninstall_symlink_boundaries
     test_installer_uninstall_anchor_race
     test_installer_install_anchor_race

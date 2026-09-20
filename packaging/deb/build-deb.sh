@@ -136,7 +136,7 @@ stage_deb_payload() {
     bash "${PROJECT_DIR}/packaging/install-tree.sh" \
         "${staged_root}" "${VERSION}" '/usr/lib/yt-dlp-aria2-downloader'
 
-    # The all-user cleanup helper is required by the RPM erase scriptlet only.
+    # RPM uses the helper for install/upgrade migration and final-erase cleanup.
     # Debian removal and purge deliberately preserve per-user runtime/config data.
     rm -f -- "${staged_root}/usr/lib/yt-dlp-aria2-downloader/package-user-cleanup.sh"
 

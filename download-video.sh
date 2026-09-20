@@ -200,7 +200,7 @@ cleanup() {
         # shellcheck disable=SC2310 # Changed or unknown staging is preserved.
         if ! get_path_identity current_staging_identity "${PRIVATE_ARIA2_STAGING}" directory \
             || [[ ${current_staging_identity} != "${PRIVATE_ARIA2_STAGING_IDENTITY}" ]] \
-            || ! remove_private_aria2_staging_candidate "${PRIVATE_ARIA2_STAGING}" true; then
+            || ! remove_private_aria2_staging_candidate "${PRIVATE_ARIA2_STAGING}"; then
             active_media_staging_safe=false
             printf 'Warning: preserving ambiguous active private aria2 staging directory: %s\n' \
                 "${PRIVATE_ARIA2_STAGING##*/}" >&2
@@ -957,6 +957,27 @@ download_group_has_live_member() {
     return 1
 }
 
+download_group_is_absent() {
+    [[ ${DOWNLOAD_WORKER_PGID} =~ ^[1-9][0-9]*$ ]] || return 1
+
+    # After losing the leader, a /proc snapshot alone can miss a child forked
+    # during the scan. Only ESRCH proves the numeric group is absent; EPERM or
+    # any other uncertainty preserves state. Signal zero grants no authority
+    # to send a real signal to this possibly recycled group.
+    python3 - "${DOWNLOAD_WORKER_PGID}" <<'PY_GROUP_ABSENT'
+import os
+import sys
+
+try:
+    os.kill(-int(sys.argv[1]), 0)
+except ProcessLookupError:
+    sys.exit(0)
+except (OSError, ValueError, OverflowError):
+    pass
+sys.exit(1)
+PY_GROUP_ABSENT
+}
+
 get_path_identity() {
     local identity_output_variable=$1
     local path=$2
@@ -1112,10 +1133,9 @@ signal_download_worker() {
             && download_group_has_live_member \
             && kill "-${signal_name}" -- "-${DOWNLOAD_WORKER_PGID}" 2>/dev/null; then
             group_signaled=true
-        else
-            DOWNLOAD_WORKER_PGID=''
-            DOWNLOAD_WORKER_PGID_START_TIME=''
         fi
+        # Failed authority or delivery is not proof of quiescence. Retain the
+        # observed group so wait/cleanup can still veto resource removal.
     fi
 
     if [[ ${signal_name} == KILL || ${group_signaled} == false ]] \
@@ -1221,10 +1241,22 @@ wait_for_download_exit() {
             fi
         fi
 
+        if [[ ${worker_alive} != true && -z ${DOWNLOAD_WORKER_PGID} &&
+            -n ${DOWNLOAD_WORKER_PID} && ${REUSE_CURRENT_SESSION} != true ]]; then
+            # In standalone no-fork topology, $! is the future session leader.
+            # It may die after forking but before readiness adoption. Keep its
+            # number only as a liveness veto, with no start-time authority.
+            DOWNLOAD_WORKER_PGID=${DOWNLOAD_WORKER_PID}
+            DOWNLOAD_WORKER_PGID_START_TIME=''
+        fi
+
         if [[ ${worker_alive} != true && -n ${DOWNLOAD_WORKER_PGID} ]]; then
-            # shellcheck disable=SC2310 # Failed authentication ends group tracking.
-            if download_group_is_current \
-                && download_group_has_live_member; then
+            # Liveness can veto cleanup without authorizing a group signal.
+            # A missing/recycled leader must never hide a surviving descendant.
+            # shellcheck disable=SC2310 # Failed absence proof preserves tracking.
+            if download_group_has_live_member; then
+                group_alive=true
+            elif ! download_group_is_current && ! download_group_is_absent; then
                 group_alive=true
             else
                 DOWNLOAD_WORKER_PGID=''
@@ -1267,7 +1299,16 @@ stop_download_worker() {
     fi
 
     signal_download_worker KILL
-    wait_for_download_exit 20
+    # shellcheck disable=SC2310 # Failure must preserve the tracked resources.
+    if wait_for_download_exit 20; then
+        return 0
+    fi
+    # shellcheck disable=SC2310 # Lost authority is diagnostic, never a kill target.
+    if [[ -n ${DOWNLOAD_WORKER_PGID} ]] && ! download_group_is_current; then
+        printf '%s\n' \
+            'Warning: command group leader identity was lost; shutdown is unconfirmed and group signaling is forbidden.' >&2
+    fi
+    return 1
 }
 
 run_supervised_command() {
@@ -1276,6 +1317,10 @@ run_supervised_command() {
     local -a worker_command=("$@")
 
     DOWNLOAD_STATUS=125
+    if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]]; then
+        error 'previous command shutdown is unconfirmed; refusing to replace its process tracking.'
+        return 0
+    fi
     DOWNLOAD_WORKER_PID=''
     DOWNLOAD_WORKER_START_TIME=''
     DOWNLOAD_WORKER_PGID=''
@@ -1430,13 +1475,9 @@ run_supervised_command() {
     if [[ ${registration_ready} != true ]]; then
         worker_status=0
         # shellcheck disable=SC2310
-        if ! process_is_running "${DOWNLOAD_WORKER_PID}"; then
-            wait "${DOWNLOAD_WORKER_PID}" 2>/dev/null || worker_status=$?
-            DOWNLOAD_WAITED_STATUS=${worker_status}
-            DOWNLOAD_WORKER_PID=''
-            DOWNLOAD_WORKER_START_TIME=''
-            DOWNLOAD_WORKER_PGID=''
-            DOWNLOAD_WORKER_PGID_START_TIME=''
+        if ! process_is_running "${DOWNLOAD_WORKER_PID}" \
+            && wait_for_download_exit 1; then
+            worker_status=${DOWNLOAD_WAITED_STATUS:-125}
             if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
                 DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS:-143}
             else
@@ -1460,7 +1501,9 @@ run_supervised_command() {
         elif [[ ${DOWNLOAD_WAITED_STATUS} =~ ^[0-9]+$ ]]; then
             DOWNLOAD_STATUS=${DOWNLOAD_WAITED_STATUS}
         fi
-        cleanup_download_registration_files
+        if [[ -z ${DOWNLOAD_WORKER_PID} && -z ${DOWNLOAD_WORKER_PGID} ]]; then
+            cleanup_download_registration_files
+        fi
         return 0
     fi
 
@@ -1496,7 +1539,9 @@ run_supervised_command() {
         fi
     fi
 
-    cleanup_download_registration_files
+    if [[ -z ${DOWNLOAD_WORKER_PID} && -z ${DOWNLOAD_WORKER_PGID} ]]; then
+        cleanup_download_registration_files
+    fi
     return 0
 }
 
@@ -1682,7 +1727,6 @@ remove_marked_private_aria2_sensitive_metadata() {
 
 private_aria2_staging_candidate_is_safe() {
     local candidate=$1
-    local require_marker=$2
     local candidate_name=${candidate##*/}
     local candidate_owner=''
     local candidate_mode=''
@@ -1694,8 +1738,6 @@ private_aria2_staging_candidate_is_safe() {
     local marker_value=''
     local marker_size=''
     local marker_seen=false
-    local legacy_plan_seen=false
-    local legacy_cookie_seen=false
 
     [[ ${candidate_name} =~ ^[.]yt-dlp-aria2[.][A-Za-z0-9]{8}$ ]] || return 1
     [[ ! -L ${candidate} && -d ${candidate} ]] || return 1
@@ -1717,7 +1759,7 @@ private_aria2_staging_candidate_is_safe() {
 
         case ${entry_name} in
             "${PRIVATE_ARIA2_STAGING_MARKER}")
-                [[ ${require_marker} == true && ${marker_seen} == false ]] || return 1
+                [[ ${marker_seen} == false ]] || return 1
                 marker_size=$(stat -c '%s' -- "${entry}" 2>/dev/null) || return 1
                 [[ ${marker_size} == "$((${#PRIVATE_ARIA2_STAGING_MARKER_VALUE} + 1))" ]] \
                     || return 1
@@ -1727,13 +1769,7 @@ private_aria2_staging_candidate_is_safe() {
                     || return 1
                 marker_seen=true
                 ;;
-            plan.json)
-                legacy_plan_seen=true
-                ;;
-            cookies.txt)
-                legacy_cookie_seen=true
-                ;;
-            aria2.input | manifest.json | \
+            plan.json | cookies.txt | aria2.input | manifest.json | \
                 item-[0-9][0-9][0-9].download | \
                 item-[0-9][0-9][0-9].download.aria2)
                 ;;
@@ -1745,22 +1781,15 @@ private_aria2_staging_candidate_is_safe() {
         find "${candidate}" -mindepth 1 -maxdepth 1 -print0 2>/dev/null || true
     )
 
-    if [[ ${require_marker} == true ]]; then
-        [[ ${marker_seen} == true ]]
-    else
-        [[ ${marker_seen} == false &&
-            ${legacy_plan_seen} == true &&
-            ${legacy_cookie_seen} == true ]]
-    fi
+    [[ ${marker_seen} == true ]]
 }
 
 remove_private_aria2_staging_candidate() {
     local candidate=$1
-    local require_marker=$2
     local entry=''
 
     # shellcheck disable=SC2310 # Predicate explicitly handles failures; validation failure stops deletion.
-    private_aria2_staging_candidate_is_safe "${candidate}" "${require_marker}" \
+    private_aria2_staging_candidate_is_safe "${candidate}" \
         || return 1
 
     while IFS= read -r -d '' entry; do
@@ -1773,21 +1802,16 @@ remove_private_aria2_staging_candidate() {
     rmdir -- "${candidate}"
 }
 
-recover_abandoned_private_aria2_staging() {
+report_abandoned_private_aria2_staging() {
     local candidate=''
     # Old sessions have no retained identity or live descriptor in this process.
-    # A marker, owner and familiar basename cannot authorize deletion.
+    # A marker, owner, age or familiar basename cannot authorize deletion.
+    # Only active, descriptor-bound temporaries are removed by cleanup.
     for candidate in "${OUTPUT_DIR}"/.yt-dlp-aria2.????????; do
         [[ -e ${candidate} || -L ${candidate} ]] || continue
         printf 'Warning: preserving legacy staging for manual inspection: %s\n' \
             "${candidate##*/}" >&2
     done
-}
-
-cleanup_stale_temporary_files() {
-    # Age and filename patterns do not authenticate a previous session's files.
-    # Only active, descriptor-bound temporaries are removed by cleanup.
-    return 0
 }
 
 probe_media_summary() {
@@ -2597,8 +2621,7 @@ prepare_output_directory() {
     acquire_output_lock "${OUTPUT_DIR}"
 
     if python3 "${PRIVATE_ARIA2_HELPER}" media-local-safe --output-dir "${OUTPUT_DIR}"; then
-        recover_abandoned_private_aria2_staging
-        cleanup_stale_temporary_files
+        report_abandoned_private_aria2_staging
     else
         local media_root=''
         if ! media_root=$(python3 "${PRIVATE_ARIA2_HELPER}" private-root --disk); then
@@ -2616,6 +2639,9 @@ prepare_output_directory() {
             || ! get_path_identity MEDIA_WORKSPACE_IDENTITY "${MEDIA_WORKSPACE}" directory \
             || ! opened_identity=$(stat -Lc '%d:%i' -- "/proc/${BASHPID}/fd/${MEDIA_WORKSPACE_FD}") \
             || [[ ${opened_identity} != "${MEDIA_WORKSPACE_IDENTITY}" ]]; then
+            # A pathname observed after open may identify a replacement, not
+            # the allocated directory. It must not grant cleanup authority.
+            MEDIA_WORKSPACE_IDENTITY=''
             finish_signal_registration
             error 'unable to authenticate the local media workspace.'
             exit 73
@@ -2656,6 +2682,7 @@ prepare_private_work_files() {
             "${PRIVATE_ARIA2_METADATA}" directory \
         || ! opened_identity=$(stat -Lc '%d:%i' -- "/proc/${BASHPID}/fd/${PRIVATE_ARIA2_METADATA_FD}") \
         || [[ ${opened_identity} != "${PRIVATE_ARIA2_METADATA_IDENTITY}" ]]; then
+        PRIVATE_ARIA2_METADATA_IDENTITY=''
         finish_signal_registration
         error 'unable to authenticate the local private metadata directory.'
         exit 73
@@ -2753,13 +2780,18 @@ prepare_private_work_files() {
     fi
     unset URL
 
+    # Replay catchable signals only after cleanup can authenticate both the
+    # allocated staging directory and its complete ownership marker.
+    begin_signal_registration
     if ! PRIVATE_ARIA2_STAGING=$(mktemp -d \
         --tmpdir="${OUTPUT_DIR}" \
         '.yt-dlp-aria2.XXXXXXXX'); then
+        finish_signal_registration
         error 'unable to create the private aria2 staging directory.'
         exit 13
     fi
     if ! chmod 700 -- "${PRIVATE_ARIA2_STAGING}"; then
+        finish_signal_registration
         error 'unable to secure the private aria2 staging directory.'
         exit 13
     fi
@@ -2770,6 +2802,8 @@ prepare_private_work_files() {
             "${PRIVATE_ARIA2_STAGING}" directory \
         || ! opened_identity=$(stat -Lc '%d:%i' -- "/proc/${BASHPID}/fd/${PRIVATE_ARIA2_STAGING_FD}") \
         || [[ ${opened_identity} != "${PRIVATE_ARIA2_STAGING_IDENTITY}" ]]; then
+        PRIVATE_ARIA2_STAGING_IDENTITY=''
+        finish_signal_registration
         error 'unable to identify the private aria2 staging directory.'
         exit 13
     fi
@@ -2778,9 +2812,11 @@ prepare_private_work_files() {
     if ! printf '%s\n' "${PRIVATE_ARIA2_STAGING_MARKER_VALUE}" \
         >"${staging_marker_path}" \
         || ! chmod 600 -- "${staging_marker_path}"; then
+        finish_signal_registration
         error 'unable to initialize private aria2 staging ownership metadata.'
         exit 13
     fi
+    finish_signal_registration
 
     PRIVATE_ARIA2_PLAN="${PRIVATE_ARIA2_METADATA}/plan.json"
     PRIVATE_ARIA2_COOKIE_JAR="${PRIVATE_ARIA2_METADATA}/cookies.txt"
@@ -3026,7 +3062,10 @@ execute_selected_transport() {
     local aria2_status
     local build_status=0
     local commit_status
+    local native_preflight_status=0
+    local native_output_template=''
     local -a builder_security_options=()
+    local -a native_output_options=()
 
     if [[ ${PRIVATE_TRANSPORT} == direct ]]; then
         if [[ ${MACHINE_PROGRESS} == true ]]; then
@@ -3116,6 +3155,12 @@ execute_selected_transport() {
 
         aria2_status=${DOWNLOAD_STATUS}
 
+        if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]]; then
+            # An unconfirmed shutdown still owns the private input and cookies.
+            # Finalization propagates the failure; cleanup preserves everything.
+            return 0
+        fi
+
         # shellcheck disable=SC2310 # A changed inode is a hard preservation path.
         if ! remove_recorded_private_aria2_sensitive_file \
             "${PRIVATE_ARIA2_INPUT}" "${PRIVATE_ARIA2_INPUT_IDENTITY}"; then
@@ -3158,12 +3203,36 @@ execute_selected_transport() {
             DOWNLOAD_STATUS=${aria2_status}
         fi
     else
+        if [[ ${MODE} == video && ${YOUTUBE_HLS_FIREFOX} != true ]]; then
+            # No-overwrites does not prevent yt-dlp's metadata postprocessor
+            # from rewriting an existing MKV. Bind every native extraction and
+            # retry to the same preflighted basename before any media transfer.
+            native_output_template=$(python3 "${PRIVATE_ARIA2_HELPER}" check-native-final \
+                --plan "${PRIVATE_ARIA2_PLAN}" --output-dir "${OUTPUT_DIR}" \
+                --final-output-dir "${FINAL_OUTPUT_DIR}" \
+                --final-output-identity "${FINAL_OUTPUT_IDENTITY}") \
+                || native_preflight_status=$?
+            if ((native_preflight_status == 1)); then
+                error 'final media destination already exists; refusing to overwrite it.'
+                exit 1
+            elif ((native_preflight_status != 0)) \
+                || [[ -z ${native_output_template} || ${native_output_template} == *$'\n'* ]]; then
+                error 'unable to validate the native video destination.'
+                exit 65
+            fi
+            native_output_options=(--output "${native_output_template}")
+        fi
         run_supervised_ytdlp \
             "${YTDLP_BIN}" \
             "${YT_DLP_OPTIONS[@]}" \
+            "${native_output_options[@]}" \
             --batch-file "${YTDLP_BATCH_FILE_TMP}"
     fi
 
+    if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]]; then
+        # Native download or direct replay may still consume this private URL.
+        return 0
+    fi
     if ! rm -f -- "${YTDLP_BATCH_FILE_TMP}"; then
         error 'unable to remove the private yt-dlp URL batch file.'
         exit 13
@@ -3281,7 +3350,8 @@ remove_owned_hls_remux_temp() {
     close_hls_remux_fd
 }
 
-# Atomically publish a verified HLS remux and update the private path record.
+# Retain a verified remux for diagnosis when final publication cannot complete.
+# This does not publish the final media or update the private result record.
 preserve_verified_hls_remux() {
     local retained_remux_path=${HLS_REMUX_TMP}
     local retained_remux_dir=''
@@ -3510,10 +3580,14 @@ remux_hls_result() {
     if [[ ${MACHINE_PROGRESS} == true ]]; then
         printf 'FFMPEG_PROGRESS_DURATION|%s\n' "${hls_source_duration_us}"
     fi
+    # Keep the temporary pathname, identity and open descriptor one registered
+    # resource before a deferred signal can invoke cleanup.
+    begin_signal_registration
     if ! HLS_REMUX_TMP=$(mktemp \
         --tmpdir="${hls_source_dir}" \
         --suffix='.mkv' \
         '.yt-dlp-remux.XXXXXXXX'); then
+        finish_signal_registration
         emit_machine_postprocess error FFmpegVideoRemuxer
         error 'unable to create the temporary MKV file.'
         exit 13
@@ -3522,11 +3596,13 @@ remux_hls_result() {
     if ! chmod 600 -- "${HLS_REMUX_TMP}" \
         || ! get_path_identity \
             HLS_REMUX_TMP_IDENTITY "${HLS_REMUX_TMP}" regular-file; then
+        finish_signal_registration
         emit_machine_postprocess error FFmpegVideoRemuxer
         error 'unable to secure the temporary MKV file.'
         exit 13
     fi
     if ! exec {HLS_REMUX_FD}<>"${HLS_REMUX_TMP}"; then
+        finish_signal_registration
         emit_machine_postprocess error FFmpegVideoRemuxer
         error 'unable to open the temporary MKV file for authenticated remuxing.'
         exit 13
@@ -3534,10 +3610,12 @@ remux_hls_result() {
     HLS_REMUX_FD_PATH="/proc/${BASHPID}/fd/${HLS_REMUX_FD}"
     # shellcheck disable=SC2310 # Failure rejects an unauthenticated remux descriptor.
     if ! hls_remux_temp_identity_matches; then
+        finish_signal_registration
         emit_machine_postprocess error FFmpegVideoRemuxer
         error 'unable to authenticate the temporary MKV descriptor.'
         exit 13
     fi
+    finish_signal_registration
 
     run_supervised_command \
         ffmpeg \

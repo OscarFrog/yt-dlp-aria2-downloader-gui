@@ -91,7 +91,7 @@ ALLOWED_SKIPS = {
 }
 
 
-def required_steps(job_name, filename):
+def required_steps(job_name):
     if job_name.startswith(IDENTITY_PREFIX):
         return {"Bind validation to the event source"}
     return REQUIRED_STEPS[job_name]
@@ -317,7 +317,7 @@ class Verifier:
             steps = job["steps"]
             require(isinstance(steps, list) and steps, "Required qualification step metadata is empty.")
             step_names = [step["name"] for step in steps]
-            mandatory = required_steps(job["name"], filename)
+            mandatory = required_steps(job["name"])
             require(all(step_names.count(name) == 1 for name in mandatory),
                     "Required qualification steps are missing or duplicated.")
             for step in steps:

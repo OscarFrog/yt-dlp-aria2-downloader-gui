@@ -198,6 +198,22 @@ def child_display_path(parent_display: str, name: str) -> str:
     return f"{parent_display.rstrip('/')}/{name}"
 
 
+def validate_directory_ancestor(descriptor: int, display_path: str) -> None:
+    directory_stat = os.fstat(descriptor)
+    if directory_stat.st_uid not in {0, os.geteuid()}:
+        raise LauncherError(
+            f"installation ancestor is not owned by root or the current user: {display_path}"
+        )
+    mode = stat.S_IMODE(directory_stat.st_mode)
+    # Sticky trusted parents protect the next trusted-owned directory from
+    # other users. Managed leaves still require validate_user_directory().
+    if mode & 0o022 and not mode & stat.S_ISVTX:
+        raise LauncherError(
+            "installation ancestor is writable by group or other users "
+            f"without sticky protection: {display_path}"
+        )
+
+
 def open_child_directory(
     parent_fd: int,
     name: str,
@@ -209,6 +225,7 @@ def open_child_directory(
     flags = directory_open_flags()
 
     for _attempt in range(MAX_DIRECTORY_BIND_ATTEMPTS):
+        validate_directory_ancestor(parent_fd, os.path.dirname(display_path))
         try:
             path_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -255,6 +272,11 @@ def open_child_directory(
             descriptor_stat.st_dev == path_stat.st_dev
             and descriptor_stat.st_ino == path_stat.st_ino
         ):
+            try:
+                validate_directory_ancestor(directory_fd, display_path)
+            except BaseException:
+                os.close(directory_fd)
+                raise
             return directory_fd
         os.close(directory_fd)
 
@@ -447,6 +469,7 @@ def validate_data_home_path_identity(data_home: str, anchored_fd: int) -> None:
         raise LauncherError("XDG data home changed during the launcher transaction")
 
     try:
+        validate_user_directory(current_fd, data_home)
         anchored_stat = os.fstat(anchored_fd)
         current_stat = os.fstat(current_fd)
     finally:
@@ -463,8 +486,6 @@ def validate_directory_branch_identity(
     data_home: str,
     components: tuple[str, ...],
     anchored_fd: int | None,
-    *,
-    expect_absent: bool = False,
 ) -> None:
     try:
         current_fd = open_directory_branch(
@@ -479,7 +500,7 @@ def validate_directory_branch_identity(
             + "/".join(components)
         ) from exc
 
-    if expect_absent or anchored_fd is None:
+    if anchored_fd is None:
         if current_fd is not None:
             os.close(current_fd)
             raise LauncherError(
@@ -494,6 +515,9 @@ def validate_directory_branch_identity(
         )
 
     try:
+        validate_user_directory(
+            current_fd, child_display_path(data_home, "/".join(components))
+        )
         anchored_stat = os.fstat(anchored_fd)
         current_stat = os.fstat(current_fd)
     finally:
@@ -514,8 +538,6 @@ def validate_managed_path_identities(
     applications_fd: int | None,
     launcher_fd: int | None,
     icon_fd: int | None,
-    *,
-    launcher_removed: bool = False,
 ) -> None:
     validate_data_home_path_identity(data_home, data_fd)
     validate_directory_branch_identity(
@@ -529,7 +551,6 @@ def validate_managed_path_identities(
         data_home,
         (APP_ID,),
         launcher_fd,
-        expect_absent=launcher_removed,
     )
     validate_directory_branch_identity(
         data_fd,
@@ -1250,6 +1271,9 @@ def install_launcher(
         assert launcher_fd is not None
         assert icon_fd is not None
 
+        validate_managed_path_identities(
+            data_home, data_fd, applications_fd, launcher_fd, icon_fd
+        )
         os.fchmod(launcher_fd, 0o700)
         remove_stale_artifacts(applications_fd, launcher_fd, icon_fd)
         raise_pending_shutdown()
@@ -1324,6 +1348,9 @@ def install_launcher(
                     ".launch.",
                 )
 
+            validate_managed_path_identities(
+                data_home, data_fd, applications_fd, launcher_fd, icon_fd
+            )
             launcher_publication_attempted = True
             os.replace(
                 "launch",
@@ -1511,6 +1538,9 @@ def uninstall_launcher(
         rollback_failures: list[tuple[str, BaseException]] = []
         cleanup_failures: list[tuple[str, BaseException]] = []
         try:
+            validate_managed_path_identities(
+                data_home, data_fd, applications_fd, launcher_fd, icon_fd
+            )
             remove_stale_artifacts(applications_fd, launcher_fd, icon_fd)
             raise_pending_shutdown()
             with defer_shutdown_interruptions():
@@ -1532,6 +1562,9 @@ def uninstall_launcher(
                     f".{APP_ID}.",
                 )
 
+            validate_managed_path_identities(
+                data_home, data_fd, applications_fd, launcher_fd, icon_fd
+            )
             if applications_fd is not None:
                 desktop_removal_attempted = True
                 launcher_removed = unlink_known_file(

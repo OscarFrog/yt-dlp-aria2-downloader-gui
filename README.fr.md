@@ -87,7 +87,8 @@ Avec le RPM, le lanceur graphique et son icône sont installés automatiquement 
 - une URL par exécution, avec désactivation des téléchargements accidentels de
   listes de lecture ;
 - configuration personnelle et plugins yt-dlp désactivés pour une exécution déterministe ;
-- médias terminés et sorties de post-traitement jamais écrasés silencieusement ;
+- refus des collisions connues avec les vidéos terminées, avec la limite de
+  publication locale décrite plus bas ;
 - sélection du dossier de destination et mémorisation des préférences ;
 - vidéo MKV sans réencodage lorsque les flux sont compatibles ;
 - profil vidéo YouTube HLS authentifié avec les cookies Firefox ;
@@ -549,7 +550,13 @@ Pour garantir le confinement, l'installateur portable exige un
 groupe ou les autres utilisateurs ; il refuse aussi tout lien symbolique à la
 racine ou dans un composant parent. Le chemin de données doit aussi être en
 UTF-8 valide et pouvoir être représenté sans ambiguïté dans une clé `Exec` de
-fichier desktop. Il conserve des descripteurs sans suivi de liens pendant toute
+fichier desktop. Tous les ancêtres, y compris les répertoires intermédiaires des
+icônes, doivent appartenir à root ou à l'utilisateur courant. Les ancêtres
+inscriptibles par le groupe ou les autres utilisateurs exigent le bit sticky ;
+la racine de données et les répertoires gérés eux-mêmes restent soumis à la
+propriété de l'utilisateur courant et à l'absence d'écriture partagée. Les
+chaînes non sûres sont refusées sans modifier leurs permissions.
+Il conserve des descripteurs sans suivi de liens pendant toute
 la transaction : un remplacement concurrent du chemin ne peut donc pas
 rediriger l'installation, le retrait ou le nettoyage.
 Les demandes concurrentes d'installation et de retrait portables sont
@@ -655,6 +662,11 @@ log**. Le journal actif reste privé (`0600`) pendant l’exécution et n'est ja
 proposé comme solution de repli si la sanitisation sûre échoue. Les erreurs de
 saisie et les autres échecs précoces sans diagnostic utile restent de simples
 messages d'erreur.
+Le fichier conservé est un instantané. Si l'arrêt des processus ne peut pas être
+confirmé, le journal actif privé et la session restent en place, y compris les
+écritures effectuées après cet instantané. Le nettoyage normal de la session
+n'est autorisé qu'après confirmation de l'arrêt ; l'instantané n'est pas
+automatiquement actualisé.
 
 
 
@@ -721,9 +733,9 @@ par le moteur est volontairement éphémère : une fois les processus de
 téléchargement arrêtés, une annulation utilisateur supprime son état
 partiel/contrôle privé et une exécution ultérieure redémarre le transfert direct
 proprement. Si l'arrêt des processus ne peut pas être confirmé, le moteur émet
-un avertissement et conserve ses fichiers temporaires pour inspection. Un média
-terminé ou post-traité déjà présent est
-conservé et l'exécution échoue au lieu de le remplacer.
+un avertissement et conserve ses fichiers temporaires pour inspection. Les
+collisions connues avec une vidéo finale sont refusées ; les contrôles propres
+aux transports et la limite de collision locale tardive sont décrits plus bas.
 
 Le modèle de sortie limite le titre et l'identifiant du média selon leur taille
 encodée en octets, ce qui réduit les échecs avec de longs titres Unicode sur les
@@ -759,11 +771,24 @@ téléchargement ; la publication vérifie à nouveau l'absence de collision.
 Des en-têtes répétés avec des casses différentes maintiennent le transfert sur
 yt-dlp natif.
 
-Pour la vidéo directe ordinaire, le contrôle préalable vérifie aussi le MKV
+Pour la vidéo ordinaire, les transports direct et natif vérifient le MKV
 assemblé/remuxé dans la véritable destination finale, même si le traitement
 utilise un espace de travail local distinct. Une collision connue provoque un
-échec sans retélécharger les deux composants ni post-traiter un ancien fichier ;
+échec avant le transfert média, sans post-traiter un ancien fichier ;
 elle n'est pas annoncée comme un nouveau succès validé.
+L'extraction native et ses nouvelles tentatives conservent le nom de base choisi
+pendant la planification, même si les métadonnées actualisées le modifieraient.
+Le profil YouTube HLS/Firefox conserve son chemin distinct de publication du
+remux contrôlé.
+
+Sur une destination locale utilisée directement pour le traitement, un autre
+programme peut encore créer le même nom final entre ce contrôle et le
+post-traitement yt-dlp ; cette fenêtre de collision tardive ne constitue pas une
+garantie atomique de non-écrasement. Le verrou de destination par utilisateur
+exclut les autres instances coopérantes du moteur, pas les écrivains arbitraires.
+La publication depuis un espace de travail privé (notamment vers le réseau) et
+la publication distincte du remux HLS/Firefox refusent les collisions tardives
+sur le nom final.
 
 Pour l'extraction YouTube actuelle, le moteur utilise le runtime Deno géré
 automatiquement via un chemin explicite :

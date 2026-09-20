@@ -708,6 +708,59 @@ test_private_plan_final_destination_preflight() {
     done
 }
 
+test_native_final_destination_preflight() {
+    local scenario final_dir final_identity expected_status before='' after=''
+
+    for scenario in absent regular symlink directory replaced-directory directory-symlink escaped-filename; do
+        new_case "native-final-${scenario}"
+        final_dir="${CASE_ROOT}/final 'quoted' % directory"
+        mkdir -- "${final_dir}"
+        final_identity=$(stat -c '%d:%i' -- "${final_dir}")
+        expected_status=1
+        case ${scenario} in
+            absent) expected_status=0 ;;
+            regular)
+                printf 'existing final media\n' >"${final_dir}/native.mkv"
+                before=$(stat -c '%d:%i:%s:%y:%z' -- "${final_dir}/native.mkv")
+                ;;
+            symlink) ln -s -- absent-target "${final_dir}/native.mkv" ;;
+            directory) mkdir -- "${final_dir}/native.mkv" ;;
+            replaced-directory)
+                mv -- "${final_dir}" "${CASE_ROOT}/original-final"
+                mkdir -- "${final_dir}"
+                expected_status=65
+                ;;
+            directory-symlink)
+                mv -- "${final_dir}" "${CASE_ROOT}/original-final"
+                ln -s -- "${CASE_ROOT}/original-final" "${final_dir}"
+                expected_status=70
+                ;;
+            escaped-filename) expected_status=65 ;;
+            *) fail "Unknown native final-preflight scenario: ${scenario}" ;;
+        esac
+        local filename="${OUTPUT_DIR}/native.mp4"
+        if [[ ${scenario} == escaped-filename ]]; then
+            filename="${CASE_ROOT}/native.mp4"
+        fi
+        write_single_plan 'https://example.invalid/native.mp4' \
+            "${filename}" 'qualification-native'
+        assert_status "${expected_status}" "native final destination preflight: ${scenario}" \
+            python3 "${HELPER}" check-native-final \
+            --output-dir "${OUTPUT_DIR}" --plan "${PLAN_FILE}" \
+            --final-output-dir "${final_dir}" --final-output-identity "${final_identity}"
+        if [[ ${scenario} == regular ]]; then
+            after=$(stat -c '%d:%i:%s:%y:%z' -- "${final_dir}/native.mkv")
+            assert_equals "${before}" "${after}" \
+                'native preflight preserves final metadata and identity'
+            assert_file_has_line "${final_dir}/native.mkv" 'existing final media' \
+                'native preflight preserves final bytes'
+        elif [[ ${scenario} == symlink ]]; then
+            [[ -L ${final_dir}/native.mkv && ! -e ${final_dir}/absent-target ]] \
+                || fail 'Native preflight followed a destination symlink.'
+        fi
+    done
+}
+
 test_private_plan_duplicate_staging_names() {
     new_case 'duplicate-staging-names'
     write_double_plan
@@ -1289,6 +1342,133 @@ print("Private-root, copy-publication and cleanup boundaries passed.")
 PY_NETWORK_BOUNDARIES
 }
 
+test_workspace_mount_boundaries() {
+    printf '%s\n' 'Private aria2 plan scenario: descriptor-bound cleanup mount boundaries'
+    new_case 'cleanup-mount-boundaries'
+    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_CLEANUP_MOUNTS'
+import argparse
+import builtins
+import errno
+import importlib.util
+import io
+import os
+from pathlib import Path
+import re
+import sys
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location("private_cleanup_mounts", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = Path(sys.argv[2])
+real_open = builtins.open
+real_listdir = os.listdir
+real_unlink = os.unlink
+
+
+def inode(path):
+    metadata = path.stat()
+    return metadata.st_dev, metadata.st_ino
+
+
+def descriptor_inode(descriptor):
+    metadata = os.fstat(descriptor)
+    return metadata.st_dev, metadata.st_ino
+
+
+for scenario in ("ordinary", "zero-id", "child-bind", "root-bind", "missing-id",
+                 "malformed-id", "duplicate-id", "unreadable-id", "changed-id"):
+    workspace = root / scenario
+    workspace.mkdir(mode=0o700)
+    nested = workspace / "nested"
+    nested.mkdir(mode=0o700)
+    protected = nested / "must-not-delete.bin"
+    protected.write_bytes(b"private fixture payload behind a simulated mount")
+    root_identity = inode(workspace)
+    nested_identity = inode(nested)
+    assert root_identity[0] == nested_identity[0] == inode(root)[0]
+    original = protected.read_bytes()
+    original_identity = inode(protected)
+    traversals = []
+    deletions = []
+    observations = []
+
+    def inspected_listdir(descriptor):
+        if isinstance(descriptor, int):
+            observed = descriptor_inode(descriptor)
+            if observed == nested_identity:
+                traversals.append(observed)
+        return real_listdir(descriptor)
+
+    def observed_unlink(filename, *args, **kwargs):
+        descriptor = kwargs.get("dir_fd")
+        if descriptor is not None and descriptor_inode(descriptor) == nested_identity:
+            deletions.append(os.fspath(filename))
+        return real_unlink(filename, *args, **kwargs)
+
+    def fdinfo_open(filename, *args, **kwargs):
+        pathname = os.fspath(filename) if not isinstance(filename, int) else ""
+        match = re.fullmatch(r"/proc/self/fdinfo/([0-9]+)", pathname)
+        if not match:
+            return real_open(filename, *args, **kwargs)
+        descriptor = int(match.group(1))
+        observed = descriptor_inode(descriptor)
+        observations.append(observed)
+        affected = observed == (root_identity if scenario == "root-bind" else nested_identity)
+        if affected and scenario == "unreadable-id":
+            raise OSError(errno.EIO, "fixture unavailable mount identity")
+        with real_open(filename, *args, **kwargs) as stream:
+            content = stream.read()
+        binary = isinstance(content, bytes)
+        text = content.decode("ascii") if binary else content
+        mount = re.search(r"^mnt_id:\s*([0-9]+)$", text, re.MULTILINE)
+        assert mount is not None, "Linux fixture fdinfo lacks a mount ID"
+        replacement = mount.group(0)
+        if scenario == "zero-id":
+            replacement = "mnt_id:\t0"
+        elif affected:
+            if scenario in {"child-bind", "root-bind"} or (scenario == "changed-id" and traversals):
+                replacement = f"mnt_id:\t{int(mount.group(1)) + 1000000}"
+            elif scenario == "missing-id":
+                replacement = ""
+            elif scenario == "malformed-id":
+                replacement = "mnt_id:\tnot-a-number"
+            elif scenario == "duplicate-id":
+                replacement = f"{mount.group(0)}\n{mount.group(0)}"
+        text = text[:mount.start()] + replacement + text[mount.end():]
+        return io.BytesIO(text.encode("ascii")) if binary else io.StringIO(text)
+
+    arguments = argparse.Namespace(
+        path=str(workspace), identity=f"{root_identity[0]}:{root_identity[1]}",
+        keep=[], keep_identity=[],
+    )
+    refused = False
+    with patch("builtins.open", fdinfo_open), patch("io.open", fdinfo_open), \
+         patch.object(module.os, "listdir", inspected_listdir), \
+         patch.object(module.os, "unlink", observed_unlink):
+        try:
+            result = module.cleanup_workspace(arguments)
+        except (module.PlanError, OSError):
+            refused = True
+        else:
+            assert result == 0
+    if scenario in {"ordinary", "zero-id"}:
+        assert not refused and not workspace.exists(), "ordinary same-mount cleanup failed"
+        continue
+    assert refused, (scenario, "cleanup crossed an unresolved mount boundary",
+                     "nested traversals", len(traversals), "deleted names", deletions)
+    assert not deletions, (scenario, "cleanup deleted behind an unresolved mount boundary")
+    assert protected.read_bytes() == original and inode(protected) == original_identity
+    assert workspace.is_dir() and nested.is_dir()
+    assert observations, "mount-boundary refusal did not observe real descriptor fdinfo"
+    if scenario == "changed-id":
+        assert len(traversals) == 1, "mount change was not rejected between inspection and removal"
+    else:
+        assert not traversals, "cleanup traversed a foreign or unauthenticated mounted subtree"
+print("Workspace mount-boundary and uncertain-identity preservation checks passed.")
+PY_CLEANUP_MOUNTS
+}
+
 test_private_plan_signal_rollback() {
     local checkpoint signal_number
 
@@ -1787,6 +1967,7 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
+    test_workspace_mount_boundaries
     test_network_media_permissions
     test_private_roots_and_media_faults
     test_private_plan_classification
@@ -1795,6 +1976,7 @@ main() {
     test_private_plan_input_validation
     test_private_plan_existing_destinations
     test_private_plan_final_destination_preflight
+    test_native_final_destination_preflight
     test_private_plan_duplicate_staging_names
     test_private_plan_publication_safety
     test_private_plan_rollback_safety

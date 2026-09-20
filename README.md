@@ -83,7 +83,8 @@ For an RPM installation, the graphical launcher and application icon are install
 - download engine that can also be used from a terminal;
 - one URL per run, with accidental playlist downloads disabled;
 - personal yt-dlp configuration and plugins are disabled for deterministic execution;
-- completed media and post-processed outputs are never overwritten silently;
+- refusal of known completed-video collisions, with the local publication
+  limitation described below;
 - destination-folder selection and preference persistence;
 - MKV video download without re-encoding when the streams are compatible;
 - authenticated YouTube HLS video profile using Firefox cookies;
@@ -522,7 +523,11 @@ moving the project directory, run `./install-gui.sh install` again.
 For containment, the portable installer requires a current-user-owned
 `XDG_DATA_HOME` that is not writable by group or other users, and refuses a
 root or parent component that is a symbolic link. The data path must be valid
-UTF-8 and safely representable in a desktop `Exec` key. It keeps no-follow
+UTF-8 and safely representable in a desktop `Exec` key. All ancestors, including
+the intermediate icon directories, must belong to root or the current user.
+Shared-writable ancestors require sticky protection; the data root and managed
+directories themselves must remain current-user-owned and not shared-writable.
+Unsafe chains are refused without changing their permissions. It keeps no-follow
 directory descriptors open for the complete transaction, so a concurrent
 pathname replacement cannot redirect installation, removal, or stale-file
 cleanup.
@@ -620,6 +625,10 @@ information survives source-log truncation and always names the file opened by
 **View log**. The live log is private (`0600`) while the worker is running and
 is never offered as a fallback if safe sanitization fails. Input errors and
 other early failures without a useful diagnostic remain simple error messages.
+The retained file is a point-in-time snapshot. If process shutdown cannot be
+confirmed, the private live log and session remain in place, including writes
+made after that snapshot. Normal session cleanup is allowed only after shutdown
+is confirmed; the snapshot is not automatically refreshed.
 
 
 
@@ -683,8 +692,9 @@ Wrapper-managed direct HTTP(S) aria2 staging is deliberately ephemeral: once
 the download processes have stopped, a user cancellation removes its private
 partial/control state and a later run starts the direct transfer cleanly. If
 process termination cannot be confirmed, the engine warns and preserves its
-temporary files for inspection. An existing completed or post-processed media file
-is preserved and the run fails instead of replacing it.
+temporary files for inspection. Known final-video collisions are refused;
+the transport-specific checks and local late-collision limitation are described
+below.
 
 The output template limits the title and media identifier by encoded byte
 length, reducing filename failures with long Unicode titles on filesystems that
@@ -717,10 +727,20 @@ A direct-transfer destination that already exists is refused before downloading;
 publication checks again for a collision. Headers repeated with different casing
 keep the transfer on native yt-dlp.
 
-For ordinary direct video, the preflight also checks the assembled/remuxed MKV
+For ordinary video, both direct and native transports check the assembled/remuxed MKV
 in the actual final destination, even when processing uses a separate local
-workspace. A known collision fails instead of downloading both components and
+workspace. A known collision fails before media transfer instead of
 post-processing an older file; it is not reported as a newly validated success.
+Native extraction and retries retain the basename selected during planning,
+including when fresh metadata would otherwise change it. The YouTube HLS/Firefox
+profile retains its separate checked-remux publication path.
+
+On a local destination used directly for processing, another program can still
+create the same final name after that check and before yt-dlp post-processing;
+this late-collision window is not an atomic no-overwrite guarantee. The engine's
+same-user destination lock excludes cooperating engine instances, not arbitrary
+writers. Private-workspace publication (including network destinations) and the
+separate HLS/Firefox remux publication refuse late final-name collisions.
 
 For current YouTube extraction, the engine uses the managed Deno runtime through
 an explicit path:

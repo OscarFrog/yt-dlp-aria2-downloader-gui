@@ -2056,9 +2056,10 @@ while (($#)); do
         *) shift ;;
     esac
 done
-final="${output}/overwritten.mkv"
+final="${output}/"'overwritten $F1_TEMPLATE_SENTINEL.mkv'
 printf '%s\\n' "${result}" >"${final}"
 printf '%s\\n' "${final}" >"${result}"
+printf '%s\\0' repeated-transfer >>"${ARIA2_INVOCATION_LOG:?}"
 printf '%s\\n' /audio.m4a /video-only.mp4 >>"${OPTIMIZATION_TEST_ROOT}/http-requests.log"
 '''
 prefix = '''set -euo pipefail
@@ -2079,9 +2080,17 @@ with tempfile.TemporaryDirectory(prefix="real-tool-optimization-") as directory:
         project.mkdir()
         media = case / "media"
         media.mkdir()
+        # The extracted qualification constructs its complete scenario matrix
+        # before running the first case; only file existence is needed here.
+        dash = case / "web" / "dash"
+        dash.mkdir(parents=True)
+        for index in (0, 1):
+            (dash / f"init-stream{index}.m4s").touch()
+            (dash / f"chunk-stream{index}-00001.m4s").touch()
         (project / "download-video.sh").write_text(engine_source, encoding="ascii")
         environment = dict(os.environ, PYTHONOPTIMIZE="1",
                            YTDLP_ARIA2_YTDLP_BIN="/bin/true",
+                           ARIA2_INVOCATION_LOG=str(case / "aria2-invocations.bin"),
                            OPTIMIZATION_TEST_ROOT=str(case))
         completed = subprocess.run(
             ["bash", "-s", "--", str(project), str(case), str(media)],
@@ -2089,25 +2098,236 @@ with tempfile.TemporaryDirectory(prefix="real-tool-optimization-") as directory:
             env=environment, capture_output=True, text=True, timeout=5,
         )
         if (completed.returncode != 1 or
-                "AssertionError: ('repeat', 0," not in completed.stderr):
+                "AssertionError: ('direct-two-streams', 'repeat', 0," not in completed.stderr):
             raise AssertionError(
                 f"{label}: optimization bypassed the actual repeated-output checks; "
                 f"status={completed.returncode}\n{completed.stdout}{completed.stderr}"
             )
-        if "Real two-stream repetition and metadata change preserve" in completed.stdout:
+        if "Real direct-two-streams repetition and metadata change preserve" in completed.stdout:
             raise AssertionError("failed repeated-output qualification reported success")
 
     check(implementation, "isolated")
     try:
         check(mutant, "without-isolation")
     except AssertionError as error:
-        if "status=0\nReal two-stream repetition and metadata change preserve" not in str(error):
+        if "status=0\nReal direct-two-streams repetition and metadata change preserve" not in str(error):
             raise AssertionError("isolation negative control failed for an unrelated reason") from error
     else:
         raise AssertionError("optimization regression accepted removal of interpreter isolation")
 
 print("Real-tool assertions resist inherited optimization and reject the unisolated negative control.")
 PY_REAL_TOOL_OPTIMIZATION
+}
+
+test_mock_child_subreaping() {
+    python3 -I - "${SCRIPT_DIR}/mock-integration.sh" <<'PY_MOCK_SUBREAPING'
+import ctypes
+import errno
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from unittest import mock
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+match = re.search(r"^enable_mock_child_subreaping\(\) \{\n.*?^\}\n", source, re.M | re.S)
+assert match is not None, "unable to extract the actual mock subreaper bootstrap"
+implementation = match.group()
+assert 'exec python3 -I -c ' in implementation
+bootstrap = implementation.split("exec python3 -I -c '\n", 1)[1].split("\n' ", 1)[0]
+
+# Neither a failed prctl nor a failed exec may continue with an unprotected
+# harness. Exercise the actual bootstrap body without changing the host state.
+for prctl_result, exec_error in ((-1, None), (0, OSError(errno.EACCES, "fixture exec"))):
+    with mock.patch("ctypes.CDLL") as library, mock.patch("os.execve") as execute, \
+            mock.patch.object(sys, "argv", ["-c", "", "/bin/bash", "/fixture"]), \
+            mock.patch("signal.signal"), \
+            mock.patch("builtins.print"):
+        library.return_value.prctl.return_value = prctl_result
+        execute.side_effect = exec_error
+        try:
+            exec(compile(bootstrap, "mock-subreaper-bootstrap", "exec"), {})
+        except SystemExit as error:
+            assert error.code == 70, error.code
+        else:
+            raise AssertionError("failed bootstrap continued into the mock suite")
+        assert execute.call_count == (prctl_result == 0)
+
+# This parent deliberately leaves adopted zombies unreaped until observations
+# finish. The negative control therefore does not depend on the host's PID 1.
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(36, 1, 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), "unable to enable fixture subreaping")
+
+child_source = r'''
+import os
+from pathlib import Path
+import signal
+import sys
+
+root = Path(sys.argv[1])
+release = int(sys.argv[2])
+child = os.fork()
+if child:
+    os._exit(0)
+
+def unexpected_signal(number, _frame):
+    (root / "unexpected-signal").write_text(str(number), encoding="ascii")
+    os._exit(128 + number)
+
+for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(number, unexpected_signal)
+fields = Path("/proc/self/stat").read_text().rsplit(") ", 1)[1].split()
+(root / "orphan").write_text(f"{os.getpid()} {fields[19]}\n", encoding="ascii")
+os.read(release, 1)
+(root / "orphan-released").touch()
+os._exit(0)
+'''
+shell_prefix = '''#!/usr/bin/env bash
+set -euo pipefail
+PROJECT_DIR=$1
+if [[ ! -e ${PROJECT_DIR}/before-pid ]]; then
+    printf '%s\\n' "${BASHPID}" >"${PROJECT_DIR}/before-pid"
+    if [[ $5 == ignored ]]; then
+        trap '' PIPE XFSZ
+    else
+        trap - PIPE XFSZ
+    fi
+fi
+'''
+shell_suffix = r'''
+[[ ! ${YTDLP_ARIA2_MOCK_SUBREAPER_PID+x} ]]
+[[ $# == 5 && $3 == 'literal % $value with spaces' ]]
+trap -p PIPE XFSZ >"${PROJECT_DIR}/after-traps"
+IFS= read -r inherited_input
+[[ ${inherited_input} == 'original stdin remains readable' ]]
+setsid python3 -I "${PROJECT_DIR}/child.py" "${PROJECT_DIR}" "$4" &
+leader=$!
+wait "${leader}"
+printf '%s\n' "${BASHPID}" >"${PROJECT_DIR}/ready"
+while [[ ! -e ${PROJECT_DIR}/finish ]]; do
+    sleep 0.01
+done
+exit "$2"
+'''
+
+def fields(pid):
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+    except FileNotFoundError:
+        return None
+
+def record(path, count):
+    try:
+        values = path.read_text(encoding="ascii").split()
+    except FileNotFoundError:
+        return None
+    if len(values) != count or not all(value.isdecimal() for value in values):
+        return None
+    return tuple(map(int, values))
+
+def wait_until(predicate, process, description, seconds=5):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        if process.poll() is not None:
+            output, errors = process.communicate(timeout=2)
+            raise AssertionError((description, process.returncode, output, errors))
+        time.sleep(0.01)
+    raise AssertionError(description)
+
+with tempfile.TemporaryDirectory(prefix="mock-subreaper-") as directory:
+    root = Path(directory)
+    for enabled, status, disposition in (
+        (False, 17, "default"), (True, 0, "default"),
+        (True, 17, "ignored"), (True, 143, "default"),
+    ):
+        case = root / f"{enabled}-{status} space %"
+        (case / "tests").mkdir(parents=True)
+        (case / "child.py").write_text(child_source, encoding="utf-8")
+        script = case / "tests/mock-integration.sh"
+        launch = 'enable_mock_child_subreaping "$@"\n' if enabled else 'unset YTDLP_ARIA2_MOCK_SUBREAPER_PID\n'
+        script.write_text(shell_prefix + implementation + launch + shell_suffix, encoding="utf-8")
+        release_read, release_write = os.pipe()
+        process = None
+        orphan = None
+        try:
+            environment = dict(os.environ, PYTHONOPTIMIZE="1",
+                               YTDLP_ARIA2_MOCK_SUBREAPER_PID=str(os.getpid()))
+            process = subprocess.Popen(
+                ["bash", str(script), str(case), str(status),
+                 "literal % $value with spaces", str(release_read), disposition],
+                env=environment, pass_fds=(release_read,),
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            os.close(release_read)
+            release_read = None
+            process.stdin.write(b"original stdin remains readable\n")
+            process.stdin.flush()
+            wait_until(lambda: record(case / "ready", 1) and record(case / "orphan", 2),
+                       process, "fixture did not publish its live orphan")
+            orphan, start = record(case / "orphan", 2)
+            assert int((case / "before-pid").read_text()) == process.pid
+            assert int((case / "ready").read_text()) == process.pid
+            assert os.getpgid(process.pid) == os.getpgrp(), "bootstrap changed the harness group"
+            expected_traps = "trap -- '' SIGPIPE\ntrap -- '' SIGXFSZ\n" if disposition == "ignored" else ""
+            assert (case / "after-traps").read_text() == expected_traps
+            expected_parent = process.pid if enabled else os.getpid()
+            wait_until(lambda: fields(orphan) is not None and int(fields(orphan)[1]) == expected_parent,
+                       process, "orphan did not reach its expected reaper")
+            observed = fields(orphan)
+            assert observed[0] not in {"Z", "X"} and int(observed[19]) == start
+            assert not (case / "unexpected-signal").exists(), "bootstrap signaled a live child"
+            os.write(release_write, b"x")
+            wait_until(lambda: (case / "orphan-released").exists(), process,
+                       "live child did not survive until explicit release")
+            if enabled:
+                wait_until(lambda: fields(orphan) is None, process,
+                           "Bash did not reap its exited orphan")
+                orphan = None
+            else:
+                wait_until(lambda: fields(orphan)[0] == "Z", process,
+                           "negative control did not retain the orphan zombie")
+                try:
+                    wait_until(lambda: fields(orphan) is None, process,
+                               "Bash did not reap its exited orphan", seconds=0.2)
+                except AssertionError as error:
+                    assert str(error) == "Bash did not reap its exited orphan", error
+                else:
+                    raise AssertionError("negative control unexpectedly reaped its orphan")
+                os.waitpid(orphan, 0)
+                orphan = None
+            assert not (case / "unexpected-signal").exists()
+            (case / "finish").touch()
+            output, errors = process.communicate(timeout=5)
+            assert process.returncode == status, (status, process.returncode, output, errors)
+        finally:
+            for descriptor in (release_read, release_write):
+                if descriptor is not None:
+                    os.close(descriptor)
+            (case / "finish").touch()
+            if process is not None and process.poll() is None:
+                try:
+                    process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate(timeout=5)
+            identity = record(case / "orphan", 2)
+            if identity is not None:
+                orphan, start = identity
+                observed = fields(orphan)
+                if (observed is not None and int(observed[1]) == os.getpid()
+                        and int(observed[19]) == start):
+                    os.kill(orphan, signal.SIGKILL)
+                    os.waitpid(orphan, 0)
+
+print("Mock subreaper: non-reaping-parent negative control, same PID, live child, stdin, argv, dispositions, statuses and startup failures passed.")
+PY_MOCK_SUBREAPING
 }
 
 test_mock_process_scan_contract() {
@@ -2951,6 +3171,7 @@ main() {
     test_monitor_runner_session_handoff
     test_real_tool_engine_supervision
     test_real_tool_optimization_isolation
+    test_mock_child_subreaping
     test_mock_process_scan_contract
     test_run_all_manifest_execution
     test_run_all_doctor_contract

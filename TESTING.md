@@ -424,6 +424,16 @@ a capture error during cleanup keeps both that state and the original failure.
 The fixture driver uses isolated Python
 so PYTHONOPTIMIZE cannot silently remove its no-overwrite assertions.
 
+Before allocating fixtures, the mock entry point registers its own Bash
+process as a Linux child subreaper through an isolated Python `prctl`/`exec`
+bootstrap. The PID and signal topology stay unchanged, and Bash harvests
+terminated orphan descendants instead of depending on the host or container's
+PID 1. This does not terminate live descendants or relax engine quiescence:
+after losing its leader, the engine still requires kernel-confirmed group
+absence before releasing tracked resources. Runner integration includes a
+non-reaping outer parent, a no-bootstrap negative control, and live-child,
+identity and exit-status checks for this fixture lifecycle.
+
 The complete mock contract is divided into nine isolated scheduler suites
 (`engine-core`, `engine-hls`, `engine-staging`, `engine-network`, `gui-progress`, `gui-state`,
 `signals`, `runtime-compat`, and `runtime-validation`) so `run-all.sh --jobs N`
@@ -566,6 +576,11 @@ The automated suite checks, among other things:
   escapes; byte-oriented redaction of malformed UTF-8 diagnostic URL tokens;
 - graceful-signal deferral during private result-record creation, including
   repeated signals and preservation of a replaced record inode;
+- HUP/INT/TERM during staging/remux allocation, permissions, identity, descriptor
+  and marker registration, with authenticated cleanup before transport starts
+  and conservative preservation after acquisition failures or replacement;
+  directory replacement between descriptor open and path-identity capture must
+  not grant deletion authority for metadata, media workspaces or aria2 staging;
 - preservation of active temporary files, inherited lock ownership, and the
   original exit status when bounded worker shutdown cannot be confirmed;
 - aria2 diagnostic filters drain the producer's final cancellation message
@@ -594,6 +609,10 @@ The automated suite checks, among other things:
 - deletion of successful-download logs and retention of failure logs, with
   shared View log/Close actions for every interactive failure that has a safely
   sanitized diagnostic and fail-closed refusal to open the raw live log;
+- preservation of the live log's path and inode while a real producer writes
+  after an error snapshot and shutdown remains unconfirmed; the snapshot stays
+  separate and sanitized, and confirmed cleanup removes the private session
+  without removing the retained snapshot;
 - View log/Close handling for bounded pre-session Zenity diagnostics, including
   correct text-viewer content, Close without viewing, private containment, and
   immediate removal after the interaction;
@@ -629,8 +648,9 @@ The automated suite checks, among other things:
   and descriptor-first HLS/result publication with no-clobber rename fallback
   when the filesystem does not support hard links;
 - rejection of a second writer targeting the same canonical output directory;
-- explicit refusal to overwrite completed or post-processed media files while
-  preserving interrupted-download resume behavior;
+- explicit no-overwrite options and refusal of known final-video collisions,
+  while preserving interrupted-download resume behavior; these checks do not
+  establish atomic local yt-dlp postprocessing against unrelated writers;
 - disabling of inherited yt-dlp plugins and personal configuration;
 - forwarding of HUP, INT, and TERM sent only to the CLI wrapper PID;
 - signal-safe CLI child registration before `$!` is published, plus bounded
@@ -650,7 +670,10 @@ The automated suite checks, among other things:
 - private XDG runtime locks and fallback permissions;
 - byte-bounded Unicode output templates;
 - fallback from relative XDG configuration and state paths;
-- retention of process-group control until every descendant has exited;
+- retention of process-group tracking until quiescence, distinct from permission
+  to signal it: a real vanished-leader/live-descendant fixture verifies refusal
+  to claim shutdown, preservation of private state and the inherited lock, no
+  signal without authority, and cleanup after the descendant actually exits;
 - Zenity timeout and unexpected-error handling;
 - folder-chooser fallback behavior on Zenity 4;
 - minimum versions, suffixed yt-dlp versions, required capabilities, and
@@ -661,6 +684,12 @@ The automated suite checks, among other things:
   escaping, restrictive-path handling, validation, permissions, reinstall, and
   removal, including refusal to mutate through a symbolic-link XDG root,
   parent, terminal, intermediate, or shared-writable directory plus
+  ancestor ownership/mode policy before child creation and before publication
+  or removal: root/current-user ancestors and sticky shared ancestors are
+  accepted, foreign-owned ancestors are refused even without shared write bits,
+  and managed leaves retain their stricter policy during revalidation; these
+  cases use real paths/permissions and inode-targeted owner metadata fixtures,
+  without changing host users or ownership;
   synchronized root and managed-directory replacements after descriptor anchoring
   while preserving victim files and rejecting false success; allocation fault
   cleanup and exact current/legacy stale namespaces are covered, with
@@ -721,6 +750,16 @@ The automated suite checks, among other things:
 - refusal of pre-existing direct-transfer destinations before aria2 starts,
   with a second no-overwrite check at commit; duplicate staging sources and
   foreign-owner private state are rejected before publication;
+- descriptor-bound workspace cleanup rejects directory mount boundaries even
+  when `st_dev` is unchanged, including a mounted workspace root. Deterministic
+  fdinfo fixtures verify no descent or deletion through such boundaries and
+  preservation when mount identity is unavailable or changes between passes;
+  these fixtures perform no real mount;
+- real-tools refusal of pre-existing ordinary-video MKVs for direct two-stream,
+  native HTTP (single and merged streams), HLS and DASH transfers. Repeated runs
+  and changed metadata preserve bytes, inode and modification/change timestamps,
+  produce no result record and issue no additional media requests. Native final
+  preflight also rejects symlinks, directories and replaced destination identity;
 - malformed or secret-bearing protocol metadata produces no traceback or raw
   protocol diagnostic, and case-insensitive duplicate header names select
   native transport without rewriting the header values;

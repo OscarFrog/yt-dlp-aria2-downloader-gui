@@ -80,7 +80,7 @@ def fixture():
                       "steps": [] if name == CHECK.SCHEDULED_JOB else [
                           {"name": step, "status": "completed",
                            "conclusion": "skipped" if (name, step) in CHECK.ALLOWED_SKIPS else "success"}
-                          for step in sorted(CHECK.required_steps(name, filename))],
+                          for step in sorted(CHECK.required_steps(name))],
                       "conclusion": "skipped" if name == CHECK.SCHEDULED_JOB else "success"}
                      for name in sorted(names)],
         }
@@ -754,7 +754,7 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
         for filename, names in CHECK.WORKFLOWS.items():
             text = self.workflow(filename)
             for name in names | {CHECK.IDENTITY_PREFIX + SOURCE}:
-                for step in CHECK.required_steps(name, filename):
+                for step in CHECK.required_steps(name):
                     with self.subTest(workflow=filename, job=name, step=step):
                         self.assertIn("- name: " + step + "\n", text)
 
