@@ -9,6 +9,13 @@
   signed, immutable publication boundaries and identify CI package builds by
   source SHA, run and attempt.
 
+### Graphical interface
+
+- Offer only Firefox HLS video and native audio for YouTube URLs, and complete
+  MKV video and native audio for other sites, with one compatible saved default.
+- Keep local-storage details in diagnostic logs without appending them to
+  progress messages; preserve percentage, speed, ETA and final-copy progress.
+
 ## 2.3.26 - Unreleased
 
 ### Maintenance

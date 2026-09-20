@@ -768,7 +768,8 @@ process_line() {
 
     case ${line} in
         'YTDLP_STORAGE|local-disk')
-            local_disk_staging=true
+            # Keep storage diagnostics in the log without changing the display.
+            return 0
             ;;
         ARIA2_PLAN\|*)
             IFS='|' read -r -a fields <<<"${line}"
@@ -835,7 +836,6 @@ result_file_confirms_output() {
 
 render_tick() {
     local rendered=${stable_percent}
-    local rendered_message=${message}
 
     case ${phase} in
         analyzing)
@@ -870,10 +870,7 @@ render_tick() {
         rendered=${VERIFY_PERCENT}
     fi
     display_percent=${rendered}
-    if [[ ${local_disk_staging} == true ]]; then
-        rendered_message="${message} Local disk space is used before copying to the selected destination."
-    fi
-    emit_progress "${display_percent}" "${rendered_message}"
+    emit_progress "${display_percent}" "${message}"
 }
 
 consume_log_data() {
@@ -1010,7 +1007,6 @@ initialize_progress_state() {
     pending_data=''
     discarding_oversized_record=false
     video_audio_fallback_plan=false
-    local_disk_staging=false
 }
 
 open_progress_log() {

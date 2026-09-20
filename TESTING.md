@@ -571,9 +571,13 @@ The automated suite checks, among other things:
 - aria2 diagnostic filters drain the producer's final cancellation message
   before closing, while unexpected redaction failures remain fatal;
 - trimming of leading and trailing whitespace entered in the GUI;
-- exact GUI YouTube-host classification, dynamic removal of the authenticated
-  HLS profile for other hosts, false-domain rejection, and compatible fallback
-  from a remembered YouTube-only profile;
+- exact GUI YouTube-host classification and false-domain rejection, with exactly
+  HLS/Firefox video plus audio for YouTube and complete video plus audio for
+  other hosts; one compatible default selection and persistence for each saved
+  profile, including missing or invalid preferences;
+- unchanged progress messages, percentage, speed and ETA with or without the
+  local-storage event; storage diagnostics remain in the log, while the final
+  destination-copy phase stays visible;
 - native-audio selection with `ba/b`, `best`, and quality `0`;
 - absence of forced MP3, M4A, or Opus output formats;
 - MKV video selection without forced re-encoding;
@@ -1351,8 +1355,11 @@ Run the selected checkout's scripts explicitly. Record its absolute path,
 `download-video.sh --version` output and source identity; the installed command
 may refer to a different release or tree even when its version string matches.
 The network mock group uses entirely fictional URL/header/cookie sentinels and
-checks both active download phases and cleanup. It simulates permissive modes
-only on the selected destination, leaving the private local workspace protected:
+checks both active download phases and cleanup. It runs the production
+`media-local-safe` decision with CIFS (`0xff534d42`) or SMB2 (`0xfe534d42`)
+filesystem types injected only for the opened destination inode. It simulates
+permissive modes only on the selected destination, leaving the private local
+workspace protected:
 
 ```bash
 ./tests/mock-integration.sh --group engine-network
@@ -1361,9 +1368,21 @@ only on the selected destination, leaving the private local workspace protected:
 ./tests/real-tools-integration.sh --simulate-network
 ```
 
+The helper suite separately exercises the actual `filesystem_type()` buffer
+decoding through an injected `fstatfs`, local filesystem controls, SMB/CIFS/NFS/
+FUSE/unknown types and syscall failure. No production override is used. Network
+success cases require local processing during planning, aria2 and yt-dlp phases,
+removal of that local workspace after completion, and exactly the final media
+plus unchanged preexisting entries in the destination. An old staging directory
+with a mode-`0755` marker must survive. Local audio/video success cases require
+active staging removal; identity replacements and active directory/marker mode
+changes must instead preserve ambiguous state with an explicit diagnostic.
+
 The real-tool simulation serves tiny generated media over loopback and makes
 only its disposable output directories permissive. It exercises real direct,
-audio, HLS and DASH processing followed by destination copy. It does not simulate
+audio, HLS and DASH processing followed by destination copy. Successful local
+and simulated-network cases also check for destination staging/path/publication
+residues and any retained local media workspace. It does not simulate
 SMB caching, reconnects, Unix-extension behavior or kernel-blocked syscalls.
 Helper fault injection covers unsupported hard links/rename, copy/write errors,
 collisions, signals, identities and private-root selection; simulated failures

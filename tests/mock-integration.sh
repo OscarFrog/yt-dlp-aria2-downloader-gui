@@ -40,7 +40,7 @@ Run every mock scenario by default. GROUP is one of:
   engine-core     Core audio/video, result, and failure behavior.
   engine-hls      Authenticated YouTube HLS and remux behavior.
   engine-staging  Private aria2 staging and crash recovery behavior.
-  engine-network  Media destinations with permissive simulated Unix modes.
+  engine-network  CIFS classification, local workspaces and publication cleanup.
   gui             Complete GUI aggregate, in historical scenario order.
   gui-progress    GUI progress rendering, profiles, and completion behavior.
   gui-state       GUI configuration, file selection, logs, and state behavior.
@@ -1841,9 +1841,35 @@ set -euo pipefail
 
 if [[ ${MOCK_NETWORK_PERMISSIONS:-0} == 1 &&
     ${1##*/} == private-aria2-plan.py && ${2:-} == media-local-safe ]]; then
-    # Select the same capability fallback as a filesystem that cannot enforce
-    # local metadata semantics. This does not emulate SMB kernel I/O behavior.
-    exit 1
+    # Run the production classifier with only the selected descriptor's
+    # filesystem type simulated. This does not emulate SMB kernel I/O behavior.
+    exec /usr/bin/python3 -B - "$@" <<'PY_NETWORK_FILESYSTEM'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+sys.argv = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("network_filesystem", sys.argv[0])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+destination = os.stat(os.environ["MOCK_NETWORK_DESTINATION"])
+real_filesystem_type = module.filesystem_type
+
+
+def network_filesystem_type(descriptor):
+    opened = os.fstat(descriptor)
+    if (opened.st_dev, opened.st_ino) == (destination.st_dev, destination.st_ino):
+        magic = int(os.environ.get("MOCK_NETWORK_FS_MAGIC", "0xfe534d42"), 16)
+        with Path(os.environ["MOCK_NETWORK_PHASE_LOG"]).open("a") as log:
+            log.write(f"filesystem:{magic:#x}\n")
+        return magic
+    return real_filesystem_type(descriptor)
+
+
+module.filesystem_type = network_filesystem_type
+raise SystemExit(module.main())
+PY_NETWORK_FILESYSTEM
 fi
 exec /usr/bin/python3 "$@"
 EOF_NETWORK_PYTHON
@@ -1862,6 +1888,7 @@ output = Path(os.environ.get("MOCK_NETWORK_DESTINATION",
 tokens = (b"NETWORK_FIXTURE_COOKIE_SECRET", b"NETWORK_FIXTURE_HEADER_SECRET",
           b"NETWORK_FIXTURE_SIGNED_SECRET")
 private_paths = []
+workspace = None
 
 
 def option_value(option):
@@ -1875,6 +1902,7 @@ def option_value(option):
 
 if phase == "plan":
     filename, extension, protocol = arguments[:3]
+    workspace = Path(filename).parent
     cookie = option_value("--cookies")
     if cookie:
         cookie_path = Path(cookie)
@@ -1902,6 +1930,17 @@ else:
         value = option_value(name)
         if value:
             private_paths.append(Path(value))
+    if phase == "aria2":
+        workspace = Path(option_value("--dir")).parent
+    elif phase == "native":
+        workspace = Path(option_value("--output")).parent
+
+if workspace is not None:
+    assert workspace.name.startswith(".media-work."), workspace
+    assert not workspace.is_relative_to(output), workspace
+    assert workspace.is_dir() and stat.S_IMODE(workspace.stat().st_mode) == 0o700
+    with open(os.environ["MOCK_NETWORK_PHASE_LOG"] + ".workspaces", "a", encoding="utf-8") as log:
+        log.write(str(workspace) + "\n")
 
 leaked = False
 for path in output.rglob("*"):
@@ -2108,19 +2147,45 @@ assert_no_retained_log_staging() {
 }
 
 assert_gui_profile_menu() {
-    (($# == 5)) || return 2
+    (($# == 5 || $# == 7)) || return 2
     local scenario=$1
     local requested_url=$2
     local youtube_expected=$3
     local label=$4
     local profile_bundle=$5
+    local remembered_profile=${6:-audio}
+    local expected_profile=${7:-audio}
+    local expected_mode=${expected_profile}
+    local expected_hls=false
+    local expected_argument_count=9
+    local video_label='Complete video (MKV)'
+    local selected_label=''
+    local row_start=-1 row_index selected_count=0
+    local config_file="${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf"
     local url_file=''
     local engine_arguments_log="${TEST_ROOT}/profile-engine-arguments.bin"
     local engine_acknowledgement_log="${TEST_ROOT}/profile-engine-acknowledgement.bin"
     local file_selection_log="${TEST_ROOT}/profile-destination.bin"
     # shellcheck disable=SC2034 # Read indirectly through nameref helpers.
     local -a engine_arguments=() profile_arguments=()
-    local -a engine_acknowledgement=()
+    local -a engine_acknowledgement=() profile_rows=()
+
+    if [[ ${youtube_expected} == true ]]; then
+        video_label='YouTube video - Firefox cookies (HLS/MKV)'
+    fi
+    if [[ ${expected_profile} == youtube-hls ]]; then
+        expected_mode=video
+        expected_hls=true
+        expected_argument_count=10
+    fi
+    mkdir -p -- "${config_file%/*}"
+    if [[ ${remembered_profile} == missing ]]; then
+        rm -f -- "${config_file}"
+    else
+        printf 'output_dir=%s\nprofile=%s\n' "${OUTPUT_DIR}" "${remembered_profile}" \
+            >"${config_file}"
+        chmod 600 -- "${config_file}"
+    fi
 
     prepare_argument_log "${scenario}"
     : >"${file_selection_log}"
@@ -2128,7 +2193,7 @@ assert_gui_profile_menu() {
     : >"${engine_acknowledgement_log}"
     assert_status 73 "${label} GUI-to-engine handoff stops before PLAN" \
         env MOCK_ZENITY_ENTRY_VALUE="${requested_url}" \
-        MOCK_PROFILE='Audio track (native format)' \
+        MOCK_USE_DEFAULT_PROFILE=1 \
         MOCK_GUI_REAL="${profile_bundle}/download-video-gui.sh" \
         MOCK_PROFILE_ENGINE_SOURCE="${profile_bundle}/engine-source.sh" \
         MOCK_PROFILE_ENGINE_ARGUMENTS="${engine_arguments_log}" \
@@ -2136,14 +2201,39 @@ assert_gui_profile_menu() {
         MOCK_FILE_SELECTION_ARGS_LOG="${file_selection_log}" \
         "${GUI_UNDER_TEST}"
     read_arguments "${LIST_ARGS_LOG}" profile_arguments
-    assert_array_contains profile_arguments 'Complete video (MKV)' \
-        "${label} complete-video profile"
-    assert_array_contains profile_arguments 'Audio track (native format)' \
-        "${label} audio profile"
+    for row_index in "${!profile_arguments[@]}"; do
+        if [[ ${profile_arguments[row_index]} == TRUE ||
+            ${profile_arguments[row_index]} == FALSE ]]; then
+            row_start=${row_index}
+            break
+        fi
+    done
+    ((row_start >= 0)) || fail "${label}: no radiolist rows."
+    profile_rows=("${profile_arguments[@]:row_start}")
+    assert_equals 4 "${#profile_rows[@]}" "${label} exactly two radiolist rows"
+    assert_equals "${video_label}" "${profile_rows[1]}" "${label} video profile"
+    assert_equals 'Audio track (native format)' "${profile_rows[3]}" "${label} audio profile"
+    for row_index in 0 2; do
+        case ${profile_rows[row_index]} in
+            TRUE)
+                ((selected_count += 1))
+                selected_label=${profile_rows[row_index + 1]}
+                ;;
+            FALSE) ;;
+            *) fail "${label}: invalid radiolist selection state." ;;
+        esac
+    done
+    assert_equals 1 "${selected_count}" "${label} exactly one default selection"
+    if [[ ${expected_profile} == audio ]]; then
+        assert_equals 'Audio track (native format)' "${selected_label}" \
+            "${label} remembered audio selection"
+    else
+        assert_equals "${video_label}" "${selected_label}" \
+            "${label} compatible video selection"
+    fi
     if [[ ${youtube_expected} == true ]]; then
-        assert_array_contains profile_arguments \
-            'YouTube video - Firefox cookies (HLS/MKV)' \
-            "${label} YouTube HLS profile"
+        assert_array_not_contains profile_arguments 'Complete video (MKV)' \
+            "${label} excludes generic complete video"
     else
         assert_array_not_contains profile_arguments \
             'YouTube video - Firefox cookies (HLS/MKV)' \
@@ -2159,11 +2249,11 @@ assert_gui_profile_menu() {
         "${label} real GUI URL-file transfer"
     assert_equals "${youtube_expected}" "${engine_acknowledgement[1]}" \
         "${label} real engine host classification"
-    assert_equals audio "${engine_acknowledgement[2]}" "${label} engine mode"
+    assert_equals "${expected_mode}" "${engine_acknowledgement[2]}" "${label} engine mode"
     assert_equals "${OUTPUT_DIR}" "${engine_acknowledgement[3]}" \
         "${label} engine destination"
     assert_equals true "${engine_acknowledgement[4]}" "${label} machine progress"
-    assert_equals false "${engine_acknowledgement[5]}" "${label} ordinary profile"
+    assert_equals "${expected_hls}" "${engine_acknowledgement[5]}" "${label} HLS profile"
     url_file=${engine_acknowledgement[6]}
     [[ ${url_file} == "${RUNTIME_DIR}/yt-dlp-aria2-downloader-${EUID}/yt-dlp-gui."*/url.txt ]] \
         || fail "${label}: the URL file was not created in the real GUI session."
@@ -2173,20 +2263,28 @@ assert_gui_profile_menu() {
         "${label} supervised GUI worker"
     assert_equals 600 "${engine_acknowledgement[9]}" "${label} private URL-file mode"
     assert_equals 700 "${engine_acknowledgement[10]}" "${label} private session mode"
-    assert_equals 9 "${#engine_arguments[@]}" "${label} engine argument count"
+    assert_equals "${expected_argument_count}" "${#engine_arguments[@]}" \
+        "${label} engine argument count"
     assert_option_value engine_arguments --url-file "${url_file}" \
         "${label} real GUI URL-file argument"
     assert_option_value engine_arguments --output-dir "${OUTPUT_DIR}" \
         "${label} real GUI destination argument"
-    assert_option_value engine_arguments --mode audio "${label} real GUI mode argument"
+    assert_option_value engine_arguments --mode "${expected_mode}" "${label} real GUI mode argument"
+    if [[ ${expected_hls} == true ]]; then
+        assert_array_contains engine_arguments --youtube-hls-firefox \
+            "${label} real GUI HLS argument"
+    else
+        assert_array_not_contains engine_arguments --youtube-hls-firefox \
+            "${label} excludes the HLS argument"
+    fi
     assert_option_value engine_arguments --result-file "${url_file%/*}/result.txt" \
         "${label} real GUI result-file argument"
     assert_array_contains engine_arguments --machine-progress \
         "${label} real GUI machine-progress argument"
     assert_array_not_contains engine_arguments "${requested_url}" \
         "${label} URL absent from engine argv"
-    assert_file_has_line "${XDG_CONFIG_HOME}/yt-dlp-aria2-downloader/gui.conf" \
-        'profile=audio' "${label} real GUI profile persistence"
+    assert_file_has_line "${config_file}" \
+        "profile=${expected_profile}" "${label} real GUI profile persistence"
     [[ ! -e ${url_file%/*} && ! -L ${url_file%/*} ]] \
         || fail "${label}: the private GUI session was not cleaned up."
     [[ ! -s ${MOCK_PLAN_ARG_LOG} &&
@@ -3561,6 +3659,7 @@ test_mock_engine_private_staging() {
     local -a successful_mutation_cases=(input manifest)
     local sticky_output_dir sticky_output_parent sticky_staging_leftover
     local staging_symlink_target symlink_candidate test_pgid
+    local successful_mode
 
     # A root- or current-user-owned sticky shared ancestor protects private
     # children from other UIDs and must remain a supported destination shape.
@@ -3797,21 +3896,28 @@ test_mock_engine_private_staging() {
 
     # The conservative replacement protection must not turn ordinary owned
     # staging into a leak: a normal successful transaction still cleans it.
-    prepare_argument_log 'private-staging-normal-cleanup'
-    assert_status 0 'owned active private staging is cleaned normally' \
-        "${PROJECT_DIR}/download-video.sh" \
-        --output-dir "${OUTPUT_DIR}" \
-        --mode audio \
-        -- 'https://example.com/watch?v=private-staging-normal-cleanup'
+    for successful_mode in audio video; do
+        prepare_argument_log "private-staging-normal-cleanup-${successful_mode}"
+        assert_status 0 "owned active ${successful_mode} staging is cleaned normally" \
+            "${PROJECT_DIR}/download-video.sh" \
+            --output-dir "${OUTPUT_DIR}" \
+            --mode "${successful_mode}" \
+            -- 'https://example.com/watch?v=private-staging-normal-cleanup'
+        # The mock reports WEBM for both modes; real-tool qualification also
+        # checks the actual audio extraction and video remux outputs.
+        [[ -s ${OUTPUT_DIR}/'Mock media [abc123].webm' ]] \
+            || fail "Successful ${successful_mode} transaction did not publish its final media."
+        assert_text_not_contains "${ASSERT_OUTPUT}" 'preserving ambiguous' \
+            "normal ${successful_mode} cleanup has no ambiguity"
 
-    owned_staging_leftover=$(find "${OUTPUT_DIR}" \
-        -mindepth 1 -maxdepth 1 -type d \
-        -name '.yt-dlp-aria2.????????' -print -quit 2>/dev/null || true)
+        owned_staging_leftover=$(find "${OUTPUT_DIR}" \
+            -mindepth 1 -maxdepth 1 \
+            -name '.yt-dlp-aria2.*' -print -quit)
+        [[ -z ${owned_staging_leftover} ]] \
+            || fail 'A normal transaction left owned private aria2 staging behind.'
 
-    [[ -z ${owned_staging_leftover} ]] \
-        || fail 'A normal transaction left owned private aria2 staging behind.'
-
-    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+        rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    done
 
     # SIGKILL cannot run cleanup. A later session must preserve all legacy
     # residues because familiar names and markers do not authenticate the
@@ -4013,6 +4119,8 @@ test_mock_engine_private_staging() {
 
 test_mock_engine_network_destination() {
     local scenario mode protocol network_output result_file phase_log final_path private_path
+    local legacy_staging legacy_identity current_legacy_identity
+    local final_entries filesystem_magic workspace_path
     local scenario_url='https://example.com/watch?v=network-fixture'
     local -a profile_arguments=()
 
@@ -4022,12 +4130,24 @@ test_mock_engine_network_destination() {
         phase_log="${TEST_ROOT}/network-${scenario}.phases"
         mkdir -- "${network_output}"
         chmod 0755 -- "${network_output}"
+        legacy_staging="${network_output}/.yt-dlp-aria2.ABCDEFGH"
+        mkdir -m 0755 -- "${legacy_staging}"
+        printf '%s\n' 'yt-dlp-aria2-private-staging-v1' \
+            >"${legacy_staging}/.yt-dlp-aria2-owner-v1"
+        chmod 0755 -- "${legacy_staging}/.yt-dlp-aria2-owner-v1"
+        legacy_identity=$(stat -c '%d:%i:%u:%a:%Y:%Z' -- \
+            "${legacy_staging}" "${legacy_staging}/.yt-dlp-aria2-owner-v1")
+        printf '%s\n' 'preexisting media' >"${network_output}/existing-media"
+        filesystem_magic=0xfe534d42
         mode=video
         protocol=http
         profile_arguments=()
         scenario_url='https://example.com/watch?v=network-fixture'
         case ${scenario} in
-            direct-audio) mode=audio ;;
+            direct-audio)
+                mode=audio
+                filesystem_magic=0xff534d42
+                ;;
             native-hls) protocol=m3u8_native ;;
             native-dash) protocol=http_dash_segments ;;
             youtube-hls)
@@ -4040,6 +4160,7 @@ test_mock_engine_network_destination() {
         prepare_argument_log "network-${scenario}"
         assert_status 0 "permissive media destination ${scenario}" \
             env MOCK_NETWORK_PERMISSIONS=1 \
+            MOCK_NETWORK_FS_MAGIC="${filesystem_magic}" \
             MOCK_NETWORK_CHECK="${MOCK_BIN}/network-check.py" \
             MOCK_NETWORK_PHASE_LOG="${phase_log}" \
             MOCK_OUTPUT_DIR="${network_output}" \
@@ -4053,6 +4174,23 @@ test_mock_engine_network_destination() {
         IFS= read -r final_path <"${result_file}"
         [[ ${final_path%/*} == "${network_output}" && -s ${final_path} ]] \
             || fail "Final media was not published to the selected destination for ${scenario}."
+        assert_file_has_line "${phase_log}" "filesystem:${filesystem_magic}" \
+            'non-local classification uses the selected destination descriptor'
+        current_legacy_identity=$(stat -c '%d:%i:%u:%a:%Y:%Z' -- \
+            "${legacy_staging}" "${legacy_staging}/.yt-dlp-aria2-owner-v1")
+        assert_equals "${legacy_identity}" "${current_legacy_identity}" \
+            'a preexisting staging directory and marker are untouched'
+        assert_file_has_line "${network_output}/existing-media" 'preexisting media' \
+            'preexisting media survives network publication'
+        final_entries=$(find "${network_output}" -mindepth 1 -maxdepth 1 -printf '.\n' | wc -l)
+        assert_equals 3 "${final_entries}" \
+            'destination contains only final media and the two preexisting entries'
+        while IFS= read -r workspace_path; do
+            [[ ! -e ${workspace_path} && ! -L ${workspace_path} ]] \
+                || fail "Local media workspace survived successful ${scenario}."
+        done <"${phase_log}.workspaces"
+        assert_text_not_contains "${ASSERT_OUTPUT}" 'preserving ambiguous' \
+            'normal network completion does not refuse active staging cleanup'
         while IFS= read -r private_path; do
             [[ ! -e ${private_path} ]] \
                 || fail "Private metadata survived controlled completion for ${scenario}."
@@ -4291,6 +4429,20 @@ get_path_identity MEDIA_WORKSPACE_IDENTITY "${MEDIA_WORKSPACE}" directory
 exec {MEDIA_WORKSPACE_FD}<"${MEDIA_WORKSPACE}"
 printf '%s\n' "${MEDIA_WORKSPACE}" >"${workspace_record}"
 case ${case_name} in
+    staging-mode | marker-mode)
+        PRIVATE_ARIA2_STAGING="${MEDIA_WORKSPACE}/.yt-dlp-aria2.ModeTest"
+        mkdir -m 700 -- "${PRIVATE_ARIA2_STAGING}"
+        exec {PRIVATE_ARIA2_STAGING_FD}<"${PRIVATE_ARIA2_STAGING}"
+        get_path_identity PRIVATE_ARIA2_STAGING_IDENTITY \
+            "${PRIVATE_ARIA2_STAGING}" directory
+        printf '%s\n' "${PRIVATE_ARIA2_STAGING_MARKER_VALUE}" \
+            >"${PRIVATE_ARIA2_STAGING}/${PRIVATE_ARIA2_STAGING_MARKER}"
+        if [[ ${case_name} == staging-mode ]]; then
+            chmod 755 -- "${PRIVATE_ARIA2_STAGING}"
+        else
+            chmod 755 -- "${PRIVATE_ARIA2_STAGING}/${PRIVATE_ARIA2_STAGING_MARKER}"
+        fi
+        ;;
     staging-file)
         PRIVATE_ARIA2_STAGING="${MEDIA_WORKSPACE}/.yt-dlp-aria2.Changed1"
         mkdir -m 700 -- "${PRIVATE_ARIA2_STAGING}"
@@ -4313,14 +4465,21 @@ esac
 trap cleanup EXIT
 exit 7
 EOF_NETWORK_CLEANUP_BOUNDARIES
-    for case_name in staging-file repaired-source; do
+    for case_name in staging-mode marker-mode staging-file repaired-source; do
         workspace_record="${TEST_ROOT}/cleanup-boundary-${case_name}.path"
         prepare_argument_log "network-cleanup-boundary-${case_name}"
         assert_status 7 "parent workspace preserves refused ${case_name} replacement" \
             bash "${harness}" "${source_copy}" \
             "${PROJECT_DIR}/private-aria2-plan.py" "${case_name}" "${workspace_record}"
         IFS= read -r workspace_path <"${workspace_record}"
-        if [[ ${case_name} == staging-file ]]; then
+        if [[ ${case_name} == staging-mode || ${case_name} == marker-mode ]]; then
+            assert_file_has_line "${workspace_path}/.yt-dlp-aria2.ModeTest/.yt-dlp-aria2-owner-v1" \
+                'yt-dlp-aria2-private-staging-v1' \
+                'permissive active staging or marker is preserved'
+            assert_text_contains "${ASSERT_OUTPUT}" \
+                'preserving ambiguous active private aria2 staging directory' \
+                'mode mismatch has an explicit cleanup diagnostic'
+        elif [[ ${case_name} == staging-file ]]; then
             assert_file_has_line "${workspace_path}/.yt-dlp-aria2.Changed1" \
                 'foreign staging replacement' \
                 'regular-file staging replacement survives parent cleanup'
@@ -4445,6 +4604,7 @@ test_mock_gui_aria_progress() {
 test_mock_gui_profiles() {
     local profile_bundle="${TEST_ROOT}/profile-engine-bundle"
     local config_file profile_case removed_profile_label requested_url scenario
+    local remembered_profile expected_profile youtube_expected
     local -a false_youtube_cases incompatible_default_arguments list_arguments
     local -a video_gui_arguments youtube_cases youtube_hls_default_arguments
     local -a youtube_hls_gui_arguments
@@ -4482,8 +4642,9 @@ EOF_PROFILE_ENGINE
     chmod 755 -- "${profile_bundle}/download-video.sh"
     youtube_cases=(
         'gui-profile-youtube-root|https://youtube.com/watch?v=profile-root'
+        'gui-profile-youtube-watch|https://www.youtube.com/watch?v=yqS_lW770e8'
         'gui-profile-youtube-subdomain|https://media.youtube.com/watch?v=profile-subdomain'
-        'gui-profile-youtu-be|https://youtu.be/profile-short'
+        'gui-profile-youtu-be|https://youtu.be/yqS_lW770e8?si=Y-P-vV5geLxBUoCc'
         'gui-profile-youtu-be-subdomain|https://media.youtu.be/profile-short-subdomain'
         'gui-profile-nocookie|https://youtube-nocookie.com/embed/profile-nocookie'
         'gui-profile-nocookie-subdomain|https://media.youtube-nocookie.com/embed/profile-nocookie-subdomain'
@@ -4507,7 +4668,7 @@ EOF_PROFILE_ENGINE
         'gui-profile-generic|https://example.com/video'
         'gui-profile-false-name|https://notyoutube.com/video'
         'gui-profile-false-prefix|https://youtube.example.com/video'
-        'gui-profile-false-suffix|https://youtube.com.example.org/video'
+        'gui-profile-false-suffix|https://youtube.com.example.org/watch?v=test'
         'gui-profile-false-short-suffix|https://youtu.be.example.org/video'
         'gui-profile-false-nocookie-suffix|https://youtube-nocookie.com.example.org/video'
         'gui-profile-false-path|https://example.org/youtube.com/video'
@@ -4516,6 +4677,21 @@ EOF_PROFILE_ENGINE
         IFS='|' read -r scenario requested_url <<<"${profile_case}"
         assert_gui_profile_menu "${scenario}" "${requested_url}" false \
             "non-YouTube URL ${requested_url}" "${profile_bundle}"
+    done
+
+    for youtube_expected in true false; do
+        requested_url='https://www.youtube.com/watch?v=yqS_lW770e8'
+        [[ ${youtube_expected} == true ]] || requested_url='https://example.com/video'
+        for remembered_profile in video youtube-hls audio invalid missing; do
+            expected_profile=video
+            [[ ${youtube_expected} == false ]] || expected_profile=youtube-hls
+            [[ ${remembered_profile} != audio ]] || expected_profile=audio
+            assert_gui_profile_menu \
+                "gui-profile-default-${youtube_expected}-${remembered_profile}" \
+                "${requested_url}" "${youtube_expected}" \
+                "YouTube=${youtube_expected} remembered=${remembered_profile}" \
+                "${profile_bundle}" "${remembered_profile}" "${expected_profile}"
+        done
     done
 
     prepare_argument_log 'gui-ytdlp-progress'
