@@ -147,7 +147,12 @@ claiming post-return immutability.
    vector.
 5. Feed the private live log to a separately supervised
    `progress-monitor.sh`, which emits Zenity's numeric/text protocol through a
-   private mode-`0600` FIFO without learning or displaying the media URL.
+   private mode-`0600` FIFO. The monitor receives no dedicated URL argument,
+   but can read URLs present in the raw log; it belongs to the same private
+   session trust domain. It renders parsed progress fields, not arbitrary log
+   lines. Only separately sanitized snapshots are offered for viewing or
+   published in the persistent log directory; an unconfirmed shutdown can
+   separately require preservation of the private live session.
 6. Run captured Zenity dialogs as registered children with 64 KiB in-memory
    ingestion bounds. On cancellation, HUP, INT, TERM, or failure, signal and
    reap Zenity, the monitor, and the complete worker process group, escalating
@@ -183,7 +188,8 @@ to the current single native-audio profile.
 
 `download-video.sh` owns the end-to-end download contract:
 
-1. Parse one URL from a direct argument, stdin, or a private URL file; reject
+1. Parse one URL from a direct argument or a private `--url-file`; stdin is not
+   a URL input interface. Reject
    raw control characters, line breaks, non-HTTP(S) schemes, and URL user
    information while preserving Unicode and percent-encoded URL data.
 2. Ask `runtime-manager.sh prepare update` for an attested yt-dlp/Deno pair, or
@@ -199,8 +205,9 @@ to the current single native-audio profile.
    filesystem and physical owner/write chain to decide whether external tools
    may safely work there. Otherwise a separate private local disk workspace
    becomes the processing directory; the chosen destination remains the final
-   publication target. Old destination residues are preserved, not deleted
-   by pattern, age or a marker alone.
+   publication target. `report_abandoned_private_aria2_staging` reports old
+   destination residues for manual inspection; it does not recover or delete
+   them by pattern, age or a marker alone.
 5. Use the shared `private-root` allocator for local mode-`0700` metadata
    sessions, independent of either media directory. File creation probes verify
    actual mode `0600` before secrets are written. The allocator opens directory
@@ -247,8 +254,9 @@ to the current single native-audio profile.
    descriptor; the filesystem-compatibility fallback revalidates the parent and
    temporary pathname immediately before a no-clobber rename.
 
-Nested long-running commands use dedicated process groups even when the engine
-itself was launched without the GUI. Child registration is signal-atomic. In
+Standalone engine commands use a dedicated process group; GUI-owned engines
+reuse the GUI's dedicated session rather than creating an escaping nested
+session. Child registration is signal-atomic. In
 autonomous mode, job control remains disabled and an outer `env` ignores HUP,
 INT, and TERM until the no-fork `setsid --wait` process has become the new
 session leader; an inner `env` then restores default dispositions before the
@@ -283,6 +291,36 @@ command wrapper without granting authority to a recycled numeric process
 group. Once readiness has been consumed into the in-memory PID or PGID state,
 its private record is unlinked before the registration critical section ends
 so a later SIGKILL cannot strand it.
+
+### Session state and ownership
+
+These globals represent resources spanning acquisition, external commands,
+publication and EXIT cleanup; making them local independently would lose that
+ownership information. An empty pathname, missing identity and open FD are not
+interchangeable states. Registration defers catchable signals until the
+identity/descriptor binding is complete; failed authentication grants no
+deletion authority. An unconfirmed worker stop vetoes resource cleanup before
+individual inode checks even begin.
+
+| State | Creator / users / publisher | Cleanup owner and preserve condition |
+| --- | --- | --- |
+| `FINAL_OUTPUT_DIR`, identity, FD | `prepare_output_directory` records the canonical user destination; final validation and publication use it | Engine closes its FD; never recursively deletes the user's destination |
+| `OUTPUT_DIR` | Initially the requested destination; after output preparation it is the processing directory, either that destination or `MEDIA_WORKSPACE` | This name must not be used to infer the final destination after workspace selection |
+| `MEDIA_WORKSPACE`, identity, FD, cleanup-safe flag | Output preparation allocates local media storage; tools process there; `publish-media` copies the validated result | Engine/helper remove only authenticated owned contents; unknown identity, mount, retained media or unsafe child cleanup preserves remaining state |
+| `PRIVATE_ARIA2_METADATA` and `PRIVATE_ARIA2_STAGING` triplets | `prepare_private_work_files` allocates and registers them; plan/credentials live in metadata, transfer bytes in staging | Engine removes current-session state only. Flat Bash staging cleanup checks identity, owner, mode, marker, regular types and its name allowlist; it does not recurse or inspect mount IDs. Metadata uses `cleanup-workspace`, including mount-ID checks, and can remove other authenticated regular files. Failed required checks preserve state |
+| `HLS_REMUX_TMP`, identity, FD | `remux_hls_result` registers before FFmpeg; publication consumes the verified inode | Engine removes the authenticated temporary or records its retained identity; failed publication does not authorize deleting the verified result |
+| `RESULT_FILE_TMP` / `INTERNAL_PATH_FILE_TMP` / `PATH_RECORD_TMP` | Exactly one first-choice temporary is allocated: beside the requested result record, or internally when none was requested. `PATH_RECORD_TMP` selects that same inode; its identity/FD bind yt-dlp reporting and validation | Finalization publishes the external record or removes the internal record; EXIT uses the common selected path, not three independent files |
+| `LOG_FILE` / `RETAINED_LOG_FILE` | GUI owns the private live log and separately published sanitized snapshot | Confirmed shutdown permits session cleanup; snapshot retention never removes a live producer's path |
+
+`run_supervised_command` normally returns shell status zero even when its
+command fails: this lets the caller handle failures under `set -e` without
+disabling error handling throughout supervision. The command/startup/requested
+signal outcome is in `DOWNLOAD_STATUS` (initially internal failure `125`), not
+`$?`; every caller must inspect it. `DOWNLOAD_WAITED_STATUS` records an observed
+wait result, while a requested signal can take precedence in `DOWNLOAD_STATUS`.
+Neither value alone proves shutdown: retained PID/PGID state remains a separate
+cleanup veto. These names and the path-record aliases are retained to avoid a
+large cosmetic rewrite of their callers.
 
 ## Transport boundary and Python helper
 
@@ -321,8 +359,11 @@ after that preflight. A separate private POST/rebased-plan transaction would be 
 close it while preserving interrupted-download resume. The same-user advisory
 lock does not exclude unrelated writers; descriptor-bound workspace publication
 and the separate HLS/Firefox remux publication already refuse late collisions.
-The classifier sends unsupported transport features to native yt-dlp; malformed
-URL/header data or unsafe paths remain validation errors. Header names repeated
+The classifier sends unsupported transport features to native yt-dlp. Malformed
+URL/header fields encountered during direct classification remain validation
+errors; an earlier native fallback does not inspect every remaining field and
+leaves unsupported transport handling to yt-dlp. Subsequent build/publication
+path checks remain mandatory on their respective paths. Header names repeated
 with different casing are not replayed through aria2. Rejected protocol fields
 are never copied into diagnostics.
 
@@ -346,9 +387,13 @@ If an otherwise owned staging directory must be preserved because it contains
 an unknown artifact, validated private authentication metadata is still removed
 before the directory is left for diagnosis.
 
-The helper is Python because bounded JSON parsing, URL decomposition, file-mode
-inspection, and transactional manifest handling are clearer there than in
-Bash. Its SPDX-plus-module-docstring header is the project-wide Python identity
+The helper is Python because structured JSON parsing, URL decomposition,
+file-mode inspection, and transactional manifest handling are clearer there
+than in Bash. JSON shape and transfer-count checks follow `json.load`; there
+is no explicit pre-parse byte or nesting-depth bound. Large metadata can
+therefore consume substantial memory, and transfer-count limits must not be
+described as a parsing-memory limit.
+Its SPDX-plus-module-docstring header is the project-wide Python identity
 contract; `SHELL_STYLE.md`'s Bash banner does not apply.
 
 `private-root`, `media-local-safe`, `check-space`, `publish-media` and
@@ -394,6 +439,49 @@ not separate hosts. Normal HLS/DASH fixtures are qualified; upstream unsupported
 or live HLS delegation to an external downloader requires separate argv-privacy
 qualification.
 
+### Private helper exchange formats
+
+These are local interfaces between the adjacent engine and helper, not public
+network protocols. Data files are private regular files; syntax never replaces
+owner/mode/path/identity checks. Diagnostics go to stderr. CLI usage errors use
+status `2`, validation failures `65`, OS failures `70`, existing destinations
+`1`, and handled publication signals `128 + signal`. Unsupported transport
+features can select native transport before all fields are inspected;
+malformed fields encountered during validation are errors, while native
+fallback leaves unsupported transport handling to yt-dlp.
+
+| Exchange | Producer / consumer | Schema and rejection policy |
+| --- | --- | --- |
+| yt-dlp plan | Planning pass / `classify`, `build`, `check-native-final` | UTF-8 JSON from `--dump-single-json --no-clean-info-json`; upstream schema, not a project version. Exactly one `requested_downloads` object is required. Unknown yt-dlp metadata is not globally rejected; selected fields, component count and paths are validated before use |
+| Classification | `classify` / engine | Two LF-terminated `key=value` lines: `transport=direct` or `transport=native`, then `transfer_count=N` where N is 1–16 without leading zero. The reader allows either order, requires both values, rejects unknown keys, repeated counts, repeated nonempty transport values and invalid final values |
+| Direct-transfer manifest | `build` / `commit` | JSON version `2`, six top-level fields described below; no v1 compatibility. Unknown keys are ignored, not a strict closed-key schema |
+| aria2 input | `build` / aria2c | aria2's line format: one URL followed by indented `out=...` and allowed `header=...` options per item. Contains sensitive replay data; it is not the manifest and never belongs on a shared destination |
+| Build / commit summaries | Helper stdout / discarded by engine | One LF-terminated `transfer_count=N` / `published_count=N` line respectively. The engine redirects these summaries to `/dev/null`; success is established by exit status and subsequent validation |
+| Native final preflight | `check-native-final` / engine | One absolute yt-dlp output template plus LF, frozen basename with literal-template escaping and dynamic extension. Used as the last output option; nonzero status aborts before native download |
+
+The manifest producer emits `version` (integer 2), `output_dir` and
+`staging_dir` (absolute path strings), `output_identity` and `staging_identity`
+(two-element `[st_dev, st_ino]` arrays), and `items` (1–16 objects). Each item
+has `staging_name` (`item-NNN.download`, three decimal digits) and `destination`
+(contained absolute path). Names and destinations must be unique. There is no
+absent/unknown sentinel for these required values. The consumer compares the
+version and identity arrays to expected values and validates required shapes;
+it does not separately enforce every producer's JSON numeric type. It rejects
+changed directory identities, unsafe paths, empty/nonregular/symbolic sources,
+remaining `.aria2` control files and existing destinations before publication.
+The manifest contains no URL, cookie or header. JSON whitespace has no meaning;
+neither plan nor manifest parsing has a pre-parse size bound.
+
+Future incompatible manifest meanings need a new version with an explicit
+reader policy. Classification and summary records have no version field: adding
+classification keys would break the current strict reader, so their producers
+and consumers must change together. Ignored JSON keys are not authority to
+change the meaning of existing fields.
+The classification transport duplicate check records only a nonempty value:
+an empty transport record preceding a valid one is currently tolerated, although
+the helper never produces it. Shell capture removes trailing newlines before
+parsing classification output; internal blank or unrecognized lines are errors.
+
 ## Progress protocol
 
 `YTDLP_STORAGE|local-disk` is a constant, path-free diagnostic emitted when the
@@ -417,6 +505,53 @@ is unavailable; exact aggregate byte weighting takes priority as soon as every
 total is known, and the stable display prevents that transition from moving the
 Zenity bar backward. Single streams and other plan shapes retain their generic
 progress model.
+
+### Record schema and compatibility
+
+Records are LF-terminated text in the private mixed diagnostic/progress log,
+with literal `|` separators and no escaping. Counts below include the record
+name. The engine/yt-dlp emit them only when machine progress is enabled;
+FFmpeg also emits its native `out_time_us=...` records. Except for the explicit
+`V2` name, these record names have no numeric version; their current schema is
+the compatibility contract, not an implied version negotiation.
+
+| Record | Fields in order after the name | Count / meaning |
+| --- | --- | --- |
+| `YTDLP_PLAN` | media ID, combined format ID, first format ID, second format ID | 5; media ID is currently ignored. The explicit two-stream video order is video then audio |
+| `YTDLP_PROGRESS_V2` | media ID, format ID, status, downloaded bytes, total bytes, estimated total bytes, fragment index, fragment count, percent text, speed text, ETA text | 12; media ID ignored; `finished` completes the item. Prefer known total, then estimated total, then fragments/percent; fragment 0/N bootstrap is neutralized when N > 1 and status is not `finished` |
+| `YTDLP_PROGRESS` | status, percent text, speed text, ETA text | 5; legacy single-item model, status ignored; current engine no longer emits it |
+| `YTDLP_POSTPROCESS` | status, processor name | 3; status is diagnostic, not proof of success. `MetadataParser` is ignored because it can run before download; other processors select the postprocessing display |
+| `YTDLP_STORAGE` | `local-disk` | 2; only this exact complete record is recognized, no display transition |
+| `FFMPEG_PROGRESS_DURATION` | expected source duration in microseconds | 2; starts remux display; invalid/zero duration leaves no quantitative denominator |
+| `ARIA2_PLAN` | transfer count, integer 1–16 without leading zero | 2; pre-registers items, ignored after items have already been observed; two video items mean video then audio |
+
+Byte and fragment counters and microseconds are unsigned decimal strings with
+1–16 digits, at most `9000000000000000`; invalid/missing/out-of-range values
+become zero. Zero totals mean unknown size, not completed transfer. Percent text
+permits surrounding whitespace, a trailing `%`, one to three integer digits,
+and up to six fractional digits; the integer part is displayed, capped at 100,
+invalid input becomes unknown (`-1`). Format identifiers use at most 128
+characters from `[A-Za-z0-9_.:+-]`; invalid identifiers become empty. Native
+progress first falls back to an incomplete planned slot, then the last native
+item, then a generic item. yt-dlp defaults absent IDs/status to `unknown`,
+counters to `0`, optional plan IDs and display strings to empty. Speed and ETA
+are formatted display strings, not arithmetic inputs or fixed units;
+empty, `NA`, `N/A`, `Unknown`,
+`unknown`, `None` and `null` are omitted from the message.
+
+The reader pads missing PLAN/V2/legacy/postprocess fields with empty strings;
+surplus parsed fields make it ignore that record. ARIA2_PLAN and duration
+require two parsed fields. Splitting uses Bash `read -a`, including its handling
+of a trailing empty field; this is not a general escaped-delimiter format.
+Unknown lines, consecutive duplicates and malformed count records are ignored.
+CR becomes a line boundary. Records exceeding 1 MiB are discarded with a
+generic progress warning. `out_time_us=N` advances only an active FFmpeg phase
+with a positive denominator; other FFmpeg keys are ignored. No progress record
+authorizes publication, deletion or a success result.
+
+Adding fields to an existing name can therefore break older readers. Use a new
+record name for incompatible changes, preserve legacy consumption until an
+explicit compatibility decision, and test producer/consumer fixtures together.
 
 ## Managed runtimes and persistent state
 
@@ -472,6 +607,49 @@ Changed identities and a GnuPG home whose agent cannot be stopped are preserved
 with a warning. SIGKILL cannot run this cleanup. There is no global residue scan,
 and capture files created inside probe command substitutions remain outside this
 bootstrap tracking mechanism.
+
+### Runtime attestation and temporary-resource contract
+
+`runtime-manager.sh prepare update` or `prepare require` emits exactly five
+LF-terminated lines, in this order, only after complete validation:
+
+```text
+runtime-contract=1
+yt-dlp-path=<absolute immutable version path>
+yt-dlp-version=<validated version>
+deno-path=<absolute immutable version path>
+deno-version=<validated version>
+```
+
+The separator is the first `=`; values are nonempty, line-safe strings without
+escaping. Paths identify versioned assets, never `current` or `previous`.
+The engine captures stdout privately and first requires successful supervised
+completion. Shell command substitution removes trailing newlines; the parser
+then requires exactly five ordered fields and rejects extra, missing, reordered
+or unsupported-contract records. There is no unknown value or optional field.
+Version compatibility is checked again without repeating the manager's
+capability probes. Future incompatible changes require a new contract and coordinated reader support;
+unknown fields are not silently ignored.
+
+This attestation conveys a trusted adjacent component's validation result,
+not a cryptographic signature or digest. yt-dlp acquisition authenticates a
+signed checksum manifest; Deno checks the release checksum obtained over HTTPS,
+not an equivalent signature. `require` performs no network update, but initial
+storage/sentinel preparation can still write to disk. `update` can retain an
+already validated pair after a bounded lock timeout or update failure.
+
+The four `RUNTIME_TEMP_*` associative arrays are one logical resource table,
+indexed by `work` (bootstrap directory), `gpg` (temporary GnuPG home), or
+`staged` (executable before installation). Only complete authenticated
+registration publishes path/identity/FD/kind together; its signal deferral
+ends afterward. Cleanup revalidates, stops the GnuPG agent when applicable,
+revalidates again, removes only an authenticated resource, then closes the FD
+and removes all four entries. A preserved ambiguous residue is also
+deregistered, never implicitly adopted by a later cleanup. After successful
+executable publication the absent staging path merely causes descriptor
+closure. EXIT belongs to the creating BASHPID and processes staged, gpg, work
+before releasing the lock. Probe captures and sentinel temporaries are not
+all covered by this table; it is not a registry of every runtime file.
 
 The other persistent paths are:
 
@@ -720,6 +898,45 @@ Python driver keeps qualification assertions active despite PYTHONOPTIMIZE.
 Tests are part of the architecture: changing a trust, cleanup, progress,
 process, packaging, or compatibility boundary requires updating or adding the
 matching regression proof.
+
+## Compatibility and independent validation
+
+Persistent data can outlive the producer that created it. Absence from the
+current happy path is not proof that a compatibility consumer is dead.
+
+| Compatibility | Original purpose / current production | Current consumer and retention decision |
+| --- | --- | --- |
+| Legacy audio profile values | Older selectable MP3/M4A/Opus profiles; current settings writer emits `audio` instead | GUI maps `audio-mp3`, `audio-m4a`, `audio-opus` to `audio`; retain migration of existing settings |
+| Older `download-*.log` names | Retained diagnostics predating the current naming/footer contract; old files persist | GUI pruning still validates ownership, mode and identity. Cleanup eligibility does not make an old log eligible for the current safe-view interface |
+| Historical desktop schemas | Direct FR/EN/bilingual launchers and an older stable-link desktop using the generic icon; not emitted by current installer | RPM install/upgrade migration recognizes exact old schemas; retain so user entries do not mask the system launcher. Modified/custom entries remain preserved |
+| Historical launcher temporaries | Old eight-alphanumeric tokens; current stages/backups use 24 hex characters | Launcher cleanup recognizes both narrow namespaces; interrupted old installations remain possible inputs |
+| Partial launcher installations | Failed/interrupted transactions, including current ones | Optional branches remain `None`; rollback must never reinterpret them as the current directory. Preserve backups when restoration fails |
+| Older runtime versions | Engines retain immutable attested paths while other sessions update `current`/`previous`; still produced | Keep older installed versions and identical inodes. No automatic collection based only on the activation links |
+| `YTDLP_PROGRESS` | Old single-item progress records; current engine emits V2, fixtures still exercise legacy records | Monitor retains the legacy consumer. Removal requires an explicit interface-compatibility decision, not merely a producer grep |
+| Forked `setsid` topology | Worker wrapper with a distinct direct-child session leader; normal current GUI launch is no-fork | GUI retains the authenticated direct-child leader fallback. It does not accept an arbitrary old numeric PGID |
+| Unmarked aria2 staging | Older layouts or incomplete acquisition; no completed current session intentionally omits its marker | Old residue is reported/preserved, never adopted as deletion authority. There is no supported unmarked-cleanup mode |
+| Packaging cleanup CLI | RPM migration/erase and re-execution as the target user | `--user-home*` has indirect callers; `--numeric-home` remains an exposed interface even without an in-tree caller. Retain unless explicitly deprecated |
+
+The removed launcher validator parameter for an already-removed directory is
+not an installation format: no transaction activated that mode. The separate
+`launcher_removed` local in uninstall remains active and reports whether known
+launcher leaves were actually removed; it does not mean the anchored parent
+directory disappeared.
+
+The following repeated checks intentionally retain independent implementations:
+
+| Boundary | Shared contract / intentional difference |
+| --- | --- |
+| Engine / GUI YouTube classification | Remove the port, normalize host case and one terminal dot; recognize `youtube.com`, `youtu.be`, `youtube-nocookie.com` and their subdomains, not suffix lookalikes. GUI selects the experience; engine remains authoritative and revalidates profile eligibility |
+| Engine / GUI private directory chains | Root/current-user ownership; group/other writable ancestors require sticky protection; canonical physical paths. Shared policy does not require a sourced shell library |
+| Engine / GUI / runtime process handling | Common rule: numeric PID/PGID is not signaling authority and requested stop is not confirmed stop. Engine uses a leader/sentinel and observation-only lost-group veto; GUI additionally authenticates surviving token-bearing members; runtime bounds foreground probes and keeps child commands from retaining its lock FD |
+| GUI / monitor result checks | Both require a contained canonical regular file from the last nonempty result line; monitor gates display, GUI gates the user-visible outcome/cancellation race, engine owns media validation |
+| yt-dlp / Deno installation | Shared staging/activation primitives already exist; keep component-specific authentication, version and capability policies independent |
+| Launcher install / uninstall | Publication order is link, icon, desktop; removal order is desktop, link, icon. Attempt flags precede mutations and reverse rollback preserves unrestored backups; a generic transaction loop must not hide these asymmetries |
+| RPM / release / privileged publishers | Each trust boundary independently validates identities, signatures, digests and immutable source. A privileged publisher must not execute candidate code to validate that candidate |
+
+Share documented contracts and boundary cases before considering code sharing.
+Do not trade these independent refusals for a generic DRY abstraction.
 
 ## Change boundaries
 

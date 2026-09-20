@@ -3798,8 +3798,8 @@ test_static_packaging_signing_contracts() {
         'RPM historical 2.1.25 version is stable'
 
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        'recover_abandoned_private_aria2_staging' \
-        'engine recovers validated abandoned private aria2 staging'
+        'report_abandoned_private_aria2_staging' \
+        'engine reports abandoned private aria2 staging without deleting it'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         "readonly PRIVATE_ARIA2_STAGING_MARKER='.yt-dlp-aria2-owner-v1'" \
         'new private aria2 staging carries a durable owner marker'

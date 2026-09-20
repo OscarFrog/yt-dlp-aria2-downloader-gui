@@ -39,7 +39,7 @@ Run every mock scenario by default. GROUP is one of:
   engine          Complete engine aggregate, in historical scenario order.
   engine-core     Core audio/video, result, and failure behavior.
   engine-hls      Authenticated YouTube HLS and remux behavior.
-  engine-staging  Private aria2 staging and crash recovery behavior.
+  engine-staging  Private aria2 staging and crash-residue preservation.
   engine-network  CIFS classification, local workspaces and publication cleanup.
   gui             Complete GUI aggregate, in historical scenario order.
   gui-progress    GUI progress rendering, profiles, and completion behavior.
@@ -3215,8 +3215,8 @@ test_mock_engine_youtube_hls() {
         'publication race reports the retained remux path'
     touch -d '2 days ago' -- "${hls_publish_collision_temps[0]}"
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].mkv"
-    prepare_argument_log 'retained-hls-remux-survives-stale-cleanup'
-    assert_status 0 'explicitly retained HLS remux survives stale cleanup' \
+    prepare_argument_log 'retained-hls-remux-survives-next-session'
+    assert_status 0 'explicitly retained HLS remux survives the next session' \
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${OUTPUT_DIR}" --mode audio \
         -- 'https://example.com/watch?v=retained-hls-remux'
@@ -4075,12 +4075,12 @@ test_mock_engine_private_staging() {
         >"${cross_candidate}/.yt-dlp-aria2-owner-v1"
     chmod 600 -- "${cross_candidate}/.yt-dlp-aria2-owner-v1"
 
-    prepare_argument_log 'private-staging-recovery'
-    assert_status 0 'abandoned private staging recovery' \
+    prepare_argument_log 'private-staging-preservation'
+    assert_status 0 'abandoned private staging preservation' \
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${OUTPUT_DIR}" \
         --mode audio \
-        -- 'https://example.com/watch?v=private-staging-recovery'
+        -- 'https://example.com/watch?v=private-staging-preservation'
 
     [[ -d ${crash_staging} ]] \
         || fail 'A previous-session marker incorrectly authorized crash cleanup.'
@@ -4094,7 +4094,7 @@ test_mock_engine_private_staging() {
         -f ${ambiguous_marked}/manifest.json ]] \
         || fail 'Unauthenticated previous-session metadata was deleted automatically.'
     [[ -f ${ambiguous_marked}/foreign.txt ]] \
-        || fail 'Ambiguous marked staging recovery removed an unknown artifact.'
+        || fail 'Abandoned marked staging inspection removed an unknown artifact.'
     [[ -d ${invalid_mode} ]] \
         || fail 'Invalid-mode staging was deleted.'
     [[ -L ${symlink_candidate} && -f ${staging_symlink_target}/sentinel ]] \

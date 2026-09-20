@@ -1802,7 +1802,7 @@ remove_private_aria2_staging_candidate() {
     rmdir -- "${candidate}"
 }
 
-recover_abandoned_private_aria2_staging() {
+report_abandoned_private_aria2_staging() {
     local candidate=''
     # Old sessions have no retained identity or live descriptor in this process.
     # A marker, owner, age or familiar basename cannot authorize deletion.
@@ -2621,7 +2621,7 @@ prepare_output_directory() {
     acquire_output_lock "${OUTPUT_DIR}"
 
     if python3 "${PRIVATE_ARIA2_HELPER}" media-local-safe --output-dir "${OUTPUT_DIR}"; then
-        recover_abandoned_private_aria2_staging
+        report_abandoned_private_aria2_staging
     else
         local media_root=''
         if ! media_root=$(python3 "${PRIVATE_ARIA2_HELPER}" private-root --disk); then
@@ -3350,7 +3350,8 @@ remove_owned_hls_remux_temp() {
     close_hls_remux_fd
 }
 
-# Atomically publish a verified HLS remux and update the private path record.
+# Retain a verified remux for diagnosis when final publication cannot complete.
+# This does not publish the final media or update the private result record.
 preserve_verified_hls_remux() {
     local retained_remux_path=${HLS_REMUX_TMP}
     local retained_remux_dir=''
