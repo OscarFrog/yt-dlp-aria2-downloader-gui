@@ -779,17 +779,19 @@ candidate repository code. The publisher consumes reviewed artifacts and
 revalidates their inventory and digests before attestation and publication.
 Fresh-download verification independently compares public immutable assets with
 the tested artifacts. Before any package or source archive is built, release
-validation also requires the English/French published-asset references and
-their static contract to match the tag version. This keeps the README files
-embedded in the immutable ZIP, RPM, and DEB compatible with the version-locked
-Fedora bootstrap; a later documentation update cannot repair those bytes.
+validation requires coherent source and published-release documentation
+contracts. The candidate source version and development paragraphs must match
+the tag, while published-asset references continue to identify the latest
+immutable release until post-publication alignment. This prevents the README
+files embedded in the immutable ZIP, RPM, and DEB from advertising assets that
+do not yet exist.
 
 The post-release documentation workflow is a separate `workflow_run` trust
 zone. Its read-only preparation and verification jobs bind the triggering
 successful `release.yml` run, semantic tag, exact source commit, and immutable
 public release before producing a data-only patch when one is still needed.
-For releases created under the tagged-documentation guard, the updater is
-expected to be an idempotent no-op. Only the final job receives
+The updater advances published references only after that immutable release is
+available; it is idempotent when they already match. Only the final job receives
 `contents: write`; it does not execute repository code or check out any
 repository ref. It resolves the protected `main` identity through the GitHub
 API, requires the release SHA to be its ancestor and uses main or a target

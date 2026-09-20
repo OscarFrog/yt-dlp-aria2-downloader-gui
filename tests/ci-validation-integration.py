@@ -1118,9 +1118,11 @@ gh() {
         script = self.step("release.yml", "Verify tag and versions")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            # The actual candidate carriers and updater retain their real checks.
+            # The actual candidate carriers retain their real source/published checks.
             for path in ("download-video.sh", "install-fedora.sh", "README.md", "README.fr.md",
-                         "test-static.sh", "CHANGELOG.md", "scripts/update-published-version.py"):
+                         "test-static.sh", "CHANGELOG.md", "scripts/check-push-version.py",
+                         "scripts/update-published-version.py",
+                         "packaging/rpm/yt-dlp-aria2-downloader-gui.spec"):
                 destination = root / path
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(PROJECT / path, destination)

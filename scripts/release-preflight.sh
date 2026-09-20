@@ -182,9 +182,8 @@ verify_release_tree_and_version() {
     [[ ${release_tag} == "v${version}" ]] \
         || fail "release tag/version mismatch: tag=${release_tag} project=${version}"
 
-    if ! python3 -B scripts/update-published-version.py \
-        --check "${version}"; then
-        fail 'release documentation does not describe the tagged artifacts.'
+    if ! python3 -B scripts/check-push-version.py coherence; then
+        fail 'release source and published-release documentation are incoherent.'
     fi
 
     [[ -f ${RPM_SIGNING_KEY} && ! -L ${RPM_SIGNING_KEY} ]] \

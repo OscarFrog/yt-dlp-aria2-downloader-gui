@@ -202,7 +202,7 @@ def check_published_version(root: Path, requested_version: str) -> None:
 
 
 def update_published_version(root: Path, requested_version: str) -> bool:
-    """Prepare the exact documentation and static-contract update."""
+    """Update published documentation after a verified immutable release."""
 
     static_text = read_regular_text(root, STATIC_CONTRACT_PATH)
     development_version = require_single_version(
