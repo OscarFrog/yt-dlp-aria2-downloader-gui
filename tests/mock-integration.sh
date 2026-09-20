@@ -5988,6 +5988,161 @@ with tempfile.TemporaryDirectory(prefix="gui-settings-signal-") as directory:
 PY_SETTINGS_SIGNAL
 }
 
+test_mock_gui_live_log_retention_unconfirmed_shutdown() {
+    python3 - "${PROJECT_DIR}/download-video-gui.sh" "${TEST_ROOT}" <<'PY_LIVE_LOG_RETENTION'
+import os
+import pathlib
+import select
+import stat
+import subprocess
+import sys
+import tempfile
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+entrypoint = 'main "$@"\n'
+if not source.endswith(entrypoint):
+    raise AssertionError("GUI entrypoint changed")
+fixture = r'''
+source "$1"
+STATE_DIR="$2/state"
+TEMP_DIR="$2/session"
+LOG_FILE="${TEMP_DIR}/live-download-log.fixture"
+LOG_TIMESTAMP=20260920-120000
+trap cleanup EXIT
+if [[ $3 == unconfirmed ]]; then
+    WORKER_PID=$4
+    # A live producer models a bounded shutdown whose completion is unknown.
+    # Only that outcome is injected: retention and cleanup are production code.
+    stop_worker() { return 1; }
+    show_diagnostic_dialog() {
+        local validated=''
+        validated_retained_log_path validated
+        [[ $5 == "${validated}" ]]
+        printf '%s\n' "${validated}"
+    }
+    show_error_with_log 'Download failed' 'Worker shutdown remains unconfirmed.'
+    printf 'LATE_GUI_CAPTURE\n' >"${TEMP_DIR}/late-monitor.stderr"
+    append_session_diagnostic "${TEMP_DIR}/late-monitor.stderr" 'Late monitor diagnostic'
+    exit 7
+fi
+# A retained point-in-time snapshot already exists. Once the real producer has
+# been reaped, normal session cleanup is allowed without another retention.
+LOG_RETENTION_ATTEMPTED=true
+exit 0
+'''
+producer_source = r'''
+import sys
+
+with open(sys.argv[1], "a", encoding="utf-8") as live_log:
+    live_log.write("INITIAL_DIAGNOSTIC https://secret.example/video?token=LIVE_SECRET\n")
+    live_log.flush()
+    print("ready", flush=True)
+    for command in sys.stdin:
+        if command.strip() == "stop":
+            break
+        live_log.write("LATE_PRODUCER_DIAGNOSTIC\n")
+        live_log.flush()
+        print("appended", flush=True)
+'''
+
+
+def expect_producer_ack(producer, expected):
+    ready, _, _ = select.select([producer.stdout], [], [], 5)
+    if not ready or producer.stdout.readline().strip() != expected:
+        raise AssertionError(f"Live diagnostic producer did not acknowledge {expected!r}")
+
+
+with tempfile.TemporaryDirectory(prefix="gui-live-log-", dir=sys.argv[2]) as directory:
+    root = pathlib.Path(directory)
+    functions = root / "functions.sh"
+    functions.write_text(source[:-len(entrypoint)], encoding="utf-8")
+    session = root / "session"
+    session.mkdir(mode=0o700)
+    state = root / "state"
+    state.mkdir(mode=0o700)
+    live_log = session / "live-download-log.fixture"
+    live_log.touch(mode=0o600)
+    live_identity = (live_log.stat().st_dev, live_log.stat().st_ino)
+    producer = subprocess.Popen(
+        [sys.executable, "-u", "-c", producer_source, str(live_log)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        expect_producer_ack(producer, "ready")
+        result = subprocess.run(
+            ["bash", "-c", fixture, "bash", str(functions), str(root),
+             "unconfirmed", str(producer.pid)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 7:
+            raise AssertionError(
+                f"Unconfirmed GUI cleanup returned {result.returncode}: {result.stderr}"
+            )
+        if "preserving active private GUI temporary files" not in result.stderr:
+            raise AssertionError("GUI cleanup did not report unconfirmed shutdown")
+        retained = pathlib.Path(result.stdout.strip())
+        if retained.parent != state or retained == live_log:
+            raise AssertionError(f"GUI diagnostic did not use a retained snapshot: {retained}")
+        metadata = retained.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise AssertionError("Retained diagnostic snapshot is not a private regular file")
+        if metadata.st_uid != os.geteuid():
+            raise AssertionError("Retained diagnostic snapshot has an unexpected owner")
+        payload = retained.read_text(encoding="utf-8")
+        if "INITIAL_DIAGNOSTIC" not in payload or "[REDACTED_URL]" not in payload:
+            raise AssertionError("Retained snapshot lost its useful sanitized diagnostic")
+        if "secret.example" in payload or "LIVE_SECRET" in payload:
+            raise AssertionError("Retained snapshot exposed a live diagnostic secret")
+        if not session.is_dir() or producer.poll() is not None:
+            raise AssertionError("Unconfirmed cleanup did not preserve the active session")
+        producer.stdin.write("append\n")
+        producer.stdin.flush()
+        expect_producer_ack(producer, "appended")
+        if not live_log.is_file():
+            raise AssertionError(
+                "Retention unlinked the live GUI log while its producer was still alive; "
+                "the later diagnostic is no longer recoverable by its session path"
+            )
+        if (live_log.stat().st_dev, live_log.stat().st_ino) != live_identity:
+            raise AssertionError("Retention replaced the active diagnostic inode")
+        live_payload = live_log.read_text(encoding="utf-8")
+        if "LATE_PRODUCER_DIAGNOSTIC" not in live_payload:
+            raise AssertionError("The preserved live log lost the producer's later diagnostic")
+        if "LATE_GUI_CAPTURE" not in live_payload:
+            raise AssertionError("The preserved live log lost a later GUI diagnostic capture")
+        if retained.read_text(encoding="utf-8") != payload:
+            raise AssertionError("The live producer changed the retained point-in-time snapshot")
+    finally:
+        try:
+            producer.communicate(input="stop\n" if producer.poll() is None else None, timeout=5)
+        except subprocess.TimeoutExpired:
+            producer.kill()
+            producer.communicate(timeout=5)
+        cleanup_result = subprocess.run(
+            ["bash", "-c", fixture, "bash", str(functions), str(root), "confirmed"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if cleanup_result.returncode != 0 or session.exists():
+            raise AssertionError(
+                "Confirmed GUI shutdown did not clean its private session: "
+                + cleanup_result.stderr
+            )
+    if not retained.is_file() or retained.read_text(encoding="utf-8") != payload:
+        raise AssertionError("Normal GUI cleanup removed or changed the retained snapshot")
+PY_LIVE_LOG_RETENTION
+}
+
 test_mock_gui_cleanup_unconfirmed_shutdown() {
     local source_copy="${TEST_ROOT}/gui-cleanup-source.sh"
     local fixture="${TEST_ROOT}/gui-cleanup-fixture.sh"
@@ -6031,6 +6186,7 @@ EOF_GUI_CLEANUP_QUIESCENCE
 }
 
 run_mock_gui_state_group() {
+    test_mock_gui_live_log_retention_unconfirmed_shutdown
     test_mock_gui_cleanup_unconfirmed_shutdown
     test_mock_gui_config_recovery
     test_mock_gui_settings_signal_cleanup

@@ -57,7 +57,9 @@ SCRIPT_DIR=''
 SCRIPT_PATH=''
 WAITED_WORKER_STATUS=''
 WORKER_STATUS=''
+# The session-private live path never becomes a retained snapshot path.
 LOG_FILE=''
+RETAINED_LOG_FILE=''
 LOG_RETAINED=false
 LOG_RETENTION_ATTEMPTED=false
 LOG_TIMESTAMP=''
@@ -1530,10 +1532,10 @@ retain_sanitized_log_impl() {
         return 0
     fi
 
-    if ! rm -f -- "${LOG_FILE}"; then
-        printf 'Warning: unable to remove the private live diagnostic log.\n' >&2
-    fi
-    LOG_FILE=${published_log}
+    # This is a point-in-time snapshot, not ownership transfer of the live log.
+    # A producer may still hold it open; only confirmed session cleanup (or
+    # the confirmed-success path) may unlink that live pathname.
+    RETAINED_LOG_FILE=${published_log}
     LOG_RETAINED=true
     return 0
 }
@@ -1552,13 +1554,13 @@ validated_retained_log_path() {
     (($# == 1)) || return 2
     local output_variable=$1
 
-    [[ ${LOG_RETAINED} == true && -n ${LOG_FILE} ]] || return 1
-    validate_retained_log_candidate "${output_variable}" "${LOG_FILE}"
+    [[ ${LOG_RETAINED} == true && -n ${RETAINED_LOG_FILE} ]] || return 1
+    validate_retained_log_candidate "${output_variable}" "${RETAINED_LOG_FILE}"
 }
 
 view_retained_log() {
     view_diagnostic_file \
-        retained '' "${LOG_FILE}" \
+        retained '' "${RETAINED_LOG_FILE}" \
         "Sanitized diagnostic log - ${APP_NAME}"
     return 0
 }
@@ -1590,7 +1592,6 @@ append_session_diagnostic() {
     local diagnostic_snapshot=''
     local source_size=''
 
-    [[ ${LOG_RETAINED} == false ]] || return 0
     [[ -n ${LOG_FILE} && -f ${LOG_FILE} && ! -L ${LOG_FILE} ]] || return 0
     [[ -f ${source_file} && ! -L ${source_file} && -s ${source_file} ]] \
         || return 0
@@ -2705,7 +2706,7 @@ resolve_confirmed_final_path() {
 }
 
 discard_success_log() {
-    if [[ ${LOG_RETAINED} == true || -z ${LOG_FILE} ]]; then
+    if [[ -z ${LOG_FILE} ]]; then
         return 0
     fi
     if rm -f -- "${LOG_FILE}"; then

@@ -168,6 +168,14 @@ claiming post-return immutability.
    temporary directory, then remove it immediately after the interaction. The
    GUI never falls back to the private raw worker log.
 
+`LOG_FILE` always identifies the private live session log;
+`RETAINED_LOG_FILE` identifies a separate sanitized point-in-time snapshot.
+Retention does not unlink or retarget the live path. If worker or GUI-child
+shutdown remains unconfirmed, cleanup preserves the session and live log, so
+later producer writes remain accessible by the same path. Only confirmed
+shutdown permits normal session removal; the snapshot is not automatically
+refreshed and does not claim to contain later writes.
+
 The GUI recognizes legacy audio-profile values solely to migrate old settings
 to the current single native-audio profile.
 

@@ -625,6 +625,10 @@ information survives source-log truncation and always names the file opened by
 **View log**. The live log is private (`0600`) while the worker is running and
 is never offered as a fallback if safe sanitization fails. Input errors and
 other early failures without a useful diagnostic remain simple error messages.
+The retained file is a point-in-time snapshot. If process shutdown cannot be
+confirmed, the private live log and session remain in place, including writes
+made after that snapshot. Normal session cleanup is allowed only after shutdown
+is confirmed; the snapshot is not automatically refreshed.
 
 
 

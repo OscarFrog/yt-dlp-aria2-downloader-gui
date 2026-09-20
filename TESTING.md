@@ -594,6 +594,10 @@ The automated suite checks, among other things:
 - deletion of successful-download logs and retention of failure logs, with
   shared View log/Close actions for every interactive failure that has a safely
   sanitized diagnostic and fail-closed refusal to open the raw live log;
+- preservation of the live log's path and inode while a real producer writes
+  after an error snapshot and shutdown remains unconfirmed; the snapshot stays
+  separate and sanitized, and confirmed cleanup removes the private session
+  without removing the retained snapshot;
 - View log/Close handling for bounded pre-session Zenity diagnostics, including
   correct text-viewer content, Close without viewing, private containment, and
   immediate removal after the interaction;

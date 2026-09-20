@@ -662,6 +662,11 @@ log**. Le journal actif reste privé (`0600`) pendant l’exécution et n'est ja
 proposé comme solution de repli si la sanitisation sûre échoue. Les erreurs de
 saisie et les autres échecs précoces sans diagnostic utile restent de simples
 messages d'erreur.
+Le fichier conservé est un instantané. Si l'arrêt des processus ne peut pas être
+confirmé, le journal actif privé et la session restent en place, y compris les
+écritures effectuées après cet instantané. Le nettoyage normal de la session
+n'est autorisé qu'après confirmation de l'arrêt ; l'instantané n'est pas
+automatiquement actualisé.
 
 
 
