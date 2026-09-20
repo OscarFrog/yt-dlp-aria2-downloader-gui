@@ -872,6 +872,7 @@ test_private_roots_and_media_faults() {
     new_case 'network-publication-boundaries'
     PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_NETWORK_BOUNDARIES'
 import argparse
+import ctypes
 import errno
 import importlib.util
 import io
@@ -885,7 +886,7 @@ import tempfile
 from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location("network_publication", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
@@ -935,6 +936,44 @@ def failure(args, expected=Exception):
 candidate = mkdir(root / "candidate")
 fallback = mkdir(root / "fallback")
 app = f"yt-dlp-aria2-downloader-{os.geteuid()}"
+
+# Exercise the production fstatfs buffer decoding and local-storage decision
+# on real directory descriptors. CIFS may report either CIFS_SUPER_MAGIC or
+# SMB2_SUPER_MAGIC; Unix mode 0700 alone must never make either one local.
+candidate_identity = candidate.stat()
+for magic, local in (
+    (0xEF53, True), (0x58465342, True), (0x9123683E, True),
+    (0x2FC12FC1, True), (0x01021994, True),
+    (0x517B, False), (0xFF534D42, False), (0xFE534D42, False),
+    (0x6969, False), (0x65735546, False), (0xDEADBEEF, False),
+):
+    def injected_fstatfs(descriptor, buffer):
+        opened = os.fstat(descriptor)
+        assert (opened.st_dev, opened.st_ino) == (
+            candidate_identity.st_dev, candidate_identity.st_ino)
+        ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ulong))[0] = magic
+        return 0
+
+    probe = Mock(side_effect=injected_fstatfs)
+    with patch.object(module.ctypes, "CDLL", return_value=SimpleNamespace(fstatfs=probe)):
+        with module.directory_descriptor(candidate) as descriptor:
+            assert module.filesystem_type(descriptor) == magic
+            for disk in (False, True):
+                accepted = local and (not disk or magic != 0x01021994)
+                try:
+                    module.require_local_filesystem(descriptor, disk=disk)
+                except module.PlanError:
+                    assert not accepted, hex(magic)
+                else:
+                    assert accepted, hex(magic)
+        assert module.media_local_safe(argparse.Namespace(output_dir=str(candidate))) == (
+            0 if local else 1)
+    assert probe.call_count == 4
+
+with patch.object(module.ctypes, "CDLL", return_value=SimpleNamespace(
+        fstatfs=Mock(return_value=-1))), patch.object(module.ctypes, "get_errno", return_value=errno.EIO):
+    assert module.media_local_safe(argparse.Namespace(output_dir=str(candidate))) == 1
+
 for invalid in (Path("relative"), root / "absent"):
     with patch.object(module, "private_root_candidates", return_value=[(invalid, True), (fallback, False)]):
         assert module.select_private_root() == fallback / app

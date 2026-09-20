@@ -199,6 +199,7 @@ run_engine() {
     local result_file="${TEST_ROOT}/${scenario}.result"
     local output_file="${TEST_ROOT}/${scenario}.stdout"
     local engine_status=0
+    local temporary_path='' output_line=''
 
     RUN_FINAL_FILE=''
     mkdir -p -- "${scenario_dir}"
@@ -243,6 +244,30 @@ run_engine() {
             "${scenario}" >&2
         return 65
     }
+    for temporary_path in \
+        "${scenario_dir}"/.yt-dlp-aria2.* \
+        "${scenario_dir}"/.media-work.* \
+        "${scenario_dir}"/.yt-dlp-path.* \
+        "${scenario_dir}"/.yt-dlp-publish.*.partial; do
+        [[ ! -e ${temporary_path} && ! -L ${temporary_path} ]] || {
+            printf 'FAIL: successful %s retained a destination temporary: %s\n' \
+                "${scenario}" "${temporary_path}" >&2
+            return 65
+        }
+    done
+    while IFS= read -r output_line; do
+        case ${output_line} in
+            'Local media workspace: '*)
+                temporary_path=${output_line#*: }
+                [[ ! -e ${temporary_path} && ! -L ${temporary_path} ]] || {
+                    printf 'FAIL: successful %s retained its local workspace: %s\n' \
+                        "${scenario}" "${temporary_path}" >&2
+                    return 65
+                }
+                ;;
+            *) ;;
+        esac
+    done <"${output_file}"
     if [[ ${SIMULATE_NETWORK} == true ]]; then
         grep -Fq -- 'requires local disk staging' "${output_file}" || {
             printf 'FAIL: %s did not exercise the local-media fallback.\n' \
