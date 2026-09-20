@@ -7028,8 +7028,10 @@ if [[ ${fixture_mode} == signal ]]; then
 fi
 wait_status=0
 wait_for_download_exit 2 || wait_status=$?
+printf '%s\n' "${wait_status}" >"${fixture_root}/wait-observed"
 stop_status=0
 stop_download_worker || stop_status=$?
+printf '%s\n' "${stop_status}" >"${fixture_root}/stop-observed"
 run_supervised_command bash -c 'printf started >"$1"' bash \
     "${fixture_root}/unexpected-command"
 replacement_status=${DOWNLOAD_STATUS}
@@ -7102,6 +7104,11 @@ for mode in ("wait", "signal", "unadopted"):
         assert int(original_child[19]) == start_time and original_child[0] not in {"Z", "X"}
         assert os.stat(f"/proc/{descendant_pid}/fd/{inherited_lock}").st_ino == (case_root / "destination.lock").stat().st_ino
         os.write(writes[0], b"x")
+        # Stop and EXIT cleanup each perform a full bounded shutdown sequence
+        # with procfs scans. Observe their boundaries rather than imposing one
+        # shared deadline on both independent sequences.
+        wait_for_record(case_root / "wait-observed", process, 1)
+        wait_for_record(case_root / "stop-observed", process, 1)
         observed = wait_for_record(case_root / "observed", process, 4)
         wait_status, stop_status, cleanup_status, replacement_status = observed
         assert wait_status != 0, (mode, "lost leader made wait claim quiescence", observed)
