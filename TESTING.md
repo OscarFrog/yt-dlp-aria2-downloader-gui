@@ -651,7 +651,10 @@ The automated suite checks, among other things:
 - private XDG runtime locks and fallback permissions;
 - byte-bounded Unicode output templates;
 - fallback from relative XDG configuration and state paths;
-- retention of process-group control until every descendant has exited;
+- retention of process-group tracking until quiescence, distinct from permission
+  to signal it: a real vanished-leader/live-descendant fixture verifies refusal
+  to claim shutdown, preservation of private state and the inherited lock, no
+  signal without authority, and cleanup after the descendant actually exits;
 - Zenity timeout and unexpected-error handling;
 - folder-chooser fallback behavior on Zenity 4;
 - minimum versions, suffixed yt-dlp versions, required capabilities, and

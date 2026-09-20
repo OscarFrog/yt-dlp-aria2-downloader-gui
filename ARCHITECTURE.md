@@ -241,7 +241,16 @@ still hold; process exit closes the parent's descriptors. Before using a
 PID or negative process-group target, the supervisor revalidates its direct
 parent where applicable and its Linux PID, PGID, SID, and start-time identity.
 The autonomous engine keeps an authenticated session-leader sentinel alive
-until every live same-session descendant has exited. If Bash has already
+until every live same-session descendant has exited. If that leader disappears
+unexpectedly, its numeric PGID remains a cleanup veto, never renewed signaling
+authority. Observed live PGID/SID members prevent quiescence; when the leader
+cannot be authenticated and the process-table snapshot finds no live member,
+only a kernel ESRCH response to a signal-zero probe confirms group absence.
+Permission failures or other uncertainty preserve the state. Before readiness
+adoption, the no-fork worker PID supplies the same observation-only candidate.
+Unconfirmed shutdown preserves remaining readiness records and the private
+aria2 input as well as media resources; a new supervised command cannot discard
+the pending tracking. If Bash has already
 harvested the GUI's leader asynchronously, an inherited private token plus a
 fresh PID, PGID, SID, and start-time check authenticates a surviving member
 instead. Cancellation can therefore still reach a child that outlives the

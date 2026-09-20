@@ -6368,6 +6368,414 @@ EOF_RECORD_REGISTRATION_HARNESS
     done
 }
 
+test_mock_signal_cli_lost_group_leader() {
+    # A vanished leader revokes signaling authority, not evidence that a live
+    # descendant still owns the private files and inherited destination lock.
+    python3 -I - "${PROJECT_DIR}" "${TEST_ROOT}" "${REAL_SETSID}" <<'PY_LOST_GROUP_LEADER'
+import ctypes
+import errno
+import fcntl
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+from unittest import mock
+
+project, root = map(Path, sys.argv[1:3])
+real_setsid = sys.argv[3]
+requested_signal = None
+
+def remember_signal(number, _frame):
+    global requested_signal
+    requested_signal = requested_signal or number
+
+def check_interruption():
+    if requested_signal:
+        raise SystemExit(128 + requested_signal)
+
+for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(number, remember_signal)
+
+source = (project / "download-video.sh").read_text(encoding="utf-8")
+entrypoint = 'main "$@"\n'
+assert source.endswith(entrypoint)
+absence_probe = source.split("<<'PY_GROUP_ABSENT'\n", 1)[1].split("\nPY_GROUP_ABSENT", 1)[0]
+for outcome, expected_status in (
+    (None, 1),
+    (ProcessLookupError(errno.ESRCH, "fixture missing group"), 0),
+    (PermissionError(errno.EPERM, "fixture permission denied"), 1),
+    (OSError(errno.EIO, "fixture unexpected probe failure"), 1),
+):
+    with mock.patch.object(sys, "argv", ["group-absence-fixture", "424242"]), \
+         mock.patch("os.kill", side_effect=outcome) as probe:
+        try:
+            exec(compile(absence_probe, "group-absence-fixture", "exec"), {})
+        except SystemExit as result:
+            assert result.code == expected_status, (outcome, result.code)
+        else:
+            raise AssertionError("group absence probe did not return its status")
+        probe.assert_called_once_with(-424242, 0)
+source_copy = root / "lost-leader-engine-functions.sh"
+source_copy.write_text(source[:-len(entrypoint)], encoding="utf-8")
+source_copy.chmod(0o600)
+
+# Adopt the deliberately orphaned descendant so cleanup can reap it directly.
+# Pipe EOF releases every fixture child even when an assertion fails early.
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(36, 1, 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), "unable to enable child subreaping")
+
+child_program = root / "lost-leader-child.py"
+child_program.write_text(r'''
+import os
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+leader_release, descendant_release, lock_fd = map(int, sys.argv[2:5])
+child = os.fork()
+if child:
+    os.close(descendant_release)
+    os.read(leader_release, 1)
+    os._exit(0)
+os.close(leader_release)
+with open(os.devnull, "wb", buffering=0) as sink:
+    os.dup2(sink.fileno(), 1)
+    os.dup2(sink.fileno(), 2)
+os.fstat(lock_fd)
+fields = Path("/proc/self/stat").read_text().rsplit(") ", 1)[1].split()
+(root / "descendant").write_text(
+    f"{os.getpid()} {os.getppid()} {os.getpgrp()} {os.getsid(0)} {fields[19]} {lock_fd}\n",
+    encoding="ascii",
+)
+os.read(descendant_release, 1)
+os._exit(0)
+''', encoding="utf-8")
+child_program.chmod(0o600)
+
+wrapper = root / "lost-leader-wrapper.sh"
+wrapper.write_text(r'''#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1090
+source "$1"
+fixture_root=$2
+leader_release=$3
+descendant_release=$4
+observation_release=$5
+fixture_mode=$6
+setsid_binary=$7
+python_binary=$8
+child_program=$9
+REUSE_CURRENT_SESSION=false
+OUTPUT_LOCK_ROOT=${fixture_root}
+YTDLP_BATCH_FILE_TMP="${fixture_root}/active.url"
+printf 'active private state\n' >"${YTDLP_BATCH_FILE_TMP}"
+exec {OUTPUT_LOCK_FD}>"${fixture_root}/destination.lock"
+flock --exclusive "${OUTPUT_LOCK_FD}"
+trap cleanup EXIT
+trap 'exit 143' TERM
+"${setsid_binary}" --wait "${python_binary}" "${child_program}" \
+    "${fixture_root}" "${leader_release}" "${descendant_release}" \
+    "${OUTPUT_LOCK_FD}" &
+DOWNLOAD_WORKER_PID=$!
+process_is_direct_child_of "${DOWNLOAD_WORKER_PID}" "${BASHPID}" \
+    DOWNLOAD_WORKER_START_TIME true
+for _ in {1..500}; do
+    if [[ -s ${fixture_root}/descendant ]] \
+        && process_is_session_group_leader "${DOWNLOAD_WORKER_PID}" "${BASHPID}" \
+            DOWNLOAD_WORKER_PGID_START_TIME false; then
+        break
+    fi
+    sleep 0.01
+done
+[[ -n ${DOWNLOAD_WORKER_PGID_START_TIME} ]]
+if [[ ${fixture_mode} == unadopted ]]; then
+    DOWNLOAD_WORKER_PGID_START_TIME=''
+else
+    DOWNLOAD_WORKER_PGID=${DOWNLOAD_WORKER_PID}
+fi
+DOWNLOAD_PGID_FILE="${fixture_root}/worker.pgid"
+DOWNLOAD_READY_FILE="${fixture_root}/worker.ready"
+printf '%s\n' "${DOWNLOAD_WORKER_PID}" >"${DOWNLOAD_PGID_FILE}"
+printf '%s\n' "${DOWNLOAD_WORKER_PID}" >"${DOWNLOAD_READY_FILE}"
+printf '%s\n' "${DOWNLOAD_WORKER_PID}" >"${fixture_root}/registered"
+wait "${DOWNLOAD_WORKER_PID}"
+[[ ! -e /proc/${DOWNLOAD_WORKER_PID}/stat ]]
+
+# Record and reject every actual signaling attempt after authority is lost.
+# Read-only kill -0 probes still consult the real kernel process table.
+kill() {
+    if [[ ${1:-} != -0 ]]; then
+        printf '%s\n' "$*" >>"${fixture_root}/signal-attempts"
+        return 1
+    fi
+    builtin kill "$@"
+}
+if [[ ${fixture_mode} == signal ]]; then
+    signal_download_worker TERM
+fi
+wait_status=0
+wait_for_download_exit 2 || wait_status=$?
+stop_status=0
+stop_download_worker || stop_status=$?
+run_supervised_command bash -c 'printf started >"$1"' bash \
+    "${fixture_root}/unexpected-command"
+replacement_status=${DOWNLOAD_STATUS}
+cleanup_status=0
+(trap cleanup EXIT; exit 7) || cleanup_status=$?
+printf '%s %s %s %s\n' "${wait_status}" "${stop_status}" \
+    "${cleanup_status}" "${replacement_status}" >"${fixture_root}/observed"
+IFS= read -r -u "${observation_release}" _ || true
+wait_for_download_exit 30
+printf 'quiescent\n' >"${fixture_root}/quiescent"
+''', encoding="utf-8")
+wrapper.chmod(0o700)
+
+def process_fields(pid):
+    return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+
+def wait_for_record(path, process, count, *, seconds=20):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        check_interruption()
+        try:
+            fields = path.read_text(encoding="ascii").split()
+        except FileNotFoundError:
+            fields = []
+        if len(fields) == count:
+            return list(map(int, fields))
+        if process.poll() is not None:
+            stdout, stderr = process.communicate(timeout=2)
+            raise AssertionError((path.name, process.returncode, stdout, stderr))
+        time.sleep(0.01)
+    raise AssertionError(f"fixture did not reach {path.name}")
+
+def reap_descendant(pid, *, seconds=5):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            observed, _status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if observed == pid:
+            return
+        time.sleep(0.01)
+    raise AssertionError("fixture descendant did not exit after pipe release")
+
+for mode in ("wait", "signal", "unadopted"):
+    case_root = root / f"lost-leader-{mode}"
+    case_root.mkdir(mode=0o700)
+    pipes = [os.pipe() for _ in range(3)]
+    reads = [pair[0] for pair in pipes]
+    writes = [pair[1] for pair in pipes]
+    process = None
+    descendant_pid = None
+    try:
+        process = subprocess.Popen(
+            ["bash", str(wrapper), str(source_copy), str(case_root),
+             *map(str, reads), mode, real_setsid, sys.executable, str(child_program)],
+            pass_fds=tuple(reads), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        for descriptor in reads:
+            os.close(descriptor)
+        reads.clear()
+        leader_pid, = wait_for_record(case_root / "registered", process, 1)
+        descendant = wait_for_record(case_root / "descendant", process, 6)
+        descendant_pid, parent_pid, pgid, sid, start_time, inherited_lock = descendant
+        leader = process_fields(leader_pid)
+        assert leader[0] not in {"Z", "X"}
+        assert list(map(int, leader[1:4])) == [process.pid, leader_pid, leader_pid]
+        assert (parent_pid, pgid, sid) == (leader_pid, leader_pid, leader_pid)
+        original_child = process_fields(descendant_pid)
+        assert int(original_child[19]) == start_time and original_child[0] not in {"Z", "X"}
+        assert os.stat(f"/proc/{descendant_pid}/fd/{inherited_lock}").st_ino == (case_root / "destination.lock").stat().st_ino
+        os.write(writes[0], b"x")
+        observed = wait_for_record(case_root / "observed", process, 4)
+        wait_status, stop_status, cleanup_status, replacement_status = observed
+        assert wait_status != 0, (mode, "lost leader made wait claim quiescence", observed)
+        assert stop_status != 0, (mode, "lost leader made stop claim quiescence", observed)
+        assert cleanup_status == 7, "cleanup replaced the original failure status"
+        assert replacement_status == 125 and not (case_root / "unexpected-command").exists(), "a new command discarded unresolved group state"
+        assert (case_root / "active.url").read_text() == "active private state\n", "cleanup removed live private state"
+        for filename in ("worker.pgid", "worker.ready"):
+            assert (case_root / filename).read_text() == f"{leader_pid}\n", "cleanup removed unresolved readiness state"
+        assert not (case_root / "signal-attempts").exists(), "lost leader authorized an actual signal"
+        child = process_fields(descendant_pid)
+        assert child[0] not in {"Z", "X"} and int(child[19]) == start_time
+        assert list(map(int, child[2:4])) == [leader_pid, leader_pid]
+        with (case_root / "destination.lock").open("rb") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                assert error.errno in {errno.EACCES, errno.EAGAIN}
+            else:
+                raise AssertionError("unconfirmed cleanup explicitly unlocked the inherited file description")
+        os.write(writes[1], b"x")
+        reap_descendant(descendant_pid)
+        descendant_pid = None
+        os.write(writes[2], b"\n")
+        stdout, stderr = process.communicate(timeout=10)
+        check_interruption()
+        assert process.returncode == 0, (mode, process.returncode, stdout, stderr)
+        assert b"shutdown could not be confirmed" in stderr and b"preserving active temporary files" in stderr
+        assert b"leader identity was lost" in stderr
+        assert (case_root / "quiescent").read_text() == "quiescent\n"
+        assert not (case_root / "active.url").exists(), "confirmed shutdown retained active private state"
+        for filename in ("worker.pgid", "worker.ready"):
+            assert not (case_root / filename).exists(), "confirmed shutdown retained readiness state"
+    finally:
+        for descriptor in reads + writes:
+            os.close(descriptor)
+        if process is not None:
+            try:
+                process.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                # Popen still owns this unreaped direct child; never signal a
+                # recycled numeric process group while unwinding a failed test.
+                process.terminate()
+                try:
+                    process.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate(timeout=5)
+        if descendant_pid is not None:
+            reap_descendant(descendant_pid)
+        # Also reap a child whose readiness record was not reached on failure.
+        cleanup_deadline = time.monotonic() + 5
+        while True:
+            try:
+                adopted, _status = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if adopted == 0:
+                if time.monotonic() >= cleanup_deadline:
+                    raise AssertionError("fixture cleanup left an adopted live child")
+                time.sleep(0.01)
+    check_interruption()
+    print(f"Lost CLI group leader ({mode}): refusal, state/lock preservation and eventual quiescence passed.")
+PY_LOST_GROUP_LEADER
+}
+
+test_mock_signal_transport_preserves_active_input() {
+    # The transport caller must not unlink authentication inputs while its
+    # supervisor still reports an unresolved worker or process group.
+    python3 -I - "${PROJECT_DIR}" "${TEST_ROOT}" <<'PY_ACTIVE_TRANSPORT_INPUT'
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+project, root = map(Path, sys.argv[1:3])
+source = (project / "download-video.sh").read_text(encoding="utf-8")
+entrypoint = 'main "$@"\n'
+assert source.endswith(entrypoint)
+source_copy = root / "active-transport-engine-functions.sh"
+source_copy.write_text(source[:-len(entrypoint)], encoding="utf-8")
+source_copy.chmod(0o600)
+wrapper = r'''
+set -euo pipefail
+source "$1"
+fixture_root=$2
+fixture_mode=$3
+PRIVATE_ARIA2_HELPER=$4
+PRIVATE_TRANSPORT=direct
+MACHINE_PROGRESS=false
+ARIA2_HTTPS_DIRECT_SAFE=false
+MODE=audio
+OUTPUT_DIR="${fixture_root}/output"
+PRIVATE_ARIA2_STAGING="${OUTPUT_DIR}/.yt-dlp-aria2-test"
+PRIVATE_ARIA2_METADATA="${fixture_root}/private"
+PRIVATE_ARIA2_PLAN="${PRIVATE_ARIA2_METADATA}/plan.json"
+PRIVATE_ARIA2_INPUT="${PRIVATE_ARIA2_METADATA}/aria2.input"
+PRIVATE_ARIA2_MANIFEST="${PRIVATE_ARIA2_METADATA}/manifest.json"
+PRIVATE_ARIA2_COOKIE_JAR="${PRIVATE_ARIA2_METADATA}/cookies.txt"
+YTDLP_BATCH_FILE_TMP="${PRIVATE_ARIA2_METADATA}/url.txt"
+ARIA2_DIRECT_OPTIONS=()
+fixture_files=(
+    "${PRIVATE_ARIA2_INPUT}" "${PRIVATE_ARIA2_MANIFEST}"
+    "${PRIVATE_ARIA2_COOKIE_JAR}" "${YTDLP_BATCH_FILE_TMP}"
+)
+if [[ ${fixture_mode} == native-* ]]; then
+    PRIVATE_TRANSPORT=native
+    YTDLP_BIN=unused-native-fixture
+    YT_DLP_OPTIONS=()
+    fixture_files=("${PRIVATE_ARIA2_COOKIE_JAR}" "${YTDLP_BATCH_FILE_TMP}")
+fi
+record_unconfirmed_supervision() {
+    sha256sum -- "${fixture_files[@]}" >"${fixture_root}/before.sha256"
+    stat -c '%d:%i:%s:%y:%z' -- "${fixture_files[@]}" >"${fixture_root}/before.stat"
+    DOWNLOAD_STATUS=125
+    # Numeric sentinels model retained state only; no process is launched or
+    # signaled by this caller-focused fixture.
+    if [[ ${fixture_mode} == pid || ${fixture_mode} == native-pid ]]; then
+        DOWNLOAD_WORKER_PID=424242
+    else
+        DOWNLOAD_WORKER_PGID=424242
+    fi
+}
+run_supervised_command() {
+    [[ ${PRIVATE_TRANSPORT} == direct ]]
+    record_unconfirmed_supervision
+}
+run_supervised_ytdlp() {
+    [[ ${PRIVATE_TRANSPORT} == native ]] || {
+        printf 'unexpected native replay\n' >&2
+        return 1
+    }
+    record_unconfirmed_supervision
+}
+execute_selected_transport
+[[ ${DOWNLOAD_STATUS} == 125 ]]
+if [[ ${PRIVATE_TRANSPORT} == direct ]]; then
+    [[ -n ${PRIVATE_ARIA2_INPUT} && -n ${PRIVATE_ARIA2_INPUT_IDENTITY} ]]
+    [[ -n ${PRIVATE_ARIA2_MANIFEST} && -n ${PRIVATE_ARIA2_MANIFEST_IDENTITY} ]]
+else
+    [[ ! -e ${PRIVATE_ARIA2_INPUT} && ! -e ${PRIVATE_ARIA2_MANIFEST} ]]
+fi
+[[ -n ${YTDLP_BATCH_FILE_TMP} ]]
+if [[ ${fixture_mode} == pid || ${fixture_mode} == native-pid ]]; then
+    [[ ${DOWNLOAD_WORKER_PID} == 424242 && -z ${DOWNLOAD_WORKER_PGID} ]]
+else
+    [[ ${DOWNLOAD_WORKER_PGID} == 424242 && -z ${DOWNLOAD_WORKER_PID} ]]
+fi
+sha256sum -- "${fixture_files[@]}" >"${fixture_root}/after.sha256"
+stat -c '%d:%i:%s:%y:%z' -- "${fixture_files[@]}" >"${fixture_root}/after.stat"
+cmp -- "${fixture_root}/before.sha256" "${fixture_root}/after.sha256"
+cmp -- "${fixture_root}/before.stat" "${fixture_root}/after.stat"
+'''
+for mode in ("pid", "pgid", "native-pid", "native-pgid"):
+    case_root = root / f"active-transport-{mode}"
+    case_root.mkdir(mode=0o700)
+    output = case_root / "output"
+    output.mkdir(mode=0o700)
+    (output / ".yt-dlp-aria2-test").mkdir(mode=0o700)
+    private = case_root / "private"
+    private.mkdir(mode=0o700)
+    plan = {"requested_downloads": [{
+        "filename": str(output / "audio.m4a"),
+        "url": "http://example.invalid/audio",
+        "protocol": "http",
+        "http_headers": {"User-Agent": "private transport fixture"},
+    }]}
+    for name, content in (("plan.json", json.dumps(plan)),
+                          ("cookies.txt", "# Netscape HTTP Cookie File\n"),
+                          ("url.txt", "http://example.invalid/watch\n")):
+        path = private / name
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o600)
+    completed = subprocess.run(
+        ["bash", "-c", wrapper, "active-transport-fixture", str(source_copy),
+         str(case_root), mode, str(project / "private-aria2-plan.py")],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=15,
+    )
+    assert completed.returncode == 0, (mode, completed.returncode, completed.stdout, completed.stderr)
+    assert not (output / "audio.m4a").exists(), "unconfirmed transport published output"
+    print(f"Unconfirmed transport ({mode}): private inputs and URL batch preserved unchanged.")
+PY_ACTIVE_TRANSPORT_INPUT
+}
+
 test_mock_signal_cli_leader_exit_descendant() {
     local cli_engine_pid cli_engine_status descendant_pid descendant_signal_log
     local descendant_started_marker descendant_start_time descendant_term_marker
@@ -8417,6 +8825,8 @@ test_mock_signal_zenity_status() {
 }
 
 run_mock_signal_group() {
+    test_mock_signal_cli_lost_group_leader
+    test_mock_signal_transport_preserves_active_input
     test_mock_signal_cli_download
     test_mock_signal_cli_aria2_diagnostic
     test_mock_signal_cleanup_requires_quiescence

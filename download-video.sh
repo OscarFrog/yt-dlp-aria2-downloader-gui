@@ -957,6 +957,27 @@ download_group_has_live_member() {
     return 1
 }
 
+download_group_is_absent() {
+    [[ ${DOWNLOAD_WORKER_PGID} =~ ^[1-9][0-9]*$ ]] || return 1
+
+    # After losing the leader, a /proc snapshot alone can miss a child forked
+    # during the scan. Only ESRCH proves the numeric group is absent; EPERM or
+    # any other uncertainty preserves state. Signal zero grants no authority
+    # to send a real signal to this possibly recycled group.
+    python3 - "${DOWNLOAD_WORKER_PGID}" <<'PY_GROUP_ABSENT'
+import os
+import sys
+
+try:
+    os.kill(-int(sys.argv[1]), 0)
+except ProcessLookupError:
+    sys.exit(0)
+except (OSError, ValueError, OverflowError):
+    pass
+sys.exit(1)
+PY_GROUP_ABSENT
+}
+
 get_path_identity() {
     local identity_output_variable=$1
     local path=$2
@@ -1112,10 +1133,9 @@ signal_download_worker() {
             && download_group_has_live_member \
             && kill "-${signal_name}" -- "-${DOWNLOAD_WORKER_PGID}" 2>/dev/null; then
             group_signaled=true
-        else
-            DOWNLOAD_WORKER_PGID=''
-            DOWNLOAD_WORKER_PGID_START_TIME=''
         fi
+        # Failed authority or delivery is not proof of quiescence. Retain the
+        # observed group so wait/cleanup can still veto resource removal.
     fi
 
     if [[ ${signal_name} == KILL || ${group_signaled} == false ]] \
@@ -1221,10 +1241,22 @@ wait_for_download_exit() {
             fi
         fi
 
+        if [[ ${worker_alive} != true && -z ${DOWNLOAD_WORKER_PGID} &&
+            -n ${DOWNLOAD_WORKER_PID} && ${REUSE_CURRENT_SESSION} != true ]]; then
+            # In standalone no-fork topology, $! is the future session leader.
+            # It may die after forking but before readiness adoption. Keep its
+            # number only as a liveness veto, with no start-time authority.
+            DOWNLOAD_WORKER_PGID=${DOWNLOAD_WORKER_PID}
+            DOWNLOAD_WORKER_PGID_START_TIME=''
+        fi
+
         if [[ ${worker_alive} != true && -n ${DOWNLOAD_WORKER_PGID} ]]; then
-            # shellcheck disable=SC2310 # Failed authentication ends group tracking.
-            if download_group_is_current \
-                && download_group_has_live_member; then
+            # Liveness can veto cleanup without authorizing a group signal.
+            # A missing/recycled leader must never hide a surviving descendant.
+            # shellcheck disable=SC2310 # Failed absence proof preserves tracking.
+            if download_group_has_live_member; then
+                group_alive=true
+            elif ! download_group_is_current && ! download_group_is_absent; then
                 group_alive=true
             else
                 DOWNLOAD_WORKER_PGID=''
@@ -1267,7 +1299,16 @@ stop_download_worker() {
     fi
 
     signal_download_worker KILL
-    wait_for_download_exit 20
+    # shellcheck disable=SC2310 # Failure must preserve the tracked resources.
+    if wait_for_download_exit 20; then
+        return 0
+    fi
+    # shellcheck disable=SC2310 # Lost authority is diagnostic, never a kill target.
+    if [[ -n ${DOWNLOAD_WORKER_PGID} ]] && ! download_group_is_current; then
+        printf '%s\n' \
+            'Warning: command group leader identity was lost; shutdown is unconfirmed and group signaling is forbidden.' >&2
+    fi
+    return 1
 }
 
 run_supervised_command() {
@@ -1276,6 +1317,10 @@ run_supervised_command() {
     local -a worker_command=("$@")
 
     DOWNLOAD_STATUS=125
+    if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]]; then
+        error 'previous command shutdown is unconfirmed; refusing to replace its process tracking.'
+        return 0
+    fi
     DOWNLOAD_WORKER_PID=''
     DOWNLOAD_WORKER_START_TIME=''
     DOWNLOAD_WORKER_PGID=''
@@ -1430,13 +1475,9 @@ run_supervised_command() {
     if [[ ${registration_ready} != true ]]; then
         worker_status=0
         # shellcheck disable=SC2310
-        if ! process_is_running "${DOWNLOAD_WORKER_PID}"; then
-            wait "${DOWNLOAD_WORKER_PID}" 2>/dev/null || worker_status=$?
-            DOWNLOAD_WAITED_STATUS=${worker_status}
-            DOWNLOAD_WORKER_PID=''
-            DOWNLOAD_WORKER_START_TIME=''
-            DOWNLOAD_WORKER_PGID=''
-            DOWNLOAD_WORKER_PGID_START_TIME=''
+        if ! process_is_running "${DOWNLOAD_WORKER_PID}" \
+            && wait_for_download_exit 1; then
+            worker_status=${DOWNLOAD_WAITED_STATUS:-125}
             if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
                 DOWNLOAD_STATUS=${REQUESTED_EXIT_STATUS:-143}
             else
@@ -1460,7 +1501,9 @@ run_supervised_command() {
         elif [[ ${DOWNLOAD_WAITED_STATUS} =~ ^[0-9]+$ ]]; then
             DOWNLOAD_STATUS=${DOWNLOAD_WAITED_STATUS}
         fi
-        cleanup_download_registration_files
+        if [[ -z ${DOWNLOAD_WORKER_PID} && -z ${DOWNLOAD_WORKER_PGID} ]]; then
+            cleanup_download_registration_files
+        fi
         return 0
     fi
 
@@ -1496,7 +1539,9 @@ run_supervised_command() {
         fi
     fi
 
-    cleanup_download_registration_files
+    if [[ -z ${DOWNLOAD_WORKER_PID} && -z ${DOWNLOAD_WORKER_PGID} ]]; then
+        cleanup_download_registration_files
+    fi
     return 0
 }
 
@@ -3119,6 +3164,12 @@ execute_selected_transport() {
 
         aria2_status=${DOWNLOAD_STATUS}
 
+        if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]]; then
+            # An unconfirmed shutdown still owns the private input and cookies.
+            # Finalization propagates the failure; cleanup preserves everything.
+            return 0
+        fi
+
         # shellcheck disable=SC2310 # A changed inode is a hard preservation path.
         if ! remove_recorded_private_aria2_sensitive_file \
             "${PRIVATE_ARIA2_INPUT}" "${PRIVATE_ARIA2_INPUT_IDENTITY}"; then
@@ -3187,6 +3238,10 @@ execute_selected_transport() {
             --batch-file "${YTDLP_BATCH_FILE_TMP}"
     fi
 
+    if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]]; then
+        # Native download or direct replay may still consume this private URL.
+        return 0
+    fi
     if ! rm -f -- "${YTDLP_BATCH_FILE_TMP}"; then
         error 'unable to remove the private yt-dlp URL batch file.'
         exit 13
