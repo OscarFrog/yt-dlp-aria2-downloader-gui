@@ -683,6 +683,49 @@ def build_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def check_native_final(args: argparse.Namespace) -> int:
+    """Refuse an existing MKV and bind native retries to that checked basename."""
+    output_dir = resolve_output_directory(args.output_dir)
+    plan = read_json(Path(args.plan), "yt-dlp plan")
+    if not isinstance(plan, dict):
+        raise PlanError("yt-dlp plan root must be a JSON object")
+    downloads = plan.get("requested_downloads")
+    if not isinstance(downloads, list) or len(downloads) != 1:
+        raise PlanError("yt-dlp plan must contain exactly one requested download")
+    root = downloads[0]
+    if not isinstance(root, dict):
+        raise PlanError("requested download is not a JSON object")
+    destination = resolve_destination(
+        root.get("filename") or root.get("_filename"),
+        output_dir,
+        "yt-dlp requested filename",
+    )
+    expected_identity = parse_identity(args.final_output_identity)
+    final_output = Path(args.final_output_dir)
+    with directory_descriptor(final_output) as final_fd:
+        metadata = os.fstat(final_fd)
+        if (metadata.st_dev, metadata.st_ino) != expected_identity:
+            raise PlanError("final media destination changed before transfer")
+        try:
+            os.stat(destination.with_suffix(".mkv").name, dir_fd=final_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise DestinationExistsError("final media destination already exists")
+        if directory_identity(final_output) != expected_identity:
+            raise PlanError("final media destination changed during preflight")
+
+    # Native extraction can refresh titles/IDs, including a live title's time.
+    # Keep its basename bound to the checked plan, while yt-dlp still chooses
+    # component extensions and performs its normal native extraction/retries.
+    # Output templates expand environment variables before metadata fields:
+    # emit literal dollars through a constant replacement/default, not $NAME.
+    stem = str(destination.with_suffix(""))
+    template = stem.replace("%", "%%").replace("$", "%(id&$|$)s")
+    print(template + ".%(ext)s")
+    return 0
+
+
 def classify_plan(args: argparse.Namespace) -> int:
     plan = read_json(Path(args.plan), "yt-dlp plan")
 
@@ -1385,6 +1428,15 @@ def create_parser() -> argparse.ArgumentParser:
     classify.add_argument("--plan", required=True)
     classify.add_argument("--allow-https-direct", action="store_true")
     classify.set_defaults(handler=classify_plan)
+
+    native = subparsers.add_parser(
+        "check-native-final", help="refuse an existing native video result and return its fixed output template"
+    )
+    native.add_argument("--plan", required=True)
+    native.add_argument("--output-dir", required=True)
+    native.add_argument("--final-output-dir", required=True)
+    native.add_argument("--final-output-identity", required=True)
+    native.set_defaults(handler=check_native_final)
 
     build = subparsers.add_parser(
         "build",

@@ -629,8 +629,9 @@ The automated suite checks, among other things:
   and descriptor-first HLS/result publication with no-clobber rename fallback
   when the filesystem does not support hard links;
 - rejection of a second writer targeting the same canonical output directory;
-- explicit refusal to overwrite completed or post-processed media files while
-  preserving interrupted-download resume behavior;
+- explicit no-overwrite options and refusal of known final-video collisions,
+  while preserving interrupted-download resume behavior; these checks do not
+  establish atomic local yt-dlp postprocessing against unrelated writers;
 - disabling of inherited yt-dlp plugins and personal configuration;
 - forwarding of HUP, INT, and TERM sent only to the CLI wrapper PID;
 - signal-safe CLI child registration before `$!` is published, plus bounded
@@ -721,6 +722,11 @@ The automated suite checks, among other things:
 - refusal of pre-existing direct-transfer destinations before aria2 starts,
   with a second no-overwrite check at commit; duplicate staging sources and
   foreign-owner private state are rejected before publication;
+- real-tools refusal of pre-existing ordinary-video MKVs for direct two-stream,
+  native HTTP (single and merged streams), HLS and DASH transfers. Repeated runs
+  and changed metadata preserve bytes, inode and modification/change timestamps,
+  produce no result record and issue no additional media requests. Native final
+  preflight also rejects symlinks, directories and replaced destination identity;
 - malformed or secret-bearing protocol metadata produces no traceback or raw
   protocol diagnostic, and case-insensitive duplicate header names select
   native transport without rewriting the header values;

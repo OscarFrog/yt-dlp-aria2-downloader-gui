@@ -197,7 +197,10 @@ to the current single native-audio profile.
    `private-aria2-plan.py classify` whether the selected formats may use the
    direct aria2 path.
 7. Execute exactly one selected transport, while publishing structured progress
-   records when the GUI requested machine progress.
+   records when the GUI requested machine progress. Ordinary native video first
+   checks the planned final MKV name and binds subsequent extraction/retries to
+   that basename; metadata refresh must not redirect postprocessing to another
+   pre-existing final. The HLS/Firefox profile keeps its separate remux path.
 8. Validate the produced media with FFprobe. The repaired YouTube HLS profile
    additionally checks duration/tail consistency and remuxes to a temporary MKV
    with FFmpeg before no-overwrite publication. The temporary inode is held by
@@ -254,6 +257,12 @@ The initial yt-dlp pass resolves formats and filenames but does not download.
 
 - `classify` validates the plan and selects `direct` only for representable
   direct HTTP(S) formats whose headers can be safely replayed;
+- `check-native-final` refuses an existing ordinary-video MKV in the actual
+  final directory using its recorded identity and an opened descriptor. On
+  success it returns an absolute yt-dlp output template with a fixed basename
+  and dynamic extension. Literal percent and dollar characters are escaped for
+  yt-dlp's template/environment expansion. The engine passes this override last
+  so refreshed native metadata cannot select a different basename;
 - `build` converts the validated plan into a mode-`0600` aria2 input file and a
   version-2 manifest inside the separate mode-`0700` metadata directory;
   media component staging stays in a private child of the processing directory.
@@ -273,9 +282,11 @@ and still handles destination collisions that appear after the build check.
 The early assembled-name check prevents a known final from triggering fresh
 component downloads or metadata rewriting, and does not report existing media
 as a newly validated success. It is not an atomic publication mechanism: direct
-local yt-dlp postprocessing still has a pathname collision window after that
-preflight. A separate private POST/rebased-plan transaction would be needed to
-close it; descriptor-bound workspace publication already refuses late collisions.
+and native local yt-dlp postprocessing still have a pathname collision window
+after that preflight. A separate private POST/rebased-plan transaction would be needed to
+close it while preserving interrupted-download resume. The same-user advisory
+lock does not exclude unrelated writers; descriptor-bound workspace publication
+and the separate HLS/Firefox remux publication already refuse late collisions.
 The classifier sends unsupported transport features to native yt-dlp; malformed
 URL/header data or unsafe paths remain validation errors. Header names repeated
 with different casing are not replayed through aria2. Rejected protocol fields

@@ -708,6 +708,59 @@ test_private_plan_final_destination_preflight() {
     done
 }
 
+test_native_final_destination_preflight() {
+    local scenario final_dir final_identity expected_status before='' after=''
+
+    for scenario in absent regular symlink directory replaced-directory directory-symlink escaped-filename; do
+        new_case "native-final-${scenario}"
+        final_dir="${CASE_ROOT}/final 'quoted' % directory"
+        mkdir -- "${final_dir}"
+        final_identity=$(stat -c '%d:%i' -- "${final_dir}")
+        expected_status=1
+        case ${scenario} in
+            absent) expected_status=0 ;;
+            regular)
+                printf 'existing final media\n' >"${final_dir}/native.mkv"
+                before=$(stat -c '%d:%i:%s:%y:%z' -- "${final_dir}/native.mkv")
+                ;;
+            symlink) ln -s -- absent-target "${final_dir}/native.mkv" ;;
+            directory) mkdir -- "${final_dir}/native.mkv" ;;
+            replaced-directory)
+                mv -- "${final_dir}" "${CASE_ROOT}/original-final"
+                mkdir -- "${final_dir}"
+                expected_status=65
+                ;;
+            directory-symlink)
+                mv -- "${final_dir}" "${CASE_ROOT}/original-final"
+                ln -s -- "${CASE_ROOT}/original-final" "${final_dir}"
+                expected_status=70
+                ;;
+            escaped-filename) expected_status=65 ;;
+            *) fail "Unknown native final-preflight scenario: ${scenario}" ;;
+        esac
+        local filename="${OUTPUT_DIR}/native.mp4"
+        if [[ ${scenario} == escaped-filename ]]; then
+            filename="${CASE_ROOT}/native.mp4"
+        fi
+        write_single_plan 'https://example.invalid/native.mp4' \
+            "${filename}" 'qualification-native'
+        assert_status "${expected_status}" "native final destination preflight: ${scenario}" \
+            python3 "${HELPER}" check-native-final \
+            --output-dir "${OUTPUT_DIR}" --plan "${PLAN_FILE}" \
+            --final-output-dir "${final_dir}" --final-output-identity "${final_identity}"
+        if [[ ${scenario} == regular ]]; then
+            after=$(stat -c '%d:%i:%s:%y:%z' -- "${final_dir}/native.mkv")
+            assert_equals "${before}" "${after}" \
+                'native preflight preserves final metadata and identity'
+            assert_file_has_line "${final_dir}/native.mkv" 'existing final media' \
+                'native preflight preserves final bytes'
+        elif [[ ${scenario} == symlink ]]; then
+            [[ -L ${final_dir}/native.mkv && ! -e ${final_dir}/absent-target ]] \
+                || fail 'Native preflight followed a destination symlink.'
+        fi
+    done
+}
+
 test_private_plan_duplicate_staging_names() {
     new_case 'duplicate-staging-names'
     write_double_plan
@@ -1795,6 +1848,7 @@ main() {
     test_private_plan_input_validation
     test_private_plan_existing_destinations
     test_private_plan_final_destination_preflight
+    test_native_final_destination_preflight
     test_private_plan_duplicate_staging_names
     test_private_plan_publication_safety
     test_private_plan_rollback_safety

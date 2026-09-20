@@ -545,8 +545,8 @@ test_real_direct_audio_scenarios() {
 }
 
 test_real_existing_assembled_output() {
-    # Only extraction is seeded: real yt-dlp selects two distinct streams and
-    # real aria2/FFmpeg download and assemble them before an identical rerun.
+    # Only extraction is seeded: real yt-dlp selects formats and the real
+    # direct/native downloaders and FFmpeg produce the first completed media.
     python3 -I - "${PROJECT_DIR}" "${TEST_ROOT}" "${MEDIA_ROOT}" "${PORT}" \
         "${SIMULATE_NETWORK}" <<'PY_EXISTING_ASSEMBLED'
 import hashlib
@@ -560,39 +560,25 @@ import time
 
 project, root, media_root = map(Path, sys.argv[1:4])
 base = f"http://127.0.0.1:{sys.argv[4]}"
-output = media_root / "existing-assembled"
-output.mkdir(mode=0o700)
-if sys.argv[5] == "true":
-    output.chmod(0o777)
 seed = root / "assembled-seed.json"
-metadata = {
-    "id": "assembled", "title": "Two streams", "extractor": "generic",
-    "extractor_key": "Generic", "webpage_url": base + "/controlled-page",
-    "duration": 2.0,
-    "formats": [
-        {"format_id": "a1", "url": base + "/audio.m4a", "ext": "m4a",
-         "protocol": "http", "vcodec": "none", "acodec": "aac", "abr": 128},
-        {"format_id": "v1", "url": base + "/video-only.mp4", "ext": "mp4",
-         "protocol": "http", "vcodec": "h264", "acodec": "none", "height": 90},
-    ],
-}
-seed.write_text(json.dumps(metadata), encoding="utf-8")
-seed.chmod(0o600)
 shim = root / "assembled-ytdlp"
 shim.write_text(
     "#!/usr/bin/python3\nimport os, sys\n"
     "args = sys.argv[1:]\n"
-    "if '--dump-single-json' in args:\n"
+    "if '--batch-file' in args:\n"
     "    index = args.index('--batch-file'); del args[index:index + 2]\n"
-    "    args += ['--load-info-json', os.environ['ASSEMBLED_SEED']]\n"
+    "    seed_key = 'ASSEMBLED_SEED' if '--dump-single-json' in args else 'ASSEMBLED_NATIVE_SEED'\n"
+    "    args += ['--load-info-json', os.environ.get(seed_key, os.environ['ASSEMBLED_SEED'])]\n"
     "os.execv(os.environ['ASSEMBLED_REAL_YTDLP'], [os.environ['ASSEMBLED_REAL_YTDLP'], *args])\n",
     encoding="utf-8",
 )
 shim.chmod(0o700)
 environment = dict(os.environ, ASSEMBLED_SEED=str(seed),
                    ASSEMBLED_REAL_YTDLP=os.environ["YTDLP_ARIA2_YTDLP_BIN"],
-                   YTDLP_ARIA2_YTDLP_BIN=str(shim))
+                   YTDLP_ARIA2_YTDLP_BIN=str(shim),
+                   F1_TEMPLATE_SENTINEL="EXPANDED_TEMPLATE_VALUE_MUST_NOT_APPEAR")
 requests = root / "http-requests.log"
+aria2_invocations = Path(os.environ["ARIA2_INVOCATION_LOG"])
 
 def capture_engine(arguments, environment, *, timeout=60, grace=20):
     # The standalone engine owns separate worker sessions. Killing only its
@@ -667,44 +653,144 @@ def capture_engine(arguments, environment, *, timeout=60, grace=20):
 def media_requests():
     return requests.read_text(encoding="utf-8").splitlines() if requests.exists() else []
 
-def run(label):
-    result = root / f"assembled-{label}.result"
+def run(scenario, label, output):
+    result = root / f"assembled-{scenario}-{label}.result"
     completed = capture_engine(
         ["bash", str(project / "download-video.sh"), "--mode", "video",
          "--output-dir", str(output), "--result-file", str(result), base + "/controlled-page"],
         environment,
     )
-    (root / f"assembled-{label}.log").write_bytes(completed.stdout + completed.stderr)
+    (root / f"assembled-{scenario}-{label}.log").write_bytes(completed.stdout + completed.stderr)
     return result, completed
 
-before = len(media_requests())
-first_result, first = run("first")
-assert first.returncode == 0, first.stdout + first.stderr
-assert sorted(media_requests()[before:]) == ["/audio.m4a", "/video-only.mp4"]
-final = Path(first_result.read_text().strip())
-assert final.parent == output.resolve() and final.suffix == ".mkv"
-assert not final.is_symlink()
-
-def final_snapshot():
+def final_snapshot(final):
     info = final.stat()
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns,
             hashlib.sha256(final.read_bytes()).hexdigest())
 
-original = final_snapshot()
-directory_entries = sorted(path.name for path in output.iterdir())
-for label in ("repeat", "changed-metadata"):
-    if label == "changed-metadata":
-        metadata["description"] = "Different metadata must not rewrite an existing final."
-        seed.write_text(json.dumps(metadata), encoding="utf-8")
+def two_http_streams():
+    return [
+        {"format_id": "a1", "url": base + "/audio.m4a", "ext": "m4a",
+         "protocol": "http", "vcodec": "none", "acodec": "aac", "abr": 128},
+        {"format_id": "v1", "url": base + "/video-only.mp4", "ext": "mp4",
+         "protocol": "http", "vcodec": "h264", "acodec": "none", "height": 90},
+    ]
+
+def dash_stream(index, *, audio):
+    directory = root / "web" / "dash"
+    fragments = [directory / f"init-stream{index}.m4s"]
+    fragments.extend(sorted(directory.glob(f"chunk-stream{index}-*.m4s")))
+    assert len(fragments) > 1 and all(path.is_file() for path in fragments)
+    return {
+        "format_id": f"dash{index}", "url": base + "/dash/stream.mpd",
+        "ext": "m4a" if audio else "mp4", "protocol": "http_dash_segments",
+        "vcodec": "none" if audio else "h264",
+        "acodec": "aac" if audio else "none",
+        "fragments": [{"url": base + "/dash/" + path.name} for path in fragments],
+    }
+
+scenarios = [
+    ("direct-two-streams", two_http_streams(), False),
+    ("native-http", [{"format_id": "av", "url": base + "/av.mp4",
+                      "ext": "mp4", "protocol": "http",
+                      "vcodec": "h264", "acodec": "aac"}], True),
+    ("native-two-streams", two_http_streams(), True),
+    ("native-hls", [{"format_id": "hls", "url": base + "/hls/stream.m3u8",
+                     "ext": "mp4", "protocol": "m3u8_native",
+                     "vcodec": "h264", "acodec": "aac"}], True),
+    ("native-dash", [dash_stream(1, audio=True), dash_stream(0, audio=False)], True),
+]
+native_http_baseline = None
+for scenario, formats, native in scenarios:
+    if scenario in {"native-http", "native-two-streams"}:
+        # A header outside the replay-safe allowlist selects actual native HTTP.
+        for selected_format in formats:
+            selected_format["http_headers"] = {"X-Fixture-Native": "1"}
+    output = media_root / f"existing-{scenario} 100% 'kept'"
+    output.mkdir(mode=0o700)
+    if sys.argv[5] == "true":
+        output.chmod(0o777)
+    metadata = {
+        "id": scenario, "title": f"100% 'Existing media' $F1_TEMPLATE_SENTINEL {scenario}",
+        "extractor": "generic", "extractor_key": "Generic",
+        "webpage_url": base + "/controlled-page", "duration": 3.0,
+        "formats": formats,
+    }
+    seed.write_text(json.dumps(metadata), encoding="utf-8")
+    seed.chmod(0o600)
+    aria2_invocations.write_bytes(b"")
     before = len(media_requests())
-    result, completed = run(label)
-    assert completed.returncode == 1, (label, completed.returncode, completed.stdout, completed.stderr)
-    assert b"final media destination already exists" in completed.stderr
-    assert not result.exists(), "an existing final was reported as a new success"
-    assert len(media_requests()) == before, "existing final caused media GET requests"
-    assert final_snapshot() == original, "existing final identity or bytes changed"
-    assert sorted(path.name for path in output.iterdir()) == directory_entries, "unused components remain"
-print("Real two-stream repetition and metadata change preserve the existing final without media GETs.")
+    first_result, first = run(scenario, "first", output)
+    assert first.returncode == 0, (scenario, first.stdout, first.stderr)
+    downloaded_requests = media_requests()[before:]
+    if scenario in {"direct-two-streams", "native-two-streams"}:
+        assert sorted(downloaded_requests) == ["/audio.m4a", "/video-only.mp4"]
+    elif scenario == "native-http":
+        assert downloaded_requests == ["/av.mp4"]
+    elif scenario == "native-hls":
+        assert "/hls/stream.m3u8" in downloaded_requests
+        assert any(path.startswith("/hls/segment-") for path in downloaded_requests)
+    else:
+        assert sorted(downloaded_requests) == sorted(
+            fragment["url"][len(base):]
+            for selected_format in formats for fragment in selected_format["fragments"]
+        )
+    assert bool(aria2_invocations.read_bytes()) != native, (scenario, "wrong downloader")
+    final = Path(first_result.read_text().strip())
+    assert final.parent == output.resolve() and final.suffix == ".mkv"
+    assert not final.is_symlink()
+    assert "$F1_TEMPLATE_SENTINEL" in final.name, "literal title dollar expanded"
+    assert environment["F1_TEMPLATE_SENTINEL"] not in final.name, "title expanded environment data"
+    original = final_snapshot(final)
+    directory_entries = sorted(path.name for path in output.iterdir())
+    invocation_snapshot = aria2_invocations.read_bytes()
+    for label in ("repeat", "changed-metadata"):
+        if label == "changed-metadata":
+            metadata["description"] = "Different metadata must not rewrite an existing final."
+            seed.write_text(json.dumps(metadata), encoding="utf-8")
+        before = len(media_requests())
+        result, completed = run(scenario, label, output)
+        assert completed.returncode == 1, (scenario, label, completed.returncode,
+                                           completed.stdout, completed.stderr)
+        assert b"final media destination already exists" in completed.stderr
+        assert not result.exists(), "an existing final was reported as a new success"
+        assert len(media_requests()) == before, (scenario, "existing final caused media GET requests")
+        assert aria2_invocations.read_bytes() == invocation_snapshot, "collision started aria2c"
+        assert final_snapshot(final) == original, (scenario, "existing final identity or bytes changed")
+        assert sorted(path.name for path in output.iterdir()) == directory_entries, "unused components remain"
+    if scenario == "native-http":
+        native_http_baseline = (output, dict(metadata), final, original, directory_entries)
+    print(f"Real {scenario} repetition and metadata change preserve the existing final without media GETs.")
+
+# Native extraction may refresh its title and ID after PLAN. The preflighted
+# basename must remain authoritative even when the refreshed name already exists.
+assert native_http_baseline is not None
+output, refreshed_metadata, existing_final, existing_snapshot, previous_entries = native_http_baseline
+planned_metadata = dict(
+    refreshed_metadata,
+    id="native-planned-title",
+    title="100% 'Planned media' $F1_TEMPLATE_SENTINEL",
+)
+planned_final = output / f"{planned_metadata['title']} [{planned_metadata['id']}].mkv"
+assert not planned_final.exists()
+seed.write_text(json.dumps(planned_metadata), encoding="utf-8")
+native_seed = root / "assembled-refreshed-seed.json"
+native_seed.write_text(json.dumps(refreshed_metadata), encoding="utf-8")
+native_seed.chmod(0o600)
+environment["ASSEMBLED_NATIVE_SEED"] = str(native_seed)
+aria2_invocations.write_bytes(b"")
+before = len(media_requests())
+result, completed = run("native-title-change", "first", output)
+assert completed.returncode == 0, (completed.stdout, completed.stderr)
+assert b"[info] native-http: Downloading" in completed.stdout, "native seed was not refreshed"
+assert media_requests()[before:] == ["/av.mp4"], "refreshed extraction did not download the planned result"
+assert not aria2_invocations.read_bytes(), "refreshed native extraction invoked aria2c"
+assert Path(result.read_text().strip()) == planned_final.resolve(), "native title change escaped the checked basename"
+assert planned_final.is_file() and not planned_final.is_symlink()
+assert final_snapshot(existing_final) == existing_snapshot, "native title change rewrote the other existing final"
+assert sorted(path.name for path in output.iterdir()) == sorted([*previous_entries, planned_final.name])
+print("Real native title/ID refresh remains bound to PLAN and preserves the other existing final.")
 PY_EXISTING_ASSEMBLED
 }
 

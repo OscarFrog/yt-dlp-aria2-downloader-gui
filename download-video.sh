@@ -3026,7 +3026,10 @@ execute_selected_transport() {
     local aria2_status
     local build_status=0
     local commit_status
+    local native_preflight_status=0
+    local native_output_template=''
     local -a builder_security_options=()
+    local -a native_output_options=()
 
     if [[ ${PRIVATE_TRANSPORT} == direct ]]; then
         if [[ ${MACHINE_PROGRESS} == true ]]; then
@@ -3158,9 +3161,29 @@ execute_selected_transport() {
             DOWNLOAD_STATUS=${aria2_status}
         fi
     else
+        if [[ ${MODE} == video && ${YOUTUBE_HLS_FIREFOX} != true ]]; then
+            # No-overwrites does not prevent yt-dlp's metadata postprocessor
+            # from rewriting an existing MKV. Bind every native extraction and
+            # retry to the same preflighted basename before any media transfer.
+            native_output_template=$(python3 "${PRIVATE_ARIA2_HELPER}" check-native-final \
+                --plan "${PRIVATE_ARIA2_PLAN}" --output-dir "${OUTPUT_DIR}" \
+                --final-output-dir "${FINAL_OUTPUT_DIR}" \
+                --final-output-identity "${FINAL_OUTPUT_IDENTITY}") \
+                || native_preflight_status=$?
+            if ((native_preflight_status == 1)); then
+                error 'final media destination already exists; refusing to overwrite it.'
+                exit 1
+            elif ((native_preflight_status != 0)) \
+                || [[ -z ${native_output_template} || ${native_output_template} == *$'\n'* ]]; then
+                error 'unable to validate the native video destination.'
+                exit 65
+            fi
+            native_output_options=(--output "${native_output_template}")
+        fi
         run_supervised_ytdlp \
             "${YTDLP_BIN}" \
             "${YT_DLP_OPTIONS[@]}" \
+            "${native_output_options[@]}" \
             --batch-file "${YTDLP_BATCH_FILE_TMP}"
     fi
 
