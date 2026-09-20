@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.3.28 - Unreleased
+
+### Maintenance
+
+- Harden production invariants after the complete production-code audit:
+  preserve known existing native-video output; retain descendant supervision
+  after leader loss; stop workspace cleanup at mount boundaries; validate the
+  complete portable-launcher XDG ancestor chain; retain a live GUI log until
+  producer shutdown is confirmed; and make temporary acquisition signal-safe.
+- Remove proven ineffective paths, clarify internal protocols and update the
+  associated documentation without weakening historical compatibility.
+- Keep the late local collision created by an unrelated writer during some
+  in-place post-processing as a documented limitation; it is not claimed as
+  transactionally resolved.
+
 ## 2.3.27 - Unreleased
 
 ### Maintenance
