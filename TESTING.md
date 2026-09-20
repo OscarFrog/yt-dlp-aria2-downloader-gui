@@ -725,6 +725,11 @@ The automated suite checks, among other things:
 - refusal of pre-existing direct-transfer destinations before aria2 starts,
   with a second no-overwrite check at commit; duplicate staging sources and
   foreign-owner private state are rejected before publication;
+- descriptor-bound workspace cleanup rejects directory mount boundaries even
+  when `st_dev` is unchanged, including a mounted workspace root. Deterministic
+  fdinfo fixtures verify no descent or deletion through such boundaries and
+  preservation when mount identity is unavailable or changes between passes;
+  these fixtures perform no real mount;
 - real-tools refusal of pre-existing ordinary-video MKVs for direct two-stream,
   native HTTP (single and merged streams), HLS and DASH transfers. Repeated runs
   and changed metadata preserve bytes, inode and modification/change timestamps,

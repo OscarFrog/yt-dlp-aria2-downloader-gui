@@ -89,6 +89,22 @@ def require_local_filesystem(descriptor: int, *, disk: bool = False) -> None:
         raise PlanError("directory is not on a supported local filesystem")
 
 
+def descriptor_mount_id(descriptor: int) -> int:
+    """Read the opened mount identity; st_dev cannot distinguish bind mounts."""
+    try:
+        with open(f"/proc/self/fdinfo/{descriptor}", encoding="ascii") as descriptor_info:
+            values = []
+            for line in descriptor_info:
+                key, separator, value = line.partition(":")
+                if separator and key == "mnt_id":
+                    values.append(value.strip())
+        if len(values) != 1 or not re.fullmatch(r"[0-9]+", values[0]):
+            raise ValueError("missing or ambiguous mount identity")
+        return int(values[0])
+    except (OSError, ValueError) as exc:
+        raise PlanError("unable to authenticate mount identity; preserving workspace") from exc
+
+
 @contextmanager
 def directory_descriptor(path: Path, *, trusted_chain: bool = False):
     """Anchor each physical path component without following symlinks."""
@@ -1071,6 +1087,9 @@ def cleanup_workspace(args: argparse.Namespace) -> int:
                 raise PlanError("workspace identity changed; preserving its contents")
             require_private_directory_descriptor(workspace_fd)
             require_local_filesystem(workspace_fd)
+            root_mount = descriptor_mount_id(workspace_fd)
+            if root_mount != descriptor_mount_id(parent_fd):
+                raise PlanError("workspace is a mount boundary; preserving contents")
             for filename, identity in kept.items():
                 if not anchored_file_matches(workspace_fd, filename.name, identity):
                     raise PlanError("retained media identity changed; preserving workspace")
@@ -1113,6 +1132,10 @@ def cleanup_workspace(args: argparse.Namespace) -> int:
                                 raise PlanError("workspace directory changed; preserving contents")
                             require_private_directory_descriptor(child_fd)
                             require_local_filesystem(child_fd)
+                            # Check both passes before descending. Open FDs pin
+                            # their mount even if its pathname is later covered.
+                            if descriptor_mount_id(child_fd) != root_mount:
+                                raise PlanError("workspace contains a mount boundary; preserving contents")
                             walk(child_fd, relative, remove=remove)
                             if remove:
                                 visible = os.stat(name, dir_fd=descriptor, follow_symlinks=False)

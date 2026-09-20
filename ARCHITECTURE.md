@@ -335,6 +335,19 @@ name alone. The disk-space estimate is three times known component bytes plus
 64 MiB; unknown sizes and later ENOSPC remain explicit runtime limitations.
 Cleanup authenticates a live session's root identity and snapshots its tree;
 foreign ownership, links, mount boundaries or replaced entries are preserved.
+Directory mount boundaries are checked with the opened descriptors' Linux
+`/proc/self/fdinfo` `mnt_id`, not `st_dev` alone: a same-filesystem bind mount
+still has a distinct mount identity. The workspace must share its immediate
+parent's mount; every opened subdirectory must share that workspace mount
+before recursion in both the inspection and removal passes. Missing, malformed
+or ambiguous mount identity stops cleanup conservatively. Mounts elsewhere in
+the ancestor chain, such as a separate `/home`, remain legitimate. Open
+descriptors stay anchored if a mount subsequently covers their pathname; no
+distinct mounted directory is recursively traversed through those validated
+descriptors. This is not a transactional deletion or a defense against a
+hostile administrator: a late change can preserve the remaining tree after
+already-validated siblings have been removed. The kernel interface is described
+in [the Linux proc documentation](https://docs.kernel.org/filesystems/proc.html).
 An ambiguous component stage, path record, HLS temporary or repaired source
 also prevents recursive cleanup of its parent workspace. These preservation
 decisions survive finalization even after a component clears its path variables.
