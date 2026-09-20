@@ -665,6 +665,12 @@ The automated suite checks, among other things:
   escaping, restrictive-path handling, validation, permissions, reinstall, and
   removal, including refusal to mutate through a symbolic-link XDG root,
   parent, terminal, intermediate, or shared-writable directory plus
+  ancestor ownership/mode policy before child creation and before publication
+  or removal: root/current-user ancestors and sticky shared ancestors are
+  accepted, foreign-owned ancestors are refused even without shared write bits,
+  and managed leaves retain their stricter policy during revalidation; these
+  cases use real paths/permissions and inode-targeted owner metadata fixtures,
+  without changing host users or ownership;
   synchronized root and managed-directory replacements after descriptor anchoring
   while preserving victim files and rejecting false success; allocation fault
   cleanup and exact current/legacy stale namespaces are covered, with

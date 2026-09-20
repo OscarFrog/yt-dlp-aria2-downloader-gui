@@ -523,7 +523,11 @@ moving the project directory, run `./install-gui.sh install` again.
 For containment, the portable installer requires a current-user-owned
 `XDG_DATA_HOME` that is not writable by group or other users, and refuses a
 root or parent component that is a symbolic link. The data path must be valid
-UTF-8 and safely representable in a desktop `Exec` key. It keeps no-follow
+UTF-8 and safely representable in a desktop `Exec` key. All ancestors, including
+the intermediate icon directories, must belong to root or the current user.
+Shared-writable ancestors require sticky protection; the data root and managed
+directories themselves must remain current-user-owned and not shared-writable.
+Unsafe chains are refused without changing their permissions. It keeps no-follow
 directory descriptors open for the complete transaction, so a concurrent
 pathname replacement cannot redirect installation, removal, or stale-file
 cleanup.

@@ -550,7 +550,13 @@ Pour garantir le confinement, l'installateur portable exige un
 groupe ou les autres utilisateurs ; il refuse aussi tout lien symbolique à la
 racine ou dans un composant parent. Le chemin de données doit aussi être en
 UTF-8 valide et pouvoir être représenté sans ambiguïté dans une clé `Exec` de
-fichier desktop. Il conserve des descripteurs sans suivi de liens pendant toute
+fichier desktop. Tous les ancêtres, y compris les répertoires intermédiaires des
+icônes, doivent appartenir à root ou à l'utilisateur courant. Les ancêtres
+inscriptibles par le groupe ou les autres utilisateurs exigent le bit sticky ;
+la racine de données et les répertoires gérés eux-mêmes restent soumis à la
+propriété de l'utilisateur courant et à l'absence d'écriture partagée. Les
+chaînes non sûres sont refusées sans modifier leurs permissions.
+Il conserve des descripteurs sans suivi de liens pendant toute
 la transaction : un remplacement concurrent du chemin ne peut donc pas
 rediriger l'installation, le retrait ou le nettoyage.
 Les demandes concurrentes d'installation et de retrait portables sont

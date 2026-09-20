@@ -63,9 +63,14 @@ The portable launcher manager requires the data root and managed directories to
 be owned by the current user and not writable by group or others, rejects the
 filesystem root, rejects data paths that are not valid UTF-8 desktop-entry
 input, and opens every `XDG_DATA_HOME` component with
-`O_DIRECTORY|O_NOFOLLOW`. It holds the data root and each managed directory
-open for the complete transaction. Install and uninstall take one exclusive
-advisory lock on that anchored data-root inode before opening managed
+`O_DIRECTORY|O_NOFOLLOW`. Every ancestor, including the intermediate icon
+directories, must be owned by root or the current user; group/other write
+permission is accepted only with sticky protection. This ancestor exception
+does not relax the stricter ownership and mode checks on the data root and
+managed leaves. Each parent is checked before creating a child, and each opened
+child is checked after its device/inode binding. It holds the data root and each
+managed directory open for the complete transaction. Install and uninstall take
+one exclusive advisory lock on that anchored data-root inode before opening managed
 directories, serializing cooperating transactions without a removable
 lockfile; lock acquisition is bounded. The helper also opens and retains the
 regular executable GUI target,
@@ -74,6 +79,11 @@ then revalidates its identity and executable mode before success. Python
 removal. Desktop validation has bounded time and captured output. Private hard
 link backups in each destination directory allow every already-attempted leaf
 publication or removal to roll back in reverse order when a later step fails.
+The full path chain and strict managed-directory policy are revalidated before
+stale cleanup, before publication/removal, and during final validation; refusal
+never attempts to repair permissions on an unsafe ancestor. A refusal before
+stale cleanup preserves the pre-existing temporary artifacts as well as the
+managed leaves.
 The Bash entrypoint supervises the Python helper and keeps ordinary helper
 failures normalized to status 1. HUP, INT, and TERM retain their public
 129/130/143 statuses. Before forwarding TERM or retrying an interrupted wait,
