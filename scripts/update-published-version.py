@@ -23,7 +23,6 @@ import tempfile
 from pathlib import Path
 
 
-EXIT_USAGE = 2
 EXIT_VALIDATION = 65
 EXIT_IO = 70
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")

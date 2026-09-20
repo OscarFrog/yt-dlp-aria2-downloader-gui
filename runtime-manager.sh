@@ -1327,14 +1327,14 @@ bootstrap_ytdlp_version() {
     fi
     finish_runtime_temp_registration
     if ! chmod 700 -- "${gpg_home}"; then
-        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
+        cleanup_ytdlp_bootstrap_work
         return 1
     fi
 
     if ! run_curl -o "${work}/${YTDLP_ASSET}" "${base_url}/${YTDLP_ASSET}" \
         || ! run_curl -o "${work}/SHA2-256SUMS" "${base_url}/SHA2-256SUMS" \
         || ! run_curl -o "${work}/SHA2-256SUMS.sig" "${base_url}/SHA2-256SUMS.sig"; then
-        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
+        cleanup_ytdlp_bootstrap_work
         return 1
     fi
 
@@ -1342,7 +1342,7 @@ bootstrap_ytdlp_version() {
         gpg --batch --homedir "${gpg_home}" --import "${YTDLP_PUBLIC_KEY}" 2>&1); then
         error 'yt-dlp bootstrap failed: unable to import the signing key.'
         printf '%s\n' "${gpg_output}" >&2
-        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
+        cleanup_ytdlp_bootstrap_work
         return 1
     fi
     if ! gpg_output=$(run_timed "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" \
@@ -1350,7 +1350,7 @@ bootstrap_ytdlp_version() {
         --verify "${work}/SHA2-256SUMS.sig" "${work}/SHA2-256SUMS" 2>&1); then
         error 'yt-dlp bootstrap failed: SHA-256 manifest signature verification failed.'
         printf '%s\n' "${gpg_output}" >&2
-        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
+        cleanup_ytdlp_bootstrap_work
         return 1
     fi
 
@@ -1359,30 +1359,30 @@ bootstrap_ytdlp_version() {
         "${work}/SHA2-256SUMS" || true)
     if [[ -z ${sums_line} ]]; then
         error "yt-dlp bootstrap failed: SHA-256 manifest has no entry for ${YTDLP_ASSET}."
-        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
+        cleanup_ytdlp_bootstrap_work
         return 1
     fi
     if ! printf '%s\n' "${sums_line}" >"${work}/CHECKSUM"; then
-        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
+        cleanup_ytdlp_bootstrap_work
         return 1
     fi
     if ! run_timed_in_dir "${RUNTIME_VALIDATE_TIMEOUT_SECONDS}" "${work}" \
         sha256sum --check CHECKSUM >&2; then
         error "yt-dlp bootstrap failed: SHA-256 verification failed for ${YTDLP_ASSET}."
-        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
+        cleanup_ytdlp_bootstrap_work
         return 1
     fi
 
     if ! chmod 0755 -- "${work}/${YTDLP_ASSET}"; then
-        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
+        cleanup_ytdlp_bootstrap_work
         return 1
     fi
     if ! install_ytdlp_candidate "${work}/${YTDLP_ASSET}" "${version}"; then
         error 'yt-dlp bootstrap failed: downloaded runtime failed validation or activation.'
-        cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
+        cleanup_ytdlp_bootstrap_work
         return 1
     fi
-    cleanup_ytdlp_bootstrap_work "${work}" "${gpg_home}"
+    cleanup_ytdlp_bootstrap_work
     return 0
 }
 

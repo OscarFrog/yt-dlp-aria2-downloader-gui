@@ -486,8 +486,6 @@ def validate_directory_branch_identity(
     data_home: str,
     components: tuple[str, ...],
     anchored_fd: int | None,
-    *,
-    expect_absent: bool = False,
 ) -> None:
     try:
         current_fd = open_directory_branch(
@@ -502,7 +500,7 @@ def validate_directory_branch_identity(
             + "/".join(components)
         ) from exc
 
-    if expect_absent or anchored_fd is None:
+    if anchored_fd is None:
         if current_fd is not None:
             os.close(current_fd)
             raise LauncherError(
@@ -540,8 +538,6 @@ def validate_managed_path_identities(
     applications_fd: int | None,
     launcher_fd: int | None,
     icon_fd: int | None,
-    *,
-    launcher_removed: bool = False,
 ) -> None:
     validate_data_home_path_identity(data_home, data_fd)
     validate_directory_branch_identity(
@@ -555,7 +551,6 @@ def validate_managed_path_identities(
         data_home,
         (APP_ID,),
         launcher_fd,
-        expect_absent=launcher_removed,
     )
     validate_directory_branch_identity(
         data_fd,

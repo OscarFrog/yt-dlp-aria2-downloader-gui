@@ -30,7 +30,6 @@ from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 
-EXIT_USAGE = 2
 EXIT_VALIDATION = 65
 EXIT_IO = 70
 

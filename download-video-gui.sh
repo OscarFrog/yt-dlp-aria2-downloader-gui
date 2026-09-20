@@ -641,7 +641,6 @@ worker_group_has_identity_token() {
 worker_group_has_live_member() {
     local process_dir=''
     local process_group=''
-    local process_pid=''
     local process_session=''
     local process_stat=''
     local process_state=''
@@ -650,7 +649,6 @@ worker_group_has_live_member() {
     [[ ${WORKER_PGID} =~ ^[1-9][0-9]*$ ]] || return 1
     for process_dir in /proc/[0-9]*; do
         [[ -d ${process_dir} ]] || continue
-        process_pid=${process_dir##*/}
         [[ -r ${process_dir}/stat ]] || continue
         process_stat=''
         if ! { IFS= read -r process_stat <"${process_dir}/stat"; } 2>/dev/null; then

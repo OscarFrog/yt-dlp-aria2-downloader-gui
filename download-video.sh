@@ -200,7 +200,7 @@ cleanup() {
         # shellcheck disable=SC2310 # Changed or unknown staging is preserved.
         if ! get_path_identity current_staging_identity "${PRIVATE_ARIA2_STAGING}" directory \
             || [[ ${current_staging_identity} != "${PRIVATE_ARIA2_STAGING_IDENTITY}" ]] \
-            || ! remove_private_aria2_staging_candidate "${PRIVATE_ARIA2_STAGING}" true; then
+            || ! remove_private_aria2_staging_candidate "${PRIVATE_ARIA2_STAGING}"; then
             active_media_staging_safe=false
             printf 'Warning: preserving ambiguous active private aria2 staging directory: %s\n' \
                 "${PRIVATE_ARIA2_STAGING##*/}" >&2
@@ -1727,7 +1727,6 @@ remove_marked_private_aria2_sensitive_metadata() {
 
 private_aria2_staging_candidate_is_safe() {
     local candidate=$1
-    local require_marker=$2
     local candidate_name=${candidate##*/}
     local candidate_owner=''
     local candidate_mode=''
@@ -1739,8 +1738,6 @@ private_aria2_staging_candidate_is_safe() {
     local marker_value=''
     local marker_size=''
     local marker_seen=false
-    local legacy_plan_seen=false
-    local legacy_cookie_seen=false
 
     [[ ${candidate_name} =~ ^[.]yt-dlp-aria2[.][A-Za-z0-9]{8}$ ]] || return 1
     [[ ! -L ${candidate} && -d ${candidate} ]] || return 1
@@ -1762,7 +1759,7 @@ private_aria2_staging_candidate_is_safe() {
 
         case ${entry_name} in
             "${PRIVATE_ARIA2_STAGING_MARKER}")
-                [[ ${require_marker} == true && ${marker_seen} == false ]] || return 1
+                [[ ${marker_seen} == false ]] || return 1
                 marker_size=$(stat -c '%s' -- "${entry}" 2>/dev/null) || return 1
                 [[ ${marker_size} == "$((${#PRIVATE_ARIA2_STAGING_MARKER_VALUE} + 1))" ]] \
                     || return 1
@@ -1772,13 +1769,7 @@ private_aria2_staging_candidate_is_safe() {
                     || return 1
                 marker_seen=true
                 ;;
-            plan.json)
-                legacy_plan_seen=true
-                ;;
-            cookies.txt)
-                legacy_cookie_seen=true
-                ;;
-            aria2.input | manifest.json | \
+            plan.json | cookies.txt | aria2.input | manifest.json | \
                 item-[0-9][0-9][0-9].download | \
                 item-[0-9][0-9][0-9].download.aria2)
                 ;;
@@ -1790,22 +1781,15 @@ private_aria2_staging_candidate_is_safe() {
         find "${candidate}" -mindepth 1 -maxdepth 1 -print0 2>/dev/null || true
     )
 
-    if [[ ${require_marker} == true ]]; then
-        [[ ${marker_seen} == true ]]
-    else
-        [[ ${marker_seen} == false &&
-            ${legacy_plan_seen} == true &&
-            ${legacy_cookie_seen} == true ]]
-    fi
+    [[ ${marker_seen} == true ]]
 }
 
 remove_private_aria2_staging_candidate() {
     local candidate=$1
-    local require_marker=$2
     local entry=''
 
     # shellcheck disable=SC2310 # Predicate explicitly handles failures; validation failure stops deletion.
-    private_aria2_staging_candidate_is_safe "${candidate}" "${require_marker}" \
+    private_aria2_staging_candidate_is_safe "${candidate}" \
         || return 1
 
     while IFS= read -r -d '' entry; do
@@ -1821,18 +1805,13 @@ remove_private_aria2_staging_candidate() {
 recover_abandoned_private_aria2_staging() {
     local candidate=''
     # Old sessions have no retained identity or live descriptor in this process.
-    # A marker, owner and familiar basename cannot authorize deletion.
+    # A marker, owner, age or familiar basename cannot authorize deletion.
+    # Only active, descriptor-bound temporaries are removed by cleanup.
     for candidate in "${OUTPUT_DIR}"/.yt-dlp-aria2.????????; do
         [[ -e ${candidate} || -L ${candidate} ]] || continue
         printf 'Warning: preserving legacy staging for manual inspection: %s\n' \
             "${candidate##*/}" >&2
     done
-}
-
-cleanup_stale_temporary_files() {
-    # Age and filename patterns do not authenticate a previous session's files.
-    # Only active, descriptor-bound temporaries are removed by cleanup.
-    return 0
 }
 
 probe_media_summary() {
@@ -2643,7 +2622,6 @@ prepare_output_directory() {
 
     if python3 "${PRIVATE_ARIA2_HELPER}" media-local-safe --output-dir "${OUTPUT_DIR}"; then
         recover_abandoned_private_aria2_staging
-        cleanup_stale_temporary_files
     else
         local media_root=''
         if ! media_root=$(python3 "${PRIVATE_ARIA2_HELPER}" private-root --disk); then
