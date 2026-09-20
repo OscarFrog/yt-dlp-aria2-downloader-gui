@@ -94,6 +94,39 @@ mock_group_enabled() {
     [[ ${MOCK_GROUP} == all || ${MOCK_GROUP} == "$1" ]]
 }
 
+enable_mock_child_subreaping() {
+    local inherited_signal_traps=''
+
+    if [[ ${YTDLP_ARIA2_MOCK_SUBREAPER_PID:-} == "${BASHPID}" ]]; then
+        unset YTDLP_ARIA2_MOCK_SUBREAPER_PID
+        return 0
+    fi
+
+    # Keep the harness PID and signal topology while making Bash reap orphaned
+    # fixture children itself, independently of a container's PID 1 behavior.
+    inherited_signal_traps=$(trap -p PIPE XFSZ)
+    exec python3 -I -c '
+import ctypes
+import os
+import signal
+import sys
+
+try:
+    if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "unable to enable mock child subreaping")
+    # Python ignores these by default; retain the original exec dispositions.
+    for name in ("SIGPIPE", "SIGXFSZ"):
+        if f"trap -- \x27\x27 {name}" not in sys.argv[1].splitlines():
+            signal.signal(getattr(signal, name), signal.SIG_DFL)
+    environment = os.environ.copy()
+    environment["YTDLP_ARIA2_MOCK_SUBREAPER_PID"] = str(os.getpid())
+    os.execve(sys.argv[2], sys.argv[2:], environment)
+except OSError as error:
+    print(f"Error: mock child-subreaper startup failed: {error}", file=sys.stderr)
+    sys.exit(70)
+' "${inherited_signal_traps}" "${BASH}" "${PROJECT_DIR}/tests/mock-integration.sh" "$@"
+}
+
 parse_mock_arguments "$@"
 
 for required_command in \
@@ -103,6 +136,7 @@ for required_command in \
 done
 [[ -r /proc/self/cmdline ]] \
     || test_error 'mock integration tests require a readable Linux /proc filesystem.'
+enable_mock_child_subreaping "$@"
 TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
 readonly TEST_OWNER_BASHPID=${BASHPID}

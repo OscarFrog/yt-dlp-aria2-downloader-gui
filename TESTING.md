@@ -424,6 +424,16 @@ a capture error during cleanup keeps both that state and the original failure.
 The fixture driver uses isolated Python
 so PYTHONOPTIMIZE cannot silently remove its no-overwrite assertions.
 
+Before allocating fixtures, the mock entry point registers its own Bash
+process as a Linux child subreaper through an isolated Python `prctl`/`exec`
+bootstrap. The PID and signal topology stay unchanged, and Bash harvests
+terminated orphan descendants instead of depending on the host or container's
+PID 1. This does not terminate live descendants or relax engine quiescence:
+after losing its leader, the engine still requires kernel-confirmed group
+absence before releasing tracked resources. Runner integration includes a
+non-reaping outer parent, a no-bootstrap negative control, and live-child,
+identity and exit-status checks for this fixture lifecycle.
+
 The complete mock contract is divided into nine isolated scheduler suites
 (`engine-core`, `engine-hls`, `engine-staging`, `engine-network`, `gui-progress`, `gui-state`,
 `signals`, `runtime-compat`, and `runtime-validation`) so `run-all.sh --jobs N`
