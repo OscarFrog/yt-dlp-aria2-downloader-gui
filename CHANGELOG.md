@@ -20,6 +20,8 @@
   CI signature qualification, private-primary-key refusal and tested shfmt bytes.
 - Remove unreachable metadata-cleanup fallbacks while retaining identity and
   ambiguous-state preservation checks.
+- Qualify Fedora 44 against RPM Fusion's FFmpeg/FFprobe 8.1.3 while retaining
+  exact-version checks and source-bound qualification evidence.
 
 ## 2.3.28 - Unreleased
 

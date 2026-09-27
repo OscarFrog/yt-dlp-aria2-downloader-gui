@@ -9959,6 +9959,28 @@ test_mock_runtime_progress_errors() {
     local progress_error_text_info_log progress_timeout_marker
     local progress_timeout_question_log progress_timeout_started
     local progress_timeout_text_info_log
+    local previous_media previous_media_identity previous_media_sha256
+    local previous_media_final_identity previous_media_final_sha256
+    local progress_timeout_output progress_error_output monitor_output
+
+    # Regression guard: a completed download in the shared destination must
+    # neither prevent these workers from starting nor be removed by their tests.
+    previous_media="${OUTPUT_DIR}/Mock media [abc123].webm"
+    if [[ ! -e ${previous_media} && ! -L ${previous_media} ]]; then
+        printf '%s\n' 'Earlier completed media' >"${previous_media}"
+    fi
+    [[ -f ${previous_media} && ! -L ${previous_media} ]] \
+        || fail 'Progress error fixture requires a regular previous media file.'
+    previous_media_identity=$(stat -c '%d:%i:%s:%y:%z' -- "${previous_media}")
+    previous_media_sha256=$(sha256sum -- "${previous_media}")
+
+    # Each failure is injected after startup, so give it a fresh destination
+    # independently of completed media from earlier scenarios in this group.
+    progress_timeout_output="${TEST_ROOT}/progress-timeout-output"
+    progress_error_output="${TEST_ROOT}/progress-error-output"
+    monitor_output="${TEST_ROOT}/progress-monitor-output"
+    mkdir -- "${progress_timeout_output}" "${progress_error_output}" \
+        "${monitor_output}"
 
     # Progress-dialog timeout and unexpected error terminate the worker group.
     # Synchronize the injected Zenity failure with a worker-start marker so the
@@ -9972,6 +9994,7 @@ test_mock_runtime_progress_errors() {
     prepare_argument_log 'progress-timeout'
     assert_status 1 'progress dialog timeout is propagated' \
         env MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_OUTPUT_DIR="${progress_timeout_output}" \
         MOCK_LONG_DOWNLOAD=1 MOCK_ZENITY_PROGRESS_STATUS=5 \
         MOCK_ZENITY_WAIT_FOR_WORKER_START=1 \
         MOCK_STARTED_MARKER="${progress_timeout_started}" \
@@ -9998,6 +10021,7 @@ test_mock_runtime_progress_errors() {
     prepare_argument_log 'progress-error'
     assert_status 1 'unexpected progress dialog status is reported' \
         env MOCK_PLAN_PROTOCOL='m3u8_native' \
+        MOCK_OUTPUT_DIR="${progress_error_output}" \
         MOCK_LONG_DOWNLOAD=1 MOCK_ZENITY_PROGRESS_STATUS=42 \
         MOCK_ZENITY_WAIT_FOR_WORKER_START=1 \
         MOCK_STARTED_MARKER="${progress_error_started}" \
@@ -10042,6 +10066,7 @@ EOF_PROGRESS_MONITOR_FAILURE
     prepare_argument_log 'progress-monitor-failure'
     assert_status 1 'progress monitor failure exposes its diagnostic' \
         env MOCK_GUI_REAL="${monitor_bundle}/download-video-gui.sh" \
+        MOCK_OUTPUT_DIR="${monitor_output}" \
         MOCK_QUESTION_ARGS_LOG="${monitor_question_log}" \
         MOCK_TEXT_INFO_ARGS_LOG="${monitor_text_info_log}" \
         "${GUI_UNDER_TEST}"
@@ -10051,6 +10076,14 @@ EOF_PROGRESS_MONITOR_FAILURE
     [[ ! -s ${monitor_text_info_log} ]] \
         || fail 'Close unexpectedly opened the progress-monitor diagnostic log.'
     assert_no_test_processes 'progress-monitor failure left GUI descendants'
+    previous_media_final_identity=$(stat -c '%d:%i:%s:%y:%z' -- "${previous_media}")
+    previous_media_final_sha256=$(sha256sum -- "${previous_media}")
+    assert_equals "${previous_media_identity}" \
+        "${previous_media_final_identity}" \
+        'progress errors preserve previous completed media identity'
+    assert_equals "${previous_media_sha256}" \
+        "${previous_media_final_sha256}" \
+        'progress errors preserve previous completed media contents'
 }
 
 test_mock_runtime_missing_zenity() {

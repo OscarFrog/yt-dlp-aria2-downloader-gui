@@ -1869,6 +1869,7 @@ try:
         os.environ["VALIDATOR_CHILD_MODE"] = mode
         module.install_shutdown_signal_handlers()
         child = 0
+        descendant_reaped = False
         interrupted = False
         descriptor_observed = False
 
@@ -1901,16 +1902,32 @@ try:
             child = int(marker.read_text())
             if live(child):
                 raise AssertionError(f"validator {mode} left its descendant alive with inherited directory FD")
-            if Path(f"/proc/{child}/fd/{application_fd}").exists():
+            # A stopped adopted child can retain a procfs entry whose FD view
+            # returns EACCES until reaping. Authenticate its wait ownership
+            # without consuming it, then reap before checking descriptor absence.
+            observation = os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            if observation is None or observation.si_pid != child:
+                raise AssertionError("stopped validator descendant is not an exited owned child")
+            reaped_pid, _wait_status = os.waitpid(child, os.WNOHANG)
+            if reaped_pid != child:
+                raise AssertionError("stopped validator descendant was not reaped")
+            descendant_reaped = True
+            try:
+                os.stat(f"/proc/{child}/fd/{application_fd}")
+            except FileNotFoundError:
+                pass
+            else:
                 raise AssertionError("stopped validator descendant retained its directory FD")
             if mode != "closed-output" and not descriptor_observed:
                 raise AssertionError("validator fixture never observed the inherited directory FD")
         finally:
             module.select.select = real_select
-            if marker.exists():
+            if marker.exists() and not descendant_reaped:
                 child = int(marker.read_text())
                 try:
-                    os.kill(child, signal.SIGKILL)
+                    observation = os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                    if observation is None:
+                        os.kill(child, signal.SIGKILL)
                     os.waitpid(child, 0)
                 except (ProcessLookupError, ChildProcessError):
                     pass

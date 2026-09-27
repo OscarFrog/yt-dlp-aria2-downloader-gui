@@ -67,7 +67,7 @@ jobs:
 
   ffmpeg-fedora-8:
     needs: identity
-    name: FFmpeg 8.1.2 / Fedora 44
+    name: FFmpeg 8.1.3 / Fedora 44
     runs-on: ubuntu-24.04
     container:
       image: fedora:44
@@ -172,10 +172,10 @@ jobs:
             --disable-pip-version-check --only-binary=:all: --require-hashes \
             --requirement "${RUNNER_TEMP}/yt-dlp-requirements.txt"
           echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
-      - name: Qualify FFmpeg 8.1.2 generation
+      - name: Qualify FFmpeg 8.1.3 generation
         env:
           EXPECTED_YTDLP_VERSION: 2026.08.19
-          EXPECTED_FFMPEG_VERSION: 8.1.2
+          EXPECTED_FFMPEG_VERSION: 8.1.3
         run: |
           timeout --signal=TERM --kill-after=10s 25m \
             bash ./tests/ffmpeg-generation-qualification.sh
