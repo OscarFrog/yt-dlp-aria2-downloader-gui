@@ -86,6 +86,9 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sun Sep 27 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.29-1
+- Fix audited correctness recovery confidentiality and qualification defects
+
 * Sun Sep 20 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.28-1
 - Harden production invariants after full code audit
 

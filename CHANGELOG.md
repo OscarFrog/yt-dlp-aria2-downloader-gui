@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 2.3.29 - Unreleased
+
+### Maintenance
+
+- Fix audited correctness recovery confidentiality and qualification defects
 
 ### Correctness and recovery
 
