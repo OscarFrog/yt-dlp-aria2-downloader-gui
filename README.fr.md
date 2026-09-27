@@ -158,6 +158,10 @@ runtime absent ou invalide provoque un échec clair sans appel à `curl`. Utilis
 explicitement souhaité. `runtime-manager.sh rollback yt-dlp` et
 `runtime-manager.sh rollback deno` réactivent un runtime précédent après
 validation lorsqu'il existe.
+Le rollback applique les mêmes contrôles de répertoire réel, d'exécutable régulier
+et de version exacte que l'activation normale. `ensure` essaie un runtime précédent
+installé et valide avant le bootstrap, même si le lien actif, son répertoire ou
+son exécutable a disparu.
 
 Les versions installées sont conservées, car un téléchargement en cours peut
 encore utiliser une ancienne version après plusieurs mises à jour. Télécharger
@@ -373,6 +377,9 @@ trousseau isolé et exige le NEVRA audité
 est refusée jusqu'à sa qualification. Le certificat et le RPM de bootstrap RPM
 Fusion franchissent la même frontière de staging appartenant à root et y sont
 revérifiés avant tout import ou installation privilégiés.
+Les signaux HUP/INT/TERM gérables sont différés jusqu'à l'authentification du
+staging temporaire et son enregistrement pour le nettoyage ; un second signal
+n'interrompt pas ce nettoyage. SIGKILL ne permet pas cette garantie.
 
 Le bootstrap :
 
@@ -780,6 +787,14 @@ L'extraction native et ses nouvelles tentatives conservent le nom de base choisi
 pendant la planification, même si les métadonnées actualisées le modifieraient.
 Le profil YouTube HLS/Firefox conserve son chemin distinct de publication du
 remux contrôlé.
+
+L'audio natif refuse aussi un nom d'entrée planifié déjà présent avant le transfert
+ou le traitement des métadonnées, sans annoncer l'ancien audio comme un nouveau
+téléchargement. La sélection actualisée doit garder l'extension d'entrée planifiée ;
+si ce format n'est plus disponible, la tentative échoue avant le transfert et peut
+être relancée. Les noms de répertoires de destination contenant littéralement
+`$`, `${VAR}` ou `%` restent littéraux ; ils ne sont pas développés comme des
+variables d'environnement ou des templates de métadonnées yt-dlp.
 
 Sur une destination locale utilisée directement pour le traitement, un autre
 programme peut encore créer le même nom final entre ce contrôle et le

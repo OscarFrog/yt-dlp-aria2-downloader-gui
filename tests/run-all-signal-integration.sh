@@ -115,7 +115,7 @@ EOF_BASH_MOCK
         PROJECT_DIR="${PROJECT_DIR}" \
         TEST_ROOT="${TEST_ROOT}" \
         MOCK_BIN="${mock_bin}" \
-        python3 <<'PY_CONTROLLER'
+        python3 -I -B - <<'PY_CONTROLLER'
 import fcntl
 import os
 import pathlib

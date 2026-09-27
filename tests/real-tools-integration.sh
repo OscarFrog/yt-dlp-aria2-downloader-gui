@@ -547,7 +547,7 @@ test_real_direct_audio_scenarios() {
 test_real_existing_assembled_output() {
     # Only extraction is seeded: real yt-dlp selects formats and the real
     # direct/native downloaders and FFmpeg produce the first completed media.
-    python3 -I - "${PROJECT_DIR}" "${TEST_ROOT}" "${MEDIA_ROOT}" "${PORT}" \
+    python3 -I -B - "${PROJECT_DIR}" "${TEST_ROOT}" "${MEDIA_ROOT}" "${PORT}" \
         "${SIMULATE_NETWORK}" <<'PY_EXISTING_ASSEMBLED'
 import hashlib
 import json
@@ -653,10 +653,10 @@ def capture_engine(arguments, environment, *, timeout=60, grace=20):
 def media_requests():
     return requests.read_text(encoding="utf-8").splitlines() if requests.exists() else []
 
-def run(scenario, label, output):
+def run(scenario, label, output, mode="video"):
     result = root / f"assembled-{scenario}-{label}.result"
     completed = capture_engine(
-        ["bash", str(project / "download-video.sh"), "--mode", "video",
+        ["bash", str(project / "download-video.sh"), "--mode", mode,
          "--output-dir", str(output), "--result-file", str(result), base + "/controlled-page"],
         environment,
     )
@@ -791,6 +791,92 @@ assert planned_final.is_file() and not planned_final.is_symlink()
 assert final_snapshot(existing_final) == existing_snapshot, "native title change rewrote the other existing final"
 assert sorted(path.name for path in output.iterdir()) == sorted([*previous_entries, planned_final.name])
 print("Real native title/ID refresh remains bound to PLAN and preserves the other existing final.")
+environment.pop("ASSEMBLED_NATIVE_SEED")
+
+# Native audio can be a final file already at the input extension. yt-dlp's
+# no-overwrites alone still permits its metadata postprocessor to rewrite it.
+for extension, codec, resource in (("m4a", "aac", "audio.m4a"),
+                                   ("mp3", "mp3", "audio-cover.mp3")):
+    scenario = f"native-audio-{extension}"
+    output = media_root / scenario
+    output.mkdir(mode=0o700)
+    if sys.argv[5] == "true":
+        output.chmod(0o777)
+    metadata = {
+        "id": scenario, "title": f"Existing {extension}",
+        "extractor": "generic", "extractor_key": "Generic",
+        "webpage_url": base + "/controlled-page", "duration": 2.0,
+        "formats": [{"format_id": "audio", "url": base + "/" + resource,
+                     "ext": extension, "protocol": "http", "vcodec": "none",
+                     "acodec": codec, "http_headers": {"X-Fixture-Native": "1"}}],
+    }
+    seed.write_text(json.dumps(metadata), encoding="utf-8")
+    aria2_invocations.write_bytes(b"")
+    first_result, first = run(scenario, "first", output, "audio")
+    assert first.returncode == 0, (scenario, first.stdout, first.stderr)
+    final = Path(first_result.read_text().strip())
+    assert final.parent == output.resolve() and final.suffix == "." + extension
+    original = final_snapshot(final)
+    entries = sorted(path.name for path in output.iterdir())
+    for label in ("repeat", "changed-metadata"):
+        if label == "changed-metadata":
+            metadata["description"] = "Changed audio metadata must not touch existing media."
+            seed.write_text(json.dumps(metadata), encoding="utf-8")
+        before = len(media_requests())
+        result, completed = run(scenario, label, output, "audio")
+        assert completed.returncode == 1, (scenario, label, completed.stdout, completed.stderr)
+        assert b"final media destination already exists" in completed.stderr
+        assert not result.exists(), "existing audio falsely announced as a new success"
+        assert final_snapshot(final) == original, "existing audio bytes or identity changed"
+        assert len(media_requests()) == before, "existing audio caused a media GET"
+        assert not aria2_invocations.read_bytes(), "native audio invoked aria2"
+        assert sorted(path.name for path in output.iterdir()) == entries
+    print(f"Real native {extension} repetition/metadata change preserves bytes, identity and timestamps.")
+    if extension == "mp3":
+        # A refreshed native extraction must not choose another extension and
+        # reuse an existing audio file that PLAN did not preflight.
+        planned = dict(metadata, formats=[dict(metadata["formats"][0],
+                       ext="m4a", acodec="aac", url=base + "/audio.m4a")])
+        seed.write_text(json.dumps(planned), encoding="utf-8")
+        native_seed.write_text(json.dumps(metadata), encoding="utf-8")
+        environment["ASSEMBLED_NATIVE_SEED"] = str(native_seed)
+        before = len(media_requests())
+        result, completed = run(scenario, "changed-extension", output, "audio")
+        assert completed.returncode != 0, "native format refresh bypassed preflight"
+        assert not result.exists(), "unplanned audio reported as a new result"
+        assert final_snapshot(final) == original, "native format refresh rewrote existing audio"
+        assert len(media_requests()) == before, "incompatible refreshed format caused media GET"
+        assert sorted(path.name for path in output.iterdir()) == entries
+        environment.pop("ASSEMBLED_NATIVE_SEED")
+        print("Real native audio extension refresh cannot reuse a different existing final.")
+
+# The destination is literal data, not an environment-variable/template input.
+environment["A2_DEFINED"] = "EXPANDED_DESTINATION_MUST_NOT_EXIST"
+environment.pop("A2_UNDEFINED", None)
+for index, literal in enumerate(("$HOME", "${A2_DEFINED}", "$A2_DEFINED",
+                                 "${A2_UNDEFINED}", "$A2_UNDEFINED", "100%",
+                                 "%(title)s-${A2_DEFINED}-$A2_UNDEFINED-100%")):
+    for native in (False, True):
+        scenario = f"literal-destination-{index}-{native}"
+        output = media_root / scenario / literal
+        output.mkdir(mode=0o700, parents=True)
+        if sys.argv[5] == "true":
+            output.chmod(0o777)
+        selected = {"format_id": "audio", "url": base + "/audio.m4a",
+                    "ext": "m4a", "protocol": "http", "vcodec": "none", "acodec": "aac"}
+        if native:
+            selected["http_headers"] = {"X-Fixture-Native": "CaseSensitive"}
+        seed.write_text(json.dumps({
+            "id": scenario, "title": "Literal destination", "extractor": "generic",
+            "extractor_key": "Generic", "webpage_url": base + "/controlled-page",
+            "duration": 2.0, "formats": [selected],
+        }), encoding="utf-8")
+        result, completed = run(scenario, "first", output, "audio")
+        assert completed.returncode == 0, (literal, native, completed.stdout, completed.stderr)
+        final = Path(result.read_text().strip())
+        assert final.is_file() and final.parent == output.resolve(), (literal, final)
+        assert sorted(output.parent.iterdir()) == [output], "download created an expanded destination"
+print("Real native/direct downloads preserve literal dollar/percent destinations.")
 PY_EXISTING_ASSEMBLED
 }
 

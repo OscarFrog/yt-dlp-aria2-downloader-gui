@@ -1650,6 +1650,7 @@ remove_active_private_aria2_sensitive_metadata() {
 }
 
 remove_marked_private_aria2_sensitive_metadata() {
+    (($# > 1)) || return 2
     local candidate=$1
     shift
     local candidate_name=${candidate##*/}
@@ -1668,21 +1669,14 @@ remove_marked_private_aria2_sensitive_metadata() {
     local removal_status=0
     local -a sensitive_names=("$@")
 
-    if ((${#sensitive_names[@]} == 0)); then
-        sensitive_names=(plan.json cookies.txt aria2.input manifest.json)
-    fi
-
+    [[ ${candidate} == "${PRIVATE_ARIA2_METADATA}" ]] || return 1
     [[ ${candidate_name} =~ ^[.]yt-dlp-aria2[.][A-Za-z0-9]{8}$ ]] || return 1
     [[ ! -L ${candidate} && -d ${candidate} ]] || return 1
     candidate_owner=$(stat -c '%u' -- "${candidate}" 2>/dev/null) || return 1
     candidate_mode=$(stat -c '%a' -- "${candidate}" 2>/dev/null) || return 1
     [[ ${candidate_owner} == "${EUID}" && ${candidate_mode} == 700 ]] || return 1
     candidate_parent=$(realpath -e -- "${candidate}/.." 2>/dev/null) || return 1
-    if [[ ${candidate} == "${PRIVATE_ARIA2_METADATA}" ]]; then
-        [[ ${candidate_parent} == "${OUTPUT_LOCK_ROOT}" ]] || return 1
-    else
-        [[ ${candidate_parent} == "${OUTPUT_DIR}" ]] || return 1
-    fi
+    [[ ${candidate_parent} == "${OUTPUT_LOCK_ROOT}" ]] || return 1
 
     [[ ! -L ${marker_path} && -f ${marker_path} ]] || return 1
     marker_owner=$(stat -c '%u' -- "${marker_path}" 2>/dev/null) || return 1
@@ -1727,6 +1721,7 @@ remove_marked_private_aria2_sensitive_metadata() {
 
 private_aria2_staging_candidate_is_safe() {
     local candidate=$1
+    local -n validated_entries=$2
     local candidate_name=${candidate##*/}
     local candidate_owner=''
     local candidate_mode=''
@@ -1738,6 +1733,11 @@ private_aria2_staging_candidate_is_safe() {
     local marker_value=''
     local marker_size=''
     local marker_seen=false
+    local inventory_pid=''
+    local inventory_status=0
+    local -a inventory=()
+
+    validated_entries=()
 
     [[ ${candidate_name} =~ ^[.]yt-dlp-aria2[.][A-Za-z0-9]{8}$ ]] || return 1
     [[ ! -L ${candidate} && -d ${candidate} ]] || return 1
@@ -1749,7 +1749,18 @@ private_aria2_staging_candidate_is_safe() {
     candidate_parent=$(realpath -e -- "${candidate}/.." 2>/dev/null) || return 1
     [[ ${candidate_parent} == "${OUTPUT_DIR}" ]] || return 1
 
-    while IFS= read -r -d '' entry; do
+    # A process substitution does not propagate find's status to its consumer.
+    # Acquire one complete inventory, wait for its producer, then validate every
+    # entry before granting any deletion authority. Never rescan for deletion.
+    # shellcheck disable=SC2312 # The producer's $! is explicitly waited below, separately from mapfile.
+    mapfile -d '' -t inventory < <(
+        find "${candidate}" -mindepth 1 -maxdepth 1 -print0 2>/dev/null
+    ) || inventory_status=$?
+    inventory_pid=$!
+    wait "${inventory_pid}" || inventory_status=$?
+    ((inventory_status == 0)) || return 1
+
+    for entry in "${inventory[@]}"; do
         entry_name=${entry##*/}
         [[ ! -L ${entry} && -f ${entry} ]] || return 1
 
@@ -1777,27 +1788,26 @@ private_aria2_staging_candidate_is_safe() {
                 return 1
                 ;;
         esac
-    done < <(
-        find "${candidate}" -mindepth 1 -maxdepth 1 -print0 2>/dev/null || true
-    )
+    done
 
-    [[ ${marker_seen} == true ]]
+    [[ ${marker_seen} == true ]] || return 1
+    # shellcheck disable=SC2034 # This nameref returns the fully validated inventory to the caller.
+    validated_entries=("${inventory[@]}")
 }
 
 remove_private_aria2_staging_candidate() {
     local candidate=$1
     local entry=''
+    local -a entries=()
 
     # shellcheck disable=SC2310 # Predicate explicitly handles failures; validation failure stops deletion.
-    private_aria2_staging_candidate_is_safe "${candidate}" \
+    private_aria2_staging_candidate_is_safe "${candidate}" entries \
         || return 1
 
-    while IFS= read -r -d '' entry; do
+    for entry in "${entries[@]}"; do
         [[ ! -L ${entry} && -f ${entry} ]] || return 1
         rm -f -- "${entry}" || return 1
-    done < <(
-        find "${candidate}" -mindepth 1 -maxdepth 1 -print0 2>/dev/null || true
-    )
+    done
 
     rmdir -- "${candidate}"
 }
@@ -2584,6 +2594,7 @@ private_directory_chain_is_safe() {
 # Canonicalize and lock the destination before creating any transfer state.
 prepare_output_directory() {
     local opened_identity=''
+    local literal_dollar='%(id&$|$)s'
     if [[ -z ${OUTPUT_DIR} ]]; then
         OUTPUT_DIR=${PWD}
     fi
@@ -2659,6 +2670,9 @@ prepare_output_directory() {
     fi
     readonly OUTPUT_DIR
     OUTPUT_DIR_TEMPLATE=${OUTPUT_DIR//%/%%}
+    # yt-dlp expands environment variables before its metadata templates. Emit
+    # dollars during template evaluation, after escaping the literal percents.
+    OUTPUT_DIR_TEMPLATE=${OUTPUT_DIR_TEMPLATE//\$/"${literal_dollar}"}
     readonly OUTPUT_DIR_TEMPLATE
 }
 
@@ -3064,6 +3078,7 @@ execute_selected_transport() {
     local commit_status
     local native_preflight_status=0
     local native_output_template=''
+    local native_audio_extension=''
     local -a builder_security_options=()
     local -a native_output_options=()
 
@@ -3131,7 +3146,7 @@ execute_selected_transport() {
                     LC_ALL=C exec stdbuf -o0 tr "\r" "\n"
                 ) | (
                     trap "" HUP INT TERM
-                    LC_ALL=C exec sed -u -E "s#https?://[^[:space:]]+#[REDACTED_URL]#g"
+                LC_ALL=C exec sed -u -E "s#https?://[^[:space:]]+#[REDACTED_URL]#gI"
                 )
             pipeline_statuses=("${PIPESTATUS[@]}")
             producer_status=${pipeline_statuses[0]:-125}
@@ -3203,24 +3218,35 @@ execute_selected_transport() {
             DOWNLOAD_STATUS=${aria2_status}
         fi
     else
-        if [[ ${MODE} == video && ${YOUTUBE_HLS_FIREFOX} != true ]]; then
+        if [[ ${YOUTUBE_HLS_FIREFOX} != true ]]; then
             # No-overwrites does not prevent yt-dlp's metadata postprocessor
-            # from rewriting an existing MKV. Bind every native extraction and
-            # retry to the same preflighted basename before any media transfer.
+            # from rewriting an existing MKV or native audio input. Bind every
+            # native extraction/retry to the preflighted basename before transfer.
             native_output_template=$(python3 "${PRIVATE_ARIA2_HELPER}" check-native-final \
                 --plan "${PRIVATE_ARIA2_PLAN}" --output-dir "${OUTPUT_DIR}" \
                 --final-output-dir "${FINAL_OUTPUT_DIR}" \
-                --final-output-identity "${FINAL_OUTPUT_IDENTITY}") \
+                --final-output-identity "${FINAL_OUTPUT_IDENTITY}" --mode "${MODE}") \
                 || native_preflight_status=$?
             if ((native_preflight_status == 1)); then
                 error 'final media destination already exists; refusing to overwrite it.'
                 exit 1
             elif ((native_preflight_status != 0)) \
                 || [[ -z ${native_output_template} || ${native_output_template} == *$'\n'* ]]; then
-                error 'unable to validate the native video destination.'
+                error 'unable to validate the native media destination.'
                 exit 65
             fi
             native_output_options=(--output "${native_output_template}")
+            if [[ ${MODE} == audio ]]; then
+                native_audio_extension=${native_output_template##*.}
+                if [[ ! ${native_audio_extension} =~ ^[A-Za-z0-9]+$ ]]; then
+                    error 'unable to validate the native audio extension.'
+                    exit 65
+                fi
+                # A metadata refresh may change the available audio container.
+                # Keep selection and its checked input name paired; fail before
+                # transfer rather than reuse a different existing audio file.
+                native_output_options+=(--format "(ba/b)[ext=${native_audio_extension}]")
+            fi
         fi
         run_supervised_ytdlp \
             "${YTDLP_BIN}" \

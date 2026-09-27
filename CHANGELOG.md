@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Correctness and recovery
+
+- Preserve pre-existing native audio before metadata processing and keep literal
+  dollar/percent characters in the selected destination directory.
+- Require a complete validated aria2 staging inventory before cleanup; mask
+  diagnostic HTTP(S) URLs regardless of scheme casing.
+- Retain process supervision and private resources after leader loss, terminate
+  portable-validator descendants, and make Fedora staging acquisition signal-safe.
+- Apply strict runtime rollback admission and recover from missing active
+  runtimes without losing valid installed fallback versions.
+
+### Qualification
+
+- Reap test descendants before releasing runner slots, isolate Python assertion
+  oracles from optimization settings, and add independent negative controls for
+  CI signature qualification, private-primary-key refusal and tested shfmt bytes.
+- Remove unreachable metadata-cleanup fallbacks while retaining identity and
+  ambiguous-state preservation checks.
+
 ## 2.3.28 - Unreleased
 
 ### Maintenance

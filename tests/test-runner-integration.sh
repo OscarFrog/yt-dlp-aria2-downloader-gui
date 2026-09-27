@@ -28,7 +28,7 @@ cleanup() {
 }
 
 test_startup_signal_registration_stress() {
-    python3 - "${SCRIPT_DIR}/lib/test-runner.sh" <<'PY_STARTUP_STRESS'
+    python3 -I -B - "${SCRIPT_DIR}/lib/test-runner.sh" <<'PY_STARTUP_STRESS'
 import os
 import pathlib
 import signal
@@ -205,7 +205,7 @@ PY_STARTUP_STRESS
 }
 
 test_startup_signal_final_transition() {
-    python3 - "${SCRIPT_DIR}/lib/test-runner.sh" <<'PY_FINAL_TRANSITION'
+    python3 -I -B - "${SCRIPT_DIR}/lib/test-runner.sh" <<'PY_FINAL_TRANSITION'
 import os
 import pathlib
 import signal
@@ -316,6 +316,112 @@ with tempfile.TemporaryDirectory(prefix="runner-final-transition-") as temp_dir:
 PY_FINAL_TRANSITION
 }
 
+test_ordinary_exit_descendant_cleanup() {
+    python3 -I -B - "${SCRIPT_DIR}/lib/test-runner.sh" <<'PY_ORDINARY_DESCENDANTS'
+import ctypes
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(36, 1, 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), "unable to adopt runner fixture descendants")
+# The supervisor scans all of procfs, whose comm field need not be ASCII.
+if libc.prctl(15, "révision".encode(), 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), "unable to name the runner fixture controller")
+library = sys.argv[1]
+fixture = r'''
+set -euo pipefail
+source "$1"
+trap 'test_runner_handle_signal TERM 143' TERM
+trap test_runner_cleanup EXIT
+test_runner_initialize
+test_runner_start_child 0 '' python3 -I -B "$2" "$3" "$4" "$5"
+status=0
+test_runner_wait_child 0 || status=$?
+printf 'status=%s slots=%s\n' "${status}" "${#TEST_RUNNER_CHILD_PIDS[@]}"
+exit "${status}"
+'''
+worker = '''import os, signal, sys, time
+child = os.fork()
+if child:
+    while not os.path.exists(sys.argv[1]):
+        time.sleep(0.01)
+    os._exit(int(sys.argv[2]))
+os.close(1)
+os.close(2)
+os.environ.pop("YTDLP_ARIA2_TEST_RUNNER_CHILD_TOKEN", None)
+os.execve(sys.executable, [sys.executable, "-I", "-B", "-c", r"""
+import os, signal, sys, time
+with open("/proc/self/environ", "rb") as environment:
+    if b"YTDLP_ARIA2_TEST_RUNNER_CHILD_TOKEN=" in environment.read():
+        raise RuntimeError("fixture descendant still exposes the runner token")
+if sys.argv[3] == "resistant":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open(sys.argv[1] + ".tmp", "w") as marker:
+    marker.write(str(os.getpid()))
+os.rename(sys.argv[1] + ".tmp", sys.argv[1])
+while True:
+    time.sleep(1)
+""", *sys.argv[1:]], os.environ)
+'''
+
+def live(pid):
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+    except FileNotFoundError:
+        return False
+    return fields[0] not in {"Z", "X"}
+
+with tempfile.TemporaryDirectory(prefix="runner-ordinary-descendants-") as raw:
+    root = Path(raw)
+    program = root / "worker.py"
+    program.write_text(worker)
+    for status, behavior, cancel in ((0, "normal", False), (42, "normal", False),
+                                     (42, "resistant", False), (0, "resistant", True)):
+        marker = root / f"child-{status}-{behavior}-{cancel}"
+        child = 0
+        process = subprocess.Popen(["bash", "-c", fixture, "bash", library, str(program),
+                                    str(marker), str(status), behavior], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True,
+                                   env=os.environ | {"YTDLP_ARIA2_TEST_RUNNER_TERMINATION_POLL_ATTEMPTS": "5"})
+        try:
+            deadline = time.monotonic() + 5
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not marker.exists():
+                raise AssertionError("ordinary-exit fixture did not publish its descendant")
+            child = int(marker.read_text())
+            if cancel:
+                # The direct command is gone; the supervisor must still own
+                # its group when cancellation arrives during descendant cleanup.
+                time.sleep(0.05)
+                process.send_signal(signal.SIGTERM)
+            stdout, stderr = process.communicate(timeout=8)
+            expected = 143 if cancel else status
+            if process.returncode != expected:
+                raise AssertionError(f"ordinary exit lost status {expected}: {process.returncode}: {stderr}")
+            if live(child):
+                raise AssertionError("runner released a live descendant after its direct command exited")
+            if not cancel and f"status={status} slots=0" not in stdout:
+                raise AssertionError("runner did not complete ordinary child cleanup before releasing its slot")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            if child:
+                try:
+                    os.kill(child, signal.SIGKILL)
+                    os.waitpid(child, 0)
+                except (ProcessLookupError, ChildProcessError):
+                    pass
+PY_ORDINARY_DESCENDANTS
+}
+
 test_parallel_repeat_runner() {
     local barrier_root="${TEST_RUNNER_LOG_DIR}/repeat-barrier"
 
@@ -374,7 +480,7 @@ test_parallel_repeat_runner() {
 }
 
 test_ffmpeg_cancellation_group_registration() {
-    python3 - "${SCRIPT_DIR}/ffmpeg-generation-compatibility.sh" <<'PY_FFMPEG_GROUP'
+    python3 -I -B - "${SCRIPT_DIR}/ffmpeg-generation-compatibility.sh" <<'PY_FFMPEG_GROUP'
 import os
 import pathlib
 import shutil
@@ -459,7 +565,7 @@ test_recycled_child_identity_guard() {
 
     sleep_path=$(command -v -- sleep) \
         || fail 'recycled-child guard could not resolve sleep'
-    python3 - "${runner_library}" "${sleep_path}" <<'PY_RECYCLED_CHILD'
+    python3 -I -B - "${runner_library}" "${sleep_path}" <<'PY_RECYCLED_CHILD'
 import os
 import signal
 import subprocess
@@ -487,17 +593,19 @@ status=0
 test_runner_wait_any completed_slot 2>/dev/null || status=$?
 [[ ${completed_slot} == 0 ]]
 ((status != 0))
-[[ ${#TEST_RUNNER_CHILD_PIDS[@]} == 0 ]]
+[[ ${#TEST_RUNNER_CHILD_PIDS[@]} == 1 ]]
 
 set_decoy_slot
 TEST_RUNNER_TERMINATION_POLL_ATTEMPTS=1
 
 test_runner_terminate_children TERM
-[[ ${#TEST_RUNNER_CHILD_PIDS[@]} == 0 ]]
-[[ ${#TEST_RUNNER_CHILD_PGIDS[@]} == 0 ]]
-[[ ${#TEST_RUNNER_CHILD_COMPLETIONS[@]} == 0 ]]
-[[ ${#TEST_RUNNER_CHILD_TOKENS[@]} == 0 ]]
-[[ ${#TEST_RUNNER_CHILD_START_TIMES[@]} == 0 ]]
+# An unrelated live group is not signaling authority or proof of quiescence.
+# Retain the observation-only slot rather than authorize scratch cleanup.
+[[ ${#TEST_RUNNER_CHILD_PIDS[@]} == 1 ]]
+[[ ${#TEST_RUNNER_CHILD_PGIDS[@]} == 1 ]]
+[[ ${#TEST_RUNNER_CHILD_COMPLETIONS[@]} == 1 ]]
+[[ ${#TEST_RUNNER_CHILD_TOKENS[@]} == 1 ]]
+[[ ${#TEST_RUNNER_CHILD_START_TIMES[@]} == 1 ]]
 '''
 
 try:
@@ -625,7 +733,7 @@ BASH_PARTIAL_IDENTITY
 }
 
 test_pre_identity_stopped_launcher_signal() {
-    python3 - "${SCRIPT_DIR}/lib/test-runner.sh" <<'PY_STOPPED_IDENTITY'
+    python3 -I -B - "${SCRIPT_DIR}/lib/test-runner.sh" <<'PY_STOPPED_IDENTITY'
 import os
 import pathlib
 import signal
@@ -726,7 +834,7 @@ test_signal_resistant_sanitized_child() {
 
     sleep_path=$(command -v -- sleep) \
         || fail 'signal-resistant fixture could not resolve sleep'
-    python3 - "${runner_library}" "${sleep_path}" <<'PY_SIGNAL_RESISTANT'
+    python3 -I -B - "${runner_library}" "${sleep_path}" <<'PY_SIGNAL_RESISTANT'
 import os
 import pathlib
 import signal
@@ -826,7 +934,7 @@ PY_SIGNAL_RESISTANT
 }
 
 test_startup_foreground_statuses() {
-    python3 -B - "${SCRIPT_DIR}/lib/test-runner.sh" <<'PY_STARTUP_STATUS'
+    python3 -I -B - "${SCRIPT_DIR}/lib/test-runner.sh" <<'PY_STARTUP_STATUS'
 import ctypes
 import os
 from pathlib import Path
@@ -1062,7 +1170,7 @@ PY_STARTUP_STATUS
 }
 
 test_monitor_runner_session_handoff() {
-    python3 -B - "${SCRIPT_DIR}" <<'PY_MONITOR_HANDOFF'
+    python3 -I -B - "${SCRIPT_DIR}" <<'PY_MONITOR_HANDOFF'
 import ctypes
 import fcntl
 import os
@@ -1644,7 +1752,7 @@ PY_MONITOR_HANDOFF
 }
 
 test_real_tool_engine_supervision() {
-    python3 -B - "${SCRIPT_DIR}/.." <<'PY_REAL_SUPERVISION'
+    python3 -I -B - "${SCRIPT_DIR}/.." <<'PY_REAL_SUPERVISION'
 import ast
 import ctypes
 import os
@@ -2021,7 +2129,7 @@ PY_REAL_SUPERVISION
 }
 
 test_real_tool_optimization_isolation() {
-    python3 -B - "${SCRIPT_DIR}/.." <<'PY_REAL_TOOL_OPTIMIZATION'
+    python3 -I -B - "${SCRIPT_DIR}/.." <<'PY_REAL_TOOL_OPTIMIZATION'
 import os
 from pathlib import Path
 import subprocess
@@ -2036,10 +2144,10 @@ if source.count(opening) != 1 or source.count(closing) != 1:
 start = source.index(opening)
 end = source.index(closing, start) + len(closing)
 implementation = source[start:end]
-isolated_launch = "    python3 -I - "
+isolated_launch = "    python3 -I -B - "
 if implementation.count(isolated_launch) != 1:
     raise AssertionError("assembled-output qualification must isolate interpreter options")
-mutant = implementation.replace(isolated_launch, "    python3 - ", 1)
+mutant = implementation.replace(isolated_launch, "    python3 -B - ", 1)
 
 # The command deliberately violates every repetition guarantee. The first run
 # remains valid so only the intended existing-output assertions reject it.
@@ -2331,7 +2439,7 @@ PY_MOCK_SUBREAPING
 }
 
 test_mock_process_scan_contract() {
-    python3 -B - "${SCRIPT_DIR}/mock-integration.sh" <<'PY_PROCESS_SCAN'
+    python3 -I -B - "${SCRIPT_DIR}/mock-integration.sh" <<'PY_PROCESS_SCAN'
 import ctypes
 import os
 from pathlib import Path
@@ -2525,7 +2633,7 @@ EOF_MANIFEST_PYTHON
                 "${real_bash}" "${SCRIPT_DIR}/run-all.sh" \
                 "--${profile}" --jobs "${jobs}"
 
-            python3 - \
+            python3 -I -B - \
                 "${profile}" "${invocation_root}" -- \
                 "${ALL_SHELL_FILES[@]}" <<'PY_MANIFEST'
 import collections
@@ -2657,6 +2765,39 @@ PY_MANIFEST
         --fast --jobs 4
     assert_text_not_contains "${ASSERT_OUTPUT}" 'Starting: Runtime-manager integration' \
         'failed Python validation prevents the integration phase'
+}
+
+test_doctor_optimization_isolation() {
+    python3 -I -B - "${SCRIPT_DIR}/test-runner-integration.sh" <<'PY_DOCTOR_OPTIMIZATION'
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+
+source = Path(sys.argv[1]).read_text()
+match = re.search(r'if ! (python3 [^\n]+) <<\x27PY_READY_DOCTOR\x27; then\n(.*?)\nPY_READY_DOCTOR',
+                  source, flags=re.S)
+if match is None:
+    raise AssertionError("cannot locate the actual doctor readiness oracle")
+flags = shlex.split(match[1].split('"${doctor_output}"', 1)[0])[1:]
+report = {"schema_version": 1, "ready": True, "required": {"failed": 0},
+          "checks": [{"id": name, "status": "pass"} for name in
+                     ("python-version", "loopback-bind", "external-https", "shfmt-cache",
+                      "shfmt-ready", "repository-state")]}
+for optimize in ("1", "2"):
+    for ready in (True, False):
+        report["ready"] = ready
+        result = subprocess.run([sys.executable, *flags, json.dumps(report)], input=match[2],
+                                text=True, capture_output=True, timeout=5,
+                                env=os.environ | {"PYTHONOPTIMIZE": optimize})
+        if ready and result.returncode:
+            raise AssertionError("the unmodified doctor positive control failed")
+        if not ready and (result.returncode == 0 or "AssertionError" not in result.stderr):
+            raise AssertionError("optimized Python disabled the actual doctor readiness oracle")
+PY_DOCTOR_OPTIMIZATION
 }
 
 test_run_all_doctor_contract() {
@@ -2814,7 +2955,7 @@ EOF_MOCK_PYTHON
         SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
         "${run_all}" --doctor --json
     doctor_output=${ASSERT_OUTPUT}
-    if ! python3 - "${doctor_output}" <<'PY_READY_DOCTOR'; then
+    if ! python3 -I -B - "${doctor_output}" <<'PY_READY_DOCTOR'; then
 import json
 import sys
 
@@ -2843,7 +2984,7 @@ PY_READY_DOCTOR
         SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
         "${run_all}" --doctor --json
     doctor_output=${ASSERT_OUTPUT}
-    if ! python3 - "${doctor_output}" <<'PY_OFFLINE_DOCTOR'; then
+    if ! python3 -I -B - "${doctor_output}" <<'PY_OFFLINE_DOCTOR'; then
 import json
 import sys
 
@@ -2871,7 +3012,7 @@ PY_OFFLINE_DOCTOR
         SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
         "${run_all}" --doctor --json
     doctor_output=${ASSERT_OUTPUT}
-    if ! python3 - "${doctor_output}" <<'PY_BLOCKED_DOCTOR'; then
+    if ! python3 -I -B - "${doctor_output}" <<'PY_BLOCKED_DOCTOR'; then
 import json
 import sys
 
@@ -2893,7 +3034,7 @@ PY_BLOCKED_DOCTOR
         SHFMT_TOOL_ROOT=/dev/null \
         "${run_all}" --doctor --json
     doctor_output=${ASSERT_OUTPUT}
-    if ! python3 - "${doctor_output}" <<'PY_UNUSABLE_SHFMT_DOCTOR'; then
+    if ! python3 -I -B - "${doctor_output}" <<'PY_UNUSABLE_SHFMT_DOCTOR'; then
 import json
 import sys
 
@@ -2918,7 +3059,7 @@ PY_UNUSABLE_SHFMT_DOCTOR
         SHFMT_TOOL_ROOT="${offline_shfmt_root}" \
         "${run_all}" --doctor --json
     doctor_output=${ASSERT_OUTPUT}
-    if ! python3 - "${doctor_output}" <<'PY_OFFLINE_SHFMT_DOCTOR'; then
+    if ! python3 -I -B - "${doctor_output}" <<'PY_OFFLINE_SHFMT_DOCTOR'; then
 import json
 import sys
 
@@ -2944,7 +3085,7 @@ PY_OFFLINE_SHFMT_DOCTOR
             SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
             "${run_all}" --doctor --json
         doctor_output=${ASSERT_OUTPUT}
-        if ! python3 - "${doctor_output}" <<'PY_UNUSABLE_GIT_DOCTOR'; then
+        if ! python3 -I -B - "${doctor_output}" <<'PY_UNUSABLE_GIT_DOCTOR'; then
 import json
 import sys
 
@@ -2967,7 +3108,7 @@ PY_UNUSABLE_GIT_DOCTOR
             SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
             "${run_all}" --doctor --json
         doctor_output=${ASSERT_OUTPUT}
-        if ! python3 - "${doctor_output}" <<'PY_ARCHIVE_GIT_DOCTOR'; then
+        if ! python3 -I -B - "${doctor_output}" <<'PY_ARCHIVE_GIT_DOCTOR'; then
 import json
 import sys
 
@@ -2992,7 +3133,7 @@ PY_ARCHIVE_GIT_DOCTOR
         SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
         "${run_all}" --doctor --json
     doctor_output=${ASSERT_OUTPUT}
-    if ! python3 - "${doctor_output}" <<'PY_CONTROL_JSON_DOCTOR'; then
+    if ! python3 -I -B - "${doctor_output}" <<'PY_CONTROL_JSON_DOCTOR'; then
 import json
 import sys
 
@@ -3015,7 +3156,7 @@ PY_CONTROL_JSON_DOCTOR
             SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
             "${run_all}" --doctor --json
         doctor_output=${ASSERT_OUTPUT}
-        if ! python3 - "${doctor_output}" <<'PY_BOUNDED_VERSION_DOCTOR'; then
+        if ! python3 -I -B - "${doctor_output}" <<'PY_BOUNDED_VERSION_DOCTOR'; then
 import json
 import sys
 
@@ -3055,6 +3196,9 @@ main() {
     trap 'return 130' INT
     trap 'return 143' TERM
     test_runner_initialize
+
+    test_ordinary_exit_descendant_cleanup
+    test_doctor_optimization_isolation
 
     test_runner_format_duration 1234 duration
     assert_equals '1.234s' "${duration}" 'millisecond duration formatting'

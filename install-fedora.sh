@@ -24,6 +24,25 @@ readonly RPM_FUSION_RELEASE_URL='https://download1.rpmfusion.org/free/fedora/rpm
 ROOT_APPLICATION_STAGE=''
 STAGED_APPLICATION_RPM=''
 STAGED_APPLICATION_KEY=''
+STAGE_REGISTRATION_ACTIVE=false
+REQUESTED_EXIT_STATUS=''
+
+request_shutdown() {
+    local status=$1
+
+    [[ -z ${REQUESTED_EXIT_STATUS} ]] || return 0
+    REQUESTED_EXIT_STATUS=${status}
+    [[ ${STAGE_REGISTRATION_ACTIVE} == true ]] && return 0
+    exit "${REQUESTED_EXIT_STATUS}"
+}
+
+finish_stage_registration() {
+    STAGE_REGISTRATION_ACTIVE=false
+    if [[ -n ${REQUESTED_EXIT_STATUS} ]]; then
+        exit "${REQUESTED_EXIT_STATUS}"
+    fi
+    return 0
+}
 
 error() {
     printf 'Error: %s\n' "$*" >&2
@@ -68,20 +87,27 @@ create_root_stage() {
         *) return 2 ;;
     esac
 
+    # A signal may arrive after mktemp creates the directory but before its
+    # command substitution returns. Replay it only after the safe path is owned
+    # by the caller's cleanup, never using an unvalidated path for removal.
+    STAGE_REGISTRATION_ACTIVE=true
     # shellcheck disable=SC2310 # Failure is converted to a staging diagnostic.
     resolved_stage_path=$(run_root mktemp -d --tmpdir=/tmp \
         "yt-dlp-aria2-downloader-${stage_label}.XXXXXXXX") || {
         error "unable to create the root-owned ${stage_label} staging directory."
+        finish_stage_registration
         exit 70
     }
     # shellcheck disable=SC2310 # This helper is a predicate.
     if ! root_stage_path_is_safe "${resolved_stage_path}"; then
         error "root-owned ${stage_label} staging returned an unsafe path."
+        finish_stage_registration
         exit 70
     fi
     # Publish the validated path before later setup so every subsequent failure
     # is covered by the caller's EXIT cleanup.
     printf -v "${output_variable}" '%s' "${resolved_stage_path}"
+    finish_stage_registration
     # shellcheck disable=SC2310 # Failure is converted to a staging diagnostic.
     run_root chmod 700 -- "${resolved_stage_path}" || {
         error "unable to secure the root-owned ${stage_label} staging directory."
@@ -126,7 +152,8 @@ stage_root_file() {
 cleanup() {
     local cleanup_status=$?
 
-    trap - EXIT HUP INT TERM
+    trap '' HUP INT TERM
+    trap - EXIT
     if [[ -n ${ROOT_APPLICATION_STAGE} ]]; then
         # shellcheck disable=SC2310 # Cleanup is explicitly best-effort on exit.
         if ! remove_root_stage "${ROOT_APPLICATION_STAGE}"; then
@@ -615,15 +642,18 @@ enable_rpm_fusion() {
         local gpg_home=''
         local rpm_verify_keyring=''
 
+        trap 'trap "" HUP INT TERM; trap - EXIT; if [[ -n ${root_stage:-} ]]; then remove_root_stage "${root_stage}" || true; fi; rm -rf -- "${bootstrap_root:-}"' EXIT
+        trap 'request_shutdown 129' HUP
+        trap 'request_shutdown 130' INT
+        trap 'request_shutdown 143' TERM
+        STAGE_REGISTRATION_ACTIVE=true
         bootstrap_root=$(mktemp -d) || {
             error 'unable to create the RPM Fusion verification directory.'
+            finish_stage_registration
             exit 70
         }
+        finish_stage_registration
         chmod 700 -- "${bootstrap_root}"
-        trap 'if [[ -n ${root_stage:-} ]]; then remove_root_stage "${root_stage}" || true; fi; rm -rf -- "${bootstrap_root:-}"' EXIT
-        trap 'exit 129' HUP
-        trap 'exit 130' INT
-        trap 'exit 143' TERM
 
         key_path="${bootstrap_root}/RPM-GPG-KEY-rpmfusion-free-fedora-2020"
         release_rpm="${bootstrap_root}/rpmfusion-free-release-44.noarch.rpm"
@@ -803,9 +833,9 @@ main() {
     local deno_bin=''
 
     trap cleanup EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    trap 'request_shutdown 129' HUP
+    trap 'request_shutdown 130' INT
+    trap 'request_shutdown 143' TERM
 
     parse_fedora_arguments allow_unsigned_dev rpm_argument "$@"
     require_fedora_installer_commands

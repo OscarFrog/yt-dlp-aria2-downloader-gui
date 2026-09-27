@@ -179,7 +179,7 @@ chmod 700 -- "${RUNTIME_DIR}"
 
 install -m 0755 -- "${PROJECT_DIR}/download-video.sh" "${MANAGED_ENGINE_UNDER_TEST}"
 # Observe the first deferred handler only in the private engine fixture.
-python3 - "${MANAGED_ENGINE_UNDER_TEST}" <<'PY_DEFERRED_SIGNAL_ACK'
+python3 -I -B - "${MANAGED_ENGINE_UNDER_TEST}" <<'PY_DEFERRED_SIGNAL_ACK'
 from pathlib import Path
 import sys
 
@@ -713,7 +713,7 @@ if [[ ${dump_single_json} == true ]]; then
     fi
 
     if [[ ${MOCK_NETWORK_PERMISSIONS:-0} == 1 ]]; then
-        python3 "${MOCK_NETWORK_CHECK:?}" plan \
+        python3 -I -B "${MOCK_NETWORK_CHECK:?}" plan \
             "${plan_filename}" "${plan_ext}" "${plan_protocol}" "$@"
         exit 0
     fi
@@ -746,7 +746,7 @@ wait_for_marker() {
 }
 
 if [[ ${MOCK_NETWORK_PERMISSIONS:-0} == 1 ]]; then
-    python3 "${MOCK_NETWORK_CHECK:?}" native "$@"
+    python3 -I -B "${MOCK_NETWORK_CHECK:?}" native "$@"
 fi
 
 progress_ready_marker=''
@@ -1029,6 +1029,10 @@ case ${1:-} in
 
     if [[ ${MOCK_ARIA2_INVALID_UTF8_DIAGNOSTIC:-0} == 1 ]]; then
         printf 'Malformed diagnostic URL: https://secret.example/\377private-suffix-token\n' >&2
+        for scheme in http https HTTP HTTPS hTtP hTtPs; do
+            printf 'Scheme diagnostic: %s://secret.example/Token_%s_CaseSensitive\n' \
+                "${scheme}" "${scheme}" >&2
+        done
     fi
 
     if [[ ${MOCK_ARIA2_EXIT_STATUS:-0} != 0 ]]; then
@@ -1076,7 +1080,7 @@ case ${1:-} in
     fi
 
     if [[ ${MOCK_NETWORK_PERMISSIONS:-0} == 1 ]]; then
-        python3 "${MOCK_NETWORK_CHECK:?}" aria2 "$@"
+        python3 -I -B "${MOCK_NETWORK_CHECK:?}" aria2 "$@"
     fi
 
     if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
@@ -1877,7 +1881,7 @@ if [[ ${MOCK_NETWORK_PERMISSIONS:-0} == 1 &&
     ${1##*/} == private-aria2-plan.py && ${2:-} == media-local-safe ]]; then
     # Run the production classifier with only the selected descriptor's
     # filesystem type simulated. This does not emulate SMB kernel I/O behavior.
-    exec /usr/bin/python3 -B - "$@" <<'PY_NETWORK_FILESYSTEM'
+    exec /usr/bin/python3 -I -B - "$@" <<'PY_NETWORK_FILESYSTEM'
 import importlib.util
 import os
 import sys
@@ -3605,6 +3609,8 @@ test_mock_engine_failure_paths() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'Malformed diagnostic URL: [REDACTED_URL]' \
         'malformed UTF-8 URL is redacted under the inherited UTF-8 locale'
+    assert_text_not_contains "${ASSERT_OUTPUT}" 'CaseSensitive' \
+        'aria2 diagnostics redact every supported HTTP scheme casing'
 
     prepare_argument_log 'pipeline-redactor-status'
     assert_status 75 'a successful producer does not mask redactor failure' \
@@ -4236,7 +4242,7 @@ test_mock_engine_network_destination() {
             "secrets absent from destination during ${scenario}"
         env MOCK_NETWORK_PHASE_LOG="${phase_log}" \
             MOCK_OUTPUT_DIR="${network_output}" \
-            python3 "${MOCK_BIN}/network-check.py" final
+            python3 -I -B "${MOCK_BIN}/network-check.py" final
         assert_text_not_contains "${ASSERT_OUTPUT}" 'NETWORK_FIXTURE_' \
             "diagnostics contain no sentinel for ${scenario}"
         if [[ ${protocol} == http ]]; then
@@ -4528,6 +4534,87 @@ EOF_NETWORK_CLEANUP_BOUNDARIES
     done
 }
 
+test_mock_active_staging_inventory() {
+    python3 -I -B - "${PROJECT_DIR}" "${TEST_ROOT}" <<'PY_STAGING_INVENTORY'
+import hashlib
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+project, test_root = map(Path, sys.argv[1:])
+source = (project / "download-video.sh").read_text().rsplit('\nmain "$@"', 1)[0]
+
+def snapshot(path):
+    metadata = path.stat()
+    return (metadata.st_dev, metadata.st_ino, metadata.st_size,
+            metadata.st_mtime_ns, metadata.st_ctime_ns,
+            hashlib.sha256(path.read_bytes()).hexdigest())
+
+for fault in ("nominal", "unknown", "empty-error", "partial-error", "divergence"):
+    with tempfile.TemporaryDirectory(dir=test_root) as raw:
+        root = Path(raw)
+        output = root / "out"
+        output.mkdir(mode=0o700)
+        staging = output / ".yt-dlp-aria2.ABCDef12"
+        staging.mkdir(mode=0o700)
+        witness = staging / "foreign.txt"
+        if fault in {"unknown", "empty-error", "partial-error"}:
+            witness.write_bytes(b"MUST SURVIVE\n")
+            witness.chmod(0o600)
+            original = snapshot(witness)
+        else:
+            original = None
+        harness = source + r'''
+OUTPUT_DIR=$1
+PRIVATE_ARIA2_STAGING=$2
+get_path_identity PRIVATE_ARIA2_STAGING_IDENTITY "$2" directory
+inventory_fault=$3
+inventory_once=$4
+printf '%s\n' "${PRIVATE_ARIA2_STAGING_MARKER_VALUE}" >"$2/${PRIVATE_ARIA2_STAGING_MARKER}"
+chmod 600 "$2/${PRIVATE_ARIA2_STAGING_MARKER}"
+printf '%s\n' 'owned media' >"$2/item-000.download"
+chmod 600 "$2/item-000.download"
+find() {
+    if [[ ! -e ${inventory_once} ]]; then
+        : >"${inventory_once}"
+        case ${inventory_fault} in
+            empty-error) return 1 ;;
+            partial-error)
+                printf '%s\0' "${PRIVATE_ARIA2_STAGING}/${PRIVATE_ARIA2_STAGING_MARKER}"
+                return 1
+                ;;
+            divergence)
+                command find "$@" || return
+                printf '%s\n' 'MUST SURVIVE' >"${PRIVATE_ARIA2_STAGING}/foreign.txt"
+                chmod 600 "${PRIVATE_ARIA2_STAGING}/foreign.txt"
+                return 0
+                ;;
+        esac
+    fi
+    command find "$@"
+}
+trap cleanup EXIT
+exit 42
+'''
+        completed = subprocess.run(
+            ["bash", "-s", "--", str(output), str(staging), fault, str(root / "once")],
+            input=harness, text=True, capture_output=True, timeout=15,
+        )
+        assert completed.returncode == 42, (fault, completed.stderr)
+        if fault == "nominal":
+            assert not staging.exists(), completed.stderr
+        else:
+            assert witness.is_file(), (fault, "foreign file was deleted", completed.stderr)
+            assert witness.read_bytes() == b"MUST SURVIVE\n", fault
+            if original is not None:
+                assert snapshot(witness) == original, (fault, "foreign identity or bytes changed")
+            if fault != "divergence":
+                assert (staging / "item-000.download").is_file(), (fault, "partial cleanup")
+        print(f"Active staging inventory: {fault} preserves unvalidated entries.")
+PY_STAGING_INVENTORY
+}
+
 run_mock_engine_core_group() {
     test_mock_cleanup_owner_guard
     test_mock_engine_log_retention
@@ -4541,6 +4628,7 @@ run_mock_engine_hls_group() {
 }
 
 run_mock_engine_staging_group() {
+    test_mock_active_staging_inventory
     test_mock_engine_private_staging
 }
 
@@ -5687,6 +5775,57 @@ EOF_MISSING_FINAL_ENGINE
     fi
 }
 
+test_mock_gui_url_redaction_cases() {
+    python3 -I -B - "${PROJECT_DIR}/download-video-gui.sh" "${TEST_ROOT}" <<'PY_GUI_URL_CASES'
+from pathlib import Path
+import subprocess
+import sys
+
+source = Path(sys.argv[1]).read_text().rsplit('\nmain "$@"', 1)[0]
+root = Path(sys.argv[2]) / "gui-url-cases"
+root.mkdir(mode=0o700)
+state = root / "state"
+state.mkdir(mode=0o700)
+live = root / "live"
+live.mkdir(mode=0o700)
+schemes = ("http", "https", "HTTP", "HTTPS", "hTtP", "hTtPs")
+tokens = [f"PRIVATE_CASE_TOKEN_{index}" for index in range(len(schemes))]
+log = live / "engine.log"
+log.write_text("".join(f"diagnostic {scheme}://example.test/{token}\n"
+                       for scheme, token in zip(schemes, tokens)))
+log.chmod(0o600)
+diagnostic = root / "zenity-diagnostic.txt"
+program = source + r'''
+STATE_DIR=$1
+TEMP_DIR=$2
+RUNTIME_TMPDIR=$2
+LOG_FILE=$3
+diagnostic_copy=$4
+LOG_TIMESTAMP='case-test'
+retain_sanitized_log_impl
+[[ ${LOG_RETAINED} == true ]] || exit 71
+show_diagnostic_dialog() { cp -- "$5" "${diagnostic_copy}"; }
+ZENITY_ERROR=$(<"${LOG_FILE}")
+show_zenity_error 'Expected diagnostic'
+'''
+result = subprocess.run(["bash", "-s", "--", str(state), str(live), str(log), str(diagnostic)],
+                        input=program, text=True, capture_output=True, timeout=15)
+if result.returncode:
+    raise AssertionError(f"GUI redaction fixture failed: {result.returncode}: {result.stderr}")
+retained = list(state.glob("download-*.log"))
+if len(retained) != 1 or not diagnostic.is_file():
+    raise AssertionError("GUI did not publish both diagnostic variants")
+for path in [retained[0], diagnostic]:
+    payload = path.read_text()
+    if any(token in payload for token in tokens):
+        raise AssertionError("GUI diagnostic retained a URL token with a supported scheme casing")
+    if payload.count("[REDACTED_URL]") != len(schemes):
+        raise AssertionError("GUI diagnostic did not mask every URL in the casing corpus")
+    if path.stat().st_mode & 0o077:
+        raise AssertionError("GUI diagnostic is accessible to other users")
+PY_GUI_URL_CASES
+}
+
 test_mock_gui_state_initialization() {
     local blocked_state_home home_error_capture home_question_log
     local home_text_info_log hostile_error_capture hostile_old_log
@@ -5962,7 +6101,7 @@ run_mock_gui_progress_group() {
 }
 
 test_mock_gui_settings_signal_cleanup() {
-    python3 - "${PROJECT_DIR}/download-video-gui.sh" <<'PY_SETTINGS_SIGNAL'
+    python3 -I -B - "${PROJECT_DIR}/download-video-gui.sh" <<'PY_SETTINGS_SIGNAL'
 import pathlib
 import subprocess
 import sys
@@ -6023,7 +6162,7 @@ PY_SETTINGS_SIGNAL
 }
 
 test_mock_gui_live_log_retention_unconfirmed_shutdown() {
-    python3 - "${PROJECT_DIR}/download-video-gui.sh" "${TEST_ROOT}" <<'PY_LIVE_LOG_RETENTION'
+    python3 -I -B - "${PROJECT_DIR}/download-video-gui.sh" "${TEST_ROOT}" <<'PY_LIVE_LOG_RETENTION'
 import os
 import pathlib
 import select
@@ -6220,6 +6359,7 @@ EOF_GUI_CLEANUP_QUIESCENCE
 }
 
 run_mock_gui_state_group() {
+    test_mock_gui_url_redaction_cases
     test_mock_gui_live_log_retention_unconfirmed_shutdown
     test_mock_gui_cleanup_unconfirmed_shutdown
     test_mock_gui_config_recovery
@@ -7212,7 +7352,7 @@ PY_LOST_GROUP_LEADER
 test_mock_signal_transport_preserves_active_input() {
     # The transport caller must not unlink authentication inputs while its
     # supervisor still reports an unresolved worker or process group.
-    python3 -I - "${PROJECT_DIR}" "${TEST_ROOT}" <<'PY_ACTIVE_TRANSPORT_INPUT'
+    python3 -I -B - "${PROJECT_DIR}" "${TEST_ROOT}" <<'PY_ACTIVE_TRANSPORT_INPUT'
 import json
 from pathlib import Path
 import subprocess
@@ -7233,9 +7373,12 @@ fixture_mode=$3
 PRIVATE_ARIA2_HELPER=$4
 PRIVATE_TRANSPORT=direct
 MACHINE_PROGRESS=false
+YOUTUBE_HLS_FIREFOX=false
 ARIA2_HTTPS_DIRECT_SAFE=false
 MODE=audio
 OUTPUT_DIR="${fixture_root}/output"
+FINAL_OUTPUT_DIR=${OUTPUT_DIR}
+FINAL_OUTPUT_IDENTITY=$(stat -c '%d:%i' -- "${FINAL_OUTPUT_DIR}")
 PRIVATE_ARIA2_STAGING="${OUTPUT_DIR}/.yt-dlp-aria2-test"
 PRIVATE_ARIA2_METADATA="${fixture_root}/private"
 PRIVATE_ARIA2_PLAN="${PRIVATE_ARIA2_METADATA}/plan.json"
@@ -7537,7 +7680,7 @@ wait_for_mock_pre_env_exit() {
         observation=marker
         shift
     fi
-    python3 - "${observation}" "$@" <<'PY_PRE_ENV_WAIT'
+    python3 -I -B - "${observation}" "$@" <<'PY_PRE_ENV_WAIT'
 import itertools
 import json
 import os
@@ -7648,7 +7791,7 @@ def report(reason, infos, limits=()):
     # failure or discard the other available log/trace and identity evidence.
     log = excerpt(log_name, 4096, tail=True)
     trace = excerpt(Path(log_name).with_suffix(".trace"), 16384)
-    log = re.sub(r"https?://[^\s]+", "[REDACTED_URL]", log)
+    log = re.sub(r"https?://[^\s]+", "[REDACTED_URL]", log, flags=re.IGNORECASE)
     log = re.sub(r"(?im)^.*(?:authorization|cookie|password|secret|token|header).*$",
                  "[REDACTED_PRIVATE_DIAGNOSTIC]", log)
     print("PRE_ENV_DIAGNOSTIC " + json.dumps(dict(
@@ -7888,7 +8031,7 @@ test_mock_pre_env_observer_controls() {
     # Exercise this exact observer with real children while replacing only the
     # procfs boundary. This covers kernel-dependent metadata without changing
     # /proc, dumpability or the production engine.
-    python3 - "${PROJECT_DIR}/tests/mock-integration.sh" <<'PY_PRE_ENV_PROCFS'
+    python3 -I -B - "${PROJECT_DIR}/tests/mock-integration.sh" <<'PY_PRE_ENV_PROCFS'
 """Exercise the real embedded observer; alter only selected procfs/read boundaries."""
 import builtins
 import contextlib
@@ -8188,7 +8331,7 @@ PY_PRE_ENV_PROCFS
         expected_status=7
         [[ ${control} != success ]] || expected_status=0
         [[ ${control} != signal-status && ${control} != cached-status ]] || expected_status=130
-        python3 - "${ready}" "${release}" "${expected_status}" \
+        python3 -I -B - "${ready}" "${release}" "${expected_status}" \
             >"${worker_log}" 2>&1 <<'PY_PRE_ENV_CONTROL' &
 from pathlib import Path
 import signal
@@ -8959,6 +9102,77 @@ test_mock_signal_gui_group_identity_after_leader_exit() {
         'leader-exit group authentication left GUI descendants'
 }
 
+test_mock_signal_gui_untrusted_group_presence() {
+    python3 -I -B - "${PROJECT_DIR}/download-video-gui.sh" "${TEST_ROOT}" <<'PY_GUI_UNTRUSTED_GROUP'
+import ctypes
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(36, 1, 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), "unable to adopt orphaned fixture processes")
+source = Path(sys.argv[1]).read_text().rsplit('\nmain "$@"', 1)[0]
+marker = Path(sys.argv[2]) / "gui-untrusted-group-child.pid"
+program = source + r'''
+marker=$1
+WORKER_IDENTITY_TOKEN='fixture-private-token'
+/usr/bin/setsid env YTDLP_ARIA2_GUI_WORKER_TOKEN="${WORKER_IDENTITY_TOKEN}" \
+    bash -c 'env -u YTDLP_ARIA2_GUI_WORKER_TOKEN sleep 30 >/dev/null 2>&1 & printf "%s\n" "$!" >"$1"; wait' \
+    bash "${marker}" &
+WORKER_PID=$!
+for _attempt in {1..100}; do
+    [[ -s ${marker} ]] && break
+    sleep 0.01
+done
+[[ -s ${marker} ]] || exit 70
+process_is_direct_child_of "${WORKER_PID}" "${BASHPID}" WORKER_PID_START_TIME false
+WORKER_PGID=${WORKER_PID}
+process_is_session_group_leader "${WORKER_PID}" "${BASHPID}" WORKER_PGID_START_TIME false
+original_pgid=${WORKER_PGID}
+kill -TERM -- "${WORKER_PID}"
+wait "${WORKER_PID}" 2>/dev/null || true
+if worker_group_is_current; then exit 71; fi
+if ! worker_tree_alive; then exit 72; fi
+signal_worker_tree TERM
+signal_worker_tree KILL
+if wait_for_worker_exit 1; then exit 73; fi
+[[ ${WORKER_PGID} == "${original_pgid}" ]] || exit 74
+IFS= read -r descendant <"${marker}"
+kill -0 -- "${descendant}" || exit 75
+# A wrong recorded start time cannot turn an unrelated numeric group into
+# signaling authority, but observed presence still forbids cleanup.
+WORKER_PID=''
+WORKER_PID_START_TIME=''
+WORKER_PGID_START_TIME='1'
+signal_worker_tree KILL
+kill -0 -- "${descendant}" || exit 76
+if wait_for_worker_exit 1; then exit 77; fi
+# ESRCH, unlike the lost token, is positive proof of an absent numeric group.
+WORKER_PGID=2147483647
+if ! wait_for_worker_exit 1; then exit 78; fi
+[[ -z ${WORKER_PGID} ]] || exit 79
+'''
+try:
+    result = subprocess.run(["bash", "-s", "--", str(marker)], input=program,
+                            text=True, capture_output=True, timeout=10)
+    if result.returncode:
+        raise AssertionError(f"GUI lost-group observation failed: {result.returncode}: {result.stderr}")
+finally:
+    if marker.exists():
+        child = int(marker.read_text())
+        # As subreaper this controller owns the still-unreaped orphan, so its
+        # PID cannot be recycled before this final cleanup signal.
+        try:
+            os.kill(child, signal.SIGKILL)
+            os.waitpid(child, 0)
+        except (ProcessLookupError, ChildProcessError):
+            pass
+PY_GUI_UNTRUSTED_GROUP
+}
+
 test_mock_signal_gui_foreground_group_registration() {
     local continue_marker gui_pid gui_status index signal_log signal_name
     local process_fields
@@ -9398,6 +9612,7 @@ run_mock_signal_group() {
     test_mock_signal_gui_zenity_diagnostic_cleanup
     test_mock_signal_gui_worker_registration
     test_mock_signal_gui_group_identity_after_leader_exit
+    test_mock_signal_gui_untrusted_group_presence
     test_mock_signal_gui_foreground_group_registration
     test_mock_signal_gui_blocked_progress
     test_mock_signal_gui_cancellation

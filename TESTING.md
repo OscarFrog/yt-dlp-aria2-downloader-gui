@@ -281,12 +281,28 @@ python3 -B tests/release-docs-integration.py
 The shfmt replay uses real disposable Git repositories and the pinned formatter,
 with controlled upstream and container stubs. It covers unchanged-version preparation,
 independent verification, altered bytes, incomplete manifests, no-op runs and
-branch creation races. The release-docs replay executes the actual publisher
+branch creation races. A coherent replacement patch with unchanged version and
+complete but stale tested-tree digests must fail the actual publisher checksum
+step. The release-docs replay executes the actual publisher
 shell and inline Python against a simulated API, including large streamed blobs,
 fast-forward updates, concurrent refs, ambiguous responses and substituted
 paths; preparation no-op uses real Git. Missing Git (and jq for release-docs)
 is an explicit skip in archive environments. Canonical shell CI installs both tools.
 These tests do not dispatch workflows or establish that GitHub publication ran.
+
+`tests/ci-validation-integration.py` includes independent business oracles for
+the mandatory RPM v4/v6 signature qualification step and the release signer's
+private-primary-key guard. The latter replays the real workflow shell with fake
+GPG/RPM commands: only the contract's `#` primary state reaches `rpmsign`; empty,
+malformed and private-material-present states must be refused. No real secret
+is used. Removing each protection in a disposable source copy must turn its
+corresponding test red.
+
+Inline Python assertion drivers use isolated, bytecode-disabled execution
+(`python3 -I -B`) where compatible. The helper mount-boundary negative and doctor
+schema negative are also replayed under `PYTHONOPTIMIZE=1` and `2`, proving that
+an unsafe mutant or invalid diagnostic cannot silently pass with assertions
+disabled by the caller's environment.
 
 ## Environment diagnosis
 
@@ -650,9 +666,12 @@ The automated suite checks, among other things:
   and descriptor-first HLS/result publication with no-clobber rename fallback
   when the filesystem does not support hard links;
 - rejection of a second writer targeting the same canonical output directory;
-- explicit no-overwrite options and refusal of known final-video collisions,
+- explicit no-overwrite options and refusal of known final-video/native-audio collisions,
   while preserving interrupted-download resume behavior; these checks do not
   establish atomic local yt-dlp postprocessing against unrelated writers;
+- complete staging-inventory admission, including empty/error, partial/error,
+  unknown files and a file introduced after acquisition; the last file must
+  survive because deletion never rescans for new entries;
 - disabling of inherited yt-dlp plugins and personal configuration;
 - forwarding of HUP, INT, and TERM sent only to the CLI wrapper PID;
 - signal-safe CLI child registration before `$!` is published, plus bounded
@@ -1420,7 +1439,12 @@ changes must instead preserve ambiguous state with an explicit diagnostic.
 
 The real-tool simulation serves tiny generated media over loopback and makes
 only its disposable output directories permissive. It exercises real direct,
-audio, HLS and DASH processing followed by destination copy. Successful local
+audio, HLS and DASH processing followed by destination copy. Native M4A/MP3
+repetition and metadata changes must preserve hashes, inodes and
+timestamps without new GET requests; a changed native input extension must be
+refused before GET or postprocessing. Literal dollar/percent destinations cover
+both native and direct transport with defined and undefined environment names.
+Successful local
 and simulated-network cases also check for destination staging/path/publication
 residues and any retained local media workspace. It does not simulate
 SMB caching, reconnects, Unix-extension behavior or kernel-blocked syscalls.

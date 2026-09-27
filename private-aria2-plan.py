@@ -699,7 +699,7 @@ def build_plan(args: argparse.Namespace) -> int:
 
 
 def check_native_final(args: argparse.Namespace) -> int:
-    """Refuse an existing MKV and bind native retries to that checked basename."""
+    """Refuse a known existing native media path and bind retries to its basename."""
     output_dir = resolve_output_directory(args.output_dir)
     plan = read_json(Path(args.plan), "yt-dlp plan")
     if not isinstance(plan, dict):
@@ -715,6 +715,9 @@ def check_native_final(args: argparse.Namespace) -> int:
         output_dir,
         "yt-dlp requested filename",
     )
+    extension = destination.suffix[1:]
+    if args.mode == "audio" and not extension_is_representable(extension):
+        raise PlanError("native audio filename has an unsupported extension")
     expected_identity = parse_identity(args.final_output_identity)
     final_output = Path(args.final_output_dir)
     with directory_descriptor(final_output) as final_fd:
@@ -722,7 +725,9 @@ def check_native_final(args: argparse.Namespace) -> int:
         if (metadata.st_dev, metadata.st_ino) != expected_identity:
             raise PlanError("final media destination changed before transfer")
         try:
-            os.stat(destination.with_suffix(".mkv").name, dir_fd=final_fd, follow_symlinks=False)
+            final_name = (destination.with_suffix(".mkv").name
+                          if args.mode == "video" else destination.name)
+            os.stat(final_name, dir_fd=final_fd, follow_symlinks=False)
         except FileNotFoundError:
             pass
         else:
@@ -731,13 +736,14 @@ def check_native_final(args: argparse.Namespace) -> int:
             raise PlanError("final media destination changed during preflight")
 
     # Native extraction can refresh titles/IDs, including a live title's time.
-    # Keep its basename bound to the checked plan, while yt-dlp still chooses
-    # component extensions and performs its normal native extraction/retries.
+    # Keep its basename bound to the checked plan. Video may choose component
+    # extensions; audio also binds its selection to this literal extension so
+    # refreshed metadata cannot select another pre-existing input filename.
     # Output templates expand environment variables before metadata fields:
     # emit literal dollars through a constant replacement/default, not $NAME.
     stem = str(destination.with_suffix(""))
     template = stem.replace("%", "%%").replace("$", "%(id&$|$)s")
-    print(template + ".%(ext)s")
+    print(template + ("." + extension if args.mode == "audio" else ".%(ext)s"))
     return 0
 
 
@@ -1452,12 +1458,13 @@ def create_parser() -> argparse.ArgumentParser:
     classify.set_defaults(handler=classify_plan)
 
     native = subparsers.add_parser(
-        "check-native-final", help="refuse an existing native video result and return its fixed output template"
+        "check-native-final", help="refuse an existing native media path and return its fixed output template"
     )
     native.add_argument("--plan", required=True)
     native.add_argument("--output-dir", required=True)
     native.add_argument("--final-output-dir", required=True)
     native.add_argument("--final-output-identity", required=True)
+    native.add_argument("--mode", choices=("video", "audio"), default="video")
     native.set_defaults(handler=check_native_final)
 
     build = subparsers.add_parser(

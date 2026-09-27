@@ -95,7 +95,11 @@ catchable requests leave that first flag unchanged and return without mutating
 signal dispositions until bounded validator termination, rollback,
 temporary-artifact cleanup, and descriptor cleanup complete, so interruption
 cannot publish only a subset of the three managed leaves. Validator cleanup
-sends KILL only while `Popen` still proves that its child is unreaped. Once all mutation,
+observes child exit with `waitid(WNOWAIT)` without releasing the leader's PID.
+It sends KILL only while that unreaped child still anchors the session group,
+checks group quiescence, and then reaps the leader and closes captured output.
+A descendant retaining stdout or the directory FD cannot hide behind leader exit.
+Once all mutation,
 cleanup, and diagnostic work is finished, the helper atomically enables
 immediate delivery and its process entrypoint covers the final function-return
 window.
@@ -157,6 +161,9 @@ claiming post-return immutability.
    ingestion bounds. On cancellation, HUP, INT, TERM, or failure, signal and
    reap Zenity, the monitor, and the complete worker process group, escalating
    within bounded waits when necessary.
+   A lost leader or unreadable descendant token revokes signaling authority,
+   not the observation-only cleanup veto. An unauthenticated numeric group is
+   retained until an ESRCH probe proves absence; it never receives a real signal.
 7. Accept success only when the worker succeeded and the private result record
    names a valid final path. Retain a sanitized diagnostic log only when useful;
    when its source exceeds 8 MiB, discard the first potentially partial tail
@@ -232,7 +239,13 @@ to the current single native-audio profile.
    records when the GUI requested machine progress. Ordinary native video first
    checks the planned final MKV name and binds subsequent extraction/retries to
    that basename; metadata refresh must not redirect postprocessing to another
-   pre-existing final. The HLS/Firefox profile keeps its separate remux path.
+   pre-existing final. Native audio applies the same preflight to the planned
+   input filename, which yt-dlp could otherwise reuse and modify in place.
+   Its last format selector retains the planned input extension; a refresh
+   lacking that extension fails before transfer instead of reusing a different
+   pre-existing audio file. Codec/container postprocessing remains yt-dlp's job.
+   Every destination template escapes literal percent and dollar characters
+   before yt-dlp receives it. The HLS/Firefox profile keeps its separate remux path.
 8. Validate the produced media with FFprobe. The repaired YouTube HLS profile
    additionally checks duration/tail consistency and remuxes to a temporary MKV
    with FFmpeg before no-overwrite publication. The temporary inode is held by
@@ -329,10 +342,12 @@ The initial yt-dlp pass resolves formats and filenames but does not download.
 
 - `classify` validates the plan and selects `direct` only for representable
   direct HTTP(S) formats whose headers can be safely replayed;
-- `check-native-final` refuses an existing ordinary-video MKV in the actual
+- `check-native-final` refuses an existing ordinary-video MKV or planned native
+  audio input filename (`--mode audio`) in the actual
   final directory using its recorded identity and an opened descriptor. On
-  success it returns an absolute yt-dlp output template with a fixed basename
-  and dynamic extension. Literal percent and dollar characters are escaped for
+  success it returns an absolute yt-dlp output template with a fixed basename,
+  dynamic video extension or validated literal audio extension. The engine pairs
+  the latter with `(ba/b)[ext=EXT]` as the last format option. Literal percent and dollar characters are escaped for
   yt-dlp's template/environment expansion. The engine passes this override last
   so refreshed native metadata cannot select a different basename;
 - `build` converts the validated plan into a mode-`0600` aria2 input file and a
@@ -368,8 +383,10 @@ with different casing are not replayed through aria2. Rejected protocol fields
 are never copied into diagnostics.
 
 URLs and replayed HTTP headers are written to private files rather than command
-arguments. aria2 diagnostics pass through byte-oriented URL redaction, including
-malformed UTF-8 input. Diagnostic filters ignore cooperative termination signals
+arguments. aria2 diagnostics pass through byte-oriented, scheme-case-insensitive
+URL redaction, including malformed UTF-8 input. GUI snapshots and Zenity
+diagnostics apply the same case-insensitive masking without changing URL data.
+Diagnostic filters ignore cooperative termination signals
 until the producer closes its pipe, preserving its final cancellation messages;
 unexpected filter failures remain fatal. Fragmented DASH/HLS,
 unsafe headers, URL user information, unrepresentable formats, and HTTPS on an
@@ -386,6 +403,11 @@ later path-based cleanup after its final check.
 If an otherwise owned staging directory must be preserved because it contains
 an unknown artifact, validated private authentication metadata is still removed
 before the directory is left for diagnosis.
+Flat transfer-staging cleanup acquires one NUL-delimited inventory and explicitly
+waits for its producer's successful exit, then validates every entry before any
+deletion. Removal uses only that inventory; an incomplete enumeration or unknown
+entry preserves the staging, and a later added entry is never swept by a second
+scan. Sensitive metadata lives in the separate authenticated metadata directory.
 
 The helper is Python because structured JSON parsing, URL decomposition,
 file-mode inspection, and transactional manifest handling are clearer there
@@ -457,7 +479,7 @@ fallback leaves unsupported transport handling to yt-dlp.
 | Direct-transfer manifest | `build` / `commit` | JSON version `2`, six top-level fields described below; no v1 compatibility. Unknown keys are ignored, not a strict closed-key schema |
 | aria2 input | `build` / aria2c | aria2's line format: one URL followed by indented `out=...` and allowed `header=...` options per item. Contains sensitive replay data; it is not the manifest and never belongs on a shared destination |
 | Build / commit summaries | Helper stdout / discarded by engine | One LF-terminated `transfer_count=N` / `published_count=N` line respectively. The engine redirects these summaries to `/dev/null`; success is established by exit status and subsequent validation |
-| Native final preflight | `check-native-final` / engine | One absolute yt-dlp output template plus LF, frozen basename with literal-template escaping and dynamic extension. Used as the last output option; nonzero status aborts before native download |
+| Native final preflight | `check-native-final` / engine | One absolute yt-dlp output template plus LF, frozen basename with literal-template escaping; dynamic video extension, literal validated audio extension paired with the final format selector. Used as the last output option; nonzero status aborts before native download |
 
 The manifest producer emits `version` (integer 2), `output_dir` and
 `staging_dir` (absolute path strings), `output_identity` and `staging_identity`
@@ -577,6 +599,12 @@ immutable paths and versions; engine attestations reuse that exact result
 instead of probing the executables again or resolving the mutable activation
 links a second time. Activation uses a journal so interrupted link changes can
 be recovered; a validated previous version remains available for rollback.
+Rollback uses the same structural and exact-version admission as installed
+version reuse, before executing a candidate. A structurally absent active link,
+directory or executable still permits local recovery from a valid previous
+runtime before bootstrap. The three-field activation journal remains compatible:
+when the old target directory is gone, activation/recovery retain a real earlier
+previous target or remove only its unusable pointer, never publish a dangling link.
 
 The selected XDG data root is resolved once to a canonical physical path before
 use. Every existing component of that resolved path must be owned by root or
@@ -878,7 +906,13 @@ before publication, one `/proc` snapshot must instead bind the still-direct
 launcher to the runner through its state, parent PID, and start time. The Python
 session supervisor retains that identity until signal-resistant same-group
 descendants have exited or the runner reaches authenticated KILL escalation;
-inactive slots are reaped before any retained PID or process group is signaled.
+ordinary command return also requires descendant cleanup before releasing its
+slot. The supervisor becomes a Linux child subreaper before forking, sends TERM
+to its anchored group and escalates only to still-owned unreaped child PIDs.
+It preserves the command's failure status and rejects a nominal success when
+quiescence cannot be proved. Uncertain slots and logs remain tracked; after an
+authenticated collective KILL, a zombie-only group is quiescent. Without that
+proof, an unauthenticated group requires ESRCH before forgetting its identity.
 The canonical and repetition executables enable Bash monitor mode so trapped
 INT does not depend on Bash's foreground-child reaping handler. The sourced
 library does not alter its caller's options. A monitor-mode child initially

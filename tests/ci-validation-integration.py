@@ -331,6 +331,28 @@ class ProofTests(unittest.TestCase):
                 self.verify()
             step["conclusion"] = "success"
 
+    def test_critical_qualification_obligations_are_independent_of_the_checker_table(self):
+        # These obligations are business contracts, not values derived from
+        # REQUIRED_STEPS: removing a production requirement must fail this test.
+        for index, name, obligation in (
+            (2, "Fedora 44 RPM build-once", "Qualify RPM v4/v6 signature semantics"),
+            (2, "Previous immutable release", "Verify exact published previous packages"),
+            (2, "Fedora 44 RPM (fresh)", "Reject a different globally trusted RPM signer in PR CI"),
+            (4, "Local media, pinned yt-dlp 2026.8.19", "Run direct, audio, HLS and DASH boundary qualification"),
+        ):
+            with self.subTest(job=name, obligation=obligation):
+                self.api = fixture()
+                self.verifier = CHECK.Verifier(self.api, NOW)
+                job = next(job for job in self.jobs(index) if job["name"] == name)
+                remaining = [step for step in job["steps"] if step["name"] != obligation]
+                job["steps"] = remaining + [{
+                    "name": obligation, "status": "completed", "conclusion": "success",
+                }]
+                self.verify()
+                job["steps"] = remaining
+                with self.assertRaisesRegex(CHECK.Refusal, "Required qualification steps"):
+                    self.verify()
+
     def test_historical_exact_content_success_does_not_expire_with_the_calendar(self):
         historical = (NOW - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
         for index in range(1, 6):
@@ -640,6 +662,80 @@ done
         result, _ = self.check_environment(self.metadata(), api_failure=True)
         self.assertEqual(result.returncode, 65)
         self.assertEqual(result.stdout, b"")
+
+
+class SigningSecretReplayTests(unittest.TestCase):
+    """Exercise signer policy, not cryptography, using the actual workflow block."""
+
+    PRIMARY = "7B54065FE061E78ED2C96252E3BE996196ABEA7F"
+    SUBKEY = "1F5B769CE48A08AAC0A7D9DDECC9894B41830245"
+
+    @staticmethod
+    def key_record(kind, *, capabilities="", secret="", fingerprint=""):
+        fields = [""] * 16
+        fields[0], fields[1] = kind, "u"
+        fields[9], fields[11], fields[14] = fingerprint, capabilities, secret
+        return ":".join(fields)
+
+    def test_only_an_offline_primary_secret_reaches_the_signer(self):
+        block = VersionBoundaryTests.step("release.yml", "Sign exact release RPM with OpenPGP")
+        tools = r'''
+rpm() {
+    if [[ $* == *'%{rpmformat}'* ]]; then
+        printf '4\n'
+    elif [[ ${@: -1} == dist/* && -f ${SIGNER_CALL_LOG} ]]; then
+        printf 'signed\n'
+    else
+        printf 'unsigned\n'
+    fi
+}
+gpg() {
+    if [[ $* == *'--list-secret-keys'* ]]; then
+        printf '%s\n' "${SIGNER_LISTING}"
+    elif [[ $* == *'--export'* ]]; then
+        printf 'inert public key fixture\n'
+    fi
+}
+rpmkeys() { return 0; }
+gpgconf() { return 0; }
+rpmsign() {
+    printf '%s\n' "$*" >>"${SIGNER_CALL_LOG}"
+}
+'''
+        for state in ("#", "+", "D2760001240102000005000012340000", "", "malformed"):
+            with self.subTest(primary_secret_state=state), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                unsigned = root / "unsigned"
+                unsigned.mkdir()
+                (unsigned / "fixture.rpm").write_bytes(b"inert package; never processed by real RPM tools\n")
+                scratch = root / "scratch"
+                scratch.mkdir()
+                calls = root / "signer-calls"
+                listing = "\n".join((
+                    self.key_record("sec", capabilities="c", secret=state),
+                    self.key_record("fpr", fingerprint=self.PRIMARY),
+                    self.key_record("ssb", capabilities="s", secret="+"),
+                    self.key_record("fpr", fingerprint=self.SUBKEY),
+                )) if state != "malformed" else "not:a:secret:key:listing"
+                environment = dict(
+                    os.environ, TMPDIR=str(scratch), SIGNER_LISTING=listing, SIGNER_CALL_LOG=str(calls),
+                    RPM_SIGNING_FINGERPRINT=self.PRIMARY, RPM_SIGNING_SUBKEY_FINGERPRINT=self.SUBKEY,
+                    RPM_SIGNING_PRIVATE_KEY_B64="aW5lcnQgZml4dHVyZQ==",
+                    RPM_SIGNING_PASSPHRASE="inert fixture passphrase",
+                )
+                result = subprocess.run(["bash", "-c", tools + block], cwd=root, env=environment,
+                                        text=True, capture_output=True, timeout=15)
+                if state == "#":
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(len(calls.read_text().splitlines()), 1)
+                    self.assertIn("--key-id " + self.SUBKEY, calls.read_text())
+                    self.assertEqual((root / "dist/fixture.rpm").read_bytes(),
+                                     (unsigned / "fixture.rpm").read_bytes())
+                else:
+                    self.assertFalse(calls.exists(), "rejected private-primary state reached rpmsign")
+                    self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+                    self.assertFalse((root / "dist").exists(), "rejected state prepared a signed publication")
+                self.assertEqual(list(scratch.iterdir()), [], "signing temporary state survived cleanup")
 
 
 class WorkflowContractTests(unittest.TestCase):
