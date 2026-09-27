@@ -54,7 +54,7 @@ write_single_plan() {
     local filename=$2
     local header_value=$3
 
-    python3 - \
+    python3 -I -B - \
         "${PLAN_FILE}" \
         "${url}" \
         "${filename}" \
@@ -91,7 +91,7 @@ PY
 }
 
 write_double_plan() {
-    python3 - \
+    python3 -I -B - \
         "${PLAN_FILE}" \
         "${OUTPUT_DIR}" <<'PY'
 import json
@@ -139,7 +139,7 @@ PY
 }
 
 write_native_plan() {
-    python3 - \
+    python3 -I -B - \
         "${PLAN_FILE}" \
         "${OUTPUT_DIR}" <<'PY_INNER'
 import json
@@ -290,7 +290,7 @@ test_private_plan_classification() {
     uri_count=$(grep -cE '^https://' "${ARIA2_INPUT}")
     assert_equals '2' "${uri_count}" 'two-stream URI count'
 
-    python3 - "${MANIFEST}" "${OUTPUT_DIR}" <<'PY'
+    python3 -I -B - "${MANIFEST}" "${OUTPUT_DIR}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -330,7 +330,7 @@ PY
     # by the private direct builder must fall back to native yt-dlp.
     printf '%s\n' 'Private aria2 plan scenario: unrepresentable direct metadata'
     new_case 'unrepresentable-direct-metadata'
-    python3 - "${PLAN_FILE}" "${OUTPUT_DIR}" <<'PY_UNREPRESENTABLE'
+    python3 -I -B - "${PLAN_FILE}" "${OUTPUT_DIR}" <<'PY_UNREPRESENTABLE'
 import json
 import os
 import sys
@@ -474,7 +474,7 @@ test_private_plan_input_validation() {
     # raw traceback or an ambiguous exit status.
     printf '%s\n' 'Private aria2 plan scenario: isolated Unicode surrogate rejection'
     new_case 'unicode-surrogate'
-    python3 - "${PLAN_FILE}" "${OUTPUT_DIR}" <<'PY_SURROGATE'
+    python3 -I -B - "${PLAN_FILE}" "${OUTPUT_DIR}" <<'PY_SURROGATE'
 import json
 import os
 import sys
@@ -505,7 +505,7 @@ PY_SURROGATE
     # numbers, booleans, or objects into aria2 input syntax.
     printf '%s\n' 'Private aria2 plan scenario: non-string header rejection'
     new_case 'header-type'
-    python3 - "${PLAN_FILE}" "${OUTPUT_DIR}" <<'PY_HEADER_TYPE'
+    python3 -I -B - "${PLAN_FILE}" "${OUTPUT_DIR}" <<'PY_HEADER_TYPE'
 import json
 import os
 import sys
@@ -761,6 +761,80 @@ test_native_final_destination_preflight() {
     done
 }
 
+test_native_audio_final_destination_preflight() {
+    local extension scenario final_dir final_identity target expected_status
+    local before='' after='' before_bytes='' after_bytes='' expected_template=''
+    local stem="native \$HOME 50% [planned]"
+
+    for extension in m4a mp3; do
+        for scenario in absent regular symlink hardlink directory; do
+            new_case "native-audio-${extension}-${scenario}"
+            final_dir="${CASE_ROOT}/final \$HOME % directory"
+            mkdir -- "${final_dir}"
+            final_identity=$(stat -c '%d:%i' -- "${final_dir}")
+            target="${final_dir}/${stem}.${extension}"
+            expected_status=1
+            case ${scenario} in
+                absent) expected_status=0 ;;
+                regular) printf 'existing native audio\n' >"${target}" ;;
+                symlink | hardlink)
+                    printf 'foreign native audio\n' >"${CASE_ROOT}/foreign-audio"
+                    if [[ ${scenario} == symlink ]]; then
+                        ln -s -- "${CASE_ROOT}/foreign-audio" "${target}"
+                    else
+                        ln -- "${CASE_ROOT}/foreign-audio" "${target}"
+                    fi
+                    ;;
+                directory) mkdir -- "${target}" ;;
+                *) fail "Unknown native audio-preflight scenario: ${scenario}" ;;
+            esac
+            if [[ ${scenario} != absent ]]; then
+                before=$(stat -c '%d:%i:%s:%h:%y:%z' -- "${target}")
+                if [[ ${scenario} != directory ]]; then
+                    before_bytes=$(sha256sum <"${target}")
+                fi
+            fi
+            write_single_plan 'https://example.invalid/native-audio' \
+                "${OUTPUT_DIR}/${stem}.${extension}" 'qualification-native'
+            assert_status_split "${expected_status}" "native audio destination: ${extension}/${scenario}" \
+                python3 "${HELPER}" check-native-final --mode audio \
+                --output-dir "${OUTPUT_DIR}" --plan "${PLAN_FILE}" \
+                --final-output-dir "${final_dir}" --final-output-identity "${final_identity}"
+            if [[ ${scenario} == absent ]]; then
+                expected_template="${OUTPUT_DIR}/native %(id&\$|\$)sHOME 50%% [planned].${extension}"
+                assert_equals "${expected_template}" "${ASSERT_STDOUT}" \
+                    'audio template preserves literal dollar/percent and the checked input extension'
+                [[ ! -e ${target} && ! -L ${target} ]] \
+                    || fail 'Audio preflight created the requested final file.'
+            else
+                assert_text_contains "${ASSERT_STDERR}" 'final media destination already exists' \
+                    'audio collision is rejected by the no-overwrite guard'
+                assert_equals '' "${ASSERT_STDOUT}" 'refused audio preflight emits no template'
+                after=$(stat -c '%d:%i:%s:%h:%y:%z' -- "${target}")
+                assert_equals "${before}" "${after}" 'audio collision preserves inode and metadata'
+                if [[ ${scenario} != directory ]]; then
+                    after_bytes=$(sha256sum <"${target}")
+                    assert_equals "${before_bytes}" "${after_bytes}" \
+                        'audio collision preserves existing bytes'
+                fi
+                if [[ ${scenario} == symlink ]]; then
+                    [[ -L ${target} ]] || fail 'Audio preflight replaced a symlink.'
+                fi
+            fi
+        done
+    done
+
+    new_case 'native-audio-invalid-extension'
+    final_identity=$(stat -c '%d:%i' -- "${OUTPUT_DIR}")
+    write_single_plan 'https://example.invalid/native-audio' \
+        "${OUTPUT_DIR}/native.m4a][ext=mp3" 'qualification-native'
+    assert_status_split 65 'audio extension cannot inject a yt-dlp format selector' \
+        python3 "${HELPER}" check-native-final --mode audio \
+        --output-dir "${OUTPUT_DIR}" --plan "${PLAN_FILE}" \
+        --final-output-dir "${OUTPUT_DIR}" --final-output-identity "${final_identity}"
+    assert_equals '' "${ASSERT_STDOUT}" 'invalid audio extension emits no usable template'
+}
+
 test_private_plan_duplicate_staging_names() {
     new_case 'duplicate-staging-names'
     write_double_plan
@@ -770,7 +844,7 @@ test_private_plan_duplicate_staging_names() {
 
     # Mutating a private manifest must be rejected before publication starts,
     # not after moving a component and relying on filesystem rollback.
-    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${MANIFEST}" <<'PY_DUPLICATE_STAGING'
+    python3 -I -B - "${HELPER}" "${MANIFEST}" <<'PY_DUPLICATE_STAGING'
 import argparse
 import importlib.util
 import json
@@ -923,7 +997,7 @@ test_network_media_permissions() {
 test_private_roots_and_media_faults() {
     printf '%s\n' 'Private aria2 plan scenario: private roots and publication fault boundaries'
     new_case 'network-publication-boundaries'
-    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_NETWORK_BOUNDARIES'
+    python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_NETWORK_BOUNDARIES'
 import argparse
 import ctypes
 import errno
@@ -1345,7 +1419,7 @@ PY_NETWORK_BOUNDARIES
 test_workspace_mount_boundaries() {
     printf '%s\n' 'Private aria2 plan scenario: descriptor-bound cleanup mount boundaries'
     new_case 'cleanup-mount-boundaries'
-    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_CLEANUP_MOUNTS'
+    python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_CLEANUP_MOUNTS'
 import argparse
 import builtins
 import errno
@@ -1469,6 +1543,54 @@ print("Workspace mount-boundary and uncertain-identity preservation checks passe
 PY_CLEANUP_MOUNTS
 }
 
+test_workspace_mount_oracle_ignores_optimization() {
+    printf '%s\n' 'Private aria2 plan scenario: optimized environment retains cleanup assertions'
+    new_case 'cleanup-oracle-optimization'
+    python3 -I -B - "${BASH_SOURCE[0]}" "${HELPER}" "${CASE_ROOT}" <<'PY_CLEANUP_ORACLE'
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+match = re.search(
+    r"^    ([^\n]+ <<'PY_CLEANUP_MOUNTS')\n(.*?)^PY_CLEANUP_MOUNTS$",
+    source, re.MULTILINE | re.DOTALL,
+)
+if match is None:
+    raise AssertionError("the actual cleanup mount oracle was not found")
+command, driver = match.groups()
+anchor = "spec.loader.exec_module(module)\n"
+if driver.count(anchor) != 1:
+    raise AssertionError("cleanup oracle helper import is ambiguous")
+# Change the helper only inside the child: the real oracle must detect a
+# cleanup that discards its mount boundary even in an optimized environment.
+mutant = driver.replace(anchor, anchor + '''
+import shutil
+def unsafe_cleanup(arguments):
+    shutil.rmtree(arguments.path)
+    return 0
+module.cleanup_workspace = unsafe_cleanup
+''')
+for level in ("1", "2"):
+    root = Path(sys.argv[3]) / level
+    root.mkdir()
+    environment = dict(os.environ, PYTHONOPTIMIZE=level,
+                       HELPER=sys.argv[2], CASE_ROOT=str(root))
+    result = subprocess.run(
+        ["bash", "-c", command + "\n" + mutant + "\nPY_CLEANUP_MOUNTS\n"],
+        env=environment, text=True, capture_output=True, timeout=15,
+    )
+    if result.returncode == 0 or "AssertionError" not in result.stderr:
+        raise AssertionError((level, "unsafe cleanup escaped the actual oracle",
+                              result.returncode, result.stdout, result.stderr))
+    if "cleanup crossed an unresolved mount boundary" not in result.stderr:
+        raise AssertionError((level, "mutation failed for an unrelated reason", result.stderr))
+print("Cleanup mount oracle rejects destructive mutations under PYTHONOPTIMIZE=1/2.")
+PY_CLEANUP_ORACLE
+}
+
 test_private_plan_signal_rollback() {
     local checkpoint signal_number
 
@@ -1485,7 +1607,7 @@ test_private_plan_signal_rollback() {
             # the first checkpoint runs, before rollback registration.
             assert_status "$((128 + signal_number))" \
                 "signal rollback at ${checkpoint}, signal ${signal_number}" \
-                env PYTHONDONTWRITEBYTECODE=1 python3 - \
+                python3 -I -B - \
                 "${HELPER}" "${MANIFEST}" "${checkpoint}" "${signal_number}" <<'PY_SIGNAL_ROLLBACK'
 import importlib.util
 import errno
@@ -1552,7 +1674,7 @@ test_private_plan_rollback_safety() {
     # originally published by this transaction.
     printf '%s\n' 'Private aria2 plan scenario: conservative rollback identity'
     new_case 'rollback-identity'
-    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_ROLLBACK'
+    python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_ROLLBACK'
 import importlib.util
 import sys
 from pathlib import Path
@@ -1584,7 +1706,7 @@ PY_ROLLBACK
     # helper-owned hardlink and leave the original staging inode available.
     printf '%s\n' 'Private aria2 plan scenario: post-link verification rollback'
     new_case 'post-link-verification-rollback'
-    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_POST_LINK'
+    python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_POST_LINK'
 import importlib.util
 import os
 import sys
@@ -1635,7 +1757,7 @@ PY_POST_LINK
     # foreign destination.
     printf '%s\n' 'Private aria2 plan scenario: rollback failure reporting'
     new_case 'rollback-failure-reporting'
-    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_ROLLBACK_FAILURE'
+    python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_ROLLBACK_FAILURE'
 import importlib.util
 import sys
 from pathlib import Path
@@ -1665,7 +1787,7 @@ PY_ROLLBACK_FAILURE
     # into PlanError/EX_DATAERR.
     printf '%s\n' 'Private aria2 plan scenario: private-file I/O error class'
     new_case 'private-file-io-error'
-    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_PRIVATE_IO'
+    python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_PRIVATE_IO'
 import importlib.util
 import os
 import sys
@@ -1707,7 +1829,7 @@ PY_PRIVATE_IO
     # report the incomplete rollback.
     printf '%s\n' 'Private aria2 plan scenario: replaced-destination rollback reporting'
     new_case 'replaced-destination-rollback'
-    PYTHONDONTWRITEBYTECODE=1 python3 - "${HELPER}" "${CASE_ROOT}" <<'PY_REPLACED_DEST'
+    python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_REPLACED_DEST'
 import importlib.util
 import os
 import sys
@@ -1748,7 +1870,7 @@ test_private_plan_ownership() {
         'https://example.invalid/media.mp4' \
         "${OUTPUT_DIR}/final.mp4" \
         'qualification-agent'
-    PYTHONDONTWRITEBYTECODE=1 python3 - \
+    python3 -I -B - \
         "${HELPER}" "${PLAN_FILE}" "${OUTPUT_DIR}" "${STAGING_DIR}" \
         "${ARIA2_INPUT}" "${MANIFEST}" <<'PY_PRIVATE_OWNERSHIP'
 import argparse
@@ -1843,7 +1965,7 @@ test_private_plan_protocol_metadata() {
     for scenario in secret-protocol list-protocol object-protocol; do
         printf 'Private aria2 plan scenario: %s\n' "${scenario}"
         new_case "${scenario}"
-        python3 - "${PLAN_FILE}" "${OUTPUT_DIR}" "${scenario}" <<'PY_PROTOCOL_METADATA'
+        python3 -I -B - "${PLAN_FILE}" "${OUTPUT_DIR}" "${scenario}" <<'PY_PROTOCOL_METADATA'
 import json
 import os
 import sys
@@ -1895,7 +2017,7 @@ test_private_plan_duplicate_headers() {
     for scenario in different-values identical-values; do
         printf 'Private aria2 plan scenario: duplicate headers %s\n' "${scenario}"
         new_case "duplicate-headers-${scenario}"
-        python3 - "${PLAN_FILE}" "${OUTPUT_DIR}" "${scenario}" <<'PY_DUPLICATE_HEADERS'
+        python3 -I -B - "${PLAN_FILE}" "${OUTPUT_DIR}" "${scenario}" <<'PY_DUPLICATE_HEADERS'
 import json
 import os
 import sys
@@ -1927,7 +2049,7 @@ PY_DUPLICATE_HEADERS
 
     printf '%s\n' 'Private aria2 plan scenario: unique mixed-case header'
     new_case 'unique-mixed-case-header'
-    python3 - "${PLAN_FILE}" "${OUTPUT_DIR}" <<'PY_UNIQUE_HEADER'
+    python3 -I -B - "${PLAN_FILE}" "${OUTPUT_DIR}" <<'PY_UNIQUE_HEADER'
 import json
 import os
 import sys
@@ -1967,6 +2089,7 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
+    test_workspace_mount_oracle_ignores_optimization
     test_workspace_mount_boundaries
     test_network_media_permissions
     test_private_roots_and_media_faults
@@ -1977,6 +2100,7 @@ main() {
     test_private_plan_existing_destinations
     test_private_plan_final_destination_preflight
     test_native_final_destination_preflight
+    test_native_audio_final_destination_preflight
     test_private_plan_duplicate_staging_names
     test_private_plan_publication_safety
     test_private_plan_rollback_safety

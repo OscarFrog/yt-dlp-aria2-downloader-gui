@@ -33,7 +33,7 @@ WORKFLOWS = {
         "Fedora 44 RPM (ffmpeg-free)", "Ubuntu 24.04 DEB",
     },
     "qualification.yml": {
-        "FFmpeg 6.1.1 / Ubuntu 24.04", "FFmpeg 8.1.2 / Fedora 44",
+        "FFmpeg 6.1.1 / Ubuntu 24.04", "FFmpeg 8.1.3 / Fedora 44",
         "FFmpeg 9.0.1 / verified upstream source",
     },
     "real-tools.yml": {
@@ -65,7 +65,7 @@ REQUIRED_STEPS = {
     } for scenario in ("fresh", "ffmpeg-free")},
     **{name: {f"Qualify FFmpeg {version} generation"} for name, version in (
         ("FFmpeg 6.1.1 / Ubuntu 24.04", "6.1.1"),
-        ("FFmpeg 8.1.2 / Fedora 44", "8.1.2"),
+        ("FFmpeg 8.1.3 / Fedora 44", "8.1.3"),
         ("FFmpeg 9.0.1 / verified upstream source", "9.0.1"),
     )},
     **{f"Local media, pinned yt-dlp {version}": {

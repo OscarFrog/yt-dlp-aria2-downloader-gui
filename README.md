@@ -144,6 +144,9 @@ causes a clear failure without invoking `curl`. Use `runtime-manager.sh ensure`
 when bootstrap-without-update is explicitly desired. `runtime-manager.sh rollback
 yt-dlp` and `runtime-manager.sh rollback deno` activate a validated previous
 runtime when one is available.
+Rollback applies the same real-directory, regular executable and exact-version
+checks as normal activation. `ensure` tries a valid installed previous runtime
+before bootstrap even when the active link, directory or executable is missing.
 
 Installed versions are retained because a running download can still use an
 older version after several updates. Re-downloading an identical verified
@@ -349,6 +352,9 @@ isolated keyring, and requires the reviewed NEVRA
 are rejected until they have been qualified. The RPM Fusion certificate and
 bootstrap RPM cross the same root-owned staging boundary and are revalidated
 there before privileged import or installation.
+Catchable HUP/INT/TERM requests are deferred until temporary staging is
+authenticated and registered for cleanup; a repeated signal does not interrupt
+that cleanup. SIGKILL cannot provide this guarantee.
 
 The bootstrap performs these checks and actions:
 
@@ -734,6 +740,13 @@ post-processing an older file; it is not reported as a newly validated success.
 Native extraction and retries retain the basename selected during planning,
 including when fresh metadata would otherwise change it. The YouTube HLS/Firefox
 profile retains its separate checked-remux publication path.
+
+Native audio also refuses a pre-existing planned input name before transfer or
+metadata processing, rather than treating the old audio as a new download.
+Its refreshed selection must retain the planned input extension; if that format
+is no longer available, the attempt fails before transfer and can be started again.
+Destination directory names containing literal `$`, `${VAR}` or `%` stay literal;
+they are not expanded as environment variables or yt-dlp metadata templates.
 
 On a local destination used directly for processing, another program can still
 create the same final name after that check and before yt-dlp post-processing;

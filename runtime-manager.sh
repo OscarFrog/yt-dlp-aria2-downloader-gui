@@ -694,6 +694,26 @@ publish_runtime_link() {
     return 0
 }
 
+# An absent old version must not prevent recovery to a verified candidate.
+# Keep the earlier previous directory when it is still real; never publish a
+# dangling or indirect target merely to complete an activation journal.
+publish_activation_previous() {
+    local root=$1
+    local old_target=$2
+    local previous_before=$3
+    local target=''
+
+    for target in "${old_target}" "${previous_before}"; do
+        [[ -n ${target} ]] || continue
+        runtime_target_is_safe "${target}" || return 1
+        if [[ -d ${root}/${target} && ! -L ${root}/${target} ]]; then
+            publish_runtime_link "${root}" previous "${target}"
+            return $?
+        fi
+    done
+    rm -f -- "${root}/previous"
+}
+
 write_activation_journal() {
     local root=$1
     local old_target=$2
@@ -776,17 +796,10 @@ recover_activation_transaction() {
 
     read_runtime_link "${root}" current current_target || return 1
     if [[ ${current_target} == "${new_target}" ]]; then
-        if [[ -n ${old_target} ]]; then
-            publish_runtime_link "${root}" previous "${old_target}" || return 1
-        else
-            rm -f -- "${root}/previous" || return 1
-        fi
+        publish_activation_previous "${root}" "${old_target}" \
+            "${previous_before}" || return 1
     elif [[ ${current_target} == "${old_target}" ]]; then
-        if [[ -n ${previous_before} ]]; then
-            publish_runtime_link "${root}" previous "${previous_before}" || return 1
-        else
-            rm -f -- "${root}/previous" || return 1
-        fi
+        publish_activation_previous "${root}" '' "${previous_before}" || return 1
     else
         error "runtime activation journal does not match current state below ${root}."
         return 1
@@ -822,11 +835,8 @@ activate_version() {
     write_activation_journal \
         "${root}" "${old_target}" "${previous_before}" "${version}" || return 1
 
-    if [[ -n ${old_target} ]]; then
-        publish_runtime_link "${root}" previous "${old_target}" || return 1
-    else
-        rm -f -- "${root}/previous" || return 1
-    fi
+    publish_activation_previous "${root}" "${old_target}" \
+        "${previous_before}" || return 1
     publish_runtime_link "${root}" current "${version}" || return 1
     rm -f -- "${root}/.activation-journal" || return 1
     return 0
@@ -1503,18 +1513,10 @@ update_deno() {
 
 ensure_runtime() {
     if ! component_path yt-dlp >/dev/null 2>&1; then
-        printf 'Installing the current yt-dlp %s runtime...\n' "${YTDLP_CHANNEL}" >&2
-        bootstrap_ytdlp || {
-            error 'unable to install the initial yt-dlp runtime.'
-            return 1
-        }
+        recover_invalid_active_runtime yt-dlp || return 1
     fi
     if ! component_path deno >/dev/null 2>&1; then
-        printf 'Installing the current Deno stable runtime...\n' >&2
-        bootstrap_deno || {
-            error 'unable to install the initial Deno runtime.'
-            return 1
-        }
+        recover_invalid_active_runtime deno || return 1
     fi
     return 0
 }
@@ -1541,18 +1543,14 @@ require_runtime() {
 rollback_component() {
     local component=$1
     local root=''
-    local asset=''
     local previous_target=''
-    local previous_path=''
 
     case ${component} in
         yt-dlp)
             root=${YTDLP_ROOT}
-            asset=${YTDLP_ASSET}
             ;;
         deno)
             root=${DENO_ROOT}
-            asset='deno'
             ;;
         *)
             error "unknown runtime component for rollback: ${component}"
@@ -1569,19 +1567,16 @@ rollback_component() {
         error "invalid previous ${component} runtime target."
         return 1
     }
-    previous_path="${root}/${previous_target}/${asset}"
-    [[ -x ${previous_path} ]] || {
-        error "previous ${component} runtime is missing or not executable."
+    # Reuse the same structure, exact-version and activation contract as a
+    # previously downloaded release; a functional probe alone is insufficient.
+    case ${component} in
+        yt-dlp) reuse_installed_ytdlp_version "${previous_target}" ;;
+        deno) reuse_installed_deno_version "${previous_target}" ;;
+        *) return 2 ;;
+    esac || {
+        error "unable to activate a verified previous ${component} runtime."
         return 1
     }
-
-    case ${component} in
-        yt-dlp) validate_ytdlp "${previous_path}" || return 1 ;;
-        deno) validate_deno "${previous_path}" || return 1 ;;
-        *) return 2 ;;
-    esac
-
-    activate_version "${root}" "${previous_target}" || return 1
     printf 'Rolled back %s to %s.\n' "${component}" "${previous_target}" >&2
     return 0
 }

@@ -145,7 +145,7 @@ assert_standard_python_header() {
         return 65
     fi
 
-    if ! python3 - "${absolute_path}" "${STANDARD_HEADER_PROJECT}" \
+    if ! python3 -I -B - "${absolute_path}" "${STANDARD_HEADER_PROJECT}" \
         "${relative_path}" <<'PYTHON_HEADER_VALIDATION'; then
 import ast
 import pathlib
@@ -2874,7 +2874,7 @@ test_static_python_interface_contracts() {
 
     # Real filesystem publication with one injected boundary failure must
     # preserve the preceding complete documentation generation.
-    python3 -B - "${SCRIPT_DIR}" "${synthetic_version}" <<'PY_UPDATE_FAILURES'
+    python3 -I -B - "${SCRIPT_DIR}" "${synthetic_version}" <<'PY_UPDATE_FAILURES'
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch

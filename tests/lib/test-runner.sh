@@ -16,6 +16,7 @@ TEST_RUNNER_CHILD_PGIDS=()
 TEST_RUNNER_CHILD_COMPLETIONS=()
 TEST_RUNNER_CHILD_TOKENS=()
 TEST_RUNNER_CHILD_START_TIMES=()
+TEST_RUNNER_KILLED_GROUPS=()
 TEST_RUNNER_CHILD_SEQUENCE=0
 TEST_RUNNER_STARTING_CHILD=false
 TEST_RUNNER_DEFERRED_SIGNAL=''
@@ -41,7 +42,7 @@ test_runner_validate_termination_poll_attempts() {
 
 # Return a monotonic timestamp in milliseconds.
 test_runner_now_ms() {
-    python3 - <<'PY_NOW'
+    python3 -I -B - <<'PY_NOW'
 import time
 
 print(time.monotonic_ns() // 1_000_000)
@@ -66,6 +67,7 @@ test_runner_initialize() {
     ((${#TEST_RUNNER_CHILD_COMPLETIONS[@]} == 0)) || return 70
     ((${#TEST_RUNNER_CHILD_TOKENS[@]} == 0)) || return 70
     ((${#TEST_RUNNER_CHILD_START_TIMES[@]} == 0)) || return 70
+    ((${#TEST_RUNNER_KILLED_GROUPS[@]} == 0)) || return 70
     ((TEST_RUNNER_CHILD_SEQUENCE == 0)) || return 70
     [[ -z ${TEST_RUNNER_LOG_DIR} ]] || return 70
     [[ ${TEST_RUNNER_STARTING_CHILD} == false ]] || return 70
@@ -80,7 +82,8 @@ test_runner_initialize() {
 # supervisor retains the private identity while the command runs, records an
 # optional monotonic completion time, and returns the command's exact status.
 _test_runner_exec_child() {
-    exec python3 - "$@" <<'PY_CHILD'
+    exec python3 -I -B - "$@" <<'PY_CHILD'
+import ctypes
 import os
 import signal
 import sys
@@ -109,6 +112,13 @@ try:
         os.setpgid(0, os.getpgid(os.getppid()))
     os.setsid()
 except OSError:
+    os._exit(70)
+
+# Adopt orphaned descendants before the command can fork. Keeping those PIDs
+# as unreaped direct children permits safe individual KILL escalation without
+# killing this session leader or losing the original command's exit status.
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(36, 1, 0, 0, 0) != 0:
     os._exit(70)
 
 def exec_command():
@@ -148,38 +158,76 @@ while True:
     except InterruptedError:
         continue
 
-# If cancellation reached this session, keep the authenticated leader alive
-# until every same-group descendant has exited. A signal-resistant command can
-# clear its environment without making the runner lose KILL escalation.
-if termination_requested:
-    own_pid = os.getpid()
-    own_pgid = os.getpgrp()
+own_pid = os.getpid()
+own_pgid = os.getpgrp()
+
+
+def reap_adopted_children():
     while True:
-        group_has_descendant = False
         try:
-            process_entries = tuple(os.scandir("/proc"))
-        except OSError:
-            os._exit(70)
-        for process_entry in process_entries:
-            if not process_entry.name.isdigit() or int(process_entry.name) == own_pid:
+            reaped_pid, _status = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if not reaped_pid:
+            return
+
+
+def live_group_members():
+    members = []
+    with os.scandir("/proc") as entries:
+        for entry in entries:
+            if not entry.name.isdigit() or int(entry.name) == own_pid:
                 continue
             try:
-                with open(
-                    f"/proc/{process_entry.name}/stat", encoding="ascii"
-                ) as process_file:
-                    process_stat = process_file.read()
-            except OSError:
+                with open(f"/proc/{entry.name}/stat", encoding="ascii", errors="replace") as process_file:
+                    fields = process_file.read().rsplit(") ", 1)[1].split()
+            except (FileNotFoundError, ProcessLookupError):
                 continue
-            stat_end = process_stat.rfind(") ")
-            if stat_end < 0:
-                continue
-            process_fields = process_stat[stat_end + 2 :].split()
-            if len(process_fields) >= 3 and process_fields[2] == str(own_pgid):
-                group_has_descendant = True
+            if (len(fields) >= 4 and fields[0] not in {"Z", "X"}
+                    and fields[2] == str(own_pgid) and fields[3] == str(own_pgid)):
+                members.append(int(entry.name))
+    return members
+
+
+# Ordinary success/failure must not release the sentinel while descendants
+# still consume logs or other resources. The existing runner grace period also
+# bounds this cleanup; cancellation retains the outer runner's escalation.
+ordinary_cleanup = not termination_requested
+cleanup_deadline = time.monotonic() + int(os.environ.get(
+    "YTDLP_ARIA2_TEST_RUNNER_TERMINATION_POLL_ATTEMPTS", "50")) / 10
+cleanup_failed = False
+sent_term = False
+while True:
+    reap_adopted_children()
+    try:
+        members = live_group_members()
+    except (OSError, IndexError):
+        cleanup_failed = True
+        break
+    if not members:
+        reap_adopted_children()
+        break
+    if ordinary_cleanup:
+        if not sent_term:
+            os.killpg(own_pgid, signal.SIGTERM)
+            sent_term = True
+        if time.monotonic() >= cleanup_deadline:
+            for pid in members:
+                try:
+                    # WNOWAIT preserves child ownership until after signaling.
+                    # Non-children cannot gain authority from a numeric PID.
+                    state = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                    if state is None:
+                        os.kill(pid, signal.SIGKILL)
+                except (ChildProcessError, ProcessLookupError):
+                    continue
+            if time.monotonic() >= cleanup_deadline + 2:
+                cleanup_failed = True
                 break
-        if not group_has_descendant:
-            break
-        time.sleep(0.05)
+    time.sleep(0.05)
+
+if cleanup_failed:
+    print("Error: validation descendants did not reach confirmed quiescence.", file=sys.stderr, flush=True)
 
 if completion_path:
     try:
@@ -189,7 +237,8 @@ if completion_path:
         os._exit(70)
 
 if os.WIFEXITED(wait_status):
-    os._exit(os.WEXITSTATUS(wait_status))
+    command_status = os.WEXITSTATUS(wait_status)
+    os._exit(command_status or (70 if cleanup_failed else 0))
 if os.WIFSIGNALED(wait_status):
     os._exit(min(128 + os.WTERMSIG(wait_status), 255))
 os._exit(70)
@@ -432,7 +481,44 @@ test_runner_read_completion() {
     printf -v "${output_name}" '%s' "${records[0]}"
 }
 
-# Wait for one recorded child and release its supervision slot.
+# Signal zero only observes a group. After authenticated collective KILL no
+# member can fork again; zombie-only members then count as stopped. Otherwise
+# require ESRCH. An unknown/recycled group never gains signal authority.
+test_runner_group_is_quiescent() {
+    (($# == 2)) || return 2
+    [[ $1 =~ ^[1-9][0-9]*$ ]] || return 1
+    python3 -I -B - "$@" <<'PY_RUNNER_GROUP_ABSENT'
+import os
+import sys
+
+try:
+    os.kill(-int(sys.argv[1]), 0)
+except ProcessLookupError:
+    sys.exit(0)
+except (OSError, ValueError, OverflowError):
+    sys.exit(1)
+if sys.argv[2] == "true":
+    try:
+        with os.scandir("/proc") as entries:
+            for entry in entries:
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    with open(f"/proc/{entry.name}/stat", encoding="ascii", errors="replace") as handle:
+                        fields = handle.read().rsplit(") ", 1)[1].split()
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                if (len(fields) >= 4 and fields[0] not in {"Z", "X"}
+                        and fields[2] == sys.argv[1] and fields[3] == sys.argv[1]):
+                    sys.exit(1)
+    except (OSError, IndexError):
+        sys.exit(1)
+    sys.exit(0)
+sys.exit(1)
+PY_RUNNER_GROUP_ABSENT
+}
+
+# Wait for one recorded child and release its slot only after group absence.
 test_runner_wait_child() {
     (($# == 1)) || return 2
     local slot=$1
@@ -441,11 +527,18 @@ test_runner_wait_child() {
 
     [[ -n ${pid} ]] || return 70
     wait "${pid}" || status=$?
+    if ! test_runner_group_is_quiescent \
+        "${TEST_RUNNER_CHILD_PGIDS[${slot}]:-${pid}}" \
+        "${TEST_RUNNER_KILLED_GROUPS[${slot}]:-false}"; then
+        ((status != 0)) || status=70
+        return "${status}"
+    fi
     unset 'TEST_RUNNER_CHILD_PIDS[slot]'
     unset 'TEST_RUNNER_CHILD_PGIDS[slot]'
     unset 'TEST_RUNNER_CHILD_COMPLETIONS[slot]'
     unset 'TEST_RUNNER_CHILD_TOKENS[slot]'
     unset 'TEST_RUNNER_CHILD_START_TIMES[slot]'
+    unset 'TEST_RUNNER_KILLED_GROUPS[slot]'
     return "${status}"
 }
 
@@ -669,7 +762,10 @@ test_runner_signal_slot() {
     if test_runner_pid_has_group_identity \
         "${pid}" "${pgid}" "${child_token}" "${child_start_time}" \
         || test_runner_group_has_token "${pgid}" "${child_token}"; then
-        kill "-${signal_name}" -- "-${pgid}" 2>/dev/null
+        kill "-${signal_name}" -- "-${pgid}" 2>/dev/null || return
+        if [[ ${signal_name} == KILL ]]; then
+            TEST_RUNNER_KILLED_GROUPS[slot]=true
+        fi
     elif test_runner_pid_has_token "${pid}" "${child_token}" \
         || test_runner_pid_has_start_time "${pid}" "${child_start_time}"; then
         kill "-${signal_name}" -- "${pid}" 2>/dev/null
@@ -720,14 +816,8 @@ test_runner_terminate_children() {
     done
 
     for slot in "${!TEST_RUNNER_CHILD_PIDS[@]}"; do
-        pid=${TEST_RUNNER_CHILD_PIDS[${slot}]}
         test_runner_signal_slot "${slot}" KILL || true
-        wait "${pid}" 2>/dev/null || true
-        unset 'TEST_RUNNER_CHILD_PIDS[slot]'
-        unset 'TEST_RUNNER_CHILD_PGIDS[slot]'
-        unset 'TEST_RUNNER_CHILD_COMPLETIONS[slot]'
-        unset 'TEST_RUNNER_CHILD_TOKENS[slot]'
-        unset 'TEST_RUNNER_CHILD_START_TIMES[slot]'
+        test_runner_wait_child "${slot}" 2>/dev/null || true
     done
 }
 
@@ -742,6 +832,10 @@ test_runner_cleanup() {
     if ((${#TEST_RUNNER_CHILD_PIDS[@]} > 0)); then
         test_runner_terminate_children "${signal_name}" || true
     fi
+    if ((${#TEST_RUNNER_CHILD_PIDS[@]} > 0)); then
+        printf '%s\n' 'Warning: preserving runner logs while child-group shutdown remains unconfirmed.' >&2
+        return 0
+    fi
 
     if [[ -n ${TEST_RUNNER_LOG_DIR} && -d ${TEST_RUNNER_LOG_DIR} &&
         ! -L ${TEST_RUNNER_LOG_DIR} ]]; then
@@ -750,6 +844,7 @@ test_runner_cleanup() {
     TEST_RUNNER_LOG_DIR=''
     TEST_RUNNER_CHILD_TOKENS=()
     TEST_RUNNER_CHILD_START_TIMES=()
+    TEST_RUNNER_KILLED_GROUPS=()
     TEST_RUNNER_CHILD_SEQUENCE=0
     TEST_RUNNER_STARTING_CHILD=false
     TEST_RUNNER_DEFERRED_SIGNAL=''

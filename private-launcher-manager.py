@@ -753,6 +753,48 @@ def create_temporary_file(
     raise LauncherError("unable to allocate a unique launcher temporary file")
 
 
+def validator_child_has_exited(process: subprocess.Popen[bytes]) -> bool:
+    """Observe exit without releasing the child PID that anchors its group."""
+
+    if process.returncode is not None:
+        return True
+    try:
+        result = os.waitid(
+            os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+        )
+    except ChildProcessError as exc:
+        raise LauncherError("desktop-file-validate child ownership was lost") from exc
+    return result is not None
+
+
+def validator_group_has_live_member(group_id: int) -> bool:
+    """Observe same-session processes while the unreaped leader anchors PGID."""
+
+    with os.scandir("/proc") as entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                with open(
+                    f"/proc/{entry.name}/stat", encoding="ascii", errors="replace"
+                ) as process_file:
+                    record = process_file.read().rsplit(") ", 1)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            if len(record) != 2:
+                raise LauncherError("unable to inspect desktop-file-validate group")
+            fields = record[1].split()
+            if len(fields) < 4:
+                raise LauncherError("unable to inspect desktop-file-validate group")
+            if (
+                fields[0] not in {"Z", "X"}
+                and fields[2] == str(group_id)
+                and fields[3] == str(group_id)
+            ):
+                return True
+    return False
+
+
 def validate_desktop_file(applications_fd: int, temporary_name: str) -> None:
     raise_pending_shutdown()
     validator = shutil.which("desktop-file-validate")
@@ -781,8 +823,9 @@ def validate_desktop_file(applications_fd: int, temporary_name: str) -> None:
     wait_error: BaseException | None = None
 
     # Once process creation begins, honor a recorded request only after every
-    # possible child has been killed, reaped, and disconnected. The polling
-    # checks below still react to the request within 100 ms.
+    # group member has stopped, the direct child is reaped, and its output is
+    # disconnected. The polling checks below still react to the request within
+    # 100 ms.
     with defer_shutdown_interruptions():
         try:
             process = subprocess.Popen(
@@ -832,7 +875,14 @@ def validate_desktop_file(applications_fd: int, temporary_name: str) -> None:
         finally:
             if process is not None:
                 if not timed_out and not operation_interrupted:
-                    while process.poll() is None:
+                    while True:
+                        try:
+                            if validator_child_has_exited(process):
+                                break
+                        except BaseException as exc:
+                            operation_interrupted = True
+                            wait_error = exc
+                            break
                         if shutdown_requested():
                             operation_interrupted = True
                             break
@@ -841,20 +891,31 @@ def validate_desktop_file(applications_fd: int, temporary_name: str) -> None:
                             timed_out = True
                             break
                         try:
-                            process.wait(timeout=min(0.1, remaining))
-                        except subprocess.TimeoutExpired:
-                            continue
+                            time.sleep(min(0.1, remaining))
                         except BaseException as exc:
                             operation_interrupted = True
                             wait_error = exc
                             break
                 if shutdown_requested():
                     operation_interrupted = True
-                if process.poll() is None:
+                if process.returncode is None:
                     try:
+                        # WNOWAIT authenticates the still-owned child without
+                        # reaping an exited leader. Its PID/PGID cannot be
+                        # recycled before the collective termination below.
+                        validator_child_has_exited(process)
                         os.killpg(process.pid, signal.SIGKILL)
+                        stop_deadline = time.monotonic() + 2
+                        while validator_group_has_live_member(process.pid):
+                            if time.monotonic() >= stop_deadline:
+                                raise TemporaryLauncherError(
+                                    "desktop-file-validate group did not stop after termination"
+                                )
+                            time.sleep(0.01)
                     except ProcessLookupError:
                         pass
+                    except (LauncherError, OSError) as exc:
+                        wait_error = exc
                 try:
                     process.wait(timeout=2)
                 except subprocess.TimeoutExpired as exc:
@@ -865,10 +926,11 @@ def validate_desktop_file(applications_fd: int, temporary_name: str) -> None:
                             file=sys.stderr,
                         )
                     else:
-                        raise TemporaryLauncherError(
+                        wait_error = TemporaryLauncherError(
                             "desktop-file-validate could not be reaped after "
                             "termination"
-                        ) from exc
+                        )
+                        wait_error.__cause__ = exc
                 if process.stdout is not None:
                     try:
                         process.stdout.close()

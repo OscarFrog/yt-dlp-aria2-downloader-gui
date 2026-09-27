@@ -286,7 +286,7 @@ class ShfmtBootstrapTests(unittest.TestCase):
         ''')
         for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
             with self.subTest(signal=number):
-                child = self.start_process([sys.executable, "-B", "-c", driver, __file__])
+                child = self.start_process([sys.executable, "-I", "-B", "-c", driver, __file__])
                 def read_message():
                     # Do not mix TextIO read-ahead with descriptor readiness:
                     # another complete message may already be in its buffer.

@@ -287,6 +287,33 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
         self.env["PROJECT_VERSION"] = "999.0.0"
         self.publish_checkout(success=False)
 
+    def test_publisher_rejects_changed_bytes_with_unchanged_version_and_complete_manifest(self):
+        self.prepare()
+        self.verify()
+        path = self.seed / "download-video.sh"
+        with path.open("a") as output:
+            output.write("\nprintf 'unverified runtime change'\n")
+        handoff = self.runtime / "shfmt-verified-handoff"
+        # Rehash the patch, but retain the complete manifest of the bytes that
+        # actually passed verification. Neither inventory nor version rejects it.
+        manifest = (handoff / "shfmt-tested-tree.sha256").read_bytes()
+        patch = self.git(self.seed, "diff", "--binary").stdout.encode("utf-8")
+        (handoff / "shfmt-update.patch").write_bytes(patch)
+        (handoff / "shfmt-update.patch.sha256").write_text(
+            hashlib.sha256(patch).hexdigest() + "  shfmt-update.patch\n", encoding="utf-8")
+        publication_input = self.runtime / "shfmt-update-handoff"
+        shutil.rmtree(publication_input)
+        shutil.copytree(handoff, publication_input)
+        publisher = self.clone("publisher")
+        result = self.run_step("Verify base and apply allowlisted patch", publisher, success=False)
+        self.assertIn("shfmt-update.patch: OK", result.stdout)
+        self.assertIn("download-video.sh: FAILED", result.stdout)
+        self.assertIn("computed checksum did NOT match", result.stderr)
+        self.assertEqual((handoff / "shfmt-tested-tree.sha256").read_bytes(), manifest)
+        self.assertEqual(self.git(publisher, "rev-parse", "HEAD").stdout.strip(), self.base_sha)
+        self.assertEqual(self.git(self.seed, "ls-remote", "--heads", "origin",
+                                 f"refs/heads/automation/shfmt-v{UPSTREAM}").stdout, "")
+
     def test_publisher_rejects_version_change_even_with_matching_tested_digests(self):
         self.prepare()
         self.verify()

@@ -70,6 +70,11 @@ args = sys.argv[1:]
 def save():
     state_path.write_text(json.dumps(state))
 
+def require(condition):
+    # The API fixture is also an oracle and must survive PYTHONOPTIMIZE.
+    if not condition:
+        raise AssertionError("invalid simulated API request")
+
 def emit(value):
     text = json.dumps(value)
     if "--jq" in args:
@@ -93,21 +98,21 @@ if method != "GET":
     save()
     if route == "git/blobs":
         data = base64.b64decode(payload["content"], validate=True)
-        assert payload["encoding"] == "base64"
+        require(payload["encoding"] == "base64")
         emit({"sha": hashlib.sha1(data).hexdigest()})
     elif route == "git/trees":
-        assert payload["base_tree"] == "d" * 40
-        assert len(payload["tree"]) == 3
+        require(payload["base_tree"] == "d" * 40)
+        require(len(payload["tree"]) == 3)
         emit({"sha": "1" * 40})
     elif route == "git/commits":
-        assert payload["parents"] == [state["base_sha"]]
+        require(payload["parents"] == [state["base_sha"]])
         emit({"sha": "2" * 40})
     else:
-        assert route in ("git/refs", "git/refs/heads/" + state["branch"])
+        require(route in ("git/refs", "git/refs/heads/" + state["branch"]))
         if method == "PATCH":
-            assert payload == {"sha": "2" * 40, "force": False}
+            require(payload == {"sha": "2" * 40, "force": False})
         else:
-            assert payload == {"ref": "refs/heads/" + state["branch"], "sha": "2" * 40}
+            require(payload == {"ref": "refs/heads/" + state["branch"], "sha": "2" * 40})
         if state["scenario"] == "ref-race":
             sys.exit(1)
         state["target_sha"] = "2" * 40
@@ -133,7 +138,7 @@ elif route.startswith("compare/"):
     emit({"merge_base_commit": {"sha": route[8:].split("...")[0]}})
 elif route.startswith("contents/"):
     relative, revision = route[9:].split("?ref=")
-    assert revision in ("a" * 40, state["base_sha"])
+    require(revision in ("a" * 40, state["base_sha"]))
     sys.stdout.buffer.write((root / "base" / relative).read_bytes())
 elif route == "git/commits/" + state["base_sha"]:
     emit(json.loads((root / "commit.json").read_text()))
@@ -338,6 +343,23 @@ class ReleaseDocsReplay(unittest.TestCase):
         for relative, contents in before.items():
             self.assertEqual((self.seed / relative).read_bytes(), contents)
             self.assertEqual((sibling / relative).read_bytes(), contents)
+
+    def test_api_oracle_rejects_forced_ref_updates_under_optimization(self):
+        for level in ("1", "2"):
+            with self.subTest(optimization=level):
+                self.prepare()
+                payload = self.root / "unsafe-ref-update.json"
+                payload.write_text(json.dumps({"sha": "2" * 40, "force": True}))
+                result = subprocess.run(
+                    [str(self.root / "bin/gh"), "api", "repos/fixture/repository/git/refs/heads/" + BRANCH,
+                     "--method", "PATCH", "--input", str(payload)],
+                    env=dict(os.environ, PYTHONOPTIMIZE=level, REPLAY_ROOT=str(self.root)),
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0, "optimized API oracle accepted a forced update")
+                self.assertIn("invalid simulated API request", result.stderr)
+                state = json.loads((self.root / "api-state.json").read_text())
+                self.assertEqual(state["target_sha"], ZERO)
 
     def test_seed_creation_failure_releases_its_temporary_directory(self):
         roots = []

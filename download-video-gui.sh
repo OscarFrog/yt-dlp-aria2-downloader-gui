@@ -285,7 +285,7 @@ show_zenity_error() {
     if ! chmod 700 -- "${diagnostic_dir}" \
         || ! printf '%s\n' "${diagnostic_text}" \
         | LC_ALL=C sed -E \
-            -e 's#https?://[^[:space:]]+#[REDACTED_URL]#g' \
+            -e 's#https?://[^[:space:]]+#[REDACTED_URL]#gI' \
             -e "s/${forbidden_source_name}/[REDACTED_SOURCE]/gI" \
             | tail -c "${ZENITY_CAPTURE_MAX_BYTES}" \
                 >"${diagnostic_file}" \
@@ -668,6 +668,41 @@ worker_group_has_live_member() {
     return 1
 }
 
+worker_group_is_absent() {
+    [[ ${WORKER_PGID} =~ ^[1-9][0-9]*$ ]] || return 1
+
+    # Losing the token revokes signaling authority, not cleanup ownership.
+    # Only ESRCH proves that this possibly recycled numeric group is absent;
+    # signal zero never authorizes sending it a real termination signal.
+    python3 -I -B - "${WORKER_PGID}" <<'PY_GUI_GROUP_ABSENT'
+import os
+import sys
+
+try:
+    os.kill(-int(sys.argv[1]), 0)
+except ProcessLookupError:
+    sys.exit(0)
+except (OSError, ValueError, OverflowError):
+    pass
+sys.exit(1)
+PY_GUI_GROUP_ABSENT
+}
+
+worker_group_may_be_alive() {
+    [[ -n ${WORKER_PGID} ]] || return 1
+    # A visible member vetoes cleanup even without a readable inherited token.
+    # With authenticated authority, a zombie-only group is already quiescent.
+    # Without it, an incomplete process-table snapshot cannot prove absence.
+    # shellcheck disable=SC2310 # These predicates distinguish presence from authority.
+    if worker_group_has_live_member; then
+        return 0
+    elif worker_group_is_current; then
+        return 1
+    fi
+    # shellcheck disable=SC2310 # This checked predicate reports only confirmed absence.
+    ! worker_group_is_absent
+}
+
 process_is_running() {
     local pid=$1
     local process_stat=''
@@ -782,14 +817,9 @@ stop_gui_children() {
 
 worker_tree_alive() {
     if [[ -n ${WORKER_PGID} ]]; then
-        # shellcheck disable=SC2310 # Both predicates authenticate current group liveness.
-        if worker_group_is_current; then
-            if worker_group_has_live_member; then
-                return 0
-            fi
-        else
-            WORKER_PGID=''
-            WORKER_PGID_START_TIME=''
+        # shellcheck disable=SC2310 # Unauthenticated presence still vetoes cleanup.
+        if worker_group_may_be_alive; then
+            return 0
         fi
     fi
     if [[ -n ${WORKER_PID} ]]; then
@@ -842,9 +872,6 @@ signal_worker_tree() {
             && kill "-${signal_name}" -- "-${WORKER_PGID}" 2>/dev/null; then
             signaled_target=true
             group_signal_succeeded=true
-        else
-            WORKER_PGID=''
-            WORKER_PGID_START_TIME=''
         fi
     fi
 
@@ -894,18 +921,13 @@ wait_for_worker_exit() {
         worker_identity_current=false
         group_alive=false
 
-        # Authenticate the group before considering the direct worker. If Bash
-        # already reaped the leader, a live inherited-token member keeps group
-        # authority without granting it to a recycled numeric PGID.
+        # Group presence remains a cleanup veto after signaling authority is
+        # lost. A readable token can restore authority, but its absence cannot
+        # establish that descendants have stopped using private resources.
         if [[ -n ${WORKER_PGID} ]]; then
-            # shellcheck disable=SC2310 # Both predicates form one authenticated liveness proof.
-            if worker_group_is_current; then
-                if worker_group_has_live_member; then
-                    group_alive=true
-                fi
-            else
-                WORKER_PGID=''
-                WORKER_PGID_START_TIME=''
+            # shellcheck disable=SC2310 # Observation is deliberately independent of authority.
+            if worker_group_may_be_alive; then
+                group_alive=true
             fi
         fi
 
@@ -934,8 +956,8 @@ wait_for_worker_exit() {
                     WORKER_PID_START_TIME=''
                 elif [[ ${worker_identity_current} == false ]]; then
                     # Bash already harvested the direct child. Keep its cached
-                    # PID solely as a wait handle while the token-authenticated
-                    # process group remains alive.
+                    # PID solely as a wait handle while group presence or
+                    # uncertain absence still vetoes cleanup.
                     worker_alive=false
                 fi
             fi
@@ -957,8 +979,8 @@ stop_worker() {
     # shellcheck disable=SC2310
     if ! worker_tree_alive; then
         # shellcheck disable=SC2310
-        wait_for_worker_exit 1 || true
-        return 0
+        wait_for_worker_exit 1
+        return "$?"
     fi
 
     signal_worker_tree TERM
@@ -1343,7 +1365,7 @@ retain_sanitized_log_impl() {
 
     forbidden_source_name=$(printf '\170\150\141\155\163\164\145\162')
     if ! LC_ALL=C sed -E \
-        -e 's#https?://[^[:space:]]+#[REDACTED_URL]#g' \
+        -e 's#https?://[^[:space:]]+#[REDACTED_URL]#gI' \
         -e "s/${forbidden_source_name}/[REDACTED_SOURCE]/gI" \
         -- "${sanitization_input}" >"${sanitized_snapshot}"; then
         rm -f -- "${retention_files[@]}" || true

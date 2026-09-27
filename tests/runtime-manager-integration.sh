@@ -271,7 +271,7 @@ test_runtime_registry_path_safety() {
 test_runtime_signal_cleanup() {
     # Real signals exercise the manager while a bounded foreground writer owns
     # its files. DEBUG injection covers the smaller allocation/identity window.
-    python3 - "${RUNTIME_MANAGER}" "${TEST_ROOT}" <<'EOF_RUNTIME_SIGNAL_TEST'
+    python3 -I -B - "${RUNTIME_MANAGER}" "${TEST_ROOT}" <<'EOF_RUNTIME_SIGNAL_TEST'
 from pathlib import Path
 import fcntl
 import os

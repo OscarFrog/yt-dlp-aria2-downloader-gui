@@ -186,7 +186,7 @@ initialize_runtime_hardening_workspace() {
     validate_hardening_run_count \
         CONTENTION_RUNS RUNTIME_HARDENING_CONTENTION_RUNS
 
-    for command_name in bash chmod env find flock grep ln mkdir mktemp readlink rm rmdir sed sha256sum sleep stat uname; do
+    for command_name in bash chmod env find flock grep ln mkdir mkfifo mktemp readlink rm rmdir sed sha256sum sleep stat uname; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             printf 'Error: required test command is absent: %s\n' "${command_name}" >&2
             exit 127
@@ -1094,6 +1094,230 @@ test_invalid_active_runtime_recovery() {
     ln -s 2.7.0 "${deno_root}/previous"
 }
 
+make_recovery_fixture() {
+    local data_home=$1
+    local root="${data_home}/yt-dlp-aria2-downloader/runtime"
+
+    make_ytdlp "${root}/yt-dlp/2026.06.09/${YTDLP_ASSET}" 2026.06.09
+    make_ytdlp "${root}/yt-dlp/2026.03.17/${YTDLP_ASSET}" 2026.03.17
+    make_deno "${root}/deno/2.8.0/deno" 2.8.0
+    make_deno "${root}/deno/2.7.0/deno" 2.7.0
+    ln -s 2026.06.09 "${root}/yt-dlp/current"
+    ln -s 2026.03.17 "${root}/yt-dlp/previous"
+    ln -s 2.8.0 "${root}/deno/current"
+    ln -s 2.7.0 "${root}/deno/previous"
+}
+
+test_rollback_candidate_admission() {
+    local component scenario data_home root asset current previous candidate
+    local status marker before after attestation
+
+    for component in yt-dlp deno; do
+        if [[ ${component} == yt-dlp ]]; then
+            asset=${YTDLP_ASSET}
+            current=2026.06.09
+            previous=2026.03.17
+        else
+            asset=deno
+            current=2.8.0
+            previous=2.7.0
+        fi
+        for scenario in file-symlink directory-symlink directory fifo wrong-version; do
+            data_home="${TEST_ROOT}/rollback-admission-${component}-${scenario}"
+            make_recovery_fixture "${data_home}"
+            root="${data_home}/yt-dlp-aria2-downloader/runtime/${component}"
+            candidate="${root}/${previous}/${asset}"
+            marker="${data_home}/untrusted-probe"
+            before=$(stat -c '%d:%i:%s:%Y' -- "${root}/${current}/${asset}")
+            before+=" $(sha256sum -- "${root}/${current}/${asset}")"
+            case ${scenario} in
+                file-symlink | directory-symlink)
+                    mkdir "${data_home}/external"
+                    printf '#!/usr/bin/env bash\nprintf executed >"%s"\nexit 1\n' \
+                        "${marker}" >"${data_home}/external/${asset}"
+                    chmod 0755 "${data_home}/external/${asset}"
+                    if [[ ${scenario} == file-symlink ]]; then
+                        rm -- "${candidate}"
+                        ln -s "${data_home}/external/${asset}" "${candidate}"
+                    else
+                        mv -- "${root}/${previous}" "${root}/${previous}.saved"
+                        ln -s "${data_home}/external" "${root}/${previous}"
+                    fi
+                    ;;
+                directory)
+                    rm -- "${candidate}"
+                    mkdir -- "${candidate}"
+                    ;;
+                fifo)
+                    rm -- "${candidate}"
+                    mkfifo -- "${candidate}"
+                    chmod 0700 "${candidate}"
+                    ;;
+                wrong-version)
+                    if [[ ${component} == yt-dlp ]]; then
+                        make_ytdlp "${candidate}" "${current}"
+                    else
+                        make_deno "${candidate}" "${current}"
+                    fi
+                    ;;
+                *) fail "unknown rollback admission scenario: ${scenario}" ;;
+            esac
+            status=0
+            MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" \
+                XDG_DATA_HOME="${data_home}" \
+                "${RUNTIME_MANAGER}" rollback "${component}" >/dev/null 2>&1 || status=$?
+            assert_equals 1 "${status}" "${component} ${scenario} rollback admission"
+            [[ ! -e ${marker} ]] || fail "${component} executed an indirect rollback candidate"
+            assert_link_target "${root}/current" "${current}" 'rejected rollback changed current'
+            assert_link_target "${root}/previous" "${previous}" 'rejected rollback changed previous'
+            after=$(stat -c '%d:%i:%s:%Y' -- "${root}/${current}/${asset}")
+            after+=" $(sha256sum -- "${root}/${current}/${asset}")"
+            assert_equals "${before}" "${after}" 'rejected rollback changed the active executable'
+
+            # Recovery must not attest the same invalid previous that explicit
+            # rollback rejected. It may only activate a verified bootstrap.
+            rm -- "${root}/${current}/${asset}"
+            attestation=$("${runtime_env[@]}" XDG_DATA_HOME="${data_home}" \
+                "${RUNTIME_MANAGER}" prepare update)
+            [[ ${attestation} == runtime-contract=1$'\n'* ]] \
+                || fail 'recovery did not emit a complete attestation'
+            MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" XDG_DATA_HOME="${data_home}" \
+                "${RUNTIME_MANAGER}" require
+            [[ ! -e ${marker} ]] || fail 'automatic recovery executed an indirect previous runtime'
+        done
+    done
+}
+
+test_structurally_missing_active_recovery() {
+    local component scenario previous_state data_home root asset current previous
+    local expected before after
+
+    for component in yt-dlp deno; do
+        if [[ ${component} == yt-dlp ]]; then
+            asset=${YTDLP_ASSET}
+            current=2026.06.09
+            previous=2026.03.17
+        else
+            asset=deno
+            current=2.8.0
+            previous=2.7.0
+        fi
+        for scenario in absent-link missing-directory missing-binary nonexecutable; do
+            for previous_state in valid absent; do
+                data_home="${TEST_ROOT}/structural-${component}-${scenario}-${previous_state}"
+                make_recovery_fixture "${data_home}"
+                root="${data_home}/yt-dlp-aria2-downloader/runtime/${component}"
+                before=$(sha256sum -- "${root}/${previous}/${asset}")
+                case ${scenario} in
+                    absent-link) rm -- "${root}/current" ;;
+                    missing-directory) mv -- "${root}/${current}" "${root}/${current}.saved" ;;
+                    missing-binary) rm -- "${root}/${current}/${asset}" ;;
+                    nonexecutable) chmod 0600 "${root}/${current}/${asset}" ;;
+                    *) fail "unknown structural recovery scenario: ${scenario}" ;;
+                esac
+                rm -f -- "${NETWORK_MARKER}"
+                if [[ ${previous_state} == valid ]]; then
+                    MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" XDG_DATA_HOME="${data_home}" \
+                        "${RUNTIME_MANAGER}" ensure >/dev/null
+                    [[ ! -e ${NETWORK_MARKER} ]] || fail 'local recovery tried the network'
+                    expected=${previous}
+                else
+                    rm -- "${root}/previous"
+                    "${runtime_env[@]}" XDG_DATA_HOME="${data_home}" \
+                        "${RUNTIME_MANAGER}" ensure >/dev/null
+                    if [[ ${component} == yt-dlp ]]; then
+                        expected=2026.07.04
+                    else
+                        expected=2.9.5
+                    fi
+                fi
+                assert_link_target "${root}/current" "${expected}" 'structural recovery did not activate a usable runtime'
+                MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" XDG_DATA_HOME="${data_home}" \
+                    "${RUNTIME_MANAGER}" prepare require >/dev/null
+                [[ ! -e ${root}/.activation-journal ]] || fail 'structural recovery left an activation journal'
+                after=$(sha256sum -- "${root}/${previous}/${asset}")
+                assert_equals "${before}" "${after}" 'structural recovery changed the previous executable'
+            done
+        done
+    done
+}
+
+test_missing_old_activation_journal() {
+    local component phase previous_state data_home root previous new_version status
+    local source_copy="${TEST_ROOT}/runtime-activation-functions.sh"
+    local -a phases=()
+
+    sed '$d' "${RUNTIME_MANAGER}" >"${source_copy}"
+    for component in yt-dlp deno; do
+        for previous_state in valid absent; do
+            phases=(before-current after-current)
+            if [[ ${previous_state} == valid ]]; then
+                phases+=(before-previous after-previous)
+            fi
+            for phase in "${phases[@]}"; do
+                data_home="${TEST_ROOT}/journal-missing-${component}-${previous_state}-${phase}"
+                make_recovery_fixture "${data_home}"
+                root="${data_home}/yt-dlp-aria2-downloader/runtime/${component}"
+                if [[ ${component} == yt-dlp ]]; then
+                    previous=2026.03.17
+                    new_version=2026.07.04
+                    mv -- "${root}/2026.06.09" "${root}/2026.06.09.saved"
+                    make_ytdlp "${root}/${new_version}/${YTDLP_ASSET}" "${new_version}"
+                else
+                    previous=2.7.0
+                    new_version=2.9.5
+                    mv -- "${root}/2.8.0" "${root}/2.8.0.saved"
+                    make_deno "${root}/${new_version}/deno" "${new_version}"
+                fi
+                if [[ ${previous_state} == absent ]]; then
+                    rm -- "${root}/previous"
+                fi
+                status=0
+                bash -s -- "${source_copy}" "${root}" "${new_version}" "${phase}" <<'SH_ACTIVATION_SIGNAL' || status=$?
+source "$1"
+root=$2
+version=$3
+phase=$4
+trap cleanup_runtime_manager EXIT
+trap 'request_runtime_shutdown 143' TERM
+mv() {
+    local destination=${*: -1}
+    local leaf=${destination##*/}
+    if [[ ${phase} == "before-${leaf}" ]]; then
+        kill -TERM -- "${BASHPID}"
+    fi
+    command mv "$@" || return $?
+    if [[ ${phase} == "after-${leaf}" ]]; then
+        kill -TERM -- "${BASHPID}"
+    fi
+}
+activate_version "${root}" "${version}" || exit 1
+exit 99
+SH_ACTIVATION_SIGNAL
+                assert_equals 143 "${status}" "${component} activation interrupted ${phase}"
+                [[ -f ${root}/.activation-journal ]] || fail 'interrupted activation did not retain its journal'
+                # Replay the existing three-field journal without probing or
+                # network access, then exercise the public recovery entrypoint.
+                bash -c 'source "$1"; recover_activation_transaction "$2"' \
+                    bash "${source_copy}" "${root}"
+                if [[ ${previous_state} == valid ]]; then
+                    assert_link_target "${root}/previous" "${previous}" 'journal lost the usable previous target'
+                    MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" XDG_DATA_HOME="${data_home}" \
+                        "${RUNTIME_MANAGER}" ensure >/dev/null
+                else
+                    [[ ! -e ${root}/previous && ! -L ${root}/previous ]] \
+                        || fail 'journal published a missing previous target'
+                    "${runtime_env[@]}" XDG_DATA_HOME="${data_home}" \
+                        "${RUNTIME_MANAGER}" ensure >/dev/null
+                fi
+                MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" XDG_DATA_HOME="${data_home}" \
+                    "${RUNTIME_MANAGER}" prepare require >/dev/null
+                [[ ! -e ${root}/.activation-journal ]] || fail 'activation recovery retained its completed journal'
+            done
+        done
+    done
+}
+
 test_runtime_updates() {
     local deno_inode_after=''
     local deno_inode_before=''
@@ -1432,6 +1656,9 @@ main() {
     test_signature_failure_bootstrap
     test_fresh_runtime_bootstrap
     test_no_network_require
+    test_rollback_candidate_admission
+    test_structurally_missing_active_recovery
+    test_missing_old_activation_journal
     test_invalid_active_runtime_recovery
     test_runtime_updates
     test_cached_runtime_file_identity

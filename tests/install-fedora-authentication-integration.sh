@@ -319,6 +319,118 @@ release_application_stage
 EOF_APPLICATION_STAGE
 }
 
+test_staging_signal_registration() {
+    local library_copy=$1
+    local mock_bin=$2
+
+    python3 -I -B - "${library_copy}" "${mock_bin}" "${TEST_ROOT}" <<'PY_STAGING_SIGNALS'
+from pathlib import Path
+import os
+import shutil
+import signal
+import subprocess
+import sys
+
+library, mock_bin, root = map(Path, sys.argv[1:])
+body = r'''
+source "$1"
+case_root=$2
+slot=$3
+phase=$4
+requested_signal=$5
+run_root() {
+    if [[ $1 == mktemp && ${phase} == mktemp-error ]]; then
+        return 1
+    fi
+    if [[ $1 == mktemp && ${phase} == unsafe-path ]]; then
+        printf '%s\n' "${case_root}/foreign"
+        return 0
+    fi
+    if [[ $1 == chmod && ${phase} == chmod-error ]]; then
+        return 1
+    fi
+    if [[ $1 == chmod && ${phase} == registered ]]; then
+        kill -s "${requested_signal}" -- "${BASHPID}"
+    fi
+    if [[ $1 == rm && ${phase} == repeat ]]; then
+        kill -HUP -- "${BASHPID}"
+    fi
+    "$@"
+}
+mktemp() {
+    local created=''
+    created=$(command /usr/bin/mktemp "$@") || return $?
+    printf '%s\n' "${created}" >>"${case_root}/paths"
+    if [[ (${slot} == bootstrap && $* == -d) ||
+        ($* == *"yt-dlp-aria2-downloader-${slot}."*) ]]; then
+        if [[ ${phase} == acquisition || ${phase} == repeat ]]; then
+            kill -s "${requested_signal}" -- "${stage_test_owner}"
+        fi
+    fi
+    printf '%s\n' "${created}"
+}
+record_stage_owner() {
+    if [[ ${BASH_COMMAND} == 'resolved_stage_path=$(run_root mktemp '* ||
+        ${BASH_COMMAND} == 'bootstrap_root=$(mktemp '* ]]; then
+        stage_test_owner=${BASHPID}
+    fi
+}
+set -T
+trap record_stage_owner DEBUG
+if [[ ${slot} == application ]]; then
+    # Exercise the actual public entrypoint traps without package operations.
+    parse_fedora_arguments() { :; }
+    require_fedora_installer_commands() { :; }
+    initialize_fedora_paths() { :; }
+    inspect_rpm_signature() { :; }
+    resolve_rpm_signing_key() { :; }
+    detect_supported_fedora() { :; }
+    prepare_application_rpm() {
+        create_root_stage application ROOT_APPLICATION_STAGE
+        exit 99
+    }
+    main fixture.rpm
+else
+    ensure_rpm_fusion_bootstrap_tools() { :; }
+    enable_rpm_fusion 44
+fi
+exit 99
+'''
+for slot in ('application', 'rpmfusion', 'bootstrap'):
+    phases = ('acquisition',) if slot == 'bootstrap' else ('acquisition', 'registered', 'repeat', 'chmod-error', 'mktemp-error', 'unsafe-path')
+    for phase in phases:
+        names = ('HUP', 'INT', 'TERM') if phase in ('acquisition', 'registered') else ('TERM',)
+        for name in names:
+            case = root / f'stage-{slot}-{phase}-{name}'
+            case.mkdir()
+            foreign = case/'foreign'
+            foreign.mkdir()
+            (foreign/'keep').write_text('unowned input\n')
+            environment = dict(os.environ, PATH=f'{mock_bin}:/usr/bin:/bin',
+                               MOCK_DNF_LOG=str(case/'dnf'), MOCK_STAGE_LOG=str(case/'stage'),
+                               MOCK_ROOT_COMMAND_LOG=str(case/'root-commands'))
+            result = subprocess.run(['bash', '-c', body, 'bash', str(library), str(case), slot, phase, name],
+                                    env=environment, capture_output=True, text=True, timeout=10)
+            paths = (case/'paths').read_text().splitlines() if (case/'paths').exists() else []
+            try:
+                expected = 70 if phase in ('chmod-error', 'mktemp-error', 'unsafe-path') else 128 + getattr(signal, 'SIG'+name)
+                if result.returncode != expected:
+                    raise RuntimeError((slot, phase, name, result.returncode, expected, result.stderr))
+                if not paths and phase not in ('mktemp-error', 'unsafe-path'):
+                    raise RuntimeError((slot, phase, 'no acquisition was exercised'))
+                if (foreign/'keep').read_text() != 'unowned input\n':
+                    raise RuntimeError((slot, phase, 'foreign path was changed'))
+                remaining = [path for path in paths if Path(path).exists()]
+                if remaining:
+                    raise RuntimeError((slot, phase, name, 'orphan staging', remaining))
+            finally:
+                for path in paths:
+                    if Path(path).is_dir() and not Path(path).is_symlink():
+                        shutil.rmtree(path)
+print('Fedora staging acquisition, registration, repeated signals and chmod failures passed.')
+PY_STAGING_SIGNALS
+}
+
 main() {
     local library_copy=''
     local mock_bin=''
@@ -329,7 +441,7 @@ main() {
     local staged_key_path=''
     local staged_rpmfusion_path=''
 
-    for command_name in bash chmod mktemp rm sed; do
+    for command_name in bash chmod mktemp python3 rm sed; do
         require_test_command "${command_name}"
     done
 
@@ -343,6 +455,7 @@ main() {
     mock_bin="${TEST_ROOT}/bin"
     : >"${TEST_ROOT}/dnf.log"
     prepare_fixture "${library_copy}" "${mock_bin}"
+    test_staging_signal_registration "${library_copy}" "${mock_bin}"
 
     assert_status 0 'authenticated RPM Fusion bootstrap' \
         run_enable_rpm_fusion "${library_copy}" "${mock_bin}"

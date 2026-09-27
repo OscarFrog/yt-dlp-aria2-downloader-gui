@@ -334,7 +334,7 @@ test_installer_failure_modes() {
 
 test_installer_ancestor_directory_policy() {
     assert_status 0 'launcher ancestor trust and strict leaf policy' \
-        python3 - \
+        python3 -I -B - \
         "${COPIED_PROJECT}/private-launcher-manager.py" \
         "${TEST_ROOT}/ancestor-directory-policy" \
         "${COPIED_PROJECT}/download-video-gui.sh" <<'PYTHON_ANCESTOR_POLICY'
@@ -792,7 +792,7 @@ test_installer_uninstall_anchor_race() {
         "${race_data_home}/yt-dlp-aria2-downloader/.install.0123456789abcdef01234567/launch"
 
     assert_status 0 'uninstall stays on anchored descriptors after root replacement' \
-        python3 - \
+        python3 -I -B - \
         "${COPIED_PROJECT}/private-launcher-manager.py" \
         "${race_data_home}" \
         "${race_saved_home}" \
@@ -882,7 +882,7 @@ test_installer_install_anchor_race() {
         "${race_victim}/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg"
 
     assert_status 0 'install stays on anchored descriptors after root replacement' \
-        python3 - \
+        python3 -I -B - \
         "${COPIED_PROJECT}/private-launcher-manager.py" \
         "${race_data_home}" \
         "${race_saved_home}" \
@@ -940,7 +940,7 @@ PYTHON_INSTALL_ANCHOR_RACE
 
 test_installer_install_branch_races() {
     assert_status 0 'install detects every managed directory replacement' \
-        python3 - \
+        python3 -I -B - \
         "${COPIED_PROJECT}/private-launcher-manager.py" \
         "${TEST_ROOT}/install-branch-races" \
         "${COPIED_PROJECT}/download-video-gui.sh" <<'PYTHON_INSTALL_BRANCH_RACES'
@@ -1001,7 +1001,7 @@ PYTHON_INSTALL_BRANCH_RACES
 
 test_installer_concurrent_transactions() {
     assert_status 0 'installer transactions serialize on the anchored data root' \
-        python3 - \
+        python3 -I -B - \
         "${COPIED_PROJECT}/private-launcher-manager.py" \
         "${TEST_ROOT}/installer-concurrent-data" \
         "${COPIED_PROJECT}/download-video-gui.sh" <<'PYTHON_CONCURRENT_TRANSACTIONS'
@@ -1096,7 +1096,7 @@ PYTHON_CONCURRENT_TRANSACTIONS
 
 test_installer_transaction_rollbacks() {
     assert_status 0 'installer rolls back partial publication and removal' \
-        python3 - \
+        python3 -I -B - \
         "${COPIED_PROJECT}/private-launcher-manager.py" \
         "${TEST_ROOT}/installer-rollback" <<'PYTHON_TRANSACTION_ROLLBACKS'
 import errno
@@ -1812,6 +1812,130 @@ if not close_failure_injected:
 PYTHON_TRANSACTION_ROLLBACKS
 }
 
+test_validator_descendant_quiescence() {
+    python3 -I -B - "${PROJECT_DIR}/private-launcher-manager.py" "${TEST_ROOT}" <<'PY_VALIDATOR_DESCENDANTS'
+import ctypes
+import importlib.util
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+
+spec = importlib.util.spec_from_file_location("launcher_descendants", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(36, 1, 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), "unable to adopt validator fixture descendants")
+root = Path(sys.argv[2]) / "validator-descendants"
+root.mkdir(mode=0o700)
+applications = root / "applications"
+applications.mkdir(mode=0o700)
+(applications / "candidate.desktop").write_text("[Desktop Entry]\nType=Application\nName=Fixture\nExec=true\n")
+validator = root / "desktop-file-validate"
+validator.write_text('''#!/usr/bin/python3
+import os, sys, time
+child = os.fork()
+if child:
+    while not os.path.exists(os.environ["VALIDATOR_CHILD_MARKER"]):
+        time.sleep(0.01)
+    os._exit(0)
+if os.environ["VALIDATOR_CHILD_MODE"] == "closed-output":
+    os.close(1)
+    os.close(2)
+with open(os.environ["VALIDATOR_CHILD_MARKER"] + ".tmp", "w") as marker:
+    marker.write(str(os.getpid()))
+os.rename(os.environ["VALIDATOR_CHILD_MARKER"] + ".tmp", os.environ["VALIDATOR_CHILD_MARKER"])
+time.sleep(30)
+''')
+validator.chmod(0o700)
+module.shutil.which = lambda _name: str(validator)
+module.VALIDATOR_TIMEOUT_SECONDS = 0.3
+real_select = module.select.select
+application_fd = os.open(applications, os.O_RDONLY | os.O_DIRECTORY)
+
+def live(pid):
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+    except FileNotFoundError:
+        return False
+    return fields[0] not in {"Z", "X"}
+
+try:
+    for mode in ("timeout", "signal", "closed-output"):
+        marker = root / (mode + ".pid")
+        os.environ["VALIDATOR_CHILD_MARKER"] = str(marker)
+        os.environ["VALIDATOR_CHILD_MODE"] = mode
+        module.install_shutdown_signal_handlers()
+        child = 0
+        descendant_reaped = False
+        interrupted = False
+        descriptor_observed = False
+
+        def observe_child(*args):
+            global child, interrupted, descriptor_observed
+            if marker.exists():
+                child = int(marker.read_text())
+                descriptor_observed = Path(f"/proc/{child}/fd/{application_fd}").is_dir()
+                if mode == "signal" and not interrupted:
+                    interrupted = True
+                    os.kill(os.getpid(), signal.SIGTERM)
+            return real_select(*args)
+
+        module.select.select = observe_child
+        started = time.monotonic()
+        try:
+            try:
+                module.validate_desktop_file(application_fd, "candidate.desktop")
+            except module.TemporaryLauncherError:
+                if mode != "timeout":
+                    raise
+            except module.LauncherInterruptedError as error:
+                if mode != "signal" or error.exit_status != 143:
+                    raise
+            else:
+                if mode != "closed-output":
+                    raise AssertionError("validator did not report its bounded interruption")
+            if time.monotonic() - started > 3:
+                raise AssertionError("validator descendant cleanup exceeded its bound")
+            child = int(marker.read_text())
+            if live(child):
+                raise AssertionError(f"validator {mode} left its descendant alive with inherited directory FD")
+            # A stopped adopted child can retain a procfs entry whose FD view
+            # returns EACCES until reaping. Authenticate its wait ownership
+            # without consuming it, then reap before checking descriptor absence.
+            observation = os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            if observation is None or observation.si_pid != child:
+                raise AssertionError("stopped validator descendant is not an exited owned child")
+            reaped_pid, _wait_status = os.waitpid(child, os.WNOHANG)
+            if reaped_pid != child:
+                raise AssertionError("stopped validator descendant was not reaped")
+            descendant_reaped = True
+            try:
+                os.stat(f"/proc/{child}/fd/{application_fd}")
+            except FileNotFoundError:
+                pass
+            else:
+                raise AssertionError("stopped validator descendant retained its directory FD")
+            if mode != "closed-output" and not descriptor_observed:
+                raise AssertionError("validator fixture never observed the inherited directory FD")
+        finally:
+            module.select.select = real_select
+            if marker.exists() and not descendant_reaped:
+                child = int(marker.read_text())
+                try:
+                    observation = os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                    if observation is None:
+                        os.kill(child, signal.SIGKILL)
+                    os.waitpid(child, 0)
+                except (ProcessLookupError, ChildProcessError):
+                    pass
+finally:
+    os.close(application_fd)
+PY_VALIDATOR_DESCENDANTS
+}
+
 test_installer_signal_supervision() {
     local data_home decoy_pid decoy_survived=false index installer_source_copy
     local launcher_pid launcher_status registration_status=0 signal_log signal_name
@@ -2019,7 +2143,7 @@ EOF_SIGNAL_PYTHON
 
 test_installer_final_revalidation() {
     assert_status 0 'installer revalidates visible root and launcher target last' \
-        python3 - \
+        python3 -I -B - \
         "${COPIED_PROJECT}/private-launcher-manager.py" \
         "${TEST_ROOT}/installer-final-revalidation" <<'PYTHON_FINAL_REVALIDATION'
 import importlib.util
@@ -2265,7 +2389,7 @@ PYTHON_FINAL_REVALIDATION
 
 test_installer_allocation_failure_cleanup() {
     assert_status 0 'installer allocations clean up every partial stage' \
-        python3 - \
+        python3 -I -B - \
         "${COPIED_PROJECT}/private-launcher-manager.py" \
         "${TEST_ROOT}/installer-allocation-failures" \
         "${COPIED_PROJECT}/download-video-gui.sh" <<'PYTHON_ALLOCATION_FAILURES'
@@ -2392,7 +2516,7 @@ PYTHON_ALLOCATION_FAILURES
 
 test_installer_bounded_dependencies() {
     assert_status 0 'installer bounds locks validators and cleanup diagnostics' \
-        python3 - \
+        python3 -I -B - \
         "${COPIED_PROJECT}/private-launcher-manager.py" \
         "${TEST_ROOT}/installer-bounded-dependencies" <<'PYTHON_BOUNDED_DEPENDENCIES'
 import contextlib
@@ -2605,7 +2729,7 @@ PYTHON_BOUNDED_DEPENDENCIES
 
 test_installer_stale_mount_boundaries() {
     assert_status 0 'stale cleanup preserves unverified mount boundaries' \
-        python3 - \
+        python3 -I -B - \
         "${COPIED_PROJECT}/private-launcher-manager.py" \
         "${TEST_ROOT}/installer-stale-mounts" \
         "${COPIED_PROJECT}/download-video-gui.sh" <<'PYTHON_STALE_MOUNTS'
@@ -2758,6 +2882,7 @@ main() {
     test_installer_install_branch_races
     test_installer_concurrent_transactions
     test_installer_transaction_rollbacks
+    test_validator_descendant_quiescence
     test_installer_signal_supervision
     test_installer_final_revalidation
     test_installer_allocation_failure_cleanup
