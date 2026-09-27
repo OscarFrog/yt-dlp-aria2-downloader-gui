@@ -28,7 +28,7 @@ fi
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 # The development tree can lead the latest installable GitHub release. Keep the
 # two contracts explicit so README package names never advertise absent assets.
-readonly EXPECTED_VERSION='2.3.28'
+readonly EXPECTED_VERSION='2.3.29'
 readonly EXPECTED_PUBLISHED_VERSION='2.3.28'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SOURCE_INVENTORY_FILE=''
