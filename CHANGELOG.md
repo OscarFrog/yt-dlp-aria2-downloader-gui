@@ -8,6 +8,14 @@
 
 ### Correctness and recovery
 
+- Supervise timed probe subgroups and live descendants after wrapper exit;
+  preserve resources and reservations until shutdown and cleanup are safe.
+- Permit independent GUI/CLI downloads in one destination with shared legacy
+  compatibility, exclusive filename-family reservations and refusal of conflicts.
+- Refuse foreign native MP4/WebM inputs; resume only unchanged, owned checkpoints.
+  Freeze native replay metadata and retain ambiguous older state for inspection.
+- Align runtime admission and recovery with exact immutable directory versions.
+
 - Preserve pre-existing native audio before metadata processing and keep literal
   dollar/percent characters in the selected destination directory.
 - Require a complete validated aria2 staging inventory before cleanup; mask
@@ -18,6 +26,12 @@
   runtimes without losing valid installed fallback versions.
 
 ### Qualification
+
+- Add independent orphan/session observation, a valid Deno archive with a wrong
+  checksum, synchronized in-place copy mutations and a GUI-only containment
+  control using an independently successful fake engine.
+- Exercise real concurrent local media transfers with shared HOME/XDG roots,
+  transfer/remux cancellation and content verification.
 
 - Reap test descendants before releasing runner slots, isolate Python assertion
   oracles from optimization settings, and add independent negative controls for

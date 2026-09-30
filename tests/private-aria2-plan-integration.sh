@@ -1211,6 +1211,38 @@ with patch.object(module.os, "write", inspect_copy):
 assert seen_copy and source.read_bytes() == (output / source.name).read_bytes()
 assert len(list(output.iterdir())) == 1
 
+# Modify the opened source inode only after the first destination write.
+# The constant-size case specifically needs the post-copy timestamp check;
+# checking only the destination length cannot detect its mixed generation.
+for change_size in (False, True):
+    source, output, args = prepare(f"in-place-source-{change_size}")
+    original_inode = identity(source)
+    changed = False
+
+    def mutate_during_copy(descriptor, data):
+        global changed
+        count = real_write(descriptor, data)
+        if not changed:
+            changed = True
+            with source.open("r+b") as writer:
+                writer.write(b"changed generation")
+                if change_size:
+                    writer.truncate(source.stat().st_size + 1024)
+                writer.flush()
+                os.fsync(writer.fileno())
+        return count
+
+    with patch.object(module.os, "write", mutate_during_copy):
+        try:
+            module.publish_media(args)
+        except module.PlanError:
+            pass
+        else:
+            raise AssertionError(f'in-place source mutation accepted: changed-size={change_size}')
+    assert changed and identity(source) == original_inode
+    assert source.read_bytes().startswith(b"changed generation")
+    assert not list(output.iterdir()), "unstable source published or temporary leaked"
+
 # Exercise an actual device boundary when the host offers one. This is a real
 # filesystem copy qualification, not an SMB mount qualification.
 source, output, args = prepare("cross-device")
@@ -2076,6 +2108,211 @@ PY_UNIQUE_HEADER
         'unique field spelling and value remain unchanged'
 }
 
+test_resource_reservations_and_resume() {
+    new_case 'resource-reservations'
+    python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_RESOURCES'
+import argparse
+import contextlib
+import fcntl
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location('resources', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = Path(sys.argv[2])
+output = root / 'output'
+registry = root / 'registry'
+registry.mkdir(mode=0o700)
+alias = root / 'alias'
+alias.symlink_to(output, target_is_directory=True)
+sequence = 0
+
+def plan(name, request='one', directory=output, formats=None, mode='video', *,
+         identity=None, download_identity=None, media_url='https://example.invalid/media?signature=one'):
+    global sequence
+    sequence += 1
+    private = root / str(sequence)
+    private.mkdir(mode=0o700)
+    source = private / 'plan.json'
+    url = private / 'request'
+    url.write_text('https://example.invalid/' + request)
+    if identity is None:
+        identity = {'id': 'fixture-media', 'extractor': 'generic', 'extractor_key': 'Generic'}
+    source.write_text(json.dumps({**identity, 'webpage_url': 'https://example.invalid/reextract',
+        'requested_downloads': [{'filename': str(directory / name),
+            'format_id': 'av', 'ext': Path(name).suffix[1:], 'protocol': 'http',
+            'url': media_url, **(download_identity or {}),
+            **({'requested_formats': formats} if formats else {})}]}))
+    info = output.stat()
+    args = argparse.Namespace(output_dir=str(directory), final_output_dir=str(directory),
+        final_output_identity=f'{info.st_dev}:{info.st_ino}', plan=str(source),
+        state=str(private / 'resources.json'), url_file=str(url), mode=mode, hls=False)
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        module.resource_plan(args)
+    frozen = json.loads((private / 'transfer-plan.json').read_text())
+    assert 'webpage_url' not in frozen, 'replay can reextract outside its plan'
+    return args, [line.split() for line in captured.getvalue().splitlines()]
+
+def acquire(keys):
+    opened = []
+    try:
+        for mode, key in keys:
+            fd = os.open(registry / (key + '.lock'), os.O_CREAT | os.O_RDWR, 0o600)
+            opened.append(fd)
+            fcntl.flock(fd, fcntl.LOCK_NB | (fcntl.LOCK_SH if mode == 'shared' else fcntl.LOCK_EX))
+        return opened
+    except BlockingIOError:
+        for fd in opened:
+            os.close(fd)
+        return None
+
+def release(opened):
+    for fd in opened:
+        os.close(fd)
+
+def state(args, action):
+    return module.resource_state(argparse.Namespace(state=args.state, registry=str(registry), action=action))
+
+def rejected(error, function, *arguments):
+    try:
+        function(*arguments)
+    except error:
+        return
+    raise AssertionError(f'{error.__name__} was not raised')
+
+# Equal paths, aliases, Unicode normalization/case, different URLs, and an
+# overlapping component with a different final basename all exclude each other.
+for left, right in [('Film.mp4', 'Film.webm'), ('café.mp4', 'CAFE\u0301.webm'),
+                    ('a.mkv', 'a.f137.webm'), ('x % $.mp4', 'x % $.webm')]:
+    _, keys = plan(left)
+    first = acquire(keys)
+    assert first is not None
+    _, keys2 = plan(right, 'other-url', alias)
+    assert acquire(keys2) is None, (left, right)
+    independent, independent_keys = plan('independent.mp4')
+    other = acquire(independent_keys)
+    assert other is not None
+    release(other)
+    release(first)
+    next_owner = acquire(keys2)
+    assert next_owner is not None
+    release(next_owner)
+
+args, _ = plan('resume.mp4')
+part = output / 'resume.mp4.part'
+part.write_bytes(b'ambiguous legacy state')
+before = part.stat()
+rejected(module.DestinationExistsError, state, args, 'admit')
+assert part.read_bytes() == b'ambiguous legacy state' and part.stat() == before
+part.unlink()
+state(args, 'admit')
+part.write_bytes(b'owned partial transfer')
+# An uncertain stop cannot release protection, even when no FD survives.
+same, _ = plan('resume.mp4')
+rejected(module.ResourceBusyError, state, same, 'admit')
+overlap, _ = plan('resume.mp4.f137.mp4')
+rejected(module.ResourceBusyError, state, overlap, 'admit')
+state(args, 'save')
+state(same, 'admit')
+state(same, 'save')
+foreign_request, _ = plan('resume.mp4', 'different-request')
+rejected(module.DestinationExistsError, state, foreign_request, 'admit')
+with part.open('r+b') as handle:
+    handle.write(b'foreign modification')
+changed, _ = plan('resume.mp4')
+rejected(module.DestinationExistsError, state, changed, 'admit')
+
+# Full media IDs can differ beyond the output template's 64-byte truncation.
+# The same request, filename and formats must not adopt another media's bytes.
+prefix = 'i' * 64
+identity = {'id': prefix + '-first', 'extractor': 'generic', 'extractor_key': 'Generic'}
+name = f'identity [{prefix}].mp4'
+owner, _ = plan(name, identity=identity)
+state(owner, 'admit')
+partial = output / (name + '.part')
+partial.write_bytes(b'partial bytes belonging only to the first media')
+before = partial.stat()
+state(owner, 'save')
+for field, value in (('id', prefix + '-second'), ('extractor', 'other'), ('extractor_key', 'Other')):
+    changed_identity = {**identity, field: value}
+    for metadata in ({'identity': changed_identity},
+                     {'identity': identity, 'download_identity': {field: value}}):
+        candidate, _ = plan(name, **metadata)
+        rejected(module.DestinationExistsError, state, candidate, 'admit')
+assert partial.read_bytes() == b'partial bytes belonging only to the first media'
+after = partial.stat()
+assert (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) == (
+    after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+
+# Moving inherited identity to the download and refreshing a signed transfer URL
+# does not change the media. The unchanged owned partial remains resumable.
+refreshed, _ = plan(name, identity={}, download_identity=identity,
+                    media_url='https://example.invalid/media?signature=refreshed')
+state(refreshed, 'admit')
+state(refreshed, 'save')
+
+# Either extractor identity field is sufficient when the other is unavailable.
+for field in ('extractor', 'extractor_key'):
+    available = {'id': identity['id'], field: identity[field]}
+    available_name = f'available-{field}.mp4'
+    owner, _ = plan(available_name, identity=available)
+    state(owner, 'admit')
+    (output / (available_name + '.part')).write_bytes(b'owned with one extractor identity')
+    state(owner, 'save')
+    retry, _ = plan(available_name, identity=available,
+                    media_url='https://example.invalid/media?signature=refreshed')
+    state(retry, 'admit')
+    state(retry, 'save')
+
+# Missing/malformed identity permits a fresh transfer, never a later adoption.
+for index, metadata in enumerate((
+        {'identity': {}},
+        {'identity': {'id': 'only-id'}},
+        {'identity': {'extractor_key': 'Generic'}},
+        {'identity': {**identity, 'id': ''}},
+        {'identity': {**identity, 'id': 123}},
+        {'identity': {**identity, 'extractor_key': []}},
+        {'identity': identity, 'download_identity': {'id': None}})):
+    missing_name = f'missing-identity-{index}.mp4'
+    unidentified, _ = plan(missing_name, **metadata)
+    state(unidentified, 'admit')
+    missing_partial = output / (missing_name + '.part')
+    missing_partial.write_bytes(b'partial without a stable extracted identity')
+    state(unidentified, 'save')
+    retry, _ = plan(missing_name, **metadata)
+    rejected(module.DestinationExistsError, state, retry, 'admit')
+    assert missing_partial.read_bytes() == b'partial without a stable extracted identity'
+
+# Final and native entries remain passive user data; they are not lock errors.
+for extension in ('mkv', 'mp4', 'webm'):
+    witness = output / ('external.' + extension)
+    witness.write_bytes(b'another media')
+    before = witness.stat()
+    candidate, _ = plan('external.' + ('mp4' if extension == 'mkv' else extension))
+    rejected(module.DestinationExistsError, state, candidate, 'admit')
+    assert witness.stat() == before and witness.read_bytes() == b'another media'
+    witness.unlink()
+rejected(module.PlanError, plan, 'x' * 240 + '.mp4')
+rejected(module.PlanError, plan, 'ordinary.mkv', 'one', output,
+         [{'format_id': '../escape', 'ext': 'mp4'}])
+converted, _ = plan('converted.webm', mode='audio')
+state(converted, 'admit')
+final = output / 'converted.opus'
+final.write_bytes(b'completed native audio in its extracted container')
+module.resource_state(argparse.Namespace(state=converted.state, registry=str(registry),
+                                        action='save', completed_path=str(final)))
+repeated, _ = plan('converted.webm', mode='audio')
+rejected(module.DestinationExistsError, state, repeated, 'admit')
+print('Resource families, alias exclusion, independent locks, uncertain-stop protection and authenticated resume passed.')
+PY_RESOURCES
+}
+
 main() {
     require_test_command python3
     require_test_command stat
@@ -2089,6 +2326,7 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
+    test_resource_reservations_and_resume
     test_workspace_mount_oracle_ignores_optimization
     test_workspace_mount_boundaries
     test_network_media_permissions

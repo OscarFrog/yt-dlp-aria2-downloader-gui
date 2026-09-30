@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import errno
+import hashlib
 import json
 import os
 import re
@@ -25,6 +26,7 @@ import secrets
 import signal
 import stat
 import sys
+import unicodedata
 from pathlib import Path
 from contextlib import contextmanager
 from urllib.parse import urlsplit
@@ -66,6 +68,10 @@ class PublicationInterrupted(PlanError):
 
 class DestinationExistsError(PlanError):
     """A final destination already exists and must not be overwritten."""
+
+
+class ResourceBusyError(PlanError):
+    """A resource remains protected until its owner's cleanup is confirmed."""
 
 
 def filesystem_type(descriptor: int) -> int:
@@ -698,6 +704,191 @@ def build_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def normalized_resource_name(name: str) -> str:
+    # A conservative alias class also coordinates casefolded/normalizing local
+    # filesystems. Names from yt-dlp have already undergone its byte truncation.
+    return unicodedata.normalize('NFKC', name).casefold()
+
+
+def resource_plan(args: argparse.Namespace) -> int:
+    output = resolve_output_directory(args.output_dir)
+    final = resolve_output_directory(args.final_output_dir)
+    expected = parse_identity(args.final_output_identity)
+    if directory_identity(final) != expected:
+        raise PlanError('destination changed before resource planning')
+    plan = read_json(Path(args.plan), 'yt-dlp plan')
+    downloads = plan.get('requested_downloads') if isinstance(plan, dict) else None
+    if not isinstance(downloads, list) or len(downloads) != 1 or not isinstance(downloads[0], dict):
+        raise PlanError('resource planning requires exactly one download')
+    root = downloads[0]
+    destination = resolve_destination(root.get('filename') or root.get('_filename'), output, 'planned filename')
+    formats = root.get('requested_formats') or [root]
+    if not isinstance(formats, list) or not 1 <= len(formats) <= 16:
+        raise PlanError('resource planning requires bounded formats')
+    names = [destination.name]
+    if root.get('requested_formats'):
+        for item in formats:
+            if not isinstance(item, dict):
+                raise PlanError('invalid planned component')
+            names.append(component_destination(destination, item).name)
+    # yt-dlp sanitizes the planned basename before this boundary. Reject a
+    # component whose derived fragment/metadata suffix could force a further
+    # filesystem truncation; it must never escape the reserved family.
+    name_limit = min(os.pathconf(output, 'PC_NAME_MAX'), os.pathconf(final, 'PC_NAME_MAX'))
+    if any(len(os.fsencode(name)) + 24 > name_limit for name in names):
+        raise PlanError('planned component filename is too long for safe resource reservation')
+    family = normalized_resource_name(destination.stem)
+    if not family or family.startswith('.') or '/' in family:
+        raise PlanError('invalid resource family')
+    # Hierarchical intention locks: foo is exclusive, ancestors shared. Thus
+    # foo and foo.f137 conflict even with different final extensions, while
+    # foo.a and foo.b can overlap. All acquisitions are nonblocking and sorted.
+    families = ['.'.join(family.split('.')[:i]) for i in range(1, len(family.split('.')) + 1)]
+    keys = []
+    for prefix in families:
+        key = hashlib.sha256((str(expected) + '\0' + prefix).encode()).hexdigest()
+        keys.append(('exclusive' if prefix == family else 'shared', key))
+    request = Path(args.url_file)
+    require_private_regular_file(request, 'private request')
+    # A sanitized/truncated filename cannot identify the extracted media.
+    # Requested downloads may inherit these fields from the plan root; explicit
+    # per-download values take precedence, including explicit null values.
+    # Signed transfer URLs can refresh without changing this stable identity.
+    media_identity = {key: root.get(key, plan.get(key))
+                      for key in ('id', 'extractor', 'extractor_key')}
+    has_media_identity = (
+        isinstance(media_identity['id'], str) and bool(media_identity['id'])
+        and all(value is None or isinstance(value, str) for value in media_identity.values())
+        and bool(media_identity['extractor'] or media_identity['extractor_key']))
+    # Incomplete identity still permits a fresh transfer, but cannot authorize
+    # a later resume even if another incomplete checkpoint has the same shape.
+    binding = None
+    if has_media_identity:
+        binding = hashlib.sha256(json.dumps({
+            'request': hashlib.sha256(request.read_bytes()).hexdigest(),
+            'media': media_identity,
+            'identity': expected, 'family': family, 'mode': args.mode, 'hls': args.hls,
+            'formats': [(item.get('format_id'), item.get('ext'), item.get('protocol')) for item in formats],
+        }, sort_keys=True).encode()).hexdigest()
+    final_name = destination.with_suffix('.mkv').name if args.mode == 'video' else destination.name
+    if args.hls and destination.suffix == '.mkv':
+        final_name = destination.stem + '.remuxed.mkv'
+    state = {'version': 1, 'family': family, 'binding': binding,
+             'output': str(output), 'final': str(final), 'identity': expected,
+             'final_name': final_name, 'key': keys[-1][1], 'owned': {}}
+    write_private_new(Path(args.state), json.dumps(state))
+    # load-info-json can retry a failed plan by extracting webpage_url again.
+    # Remove that fallback from the replay only, preserving the original plan
+    # for classification and ownership. Names and selected formats stay frozen.
+    replay = dict(plan)
+    replay.pop('webpage_url', None)
+    replay.pop('original_url', None)
+    replay['formats'] = formats
+    write_private_new(Path(args.state).with_name('transfer-plan.json'), json.dumps(replay))
+    for mode, key in sorted(keys, key=lambda item: item[1]):
+        print(mode, key)
+    return 0
+
+
+def resource_snapshot(state: dict) -> dict:
+    final = Path(state['final'])
+    if directory_identity(final) != tuple(state['identity']):
+        raise PlanError('resource destination identity changed')
+    result = {}
+    with directory_descriptor(final) as descriptor:
+        for name in os.listdir(descriptor):
+            normalized = normalized_resource_name(name)
+            if normalized != state['family'] and not normalized.startswith(state['family'] + '.'):
+                continue
+            info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                raise DestinationExistsError('ambiguous pre-existing resource; preserved for inspection')
+            result[name] = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+    return result
+
+
+def replace_private_json(path: Path, payload: dict) -> None:
+    with directory_descriptor(path.parent, trusted_chain=True) as descriptor:
+        require_private_directory_descriptor(descriptor)
+        if path.exists() or path.is_symlink():
+            require_private_regular_file(path, 'resource ownership record')
+        temporary = path.with_name('.ownership-' + secrets.token_hex(16))
+        write_private_new(temporary, json.dumps(payload, sort_keys=True))
+        try:
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def resource_state(args: argparse.Namespace) -> int:
+    state_path = Path(args.state)
+    state = read_json(state_path, 'resource plan')
+    registry = Path(args.registry)
+    with directory_descriptor(registry, trusted_chain=True) as descriptor:
+        require_private_directory_descriptor(descriptor)
+        bucket = 'resources-' + hashlib.sha256(str(tuple(state['identity'])).encode()).hexdigest()
+        try:
+            os.mkdir(bucket, 0o700, dir_fd=descriptor)
+        except FileExistsError:
+            pass
+    registry = registry / bucket
+    with directory_descriptor(registry, trusted_chain=True) as descriptor:
+        require_private_directory_descriptor(descriptor)
+    record = registry / (state['key'] + '.resume.json')
+    if args.action == 'admit':
+        # A failed/uncertain stop must retain protection even if a consumer
+        # closed inherited lock descriptors. These are per-resource ownership
+        # checkpoints, never a PID registry or an authority to signal anyone.
+        for path in registry.glob('*.resume.json'):
+            other = read_json(path, 'resource ownership')
+            if other.get('active') and other.get('identity') == state['identity']:
+                family = other.get('family', '')
+                if (family == state['family'] or family.startswith(state['family'] + '.')
+                        or state['family'].startswith(family + '.')):
+                    raise ResourceBusyError('media resources remain reserved after an unconfirmed shutdown; inspect the preserved session')
+    snapshot = resource_snapshot(state)
+    completed = getattr(args, 'completed_path', '')
+    if completed:
+        completed = resolve_destination(completed, Path(state['final']), 'completed media').name
+        if completed not in snapshot:
+            raise PlanError('completed media escaped its reserved family')
+    checkpoint = {'version': 1, 'binding': state['binding'], 'owned': snapshot, 'completed': completed,
+                  'identity': state['identity'], 'family': state['family'], 'active': False}
+    if args.action == 'admit':
+        previous = read_json(record, 'resource ownership') if record.exists() else {}
+        # A .part name is no proof. Only this protocol's previous quiescent
+        # checkpoint, media/request/format binding and unchanged file identities can
+        # authorize a local native resumption. Network workspaces still restart.
+        final_alias = normalized_resource_name(state['final_name'])
+        for name in snapshot:
+            if (normalized_resource_name(name) == final_alias or
+                    name == previous.get('completed')):
+                raise DestinationExistsError('final media destination already exists; refusing to overwrite it. Destination: ' + name)
+        if snapshot and (not state['binding'] or state['output'] != state['final'] or
+                         previous.get('binding') != state['binding'] or
+                         previous.get('owned') != snapshot):
+            raise DestinationExistsError('pre-existing or ambiguous media resources; preserved, not an authorized resume')
+        state['owned'] = snapshot
+        replace_private_json(state_path, state)
+        # Invalidate the previous checkpoint before tools run. A crash cannot
+        # turn an unobserved write into a new ownership proof.
+        checkpoint.update(active=True, owned={})
+        replace_private_json(record, checkpoint)
+    else:
+        replace_private_json(record, checkpoint)
+    return 0
+
+
+def owned_native_input(path: Path, ownership: str | None) -> bool:
+    if not ownership:
+        return False
+    state = read_json(Path(ownership), 'resource admission')
+    info = path.stat(follow_symlinks=False)
+    observed = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+    return (str(path.parent) == state['output'] == state['final'] and
+            state['owned'].get(path.name) == observed and stat.S_ISREG(info.st_mode))
+
+
 def check_native_final(args: argparse.Namespace) -> int:
     """Refuse a known existing native media path and bind retries to its basename."""
     output_dir = resolve_output_directory(args.output_dir)
@@ -718,6 +909,12 @@ def check_native_final(args: argparse.Namespace) -> int:
     extension = destination.suffix[1:]
     if args.mode == "audio" and not extension_is_representable(extension):
         raise PlanError("native audio filename has an unsupported extension")
+    inputs = [destination]
+    if root.get('requested_formats'):
+        inputs.extend(component_destination(destination, item) for item in root['requested_formats'])
+    for candidate in inputs:
+        if (candidate.exists() or candidate.is_symlink()) and not owned_native_input(candidate, getattr(args, 'ownership', None)):
+            raise DestinationExistsError('native input already exists without authorized ownership; preserved')
     expected_identity = parse_identity(args.final_output_identity)
     final_output = Path(args.final_output_dir)
     with directory_descriptor(final_output) as final_fd:
@@ -727,6 +924,8 @@ def check_native_final(args: argparse.Namespace) -> int:
         try:
             final_name = (destination.with_suffix(".mkv").name
                           if args.mode == "video" else destination.name)
+            if args.ownership:
+                final_name = read_json(Path(args.ownership), 'resource admission')['final_name']
             os.stat(final_name, dir_fd=final_fd, follow_symlinks=False)
         except FileNotFoundError:
             pass
@@ -1449,6 +1648,19 @@ def create_parser() -> argparse.ArgumentParser:
     cleanup.add_argument("--keep-identity", action="append", default=[])
     cleanup.set_defaults(handler=cleanup_workspace)
 
+    resources = subparsers.add_parser('resource-plan', help='plan destination resource reservations')
+    for option in ('plan', 'state', 'url-file', 'output-dir', 'final-output-dir', 'final-output-identity'):
+        resources.add_argument('--' + option, required=True)
+    resources.add_argument('--mode', choices=('video', 'audio'), required=True)
+    resources.add_argument('--hls', action='store_true')
+    resources.set_defaults(handler=resource_plan)
+    ownership = subparsers.add_parser('resource-state', help='admit or checkpoint owned local media')
+    ownership.add_argument('--action', choices=('admit', 'save'), required=True)
+    ownership.add_argument('--state', required=True)
+    ownership.add_argument('--registry', required=True)
+    ownership.add_argument('--completed-path', default='')
+    ownership.set_defaults(handler=resource_state)
+
     classify = subparsers.add_parser(
         "classify",
         help="classify the selected yt-dlp transport as direct or native",
@@ -1465,6 +1677,7 @@ def create_parser() -> argparse.ArgumentParser:
     native.add_argument("--final-output-dir", required=True)
     native.add_argument("--final-output-identity", required=True)
     native.add_argument("--mode", choices=("video", "audio"), default="video")
+    native.add_argument("--ownership")
     native.set_defaults(handler=check_native_final)
 
     build = subparsers.add_parser(
@@ -1514,6 +1727,9 @@ def main() -> int:
     except DestinationExistsError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    except ResourceBusyError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 75
     except PlanError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_VALIDATION

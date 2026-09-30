@@ -783,7 +783,7 @@ aria2_invocations.write_bytes(b"")
 before = len(media_requests())
 result, completed = run("native-title-change", "first", output)
 assert completed.returncode == 0, (completed.stdout, completed.stderr)
-assert b"[info] native-http: Downloading" in completed.stdout, "native seed was not refreshed"
+assert b"[info] native-planned-title: Downloading" in completed.stdout, "native download did not replay its frozen plan"
 assert media_requests()[before:] == ["/av.mp4"], "refreshed extraction did not download the planned result"
 assert not aria2_invocations.read_bytes(), "refreshed native extraction invoked aria2c"
 assert Path(result.read_text().strip()) == planned_final.resolve(), "native title change escaped the checked basename"
@@ -877,6 +877,33 @@ for index, literal in enumerate(("$HOME", "${A2_DEFINED}", "$A2_DEFINED",
         assert final.is_file() and final.parent == output.resolve(), (literal, final)
         assert sorted(output.parent.iterdir()) == [output], "download created an expanded destination"
 print("Real native/direct downloads preserve literal dollar/percent destinations.")
+# Native-video negative controls contain a different valid medium, with the
+# MKV absent. Neither a completed input nor a lone .part conveys ownership.
+for extension, codecs in (("mp4", ["-c:v", "libx264", "-c:a", "aac"]),
+                          ("webm", ["-c:v", "libvpx-vp9", "-c:a", "libopus"])):
+    scenario = "foreign-native-" + extension
+    output = media_root / scenario
+    output.mkdir(mode=0o700)
+    foreign = output / f"Foreign witness [{scenario}].{extension}"
+    subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i",
+                    "color=c=red:s=160x90:r=10", "-f", "lavfi", "-i", "sine=frequency=300",
+                    "-t", "1", *codecs, str(foreign)], check=True)
+    before_identity = final_snapshot(foreign)
+    metadata = {"id": scenario, "title": "Foreign witness", "extractor": "generic",
+                "extractor_key": "Generic", "webpage_url": base + "/controlled-page", "duration": 3,
+                "formats": [{"format_id": "av", "url": base + "/av.mp4", "ext": extension,
+                             "protocol": "http", "vcodec": "h264", "acodec": "aac",
+                             "http_headers": {"X-Fixture-Native": "1"}}]}
+    seed.write_text(json.dumps(metadata)); seed.chmod(0o600)
+    before = len(media_requests())
+    result, completed = run(scenario, "foreign-input", output)
+    assert completed.returncode == 1, (completed.returncode, completed.stdout, completed.stderr)
+    assert final_snapshot(foreign) == before_identity, "native input bytes/identity/timestamps changed"
+    assert not result.exists() and not foreign.with_suffix(".mkv").exists(), "foreign media became a false success"
+    assert len(media_requests()) == before, "native input collision caused a transfer"
+    print(f"Native {extension} foreign-media witness preserved before transfer/postprocessing.")
+
+
 PY_EXISTING_ASSEMBLED
 }
 
@@ -894,6 +921,7 @@ test_real_media_validation_mutations() {
     # intended mutated validation logic instead of failing dependency discovery.
     cp -- "${PROJECT_DIR}/private-aria2-plan.py" "${TEST_ROOT}/private-aria2-plan.py"
     chmod 644 -- "${TEST_ROOT}/private-aria2-plan.py"
+    cp -- "${PROJECT_DIR}/private-process-supervisor.py" "${TEST_ROOT}/private-process-supervisor.py"
 
     # VAL-001 regression: create a clean physical truncation that still exposes
     # both expected streams and retains fewer content-video packets. A temporary

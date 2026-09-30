@@ -18,6 +18,7 @@ project. It is intentionally independent of a particular release date.
 - [Covered behavior](#covered-behavior)
 - [GitHub Actions](#github-actions)
 - [Controlled real Zenity qualification](#controlled-real-zenity-qualification)
+- [Shared-destination and process qualification](#shared-destination-and-process-qualification)
 - [Release maintainer preflight](#release-maintainer-preflight)
 - [Post-release evidence qualification](#post-release-evidence-qualification)
 - [Real-world checks on Fedora 44](#real-world-checks-on-fedora-44)
@@ -447,8 +448,9 @@ process as a Linux child subreaper through an isolated Python `prctl`/`exec`
 bootstrap. The PID and signal topology stay unchanged, and Bash harvests
 terminated orphan descendants instead of depending on the host or container's
 PID 1. This does not terminate live descendants or relax engine quiescence:
-after losing its leader, the engine still requires kernel-confirmed group
-absence before releasing tracked resources. Runner integration includes a
+after losing its leader, the engine still requires ESRCH or two complete matching
+zombie-only inventories with identity revalidation before releasing tracked
+resources. Runner integration includes a
 non-reaping outer parent, a no-bootstrap negative control, and live-child,
 identity and exit-status checks for this fixture lifecycle.
 
@@ -599,8 +601,10 @@ The automated suite checks, among other things:
   and conservative preservation after acquisition failures or replacement;
   directory replacement between descriptor open and path-identity capture must
   not grant deletion authority for metadata, media workspaces or aria2 staging;
-- preservation of active temporary files, inherited lock ownership, and the
-  original exit status when bounded worker shutdown cannot be confirmed;
+- preservation of active temporary files and the original requested exit status
+  when bounded worker shutdown cannot be confirmed; after admission the engine
+  stays alive holding historical and fine reservation FDs until consumers stop,
+  including consumers that closed all inherited lock descriptors;
 - aria2 diagnostic filters drain the producer's final cancellation message
   before closing, while unexpected redaction failures remain fatal;
 - trimming of leading and trailing whitespace entered in the GUI;
@@ -665,9 +669,15 @@ The automated suite checks, among other things:
   from hostile runtime/TMPDIR/XDG roots, acceptance of sticky shared parents,
   and descriptor-first HLS/result publication with no-clobber rename fallback
   when the filesystem does not support hard links;
-- rejection of a second writer targeting the same canonical output directory;
+- parallel independent writers in one canonical destination, and refusal of
+  overlapping filename families; legacy exclusive-lock compatibility during
+  supervised shutdown, without a guarantee after external SIGKILL removes the
+  historical lock holders;
 - explicit no-overwrite options and refusal of known final-video/native-audio collisions,
-  while preserving interrupted-download resume behavior; these checks do not
+  while preserving authenticated native resumes bound to the full media ID and
+  extractor identity; filename truncation, changed extractors and missing
+  identity cannot authorize adoption, while signed transfer URLs may refresh;
+  these checks do not
   establish atomic local yt-dlp postprocessing against unrelated writers;
 - complete staging-inventory admission, including empty/error, partial/error,
   unknown files and a file introduced after acquisition; the last file must
@@ -684,7 +694,12 @@ The automated suite checks, among other things:
   process-group discovery;
 - forwarding of termination signals during the wrapper-managed HLS FFmpeg remux;
 - preservation of immediate command failure statuses before PGID observation;
-- one shared process session for GUI, engine, yt-dlp, aria2c, FFmpeg, and Deno;
+- GUI-owned engine wrappers share the outer worker session; runtime and FFprobe
+  helpers stay in that SID while pinning their direct child's private SID with
+  WNOWAIT through all live subgroups; engine force escalation freezes an
+  authenticated target through a pidfd, then checks every thread's stopped
+  state, identity and children in two stable inventories before leaf KILL or
+  parent CONT;
 - FFprobe rejection of missing or structurally invalid expected media streams;
 - canonical destination validation before the progress monitor emits 100 percent;
 - no-target-directory publication when a destination changes into a directory;
@@ -695,6 +710,10 @@ The automated suite checks, among other things:
   to signal it: a real vanished-leader/live-descendant fixture verifies refusal
   to claim shutdown, preservation of private state and the inherited lock, no
   signal without authority, and cleanup after the descendant actually exits;
+- positive zombie-only quiescence without requiring an external reaper: after
+  lost leader authority, two complete matching PGID/SID inventories and final
+  PID/start/state revalidation are required; live members, changed inventories
+  and read/parse/permission errors cannot authorize cleanup;
 - Zenity timeout and unexpected-error handling;
 - folder-chooser fallback behavior on Zenity 4;
 - minimum versions, suffixed yt-dlp versions, required capabilities, and
@@ -1255,6 +1274,133 @@ residual descendants. Its default output is under
 `qualification-evidence/zenity/`, which is ignored because it is local,
 generated evidence rather than permanent source documentation. Pass an
 explicit second path when another evidence store owns the result.
+
+## Shared-destination and process qualification
+
+Run the deterministic process/observer controls through the `signals` group
+(or `python3 -B tests/process-supervision-integration.py` while developing).
+The deterministic cases exercise production supervision functions with
+controlled consumers; real-media cycles are qualified separately:
+
+| Cases | Required observation before rescue |
+| --- | --- |
+| Orphan observer and intentional external viewer | The actual Zenity harness rejects a marked orphan in another SID and detects a synthetic URL in argv; the explicitly opened external viewer remains alive and excluded without being signaled |
+| Timed command with early leader exit | A resistant descendant in another process group retains its pipe/resource until the helper signals the pinned private SID and returns 137 after KILL |
+| Runtime timed probe | The actual runtime capture path retains the original manager's update lock and registered temporary through the child's last access, then cleans up and returns 124 |
+| Engine wrapper exit, GUI and CLI modes | The engine retains resources and locks after the command wrapper exits, delivers cancellation, and waits for last access; adopted zombies remain unreaped by the test until after the production verdict |
+| Engine FFprobe cancellation, GUI and CLI paths | The actual `capture_media_probe` path runs a controlled FFprobe executable with an early leader exit and resistant subgroup; cancellation returns 143 with no live marked consumer and removes the probe capture only after shutdown |
+| Uncertain stop with closed consumer lock FDs | With KILL failure injected only for that consumer, the admitted engine remains alive, preserves its resource and denies an old-style exclusive lock; an independent lock remains available and release occurs only after the consumer stops |
+| CLI escalation before sentinel retirement | Explicit escalation reaches the helper's private command session while its leader is pinned, before the outer sentinel can be retired |
+| GUI shutdown after worker leader exit | A token-bearing GNU-timeout subgroup remains observable and is stopped before the GUI reports completion |
+| Bash quiescence decisions | A private procfs model changes an enumerated parent to a zombie and adds a live child before its stat is read; GUI session reuse, GUI observation and the CLI sentinel retain supervision. Removing the second inventory fails each oracle without creating or signaling the modeled processes |
+
+The orphan control starts a marked worker in another session, waits for its
+parent to exit, and requires the real Zenity harness verdict to fail before
+rescue. The observer follows the launch marker and recorded PID/start identity,
+not all processes of the user. It neither ptraces nor reaps the application.
+The open-folder scenario marks the deliberately launched external viewer via
+its fixture launcher; the observer excludes that application and its children.
+An independent positive control verifies this exception without signaling it.
+Polling cannot prove absence of a process that erased its marker and escaped
+before any observation. Test-only subreaping changes reparenting and collects
+already stopped zombies; it is never counted as application wait-status proof.
+The engine wrapper cases deliberately defer that collection until after their
+verdict. Zombie-only state means no live consumer can use a descriptor; it does
+not mean the application reaped every descendant. Production engine/GUI
+lost-authority checks require two complete, stable inventories and identity/state
+revalidation, with uncertain observations preserving state. Timed helpers also
+require two complete unchanged member inventories with no live member, then
+reap their own direct child retained through WNOWAIT. A child forked after
+the first `/proc` enumeration must be caught by the second complete inventory;
+rechecking only the already enumerated zombie PIDs is insufficient.
+The same requirement covers the Bash GUI, engine session-reuse and CLI sentinel
+paths: two complete inventories must retain identical zombie PID/start identities,
+with any live consumer, changed inventory or uncertainty vetoing cleanup.
+
+Ordinary duplicate TERM delivery must retain the helper's original grace
+deadline. The outer supervisor's CONT control forces private-session KILL only
+after a graceful signal was recorded; a helper with a pinned child cannot be
+retired as an outer leaf. Deadline/forced KILL repeats until private-session
+quiescence, covering members missed by an earlier enumeration.
+
+The force path requires Linux pidfds and Python's `os.pidfd_open` and
+`signal.pidfd_send_signal`. Its safety assertions require an authenticated
+PID/start/SID and pidfd STOP, followed by two complete inspections while frozen:
+every thread must be in `T`/`t` and the nonempty sets of task IDs/start identities
+must match. Every thread's children are checked; same-session children are stopped
+while the parent stays frozen, then revalidated as quiescent before its retirement.
+A different-session child vetoes retirement even when it is a pinned zombie of
+a timed helper. A child created by a non-leader thread must not be missed when the
+leader's children list is empty. The pre-env double-signal fixture retains its
+two-second limit and verifies that a startup loop cannot recreate a child between
+escalation attempts. Session-leader retirement additionally requires two complete
+quiescent inventories of its other members. A running,
+missing or unreadable thread, or changed task inventory, must also refuse KILL.
+Parents resume with CONT. Missing pidfd support or any failed observation must
+refuse unsafe force delivery and preserve
+unconfirmed resources; process names and UID matching are never substitutes.
+With `WORKER_ENGINE_SUPERVISION` on a real engine launch, GUI escalation sends
+CONT to the authenticated engine and its persistent force loop owns subsequent
+freezes. The GUI may freeze targets itself only on the orphan/generic-worker
+fallback, avoiding concurrent GUI/engine STOP/CONT decisions that reopen the
+fork race. These escalation deadlines do not bound closure of an
+uninterruptible consumer. A retained active checkpoint protects new-protocol
+admission after a crash, but an old executable cannot read it. The controlled
+legacy-lock fixture qualifies owner retention during uncertain shutdown, not
+exclusion after external SIGKILL destroys every historical lock holder.
+
+```bash
+python3 -B tests/multi-instance-real.py
+```
+
+This local opt-in qualification uses real yt-dlp, aria2, FFprobe and FFmpeg,
+a loopback media server and scripted Zenity answers. It shares HOME, all XDG
+roots, preferences and managed runtimes between instances. HTTP barriers prove
+active transfer overlap, decoded frame hashes verify distinctive content,
+and monotonic events record closure and quiescence before any rescue. It covers
+three bounded GUI/GUI, GUI/CLI and CLI/CLI cycles, transfer and real remux
+cancellation, D admission while B/C run, and authorized native partial resume.
+These are bounded qualification cycles, not an unbounded soak test; barrier
+expiry or a closure deadline failure remains a failure before rescue.
+It also covers two URLs with identical names, different profiles sharing an
+input, title truncation, and conflicts through a destination alias and a
+different XDG runtime root. A real aria2 consumer paused with an open staging
+descriptor proves that both staging and reservations survive until its stop;
+independent transfers continue during that interval. Legacy exclusive locking
+is exercised in both launch orders against the historical inode. To also run
+an available, separately preserved 2.3.29 executable, set
+`YTDLP_LEGACY_ENGINE=/absolute/path/to/old/download-video.sh`; its adjacent
+helpers must be from that version. Evidence remains in the printed
+private `/tmp/shared-destination-real-*` directory. Scripted answers do not
+qualify visible desktop gestures; the interactive Zenity procedure remains
+separate. No network outage or actual CIFS qualification is implied.
+
+The private-plan suite exercises shared/exclusive ancestor reservations,
+Unicode/case aliases, different URLs and overlapping intermediate families,
+unchanged owned resumes, ambiguous legacy partials and active-record retention
+after uncertain shutdown. Resume cases keep the request, filename and formats
+fixed while changing the full media ID beyond its 64-byte filename prefix, or
+changing either extractor field. Both inherited and per-download identities
+are covered; refreshed signed URLs and either available extractor field remain
+valid positive controls. Missing, null or malformed identities permit a fresh
+transfer but never authenticate its later partial. Pre-identity checkpoints are
+not upgraded into ownership. The regression must fail against the former
+binding; removing the missing-binding admission guard must also fail.
+
+Qualify the following four independent oracles on disposable source copies.
+Each mutant must fail its intended assertion before rescue; a startup error,
+unrelated timeout or rescue killing the witness is not an oracle success.
+
+| Oracle | Controlled input and positive control | Mutation that must be detected |
+| --- | --- | --- |
+| Process observation | Marked orphan in a new SID, plus the intentionally opened external viewer | Disable marker observation: the actual Zenity verdict must no longer satisfy the orphan-rejection assertion |
+| Deno checksum | A valid ZIP with a deliberately wrong expected checksum; reject before extraction, execution or activation | Disable checksum verification: the integrity/no-extraction assertion must fail |
+| Copy stability | Change the source in place after the first destination write, at both constant and changed size; unchanged source succeeds | Disable post-copy source-stability verification: mutated-source publication must violate the rejection assertion |
+| GUI result containment | A separate engine returns success with an outside path; an inside path is the positive control | Disable GUI containment: the outside-result rejection assertion must fail |
+
+Record source identity, the intended assertion and pre-rescue outcome for each
+run. These procedures describe qualification requirements, not evidence that a
+particular working tree or mutant has already passed.
 
 ## Release maintainer preflight
 

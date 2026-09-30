@@ -3381,8 +3381,8 @@ test_static_release_contracts() {
         'engine destination-directory lock'
     # shellcheck disable=SC2016 # Literal shell-source assertion.
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        'flock --exclusive --nonblock "${OUTPUT_LOCK_FD}"' \
-        'nonblocking destination lock acquisition'
+        'flock --shared --nonblock "${OUTPUT_LOCK_FD}"' \
+        'shared legacy destination lock acquisition'
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         'worker_group_has_identity_token() {' \
         'worker group remains authenticated after session-leader exit'

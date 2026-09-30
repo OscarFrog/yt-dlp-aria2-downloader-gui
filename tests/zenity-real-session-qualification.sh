@@ -77,64 +77,15 @@ cleanup() {
         kill -TERM -- "${WATCHER_PID}" 2>/dev/null || true
         wait "${WATCHER_PID}" 2>/dev/null || true
     fi
-    if [[ -n ${GUI_SID} && ${GUI_SID} =~ ^[1-9][0-9]*$ ]]; then
-        kill -TERM -- "-${GUI_SID}" 2>/dev/null || true
-    elif [[ -n ${GUI_PID} ]]; then
+    if [[ -n ${GUI_PID} ]]; then
         kill -TERM -- "${GUI_PID}" 2>/dev/null || true
     fi
     if [[ -n ${GUI_PID} ]]; then
         wait "${GUI_PID}" 2>/dev/null || true
     fi
-    if [[ -n ${SESSION_ROOT} ]]; then
+    if [[ ${cleanup_status} == 0 && -n ${SESSION_ROOT} ]]; then
         rm -rf -- "${SESSION_ROOT}" || true
     fi
-}
-
-relevant_processes() {
-    local uid=$1
-
-    ps -u "${uid}" -o pid=,comm=,args= \
-        | awk '
-            $2 != "awk" && $2 != "grep" && $2 != "ps" &&
-            ($0 ~ /(^|[[:space:]\/])(yt-dlp|aria2c|ffmpeg|ffprobe|deno)([[:space:]]|$)/ ||
-             $0 ~ /(download-video\.sh|progress-monitor\.sh)/) {
-                print $1 "|" $2
-            }
-        ' \
-        | LC_ALL=C sort -u
-}
-
-watch_process_topology() {
-    local uid=$1
-    local gui_pid=$2
-    local gui_sid=$3
-    local topology_file=$4
-    local leak_file=$5
-
-    local topology_timestamp
-    local privacy_timestamp
-
-    while kill -0 -- "${gui_pid}" 2>/dev/null; do
-        topology_timestamp=$(date --iso-8601=ns)
-        privacy_timestamp=$(date --iso-8601=seconds)
-        printf -- '--- %s ---\n' "${topology_timestamp}" >>"${topology_file}"
-        ps -u "${uid}" -o pid=,ppid=,pgid=,sid=,comm= \
-            | awk -v target_sid="${gui_sid}" '$4 == target_sid { print }' \
-                >>"${topology_file}" || true
-
-        ps -u "${uid}" -o pid=,ppid=,pgid=,sid=,comm=,args= \
-            | awk -v target_sid="${gui_sid}" -v timestamp="${privacy_timestamp}" '
-                $4 == target_sid &&
-                $5 != "awk" && $5 != "grep" && $5 != "ps" &&
-                ($0 ~ /(^|[[:space:]\/])(yt-dlp|aria2c|ffmpeg|ffprobe|deno)([[:space:]]|$)/ ||
-                 $0 ~ /(download-video\.sh|progress-monitor\.sh)/) &&
-                $0 ~ /https?:\/\// {
-                    print timestamp " potential-url-in-argv pid=" $1 " comm=" $5
-                }
-            ' >>"${leak_file}" || true
-
-        sleep 0.2
-    done
 }
 
 print_scenario_instructions() {
@@ -236,49 +187,36 @@ record_environment() {
     } >"${evidence_dir}/environment.txt"
 }
 assert_no_residual_processes() {
-    local uid=$1
-    local gui_sid=$2
-    local evidence_dir=$3
-    local current_file="${evidence_dir}/processes-after.txt"
-    local residual_file="${evidence_dir}/residual-processes.txt"
-    local attempt
+    local evidence_dir=$1
+    local stop_file=$2
 
-    : >"${current_file}"
-    : >"${residual_file}"
-
-    for ((attempt = 0; attempt < 50; attempt++)); do
-        ps -u "${uid}" -o pid=,sid=,comm= \
-            | awk -v target_sid="${gui_sid}" '
-                $2 == target_sid {
-                    print $1 "|" $3
-                }
-            ' >"${current_file}" || true
-
-        if [[ ! -s ${current_file} ]]; then
-            : >"${residual_file}"
-            return 0
-        fi
-        sleep 0.1
-    done
-
-    cp -- "${current_file}" "${residual_file}"
-    fail_test \
-        "download-related processes in GUI session ${gui_sid} remained after the GUI exited."
+    # Finish observation before rescue or session deletion; the verdict must
+    # describe the application's shutdown, never the harness cleanup.
+    : >"${stop_file}"
+    wait "${WATCHER_PID}"
+    WATCHER_PID=''
+    python3 -I -B - "${evidence_dir}/processes-current.json" <<'PY_RESIDUAL'
+import json
+import sys
+from pathlib import Path
+state = json.loads(Path(sys.argv[1]).read_text())
+if state['live'] or state['url_in_argv']:
+    print('FAIL: surviving qualification descendants or URL arguments detected.', file=sys.stderr)
+    sys.exit(65)
+PY_RESIDUAL
 }
 
 main() {
     local scenario=${1:-}
     local requested_evidence=${2:-}
-    local uid
     local evidence_dir
     local output_dir
-    local baseline_file
     local leak_file
     local session_id_file
     local actual_sid=''
     local actual_pgid=''
     local attempt
-    local topology_file
+    local observer_token observer_stop
     local raw_gui_stdout
     local raw_gui_stderr
     local gui_status=0
@@ -305,7 +243,7 @@ main() {
             ;;
     esac
 
-    for command_name in awk bash cp date find grep id mktemp ps realpath setsid sleep sort wc zenity; do
+    for command_name in awk bash cp date find grep mktemp ps python3 realpath setsid sleep wc zenity; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             fail_test "required command is absent: ${command_name}."
         fi
@@ -350,17 +288,13 @@ main() {
     fi
     chmod 700 -- "${evidence_dir}"
 
-    uid=$(id -u)
-    baseline_file="${evidence_dir}/processes-before.txt"
     leak_file="${evidence_dir}/privacy-findings.txt"
-    topology_file="${evidence_dir}/process-topology.txt"
+    observer_token=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+    observer_stop="${SESSION_ROOT}/observer.stop"
     raw_gui_stdout="${SESSION_ROOT}/gui.stdout"
     raw_gui_stderr="${SESSION_ROOT}/gui.stderr"
     session_id_file="${SESSION_ROOT}/gui.sid"
     : >"${leak_file}"
-    : >"${topology_file}"
-
-    relevant_processes "${uid}" >"${baseline_file}"
     record_environment "${evidence_dir}"
     printf 'scenario=%s\n' "${scenario}" >"${evidence_dir}/scenario.txt"
 
@@ -368,12 +302,31 @@ main() {
     printf '\nEvidence directory: %s\n' "${evidence_dir}"
     printf 'Start the GUI now and perform the scenario exactly as described.\n\n'
 
+    if [[ ${scenario} == open-folder ]] && command -v xdg-open >/dev/null 2>&1; then
+        # Identify this intentionally opened application without excluding
+        # other users' processes or weakening worker-session observation.
+        YTDLP_QUALIFICATION_XDG_OPEN=$(command -v xdg-open)
+        export YTDLP_QUALIFICATION_XDG_OPEN
+        mkdir -- "${SESSION_ROOT}/bin"
+        cat >"${SESSION_ROOT}/bin/xdg-open" <<'EOF_EXTERNAL_VIEWER'
+#!/usr/bin/env bash
+exec env YTDLP_QUALIFICATION_EXTERNAL=1 "${YTDLP_QUALIFICATION_XDG_OPEN}" "$@"
+EOF_EXTERNAL_VIEWER
+        chmod 700 -- "${SESSION_ROOT}/bin/xdg-open"
+        export PATH="${SESSION_ROOT}/bin:${PATH}"
+    fi
+
+    python3 -I -B "${PROJECT_DIR}/tests/process-observer.py" \
+        "${observer_token}" "${evidence_dir}" "${observer_stop}" &
+    WATCHER_PID=$!
+
     HARNESS_PHASE='launching-gui'
     set +e
     # The single-quoted child program is intentionally expanded by the child
     # Bash launched via `bash -c`, not by this qualification harness.
     # shellcheck disable=SC2016
-    XDG_CONFIG_HOME="${SESSION_ROOT}/config" \
+    YTDLP_QUALIFICATION_TOKEN="${observer_token}" \
+        XDG_CONFIG_HOME="${SESSION_ROOT}/config" \
         XDG_STATE_HOME="${SESSION_ROOT}/state" \
         setsid --wait \
         bash -c '
@@ -417,10 +370,6 @@ main() {
         printf 'gui_process_group_id=%s\n' "${actual_pgid}"
     } >>"${evidence_dir}/scenario.txt"
 
-    watch_process_topology \
-        "${uid}" "${GUI_PID}" "${GUI_SID}" "${topology_file}" "${leak_file}" &
-    WATCHER_PID=$!
-
     case ${scenario} in
         signal-entry | signal-progress)
             printf '\nType SIGNAL only when the requested Zenity dialog is visibly active: '
@@ -446,10 +395,6 @@ main() {
 
     HARNESS_PHASE='post-gui'
 
-    kill -TERM -- "${WATCHER_PID}" 2>/dev/null || true
-    wait "${WATCHER_PID}" 2>/dev/null || true
-    WATCHER_PID=''
-
     printf 'gui_exit_status=%d\n' "${gui_status}" >>"${evidence_dir}/scenario.txt"
 
     case ${scenario} in
@@ -461,7 +406,7 @@ main() {
         *) ;;
     esac
 
-    assert_no_residual_processes "${uid}" "${GUI_SID}" "${evidence_dir}"
+    assert_no_residual_processes "${evidence_dir}" "${observer_stop}"
 
     if [[ -d ${SESSION_ROOT}/state ]]; then
         state_url_hits=$(

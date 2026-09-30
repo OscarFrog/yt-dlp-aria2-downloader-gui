@@ -95,11 +95,11 @@ For an RPM installation, the graphical launcher and application icon are install
 - automatic native HTTPS fallback for affected aria2/GnuTLS combinations;
 - unified graphical progress for direct files, native HLS/DASH fragments,
   separate video/audio streams, and FFmpeg post-processing;
-- cancellation of the complete process group through one shared GUI session;
-- supervised yt-dlp and wrapper-managed FFmpeg commands, including bounded shutdown;
+- cancellation of the download session, including supervised runtime and FFprobe commands;
+- supervised yt-dlp and wrapper-managed FFmpeg commands, with timed signal escalation and preservation while shutdown remains unconfirmed;
 - FFprobe validation of both video and audio streams for complete-video results, and of an audio stream with no content-video stream for audio results, before success is published;
-- one active writer per destination directory, preventing concurrent
-  instances from sharing partial or post-processing files;
+- concurrent independent downloads into the same destination, with exclusive
+  reservations for overlapping media, partial and post-processing files;
 - private diagnostic logs retained only for problematic runs, with URL redaction and an 8 MiB retained-size cap;
 - application-menu launcher;
 - static, mock, and hermetic real-tool integration tests, including local
@@ -153,9 +153,12 @@ older version after several updates. Re-downloading an identical verified
 binary preserves the installed file; a damaged copy can be repaired from the
 verified release.
 
-On a graceful interruption, bootstrap temporary files are cleaned after the
-running command finishes and before the update lock is released. Forced
-termination with `SIGKILL` can leave temporary files behind.
+On a graceful interruption, the runtime manager keeps its bootstrap temporary
+files and update lock until the running command and its supervised consumers
+have stopped. A timed probe returning early does not authorize cleanup of a
+surviving child. The manager then removes its authenticated temporaries before
+releasing the lock. Forced termination with `SIGKILL` can leave temporary files
+and consumers behind.
 
 The runtime manager first resolves the exact release tag and then downloads all
 assets from that immutable coordinate, avoiding a `latest`-moving-between-files
@@ -693,12 +696,20 @@ The engine deliberately uses `--ignore-config`, disables yt-dlp plugins through
 installed aria2c build advertises `--no-netrc`, the engine enables it to avoid
 loading credentials from a personal `.netrc` file. Builds that omit this
 optional capability are accepted and are not passed an unsupported option.
-yt-dlp-native `.part` files may still be resumed when supported upstream.
+Native resumes require an ownership checkpoint written after a confirmed stop,
+matching the request, profile, selected formats, full extracted media ID and
+available extractor identity, plus unchanged file identities, sizes and
+timestamps. Truncated filenames and `.part` names alone are not proof. Signed
+download URLs may refresh without changing media identity. Missing or malformed
+media/extractor identity permits a fresh transfer, but no later resume. Older
+checkpoints without this binding, ambiguous partials and foreign MP4/WebM inputs
+are preserved with an explicit refusal.
 Wrapper-managed direct HTTP(S) aria2 staging is deliberately ephemeral: once
 the download processes have stopped, a user cancellation removes its private
 partial/control state and a later run starts the direct transfer cleanly. If
-process termination cannot be confirmed, the engine warns and preserves its
-temporary files for inspection. Known final-video collisions are refused;
+process termination cannot be confirmed after admission, the engine warns and
+keeps its temporary files and reservations while waiting for consumers to stop.
+Known final-video collisions are refused;
 the transport-specific checks and local late-collision limitation are described
 below.
 
@@ -847,15 +858,56 @@ and the resulting file stays mode `0600`. Its final section gives the exact
 older than 15 days are removed automatically the next time a graphical download
 session is prepared.
 
-A same-user, per-destination advisory lock uses the revalidated private
-`/tmp/yt-dlp-aria2-downloader-UID` directory, falling back to the corresponding
-`/var/tmp` directory when `/tmp` is unsuitable. This common location prevents
-concurrent writers even when launchers have different `XDG_RUNTIME_DIR` values.
-Private work files prefer the validated local
-`$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader-UID` root, then the same `/tmp` root
-or `/var/tmp/yt-dlp-aria2-downloader-UID` if necessary. Lock files contain no URL, cookie, or media path, and the kernel
-releases the lock automatically when the engine exits. Downloads to different
-destination directories may run concurrently.
+GUI and CLI instances can transfer and process independent media concurrently
+in the same folder. Completed files appear directly in that folder. Requests
+whose filename families overlap are refused with status **75** as soon as the
+plan is known; a different URL or profile does not bypass this reservation.
+An existing final or an unowned native input is a separate collision (status
+**1**), preserved without overwrite, adoption or an automatic “(1)” suffix.
+
+Coordination covers the same host and user, including canonical path aliases
+and different XDG roots. Stable lock inodes live in the revalidated private
+`/tmp/yt-dlp-aria2-downloader-UID` root (or its `/var/tmp` fallback); they are
+never deleted as stale. Private session files prefer the validated
+`$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader-UID` root. A shared hold on the historic
+destination lock excludes an old 2.3.29 instance using its exclusive protocol,
+in either launch order; new instances use finer reservations concurrently.
+This does not repair an old executable's shutdown defects.
+
+Reservations last through consumer shutdown and cleanup. Closing one instance
+does not signal another instance. If shutdown remains uncertain after admission,
+the engine stays alive holding its reservations, including the historical lock,
+even when consumers have closed their inherited lock descriptors. The GUI
+delegates forced cancellation to the authenticated engine so that only one
+supervisor freezes and inspects consumers before stopping them. Forced retirement
+requires stable inventories of all stopped threads and confirmed shutdown of
+their authenticated children in the same session, while the parent stays frozen.
+A timed helper retains its child from a private session even after that child
+exits, until its own wait proves complete shutdown. This force path requires Linux pidfd support in the kernel and
+Python; unavailable support or
+failed checks leave shutdown unconfirmed and preserve resources. Timed helpers
+retain supervision of their own command sessions until the consumers stop and
+the pinned child is reaped;
+duplicate graceful signals do not shorten their grace period. They repeat force
+delivery after escalation and require two unchanged complete process inventories
+with no live member before returning. The GUI, engine and CLI sentinel also
+require two complete process inventories with identical zombie identities
+(PID/start time); any live consumer, changed inventory or uncertainty prevents
+cleanup. Signal escalation
+has deadlines, but a consumer blocked in the kernel can delay closure beyond
+them. An unconfirmed GUI shutdown preserves its private session and reports the
+uncertainty. Confirmed shutdown permits cleanup and descriptor closure without
+an explicit unlock.
+
+An external `SIGKILL` or crash can remove those lock holders without cleanup.
+A retained active ownership checkpoint still blocks overlapping requests from
+new engines. Version 2.3.29 cannot read that checkpoint: once every historical
+lock holder is gone, exclusion against that old version is no longer guaranteed.
+Do not delete preserved locks or checkpoints merely because they look old;
+uncertain state requires inspection. Ownership records are private and contain
+no URL, cookie or authentication header. Coordination is local to one host and
+user; it provides neither distributed exclusion nor protection against arbitrary
+external writers (the separate F1 BIS limit remains).
 
 ## Network destinations and private storage
 
@@ -911,7 +963,7 @@ and its path is reported. Ambiguous remote temporaries are preserved. HUP,
 INT, TERM and GUI cancellation supervise the process groups; cleanup waits for
 confirmed shutdown. SIGKILL cannot run cleanup, and a kernel-blocked network
 operation can outlast the bounded cancellation waits. Concurrent instances on
-one host use the same destination lock; different hosts still rely on the
+one host use the shared destination protocol; different hosts still rely on the
 atomic no-overwrite publication, not that local advisory lock.
 
 Old `.yt-dlp-aria2.*`, `.yt-dlp-path.*` and remux residues are not automatically

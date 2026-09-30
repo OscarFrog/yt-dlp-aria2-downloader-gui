@@ -116,6 +116,9 @@ ALL_SHELL_FILES=(
 PYTHON_FILES=(
     private-aria2-plan.py
     private-process-supervisor.py
+    tests/process-observer.py
+    tests/multi-instance-real.py
+    tests/process-supervision-integration.py
     private-launcher-manager.py
     scripts/update-published-version.py
     scripts/check-push-version.py

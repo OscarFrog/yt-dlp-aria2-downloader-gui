@@ -100,14 +100,13 @@ Avec le RPM, le lanceur graphique et son icône sont installés automatiquement 
 - repli HTTPS natif automatique pour les combinaisons aria2/GnuTLS concernées ;
 - progression graphique unifiée pour les fichiers directs, les fragments
   HLS/DASH, les pistes vidéo/audio séparées et le post-traitement FFmpeg ;
-- annulation de tout le groupe de processus au sein d’une session GUI unique ;
-- supervision de yt-dlp et des commandes FFmpeg exécutées par le moteur, avec arrêt borné ;
+- annulation de la session de téléchargement, y compris les commandes supervisées du runtime et de FFprobe ;
+- supervision de yt-dlp et des commandes FFmpeg exécutées par le moteur, avec escalade des signaux temporisée et préservation tant que l’arrêt reste incertain ;
 - validation FFprobe des pistes vidéo et audio pour une vidéo complète, et
   d'une piste audio sans piste vidéo de contenu pour le mode audio, avant la
   publication du succès ;
-- une seule instance en écriture par dossier de destination, afin
-  d'empêcher le partage concurrent de fichiers partiels ou de
-  post-traitement ;
+- téléchargements indépendants simultanés dans le même dossier, avec réservation
+  exclusive des fichiers média, partiels et de post-traitement communs ;
 - journaux privés conservés uniquement pour les exécutions problématiques, avec expurgation des URL et limite de 8 Mio ;
 - lanceur dans le menu des applications ;
 - tests statiques, mocks et intégrations hermétiques avec outils réels,
@@ -168,9 +167,13 @@ encore utiliser une ancienne version après plusieurs mises à jour. Télécharg
 à nouveau un binaire vérifié identique préserve le fichier installé ; une copie
 endommagée peut être réparée depuis la release vérifiée.
 
-Lors d'une interruption gérable, les fichiers temporaires du bootstrap sont
-nettoyés après la fin de la commande en cours et avant la libération du verrou
-de mise à jour. Un arrêt forcé par `SIGKILL` peut laisser des temporaires.
+Lors d'une interruption gérable, le gestionnaire de runtime conserve les fichiers
+temporaires du bootstrap et le verrou de mise à jour jusqu'à l'arrêt de la
+commande en cours et de ses consommateurs supervisés. Le retour anticipé d'une
+sonde temporisée n'autorise pas le nettoyage si un enfant reste actif. Le
+gestionnaire supprime ensuite ses temporaires authentifiés avant de libérer le
+verrou. Un arrêt forcé par `SIGKILL` peut laisser des temporaires et des
+consommateurs actifs.
 
 Le gestionnaire résout d'abord le tag exact de la release, puis télécharge tous
 les fichiers depuis cette coordonnée immuable, ce qui élimine la course où
@@ -734,13 +737,21 @@ non-écrasement. Lorsque le build aria2c installé annonce `--no-netrc`, le
 moteur active cette option afin d’éviter la lecture des identifiants d’un
 fichier `.netrc` personnel. Les builds qui n’exposent pas cette capacité
 facultative restent acceptés et ne reçoivent pas une option non prise en charge.
-Les fichiers `.part` gérés nativement par yt-dlp peuvent toujours être repris
-lorsque l'amont le permet. Le staging aria2 des transferts HTTP(S) directs gérés
+Une reprise native exige une preuve enregistrée après un arrêt confirmé : même
+demande, même profil, mêmes formats, identifiant complet du média extrait et
+identité disponible de l'extracteur, ainsi que des identités, tailles et dates de
+fichiers inchangées. Un nom tronqué ou `.part` ne suffit pas. Les URL signées de
+téléchargement peuvent être renouvelées sans changer l'identité du média. Une
+identité de média ou d'extracteur absente ou mal formée permet un nouveau
+transfert, mais aucune reprise ultérieure. Les anciennes preuves dépourvues de
+cette liaison, les partiels ambigus et les entrées MP4/WebM étrangères sont
+conservés avec un refus explicite. Le staging aria2 des transferts HTTP(S) directs gérés
 par le moteur est volontairement éphémère : une fois les processus de
 téléchargement arrêtés, une annulation utilisateur supprime son état
 partiel/contrôle privé et une exécution ultérieure redémarre le transfert direct
-proprement. Si l'arrêt des processus ne peut pas être confirmé, le moteur émet
-un avertissement et conserve ses fichiers temporaires pour inspection. Les
+proprement. Si l'arrêt des processus ne peut pas être confirmé après admission,
+le moteur émet un avertissement et conserve ses fichiers temporaires et ses
+réservations en attendant l'arrêt des consommateurs. Les
 collisions connues avec une vidéo finale sont refusées ; les contrôles propres
 aux transports et la limite de collision locale tardive sont décrits plus bas.
 
@@ -898,16 +909,64 @@ basename `download-*.log` exact et son chemin absolu canonique. Les journaux de
 diagnostic conservés depuis plus de 15 jours sont supprimés automatiquement
 lors de la prochaine préparation d’une session de téléchargement graphique.
 
-Un verrou consultatif par utilisateur et destination utilise le répertoire
-privé revalidé `/tmp/yt-dlp-aria2-downloader-UID`, avec repli vers le répertoire
-correspondant de `/var/tmp` si `/tmp` est inadéquat. Cet emplacement commun évite
-les écritures concurrentes même avec des `XDG_RUNTIME_DIR` différents.
-Les fichiers de travail privés privilégient toujours le dossier privé validé
-`$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader-UID`, puis le même dossier `/tmp`
-ou `/var/tmp/yt-dlp-aria2-downloader-UID` en repli.
-Les fichiers de verrou ne contiennent ni URL, ni cookie, ni chemin de média,
-et le noyau libère automatiquement le verrou à la fin du moteur. Des
-téléchargements vers des dossiers différents peuvent s'exécuter simultanément.
+Les instances GUI et CLI peuvent transférer et traiter des médias indépendants
+simultanément dans le même dossier. Les fichiers terminés y apparaissent
+directement. Si leurs familles de noms se recouvrent, la seconde demande est
+refusée avec le statut **75** dès que son plan est connu ; une autre URL ou un
+autre profil ne contourne pas cette réservation. Un fichier final existant ou
+une entrée native sans preuve d’appartenance est une collision distincte
+(statut **1**), conservée sans écrasement, adoption ni suffixe automatique « (1) ».
+
+La coordination couvre le même hôte et le même utilisateur, y compris les
+alias de chemins canoniques et les racines XDG différentes. Les inodes des
+verrous restent dans la racine privée revalidée
+`/tmp/yt-dlp-aria2-downloader-UID` (ou son repli `/var/tmp`) et ne sont jamais
+supprimés pour leur âge. Les sessions privées privilégient la racine validée
+`$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader-UID`. Le verrou historique de destination
+est conservé en mode partagé : il exclut une ancienne instance 2.3.29 utilisant
+son protocole exclusif, dans les deux ordres de lancement. Les nouvelles
+instances emploient en parallèle des réservations plus fines. Cela ne corrige
+pas rétroactivement les défauts d’arrêt de l’ancien exécutable.
+
+Les réservations durent jusqu’à l’arrêt des consommateurs et la fin du
+nettoyage. Fermer une instance ne signale pas les autres. Si l'arrêt reste
+incertain après admission, le moteur reste actif et conserve ses réservations,
+y compris le verrou historique, même si les consommateurs ont fermé leurs
+descripteurs de verrou hérités. La GUI délègue l'annulation forcée au moteur
+authentifié afin qu'un seul superviseur suspende et inspecte les consommateurs
+avant de les arrêter. L'arrêt forcé exige des inventaires stables de tous les
+threads suspendus et l'arrêt confirmé de leurs enfants authentifiés dans la même
+session, pendant que le parent reste suspendu. Un auxiliaire temporisé conserve
+son enfant d'une session privée, même après sa mort, jusqu'à ce que sa propre
+attente confirme l'arrêt complet. Cette voie exige la prise en charge
+des pidfds Linux par le noyau et Python ; une prise en charge absente ou un
+contrôle échoué laisse
+l'arrêt non confirmé et préserve les ressources. Les auxiliaires temporisés
+supervisent leurs propres sessions de commande jusqu'à l'arrêt des consommateurs
+et à la collecte de leur enfant dont
+l'identité reste retenue ; des signaux gracieux répétés ne raccourcissent pas leur
+délai de grâce. Ils répètent les signaux forcés après escalade et exigent deux
+inventaires complets inchangés, sans membre actif, avant de rendre la main.
+La GUI, le moteur et la sentinelle CLI exigent aussi deux inventaires complets
+des processus avec les mêmes identités de zombies (PID/instant de démarrage) ;
+tout consommateur vivant, changement d'inventaire ou incertitude interdit le
+nettoyage.
+L'escalade des signaux a des échéances, mais un consommateur
+bloqué dans le noyau peut retarder la fermeture au-delà de celles-ci. Un arrêt
+GUI non confirmé préserve sa session privée et signale l'incertitude. L'arrêt
+confirmé permet le nettoyage et la fermeture des descripteurs sans
+déverrouillage explicite.
+
+Un `SIGKILL` externe ou un crash peut supprimer ces détenteurs de verrou sans
+nettoyage. Une preuve d'activité conservée bloque encore les demandes qui se
+recouvrent pour les nouveaux moteurs. La version 2.3.29 ne peut pas lire cette
+preuve : une fois tous les détenteurs du verrou historique disparus, l'exclusion
+de cette ancienne version n'est plus garantie. Ne supprimez pas les verrous ou
+preuves préservés pour leur seul âge ; un état incertain exige une inspection.
+Les preuves privées ne contiennent ni URL, ni cookie, ni en-tête
+d'authentification. La coordination reste locale à un hôte et un utilisateur ;
+elle ne fournit ni exclusion distribuée ni protection contre tous les écrivains
+extérieurs (la limite F1 BIS reste distincte).
 
 ## Destinations réseau et stockage privé
 

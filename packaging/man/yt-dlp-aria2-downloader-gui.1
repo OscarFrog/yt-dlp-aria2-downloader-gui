@@ -24,6 +24,19 @@ Progress includes percentage, speed, estimated time remaining and processing
 phases, including the final destination copy. Local workspace details remain
 in the diagnostic log. Errors with a safely retained diagnostic offer direct
 View log and Close actions.
+.SH SHARED DESTINATIONS
+Independent GUI and CLI instances may transfer and process media concurrently
+in the same folder. Final files appear directly there. Overlapping filename
+families are refused with status 75; existing final files or unowned native
+inputs are preserved with status 1. No numeric suffix is added automatically.
+.PP
+Reservations cover the same user and host, including canonical path aliases.
+They remain held through consumer shutdown and cleanup. Native resume requires
+an unchanged ownership checkpoint from a confirmed stop; a .part name alone is
+insufficient. Uncertain shutdown preserves active state for manual inspection.
+Do not delete old-looking lock files. The shared legacy lock excludes an older
+2.3.29 instance's exclusive lock. This is not distributed exclusion and does
+not cover arbitrary external writers.
 .SH FILES
 .TP
 .I ~/.config/yt-dlp-aria2-downloader/gui.conf

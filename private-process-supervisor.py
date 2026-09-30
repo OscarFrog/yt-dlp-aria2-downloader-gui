@@ -15,16 +15,24 @@ import time
 
 def session_alive(session):
     """Presence is independent of signaling authority; zombies cannot use FDs."""
-    for path in Path('/proc').glob('[0-9]*/stat'):
-        try:
-            fields = path.read_text().rsplit(') ', 1)[1].split()
-            if fields[0] not in ('Z', 'X') and int(fields[3]) == session:
+    previous = None
+    for observation in range(2):
+        members = set()
+        for path in Path('/proc').glob('[0-9]*/stat'):
+            try:
+                fields = path.read_text().rsplit(') ', 1)[1].split()
+                if int(fields[3]) == session:
+                    if fields[0] not in ('Z', 'X'):
+                        return True
+                    members.add((path, fields[19]))
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError, IndexError):
+                # Incomplete observation cannot grant permission to return/cleanup.
                 return True
-        except FileNotFoundError:
-            continue
-        except (OSError, ValueError, IndexError):
-            # Incomplete observation cannot grant permission to return/cleanup.
+        if observation and members != previous:
             return True
+        previous = members
     return False
 
 
@@ -118,7 +126,7 @@ def supervise(command, seconds, grace):
             timed_out = True
             delivery = signal.SIGTERM
             escalation = now + grace
-        if escalation is not None and (now >= escalation or force_requested) and not killed:
+        if escalation is not None and (now >= escalation or force_requested):
             delivery = signal.SIGKILL
         if delivery is not None:
             try:
