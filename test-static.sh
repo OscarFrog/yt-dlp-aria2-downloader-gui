@@ -3474,6 +3474,24 @@ test_static_release_contracts() {
         $'      image: fedora:44\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
         'Fedora media qualification uses isolated local volumes'
 
+    local package_storage_workflow package_storage_job package_storage_block
+    for package_storage_workflow in packages release; do
+        if [[ ${package_storage_workflow} == packages ]]; then
+            package_storage_job=rpm
+        else
+            package_storage_job=rpm-test
+        fi
+        package_storage_block=$(workflow_job_block \
+            "${SCRIPT_DIR}/.github/workflows/${package_storage_workflow}.yml" \
+            "${package_storage_job}")
+        assert_text_contains "${package_storage_block}" \
+            $'    container:\n      image: fedora:44\n      volumes:\n        - /tmp\n        - /var/tmp' \
+            "${package_storage_workflow} RPM lifecycle has private local volumes"
+        assert_text_contains "${package_storage_block}" \
+            $'    env:\n      TMPDIR: /var/tmp\n      PACKAGE_TEST_HOME: /root' \
+            "${package_storage_workflow} RPM fixtures select the local disk volume"
+    done
+
     # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
         'RUNTIME_STRESS_RESULT: ${{ needs.runtime-hardening-stress.result }}' \

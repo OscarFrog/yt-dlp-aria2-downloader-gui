@@ -110,9 +110,25 @@ class ProcessTests(unittest.TestCase):
         while process.poll() is None and time.monotonic() < deadline:
             # Test-only reaper service: zombies have already stopped; this
             # neither signals live processes nor claims application wait status.
-            for pid, row in observer.snapshot().items():
-                if (row['parent'] == os.getpid() and row['state'] == 'Z'
-                        and pid not in {p.pid for p in self.processes}):
+            # Only our own adopted children can be harvested here. A global
+            # procfs inventory adds unrelated races without reaping authority.
+            owned = set()
+            for task in Path(f'/proc/{os.getpid()}/task').iterdir():
+                owned.update(map(int, (task / 'children').read_text().split()))
+            registered = {pid for pid, _ in self.observer.known}
+            tracked = {p.pid for p in self.processes}
+            for pid in (owned & registered) - tracked:
+                try:
+                    row = observer.process_row(Path(f'/proc/{pid}/stat'))
+                except FileNotFoundError:
+                    continue
+                if ((pid, row['start']) not in self.observer.known
+                        or row['parent'] != os.getpid() or row['state'] != 'Z'):
+                    continue
+                # A zombie leader can still have live sibling threads. Our
+                # unreaped direct child pins its identity through this wait.
+                ended = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                if ended is not None:
                     os.waitpid(pid, os.WNOHANG)
             time.sleep(.02)
         return process.communicate(timeout=max(.1, deadline - time.monotonic()))
@@ -263,6 +279,121 @@ ctypes.CDLL(None).pthread_exit(None)
             with mock.patch.object(module, 'process_paths', return_value=[path]), \
                     mock.patch.object(Path, 'read_text', side_effect=lambda: held.read()):
                 self.assertTrue(module.session_alive(-1))
+
+    def test_finish_reaps_only_revalidated_known_children(self):
+        gates = set()
+
+        def orphan(marked):
+            read_end, write_end = os.pipe()
+            gates.add(write_end)
+            environment = dict(os.environ)
+            environment.pop('YTDLP_QUALIFICATION_TOKEN', None)
+            if marked:
+                environment['YTDLP_QUALIFICATION_TOKEN'] = self.token
+            launcher = subprocess.Popen(
+                [sys.executable, '-I', '-B', '-c', '''import os,sys
+child = os.fork()
+if child:
+    print(child, flush=True)
+    os._exit(23)
+os.read(int(sys.argv[1]), 1)
+os._exit(7)
+''', str(read_end)], pass_fds=(read_end,), start_new_session=True,
+                env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.processes.append(launcher)
+            os.close(read_end)
+            self.assertTrue(select.select([launcher.stdout], [], [], 3)[0])
+            pid = int(launcher.stdout.readline())
+            self.assertEqual(launcher.wait(timeout=3), 23)
+            return pid
+
+        try:
+            known = orphan(True)
+            unrelated = orphan(False)
+            sample = self.observer.sample()
+            self.assertIn(str(known), sample['live'])
+            self.assertNotIn(str(unrelated), sample['live'])
+            unrelated_row = observer.process_row(Path(f'/proc/{unrelated}/stat'))
+            # A numeric PID in the registry is insufficient: this deliberately
+            # stale identity must not grant permission to harvest its status.
+            self.observer.known.add((unrelated, unrelated_row['start'] + 1))
+            for fd in tuple(gates):
+                os.close(fd)
+                gates.remove(fd)
+            for pid in (known, unrelated):
+                deadline = time.monotonic() + 3
+                while os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+                    self.assertLess(time.monotonic(), deadline, 'orphan failed to exit')
+                    time.sleep(.005)
+
+            managed = self.launch([sys.executable, '-I', '-B', '-c', 'raise SystemExit(31)'])
+            managed_row = observer.process_row(Path(f'/proc/{managed.pid}/stat'))
+            self.observer.known.add((managed.pid, managed_row['start']))
+            deadline = time.monotonic() + 3
+            while os.waitid(os.P_PID, managed.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+                self.assertLess(time.monotonic(), deadline, 'managed child failed to exit')
+                time.sleep(.005)
+            waiter = self.launch([sys.executable, '-I', '-B', '-c', '''import sys,time
+from pathlib import Path
+deadline = time.monotonic() + 3
+while Path('/proc/' + sys.argv[1]).exists():
+    if time.monotonic() >= deadline: sys.exit(91)
+    time.sleep(.005)
+''', str(known)])
+            real_read = Path.read_text
+
+            def denied_known(path, *args, **kwargs):
+                if path == Path(f'/proc/{known}/stat'):
+                    raise PermissionError('known child stat denied')
+                return real_read(path, *args, **kwargs)
+
+            with mock.patch.object(Path, 'read_text', new=denied_known):
+                with self.assertRaisesRegex(PermissionError, 'known child stat denied'):
+                    self.finish(waiter)
+            self.assertIsNotNone(os.waitid(os.P_PID, known, os.WEXITED | os.WNOHANG | os.WNOWAIT))
+
+            foreign = self.launch([sys.executable, '-I', '-B', '-c', 'pass'])
+            foreign_path = Path(f'/proc/{foreign.pid}/stat')
+            real_iterdir = Path.iterdir
+            stale_reads = 0
+            with foreign_path.open() as held:
+                self.assertEqual(foreign.wait(timeout=3), 0)
+
+                def ambient_inventory(path):
+                    entries = list(real_iterdir(path))
+                    if path == Path('/proc'):
+                        entries.insert(0, foreign_path.parent)
+                    return iter(entries)
+
+                def stale_stat(path, *args, **kwargs):
+                    nonlocal stale_reads
+                    if path == foreign_path:
+                        stale_reads += 1
+                        return held.read()
+                    return real_read(path, *args, **kwargs)
+
+                with mock.patch.object(Path, 'iterdir', new=ambient_inventory), \
+                        mock.patch.object(Path, 'read_text', new=stale_stat):
+                    # This is the former finish() enumeration, with a real
+                    # open-before-exit/read-after-reap kernel ESRCH. No rescue.
+                    with self.assertRaises(ProcessLookupError) as error:
+                        observer.snapshot()
+                    self.assertEqual(error.exception.errno, 3)
+                    self.assertIsNotNone(os.waitid(os.P_PID, known, os.WEXITED | os.WNOHANG | os.WNOWAIT))
+                    out, err = self.finish(waiter)
+                    self.assertEqual(stale_reads, 1, 'finish inspected an unrelated process')
+            self.assertEqual(waiter.returncode, 0, (out, err))
+            self.assertEqual(managed.wait(timeout=3), 31, 'finish stole the managed Popen status')
+            with self.assertRaises(ChildProcessError):
+                os.waitid(os.P_PID, known, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            witness = os.waitid(os.P_PID, unrelated, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            self.assertIsNotNone(witness, 'finish stole an unrelated child status')
+            self.assertEqual(witness.si_status, 7)
+            # Harvest this deliberately excluded witness only after the verdict.
+            self.assertEqual(os.waitpid(unrelated, 0)[1], 7 << 8)
+        finally:
+            for fd in gates:
+                os.close(fd)
 
     def test_observer_detects_orphan_zombie_leader_live_thread(self):
         script = self.thread_fixture()
@@ -1051,7 +1182,8 @@ printf '%s\n' "$status"
             self.assertEqual(source.count(opening), 1)
             yield filename, source.split(opening, 1)[1].split('\nPY_ESCALATE_OWNED', 1)[0]
 
-    def escalation_case(self, code, filename, *, threaded=False):
+    def escalation_case(self, code, filename, *, threaded=False,
+                        foreign_stat_race=False, isolate_inventory=True):
         program = '''import os, sys, threading
 report, trigger, release = map(int, sys.argv[1:4])
 def fork_child():
@@ -1078,10 +1210,13 @@ else:
         open_fds = {report_read, report_write, trigger_read, trigger_write,
                     release_read, release_write}
         real_read = Path.read_text
+        real_iterdir = Path.iterdir
         real_signal = signal.pidfd_send_signal
         deliveries = []
         reads = 0
         late_child = None
+        foreign = None
+        foreign_race_observed = False
 
         def fields(pid):
             return real_read(Path(f'/proc/{pid}/stat')).rsplit(') ', 1)[1].split()
@@ -1104,6 +1239,19 @@ else:
             thread_id = record()
             identity = fields(process.pid)
             main_children = Path(f'/proc/{process.pid}/task/{process.pid}/children')
+            if foreign_stat_race:
+                foreign_read, foreign_write = os.pipe()
+                open_fds.update((foreign_read, foreign_write))
+                foreign = subprocess.Popen(
+                    [sys.executable, '-I', '-B', '-c',
+                     'import os,sys; os.read(int(sys.argv[1]),1)', str(foreign_read)],
+                    pass_fds=(foreign_read,), start_new_session=True,
+                    env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.processes.append(foreign)
+                os.close(foreign_read)
+                open_fds.remove(foreign_read)
+                self.assertNotEqual(int(fields(foreign.pid)[3]), int(identity[3]))
             if threaded:
                 os.write(trigger_write, b'F')
                 late_child = record()
@@ -1111,6 +1259,27 @@ else:
                 self.assertEqual(real_read(main_children).strip(), '')
                 thread_children = Path(f'/proc/{process.pid}/task/{thread_id}/children')
                 self.assertIn(str(late_child), real_read(thread_children).split())
+
+            def fixture_inventory(path):
+                if path != Path('/proc'):
+                    return real_iterdir(path)
+                if not isolate_inventory:
+                    # Reproduce the former ambient inventory with the controlled
+                    # foreign race first, before unrelated host churn can act.
+                    foreign_path = Path(f'/proc/{foreign.pid}')
+                    return iter([foreign_path] + [entry for entry in real_iterdir(path)
+                                                   if entry != foreign_path])
+                # This program has one parent and at most one reported child.
+                # Root enumeration alone is scoped; all task, stat, children
+                # and FD reads remain real, including the late child's new SID.
+                expected_children = set() if late_child is None else {late_child}
+                actual_children = set()
+                for task in real_iterdir(Path(f'/proc/{process.pid}/task')):
+                    actual_children.update(map(int, real_read(task / 'children').split()))
+                self.assertEqual(actual_children, expected_children,
+                                 'fixture inventory omitted an unreported child')
+                pids = {os.getpid(), process.pid} | expected_children
+                return iter(Path(f'/proc/{pid}') for pid in sorted(pids))
 
             def deliver(descriptor, number, *args):
                 real_signal(descriptor, number, *args)
@@ -1128,7 +1297,21 @@ else:
                         time.sleep(.005)
 
             def read_then_release(path, *args, **kwargs):
-                nonlocal reads, late_child
+                nonlocal reads, late_child, foreign_race_observed
+                if foreign is not None and path == Path(f'/proc/{foreign.pid}/stat'):
+                    # An open proc stat can yield ESRCH after actual exit/reap.
+                    # Do not fabricate an errno or waive production's veto.
+                    with path.open() as held:
+                        os.close(foreign_write)
+                        open_fds.remove(foreign_write)
+                        self.assertEqual(foreign.wait(timeout=3), 0)
+                        try:
+                            held.read()
+                        except ProcessLookupError as error:
+                            self.assertEqual(error.errno, 3)
+                            foreign_race_observed = True
+                            raise
+                        self.fail('foreign stat did not produce the required real ESRCH')
                 value = real_read(path, *args, **kwargs)
                 if not threaded and path == main_children:
                     reads += 1
@@ -1142,14 +1325,16 @@ else:
                             late_child = record()
                 return value
 
-            with mock.patch.object(signal, 'pidfd_send_signal', deliver), \
+            status = 0
+            with mock.patch.object(Path, 'iterdir', fixture_inventory), \
+                    mock.patch.object(signal, 'pidfd_send_signal', deliver), \
                     mock.patch.object(Path, 'read_text', read_then_release), \
                     mock.patch.object(sys, 'argv', ['probe', str(process.pid),
                                                    identity[19], identity[3]]):
                 try:
                     exec(compile(code, filename, 'exec'), {})
                 except SystemExit as result:
-                    self.assertEqual(result.code, 0)
+                    status = result.code
 
             if late_child is not None:
                 witness = fields(late_child)
@@ -1158,6 +1343,9 @@ else:
                 inherited = os.stat(f'/proc/{late_child}/fd/{release_read}')
                 held = os.fstat(release_write)
                 self.assertEqual((inherited.st_dev, inherited.st_ino), (held.st_dev, held.st_ino))
+            if foreign_stat_race:
+                self.assertEqual(foreign_race_observed, not isolate_inventory)
+            self.assertEqual(status, 0, f'escalation inventory failed: {status}')
             if threaded:
                 self.assertNotIn(signal.SIGKILL, deliveries, 'escalation killed a worker-thread child owner')
                 self.assertIn(signal.SIGCONT, deliveries)
@@ -1191,6 +1379,15 @@ else:
             with self.subTest(target=filename, freeze=False):
                 with self.assertRaisesRegex(self.failureException, 'startup child escape'):
                     self.escalation_case(mutant, filename)
+            with self.subTest(target=filename, freeze=False, ambient_esrch=True):
+                # The old oracle reports a conservative observation failure,
+                # masking the actual escaped child (whose FD was checked first).
+                with self.assertRaisesRegex(self.failureException, 'escalation inventory failed: 1'):
+                    self.escalation_case(mutant, filename, foreign_stat_race=True,
+                                         isolate_inventory=False)
+            with self.subTest(target=filename, freeze=False, isolated_esrch=True):
+                with self.assertRaisesRegex(self.failureException, 'startup child escape'):
+                    self.escalation_case(mutant, filename, foreign_stat_race=True)
 
     def test_escalation_preserves_worker_thread_child_owner(self):
         for filename, code in self.escalation_sources():

@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -47,9 +48,136 @@ def decoded_hash(path):
     return hashlib.sha256(data).hexdigest()
 
 
+def fixture_roots():
+    # The runner's artifact directory may have shared, non-sticky ancestors.
+    # Keep application HOME/XDG/media under the ordinary safe local /tmp root;
+    # export only qualification evidence to the caller's requested TMPDIR.
+    root = Path(tempfile.mkdtemp(prefix='shared-destination-real-', dir='/tmp'))
+    evidence = root
+    if Path(tempfile.gettempdir()).resolve() != Path('/tmp').resolve():
+        evidence = Path(tempfile.mkdtemp(prefix='shared-destination-real-'))
+    return root, evidence
+
+
+def record_fixture_environment(root, evidence):
+    chains = {}
+    for name, path in (('workspace', root), ('evidence', evidence)):
+        rows = []
+        for ancestor in (path, *path.parents):
+            info = ancestor.lstat()
+            rows.append(dict(path=str(ancestor), uid=info.st_uid, gid=info.st_gid,
+                             mode=oct(stat.S_IMODE(info.st_mode)), device=info.st_dev,
+                             symlink=stat.S_ISLNK(info.st_mode),
+                             filesystem=subprocess.check_output(
+                                 ['stat', '-f', '--format=%T', '--', str(ancestor)], text=True).strip()))
+        chains[name] = rows
+    (root / 'fixture-environment.log').write_text(json.dumps(dict(
+        python=sys.version, uid=os.getuid(), display_present=bool(os.environ.get('DISPLAY')),
+        wayland_present=bool(os.environ.get('WAYLAND_DISPLAY')), ancestors=chains), indent=2) + '\n')
+    (root / 'fixture-environment.log').chmod(0o600)
+
+
+def preserve_fixture_evidence(root, evidence, labels):
+    if root == evidence:
+        return
+    names = {'fixture-environment.log', 'fixture-tools.log', 'events.json',
+             'events-xwayland.log', 'events-bus.log', 'dialog-events.jsonl', 'fixture-cleanup.jsonl'}
+    names.update(label + suffix for label in labels for suffix in
+                 ('.log', '.dialogs.log', '.status.log', '.before-rescue.json', '.final-before-rescue.json'))
+    for name in sorted(names):
+        path = root / name
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        require(stat.S_ISREG(info.st_mode), 'fixture evidence must be a regular non-symlink file')
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as source:
+            opened = os.fstat(source.fileno())
+            require(stat.S_ISREG(opened.st_mode) and (opened.st_dev, opened.st_ino) ==
+                    (info.st_dev, info.st_ino), 'fixture evidence identity changed before export')
+            with os.fdopen(os.open(evidence / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                   os.O_NOFOLLOW, 0o600), 'wb') as target:
+                shutil.copyfileobj(source, target)
+
+
+def write_scripted_zenity(path):
+    program = '''import hashlib, json, os, re, sys, time
+from pathlib import Path
+os.umask(0o077)
+args = sys.argv[1:]
+label = os.environ['FIXTURE_LABEL']
+if not re.fullmatch(r'[A-Za-z0-9_-]+', label):
+    sys.exit(70)
+kind = next((name for name in ('version', 'entry', 'file-selection', 'list', 'progress',
+                              'question', 'error', 'info', 'text-info') if '--' + name in args), 'unknown')
+dialog_text = next((value[7:] for value in args if value.startswith('--text=')), '')
+is_error = kind == 'error' or (kind == 'question' and '--ok-label=View log' in args)
+# Preserve only known application diagnostics, never arbitrary arguments,
+# URLs, headers, diagnostic-file contents or user-entered values.
+safe_errors = {
+    'No safe application configuration directory is available.',
+    'No safe application state directory is available.',
+    'Unable to inspect setsid capabilities.',
+    'This version of setsid does not support --wait.',
+    'download-video.sh is missing or not executable.',
+    'progress-monitor.sh is missing or not readable.',
+    'The path must not contain line breaks.',
+    'The selected folder is not writable.',
+    'Unable to create the temporary working directory.',
+    'Unable to create the private live diagnostic log.',
+    'Unable to create the private progress pipe.',
+    'The download is complete.',
+}
+dialog_error = None
+if is_error:
+    first_line = dialog_text.splitlines()[0] if dialog_text else ''
+    if first_line in safe_errors or re.fullmatch(r"Required command '[a-zA-Z0-9_-]+' was not found[.]", first_line):
+        dialog_error = first_line
+    elif re.fullmatch(r'The download failed with status [0-9]+[.]', first_line):
+        dialog_error = first_line
+    else:
+        dialog_error = '[REDACTED_UNRECOGNIZED_DIALOG_TEXT]'
+def record(event, status=None):
+    row = dict(monotonic_ns=time.monotonic_ns(), label=label, event=event, dialog=kind,
+               status=status, dialog_error=dialog_error)
+    if is_error:
+        row['dialog_error_sha256'] = hashlib.sha256(dialog_text.encode()).hexdigest()
+    target = Path(os.environ['FIXTURE_DIALOG_LOG_DIR']) / (label + '.dialogs.log')
+    fd = os.open(target, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, (json.dumps(row) + '\\n').encode())
+    finally:
+        os.close(fd)
+record('dialog-opened')
+try:
+    status = 0
+    if kind == 'version': print('4.2.2')
+    elif kind == 'entry': print(os.environ['FIXTURE_URL'])
+    elif kind == 'file-selection': print(os.environ['FIXTURE_OUTPUT'])
+    elif kind == 'list': print('Complete video (MKV)')
+    elif kind == 'progress':
+        for line in sys.stdin: pass
+    elif kind == 'question': status = 1
+    elif kind not in ('error', 'info', 'text-info'):
+        raise RuntimeError('Unsupported scripted dialog')
+    record('dialog-result', status)
+except Exception:
+    record('fixture-adapter-failed', 70)
+    sys.exit(70)
+sys.exit(status)
+'''
+    # Even a trace-opening failure must not become Zenity's ordinary Cancel.
+    path.write_text('#!/usr/bin/python3\nimport sys\ntry:\n' +
+                    ''.join('    ' + line for line in program.splitlines(keepends=True)) +
+                    '\nexcept Exception:\n    sys.stderr.write("Scripted Zenity fixture failed\\n")\n    sys.exit(70)\n')
+    path.chmod(0o700)
+
+
 def main():
-    root = Path(tempfile.mkdtemp(prefix='shared-destination-real-'))
-    print(f'Evidence: {root}', flush=True)
+    root, evidence = fixture_roots()
+    print(f'Evidence: {evidence}', flush=True)
+    if root != evidence:
+        print(f'Private fixture: {root}', flush=True)
     events = []
     processes = []
     gates = {}
@@ -103,6 +231,7 @@ def main():
     thread.start()
     base = f'http://127.0.0.1:{server.server_port}'
     try:
+        record_fixture_environment(root, evidence)
         for name in ('home', 'config', 'state', 'data', 'cache', 'runtime', 'bin', 'output 100% $ é'):
             (root / name).mkdir(mode=0o700)
         output = root / 'output 100% $ é'
@@ -120,6 +249,11 @@ def main():
             real_ytdlp = str(installed.resolve())
         version = subprocess.check_output([real_ytdlp, '--ignore-config', '--no-plugin-dirs', '--version'], text=True).strip()
         deno_version = subprocess.check_output([real_deno, '--version'], text=True).split()[1]
+        with Path(real_ytdlp).open('rb') as binary:
+            kind = 'ELF' if binary.read(4) == b'\x7fELF' else 'script-or-other'
+        (root / 'fixture-tools.log').write_text(json.dumps(dict(
+            yt_dlp_version=version, yt_dlp_kind=kind, deno_version=deno_version)) + '\n')
+        (root / 'fixture-tools.log').chmod(0o600)
         runtime = root / 'data/yt-dlp-aria2-downloader/runtime'
         yt_dir = runtime / 'yt-dlp' / version
         deno_dir = runtime / 'deno' / deno_version
@@ -147,18 +281,7 @@ os.execv(real, [real, *args])
 ''')
         shim.chmod(0o700)
         zenity = root / 'bin/zenity'
-        zenity.write_text('''#!/usr/bin/python3
-import os, sys
-args = sys.argv[1:]
-if '--version' in args: print('4.2.2')
-elif '--entry' in args: print(os.environ['FIXTURE_URL'])
-elif '--file-selection' in args: print(os.environ['FIXTURE_OUTPUT'])
-elif '--list' in args: print('Complete video (MKV)')
-elif '--progress' in args:
-    for line in sys.stdin: pass
-elif '--question' in args: sys.exit(1)
-''')
-        zenity.chmod(0o700)
+        write_scripted_zenity(zenity)
         if os.environ.get('YTDLP_QUALIFY_ZENITY_EVENTS') == '1':
             event_path = PROJECT / 'tests/zenity-x11-events.py'
             event_spec = importlib.util.spec_from_file_location('zenity_events', event_path)
@@ -184,7 +307,7 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
                       PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'],
                       YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE='0', YTDLP_DISABLE_REMOTE_EJS='1',
                       FIXTURE_REAL_YTDLP=real_ytdlp, FIXTURE_REAL_FFMPEG=shutil.which('ffmpeg'),
-                      FIXTURE_OUTPUT=str(output))
+                      FIXTURE_OUTPUT=str(output), FIXTURE_DIALOG_LOG_DIR=str(root))
         if dialogs is not None:
             shared.update(dialogs.env)
         for key in ('YTDLP_ARIA2_YTDLP_BIN', 'YTDLP_ARIA2_DENO_BIN', 'YTDLP_ARIA2_SUPERVISED_SESSION',
@@ -258,7 +381,9 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         def wait_active(entry):
             label, p, obs, _ = entry
             wait_until(lambda: label in active or p.poll() is not None, f'{label} never reached transfer barrier')
-            require(p.poll() is None, f'{label} exited before transfer: {root / (label + ".log")}')
+            require(p.poll() is None,
+                    f'{label} exited before transfer (status {p.returncode}); '
+                    f'see {evidence / (label + ".log")} and {evidence / (label + ".dialogs.log")}')
             obs.sample()
 
         if dialogs is not None:
@@ -453,32 +578,46 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
             outcomes = [json.loads(line) for line in (root / 'dialog-events.jsonl').read_text().splitlines()]
             require(not any(row.get('event') == 'adapter-failed-before-rescue' for row in outcomes),
                     'an event adapter failure cannot be converted into a passing graphical verdict')
+        else:
+            for label, *_ in processes:
+                trace = root / (label + '.dialogs.log')
+                if trace.exists():
+                    outcomes = [json.loads(line) for line in trace.read_text().splitlines()]
+                    require(not any(row['dialog_error'] or row['event'] == 'fixture-adapter-failed'
+                                    for row in outcomes), f'{label} displayed an unexpected fixture error')
         succeeded = True
         print('PASS: real shared-destination GUI/GUI, GUI/CLI, CLI conflicts, transfer/remux cancellation, D relaunch and decoded contents.', flush=True)
     finally:
         # The verdict/evidence is written before any rescue. Never turn rescue
         # into a passing application result or delete uncertain application state.
-        (root / 'events.json').write_text(json.dumps(events, indent=2))
-        for entry in processes:
-            label, process, obs, _ = entry
-            state = obs.sample()
-            (root / f'{label}.final-before-rescue.json').write_text(json.dumps(state))
-            if process.poll() is None:
-                process.send_signal(signal.SIGTERM)
-            for pid, row in state['live'].items():
-                current = observer_module.snapshot().get(int(pid))
-                if current and current['start'] == row['start']:
-                    try:
-                        os.kill(int(pid), signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-            if process.poll() is None:
-                process.wait(timeout=10)
-        for gate in gates.values():
-            gate.set()
-        server.shutdown(); server.server_close()
-        if dialogs is not None:
-            dialogs.close()
+        try:
+            (root / 'events.json').write_text(json.dumps(events, indent=2))
+            for entry in processes:
+                label, process, obs, _ = entry
+                state = obs.sample()
+                (root / f'{label}.final-before-rescue.json').write_text(json.dumps(state))
+                (root / f'{label}.status.log').write_text(json.dumps(dict(
+                    monotonic_ns=time.monotonic_ns(), label=label, parent_status=process.poll(),
+                    event='parent-status-before-rescue')) + '\n')
+                (root / f'{label}.status.log').chmod(0o600)
+                if process.poll() is None:
+                    process.send_signal(signal.SIGTERM)
+                for pid, row in state['live'].items():
+                    current = observer_module.snapshot().get(int(pid))
+                    if current and current['start'] == row['start']:
+                        try:
+                            os.kill(int(pid), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                if process.poll() is None:
+                    process.wait(timeout=10)
+            for gate in gates.values():
+                gate.set()
+            server.shutdown(); server.server_close()
+            if dialogs is not None:
+                dialogs.close()
+        finally:
+            preserve_fixture_evidence(root, evidence, [entry[0] for entry in processes])
         print('Qualification passed.' if succeeded else 'Qualification FAILED; evidence preserved.', flush=True)
 
 

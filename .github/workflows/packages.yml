@@ -349,9 +349,14 @@ jobs:
       - rpm-build
       - previous-release
     runs-on: ubuntu-24.04
-    container: fedora:44
+    container:
+      image: fedora:44
+      volumes:
+        - /tmp
+        - /var/tmp
     timeout-minutes: 35
     env:
+      TMPDIR: /var/tmp
       PACKAGE_TEST_HOME: /root
     strategy:
       fail-fast: true

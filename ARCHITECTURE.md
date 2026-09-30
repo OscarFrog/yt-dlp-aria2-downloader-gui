@@ -962,9 +962,12 @@ the absolute interpreter paths after apt. User workstation interpreters stay int
 The latest pinned real-tools entry also requires the shared-destination matrix
 with digest/version-verified Deno and selectively retained pre-rescue evidence.
 
-Fedora jobs executing downloads use anonymous Docker volumes for `/tmp` and
-`/var/tmp`, so private-state and media-workspace tests exercise the host volume's
-actual local filesystem instead of an unqualified container overlay. The
+Fedora download and RPM lifecycle/upgrade jobs use anonymous Docker volumes
+for `/tmp` and `/var/tmp`, with `TMPDIR=/var/tmp`. Installed-payload checks also
+read private plans and enter the engine workspace paths, so their temporary
+fixtures must use the volume's actual local filesystem instead of an unqualified
+container overlay. This covers both RPM matrix scenarios in package and release
+CI; build-only and isolated signing jobs retain their existing storage setup. The
 isolated shfmt verifier likewise gets an anonymous `/var/tmp` disk volume while
 retaining its `/tmp` tmpfs, read-only checkout, disabled network and dropped
 capabilities. Its cleanup removes the disposable volume with the container.

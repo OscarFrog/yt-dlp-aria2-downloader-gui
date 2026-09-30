@@ -1074,8 +1074,9 @@ called by static validation, exercise rejected proofs and source archives and
 protect the graph against reintroducing full PR/main/release qualification.
 Dated baseline measurements and implementation evidence are in `CI_AUDIT.md`.
 
-The Fedora shell and FFmpeg qualification containers mount anonymous Docker
-volumes at `/tmp` and `/var/tmp`, with `TMPDIR=/var/tmp` for test fixtures. These
+The Fedora shell, FFmpeg and RPM lifecycle/upgrade qualification containers
+mount anonymous Docker volumes at `/tmp` and `/var/tmp`, with `TMPDIR=/var/tmp`
+for test fixtures. These
 provide separate local storage rather than treating the container's overlay
 filesystem as a qualified private filesystem. Production checks still validate
 the actual filesystem, ownership and modes; a volume whose backing filesystem
@@ -1083,9 +1084,13 @@ does not satisfy those checks fails qualification. The volumes belong to the
 disposable GitHub-hosted job and contain no host home or credential bind mounts.
 The isolated shfmt verifier retains its private `/tmp` tmpfs and adds an
 anonymous `/var/tmp` disk volume for the media workspace cases; both normal and
-failure cleanup remove that volume with the verifier container. RPM build and
-lifecycle jobs only exercise the engine's version command and do not need these
-download-workspace volumes.
+failure cleanup remove that volume with the verifier container. The RPM `rpm`
+job in `packages.yml` and `rpm-test` job in `release.yml` exercise installed
+helpers after installation and upgrade, including private JSON plans and engine
+workspace checks; both matrix scenarios require these volumes. RPM build-only
+and isolated signing jobs do not execute that helper contract and retain their
+existing storage setup. DEB lifecycle/upgrade and Git-free source qualification
+run directly on Ubuntu runners with their ordinary local temporary storage.
 
 `.github/workflows/packages.yml` validates both package formats. Before package
 upgrade testing, a dedicated `previous-release` job resolves the immediately
@@ -1144,6 +1149,9 @@ HLS duration mocks yt-dlp and FFmpeg progress does not use it; those fixtures
 run once on the latest Ubuntu matrix entry with FFmpeg/FFprobe 6.1.1 verified.
 The FFmpeg 6 generation job adds only generation-specific compatibility fixtures;
 Fedora 8 and upstream 9 each run the common fixtures with their distinct tools.
+The verified upstream FFmpeg 9 build enables libvpx as well as libopus so the
+foreign native WebM witness contains real VP9/Opus media. Missing encoders are
+qualification failures; that preservation witness is never skipped.
 The controlled
 aria2 behavior suite repeats
 Range/no-Range/redirect/error three times, the silent-active quiescence
@@ -1321,7 +1329,16 @@ Polling cannot prove absence of a process that erased its marker and escaped
 before any observation. Test-only subreaping changes reparenting and collects
 already stopped zombies; it is never counted as application wait-status proof.
 The engine wrapper cases deliberately defer that collection until after their
-verdict. Confirmed zombie-only state requires stable inventories of every
+verdict. The test-only `finish()` service harvests only already attributed
+children of its controller, revalidates PID/start/parent and WNOWAIT exit state,
+and leaves managed Popen statuses to their owner. Its real ESRCH counterexample
+must not turn an unrelated process's stat race into a harvesting prerequisite.
+The frozen-parent causal tests bound the root inventory to their complete known
+fixture while reading real task states, children and descriptors and delivering
+real pidfd signals. Their ambient-inventory control demonstrates how unrelated
+ESRCH can mask the intended missing-freeze mutation; separate uncertainty tests
+still require conservative production refusal.
+Confirmed zombie-only state requires stable inventories of every
 thread; a zombie leader alone is insufficient. It means no live consumer can
 use a descriptor, not that the application reaped every descendant. Production engine/GUI
 lost-authority checks require two complete, stable inventories and identity/state
@@ -1400,8 +1417,15 @@ independent transfers continue during that interval. Legacy exclusive locking
 is exercised in both launch orders against the historical inode. To also run
 an available, separately preserved 2.3.29 executable, set
 `YTDLP_LEGACY_ENGINE=/absolute/path/to/old/download-video.sh`; its adjacent
-helpers must be from that version. Evidence remains in the printed
-private `/tmp/shared-destination-real-*` directory. Scripted answers do not
+helpers must be from that version. Application workspaces remain private
+`/tmp/shared-destination-real-*` directories, independent of an artifact root
+whose ancestors may not satisfy the application's private-directory policy.
+If `TMPDIR` selects another evidence store, only the exact launched labels'
+logs, statuses, pre-rescue inventories and fixture metadata/events are copied
+there. Media, seeds, configuration and runtimes are never exported. The printed
+evidence directory retains ancestor modes/filesystem metadata and redacted
+scripted-dialog diagnostics so a startup refusal cannot become an empty log.
+Scripted answers do not
 qualify visible desktop gestures; the interactive Zenity procedure remains
 separate. No network outage or actual CIFS qualification is implied.
 
