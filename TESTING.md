@@ -1379,6 +1379,16 @@ and requires the late child in the second snapshot. Its single-inventory mutant
 must report the live child absent; an unrelated read error cannot mask that
 defect. A separate foreign-stat ESRCH witness requires conservative refusal,
 including rejection of a mutant that silently skips that error.
+The direct zombie-leader retirement oracle likewise enumerates only its complete
+known fixture, with real task/child/FD reads and real pidfd signals. Every subcase
+has separate resource paths so a conservatively refused predecessor cannot leave
+a last-access marker for the next case. The leader-only mutant must be rejected
+while its sibling thread still owns the release pipe, before release or rescue.
+The correct case observes pidfd readiness after delivered KILL and before wait or
+pipe draining; this test observation does not claim application status collection.
+A held foreign stat descriptor produces real ESRCH after reaping: retirement must
+refuse, resume the authenticated parent and leave its sibling/pipe alive until
+the test releases its own barrier after the verdict.
 Confirmed zombie-only state requires stable inventories of every
 thread; a zombie leader alone is insufficient. It means no live consumer can
 use a descriptor, not that the application reaped every descendant. Production engine/GUI

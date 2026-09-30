@@ -50,6 +50,8 @@
 - Revalidate stale observer stat reads once without accepting uncertain shutdown;
   isolate second-inventory oracles from unrelated procfs races and retain a
   separate conservative-refusal control.
+- Isolate zombie-thread retirement subcases and their resource witnesses; reject
+  a leader-only quiescence mutant while its sibling still owns the release pipe.
 - Size the minimum-interpreter CI suite budget for the measured complete
   workload while preserving individual deadlines and the total job limit.
 - Require the shared-media prerequisite step in source qualification, with

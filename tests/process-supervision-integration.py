@@ -719,36 +719,173 @@ assert_no_residual_processes "$2" "$2/stop"
 
     def test_engine_gui_detect_and_retire_zombie_main_thread(self):
         script = self.thread_fixture()
+        real_iterdir, real_read = Path.iterdir, Path.read_text
+        real_send = signal.pidfd_send_signal
         for filename, code in self.escalation_sources():
-            with self.subTest(target=filename):
-                (self.root / 'thread-ready').unlink(missing_ok=True)
-                read_end, write_end = os.pipe()
-                process = subprocess.Popen(
-                    [sys.executable, '-I', '-B', str(script), str(self.root), str(read_end), 'direct'],
-                    pass_fds=(read_end,), start_new_session=True,
-                    env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token,
-                             YTDLP_ARIA2_GUI_WORKER_TOKEN=self.token),
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                self.processes.append(process)
-                os.close(read_end)
-                try:
-                    consumer = int(self.wait_file('thread-ready', process))
-                    fields = Path(f'/proc/{consumer}/stat').read_text().rsplit(') ', 1)[1].split()
-                    source = (PROJECT / filename).read_text()
-                    start = source.index('process_threads_are_quiescent() {')
-                    name = 'download_group_has_live_member' if filename == 'download-video.sh' else 'worker_group_has_live_member'
-                    end = source.index('\n}\n', source.index(name + '() {')) + 3
-                    setup = (f'DOWNLOAD_SESSION_ID={consumer}; DOWNLOAD_WORKER_PGID={consumer}\n'
-                             if filename == 'download-video.sh' else f'WORKER_PGID={consumer}\n')
-                    result = subprocess.run(['bash', '-c', source[start:end] + '\n' + setup + name],
-                                            capture_output=True, timeout=3)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    with mock.patch.object(sys, 'argv', ['probe', str(consumer), fields[19], fields[3]]):
-                        exec(compile(code, filename, 'exec'), {})
-                    self.assertEqual(process.wait(timeout=3), -signal.SIGKILL)
-                    self.assertFalse((self.root / 'thread-last-access').exists())
-                finally:
-                    os.close(write_end)
+            guard = "        if identity() in ('Z', 'X') and process_quiescent(pid, expected_start):\n"
+            self.assertEqual(code.count(guard), 1)
+            mutant = code.replace(guard, "        if identity() in ('Z', 'X'):\n", 1)
+            for label, source_code in (('correct', code), ('leader-only', mutant),
+                                       ('foreign-esrch', code)):
+                with self.subTest(target=filename, case=label):
+                    # A failed predecessor may still finish its last access
+                    # after its release pipe closes. Never reuse its paths.
+                    case_root = self.root / f'{filename}-{label}'
+                    case_root.mkdir()
+                    read_end, write_end = os.pipe()
+                    process = subprocess.Popen(
+                        [sys.executable, '-I', '-B', str(script), str(case_root), str(read_end), 'direct'],
+                        pass_fds=(read_end,), start_new_session=True,
+                        env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token,
+                                 YTDLP_ARIA2_GUI_WORKER_TOKEN=self.token),
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    self.processes.append(process)
+                    os.close(read_end)
+                    descriptor = foreign = foreign_write = None
+                    deliveries = []
+                    foreign_race = False
+                    try:
+                        consumer = int(self.wait_file(
+                            f'{case_root.name}/thread-ready', process))
+                        fields = real_read(Path(f'/proc/{consumer}/stat')).rsplit(') ', 1)[1].split()
+                        self.assertEqual(consumer, process.pid)
+                        self.assertEqual(fields[0], 'Z')
+                        descriptor = os.pidfd_open(consumer)
+                        current = real_read(Path(f'/proc/{consumer}/stat')).rsplit(') ', 1)[1].split()
+                        self.assertEqual((current[19], current[3]), (fields[19], fields[3]))
+                        self.assertEqual(select.select([descriptor], [], [], 0)[0], [])
+                        self.assertFalse((case_root / 'thread-last-access').exists())
+
+                        def live_pipe():
+                            live = []
+                            for task in real_iterdir(Path(f'/proc/{consumer}/task')):
+                                row = real_read(task / 'stat').rsplit(') ', 1)[1].split()
+                                self.assertEqual(real_read(task / 'children').strip(), '',
+                                                 'thread fixture unexpectedly forked')
+                                if row[0] not in ('Z', 'X'):
+                                    live.append(task)
+                            self.assertTrue(live, 'fixture has no surviving sibling thread')
+                            held = (live[0] / 'fd' / str(read_end)).stat()
+                            release = os.fstat(write_end)
+                            self.assertEqual((held.st_dev, held.st_ino),
+                                             (release.st_dev, release.st_ino))
+
+                        live_pipe()
+                        source = (PROJECT / filename).read_text()
+                        start = source.index('process_threads_are_quiescent() {')
+                        name = ('download_group_has_live_member' if filename == 'download-video.sh'
+                                else 'worker_group_has_live_member')
+                        end = source.index('\n}\n', source.index(name + '() {')) + 3
+                        setup = (f'DOWNLOAD_SESSION_ID={consumer}; DOWNLOAD_WORKER_PGID={consumer}\n'
+                                 if filename == 'download-video.sh' else f'WORKER_PGID={consumer}\n')
+                        result = subprocess.run(['bash', '-c', source[start:end] + '\n' + setup + name],
+                                                capture_output=True, timeout=3)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+
+                        if label == 'foreign-esrch':
+                            foreign_read, foreign_write = os.pipe()
+                            try:
+                                foreign = subprocess.Popen(
+                                    [sys.executable, '-I', '-B', '-c',
+                                     'import os,sys; os.read(int(sys.argv[1]),1)', str(foreign_read)],
+                                    pass_fds=(foreign_read,), start_new_session=True,
+                                    env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                self.processes.append(foreign)
+                            finally:
+                                os.close(foreign_read)
+                            foreign_fields = real_read(Path(f'/proc/{foreign.pid}/stat')).rsplit(') ', 1)[1].split()
+                            self.assertNotEqual(foreign_fields[3], fields[3])
+
+                        def inventory(path):
+                            if path != Path('/proc'):
+                                return real_iterdir(path)
+                            # Only the root inventory is bounded. This real
+                            # fixture never forks; every task/child read remains
+                            # real and must prove that the participant set is complete.
+                            for task in real_iterdir(Path(f'/proc/{consumer}/task')):
+                                self.assertEqual(real_read(task / 'children').strip(), '',
+                                                 'fixture inventory omitted a child')
+                            pids = [os.getpid(), consumer]
+                            if foreign is not None:
+                                pids.insert(0, foreign.pid)
+                            return iter(Path(f'/proc/{pid}') for pid in pids)
+
+                        def read(path, *args, **kwargs):
+                            nonlocal foreign_write, foreign_race
+                            if foreign is not None and path == Path(f'/proc/{foreign.pid}/stat'):
+                                # A held stat fails with real ESRCH after reaping;
+                                # production must retain its uncertainty veto.
+                                with path.open() as held:
+                                    os.close(foreign_write)
+                                    foreign_write = None
+                                    self.assertEqual(foreign.wait(timeout=3), 0)
+                                    try:
+                                        held.read()
+                                    except ProcessLookupError as error:
+                                        self.assertEqual(error.errno, 3)
+                                        foreign_race = True
+                                        raise
+                                    self.fail('held foreign stat did not produce real ESRCH')
+                            return real_read(path, *args, **kwargs)
+
+                        def send(fd, number, *args):
+                            real_send(fd, number, *args)
+                            deliveries.append(number)
+
+                        status = 0
+                        with mock.patch.object(Path, 'iterdir', inventory), \
+                                mock.patch.object(Path, 'read_text', read), \
+                                mock.patch.object(signal, 'pidfd_send_signal', send), \
+                                mock.patch.object(sys, 'argv', ['probe', str(consumer), fields[19], fields[3]]):
+                            try:
+                                exec(compile(source_code, filename, 'exec'), {})
+                            except SystemExit as error:
+                                status = error.code
+                        # Observe actual kernel termination before wait/drain or
+                        # release. Only a delivered KILL can need completion time;
+                        # the leader-only mutant must fail immediately while its
+                        # live thread still owns the barrier descriptor.
+                        stopped = select.select(
+                            [descriptor], [], [], 3 if signal.SIGKILL in deliveries else 0)[0]
+
+                        def require_retired():
+                            self.assertEqual(stopped, [descriptor],
+                                             'retirement returned with a live zombie sibling')
+
+                        if label == 'correct':
+                            self.assertEqual(status, 0)
+                            require_retired()
+                            self.assertEqual(process.wait(timeout=3), -signal.SIGKILL)
+                            self.assertFalse((case_root / 'thread-last-access').exists())
+                        else:
+                            self.assertEqual(stopped, [])
+                            self.assertNotIn(signal.SIGKILL, deliveries)
+                            live_pipe()
+                            self.assertFalse((case_root / 'thread-last-access').exists())
+                            if label == 'leader-only':
+                                self.assertEqual(status, 0)
+                                self.assertEqual(deliveries, [])
+                                with self.assertRaisesRegex(self.failureException, 'live zombie sibling'):
+                                    require_retired()
+                            else:
+                                self.assertEqual(status, 1)
+                                self.assertTrue(foreign_race)
+                                self.assertIn(signal.SIGSTOP, deliveries)
+                                self.assertIn(signal.SIGCONT, deliveries)
+                            # Release only after the live-FD and refusal verdicts.
+                            # This marker is confined to this subcase's root.
+                            os.close(write_end)
+                            write_end = None
+                            self.assertEqual(process.wait(timeout=3), 0)
+                            self.assertTrue((case_root / 'thread-last-access').exists())
+                    finally:
+                        if write_end is not None:
+                            os.close(write_end)
+                        if foreign_write is not None:
+                            os.close(foreign_write)
+                        if descriptor is not None:
+                            os.close(descriptor)
 
     def test_procfs_enumeration_failure_is_unknown(self):
         module = self.supervisor_module()
