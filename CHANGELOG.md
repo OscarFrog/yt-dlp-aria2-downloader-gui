@@ -50,6 +50,8 @@
 - Revalidate stale observer stat reads once without accepting uncertain shutdown;
   isolate second-inventory oracles from unrelated procfs races and retain a
   separate conservative-refusal control.
+- Size the minimum-interpreter CI suite budget for the measured complete
+  workload while preserving individual deadlines and the total job limit.
 - Add optional injected events in isolated real Zenity windows, distinct from
   scripted responses and operator-assisted desktop qualification.
 

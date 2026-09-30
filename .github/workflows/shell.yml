@@ -152,7 +152,7 @@ jobs:
           bash -c 'printf "%s\n" "${BASH_VERSION}"; [[ ${BASH_VERSINFO[0]} == 4 && ${BASH_VERSINFO[1]} == 4 && ${BASH_VERSINFO[2]} == 0 ]]'
           bash ./tests/run-all.sh --doctor
       - name: Exercise the complete contract under Python 3.10
-        run: timeout --signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --full --jobs 4
+        run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/run-all.sh --full --jobs 4
   validate-fedora:
     needs: identity
     name: Fedora 44

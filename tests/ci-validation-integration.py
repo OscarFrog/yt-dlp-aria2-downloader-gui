@@ -896,7 +896,8 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
                         job.index("tar --extract"))
         self.assertLess(job.index("Confirm minimum Python and environment"),
                         job.index("./tests/run-all.sh --full --jobs 4"))
-        self.assertIn("timeout --signal=TERM --kill-after=10s 5m", job)
+        self.assertIn("timeout --signal=TERM --kill-after=10s 8m", job)
+        self.assertIn("timeout-minutes: 10", job)
 
     def test_shared_destination_uses_one_verified_tool_entry_and_retains_only_diagnostics(self):
         job = self.jobs(self.workflow("real-tools.yml"))["pinned-local-media"]

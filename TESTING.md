@@ -120,6 +120,13 @@ lookups are bound and checked only on the disposable GitHub-hosted runner. This 
 additional qualification; its addition does not change remote required-check
 settings.
 
+The paired minimum-interpreter job allows eight minutes for the complete
+four-worker suite, within its unchanged ten-minute job budget. This aggregate
+budget includes every static and integration task; it is separate from the
+individual signal, shutdown and fixture deadlines, which remain unchanged.
+Ubuntu/Fedora jobs retain their five-minute suite budgets and every wrapper
+retains TERM followed by KILL after ten seconds.
+
 Some Linux fixtures deliberately use `/usr/bin/python3` or a restricted system
 PATH. After installing distribution dependencies, the disposable minimum-Python
 CI runner binds that path to its selected Python 3.10 and asserts both lookup
