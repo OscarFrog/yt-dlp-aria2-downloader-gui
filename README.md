@@ -908,7 +908,11 @@ A retained active ownership checkpoint still blocks overlapping requests from
 new engines. Version 2.3.29 cannot read that checkpoint: once every historical
 lock holder is gone, exclusion against that old version is no longer guaranteed.
 Do not delete preserved locks or checkpoints merely because they look old;
-uncertain state requires inspection. Ownership records are private and contain
+uncertain state requires inspection. When the filesystem supplies a verified
+directory identity, recreating a deleted folder does not inherit the old
+folder's active checkpoint merely because its inode number was reused. Without
+that proof, an older active checkpoint remains protected pending inspection.
+Ownership records are private and contain
 no URL, cookie or authentication header. Coordination is local to one host and
 user; it provides neither distributed exclusion nor protection against arbitrary
 external writers (the separate F1 BIS limit remains).

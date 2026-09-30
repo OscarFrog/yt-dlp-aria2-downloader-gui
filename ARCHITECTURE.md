@@ -298,6 +298,20 @@ The exact historical canonical-path lock remains shared throughout the new
 transaction, excluding an old instance's exclusive lock in both launch orders.
 The runtime update lock is unrelated and never spans the media transfer.
 
+Ownership checkpoints additionally bind the destination's incarnation to an
+opaque Linux file handle obtained from its authenticated open descriptor.
+The destination descriptor stays open through admission or checkpoint saving,
+so the inode cannot be recycled between that observation and the decision.
+This leaves lock keys unchanged across aliases and keeps records for distinct
+incarnations separate. Two valid handles from the same provider establish that
+an inode reused for a newly created directory is not the older destination.
+Neither directory timestamps nor disappearance of the old path supplies that
+proof. Missing or denied handle support and older active records without this
+identity remain uncertain; they cannot authorize clearing a reservation.
+A passive legacy checkpoint still needs the complete media binding and unchanged
+file snapshots to authorize resumption. No file handle is used to open a file
+or bypass path, permission, publication or ownership checks.
+
 Under reservation, admission rejects existing final entries (status 1), foreign
 native inputs and ambiguous partials. A native local resume requires an exact
 request/format/profile binding, the full extracted media ID and available

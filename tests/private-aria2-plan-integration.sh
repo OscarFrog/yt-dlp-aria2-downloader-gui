@@ -2108,6 +2108,322 @@ PY_UNIQUE_HEADER
         'unique field spelling and value remain unchanged'
 }
 
+test_resource_directory_incarnation() {
+    new_case 'resource-directory-incarnation'
+    python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_DIRECTORY_INCARNATION'
+import argparse
+import contextlib
+import copy
+import ctypes
+import errno
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import sys
+from types import SimpleNamespace
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location('incarnations', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = Path(sys.argv[2])
+output = root / 'output'
+identity = (output.stat().st_dev, output.stat().st_ino)
+
+# Real optional capability: never turn its absence into a claimed real PASS.
+actual = module.directory_incarnation(output, identity)
+if actual is None:
+    print('Real directory file-handle capability unavailable; conservative fallback tested below.')
+else:
+    alias = root / 'alias'
+    alias.symlink_to(output, target_is_directory=True)
+    assert module.directory_incarnation(alias.resolve(), identity) == actual
+    moved = root / 'renamed-output'
+    output.rename(moved)
+    try:
+        assert module.directory_incarnation(moved, identity) == actual, 'rename changed incarnation'
+        content = moved / 'unrelated-content'
+        content.write_bytes(b'content is not a directory incarnation')
+        assert module.directory_incarnation(moved, identity) == actual, 'directory contents changed incarnation'
+        content.unlink()
+    finally:
+        moved.rename(output)
+    print('Real file handle remains stable across symlink alias, rename and directory content changes.')
+
+class Header(ctypes.Structure):
+    _fields_ = [('size', ctypes.c_uint32), ('kind', ctypes.c_int32),
+                ('data', ctypes.c_ubyte * 128)]
+
+assert ctypes.sizeof(Header) == 136 and Header.data.offset == 8
+real_fstat = module.os.fstat
+observations = []
+
+class Provider:
+    def __init__(self, error=0, size=8, kind=1):
+        self.error, self.size, self.kind = error, size, kind
+
+    def __call__(self, descriptor, name, buffer, mount_id, flags):
+        info = real_fstat(descriptor)
+        assert (info.st_dev, info.st_ino) == identity
+        assert name == b'' and flags == 0x1000
+        header = ctypes.cast(buffer, ctypes.POINTER(Header)).contents
+        assert header.size == 128, 'unbounded provider allocation'
+        header.size, header.kind = self.size, self.kind
+        for index in range(min(self.size, 128)):
+            header.data[index] = index + 1
+        # Different mount IDs must never distinguish aliases of one directory.
+        ctypes.cast(mount_id, ctypes.POINTER(ctypes.c_int)).contents.value = 123 + len(observations)
+        observations.append(descriptor)
+        ctypes.set_errno(self.error)
+        return -1 if self.error else 0
+
+for error in (errno.ENOSYS, errno.EOPNOTSUPP, errno.EPERM, errno.EACCES, errno.EIO, errno.EOVERFLOW):
+    with patch.object(module.ctypes, 'CDLL', return_value=SimpleNamespace(name_to_handle_at=Provider(error))):
+        assert module.directory_incarnation(output, identity) is None, ('provider error became proof', error)
+for size, kind in ((0, 1), (129, 1), (8, -1)):
+    with patch.object(module.ctypes, 'CDLL', return_value=SimpleNamespace(name_to_handle_at=Provider(size=size, kind=kind))):
+        assert module.directory_incarnation(output, identity) is None, 'malformed provider result became proof'
+with patch.object(module.ctypes, 'CDLL', return_value=SimpleNamespace()):
+    assert module.directory_incarnation(output, identity) is None
+with patch.object(module.ctypes, 'CDLL', side_effect=OSError(errno.EIO, 'provider unavailable')):
+    assert module.directory_incarnation(output, identity) is None
+with patch.object(module.ctypes, 'CDLL', return_value=SimpleNamespace(name_to_handle_at=Provider())):
+    first = module.directory_incarnation(output, identity)
+    assert first == module.directory_incarnation(output, identity), 'mount ID entered the incarnation token'
+    assert first['handle'] == '0102030405060708'
+    calls = []
+    def changed_fstat(descriptor):
+        info = real_fstat(descriptor)
+        calls.append(descriptor)
+        if len(calls) == 2:
+            return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino + 1, st_mode=info.st_mode)
+        return info
+    with patch.object(module.os, 'fstat', changed_fstat):
+        try:
+            module.directory_incarnation(output, identity)
+        except module.PlanError:
+            pass
+        else:
+            raise AssertionError('post-provider FD identity change was ignored')
+    assert len(calls) == 2
+    try:
+        module.directory_incarnation(output, (identity[0], identity[1] + 1))
+    except module.PlanError:
+        pass
+    else:
+        raise AssertionError('provider accepted a descriptor of another destination')
+
+token_a = {'provider': 'linux-file-handle', 'schema': 1, 'type': 1, 'handle': '01' * 8}
+token_b = {**token_a, 'handle': '02' * 8}
+# Fresh token-B admission below is the discriminating positive oracle.
+for unknown in (None, {}, {**token_a, 'schema': 2}, {**token_a, 'provider': 'future'},
+                {**token_a, 'type': 2}, {**token_a, 'handle': '02' * 12},
+                {**token_a, 'handle': 'not-hex'}, {**token_a, 'schema': True}):
+    assert not module.different_directory_incarnations(unknown, token_b)
+    assert not module.different_directory_incarnations(token_b, unknown)
+
+# The state-machine oracle injects only the provider token. Actual inode reuse
+# is qualified separately on a filesystem that demonstrably reuses an inode.
+current = None
+sequence = 0
+registry = root / 'registry'
+registry.mkdir(mode=0o700)
+
+def plan(name, request='same-request'):
+    global sequence
+    sequence += 1
+    private = root / ('plan-' + str(sequence))
+    private.mkdir(mode=0o700)
+    info = {'id': 'fixture', 'extractor_key': 'Generic', 'format_id': 'audio',
+            'ext': 'webm', 'protocol': 'http', 'filename': str(output / (name + '.webm'))}
+    source = private / 'plan.json'
+    source.write_text(json.dumps({**info, 'requested_downloads': [dict(info)]}))
+    url = private / 'request'
+    url.write_text('https://example.invalid/' + request)
+    args = argparse.Namespace(plan=str(source), state=str(private / 'resources.json'),
+                              output_dir=str(output), final_output_dir=str(output),
+                              final_output_identity=f'{identity[0]}:{identity[1]}',
+                              url_file=str(url), mode='audio', hls=False)
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        module.resource_plan(args)
+    return args, captured.getvalue()
+
+def action(args, name):
+    return module.resource_state(argparse.Namespace(state=args.state, registry=str(registry), action=name))
+
+def record(args):
+    name = module.resource_record_name(json.loads(Path(args.state).read_text()))
+    records = list(registry.glob('resources-*/' + name))
+    assert len(records) == 1, ('checkpoint path is not unique', records)
+    return records[0]
+
+def refused(error, function, *args):
+    try:
+        function(*args)
+    except error:
+        return
+    raise AssertionError('missing expected refusal: ' + error.__name__)
+
+with patch.object(module, 'directory_incarnation', side_effect=lambda *args: copy.deepcopy(current)):
+    current = token_a
+    owner, old_keys = plan('incarnation')
+    action(owner, 'admit')
+    old_record = record(owner)
+    preserved = old_record.read_bytes()
+    same, same_keys = plan('incarnation')
+    assert same_keys == old_keys
+    refused(module.ResourceBusyError, action, same, 'admit')
+    current = token_b
+    fresh, new_keys = plan('incarnation')
+    assert old_keys == new_keys, 'incarnation split the flock namespace'
+    assert json.loads(Path(owner.state).read_text())['binding'] != json.loads(Path(fresh.state).read_text())['binding']
+    action(fresh, 'admit')
+    assert record(fresh) != old_record
+    assert record(fresh).parent == old_record.parent, 'incarnation split the dev/ino bucket'
+    assert old_record.read_bytes() == preserved, 'new incarnation changed the prior active checkpoint'
+    action(same, 'save')
+    assert old_record.read_bytes() == preserved, 'refused transaction released the active old incarnation'
+    refused(module.PlanError, action, owner, 'save')
+    assert old_record.read_bytes() == preserved, 'old owner checkpointed another directory incarnation'
+    action(fresh, 'save')
+
+    for label, old_token, new_token in (('old-unknown', None, token_b),
+                                        ('new-unknown', token_a, None),
+                                        ('both-unknown', None, None)):
+        current = old_token
+        owner, _ = plan(label)
+        action(owner, 'admit')
+        saved = record(owner).read_bytes()
+        current = new_token
+        retry, _ = plan(label)
+        refused(module.ResourceBusyError, action, retry, 'admit')
+        action(retry, 'save')
+        assert record(owner).read_bytes() == saved, 'unknown incarnation lost its active protection'
+
+    current = None
+    ordinary_unknown, _ = plan('ordinary-without-provider')
+    action(ordinary_unknown, 'admit')
+    action(ordinary_unknown, 'save')
+    assert json.loads(record(ordinary_unknown).read_text())['active'] is False
+
+    current = token_a
+    lost_owner, _ = plan('provider-lost-with-active-owner')
+    action(lost_owner, 'admit')
+    lost_record = record(lost_owner).read_bytes()
+    lost_retry, _ = plan('provider-lost-with-active-owner')
+    current = None
+    refused(module.ResourceBusyError, action, lost_retry, 'admit')
+    refused(module.PlanError, action, lost_owner, 'save')
+    assert record(lost_owner).read_bytes() == lost_record
+
+    # A v1 active record remains authoritative; a valid new token supplies no
+    # missing historic generation and cannot grant an inspection-free reset.
+    current = None
+    legacy_active, _ = plan('legacy-active')
+    action(legacy_active, 'admit')
+    legacy_path = record(legacy_active)
+    legacy = json.loads(legacy_path.read_text())
+    legacy['version'] = 1
+    del legacy['incarnation']
+    legacy_path.write_text(json.dumps(legacy))
+    legacy_active_bytes = legacy_path.read_bytes()
+    current = token_b
+    retry, _ = plan('legacy-active')
+    refused(module.ResourceBusyError, action, retry, 'admit')
+    assert legacy_path.read_bytes() == legacy_active_bytes
+
+    # Migrate a demonstrably quiescent v1 resume without replacing that record.
+    current = None
+    legacy_owner, _ = plan('legacy-resume')
+    action(legacy_owner, 'admit')
+    partial = output / 'legacy-resume.webm.part'
+    partial.write_bytes(b'owned legacy partial')
+    action(legacy_owner, 'save')
+    legacy_path = record(legacy_owner)
+    legacy = json.loads(legacy_path.read_text())
+    legacy['version'] = 1
+    del legacy['incarnation']
+    legacy_path.write_text(json.dumps(legacy))
+    legacy_bytes = legacy_path.read_bytes()
+    current = token_b
+    foreign, _ = plan('legacy-resume', 'foreign-request')
+    refused(module.DestinationExistsError, action, foreign, 'admit')
+    retry, _ = plan('legacy-resume')
+    action(retry, 'admit')
+    assert legacy_path.read_bytes() == legacy_bytes
+    assert record(retry) != legacy_path
+    assert json.loads(Path(retry.state).read_text())['owned']
+    action(retry, 'save')
+    partial.write_bytes(b'foreign bytes after the valid checkpoint')
+    altered, _ = plan('legacy-resume')
+    refused(module.DestinationExistsError, action, altered, 'admit')
+    assert partial.read_bytes() == b'foreign bytes after the valid checkpoint'
+
+    current = token_a
+    unstable, _ = plan('provider-lost-before-admit')
+    current = None
+    refused(module.PlanError, action, unstable, 'admit')
+    assert not list(registry.glob('resources-*/' + module.resource_record_name(json.loads(Path(unstable.state).read_text()))))
+
+    # A generation observation must remain anchored through the decision.
+    # At the provider->snapshot barrier, replace only this fixture's directory;
+    # verify an authenticated FD still pins the old inode and the current path
+    # fails validation before a new checkpoint can be published.
+    current = token_a
+    pinned_owner, _ = plan('pin-barrier')
+    action(pinned_owner, 'admit')
+    pinned_record = record(pinned_owner)
+    pinned_bytes = pinned_record.read_bytes()
+    current = token_b
+    replaced, _ = plan('pin-barrier')
+    real_descriptor = module.directory_descriptor
+    real_snapshot = module.resource_snapshot
+    open_destination_descriptors = []
+    barrier = []
+
+    @contextlib.contextmanager
+    def tracked_descriptor(path, **kwargs):
+        with real_descriptor(path, **kwargs) as descriptor:
+            relevant = path == output
+            if relevant:
+                open_destination_descriptors.append(descriptor)
+            try:
+                yield descriptor
+            finally:
+                if relevant:
+                    open_destination_descriptors.remove(descriptor)
+
+    def replaced_snapshot(state):
+        assert open_destination_descriptors, 'incarnation FD no longer pinned at snapshot'
+        descriptor = open_destination_descriptors[-1]
+        before = os.fstat(descriptor)
+        assert (before.st_dev, before.st_ino) == identity
+        moved = root / 'moved-before-snapshot'
+        output.rename(moved)
+        output.mkdir(mode=0o700)
+        protected = output / 'pin-barrier.webm.part'
+        protected.write_bytes(b'foreign replacement must remain untouched')
+        after = os.fstat(descriptor)
+        assert (after.st_dev, after.st_ino) == identity, 'old inode lost its FD anchor'
+        assert (output.stat().st_dev, output.stat().st_ino) != identity
+        barrier.append((descriptor, identity))
+        return real_snapshot(state)
+
+    with patch.object(module, 'directory_descriptor', tracked_descriptor), \
+            patch.object(module, 'resource_snapshot', replaced_snapshot):
+        refused(module.PlanError, action, replaced, 'admit')
+    assert len(barrier) == 1 and not open_destination_descriptors
+    assert pinned_record.read_bytes() == pinned_bytes
+    assert (output / 'pin-barrier.webm.part').read_bytes() == b'foreign replacement must remain untouched'
+    assert not list(registry.glob('resources-*/' + module.resource_record_name(json.loads(Path(replaced.state).read_text()))))
+
+print('Incarnation provider, conservative fallback, independent checkpoints and authenticated legacy resume passed.')
+PY_DIRECTORY_INCARNATION
+}
+
 test_frozen_replay_contract() {
     new_case 'frozen-replay'
     python3 -I -B - "${PROJECT_DIR}" "${CASE_ROOT}" <<'PY_FROZEN_REPLAY'
@@ -2512,7 +2828,9 @@ part.write_bytes(b'owned partial transfer')
 # An uncertain stop cannot release protection, even when no FD survives.
 same, _ = plan('resume.mp4')
 rejected(module.ResourceBusyError, state, same, 'admit')
-record = next(registry.rglob(json.loads(Path(args.state).read_text())['key'] + '.resume.json'))
+records = list(registry.rglob(module.resource_record_name(json.loads(Path(args.state).read_text()))))
+assert len(records) == 1, 'admitted resource checkpoint is not unique'
+record = records[0]
 active_record = record.read_bytes()
 # Cleanup was prudently registered before attempted admission. It must neither
 # release somebody else's active record nor invent ownership after a refusal.
@@ -2631,6 +2949,7 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
+    test_resource_directory_incarnation
     test_frozen_replay_contract
     test_resource_activation_signal_handoff
     test_resource_reservations_and_resume

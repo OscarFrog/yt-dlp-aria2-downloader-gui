@@ -698,6 +698,78 @@ def normalized_resource_name(name: str) -> str:
     return unicodedata.normalize('NFKC', name).casefold()
 
 
+def valid_directory_incarnation(value: object) -> bool:
+    return (isinstance(value, dict) and
+            set(value) == {'provider', 'schema', 'type', 'handle'} and
+            value['provider'] == 'linux-file-handle' and
+            type(value['schema']) is int and value['schema'] == 1 and
+            type(value['type']) is int and 0 <= value['type'] < 2 ** 31 and
+            isinstance(value['handle'], str) and
+            re.fullmatch(r'(?:[a-f0-9]{2}){1,128}', value['handle']) is not None)
+
+
+def directory_incarnation(path: Path, expected: tuple[int, int]) -> dict | None:
+    """Observe an optional opaque kernel handle without reopening it by handle."""
+    class FileHandle(ctypes.Structure):
+        _fields_ = [('handle_bytes', ctypes.c_uint32), ('handle_type', ctypes.c_int32),
+                    ('payload', ctypes.c_ubyte * 128)]
+
+    with directory_descriptor(path) as descriptor:
+        before = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino) != expected or not stat.S_ISDIR(before.st_mode):
+            raise PlanError('destination changed before incarnation observation')
+        token = None
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            provider = libc.name_to_handle_at
+            provider.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p,
+                                 ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+            provider.restype = ctypes.c_int
+            handle = FileHandle()
+            handle.handle_bytes = 128
+            mount_id = ctypes.c_int()
+            # Linux UAPI: the eight-byte header precedes at most MAX_HANDLE_SZ
+            # opaque bytes. AT_EMPTY_PATH inspects this already-open directory.
+            # The returned mount ID intentionally does not separate bind aliases.
+            if (ctypes.sizeof(FileHandle) == 136 and FileHandle.payload.offset == 8 and
+                    provider(descriptor, b'', ctypes.byref(handle), ctypes.byref(mount_id), 0x1000) == 0 and
+                    0 < handle.handle_bytes <= 128):
+                candidate = {'provider': 'linux-file-handle', 'schema': 1,
+                             'type': handle.handle_type,
+                             'handle': bytes(handle.payload[:handle.handle_bytes]).hex()}
+                if valid_directory_incarnation(candidate):
+                    token = candidate
+        except (AttributeError, OSError):
+            # Missing libc/kernel/filesystem support or permissions cannot
+            # turn uncertainty into authority to bypass an active checkpoint.
+            pass
+        after = os.fstat(descriptor)
+        if ((after.st_dev, after.st_ino) != expected or
+                not stat.S_ISDIR(after.st_mode)):
+            raise PlanError('destination changed during incarnation observation')
+    return token
+
+
+def different_directory_incarnations(left: object, right: object) -> bool:
+    # A changed provider, schema, handle type or representation length is not
+    # proof of a new inode generation. Unknown identities remain conservative.
+    return (valid_directory_incarnation(left) and valid_directory_incarnation(right) and
+            left['type'] == right['type'] and len(left['handle']) == len(right['handle']) and
+            left['handle'] != right['handle'])
+
+
+def resource_record_name(state: dict) -> str:
+    key = state['key']
+    if not isinstance(key, str) or not re.fullmatch(r'[a-f0-9]{64}', key):
+        raise PlanError('invalid resource checkpoint key')
+    incarnation = state.get('incarnation')
+    if incarnation is not None:
+        if not valid_directory_incarnation(incarnation):
+            raise PlanError('invalid directory incarnation in resource plan')
+        key += '-' + hashlib.sha256(json.dumps(incarnation, sort_keys=True).encode()).hexdigest()
+    return key + '.resume.json'
+
+
 def selected_download(plan: object) -> dict:
     """Restore inherited fields omitted from yt-dlp's selected download delta."""
     downloads = plan.get('requested_downloads') if isinstance(plan, dict) else None
@@ -718,6 +790,7 @@ def resource_plan(args: argparse.Namespace) -> int:
     expected = parse_identity(args.final_output_identity)
     if directory_identity(final) != expected:
         raise PlanError('destination changed before resource planning')
+    incarnation = directory_incarnation(final, expected)
     plan = read_json(Path(args.plan), 'yt-dlp plan')
     root = selected_download(plan)
     destination = resolve_destination(root.get('filename') or root.get('_filename'), output, 'planned filename')
@@ -769,10 +842,15 @@ def resource_plan(args: argparse.Namespace) -> int:
             'identity': expected, 'family': family, 'mode': args.mode, 'hls': args.hls,
             'formats': [(item.get('format_id'), item.get('ext'), item.get('protocol')) for item in formats],
         }, sort_keys=True).encode()).hexdigest()
+    legacy_binding = binding
+    if binding is not None and incarnation is not None:
+        binding = hashlib.sha256(json.dumps({'legacy_binding': binding,
+                                            'incarnation': incarnation}, sort_keys=True).encode()).hexdigest()
     final_name = destination.with_suffix('.mkv').name if args.mode == 'video' else destination.name
     if args.hls and destination.suffix == '.mkv':
         final_name = destination.stem + '.remuxed.mkv'
-    state = {'version': 1, 'family': family, 'binding': binding,
+    state = {'version': 2, 'family': family, 'binding': binding,
+             'legacy_binding': legacy_binding, 'incarnation': incarnation,
              'transaction': secrets.token_hex(32),
              'output': str(output), 'final': str(final), 'identity': expected,
              'final_name': final_name, 'key': keys[-1][1], 'owned': {}}
@@ -836,7 +914,7 @@ def resource_state(args: argparse.Namespace) -> int:
     registry = registry / bucket
     with directory_descriptor(registry, trusted_chain=True) as descriptor:
         require_private_directory_descriptor(descriptor)
-    record = registry / (state['key'] + '.resume.json')
+    record = registry / resource_record_name(state)
     if args.action == 'save':
         previous = read_json(record, 'resource ownership') if record.exists() else {}
         # The shell registers cleanup before admission can commit. A signal
@@ -846,49 +924,77 @@ def resource_state(args: argparse.Namespace) -> int:
         if (not state.get('transaction') or not previous.get('active') or
                 previous.get('transaction') != state['transaction']):
             return 0
-    if args.action == 'admit':
-        # A failed/uncertain stop must retain protection even if a consumer
-        # closed inherited lock descriptors. These are per-resource ownership
-        # checkpoints, never a PID registry or an authority to signal anyone.
-        for path in registry.glob('*.resume.json'):
-            other = read_json(path, 'resource ownership')
-            if other.get('active') and other.get('identity') == state['identity']:
-                family = other.get('family', '')
-                if (family == state['family'] or family.startswith(state['family'] + '.')
-                        or state['family'].startswith(family + '.')):
-                    raise ResourceBusyError('media resources remain reserved after an unconfirmed shutdown; inspect the preserved session')
-    snapshot = resource_snapshot(state)
-    completed = getattr(args, 'completed_path', '')
-    if completed:
-        completed = resolve_destination(completed, Path(state['final']), 'completed media').name
-        if completed not in snapshot:
-            raise PlanError('completed media escaped its reserved family')
-    checkpoint = {'version': 1, 'binding': state['binding'], 'owned': snapshot, 'completed': completed,
-                  'transaction': state['transaction'],
-                  'identity': state['identity'], 'family': state['family'], 'active': False}
-    if args.action == 'admit':
-        previous = read_json(record, 'resource ownership') if record.exists() else {}
-        # A .part name is no proof. Only this protocol's previous quiescent
-        # checkpoint, media/request/format binding and unchanged file identities can
-        # authorize a local native resumption. Network workspaces still restart.
-        final_alias = normalized_resource_name(state['final_name'])
-        for name in snapshot:
-            if (normalized_resource_name(name) == final_alias or
-                    name == previous.get('completed')):
-                raise DestinationExistsError('final media destination already exists; refusing to overwrite it. Destination: ' + name)
-        if snapshot and (not state['binding'] or state['output'] != state['final'] or
-                         previous.get('binding') != state['binding'] or
-                         previous.get('owned') != snapshot):
-            raise DestinationExistsError('pre-existing or ambiguous media resources; preserved, not an authorized resume')
-        state['owned'] = snapshot
-        replace_private_json(state_path, state)
-        # Invalidate the previous checkpoint before tools run. A crash cannot
-        # turn an unobserved write into a new ownership proof.
-        checkpoint.update(active=True, owned={})
-        replace_private_json(record, checkpoint)
-    else:
-        replace_private_json(record, checkpoint)
-    return 0
+    # Keep this authenticated inode alive until checkpoint publication. Closing
+    # the observation FD before the decision would permit inode recycling
+    # between the generation proof and the pathname-based resource snapshot.
+    with directory_descriptor(Path(state['final'])) as destination_descriptor:
+        pinned = os.fstat(destination_descriptor)
+        if ((pinned.st_dev, pinned.st_ino) != tuple(state['identity']) or
+                not stat.S_ISDIR(pinned.st_mode)):
+            raise PlanError('resource destination changed before checkpoint decision')
+        incarnation = directory_incarnation(Path(state['final']), tuple(state['identity']))
+        if args.action == 'admit':
+            # A failed/uncertain stop must retain protection even if a consumer
+            # closed inherited lock descriptors. These are per-resource ownership
+            # checkpoints, never a PID registry or an authority to signal anyone.
+            for path in registry.glob('*.resume.json'):
+                other = read_json(path, 'resource ownership')
+                if other.get('active') and other.get('identity') == state['identity']:
+                    if (incarnation == state.get('incarnation') and
+                            different_directory_incarnations(other.get('incarnation'), incarnation)):
+                        continue
+                    family = other.get('family', '')
+                    if (family == state['family'] or family.startswith(state['family'] + '.')
+                            or state['family'].startswith(family + '.')):
+                        raise ResourceBusyError('media resources remain reserved after an unconfirmed shutdown; inspect the preserved session')
+        if state.get('incarnation') is not None and incarnation != state['incarnation']:
+            raise PlanError('destination incarnation could not be revalidated; preserving its checkpoint')
+        snapshot = resource_snapshot(state)
+        completed = getattr(args, 'completed_path', '')
+        if completed:
+            completed = resolve_destination(completed, Path(state['final']), 'completed media').name
+            if completed not in snapshot:
+                raise PlanError('completed media escaped its reserved family')
+        checkpoint = {'version': 2, 'binding': state['binding'], 'owned': snapshot, 'completed': completed,
+                      'incarnation': state.get('incarnation'),
+                      'transaction': state['transaction'],
+                      'identity': state['identity'], 'family': state['family'], 'active': False}
+        if args.action == 'admit':
+            previous = read_json(record, 'resource ownership') if record.exists() else {}
+            legacy_record = registry / (state['key'] + '.resume.json')
+            if not previous and legacy_record != record and legacy_record.exists():
+                previous = read_json(legacy_record, 'legacy resource ownership')
+            # A legacy passive checkpoint still proves ownership only through its
+            # complete original request/media/format binding and unchanged files.
+            # Migration writes a separate current record; it never deletes the old
+            # record or uses legacy metadata to dismiss an uncertain active owner.
+            legacy_resume = (previous.get('version') in (1, 2) and
+                             previous.get('incarnation') is None and
+                             previous.get('active') is False and
+                             previous.get('identity') == state['identity'] and
+                             previous.get('family') == state['family'])
+            expected_binding = state.get('legacy_binding', state['binding']) if legacy_resume else state['binding']
+            # A .part name is no proof. Only this protocol's previous quiescent
+            # checkpoint, media/request/format binding and unchanged file identities can
+            # authorize a local native resumption. Network workspaces still restart.
+            final_alias = normalized_resource_name(state['final_name'])
+            for name in snapshot:
+                if (normalized_resource_name(name) == final_alias or
+                        name == previous.get('completed')):
+                    raise DestinationExistsError('final media destination already exists; refusing to overwrite it. Destination: ' + name)
+            if snapshot and (not state['binding'] or state['output'] != state['final'] or
+                             previous.get('binding') != expected_binding or
+                             previous.get('owned') != snapshot):
+                raise DestinationExistsError('pre-existing or ambiguous media resources; preserved, not an authorized resume')
+            state['owned'] = snapshot
+            replace_private_json(state_path, state)
+            # Invalidate the previous checkpoint before tools run. A crash cannot
+            # turn an unobserved write into a new ownership proof.
+            checkpoint.update(active=True, owned={})
+            replace_private_json(record, checkpoint)
+        else:
+            replace_private_json(record, checkpoint)
+        return 0
 
 
 def owned_native_input(path: Path, ownership: str | None) -> bool:

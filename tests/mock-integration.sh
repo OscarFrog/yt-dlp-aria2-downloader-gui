@@ -4691,7 +4691,7 @@ run_selected_mock_engine_group() {
 
 test_mock_gui_aria_progress() {
     local aria_unknown_capture gui_aria2_arguments_text gui_url_seen_log
-    local trimmed_gui_url
+    local trimmed_gui_url status=0
     local -a gui_arguments gui_aria2_arguments
 
     # Scenario: aria2 GUI progress with an unknown total size.
@@ -4702,7 +4702,53 @@ test_mock_gui_aria_progress() {
         MOCK_URL_SEEN_LOG="${gui_url_seen_log}" \
         MOCK_ARIA_ONLY=1 \
         MOCK_PROGRESS_CAPTURE="${PROGRESS_CAPTURE}" \
-        "${GUI_UNDER_TEST}"
+        "${GUI_UNDER_TEST}" || status=$?
+    if ((status != 0)); then
+        # Keep only allowlisted failure categories before the private fixture's
+        # cleanup removes its logs. Never print raw media requests or headers.
+        python3 -I -B - "${XDG_STATE_HOME}" "${OUTPUT_DIR}" "${status}" <<'PY_GUI_FAILURE' || true
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import time
+
+categories = {
+    'legacy-lock': b'another download is already using the destination directory',
+    'family-lock': b'media resources are currently reserved by another download',
+    'active-checkpoint': b'media resources remain reserved after an unconfirmed shutdown',
+    'foreign-input': b'media destination already exists or contains an ambiguous input',
+}
+observed = set()
+logs_read = 0
+root = Path(sys.argv[1]) / 'yt-dlp-aria2-downloader'
+for path in sorted(root.glob('download-*.log'))[-4:]:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        continue
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_size > 8 * 1024 * 1024:
+            continue
+        data = os.read(descriptor, 8 * 1024 * 1024)
+        observed.update(label for label, marker in categories.items() if marker in data)
+        logs_read += 1
+    finally:
+        os.close(descriptor)
+try:
+    info = Path(sys.argv[2]).stat()
+    destination = [info.st_dev, info.st_ino]
+except OSError as error:
+    destination = {'unavailable_errno': error.errno}
+print(json.dumps({'event': 'gui-aria-percent-failure-before-fixture-cleanup',
+                  'monotonic_ns': time.monotonic_ns(), 'status': int(sys.argv[3]),
+                  'destination': destination, 'logs_read': logs_read,
+                  'categories': sorted(observed)}, sort_keys=True), flush=True)
+PY_GUI_FAILURE
+        return "${status}"
+    fi
     assert_file_has_line "${PROGRESS_CAPTURE}" '39' 'aria2 progress maps into the global download phase'
     assert_file_contains "${PROGRESS_CAPTURE}" \
         '# Downloading the audio track - 40% (aria2c) - 1.00MiB - 6s remaining' \

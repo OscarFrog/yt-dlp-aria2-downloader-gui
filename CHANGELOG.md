@@ -30,6 +30,8 @@
   bound to full media/extractor/request/format identity and a confirmed stop.
 - Freeze selected metadata and literal replay names, including inherited format
   fields and live titles. Make interrupted checkpoint activation transaction-bound.
+- Bind ownership checkpoints to verified directory incarnations so a reused
+  inode does not reserve an unrelated new folder; preserve ambiguous old records.
 - Align runtime admission and local recovery with exact versioned directories.
 
 ### Qualification
@@ -43,6 +45,8 @@
   real shared-destination transfers with decoded content and pre-rescue evidence.
 - Bind signal and lock-lifetime fixture readiness to completed observations;
   provision checksum-pinned impersonation dependencies for managed-runtime CI.
+- Record startup-timeout process state before rescue and allowlisted GUI failure
+  categories before fixture cleanup, without exposing requests or changing statuses.
 - Add optional injected events in isolated real Zenity windows, distinct from
   scripted responses and operator-assisted desktop qualification.
 

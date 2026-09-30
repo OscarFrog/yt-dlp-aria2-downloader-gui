@@ -34,6 +34,9 @@ Reservations cover the same user and host, including canonical path aliases.
 They remain held through consumer shutdown and cleanup. Native resume requires
 an unchanged ownership checkpoint from a confirmed stop; a .part name alone is
 insufficient. Uncertain shutdown preserves active state for manual inspection.
+A verified filesystem identity separates a recreated directory from an older
+checkpoint when its inode number is reused. Missing identity information does
+not authorize releasing an older active checkpoint.
 Do not delete old-looking lock files. The shared legacy lock excludes an older
 2.3.29 instance's exclusive lock. This is not distributed exclusion and does
 not cover arbitrary external writers.

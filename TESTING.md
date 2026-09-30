@@ -389,7 +389,11 @@ shfmt check, static behavioral validation, and four ShellCheck inventories
 share the requested job limit. Parallel output is buffered separately and
 printed in canonical manifest order, so completion races do not produce
 interleaved logs. The integration manifest starts the latency-dominant signal
-and runner suites first, then staggers CPU-heavy mocks with wait-heavy suites.
+and runner suites first. Separate compact start/completion events expose the
+already recorded monotonic timestamps and statuses as tasks progress, so an
+outer timeout cannot erase the distinction between completed and active tasks.
+Detailed suite logs retain their canonical order. The manifest then
+staggers CPU-heavy mocks with wait-heavy suites.
 The scheduler immediately reuses a slot when any suite finishes; a short suite
 therefore cannot leave a worker idle while an unrelated long suite is still
 running. Reports and the first nonzero status remain selected in manifest order
@@ -434,6 +438,11 @@ descendant shutdown and cleanup after a second Ctrl-C, including an explicitly
 handled poll status 130 under Bash 4.4 and the EXIT path that bypasses Bash’s
 ordinary INT trap. Failed or missing scheduler polls must preserve their exact
 status and clean active children without consuming a nonexistent completion slot.
+The startup stress records monotonic failure time, barrier states and the
+fixture parent/child procfs state before watchdog rescue. A timeout remains a
+failure even if that rescue succeeds. The GUI progress mock similarly retains
+only allowlisted failure categories before removing its private logs; it does
+not expose raw requests or replace the original exit status.
 Provisional supervision precedes every
 foreground command in the registration window. The full-profile signal suite
 retains its original time limits; diagnostics also
@@ -1490,7 +1499,16 @@ The ordinary headless CI matrix remains independent.
 The private-plan suite exercises shared/exclusive ancestor reservations,
 Unicode/case aliases, different URLs and overlapping intermediate families,
 unchanged owned resumes, ambiguous legacy partials and active-record retention
-after uncertain shutdown. Resume cases keep the request, filename and formats
+after uncertain shutdown. Incarnation cases distinguish a recreated destination
+from an active checkpoint for an older directory while retaining lock keys,
+old records, alias convergence and refusal when handle identity is unavailable.
+A bounded real inode-reuse experiment complements the deterministic checkpoint
+oracle; failure to obtain reuse is inconclusive, not a successful witness.
+The descriptor barrier replaces the visible destination after observation and
+requires refusal while the authenticated inode remains pinned. The real shared
+matrix compares checkpoint digests before and after its own cycles: its records
+must become passive, while older active records must remain byte-identical.
+Resume cases keep the request, filename and formats
 fixed while changing the full media ID beyond its 64-byte filename prefix, or
 changing either extractor field. Both inherited and per-download identities
 are covered; refreshed signed URLs and either available extractor field remain

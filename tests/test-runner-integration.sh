@@ -29,11 +29,13 @@ cleanup() {
 
 test_startup_signal_registration_stress() {
     python3 -I -B - "${SCRIPT_DIR}/lib/test-runner.sh" <<'PY_STARTUP_STRESS'
+import json
 import os
 import pathlib
 import signal
 import subprocess
 import tempfile
+import time
 
 library = pathlib.Path(__import__("sys").argv[1])
 fixture = r'''
@@ -160,9 +162,47 @@ with tempfile.TemporaryDirectory(prefix="runner-startup-stress-") as temp_dir:
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
+        started = time.monotonic_ns()
         try:
             _, stderr = process.communicate(timeout=10)
         except subprocess.TimeoutExpired as error:
+            # Record the failure while the original Popen child still pins its
+            # private session. Observation precedes rescue and never reaps it.
+            observation = {
+                "event": "startup-timeout-before-rescue",
+                "iteration": iteration,
+                "monotonic_start_ns": started,
+                "monotonic_failure_ns": time.monotonic_ns(),
+                "registration_ready": registration_gate.exists(),
+                "sender_acknowledged": signal_sent_gate.exists(),
+                "handler_observed_unregistered": unregistered_signal_gate.exists(),
+                "processes": {},
+            }
+            try:
+                observed = os.waitid(os.P_PID, process.pid,
+                                     os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                observation["parent_waitable"] = (None if observed is None else
+                                                 {"code": observed.si_code, "status": observed.si_status})
+            except OSError as wait_error:
+                observation["parent_waitable"] = {"unavailable_errno": wait_error.errno}
+            pids = [process.pid]
+            try:
+                pids.append(int(marker.read_text(encoding="ascii").strip()))
+            except (OSError, ValueError):
+                pass
+            for pid in pids:
+                details = {}
+                for name in ("stat", "status", "wchan"):
+                    try:
+                        details[name] = pathlib.Path(f"/proc/{pid}/{name}").read_text()
+                    except OSError as read_error:
+                        details[name] = {"unavailable_errno": read_error.errno}
+                try:
+                    details["stderr_descriptor"] = os.readlink(f"/proc/{pid}/fd/2")
+                except OSError as read_error:
+                    details["stderr_descriptor"] = {"unavailable_errno": read_error.errno}
+                observation["processes"][str(pid)] = details
+            print(json.dumps(observation, sort_keys=True), flush=True)
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:

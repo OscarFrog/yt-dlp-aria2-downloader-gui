@@ -966,6 +966,10 @@ recouvrent pour les nouveaux moteurs. La version 2.3.29 ne peut pas lire cette
 preuve : une fois tous les détenteurs du verrou historique disparus, l'exclusion
 de cette ancienne version n'est plus garantie. Ne supprimez pas les verrous ou
 preuves préservés pour leur seul âge ; un état incertain exige une inspection.
+Lorsque le système de fichiers fournit une identité de dossier vérifiée,
+recréer un dossier supprimé ne lui attribue pas la preuve d'activité de l'ancien
+pour la seule réutilisation de son numéro d'inode. Sans cette preuve, un ancien
+état actif reste protégé en attendant son inspection.
 Les preuves privées ne contiennent ni URL, ni cookie, ni en-tête
 d'authentification. La coordination reste locale à un hôte et un utilisateur ;
 elle ne fournit ni exclusion distribuée ni protection contre tous les écrivains

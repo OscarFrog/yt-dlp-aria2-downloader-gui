@@ -1259,6 +1259,8 @@ start_static_validation() {
     STATIC_VALIDATION_SLOT_INDEX[slot]=${validation_index}
 
     printf 'Starting: %s\n' "${label}"
+    printf 'Runner event: phase=static task=%s event=start monotonic_ms=%s\n' \
+        "${validation_id}" "${STATIC_VALIDATION_STARTS[validation_index]}"
     test_runner_start_timed_child \
         "${slot}" "${log_file}" "${completion_file}" \
         "${validation_command[@]}"
@@ -1284,6 +1286,8 @@ collect_completed_static_validation() {
     fi
     STATIC_VALIDATION_ENDS[validation_index]=${end_ms}
     STATIC_VALIDATION_STATUSES[validation_index]=${status}
+    printf 'Runner event: phase=static task=%s event=complete monotonic_ms=%s status=%d\n' \
+        "${STATIC_VALIDATION_IDS[validation_index]}" "${end_ms}" "${status}"
     unset 'STATIC_VALIDATION_SLOT_INDEX[completed_slot]'
 }
 
@@ -1390,6 +1394,8 @@ start_integration_suite() {
     INTEGRATION_SLOT_SUITE_INDEX[slot]=${suite_index}
 
     printf 'Starting: %s\n' "${label}"
+    printf 'Runner event: phase=integration task=%s event=start monotonic_ms=%s\n' \
+        "${suite_id}" "${INTEGRATION_SUITE_STARTS[suite_index]}"
     test_runner_start_timed_child \
         "${slot}" "${log_file}" "${completion_file}" \
         "${suite_command[@]}"
@@ -1415,6 +1421,8 @@ collect_completed_integration_suite() {
     fi
     INTEGRATION_SUITE_ENDS[suite_index]=${end_ms}
     INTEGRATION_SUITE_STATUSES[suite_index]=${status}
+    printf 'Runner event: phase=integration task=%s event=complete monotonic_ms=%s status=%d\n' \
+        "${INTEGRATION_SUITE_IDS[suite_index]}" "${end_ms}" "${status}"
     unset 'INTEGRATION_SLOT_SUITE_INDEX[completed_slot]'
 }
 
