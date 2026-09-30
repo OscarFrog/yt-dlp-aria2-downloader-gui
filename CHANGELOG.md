@@ -50,6 +50,8 @@
 - Retain bounded, allowlisted progress from interrupted Ubuntu validation suites
   with passive resource measurements, preserving the original validation status,
   five-minute deadline and four-worker schedule.
+  Explicit normal and EXIT collection paths remain checked with supported
+  ShellCheck versions and premature-exit status witnesses.
 - Revalidate stale observer stat reads once without accepting uncertain shutdown;
   isolate second-inventory oracles from unrelated procfs races and retain a
   separate conservative-refusal control.

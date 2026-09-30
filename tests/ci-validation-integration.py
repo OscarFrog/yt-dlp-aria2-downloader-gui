@@ -1728,6 +1728,8 @@ python3() {
 }
 timeout() {
     [[ "$*" == '--signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --jobs 4' ]] || return 98
+    # Exercise the EXIT path before normal collection or log handoff.
+    if [[ ${CHECK_COMMAND_STATUS} == 27 ]]; then exit 27; fi
     shift 3
     if [[ ${CHECK_TIMEOUT} == 1 ]]; then
         command timeout --signal=TERM --kill-after=10s 0.05s "$@"
@@ -1736,7 +1738,7 @@ timeout() {
     fi
 }
 '''
-        cases = ((0, False, False, 0), (23, False, False, 23),
+        cases = ((0, False, False, 0), (23, False, False, 23), (27, False, False, 27),
                  (0, True, False, 124), (0, False, True, 65), (23, False, True, 23))
         for case, incoming_umask in ((case, mask) for case in cases for mask in ("0022", "0077")):
             command_status, expired, observer_failed, expected = case

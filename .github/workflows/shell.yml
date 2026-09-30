@@ -75,9 +75,8 @@ jobs:
           python3 -I -B scripts/ci-validation-diagnostics.py observe "${diagnostic_dir}" \
             >"${diagnostic_dir}/samples.jsonl" &
           diagnostic_pid=$!
-          # shellcheck disable=SC2329 # EXIT invokes this collector; the step replay exercises that path.
           finish_diagnostics() {
-            local validation_status=$?
+            local validation_status=$1
             local diagnostic_status=0
             trap - EXIT
             umask 077
@@ -89,13 +88,13 @@ jobs:
             ((validation_status != 0)) || validation_status=${diagnostic_status}
             exit "${validation_status}"
           }
-          trap 'finish_diagnostics' EXIT
+          trap 'finish_diagnostics "$?"' EXIT
           validation_status=0
           umask "${validation_umask}"
           YTDLP_ARIA2_CI_DIAGNOSTICS_DIR=${diagnostic_dir} \
             timeout --signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --jobs 4 \
             || validation_status=$?
-          exit "${validation_status}"
+          finish_diagnostics "${validation_status}"
   validate-python-minimum:
     needs: identity
     name: Python 3.10 / Ubuntu
