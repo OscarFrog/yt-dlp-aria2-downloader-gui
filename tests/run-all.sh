@@ -49,6 +49,10 @@ readonly -a FULL_SUITE_IDS=(
     mock-signals
     test-runner
     runtime-manager-hardening
+    runtime-manager-rollback-admission
+    runtime-manager-recovery
+    runtime-manager-cache-identity
+    runtime-manager-transactions
     mock-engine-core
     progress-monitor
     run-all-signal
@@ -87,7 +91,11 @@ readonly -a FAST_SUITE_IDS=(
 declare -Ar SUITE_LABELS=(
     ['runtime-manager']='Runtime-manager integration'
     ['run-all-signal']='run-all signal/descendant integration'
-    ['runtime-manager-hardening']='Runtime-manager hardening integration'
+    ['runtime-manager-hardening']='Runtime-manager validation integration'
+    ['runtime-manager-rollback-admission']='Runtime-manager rollback admission integration'
+    ['runtime-manager-recovery']='Runtime-manager recovery integration'
+    ['runtime-manager-cache-identity']='Runtime-manager file identity integration'
+    ['runtime-manager-transactions']='Runtime-manager transaction integration'
     ['mock-engine-core']='Mock engine core/storage integration'
     ['mock-engine-hls']='Mock engine YouTube HLS integration'
     ['mock-engine-staging']='Mock engine private-staging integration'
@@ -112,6 +120,10 @@ declare -Ar SUITE_PATHS=(
     ['runtime-manager']='./tests/runtime-manager-integration.sh'
     ['run-all-signal']='./tests/run-all-signal-integration.sh'
     ['runtime-manager-hardening']='./tests/runtime-manager-hardening-integration.sh'
+    ['runtime-manager-rollback-admission']='./tests/runtime-manager-hardening-integration.sh'
+    ['runtime-manager-recovery']='./tests/runtime-manager-hardening-integration.sh'
+    ['runtime-manager-cache-identity']='./tests/runtime-manager-hardening-integration.sh'
+    ['runtime-manager-transactions']='./tests/runtime-manager-hardening-integration.sh'
     ['mock-engine-core']='./tests/mock-integration.sh'
     ['mock-engine-hls']='./tests/mock-integration.sh'
     ['mock-engine-staging']='./tests/mock-integration.sh'
@@ -133,6 +145,11 @@ declare -Ar SUITE_PATHS=(
 )
 
 declare -Ar SUITE_GROUP_ARGUMENTS=(
+    ['runtime-manager-hardening']='validation'
+    ['runtime-manager-rollback-admission']='rollback-admission'
+    ['runtime-manager-recovery']='recovery'
+    ['runtime-manager-cache-identity']='cache-identity'
+    ['runtime-manager-transactions']='transactions'
     ['mock-engine-core']='engine-core'
     ['mock-engine-hls']='engine-hls'
     ['mock-engine-staging']='engine-staging'

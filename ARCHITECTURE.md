@@ -962,6 +962,14 @@ the absolute interpreter paths after apt. User workstation interpreters stay int
 The latest pinned real-tools entry also requires the shared-destination matrix
 with digest/version-verified Deno and selectively retained pre-rescue evidence.
 
+Runtime hardening is split into independent validation, rollback-admission,
+recovery, cache-identity and transaction fixtures. Full qualification schedules
+all five through the existing worker pool; stress executes each once under its
+bounded wrapper. The transaction fixture keeps updates, double rollbacks,
+journal recovery and lock contention in their original stateful order, including
+the ten stress cycles. The default standalone entry still runs the complete
+original sequence, and coverage checks require every phase exactly once.
+
 Fedora download and RPM lifecycle/upgrade jobs use anonymous Docker volumes
 for `/tmp` and `/var/tmp`, with `TMPDIR=/var/tmp`. Installed-payload checks also
 read private plans and enter the engine workspace paths, so their temporary

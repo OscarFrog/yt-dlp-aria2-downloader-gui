@@ -150,5 +150,18 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          timeout --signal=TERM --kill-after=10s 2m \
-            bash ./tests/runtime-manager-hardening-integration.sh
+          # Each semantic group runs once. Keep the per-group bound and the
+          # ten rollback/contention cycles, including after an earlier failure.
+          first_failure=0
+          for group in validation rollback-admission recovery cache-identity transactions; do
+            printf '\n=== Runtime hardening: %s ===\n' "${group}"
+            status=0
+            timeout --signal=TERM --kill-after=10s 2m \
+              bash ./tests/runtime-manager-hardening-integration.sh --group "${group}" \
+              || status=$?
+            printf 'Runtime hardening %s status: %s\n' "${group}" "${status}"
+            if ((first_failure == 0 && status != 0)); then
+              first_failure=${status}
+            fi
+          done
+          exit "${first_failure}"

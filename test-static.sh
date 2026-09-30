@@ -2576,7 +2576,7 @@ test_static_tooling_contracts() {
     local mock_gui_group mock_gui_suite mock_phase
     local mock_runtime_group mock_runtime_suite
     local runtime_phase scheduler_phase shfmt_phase signal_phase static_phase
-    local python_suite workflow_file
+    local hardening_suite python_suite workflow_file
 
     assert_source_inventory_is_canonical
     assert_repository_file_inventory_is_canonical
@@ -2701,6 +2701,11 @@ test_static_tooling_contracts() {
     done
     assert_text_contains "${ASSERT_OUTPUT}" 'runtime-manager-hardening' \
         'run-all suite list includes runtime hardening'
+    for hardening_suite in runtime-manager-rollback-admission runtime-manager-recovery \
+        runtime-manager-cache-identity runtime-manager-transactions; do
+        assert_text_contains "${ASSERT_OUTPUT}" "${hardening_suite}" \
+            "run-all suite list includes ${hardening_suite} coverage"
+    done
     for mock_engine_suite in \
         mock-engine-core \
         mock-engine-hls \
@@ -4954,6 +4959,15 @@ test_static_runtime_regression_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
         'RUNTIME_HARDENING_CONTENTION_RUNS: 10' \
         'runtime hardening stress restores ten contention cycles per run'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
+        'for group in validation rollback-admission recovery cache-identity transactions; do' \
+        'runtime stress executes every semantic group exactly once'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
+        'timeout --signal=TERM --kill-after=10s 2m' \
+        'runtime stress keeps the two-minute group bound and escalation grace'
+    assert_file_contains "${SCRIPT_DIR}/tests/test-runner-integration.sh" \
+        'test_runtime_hardening_group_dispatch' \
+        'runtime group dispatch, failure statuses and workflow aggregation are exercised'
     assert_status 64 'runtime hardening rejects zero rollback repetitions' \
         env RUNTIME_HARDENING_ROLLBACK_RUNS=0 \
         "${SCRIPT_DIR}/tests/runtime-manager-hardening-integration.sh"

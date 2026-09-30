@@ -2645,6 +2645,164 @@ print("Mock process scan: argv boundaries, disappearance, foreign processes and 
 PY_PROCESS_SCAN
 }
 
+test_runtime_hardening_group_dispatch() {
+    python3 -I -B - "${SCRIPT_DIR}" <<'PY_HARDENING_DISPATCH'
+from collections import Counter
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+tests = Path(sys.argv[1])
+source = (tests / "runtime-manager-hardening-integration.sh").read_text()
+initial = [
+    "test_runtime_setting_bounds", "test_runtime_command_and_lock_errors",
+    "test_xdg_data_home_hardening", "test_bounded_runtime_probes",
+    "test_oversized_deno_versions", "test_invalid_runtime_path",
+    "test_mismatched_ytdlp_candidate", "test_mismatched_deno_candidate",
+    "test_release_location_and_archive_hardening", "test_symlinked_managed_data_root",
+    "test_signature_failure_bootstrap", "test_fresh_runtime_bootstrap",
+    "test_no_network_require",
+]
+admission = ["test_exact_active_runtime_admission", "test_deno_checksum_before_extraction"]
+rollback = ["test_rollback_candidate_admission"]
+recovery = ["test_structurally_missing_active_recovery", "test_missing_old_activation_journal"]
+invalid_active = ["test_invalid_active_runtime_recovery"]
+identity = ["test_cached_runtime_file_identity"]
+transactions = ["test_runtime_updates", "test_repeated_rollbacks",
+                "test_invalid_rollback_targets", "test_activation_journal_recovery",
+                "test_runtime_lock_hardening"]
+expected_all = (initial + admission + rollback + recovery + invalid_active
+                + transactions[:1] + identity + transactions[1:])
+groups = {"validation": initial + admission + invalid_active,
+          "rollback-admission": rollback, "recovery": recovery,
+          "cache-identity": identity, "transactions": transactions}
+assert len(expected_all) == len(set(expected_all)) == 25
+assert source.endswith('main "$@"\n')
+# Replace only test bodies at the final call site. Execute the real argument
+# parser, private initialization, dispatch and cleanup, with inert phases.
+# All three initializers remain real; their HOME_DIR never comes from a stub.
+record = r'''
+hardening_dispatch_record() {
+    [[ -n ${TEST_ROOT} && ${TEST_ROOT} == "${TMPDIR}/"tmp.* &&
+       ${HOME_DIR} == "${TEST_ROOT}/home" && -d ${HOME_DIR} &&
+       ! -L ${TEST_ROOT} && ! -L ${HOME_DIR} ]] || return 90
+    printf '%s\n' "$1" >>"${HARDENING_DISPATCH_LOG}"
+    if [[ $1 == test_no_network_require ]]; then
+        mkdir -p -- "${HOME_DIR}/.config/yt-dlp"
+        printf '%s\n' '--update' >"${HOME_DIR}/.config/yt-dlp/config"
+    fi
+    case $1 in
+        test_exact_active_runtime_admission | test_rollback_candidate_admission | \
+        test_structurally_missing_active_recovery | test_cached_runtime_file_identity | \
+        test_runtime_updates)
+            [[ $(<"${HOME_DIR}/.config/yt-dlp/config") == --update ]] || return 91
+            ;;
+    esac
+    if [[ $1 == test_runtime_updates ]]; then
+        [[ $(readlink "${ytdlp_root}/current") == 2026.06.09 &&
+           $(readlink "${ytdlp_root}/previous") == 2026.03.17 &&
+           $(readlink "${deno_root}/current") == 2.8.0 &&
+           $(readlink "${deno_root}/previous") == 2.7.0 ]] || return 92
+    fi
+    if [[ ${HARDENING_FAIL_PHASE:-} == "$1" ]]; then
+        if [[ -n ${HARDENING_FAIL_SIGNAL:-} ]]; then
+            kill -"${HARDENING_FAIL_SIGNAL}" "${BASHPID}"
+        fi
+        return "${HARDENING_FAIL_STATUS:-23}"
+    fi
+}
+'''
+stubs = "".join(f"{name}() {{ hardening_dispatch_record {name}; }}\n"
+                for name in expected_all)
+with tempfile.TemporaryDirectory(prefix="hardening-dispatch-") as directory:
+    root = Path(directory)
+    project = root / "project"
+    (project / "tests/lib").mkdir(parents=True)
+    shutil.copyfile(tests / "lib/assert.sh", project / "tests/lib/assert.sh")
+    specimen = project / "tests/runtime-manager-hardening-integration.sh"
+    specimen.write_text(source[:-len('main "$@"\n')] + record + stubs + 'main "$@"\n')
+    bash = shutil.which("bash")
+    sequence = 0
+
+    def run(arguments, expected, status=0, **extra):
+        global sequence
+        sequence += 1
+        case = root / str(sequence)
+        case.mkdir()
+        log = case / "phases"
+        environment = dict(os.environ, TMPDIR=str(case), HARDENING_DISPATCH_LOG=str(log), **extra)
+        result = subprocess.run([bash, str(specimen), *arguments], env=environment,
+                                capture_output=True, text=True, timeout=8)
+        actual = log.read_text().splitlines() if log.exists() else []
+        if result.returncode != status or actual != expected:
+            raise AssertionError((arguments, result.returncode, status, actual, expected, result.stderr))
+        if status and "integration passed" in result.stdout:
+            raise AssertionError("failed dispatch announced success")
+        if any(path.is_dir() for path in case.iterdir()):
+            raise AssertionError("dispatch failed to clean its private fixture")
+        return actual
+
+    run([], expected_all)
+    run(["--group", "all"], expected_all)
+    union = []
+    for group, phases in groups.items():
+        union.extend(run(["--group", group], phases))
+        run(["--group", group], phases[:1], 23, HARDENING_FAIL_PHASE=phases[0])
+    assert Counter(union) == Counter(expected_all)
+    for arguments in (["--group"], ["validation"], ["--group", "unknown"],
+                      ["--group", ""], ["--group", "validation", "extra"]):
+        run(arguments, [], 64)
+    for signal_name, status in (("HUP", 129), ("INT", 130), ("TERM", 143)):
+        run(["--group", "transactions"], transactions[:1], status,
+            HARDENING_FAIL_PHASE=transactions[0], HARDENING_FAIL_SIGNAL=signal_name)
+
+    # Exercise the actual workflow body with an inert timeout executable. Its
+    # entire ordered group set must run even when an earlier group fails.
+    workflow = (tests.parent / ".github/workflows/stress.yml").read_text()
+    anchor = "      - name: Qualify runtime-manager transactions and contention\n"
+    assert workflow.count(anchor) == 1
+    block = workflow.split(anchor)[1].split("        run: |\n", 1)[1]
+    lines = []
+    for line in block.splitlines():
+        if line and not line.startswith("          "):
+            break
+        lines.append(line[10:] if line else "")
+    workflow_script = root / "stress-body.sh"
+    workflow_script.write_text("\n".join(lines) + "\n")
+    binaries = root / "bin"
+    binaries.mkdir()
+    timeout = binaries / "timeout"
+    timeout.write_text('''#!/bin/bash
+set -euo pipefail
+[[ $# == 7 && $1 == --signal=TERM && $2 == --kill-after=10s && $3 == 2m &&
+   $4 == bash && $5 == ./tests/runtime-manager-hardening-integration.sh &&
+   $6 == --group && ${RUNTIME_HARDENING_ROLLBACK_RUNS} == 10 &&
+   ${RUNTIME_HARDENING_CONTENTION_RUNS} == 10 ]] || exit 99
+printf '%s\\n' "$7" >>"${HARDENING_DISPATCH_LOG}"
+case "${HARDENING_WORKFLOW_MODE}:$7" in
+    first:validation) exit 23 ;;
+    first:transactions) exit 29 ;;
+    timeout:rollback-admission) exit 124 ;;
+    late:transactions) exit 17 ;;
+esac
+''')
+    timeout.chmod(0o700)
+    for mode, expected_status in (("pass", 0), ("first", 23), ("timeout", 124), ("late", 17)):
+        log = root / ("stress-" + mode)
+        environment = dict(os.environ, PATH=f"{binaries}:{os.environ['PATH']}",
+                           HARDENING_DISPATCH_LOG=str(log), HARDENING_WORKFLOW_MODE=mode,
+                           RUNTIME_HARDENING_ROLLBACK_RUNS="10", RUNTIME_HARDENING_CONTENTION_RUNS="10")
+        result = subprocess.run([bash, str(workflow_script)], env=environment,
+                                capture_output=True, text=True, timeout=8)
+        if result.returncode != expected_status or log.read_text().splitlines() != list(groups):
+            raise AssertionError((mode, result.returncode, result.stdout, result.stderr))
+print("Hardening groups: exact all/partition, private fixtures, hostile config, statuses and stress bounds passed.")
+PY_HARDENING_DISPATCH
+}
+
 test_run_all_manifest_execution() {
     local manifest_root="${TEST_RUNNER_LOG_DIR}/run-all-manifest"
     local mock_bin="${manifest_root}/bin"
@@ -2748,7 +2906,11 @@ static_bash_commands = [
 full_suite_commands = [
     ("--", "./tests/mock-integration.sh", "--group", "signals"),
     ("--", "./tests/test-runner-integration.sh"),
-    ("--", "./tests/runtime-manager-hardening-integration.sh"),
+    ("--", "./tests/runtime-manager-hardening-integration.sh", "--group", "validation"),
+    ("--", "./tests/runtime-manager-hardening-integration.sh", "--group", "rollback-admission"),
+    ("--", "./tests/runtime-manager-hardening-integration.sh", "--group", "recovery"),
+    ("--", "./tests/runtime-manager-hardening-integration.sh", "--group", "cache-identity"),
+    ("--", "./tests/runtime-manager-hardening-integration.sh", "--group", "transactions"),
     ("--", "./tests/mock-integration.sh", "--group", "engine-core"),
     ("--", "./tests/progress-monitor-integration.sh"),
     ("--", "./tests/run-all-signal-integration.sh"),
@@ -3412,6 +3574,7 @@ main() {
     test_real_tool_optimization_isolation
     test_mock_child_subreaping
     test_mock_process_scan_contract
+    test_runtime_hardening_group_dispatch
     test_run_all_manifest_execution
     test_run_all_doctor_contract
 

@@ -1618,8 +1618,21 @@ The unrelated engine, GUI configuration, installer and static scenarios remain i
 the full suite and are not repeated for each timing tuple. Each shard retains
 five bounded five-minute iterations and ten-second termination grace periods.
 
-The runtime-manager job runs the hardening suite once with ten internal
-lock-contention and double-rollback cycles. This retains stateful transaction
+The runtime-manager job runs each hardening group once: `validation`,
+`rollback-admission`, `recovery`, `cache-identity` and `transactions`. Each group
+has its own initialized private fixtures and a two-minute wrapper with the
+existing ten-second termination grace. The job records every group status and
+fails if any group fails; its required check name and job deadline are unchanged.
+The transaction group retains ten internal lock-contention and double-rollback
+cycles, with updates, rollbacks and journal recovery sharing their state in the
+original order. No scenario is removed or repeated merely to fill a group.
+
+The full runner schedules the same five groups through its existing bounded
+worker pool. Direct invocation without `--group` still runs every phase in the
+original order. These semantic groups cover the expanded exact-admission and
+recovery matrices without imposing one serial deadline on all independent
+fixtures. The runner-manifest and phase-coverage controls require their union to
+execute every original phase exactly once. This retains stateful transaction
 stress without multiplying ten internal cycles by ten complete-suite wrappers.
 Deterministic package-cleanup scenarios are already covered in the full suite
 on each supported environment and have no separate stress repetition. The

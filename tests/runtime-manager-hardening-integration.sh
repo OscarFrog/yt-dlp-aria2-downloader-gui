@@ -1739,34 +1739,74 @@ test_runtime_lock_hardening() {
 }
 
 main() {
+    local group=all
+    if (($# != 0)); then
+        if (($# != 2)) || [[ $1 != --group ]]; then
+            printf 'Usage: runtime-manager-hardening-integration.sh [--group all|validation|rollback-admission|recovery|cache-identity|transactions]\n' >&2
+            return 64
+        fi
+        group=$2
+        case ${group} in
+            all | validation | rollback-admission | recovery | cache-identity | transactions) ;;
+            *)
+                printf 'Error: unknown runtime hardening group: %s\n' "${group}" >&2
+                return 64
+                ;;
+        esac
+    fi
+
     initialize_runtime_hardening_workspace
     write_runtime_hardening_mocks
     initialize_runtime_hardening_fixtures
-    test_runtime_setting_bounds
-    test_runtime_command_and_lock_errors
-    test_xdg_data_home_hardening
-    test_bounded_runtime_probes
-    test_oversized_deno_versions
-    test_invalid_runtime_path
-    test_mismatched_ytdlp_candidate
-    test_mismatched_deno_candidate
-    test_release_location_and_archive_hardening
-    test_symlinked_managed_data_root
-    test_signature_failure_bootstrap
-    test_fresh_runtime_bootstrap
-    test_no_network_require
-    test_exact_active_runtime_admission
-    test_deno_checksum_before_extraction
-    test_rollback_candidate_admission
-    test_structurally_missing_active_recovery
-    test_missing_old_activation_journal
-    test_invalid_active_runtime_recovery
-    test_runtime_updates
-    test_cached_runtime_file_identity
-    test_repeated_rollbacks
-    test_invalid_rollback_targets
-    test_activation_journal_recovery
-    test_runtime_lock_hardening
+
+    # These groups start after the offline test in the complete sequence.
+    # Retain its hostile user configuration in each independent fixture.
+    if [[ ${group} != all && ${group} != validation ]]; then
+        mkdir -p -- "${HOME_DIR}/.config/yt-dlp"
+        printf '%s\n' '--update' >"${HOME_DIR}/.config/yt-dlp/config"
+    fi
+
+    if [[ ${group} == all || ${group} == validation ]]; then
+        test_runtime_setting_bounds
+        test_runtime_command_and_lock_errors
+        test_xdg_data_home_hardening
+        test_bounded_runtime_probes
+        test_oversized_deno_versions
+        test_invalid_runtime_path
+        test_mismatched_ytdlp_candidate
+        test_mismatched_deno_candidate
+        test_release_location_and_archive_hardening
+        test_symlinked_managed_data_root
+        test_signature_failure_bootstrap
+        test_fresh_runtime_bootstrap
+        test_no_network_require
+        test_exact_active_runtime_admission
+        test_deno_checksum_before_extraction
+    fi
+    if [[ ${group} == all || ${group} == rollback-admission ]]; then
+        test_rollback_candidate_admission
+    fi
+    if [[ ${group} == all || ${group} == recovery ]]; then
+        test_structurally_missing_active_recovery
+        test_missing_old_activation_journal
+    fi
+    if [[ ${group} == all || ${group} == validation ]]; then
+        test_invalid_active_runtime_recovery
+    fi
+    # Initialization provides the same active/previous pair restored by
+    # test_invalid_active_runtime_recovery before updates in the all-sequence.
+    if [[ ${group} == all || ${group} == transactions ]]; then
+        test_runtime_updates
+    fi
+    if [[ ${group} == all || ${group} == cache-identity ]]; then
+        test_cached_runtime_file_identity
+    fi
+    if [[ ${group} == all || ${group} == transactions ]]; then
+        test_repeated_rollbacks
+        test_invalid_rollback_targets
+        test_activation_journal_recovery
+        test_runtime_lock_hardening
+    fi
 
     printf 'Runtime-manager hardening integration passed.\n'
 }
