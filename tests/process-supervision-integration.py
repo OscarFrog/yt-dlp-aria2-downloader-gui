@@ -46,6 +46,90 @@ def denied_procfs_enumeration(error):
         yield
 
 
+class DisplayReadinessTests(unittest.TestCase):
+    @staticmethod
+    def helper():
+        module_spec = importlib.util.spec_from_file_location(
+            'zenity_events', PROJECT / 'tests/zenity-x11-events.py')
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+        return module
+
+    def check_fragmented_frame(self, read_number):
+        import threading
+        reader, writer = os.pipe()
+        continuation = threading.Event()
+        first_read = threading.Event()
+        received = bytearray()
+        writer_errors = []
+        real_read, real_select = os.read, select.select
+
+        def produce():
+            try:
+                os.write(writer, b'17')
+                if not continuation.wait(3):
+                    raise AssertionError('reader never requested the display terminator')
+                os.write(writer, b'\n')
+            except BaseException as error:
+                writer_errors.append(error)
+
+        def observe_read(fd, size):
+            data = real_read(fd, size)
+            if fd == reader:
+                received.extend(data)
+                if received == b'17':
+                    first_read.set()
+            return data
+
+        def observe_select(readers, writers, exceptional, timeout=None):
+            if reader in readers and first_read.is_set():
+                continuation.set()
+            return real_select(readers, writers, exceptional, timeout)
+
+        producer = threading.Thread(target=produce)
+        producer.start()
+        try:
+            with mock.patch.object(os, 'read', side_effect=observe_read), \
+                    mock.patch.object(select, 'select', side_effect=observe_select):
+                self.assertEqual(read_number(reader), b'17')
+            self.assertTrue(continuation.is_set(),
+                            'display number accepted before its newline was received')
+            producer.join(3)
+            self.assertFalse(producer.is_alive(), 'display producer did not finish')
+            self.assertEqual(writer_errors, [])
+        finally:
+            os.close(reader)
+            continuation.set()
+            producer.join(3)
+            os.close(writer)
+
+    def test_display_number_waits_for_the_complete_frame(self):
+        self.check_fragmented_frame(self.helper().read_display_number)
+
+        def premature_read(fd):
+            select.select([fd], [], [], 10)
+            return os.read(fd, 32).strip()
+
+        with self.assertRaisesRegex(AssertionError, 'accepted before its newline'):
+            self.check_fragmented_frame(premature_read)
+
+    def test_display_number_rejects_incomplete_and_invalid_frames(self):
+        read_number = self.helper().read_display_number
+        for payload in (b'', b'17', b'not-a-number\n', b'1' * 33 + b'\n'):
+            with self.subTest(payload=payload):
+                reader, writer = os.pipe()
+                try:
+                    os.write(writer, payload)
+                    os.close(writer)
+                    writer = None
+                    with self.assertRaises(RuntimeError):
+                        read_number(reader)
+                finally:
+                    os.close(reader)
+                    if writer is not None:
+                        os.close(writer)
+
+
 class ProcessTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='process-contract-')
@@ -1718,7 +1802,10 @@ escalate_owned_process() {
     consumer_pid=$(<"${OUTPUT_LOCK_ROOT}/ready")
     # The same failure must veto recursive retirement through its sentinel.
     if [[ $1 == "$consumer_pid" || $1 == "$DOWNLOAD_WORKER_PGID" ]]; then
-        printf '%s' "$consumer_pid" >"${OUTPUT_LOCK_ROOT}/blocked-escalation"
+        # Preserve the first completed observation while shutdown retries.
+        if [[ ! -e ${OUTPUT_LOCK_ROOT}/blocked-escalation ]]; then
+            printf '%s' "$consumer_pid" >"${OUTPUT_LOCK_ROOT}/blocked-escalation"
+        fi
         return 1
     fi
     observed_escalate_owned_process "$@"

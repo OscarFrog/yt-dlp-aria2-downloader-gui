@@ -1340,6 +1340,91 @@ for name, mutated in mutations:
     else:
         raise AssertionError(f"single-run policy accepted mutation: {name}")
 print("Real-tools single-run supervision: exact multi-instance wrapper accepted; nine repetition/command mutations rejected.")
+
+# The shared GUI fixture enters the managed-runtime contract. A plain yt-dlp
+# wheel can report version/help successfully while every impersonation target
+# remains unavailable; its latest-only CI prerequisites must be installed first.
+prerequisite_marker = "      - name: Install pinned impersonation dependencies for shared qualification\n"
+prerequisite_condition = "        if: matrix.yt_dlp_version == '2026.8.19'\n"
+prerequisite_diagnostic = "shared qualification requires the pinned/hash-verified latest-only impersonation step before its run"
+pins = (
+    "certifi==2026.7.22 --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+    "cffi==2.1.1 --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf",
+    "curl-cffi==0.16.0 --hash=sha256:182416f07d71a342240554fa62c22e591999b78c225b21d3fe27d9f807420dd6",
+    "pycparser==3.0 --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+)
+requirements_assignment = '          requirements="${RUNNER_TEMP}/yt-dlp-impersonation-requirements.txt"\n'
+requirements_payload = '          cat >"${requirements}" <<\'EOF_REQUIREMENTS\'\n'
+requirements_payload += ''.join('          ' + pin + '\n' for pin in pins)
+requirements_payload += '          EOF_REQUIREMENTS\n'
+python_target = '          "${RUNNER_TEMP}/yt-dlp-venv/bin/python" -c \'import sys; assert sys.version_info[:2] == (3, 12)\'\n'
+install = r"""          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" --isolated install \
+            --disable-pip-version-check \
+            --index-url https://pypi.org/simple \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement "${requirements}"
+"""
+
+
+def prerequisite_step(text):
+    if text.count(prerequisite_marker) != 1:
+        raise AssertionError(prerequisite_diagnostic)
+    return prerequisite_marker + text.split(prerequisite_marker, 1)[1].split("\n      - ", 1)[0] + "\n"
+
+
+def validate_prerequisites(text):
+    step = prerequisite_step(text)
+    if (text.count("  pinned-local-media:\n") != 1 or
+            text.count("  current-stable-local-media:\n") != 1 or text.count(marker) != 1):
+        raise AssertionError(prerequisite_diagnostic)
+    pinned_job = text.split("  pinned-local-media:\n", 1)[1].split("  current-stable-local-media:\n", 1)[0]
+    conditions = [line + '\n' for line in step.splitlines() if line.startswith('        if:')]
+    if (step not in pinned_job or "    runs-on: ubuntu-24.04\n" not in pinned_job or
+            text.index(prerequisite_marker) >= text.index(marker) or
+            conditions != [prerequisite_condition]):
+        raise AssertionError(prerequisite_diagnostic)
+    for required in (requirements_assignment, requirements_payload, python_target, install):
+        if step.count(required) != 1:
+            raise AssertionError(prerequisite_diagnostic)
+    if any(text.count(pin) != 1 for pin in pins) or text.count(install) != 1:
+        raise AssertionError(prerequisite_diagnostic)
+
+
+validate_prerequisites(source)
+prerequisite = prerequisite_step(source)
+prerequisite_mutations = []
+for pin in pins:
+    package = pin.split('==', 1)[0]
+    wrong_version = package + '==0 ' + pin.split(' ', 1)[1]
+    wrong_hash = pin.rsplit(':', 1)[0] + ':' + '0' * 64
+    prerequisite_mutations.extend((
+        (package + ' version', source.replace(pin, wrong_version, 1)),
+        (package + ' digest', source.replace(pin, wrong_hash, 1)),
+    ))
+prerequisite_mutations.extend((
+    ('missing step', source.replace(prerequisite, '', 1)),
+    ('duplicate step', source.replace(prerequisite, prerequisite + prerequisite, 1)),
+    ('other matrix entry', source.replace(prerequisite, prerequisite.replace("'2026.8.19'", "'2026.7.4'", 1), 1)),
+    ('unconditional step', source.replace(prerequisite, prerequisite.replace(prerequisite_condition, '', 1), 1)),
+    ('late installation', source.replace(prerequisite, '', 1).replace(
+        '      - name: Retain shared-destination verdicts and monotonic events\n',
+        prerequisite + '      - name: Retain shared-destination verdicts and monotonic events\n', 1)),
+    ('no hash enforcement', source.replace(prerequisite, prerequisite.replace('            --require-hashes \\\n', '', 1), 1)),
+    ('source builds allowed', source.replace(prerequisite, prerequisite.replace('            --only-binary=:all: \\\n', '', 1), 1)),
+    ('different Python target', source.replace(prerequisite, prerequisite.replace('(3, 12)', '(3, 13)', 1), 1)),
+))
+for name, mutated in prerequisite_mutations:
+    if mutated == source:
+        raise AssertionError(f"ineffective prerequisite mutation: {name}")
+    try:
+        validate_prerequisites(mutated)
+    except AssertionError as error:
+        if str(error) != prerequisite_diagnostic:
+            raise
+    else:
+        raise AssertionError(f"shared-runtime prerequisite policy accepted mutation: {name}")
+print(f"Shared-runtime prerequisites: exact latest-only pins and hashes accepted; {len(prerequisite_mutations)} mutations rejected.")
 PY_REAL_TOOLS_SINGLE_RUN
 }
 

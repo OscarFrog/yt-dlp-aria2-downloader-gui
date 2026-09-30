@@ -437,8 +437,12 @@ status and clean active children without consuming a nonexistent completion slot
 Provisional supervision precedes every
 foreground command in the registration window. The full-profile signal suite
 retains its original time limits; diagnostics also
-cover failure to enter the reentrant-signal guard. No debugger is required by
-either canonical profile.
+cover failure to enter the reentrant-signal guard. Its stderr fixture establishes
+backpressure with two nonwritable POLLOUT observations after the producer starts
+an output larger than the capture pipe. Partial padding writes can exhaust pipe
+slots below nominal byte capacity. The identity-checked observation descriptor
+is closed before communicate, which must drain every byte and retain status 130;
+waiting before draining is rejected. No debugger is required by either profile.
 After escalation, the monitor test permits at most one second for an original
 descendant with an already pending SIGKILL to become a zombie or disappear.
 It authenticates PID/start-time around the signal snapshot and sends no extra
@@ -1147,6 +1151,15 @@ FFmpeg progress, and checks HLS post-remux duration consistency without
 contacting a public media service. Routing runs once per pinned yt-dlp version.
 HLS duration mocks yt-dlp and FFmpeg progress does not use it; those fixtures
 run once on the latest Ubuntu matrix entry with FFmpeg/FFprobe 6.1.1 verified.
+Before shared-destination qualification, that latest entry has a dedicated
+Python 3.12 / Ubuntu 24.04 prerequisite step. It installs curl-cffi 0.16.0,
+cffi 2.1.1, certifi 2026.7.22 and pycparser 3.0 into its disposable yt-dlp venv
+with exact wheel SHA-256 pins, `--require-hashes` and `--only-binary=:all:`.
+These versions come from the verified yt-dlp wheel's `pin-curl-cffi` metadata;
+the wheel hashes come from the corresponding public PyPI releases. The other
+matrix entries retain their existing environments. The static contract binds
+each version/hash, the Python target, installation flags and latest-only
+placement before the shared run, with discriminating source mutations.
 The FFmpeg 6 generation job adds only generation-specific compatibility fixtures;
 Fedora 8 and upstream 9 each run the common fixtures with their distinct tools.
 The verified upstream FFmpeg 9 build enables libvpx as well as libopus so the
@@ -1379,7 +1392,14 @@ A different-session child vetoes retirement even when it is a pinned zombie of
 a timed helper. A child created by a non-leader thread must not be missed when the
 leader's children list is empty. The pre-env double-signal fixture retains its
 two-second limit and verifies that a startup loop cannot recreate a child between
-escalation attempts. Session-leader retirement additionally requires two complete
+escalation attempts. Its private readiness marker is published from the registration
+loop after the first signal handler returns, so a second INT tests escalation
+instead of signal coalescing while an instrumented handler is still active.
+Uncertain-stop fixtures publish their first escalation
+observation once, so retries cannot truncate a witness while it is being read.
+The runtime contention fixture uses exec for its lock-holding sleep: the waited
+PID owns the descriptor whose lifetime the assertion measures.
+Session-leader retirement additionally requires two complete
 quiescent inventories of its other members. A running,
 missing or unreadable thread, or changed task inventory, must also refuse KILL.
 Parents resume with CONT. Missing pidfd support or any failed observation must
@@ -1400,7 +1420,12 @@ python3 -B tests/multi-instance-real.py
 ```
 
 This local qualification also runs in the required latest pinned yt-dlp CI
-entry, after verified Deno provisioning. It uses real yt-dlp, aria2, FFprobe and FFmpeg,
+entry, after verified Deno provisioning and the pinned impersonation prerequisites.
+Its managed-runtime admission requires a usable `curl_cffi` target: successful
+`--version`, `--help` or `--list-impersonate-targets` exit statuses alone do not
+satisfy that contract. A wheel without those dependencies is refused with 69;
+the fixture does not bypass admission or fabricate an impersonation target.
+It uses real yt-dlp, aria2, FFprobe and FFmpeg,
 a loopback media server and scripted Zenity answers. It shares HOME, all XDG
 roots, preferences and managed runtimes between instances. HTTP barriers prove
 active transfer overlap, decoded frame hashes verify distinctive content,
@@ -1438,14 +1463,29 @@ YTDLP_QUALIFY_ZENITY_EVENTS=1 ./tests/repeat-qualification.sh --runs 1 --jobs 1 
 ```
 
 `tests/zenity-x11-events.py` starts a dedicated X11 server and a private bus
-without service activation. It injects window-close and Cancel events into real
+without service activation. Startup reads the complete newline-terminated
+Xwayland display reply before closing its pipe. A canonical headless regression
+uses a real pipe with a separately gated newline and rejects the premature-read
+control, incomplete EOF, malformed replies and oversized frames. Before semantic keyboard actions,
+a disposable private window must receive two complete KeyPress/KeyRelease pairs
+with matching window/keycode within a bounded readiness wait; accepted XTest
+requests alone do not prove delivery. Readiness records carry their own `title`
+so the New download reader can consume the shared event stream.
+
+The adapter injects window-close and activates the real Cancel button in
 entry/progress windows, including transfer and real remux cancellation while
 other instances continue. It selects New download in a real completion dialog
 and closes the new real entry. Ordinary URL/profile/folder selection is still
 scripted. Event records identify real windows and monotonic emission times;
 this is neither a human gesture nor a substitute for the operator-assisted
 procedure. Missing graphical capabilities fail this opt-in run, never silently
-turn it into a scripted PASS. The ordinary headless CI matrix remains independent.
+turn it into a scripted PASS. Cancel uses Tab then Space for entry and Space on
+the initially focused Cancel button for progress; `escape` is a separate action.
+Short response controls distinguish `ZENITY_CANCEL=41` from `ZENITY_ESC=42` and
+retain the normal cancellation status 1; progress input stays open until the
+verdict so EOF cannot fake cancellation. Keyboard readiness does not extend the
+adapter's 10-second dialog-result timeout or retry a failed semantic action.
+The ordinary headless CI matrix remains independent.
 
 The private-plan suite exercises shared/exclusive ancestor reservations,
 Unicode/case aliases, different URLs and overlapping intermediate families,

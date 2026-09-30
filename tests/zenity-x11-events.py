@@ -20,6 +20,25 @@ import time
 import traceback
 
 
+def read_display_number(read_fd):
+    # Xwayland can write the digits and newline separately. Keep
+    # the reader open until the complete displayfd reply arrives.
+    number = b''
+    deadline = time.monotonic() + 10
+    while not number.endswith(b'\n'):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([read_fd], [], [], remaining)[0]:
+            raise RuntimeError('Dedicated Xwayland readiness timeout')
+        chunk = os.read(read_fd, 1)
+        if not chunk or len(number) >= 32:
+            raise RuntimeError('Invalid dedicated Xwayland display')
+        number += chunk
+    number = number.strip()
+    if not number.isdigit():
+        raise RuntimeError('Invalid dedicated Xwayland display')
+    return number
+
+
 class Attributes(c.Structure):
     _fields_ = [(name, kind) for name, kind in (
         ('x', c.c_int), ('y', c.c_int), ('width', c.c_int), ('height', c.c_int),
@@ -41,8 +60,16 @@ class Client(c.Structure):
                 ('format', c.c_int), ('data', Data)]
 
 
+class Key(c.Structure):
+    _fields_ = [('type', c.c_int), ('serial', c.c_ulong), ('send_event', c.c_int),
+                ('display', c.c_void_p), ('window', c.c_ulong), ('root', c.c_ulong),
+                ('subwindow', c.c_ulong), ('time', c.c_ulong), ('x', c.c_int), ('y', c.c_int),
+                ('x_root', c.c_int), ('y_root', c.c_int), ('state', c.c_uint),
+                ('keycode', c.c_uint), ('same_screen', c.c_int)]
+
+
 class Event(c.Union):
-    _fields_ = [('client', Client), ('padding', c.c_long * 24)]
+    _fields_ = [('client', Client), ('key', Key), ('padding', c.c_long * 24)]
 
 
 class Display:
@@ -51,6 +78,15 @@ class Display:
         self.xt = c.CDLL(ctypes.util.find_library('Xtst'))
         bindings = {
             'XOpenDisplay': ([c.c_char_p], c.c_void_p),
+            'XCreateSimpleWindow': ([c.c_void_p, c.c_ulong, c.c_int, c.c_int, c.c_uint,
+                                     c.c_uint, c.c_uint, c.c_ulong, c.c_ulong], c.c_ulong),
+            'XStoreName': ([c.c_void_p, c.c_ulong, c.c_char_p], c.c_int),
+            'XSelectInput': ([c.c_void_p, c.c_ulong, c.c_long], c.c_int),
+            'XMapWindow': ([c.c_void_p, c.c_ulong], c.c_int),
+            'XDestroyWindow': ([c.c_void_p, c.c_ulong], c.c_int),
+            'XGetInputFocus': ([c.c_void_p, c.POINTER(c.c_ulong), c.POINTER(c.c_int)], c.c_int),
+            'XPending': ([c.c_void_p], c.c_int),
+            'XNextEvent': ([c.c_void_p, c.POINTER(Event)], c.c_int),
             'XDefaultRootWindow': ([c.c_void_p], c.c_ulong),
             'XQueryTree': ([c.c_void_p, c.c_ulong, c.POINTER(c.c_ulong), c.POINTER(c.c_ulong),
                             c.POINTER(c.POINTER(c.c_ulong)), c.POINTER(c.c_uint)], c.c_int),
@@ -119,6 +155,65 @@ class Display:
             time.sleep(.02)
         raise AssertionError(f'No mapped real Zenity window: {title}')
 
+    def prepare_keyboard(self, record):
+        # Xwayland can accept the first XTest pair without delivering it while
+        # its optional EI path initializes/fails. Prove complete delivery in
+        # our own disposable window before any semantic Zenity gesture.
+        title = 'qualification:keyboard-readiness'
+        root = self.x.XDefaultRootWindow(self.display)
+        window = self.x.XCreateSimpleWindow(self.display, root, 0, 0, 160, 80, 0, 0, 0xffffff)
+        completed = 0
+        attempts = 0
+        pressed = False
+        try:
+            self.x.XStoreName(self.display, window, title.encode())
+            self.x.XSelectInput(self.display, window, 3)  # KeyPressMask | KeyReleaseMask
+            self.x.XMapWindow(self.display, window)
+            self.synchronize()
+            if self.wait_window(title) != window:
+                raise RuntimeError('Keyboard readiness window identity changed')
+            self.x.XSetInputFocus(self.display, window, 1, 0)
+            self.synchronize()
+            focus, revert = c.c_ulong(), c.c_int()
+            self.x.XGetInputFocus(self.display, c.byref(focus), c.byref(revert))
+            self.synchronize()
+            if focus.value != window:
+                raise RuntimeError('Keyboard readiness window did not acquire focus')
+            code = self.x.XKeysymToKeycode(self.display, 0xff1b)
+            deadline = time.monotonic() + 10
+            next_pair = 0.0
+            while completed < 2 and time.monotonic() < deadline:
+                while self.x.XPending(self.display):
+                    value = Event()
+                    self.x.XNextEvent(self.display, c.byref(value))
+                    if value.key.window != window or value.key.keycode != code:
+                        continue
+                    if value.key.type == 2:
+                        pressed = True
+                    elif value.key.type == 3 and pressed:
+                        completed += 1
+                        pressed = False
+                if completed >= 2:
+                    break
+                if time.monotonic() >= next_pair:
+                    for state in (1, 0):
+                        if not code or not self.xt.XTestFakeKeyEvent(self.display, code, state, 0):
+                            raise RuntimeError('Keyboard readiness event was refused')
+                    attempts += 1
+                    self.synchronize()
+                    next_pair = time.monotonic() + .05
+                time.sleep(.005)
+            with Path(record).open('a') as stream:
+                stream.write(json.dumps({'monotonic_ns': time.monotonic_ns(),
+                                         'event': 'keyboard-readiness-before-dialogs', 'title': title,
+                                         'window': window, 'attempts': attempts,
+                                         'completed_pairs': completed}) + '\n')
+            if completed < 2 or pressed:
+                raise RuntimeError('Keyboard readiness requires two complete received pairs')
+        finally:
+            self.x.XDestroyWindow(self.display, window)
+            self.synchronize()
+
     def action(self, title, action, record, *, extra_buttons=2):
         window = self.wait_window(title)
         event = {'monotonic_ns': time.monotonic_ns(), 'window': window, 'title': title,
@@ -155,6 +250,16 @@ class Display:
                 key(0xffe1, 0)
                 symbol = 0xff0d
             elif action == 'cancel':
+                # Leave the entry field before activating the Cancel button.
+                # Escape has a separate response and must stay a distinct action.
+                if title.endswith(':entry'):
+                    key(0xff09, 1)
+                    key(0xff09, 0)
+                    self.synchronize()
+                elif not title.endswith(':progress'):
+                    raise ValueError('Cancel button traversal requires entry or progress')
+                symbol = 0x20
+            elif action == 'escape':
                 symbol = 0xff1b
             else:
                 raise ValueError(action)
@@ -205,11 +310,7 @@ class Session:
                 self.children.append(server)
                 os.close(write_fd)
                 write_fd = None
-                if not select.select([read_fd], [], [], 10)[0]:
-                    raise RuntimeError('Dedicated Xwayland readiness timeout')
-                number = os.read(read_fd, 32).strip()
-                if not number.isdigit():
-                    raise RuntimeError('Invalid dedicated Xwayland display')
+                number = read_display_number(read_fd)
             finally:
                 os.close(read_fd)
                 if write_fd is not None:
@@ -220,6 +321,7 @@ class Session:
                             FIXTURE_X11_EVENTS=str(root / 'dialog-events.jsonl'))
             os.environ['DISPLAY'] = self.env['DISPLAY']
             self.display = Display()
+            self.display.prepare_keyboard(self.env['FIXTURE_X11_EVENTS'])
         except BaseException:
             self.close()
             raise
@@ -287,7 +389,7 @@ def dialog(args):
     if kind == 'progress':
         os.execv(command[0], command)
     action = 'new-download' if kind == 'question' and label == 'new-download' else 'window-close'
-    if label == 'entry-cancel':
+    if label == 'entry-cancel' and kind == 'entry':
         action = 'cancel'
     process = subprocess.Popen(command, stdout=subprocess.PIPE)
     display = None

@@ -41,6 +41,8 @@
   forward terminal-interrupted scheduler polls on Bash 4.4.
 - Add installed-payload execution, actual Bash 4.4/Python 3.10 CI and required
   real shared-destination transfers with decoded content and pre-rescue evidence.
+- Bind signal and lock-lifetime fixture readiness to completed observations;
+  provision checksum-pinned impersonation dependencies for managed-runtime CI.
 - Add optional injected events in isolated real Zenity windows, distinct from
   scripted responses and operator-assisted desktop qualification.
 

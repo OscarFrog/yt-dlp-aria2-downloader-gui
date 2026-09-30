@@ -961,6 +961,13 @@ uses the historical C dialect. Only a GitHub-hosted disposable runner may bind
 the absolute interpreter paths after apt. User workstation interpreters stay intact.
 The latest pinned real-tools entry also requires the shared-destination matrix
 with digest/version-verified Deno and selectively retained pre-rescue evidence.
+A dedicated latest-only prerequisite step installs the four exact wheel/hash
+pins for the verified yt-dlp wheel's `pin-curl-cffi` dependencies into its
+Python 3.12 / Ubuntu 24.04 venv before that matrix. Production managed-runtime
+admission still requires a usable impersonation target; a plain wheel's successful
+version/help probes are insufficient. Static checks bind those prerequisites
+to their condition, target and execution order without adding a permanent helper
+or broadening the environments of the other matrix entries.
 
 Runtime hardening is split into independent validation, rollback-admission,
 recovery, cache-identity and transaction fixtures. Full qualification schedules

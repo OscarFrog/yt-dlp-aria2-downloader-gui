@@ -178,7 +178,7 @@ mkdir -p -- \
 chmod 700 -- "${RUNTIME_DIR}"
 
 install -m 0755 -- "${PROJECT_DIR}/download-video.sh" "${MANAGED_ENGINE_UNDER_TEST}"
-# Observe the first deferred handler only in the private engine fixture.
+# Observe return from the first deferred handler only in the private fixture.
 python3 -I -B - "${MANAGED_ENGINE_UNDER_TEST}" <<'PY_DEFERRED_SIGNAL_ACK'
 from pathlib import Path
 import sys
@@ -188,14 +188,24 @@ source = path.read_text(encoding="utf-8")
 needle = "            DEFERRED_SIGNAL_NAME=${signal_name}\n"
 if source.count(needle) != 1:
     raise SystemExit("expected one deferred-signal registration in the engine fixture")
-acknowledgement = r'''            if [[ -n ${MOCK_DEFERRED_SIGNAL_MARKER:-} ]]; then
-                printf '%s\n' "${DEFERRED_SIGNAL_STATUS}" \
-                    >"${MOCK_DEFERRED_SIGNAL_MARKER}.tmp"
-                mv -Tf -- "${MOCK_DEFERRED_SIGNAL_MARKER}.tmp" \
-                    "${MOCK_DEFERRED_SIGNAL_MARKER}"
-            fi
+# A marker published inside the INT trap becomes visible before that trap
+# returns. Bash 4.4 can consume a second INT during the external mv without
+# entering the handler again. Both registration polling loops run this probe
+# only after the first handler has returned, retaining the same two-INT test.
+acknowledgement = r'''        if [[ -n ${DEFERRED_SIGNAL_STATUS} &&
+            -n ${MOCK_DEFERRED_SIGNAL_RETURNED_MARKER:-} &&
+            ! -e ${MOCK_DEFERRED_SIGNAL_RETURNED_MARKER} ]]; then
+            mock_trace_pre_env handler-return-observed
+            printf '%s\n' "${DEFERRED_SIGNAL_STATUS}" \
+                >"${MOCK_DEFERRED_SIGNAL_RETURNED_MARKER}.tmp"
+            mv -Tf -- "${MOCK_DEFERRED_SIGNAL_RETURNED_MARKER}.tmp" \
+                "${MOCK_DEFERRED_SIGNAL_RETURNED_MARKER}"
+        fi
 '''
-source = source.replace(needle, needle + acknowledgement, 1)
+registration_poll = "    for ((attempt = 0; attempt < 500; attempt++)); do\n"
+if source.count(registration_poll) != 2:
+    raise SystemExit("expected both engine registration polling loops")
+source = source.replace(registration_poll, registration_poll + acknowledgement)
 # Only the private pre-env fixture enables this bounded, builtin-only trace.
 # Never record argv, environment contents, or private authentication tokens.
 trace_function = r'''
@@ -8511,7 +8521,7 @@ PY_PRE_ENV_CONTROL
 
 test_mock_signal_cli_pre_env_registration() {
     local cli_engine_pid cli_engine_start_time cli_engine_status continue_marker delay_marker
-    local elapsed_milliseconds first_signal_marker mode runtime_signal_log signal_finished_at
+    local elapsed_milliseconds first_handler_returned_marker mode runtime_signal_log signal_finished_at
     local observer_status process_stat signal_started_at kernel_version
     local parent_pid=${BASHPID}
     local -a registration_leftovers=()
@@ -8597,7 +8607,7 @@ test_mock_signal_cli_pre_env_registration() {
     for mode in "${session_modes[@]}"; do
         delay_marker="${TEST_ROOT}/pre-env-escalate-${mode}-delayed"
         continue_marker="${TEST_ROOT}/pre-env-escalate-${mode}-continue"
-        first_signal_marker="${TEST_ROOT}/pre-env-escalate-${mode}-first-signal"
+        first_handler_returned_marker="${TEST_ROOT}/pre-env-escalate-${mode}-first-handler-returned"
         runtime_signal_log="${TEST_ROOT}/pre-env-escalate-${mode}.log"
 
         "${REAL_SETSID}" --wait /usr/bin/env \
@@ -8608,7 +8618,7 @@ test_mock_signal_cli_pre_env_registration() {
             MOCK_ENV_DELAY_MARKER="${delay_marker}" \
             MOCK_ENV_CONTINUE_MARKER="${continue_marker}" \
             MOCK_PRE_ENV_TRACE="${runtime_signal_log%.log}.trace" \
-            MOCK_DEFERRED_SIGNAL_MARKER="${first_signal_marker}" \
+            MOCK_DEFERRED_SIGNAL_RETURNED_MARKER="${first_handler_returned_marker}" \
             MOCK_RUNTIME_MANAGER_BLOCK=1 \
             MOCK_RUNTIME_STARTED_MARKER="${TEST_ROOT}/pre-env-escalate-${mode}-runtime-started" \
             MOCK_RUNTIME_TERMINATION_MARKER="${TEST_ROOT}/pre-env-escalate-${mode}-runtime-terminated" \
@@ -8628,14 +8638,14 @@ test_mock_signal_cli_pre_env_registration() {
         printf 'Pre-env mode=%s phase=escalation-delay-observed monotonic=%s pid=%s start=%s\n' \
             "${mode}" "${signal_finished_at}" "${cli_engine_pid}" "${cli_engine_start_time}"
         kill -INT -- "${cli_engine_pid}"
-        # Standard signals can coalesce while pending. Confirm that the first
-        # handler ran before sending the distinct signal that requests escalation.
+        # Standard signals can coalesce while pending. Confirm return from the
+        # first handler before sending the second INT that requests escalation.
         wait_for_mock_pre_env_marker "${cli_engine_pid}" "${cli_engine_start_time}" \
-            "${first_signal_marker}" "pre-env escalation ${mode} first SIGINT acknowledgement" \
+            "${first_handler_returned_marker}" "pre-env escalation ${mode} first SIGINT handler return" \
             "${runtime_signal_log}"
-        assert_file_has_line "${first_signal_marker}" 130 \
+        assert_file_has_line "${first_handler_returned_marker}" 130 \
             "pre-env escalation ${mode} first SIGINT is deferred"
-        printf 'Pre-env mode=%s phase=first-handler-acknowledged\n' "${mode}"
+        printf 'Pre-env mode=%s phase=first-handler-return-observed\n' "${mode}"
         # Measure escalation from its trigger, after the first-handler barrier.
         read -r signal_started_at signal_finished_at </proc/uptime
         kill -INT -- "${cli_engine_pid}"
@@ -8647,7 +8657,7 @@ test_mock_signal_cli_pre_env_registration() {
             "${delay_marker}" "${continue_marker}" \
             "${TEST_ROOT}/pre-env-escalate-${mode}-runtime-started" \
             "${TEST_ROOT}/pre-env-escalate-${mode}-runtime-terminated" \
-            "${first_signal_marker}") || observer_status=$?
+            "${first_handler_returned_marker}") || observer_status=$?
         reap_mock_pre_env_child "${cli_engine_pid}" "${cli_engine_start_time}" \
             cli_engine_status "pre-env-escalate-${mode}" "${observer_status}"
         if ((observer_status != 0)); then

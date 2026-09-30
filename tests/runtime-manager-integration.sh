@@ -542,7 +542,7 @@ test_runtime_paths_and_locking() {
         exec 9>>"${runtime_root}/update.lock"
         flock --exclusive 9
         : >"${lock_holder_ready}"
-        sleep 6
+        exec sleep 6
     ) &
     lock_holder_pid=$!
     for _ in {1..250}; do
