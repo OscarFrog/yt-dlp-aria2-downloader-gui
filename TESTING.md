@@ -1305,7 +1305,7 @@ controlled consumers; real-media cycles are qualified separately:
 | Uncertain stop with closed consumer lock FDs | With KILL failure injected only for that consumer, the admitted engine remains alive, preserves its resource and denies an old-style exclusive lock; an independent lock remains available and release occurs only after the consumer stops |
 | CLI escalation before sentinel retirement | Explicit escalation reaches the helper's private command session while its leader is pinned, before the outer sentinel can be retired |
 | GUI shutdown after worker leader exit | A token-bearing GNU-timeout subgroup remains observable and is stopped before the GUI reports completion |
-| Zombie leader with surviving threads | Real orphan and direct-child witnesses retain a pipe after pthread_exit; observer, GUI/CLI predicates and timed supervisor must still detect and stop the live thread before return |
+| Zombie leader with surviving threads | Real orphan and direct-child witnesses retain a pipe after pthread_exit; observer, GUI/CLI predicates and timed supervisor must still detect and stop the live thread before return. A revalidated consumer pidfd must be readable immediately after helper wait, before pipe draining; a premature-return mutant fails this assertion before rescue |
 | Capability admission and degraded observation | Actual private-child pidfd/WNOWAIT probe, refusals injected before launch and waitid/procfs failures after admission; errors never become absence or cleanup authority |
 | Observer procfs failure | Root/stat failures reject the real Zenity harness even when a previous empty success JSON exists; only a vanished stat entry is tolerated |
 | Bash quiescence decisions | A private procfs model changes an enumerated parent to a zombie and adds a live child before its stat is read; GUI session reuse, GUI observation and the CLI sentinel retain supervision. Removing the second inventory fails each oracle without creating or signaling the modeled processes |
@@ -1330,6 +1330,12 @@ require two complete unchanged member inventories with no live member, then
 reap their own direct child retained through WNOWAIT. A child forked after
 the first `/proc` enumeration must be caught by the second complete inventory;
 rechecking only the already enumerated zombie PIDs is insufficient.
+The timed-thread test uses its known consumer's pidfd as the independent stop
+oracle, not another global procfs scan. An unrelated process can exit between
+opening and reading its stat file: a real-kernel control requires this ESRCH to
+remain unknown in the production predicate, even after that process is reaped.
+Pidfd readiness proves all threads in this fixture's thread group have stopped;
+it does not prove general session quiescence or application reaping.
 The same requirement covers the Bash GUI, engine session-reuse and CLI sentinel
 paths: two complete inventories must retain identical zombie PID/start identities,
 with any live consumer, changed inventory or uncertainty vetoing cleanup.

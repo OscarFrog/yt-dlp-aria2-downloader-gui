@@ -176,13 +176,21 @@ ctypes.CDLL(None).pthread_exit(None)
     def test_timed_supervisor_retains_zombie_leader_live_thread(self):
         module = self.supervisor_module()
         script = self.thread_fixture()
-        for orphan, expire in ((False, False), (True, False), (False, True), (True, True)):
-            with self.subTest(orphan=orphan, expire=expire):
+        supervisor = PROJECT / 'private-process-supervisor.py'
+        premature = self.root / 'premature-supervisor.py'
+        source = supervisor.read_text()
+        self.assertEqual(source.count('            delivery = signal.SIGKILL\n'), 1)
+        premature.write_text(source.replace('            delivery = signal.SIGKILL\n',
+                                             '            return 137\n'))
+        cases = ((False, False, False), (True, False, False),
+                 (False, True, False), (True, True, False), (False, True, True))
+        for orphan, expire, mutant in cases:
+            with self.subTest(orphan=orphan, expire=expire, premature_return=mutant):
                 for name in ('thread-ready', 'thread-last-access'):
                     (self.root / name).unlink(missing_ok=True)
                 read_end, write_end = os.pipe()
                 process = subprocess.Popen(
-                    [sys.executable, '-I', '-B', str(PROJECT / 'private-process-supervisor.py'),
+                    [sys.executable, '-I', '-B', str(premature if mutant else supervisor),
                      '--timeout', '.3' if expire else '5', '--grace', '.1', '--',
                      sys.executable, '-I', '-B', str(script), str(self.root),
                      str(read_end), 'orphan' if orphan else 'direct'],
@@ -191,22 +199,70 @@ ctypes.CDLL(None).pthread_exit(None)
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 self.processes.append(process)
                 os.close(read_end)
+                descriptor = None
                 try:
                     consumer = int(self.wait_file('thread-ready', process))
                     fields = Path(f'/proc/{consumer}/stat').read_text().rsplit(') ', 1)[1].split()
+                    descriptor = os.pidfd_open(consumer)
+                    current = Path(f'/proc/{consumer}/stat').read_text().rsplit(') ', 1)[1].split()
+                    self.assertEqual((current[19], current[3]), (fields[19], fields[3]))
                     self.assertEqual(fields[0], 'Z')
+                    readiness = select.poll()
+                    readiness.register(descriptor, select.POLLIN)
+                    self.assertEqual(readiness.poll(0), [], 'consumer stopped before its barrier')
                     self.assertTrue(module.session_alive(int(fields[3])))
                     time.sleep(.08)
                     self.assertIsNone(process.poll(), 'returned while sibling thread still owned its FD')
                     self.assertFalse((self.root / 'thread-last-access').exists())
                     if not expire:
                         os.write(write_end, b'R')
+                    # Wait for the helper alone. communicate() first could hide
+                    # an early return by waiting for its consumer's pipe EOF.
+                    result = process.wait(timeout=5)
+                    stop_events = readiness.poll(0)
+
+                    def assert_stopped():
+                        self.assertEqual(len(stop_events), 1,
+                                         'supervisor returned while its consumer remained live')
+                        fd, mask = stop_events[0]
+                        self.assertEqual(fd, descriptor)
+                        self.assertTrue(mask & select.POLLIN, stop_events)
+                        self.assertFalse(mask & (select.POLLERR | select.POLLNVAL), stop_events)
+
+                    if mutant:
+                        # The negative verdict precedes rescue and draining the
+                        # inherited pipe. No fixture reaping proves program exit.
+                        with self.assertRaisesRegex(self.failureException, 'consumer remained live'):
+                            assert_stopped()
+                        self.assertFalse((self.root / 'thread-last-access').exists())
+                        signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                        os.waitpid(consumer, 0)
+                    else:
+                        assert_stopped()
                     out, err = process.communicate(timeout=5)
-                    self.assertEqual(process.returncode, 137 if expire else (23 if orphan else 0), (out, err))
-                    self.assertFalse(module.session_alive(int(fields[3])))
+                    self.assertEqual(result, 137 if expire else (23 if orphan else 0), (out, err))
                     self.assertEqual((self.root / 'thread-last-access').exists(), not expire)
                 finally:
+                    if descriptor is not None:
+                        os.close(descriptor)
                     os.close(write_end)
+
+    def test_stale_foreign_proc_stat_remains_unknown_after_exit(self):
+        module = self.supervisor_module()
+        process = self.launch([sys.executable, '-I', '-B', '-c',
+                               'import time; time.sleep(3)'])
+        path = Path(f'/proc/{process.pid}/stat')
+        # Opening before exit and reading after reap produces a real kernel
+        # ESRCH, distinct from FileNotFoundError at open. No target-SID consumer
+        # is involved; the conservative predicate still must report unknown.
+        with path.open() as held:
+            process.terminate()
+            process.wait(timeout=3)
+            with self.assertRaises(ProcessLookupError):
+                held.read()
+            with mock.patch.object(module, 'process_paths', return_value=[path]), \
+                    mock.patch.object(Path, 'read_text', side_effect=lambda: held.read()):
+                self.assertTrue(module.session_alive(-1))
 
     def test_observer_detects_orphan_zombie_leader_live_thread(self):
         script = self.thread_fixture()
