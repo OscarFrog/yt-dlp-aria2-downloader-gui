@@ -1257,6 +1257,7 @@ collect_completed_static_validation() {
     # read-only validators.
     # shellcheck disable=SC2310
     test_runner_wait_any completed_slot || status=$?
+    [[ -n ${completed_slot} ]] || return "${status}"
     validation_index=${STATIC_VALIDATION_SLOT_INDEX[${completed_slot}]}
     # Missing completion metadata falls back to the conservative reap time.
     # shellcheck disable=SC2310
@@ -1387,6 +1388,7 @@ collect_completed_integration_suite() {
     # suite has been reaped.
     # shellcheck disable=SC2310
     test_runner_wait_any completed_slot || status=$?
+    [[ -n ${completed_slot} ]] || return "${status}"
     suite_index=${INTEGRATION_SLOT_SUITE_INDEX[${completed_slot}]}
     # A missing record falls back to the conservative observed completion time.
     # shellcheck disable=SC2310

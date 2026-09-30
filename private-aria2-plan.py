@@ -539,19 +539,7 @@ def build_plan(args: argparse.Namespace) -> int:
     plan_path = Path(args.plan)
     plan = read_json(plan_path, "yt-dlp plan")
 
-    if not isinstance(plan, dict):
-        raise PlanError("yt-dlp plan root must be a JSON object")
-
-    downloads = plan.get("requested_downloads")
-
-    if not isinstance(downloads, list) or len(downloads) != 1:
-        raise PlanError("yt-dlp plan must contain exactly one requested download")
-
-    root = downloads[0]
-
-    if not isinstance(root, dict):
-        raise PlanError("requested download is not a JSON object")
-
+    root = selected_download(plan)
     root_destination = resolve_destination(
         root.get("filename") or root.get("_filename"),
         output_dir,
@@ -710,6 +698,20 @@ def normalized_resource_name(name: str) -> str:
     return unicodedata.normalize('NFKC', name).casefold()
 
 
+def selected_download(plan: object) -> dict:
+    """Restore inherited fields omitted from yt-dlp's selected download delta."""
+    downloads = plan.get('requested_downloads') if isinstance(plan, dict) else None
+    if not isinstance(downloads, list) or len(downloads) != 1 or not isinstance(downloads[0], dict):
+        raise PlanError('resource planning requires exactly one download')
+    # yt-dlp removes fields equal to its root result from requested_downloads.
+    # Preserve explicit overrides, including null, but not the unselected
+    # formats or a recursively nested requested_downloads list in the replay.
+    result = {key: value for key, value in plan.items()
+              if key not in ('formats', 'requested_downloads')}
+    result.update(downloads[0])
+    return result
+
+
 def resource_plan(args: argparse.Namespace) -> int:
     output = resolve_output_directory(args.output_dir)
     final = resolve_output_directory(args.final_output_dir)
@@ -717,10 +719,7 @@ def resource_plan(args: argparse.Namespace) -> int:
     if directory_identity(final) != expected:
         raise PlanError('destination changed before resource planning')
     plan = read_json(Path(args.plan), 'yt-dlp plan')
-    downloads = plan.get('requested_downloads') if isinstance(plan, dict) else None
-    if not isinstance(downloads, list) or len(downloads) != 1 or not isinstance(downloads[0], dict):
-        raise PlanError('resource planning requires exactly one download')
-    root = downloads[0]
+    root = selected_download(plan)
     destination = resolve_destination(root.get('filename') or root.get('_filename'), output, 'planned filename')
     formats = root.get('requested_formats') or [root]
     if not isinstance(formats, list) or not 1 <= len(formats) <= 16:
@@ -774,6 +773,7 @@ def resource_plan(args: argparse.Namespace) -> int:
     if args.hls and destination.suffix == '.mkv':
         final_name = destination.stem + '.remuxed.mkv'
     state = {'version': 1, 'family': family, 'binding': binding,
+             'transaction': secrets.token_hex(32),
              'output': str(output), 'final': str(final), 'identity': expected,
              'final_name': final_name, 'key': keys[-1][1], 'owned': {}}
     write_private_new(Path(args.state), json.dumps(state))
@@ -783,7 +783,9 @@ def resource_plan(args: argparse.Namespace) -> int:
     replay = dict(plan)
     replay.pop('webpage_url', None)
     replay.pop('original_url', None)
-    replay['formats'] = formats
+    replay['formats'] = [{key: value for key, value in item.items()
+                          if key not in ('webpage_url', 'original_url')}
+                         for item in formats]
     write_private_new(Path(args.state).with_name('transfer-plan.json'), json.dumps(replay))
     for mode, key in sorted(keys, key=lambda item: item[1]):
         print(mode, key)
@@ -835,6 +837,15 @@ def resource_state(args: argparse.Namespace) -> int:
     with directory_descriptor(registry, trusted_chain=True) as descriptor:
         require_private_directory_descriptor(descriptor)
     record = registry / (state['key'] + '.resume.json')
+    if args.action == 'save':
+        previous = read_json(record, 'resource ownership') if record.exists() else {}
+        # The shell registers cleanup before admission can commit. A signal
+        # may interrupt either side of that commit; only our exact active
+        # transaction may be made passive. A refused request must not clear an
+        # older active checkpoint or adopt the files of a previous owner.
+        if (not state.get('transaction') or not previous.get('active') or
+                previous.get('transaction') != state['transaction']):
+            return 0
     if args.action == 'admit':
         # A failed/uncertain stop must retain protection even if a consumer
         # closed inherited lock descriptors. These are per-resource ownership
@@ -853,6 +864,7 @@ def resource_state(args: argparse.Namespace) -> int:
         if completed not in snapshot:
             raise PlanError('completed media escaped its reserved family')
     checkpoint = {'version': 1, 'binding': state['binding'], 'owned': snapshot, 'completed': completed,
+                  'transaction': state['transaction'],
                   'identity': state['identity'], 'family': state['family'], 'active': False}
     if args.action == 'admit':
         previous = read_json(record, 'resource ownership') if record.exists() else {}
@@ -893,14 +905,7 @@ def check_native_final(args: argparse.Namespace) -> int:
     """Refuse a known existing native media path and bind retries to its basename."""
     output_dir = resolve_output_directory(args.output_dir)
     plan = read_json(Path(args.plan), "yt-dlp plan")
-    if not isinstance(plan, dict):
-        raise PlanError("yt-dlp plan root must be a JSON object")
-    downloads = plan.get("requested_downloads")
-    if not isinstance(downloads, list) or len(downloads) != 1:
-        raise PlanError("yt-dlp plan must contain exactly one requested download")
-    root = downloads[0]
-    if not isinstance(root, dict):
-        raise PlanError("requested download is not a JSON object")
+    root = selected_download(plan)
     destination = resolve_destination(
         root.get("filename") or root.get("_filename"),
         output_dir,
@@ -948,21 +953,7 @@ def check_native_final(args: argparse.Namespace) -> int:
 
 def classify_plan(args: argparse.Namespace) -> int:
     plan = read_json(Path(args.plan), "yt-dlp plan")
-
-    if not isinstance(plan, dict):
-        raise PlanError("yt-dlp plan root must be a JSON object")
-
-    downloads = plan.get("requested_downloads")
-
-    if not isinstance(downloads, list) or len(downloads) != 1:
-        raise PlanError(
-            "yt-dlp plan must contain exactly one requested download"
-        )
-
-    root = downloads[0]
-
-    if not isinstance(root, dict):
-        raise PlanError("requested download is not a JSON object")
+    root = selected_download(plan)
 
     requested_formats = root.get("requested_formats")
 

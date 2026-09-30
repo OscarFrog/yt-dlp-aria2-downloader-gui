@@ -113,7 +113,10 @@ suites and stdlib `unittest` tests are the test entry points; no pytest, Ruff or
 type-checker configuration is currently a project requirement. Compilation or
 typing alone cannot establish exception, subprocess or cancellation behavior.
 The `shell.yml` job **Python 3.10 / Ubuntu** selects the real minimum interpreter,
-asserts its minor version, and runs doctor plus the full contract. This job is
+asserts its minor version, and runs doctor plus the full contract together with
+GNU Bash 4.4.0. The Bash source archive is verified by fixed SHA-256 and the
+exact upstream maintainer signature before building. Both absolute and PATH
+lookups are bound and checked only on the disposable GitHub-hosted runner. This job is
 additional qualification; its addition does not change remote required-check
 settings.
 
@@ -417,12 +420,21 @@ library leaves caller options unchanged. Before starting a command, its Python
 supervisor moves from the provisional Bash process group into a dedicated
 session with managed signals blocked and the same PID. Group readiness and
 signaling require SID to equal PGID as well as the existing identity proof.
+Before that transition completes, cancellation signals the authenticated
+registered child directly. It does not wait for session readiness or scan for
+orphaned group members while that original child still provides authority.
+The handoff oracle retains its 0.8-second pending-signal deadline and injects a
+slow orphan lookup to prove that unrelated discovery cannot delay delivery to
+the known child. Grace-period and final cleanup measurements remain separate.
 The runner integration suite qualifies this transition, pending fatal signals,
 status/output preservation and rejection of provisional group identity. It
 also sends real terminal Ctrl-C during scheduler polling, incomplete identity
 handoff and handoff-file removal. It verifies the worker's received INT,
-descendant shutdown and cleanup after a second Ctrl-C, including the EXIT path
-that bypasses Bash's ordinary INT trap. Provisional supervision precedes every
+descendant shutdown and cleanup after a second Ctrl-C, including an explicitly
+handled poll status 130 under Bash 4.4 and the EXIT path that bypasses Bash’s
+ordinary INT trap. Failed or missing scheduler polls must preserve their exact
+status and clean active children without consuming a nonexistent completion slot.
+Provisional supervision precedes every
 foreground command in the registration window. The full-profile signal suite
 retains its original time limits; diagnostics also
 cover failure to enter the reentrant-signal guard. No debugger is required by
@@ -555,9 +567,10 @@ done
 option models explicit. `test-static.sh` verifies that those classifications
 remain inside the canonical inventory and that every executable begins with an
 approved top-level `set` declaration. Installed production and cleanup helpers
-target GNU Bash 4.4 or newer; exact minimum-version semantic compatibility also
-remains a review requirement because the supported distro CI environments may
-provide later Bash versions.
+target GNU Bash 4.4 or newer. The **Python 3.10 / Ubuntu** job exercises the
+full contract with Bash 4.4.0 as well as Python 3.10, including absolute-path
+and restricted-PATH fixtures; Ubuntu and Fedora jobs additionally cover their
+distribution interpreters. A version string or syntax parse alone is insufficient.
 
 ## ShellCheck
 
@@ -1292,6 +1305,9 @@ controlled consumers; real-media cycles are qualified separately:
 | Uncertain stop with closed consumer lock FDs | With KILL failure injected only for that consumer, the admitted engine remains alive, preserves its resource and denies an old-style exclusive lock; an independent lock remains available and release occurs only after the consumer stops |
 | CLI escalation before sentinel retirement | Explicit escalation reaches the helper's private command session while its leader is pinned, before the outer sentinel can be retired |
 | GUI shutdown after worker leader exit | A token-bearing GNU-timeout subgroup remains observable and is stopped before the GUI reports completion |
+| Zombie leader with surviving threads | Real orphan and direct-child witnesses retain a pipe after pthread_exit; observer, GUI/CLI predicates and timed supervisor must still detect and stop the live thread before return |
+| Capability admission and degraded observation | Actual private-child pidfd/WNOWAIT probe, refusals injected before launch and waitid/procfs failures after admission; errors never become absence or cleanup authority |
+| Observer procfs failure | Root/stat failures reject the real Zenity harness even when a previous empty success JSON exists; only a vanished stat entry is tolerated |
 | Bash quiescence decisions | A private procfs model changes an enumerated parent to a zombie and adds a live child before its stat is read; GUI session reuse, GUI observation and the CLI sentinel retain supervision. Removing the second inventory fails each oracle without creating or signaling the modeled processes |
 
 The orphan control starts a marked worker in another session, waits for its
@@ -1305,8 +1321,9 @@ Polling cannot prove absence of a process that erased its marker and escaped
 before any observation. Test-only subreaping changes reparenting and collects
 already stopped zombies; it is never counted as application wait-status proof.
 The engine wrapper cases deliberately defer that collection until after their
-verdict. Zombie-only state means no live consumer can use a descriptor; it does
-not mean the application reaped every descendant. Production engine/GUI
+verdict. Confirmed zombie-only state requires stable inventories of every
+thread; a zombie leader alone is insufficient. It means no live consumer can
+use a descriptor, not that the application reaped every descendant. Production engine/GUI
 lost-authority checks require two complete, stable inventories and identity/state
 revalidation, with uncertain observations preserving state. Timed helpers also
 require two complete unchanged member inventories with no live member, then
@@ -1324,10 +1341,16 @@ retired as an outer leaf. Deadline/forced KILL repeats until private-session
 quiescence, covering members missed by an earlier enumeration.
 
 The force path requires Linux pidfds and Python's `os.pidfd_open` and
-`signal.pidfd_send_signal`. Its safety assertions require an authenticated
+`signal.pidfd_send_signal`. Entry admission actually probes pidfd open and
+0/STOP/CONT/KILL delivery on a private child, WNOWAIT stop/exit observation,
+waitpid collection and procfs process/thread access. Missing APIs, kernel
+support or permissions cause status 69 before media activity. Revocation
+following admission preserves protection; it is not a successful shutdown.
+A TGID marked Z is not quiescent while sibling threads are live. Refusal and
+post-admission failure injections complement real minimum-interpreter runs. Its safety assertions require an authenticated
 PID/start/SID and pidfd STOP, followed by two complete inspections while frozen:
-every thread must be in `T`/`t` and the nonempty sets of task IDs/start identities
-must match. Every thread's children are checked; same-session children are stopped
+every live thread must be in `T`/`t`, terminated threads may be `Z`/`X`,
+and the nonempty sets of task IDs/start identities must match. Every thread's children are checked; same-session children are stopped
 while the parent stays frozen, then revalidated as quiescent before its retirement.
 A different-session child vetoes retirement even when it is a pinned zombie of
 a timed helper. A child created by a non-leader thread must not be missed when the
@@ -1353,7 +1376,8 @@ exclusion after external SIGKILL destroys every historical lock holder.
 python3 -B tests/multi-instance-real.py
 ```
 
-This local opt-in qualification uses real yt-dlp, aria2, FFprobe and FFmpeg,
+This local qualification also runs in the required latest pinned yt-dlp CI
+entry, after verified Deno provisioning. It uses real yt-dlp, aria2, FFprobe and FFmpeg,
 a loopback media server and scripted Zenity answers. It shares HOME, all XDG
 roots, preferences and managed runtimes between instances. HTTP barriers prove
 active transfer overlap, decoded frame hashes verify distinctive content,
@@ -1374,6 +1398,24 @@ helpers must be from that version. Evidence remains in the printed
 private `/tmp/shared-destination-real-*` directory. Scripted answers do not
 qualify visible desktop gestures; the interactive Zenity procedure remains
 separate. No network outage or actual CIFS qualification is implied.
+
+On a graphical Linux host with Xwayland, Zenity, D-Bus, libX11 and libXtst,
+run the optional real-event variant through the same bounded wrapper:
+
+```bash
+YTDLP_QUALIFY_ZENITY_EVENTS=1 ./tests/repeat-qualification.sh --runs 1 --jobs 1 -- \
+    python3 -B tests/multi-instance-real.py
+```
+
+`tests/zenity-x11-events.py` starts a dedicated X11 server and a private bus
+without service activation. It injects window-close and Cancel events into real
+entry/progress windows, including transfer and real remux cancellation while
+other instances continue. It selects New download in a real completion dialog
+and closes the new real entry. Ordinary URL/profile/folder selection is still
+scripted. Event records identify real windows and monotonic emission times;
+this is neither a human gesture nor a substitute for the operator-assisted
+procedure. Missing graphical capabilities fail this opt-in run, never silently
+turn it into a scripted PASS. The ordinary headless CI matrix remains independent.
 
 The private-plan suite exercises shared/exclusive ancestor reservations,
 Unicode/case aliases, different URLs and overlapping intermediate families,

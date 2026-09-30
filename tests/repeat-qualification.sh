@@ -190,6 +190,7 @@ collect_iteration() {
     # been reaped.
     # shellcheck disable=SC2310
     test_runner_wait_any completed_slot || status=$?
+    [[ -n ${completed_slot} ]] || return "${status}"
     iteration=${SLOT_ITERATIONS[${completed_slot}]}
     # Missing completion metadata falls back to the observed reap time.
     # shellcheck disable=SC2310

@@ -122,6 +122,7 @@ Les commandes système requises par l'application sont :
 - Bash **4.4 ou plus récent** ;
 - `aria2c` **1.37.0 ou plus récent** ;
 - Python **3.10 ou plus récent** ;
+- pidfds Linux et WNOWAIT utilisables, inventaires procfs des processus/threads lisibles ;
 - FFmpeg et `ffprobe` ;
 - Zenity pour l'interface graphique ;
 - `ca-certificates`, `curl`, GnuPG et `unzip` pour l'initialisation et la mise
@@ -938,10 +939,12 @@ avant de les arrêter. L'arrêt forcé exige des inventaires stables de tous les
 threads suspendus et l'arrêt confirmé de leurs enfants authentifiés dans la même
 session, pendant que le parent reste suspendu. Un auxiliaire temporisé conserve
 son enfant d'une session privée, même après sa mort, jusqu'à ce que sa propre
-attente confirme l'arrêt complet. Cette voie exige la prise en charge
-des pidfds Linux par le noyau et Python ; une prise en charge absente ou un
-contrôle échoué laisse
-l'arrêt non confirmé et préserve les ressources. Les auxiliaires temporisés
+attente confirme l'arrêt complet. Avant toute activité média, la GUI, le moteur
+et le gestionnaire de runtime vérifient les API Python, les opérations Linux
+pidfd/WAIT et l'accès procfs avec un enfant privé jetable. Une capacité absente
+entraîne un refus anticipé de statut **69**. Un refus de permission ou une
+observation impossible après admission laisse l'arrêt non confirmé et préserve
+les ressources. Un leader de threads zombie dont d'autres threads vivent reste actif. Les auxiliaires temporisés
 supervisent leurs propres sessions de commande jusqu'à l'arrêt des consommateurs
 et à la collecte de leur enfant dont
 l'identité reste retenue ; des signaux gracieux répétés ne raccourcissent pas leur

@@ -310,9 +310,14 @@ signed transfer URLs are excluded from the binding so they can refresh.
 Checkpoints made without the full identity binding cannot authorize resumption.
 Names or `.part` files alone confer no ownership. Records contain digests, never
 a URL or credential. Admission invalidates the prior checkpoint before launching
-tools. Replay uses selected
+tools and binds it to a private transaction nonce. The shell registers possible
+activation before starting the helper, so cancellation between atomic publication
+and its acknowledgement can safely checkpoint only its own transaction.
+Selected-download fields inherit the root metadata when omitted; the same merged
+view supplies planning, classification and the resume binding. Replay uses selected
 formats in a private frozen plan without yt-dlp's webpage re-extraction fallback;
-its literal output template remains bound to the planned name.
+its literal output template remains bound to the planned name for direct and
+native replay, including live titles that yt-dlp would otherwise timestamp again.
 
 Normal cleanup checkpoints passive owned media only after consumers stop and
 closes reservation descriptors only after cleanup. It never calls `LOCK_UN`:
@@ -347,12 +352,20 @@ likewise published only after default dispositions are restored. The critical
 section remains active until that readiness marker or PGID is published, so the
 first signal cannot disappear in the fork/exec window; a repeated outer shutdown
 request selects escalation while retaining the first requested status.
+GUI, engine and runtime entry points verify usable pidfd, WNOWAIT and procfs
+operations on a disposable private child before admitting media work. The check
+actually stops, continues, kills and reaps that child; API names alone are not
+sufficient. Unavailable capabilities cause status 69. Failure after admission
+never grants cleanup permission. A zombie thread leader remains active while
+any sibling thread can still use resources.
+
 Timed runtime and FFprobe commands use `private-process-supervisor.py`. It
 remains in its caller's outer SID while its direct child creates a private SID
 before restoring signal dispositions and executing the command. The helper pins
 that child with `waitid(WNOWAIT)`, including after early leader exit. This
 unreaped session leader authenticates signaling across every process group in
-the private SID; PID/start/SID membership is revalidated before delivery.
+the private SID. Each target is attached to a pidfd before PID/start/SID
+membership is revalidated and the signal is delivered through that descriptor.
 Observed live members or unreadable/malformed process state veto return. The
 helper requires two complete inventories with unchanged private-session member
 identities and no live member before reaping its direct child and returning.
@@ -877,9 +890,9 @@ architecture document. The source ZIP contains the tracked source tree.
 
 | Workflow | Responsibility |
 | --- | --- |
-| `shell.yml` | PR source identity/coherence/syntax gate, pinned workflow checks, full local suite on Ubuntu/Fedora and Python 3.10 |
+| `shell.yml` | PR source identity/coherence/syntax gate, pinned workflow checks, full local suite on Ubuntu/Fedora and paired Python 3.10/Bash 4.4.0 |
 | `packages.yml` | Git-free source archive, RPM/DEB construction, lifecycle, authentication, and previous-release upgrade |
-| `real-tools.yml` | Pinned real-tool behavior plus scheduled current-stable qualification |
+| `real-tools.yml` | Pinned real-tool behavior, required latest-pin shared-destination matrix and scheduled current-stable qualification |
 | `qualification.yml` | Supported FFmpeg/FFprobe generation matrix |
 | `stress.yml` | Twenty signal timing tuples and ten runtime transaction cycles; existing required check aggregates all five PR workflows |
 | `promotion.yml` | Main-only authenticated verification of the complete PR source qualification, without suite execution |
@@ -941,7 +954,13 @@ disabled. Jobs receive only the permissions they need. The Ubuntu validation
 job verifies the pinned actionlint archive before running the shared explicit
 workflow check; ordinary local fast/full validation does not provision this
 additional tool. A separate setup-python job exercises the complete suite with
-Python 3.10 and asserts the selected interpreter before starting.
+Python 3.10 together with authenticated GNU Bash 4.4.0, and asserts both selected
+interpreters before starting its single full run. The Bash archive must match
+its fixed SHA-256 and maintainer signature before extraction; its private build
+uses the historical C dialect. Only a GitHub-hosted disposable runner may bind
+the absolute interpreter paths after apt. User workstation interpreters stay intact.
+The latest pinned real-tools entry also requires the shared-destination matrix
+with digest/version-verified Deno and selectively retained pre-rescue evidence.
 
 Fedora jobs executing downloads use anonymous Docker volumes for `/tmp` and
 `/var/tmp`, so private-state and media-workspace tests exercise the host volume's
@@ -1075,9 +1094,16 @@ changing PID. Group signaling additionally requires the authenticated process
 to belong to that dedicated session (SID equals PGID), not merely to the
 provisional group. A failed session transition exits 70 before starting the
 command; pending managed signals retain their original cancellation semantics.
-Terminal Ctrl-C can instead interrupt a foreground utility and take Bash
-directly to EXIT with status 130. Both runners preserve INT on that path and
-guard cleanup against repeated fatal signals. A provisional direct-child
+Cancellation uses the registered child's direct identity during this handoff;
+it does not wait for session readiness before delivering the first signal.
+Discovery of token-bearing orphaned group members is a fallback after direct
+authority is lost, so unrelated procfs traversal cannot delay the known child.
+Terminal Ctrl-C can instead interrupt a foreground utility. The scheduler
+handles the poll’s status 130 explicitly: Bash 4.4 may leave its INT trap
+undispatched, and callers collecting child statuses suppress implicit errexit.
+The EXIT path also preserves INT when Bash exits directly with status 130.
+Both runners guard cleanup against repeated fatal signals. Other failed polls
+propagate their status without inventing a completed child slot. A provisional direct-child
 identity is registered before foreground handoff polling or file removal, so
 EXIT can also stop a worker whose normal identity handshake is incomplete.
 The real-tool assembled-output fixture similarly lets the standalone engine
@@ -1118,7 +1144,7 @@ The following repeated checks intentionally retain independent implementations:
 | --- | --- |
 | Engine / GUI YouTube classification | Remove the port, normalize host case and one terminal dot; recognize `youtube.com`, `youtu.be`, `youtube-nocookie.com` and their subdomains, not suffix lookalikes. GUI selects the experience; engine remains authoritative and revalidates profile eligibility |
 | Engine / GUI private directory chains | Root/current-user ownership; group/other writable ancestors require sticky protection; canonical physical paths. Shared policy does not require a sourced shell library |
-| Engine / GUI / runtime process handling | Numeric PID/PGID/SID, process name or UID alone is not signaling authority. GUI delegates force to its authenticated engine; pidfd STOP plus stable all-thread inventories keep parents frozen while their authenticated same-session children stop. Different-session pinned children veto parent retirement, and session leaders require complete quiescence before KILL; missing support or uncertain observations fail closed. GUI uses the same freeze only for orphan/generic-worker fallback. Timed helpers pin a private SID, repeat deadline KILL and require two unchanged complete quiescent inventories before reaping. The original runtime manager owns lock release and temporary cleanup |
+| Engine / GUI / runtime process handling | Numeric PID/PGID/SID, process name or UID alone is not signaling authority. GUI delegates force to its authenticated engine; pidfd STOP plus stable all-thread inventories keep parents frozen while their authenticated same-session children stop. Different-session pinned children veto parent retirement, and session leaders require complete quiescence before KILL; missing support or uncertain observations fail closed. GUI uses the same freeze only for orphan/generic-worker fallback. Timed helpers pin a private SID, repeat deadline KILL and require two unchanged complete quiescent inventories before reaping. Admission probes required APIs, pidfd operations, WNOWAIT and procfs on a private child and refuses with 69 before media work when unavailable. Zombie leaders with live threads remain consumers. The original runtime manager owns lock release and temporary cleanup |
 | GUI / monitor result checks | Both require a contained canonical regular file from the last nonempty result line; monitor gates display, GUI gates the user-visible outcome/cancellation race, engine owns media validation |
 | yt-dlp / Deno installation | Shared staging/activation primitives already exist; keep component-specific authentication, version and capability policies independent |
 | Launcher install / uninstall | Publication order is link, icon, desktop; removal order is desktop, link, icon. Attempt flags precede mutations and reverse rollback preserves unrestored backups; a generic transaction loop must not hide these asymmetries |

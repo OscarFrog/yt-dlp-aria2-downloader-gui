@@ -1807,6 +1807,10 @@ initialize_runtime_platform() {
         error 'the timed-command supervisor is missing or unsafe.'
         return 66
     fi
+    if ! python3 -I -B "${SCRIPT_DIR}/private-process-supervisor.py" --check-capabilities; then
+        error 'Linux process supervision is unavailable; refusing runtime preparation.'
+        return 69
+    fi
 
     if [[ -f ${SCRIPT_DIR}/keys/yt-dlp-public.key ]]; then
         YTDLP_PUBLIC_KEY=${SCRIPT_DIR}/keys/yt-dlp-public.key

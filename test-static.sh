@@ -1288,6 +1288,61 @@ print("Installed README contributor links: absolute targets in both languages.")
 PY_STATIC_HARNESS_REGRESSIONS
 }
 
+assert_real_tools_single_supervised_qualification() {
+    python3 -B - "${SCRIPT_DIR}" <<'PY_REAL_TOOLS_SINGLE_RUN'
+from pathlib import Path
+import sys
+
+source = (Path(sys.argv[1]) / ".github/workflows/real-tools.yml").read_text(encoding="utf-8")
+# The wrapper supplies supervision for one new fixture, never repetition of
+# complete media suites. Match the whole invocation, including its command.
+allowed = r"""          timeout --signal=TERM --kill-after=10s 8m \
+            bash ./tests/repeat-qualification.sh --runs 1 --jobs 1 \
+              --label 'Shared-destination real tools' -- \
+              python3 -B ./tests/multi-instance-real.py \
+            2>&1 | tee "${TMPDIR}/qualification.log"
+"""
+marker = "      - name: Run real shared-destination GUI and CLI qualification\n"
+diagnostic = "real-tools permits only one supervised --runs 1 --jobs 1 multi-instance invocation"
+
+
+def validate(text):
+    if text.count(marker) != 1 or text.count(allowed) != 1:
+        raise AssertionError(diagnostic)
+    step = text.split(marker, 1)[1].split("\n      - ", 1)[0] + "\n"
+    if allowed not in step or "repeat-qualification.sh" in text.replace(allowed, "", 1):
+        raise AssertionError(diagnostic)
+
+
+validate(source)
+mutations = (
+    ("more runs", source.replace("--runs 1 --jobs 1", "--runs 2 --jobs 1", 1)),
+    ("more jobs", source.replace("--runs 1 --jobs 1", "--runs 1 --jobs 2", 1)),
+    ("overridden count", source.replace("--runs 1 --jobs 1", "--runs 1 --jobs 1 --runs 2", 1)),
+    ("different Python fixture", source.replace("python3 -B ./tests/multi-instance-real.py",
+                                               "python3 -B ./tests/ci-validation-integration.py", 1)),
+    ("repeated media suite", source.replace("python3 -B ./tests/multi-instance-real.py",
+                                           "bash ./tests/real-tools-integration.sh", 1)),
+    ("command arguments", source.replace("python3 -B ./tests/multi-instance-real.py",
+                                        "python3 -B ./tests/multi-instance-real.py --repeat 2", 1)),
+    ("duplicate invocation", source.replace(allowed, allowed + allowed, 1)),
+    ("another wrapper", source + "\n          bash ./tests/repeat-qualification.sh --runs 2 --jobs 1 -- true\n"),
+    ("wrong step", source.replace(marker, "      - name: Other qualification\n", 1)),
+)
+for name, mutated in mutations:
+    if mutated == source:
+        raise AssertionError(f"ineffective single-run mutation: {name}")
+    try:
+        validate(mutated)
+    except AssertionError as error:
+        if str(error) != diagnostic:
+            raise
+    else:
+        raise AssertionError(f"single-run policy accepted mutation: {name}")
+print("Real-tools single-run supervision: exact multi-instance wrapper accepted; nine repetition/command mutations rejected.")
+PY_REAL_TOOLS_SINGLE_RUN
+}
+
 assert_workflow_validator_regressions() {
     python3 -B - "${SCRIPT_DIR}" <<'PY_WORKFLOW_VALIDATOR_TESTS'
 from pathlib import Path
@@ -2805,12 +2860,13 @@ test_static_tooling_contracts() {
     assert_file_not_contains "${SCRIPT_DIR}/tests/run-all.sh" \
         'run_suite_batch() {' \
         'integration scheduler has no fixed-batch barrier'
-    for repeat_workflow in release packages real-tools stress; do
+    for repeat_workflow in release packages stress; do
         assert_file_not_contains \
             "${SCRIPT_DIR}/.github/workflows/${repeat_workflow}.yml" \
             'bash ./tests/repeat-qualification.sh' \
             "${repeat_workflow} does not repeat identical complete fixtures"
     done
+    assert_real_tools_single_supervised_qualification
     assert_file_not_contains \
         "${SCRIPT_DIR}/tests/ffmpeg-generation-qualification.sh" \
         'repeat-qualification.sh' \

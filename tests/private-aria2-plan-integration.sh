@@ -2108,6 +2108,302 @@ PY_UNIQUE_HEADER
         'unique field spelling and value remain unchanged'
 }
 
+test_frozen_replay_contract() {
+    new_case 'frozen-replay'
+    python3 -I -B - "${PROJECT_DIR}" "${CASE_ROOT}" <<'PY_FROZEN_REPLAY'
+import argparse
+import contextlib
+import copy
+import importlib.util
+import io
+import json
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+
+project, case = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location('helper', project / 'private-aria2-plan.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+output = case / 'output'
+identity = output.stat()
+source = (project / 'download-video.sh').read_text().rsplit('main "$@"', 1)[0]
+common = {'id': 'fixture', 'extractor': 'generic', 'extractor_key': 'Generic'}
+original_template = str(output / '%(title).160B [%(id).64B].%(ext)s')
+for label, plan in (
+        ('inherited', {**common, 'title': 'Inherited', 'format_id': 'av', 'ext': 'mp4',
+            'url': 'http://example.invalid/media.mp4', 'protocol': 'http',
+            'requested_downloads': [{'filename': str(output / 'Inherited [fixture].mp4')}]}),
+        ('live', {**common, 'title': 'Live 2026-09-30 13:51', 'is_live': True,
+            'webpage_url': 'http://example.invalid/do-not-reextract',
+            'formats': [{'format_id': 'unselected', 'url': 'http://example.invalid/other'}],
+            'requested_downloads': [{'filename': str(output / 'Live 2026-09-30 13_51 [fixture].mkv'),
+                'requested_formats': [
+                    {'format_id': 'v', 'ext': 'mp4', 'protocol': 'http',
+                     'vcodec': 'h264', 'acodec': 'none', 'url': 'http://example.invalid/v.mp4'},
+                    {'format_id': 'a', 'ext': 'm4a', 'protocol': 'http',
+                     'vcodec': 'none', 'acodec': 'aac', 'url': 'http://example.invalid/a.m4a'}]}]})):
+    root = case / label
+    root.mkdir(mode=0o700)
+    (root / 'registry').mkdir(mode=0o700)
+    (root / 'private').mkdir(mode=0o700)
+    plan_file = root / 'private/plan.json'
+    plan_file.write_text(json.dumps(plan))
+    request = root / 'private/request'
+    request.write_text('http://example.invalid/request\n')
+    engine = root / 'engine.sh'
+    engine.write_text(source + '\n' + f'''
+PRIVATE_ARIA2_HELPER={shlex.quote(str(project / 'private-aria2-plan.py'))}
+PRIVATE_ARIA2_METADATA={shlex.quote(str(root / 'private'))}
+PRIVATE_ARIA2_PLAN="${{PRIVATE_ARIA2_METADATA}}/plan.json"
+YTDLP_BATCH_FILE_TMP="${{PRIVATE_ARIA2_METADATA}}/request"
+OUTPUT_DIR={shlex.quote(str(output))}
+FINAL_OUTPUT_DIR=${{OUTPUT_DIR}}
+FINAL_OUTPUT_IDENTITY={shlex.quote(f'{identity.st_dev}:{identity.st_ino}')}
+MODE=video
+YOUTUBE_HLS_FIREFOX=false
+YT_DLP_OPTIONS=(--output {shlex.quote(original_template)})
+resolve_lock_root() {{ printf -v "${{1:-OUTPUT_LOCK_ROOT}}" '%s' {shlex.quote(str(root / 'registry'))}; }}
+trap cleanup EXIT
+acquire_output_lock "${{OUTPUT_DIR}}"
+acquire_resource_reservations
+printf '%s\\0' "${{YT_DLP_OPTIONS[@]}}"
+''')
+    result = subprocess.run(['bash', str(engine)], capture_output=True, check=True)
+    options = result.stdout.decode().rstrip('\0').split('\0')
+    template = options[-1]
+    planned = plan['requested_downloads'][0]['filename']
+    expected = str(Path(planned).with_suffix('')).replace('%', '%%').replace('$', '%(id&$|$)s') + '.%(ext)s'
+    assert options[-2] == '--output' and template == expected, 'engine replay did not freeze its admitted basename'
+    frozen = json.loads((root / 'private/transfer-plan.json').read_text())
+    assert 'webpage_url' not in frozen
+    assert all('webpage_url' not in f and 'original_url' not in f for f in frozen['formats'])
+    if label == 'inherited':
+        actual = frozen['formats'][0]
+        assert tuple(actual.get(key) for key in ('format_id', 'ext', 'protocol', 'url')) == (
+            'av', 'mp4', 'http', plan['url']), 'inherited format was lost during replay freezing'
+        # Classification and component publication must agree with the same
+        # effective selected format, not merely the requested_downloads delta.
+        capture = io.StringIO()
+        with contextlib.redirect_stdout(capture):
+            module.classify_plan(argparse.Namespace(plan=str(plan_file), allow_https_direct=True))
+        assert 'transport=direct' in capture.getvalue()
+        ownership = root / 'private/resources.json'
+        state_args = argparse.Namespace(state=str(ownership), registry=str(root / 'registry'), action='admit')
+        module.resource_state(state_args)
+        partial = Path(planned + '.part')
+        partial.write_bytes(b'owned partial of the inherited format')
+        state_args.action = 'save'
+        module.resource_state(state_args)
+        for field, value in (('format_id', 'different'), ('ext', 'webm'), ('protocol', 'https')):
+            changed = {**plan, field: value}
+            candidate = root / ('changed-' + field)
+            candidate.mkdir(mode=0o700)
+            (candidate / 'plan.json').write_text(json.dumps(changed))
+            (candidate / 'request').write_text('http://example.invalid/request\n')
+            args = argparse.Namespace(plan=str(candidate / 'plan.json'),
+                state=str(candidate / 'resources.json'), url_file=str(candidate / 'request'),
+                output_dir=str(output), final_output_dir=str(output),
+                final_output_identity=f'{identity.st_dev}:{identity.st_ino}', mode='video', hls=False)
+            with contextlib.redirect_stdout(io.StringIO()):
+                module.resource_plan(args)
+            try:
+                module.resource_state(argparse.Namespace(state=args.state,
+                    registry=str(root / 'registry'), action='admit'))
+            except module.DestinationExistsError:
+                pass
+            else:
+                raise AssertionError('changed inherited format was adopted for resume: ' + field)
+        partial.unlink()
+    else:
+        assert [f['format_id'] for f in frozen['formats']] == ['v', 'a']
+    # The full contract stays hermetic without the optional yt-dlp package.
+    # When available, also execute its real template/format processing without
+    # transfer, network access, postprocessing or cache writes.
+    try:
+        from yt_dlp import YoutubeDL
+    except ImportError:
+        print('Optional real yt-dlp replay check unavailable; engine/helper contract checked.')
+    else:
+        options = dict(quiet=True, simulate=True, skip_download=True, cachedir=False,
+                       format='bv*+ba/b', merge_output_format='mkv', outtmpl=template)
+        with YoutubeDL(options) as downloader:
+            replayed = downloader.process_ie_result(copy.deepcopy(frozen), download=True)
+        assert replayed['requested_downloads'][0]['filename'] == planned, 'real replay escaped the admitted name'
+        if label == 'live':
+            with YoutubeDL({**options, 'outtmpl': original_template}) as downloader:
+                unbound = downloader.process_ie_result(copy.deepcopy(frozen), download=True)
+            assert unbound['requested_downloads'][0]['filename'] != planned, 'live naming negative control was not discriminating'
+print('Frozen direct/native replay and inherited-format contract passed.')
+PY_FROZEN_REPLAY
+}
+
+test_resource_activation_signal_handoff() {
+    new_case 'resource-activation-signal'
+    python3 -I -B - "${PROJECT_DIR}" "${CASE_ROOT}" <<'PY_RESOURCE_SIGNAL'
+import json
+import os
+from pathlib import Path
+import shlex
+import signal
+import subprocess
+import sys
+import time
+
+project, root = map(Path, sys.argv[1:])
+engine_source = (project / 'download-video.sh').read_text().rsplit('main "$@"', 1)[0]
+gui_source = (project / 'download-video-gui.sh').read_text().rsplit('main "$@"', 1)[0]
+events = []
+for phase in ('before-activation', 'after-activation'):
+    case = root / phase
+    case.mkdir(mode=0o700)
+    for name in ('output', 'private', 'registry'):
+        (case / name).mkdir(mode=0o700)
+    output = case / 'output'
+    plan = {'id': 'fixture', 'extractor_key': 'Generic', 'requested_downloads': [{
+        'filename': str(output / 'fixture.mp4'), 'format_id': 'av', 'ext': 'mp4',
+        'protocol': 'http', 'url': 'http://example.invalid/media'}]}
+    (case / 'private/plan.json').write_text(json.dumps(plan))
+    (case / 'private/request').write_text('http://example.invalid/request\n')
+    helper = case / 'helper.py'
+    helper.write_text('''import importlib.util, json, os, signal, sys, time
+from pathlib import Path
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location('helper', sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+case = Path(sys.argv[2]); phase = sys.argv[3]
+sys.argv = [sys.argv[1], *sys.argv[4:]]
+real_replace = m.os.replace
+def replace(source, target, *args, **kwargs):
+    admission = ('admit' in sys.argv and str(target).endswith('.resume.json'))
+    if not admission or phase == 'after-activation':
+        result = real_replace(source, target, *args, **kwargs)
+    if admission:
+        assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+        (case / 'ready').write_text(str(os.getpid()))
+        while True:
+            signal.pause()
+    return result
+m.os.replace = replace
+raise SystemExit(m.main())
+''')
+    # Keep the command interface real; instrumentation only gates its atomic
+    # replacement. The signal comes from the actual GUI worker-group path.
+    shim = case / 'helper-shim.py'
+    shim.write_text('import os,sys\nos.execv(sys.executable, [sys.executable, ' +
+                    repr(str(helper)) + ', ' + repr(str(project / 'private-aria2-plan.py')) +
+                    ', ' + repr(str(case)) + ', ' + repr(phase) + ', *sys.argv[1:]])\n')
+    engine = case / 'engine.sh'
+    engine.write_text(engine_source + '\n' + f'''
+PRIVATE_ARIA2_HELPER={shlex.quote(str(shim))}
+PRIVATE_ARIA2_METADATA={shlex.quote(str(case / 'private'))}
+PRIVATE_ARIA2_PLAN="${{PRIVATE_ARIA2_METADATA}}/plan.json"
+YTDLP_BATCH_FILE_TMP="${{PRIVATE_ARIA2_METADATA}}/request"
+OUTPUT_DIR={shlex.quote(str(output))}
+FINAL_OUTPUT_DIR=${{OUTPUT_DIR}}
+FINAL_OUTPUT_IDENTITY=$(stat -c '%d:%i' -- "${{OUTPUT_DIR}}")
+MODE=video
+YOUTUBE_HLS_FIREFOX=false
+YT_DLP_OPTIONS=()
+resolve_lock_root() {{ printf -v "${{1:-OUTPUT_LOCK_ROOT}}" '%s' {shlex.quote(str(case / 'registry'))}; }}
+trap cleanup EXIT
+trap 'request_shutdown TERM 143' TERM
+acquire_output_lock "${{OUTPUT_DIR}}"
+acquire_resource_reservations
+exit 91
+''')
+    gui = case / 'gui.sh'
+    token = os.urandom(24).hex()
+    gui.write_text(gui_source + '\n' + f'''
+PGID_FILE={shlex.quote(str(case / 'pgid'))}
+LOG_FILE={shlex.quote(str(case / 'engine.log'))}
+WORKER_IDENTITY_TOKEN={shlex.quote(token)}
+COMMAND=(bash {shlex.quote(str(engine))})
+start_download_worker
+IFS= read -r action
+[[ ${{action}} == cancel ]] || exit 92
+signal_worker_tree TERM
+status=0
+wait "${{WORKER_PID}}" || status=$?
+exit "${{status}}"
+''')
+    process = subprocess.Popen(['bash', str(gui)], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 5
+        while not (case / 'ready').exists():
+            assert process.poll() is None, ('GUI exited before admission barrier', process.communicate())
+            assert time.monotonic() < deadline, 'activation barrier was not reached'
+            time.sleep(.01)
+        events.append((time.monotonic_ns(), phase, 'activation-barrier'))
+        events.append((time.monotonic_ns(), phase, 'gui-cancel-request'))
+        stdout, stderr = process.communicate(b'cancel\n', timeout=8)
+        events.append((time.monotonic_ns(), phase, 'gui-and-worker-exited'))
+        assert process.returncode == 143, (phase, process.returncode, stdout, stderr)
+        live = []
+        for entry in Path('/proc').glob('[0-9]*'):
+            try:
+                fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+                if (fields[0] not in ('Z', 'X') and
+                        ('YTDLP_ARIA2_GUI_WORKER_TOKEN=' + token).encode() in
+                        (entry / 'environ').read_bytes().split(b'\0')):
+                    live.append(entry.name)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except PermissionError:
+                continue
+        assert not live, ('live admission consumers before rescue', live)
+        records = [json.loads(p.read_text()) for p in (case / 'registry').glob('resources-*/*.resume.json')]
+        (case / 'before-rescue.json').write_text(json.dumps({'status': process.returncode,
+                                                         'live': live, 'records': records}))
+        assert all(not item['active'] for item in records), 'GUI cancellation left an active admission checkpoint'
+        assert not list(output.iterdir()), 'admission unexpectedly modified media'
+        # Exercise actual new admission, not merely absence of a live process.
+        retry = case / 'retry'
+        retry.mkdir(mode=0o700)
+        info = output.stat()
+        state = retry / 'resources.json'
+        common = [sys.executable, str(project / 'private-aria2-plan.py')]
+        request = retry / 'request'
+        request.write_text('http://example.invalid/request\n')
+        subprocess.run([*common, 'resource-plan', '--plan', str(case / 'private/plan.json'),
+            '--state', str(state), '--url-file', str(request), '--mode', 'video',
+            '--output-dir', str(output), '--final-output-dir', str(output),
+            '--final-output-identity', f'{info.st_dev}:{info.st_ino}'], check=True,
+            stdout=subprocess.PIPE)
+        subprocess.run([*common, 'resource-state', '--action', 'admit', '--state', str(state),
+                        '--registry', str(case / 'registry')], check=True)
+        subprocess.run([*common, 'resource-state', '--action', 'save', '--state', str(state),
+                        '--registry', str(case / 'registry')], check=True)
+        events.append((time.monotonic_ns(), phase, 'new-admission-succeeded'))
+    finally:
+        (root / 'events.json').write_text(json.dumps(events))
+        # Record/assert first. Rescue only this fixture's direct GUI process and
+        # its published, still-authenticated group; rescue never creates PASS.
+        if process.poll() is None:
+            for entry in Path('/proc').glob('[0-9]*'):
+                try:
+                    if ('YTDLP_ARIA2_GUI_WORKER_TOKEN=' + token).encode() not in (entry / 'environ').read_bytes().split(b'\0'):
+                        continue
+                    descriptor = os.pidfd_open(int(entry.name))
+                    try:
+                        if ('YTDLP_ARIA2_GUI_WORKER_TOKEN=' + token).encode() in (entry / 'environ').read_bytes().split(b'\0'):
+                            signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                    finally:
+                        os.close(descriptor)
+                except (FileNotFoundError, ProcessLookupError, PermissionError):
+                    continue
+            process.terminate()
+            try:
+                process.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=2)
+print('GUI admission signal handoff before/after activation passed.')
+PY_RESOURCE_SIGNAL
+}
+
 test_resource_reservations_and_resume() {
     new_case 'resource-reservations'
     python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_RESOURCES'
@@ -2216,6 +2512,12 @@ part.write_bytes(b'owned partial transfer')
 # An uncertain stop cannot release protection, even when no FD survives.
 same, _ = plan('resume.mp4')
 rejected(module.ResourceBusyError, state, same, 'admit')
+record = next(registry.rglob(json.loads(Path(args.state).read_text())['key'] + '.resume.json'))
+active_record = record.read_bytes()
+# Cleanup was prudently registered before attempted admission. It must neither
+# release somebody else's active record nor invent ownership after a refusal.
+state(same, 'save')
+assert record.read_bytes() == active_record, 'failed admission cleared another transaction'
 overlap, _ = plan('resume.mp4.f137.mp4')
 rejected(module.ResourceBusyError, state, overlap, 'admit')
 state(args, 'save')
@@ -2223,6 +2525,9 @@ state(same, 'admit')
 state(same, 'save')
 foreign_request, _ = plan('resume.mp4', 'different-request')
 rejected(module.DestinationExistsError, state, foreign_request, 'admit')
+passive_record = record.read_bytes()
+state(foreign_request, 'save')
+assert record.read_bytes() == passive_record, 'failed admission adopted foreign resources'
 with part.open('r+b') as handle:
     handle.write(b'foreign modification')
 changed, _ = plan('resume.mp4')
@@ -2326,6 +2631,8 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
+    test_frozen_replay_contract
+    test_resource_activation_signal_handoff
     test_resource_reservations_and_resume
     test_workspace_mount_oracle_ignores_optimization
     test_workspace_mount_boundaries

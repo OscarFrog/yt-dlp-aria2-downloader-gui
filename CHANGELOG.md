@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased
+
+### Shared destinations
+
+- Allow independent GUI and CLI transfers and post-processing in one folder,
+  with final files directly in that folder. Reserve overlapping filename
+  families exclusively, returning 75 for an active reservation and 1 for a
+  pre-existing file, foreign input or ambiguous resume state.
+- Preserve same-host/user coordination across canonical aliases and XDG roots,
+  including a shared historical lock that excludes an older exclusive engine.
+  No distributed exclusion, automatic suffix or general F1 BIS fix is claimed.
+
+### Shutdown and supervision
+
+- Cover timed-command subgroups and descendants after early wrapper exit;
+  retain resources and reservations until consumers and cleanup are finished.
+- Bind individual signals to pidfds, include live threads behind zombie leaders,
+  and refuse incomplete procfs observations. Probe required Linux capabilities
+  before media work with an early status 69 refusal when unavailable.
+
+### Preservation and runtime validation
+
+- Refuse foreign native MP4/WebM inputs. Resume only from an unchanged checkpoint
+  bound to full media/extractor/request/format identity and a confirmed stop.
+- Freeze selected metadata and literal replay names, including inherited format
+  fields and live titles. Make interrupted checkpoint activation transaction-bound.
+- Align runtime admission and local recovery with exact versioned directories.
+
+### Qualification
+
+- Strengthen the four A4 oracles for orphan observation, Deno checksum refusal,
+  in-place copy mutation and GUI-only output containment.
+- Remove delayed first-signal forwarding in the test runner; retain the 0.8 s
+  contract and add a deterministic slow-discovery negative control. Explicitly
+  forward terminal-interrupted scheduler polls on Bash 4.4.
+- Add installed-payload execution, actual Bash 4.4/Python 3.10 CI and required
+  real shared-destination transfers with decoded content and pre-rescue evidence.
+- Add optional injected events in isolated real Zenity windows, distinct from
+  scripted responses and operator-assisted desktop qualification.
+
 ## 2.3.29 - Unreleased
 
 ### Maintenance
@@ -7,14 +47,6 @@
 - Fix audited correctness recovery confidentiality and qualification defects
 
 ### Correctness and recovery
-
-- Supervise timed probe subgroups and live descendants after wrapper exit;
-  preserve resources and reservations until shutdown and cleanup are safe.
-- Permit independent GUI/CLI downloads in one destination with shared legacy
-  compatibility, exclusive filename-family reservations and refusal of conflicts.
-- Refuse foreign native MP4/WebM inputs; resume only unchanged, owned checkpoints.
-  Freeze native replay metadata and retain ambiguous older state for inspection.
-- Align runtime admission and recovery with exact immutable directory versions.
 
 - Preserve pre-existing native audio before metadata processing and keep literal
   dollar/percent characters in the selected destination directory.
@@ -26,12 +58,6 @@
   runtimes without losing valid installed fallback versions.
 
 ### Qualification
-
-- Add independent orphan/session observation, a valid Deno archive with a wrong
-  checksum, synchronized in-place copy mutations and a GUI-only containment
-  control using an independently successful fake engine.
-- Exercise real concurrent local media transfers with shared HOME/XDG roots,
-  transfer/remux cancellation and content verification.
 
 - Reap test descendants before releasing runner slots, isolate Python assertion
   oracles from optimization settings, and add independent negative controls for

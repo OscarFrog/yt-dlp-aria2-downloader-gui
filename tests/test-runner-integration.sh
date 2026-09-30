@@ -1002,6 +1002,12 @@ if [[ $STARTUP_STAGE == rm-no-identity ]]; then
 fi
 printf '%s\n' "$TEST_RUNNER_LOG_DIR" >"$STARTUP_CASE/log-dir"
 test_runner_start_child 0 '' python3 "$STARTUP_WORKER" "$STARTUP_CASE"
+if [[ $STARTUP_STAGE == poll ]]; then
+    completed_slot=''
+    status=0
+    test_runner_wait_any completed_slot || status=$?
+    [[ -n $completed_slot ]] || exit "$status"
+fi
 printf 'startup-ok\n'
 test_runner_terminate_children TERM
 '''
@@ -1035,6 +1041,7 @@ command, *arguments = sys.argv[1:]
 stage = os.environ["STARTUP_STAGE"]
 mode = os.environ["STARTUP_MODE"]
 target = ((command == "sleep" and arguments == ["0.001"] and stage == "sleep")
+          or (command == "sleep" and arguments == ["0.01"] and stage == "poll")
           or (command == "rm" and len(arguments) == 3 and arguments[:2] == ["-f", "--"]
               and arguments[2].endswith(".identity") and stage.startswith("rm")))
 if not target:
@@ -1075,8 +1082,8 @@ elif mode == "missing":
                              str(root / "nonexistent-command")], capture_output=True)
     status, diagnostic = result.returncode, result.stderr
 else:
-    status = 23
-    diagnostic = f"controlled {command} failure\\n".encode()
+    status = 130 if mode == "interrupted" else 23
+    diagnostic = b"" if mode == "interrupted" else f"controlled {command} failure\\n".encode()
     if mode in ("HUP", "INT", "TERM"):
         os.kill(int(os.environ["STARTUP_RUNNER_PID"]), getattr(signal, "SIG" + mode))
 (root / "expected-stderr").write_bytes(diagnostic)
@@ -1106,6 +1113,9 @@ with tempfile.TemporaryDirectory(prefix="runner-foreground-status-") as director
              for mode in ("ok", "failure", "missing", "HUP", "INT", "TERM")]
     cases += [(stage, mode) for stage in ("rm", "rm-no-identity")
               for mode in ("absent", "permission")]
+    # A poll can report terminal INT without Bash dispatching the runner trap.
+    # Keep ordinary utility failures distinct from a completed child status.
+    cases += [("poll", mode) for mode in ("interrupted", "failure", "missing", "HUP", "INT", "TERM")]
     for index, (stage, mode) in enumerate(cases):
         case = root / str(index)
         case.mkdir()
@@ -1120,6 +1130,7 @@ with tempfile.TemporaryDirectory(prefix="runner-foreground-status-") as director
                                        stderr=subprocess.PIPE, start_new_session=True)
             stdout, stderr = process.communicate(timeout=8)
             expected = (128 + getattr(signal, "SIG" + mode) if mode in ("HUP", "INT", "TERM")
+                        else 130 if mode == "interrupted"
                         else 23 if mode == "failure" else 127 if mode == "missing"
                         else 1 if mode == "permission" else 70 if stage == "rm-no-identity" else 0)
             expected_stdout = b"startup-ok\n" if expected == 0 else b""
@@ -1141,8 +1152,9 @@ with tempfile.TemporaryDirectory(prefix="runner-foreground-status-") as director
                 current = identity(pid)
                 if current and current[:2] == (pid, start_time):
                     raise AssertionError(f"{stage}/{mode}: original worker survived")
-                if mode in ("HUP", "INT", "TERM"):
-                    if (case / "received").read_text() != str(int(getattr(signal, "SIG" + mode))):
+                if mode in ("HUP", "INT", "TERM", "interrupted"):
+                    expected_signal = signal.SIGINT if mode == "interrupted" else getattr(signal, "SIG" + mode)
+                    if (case / "received").read_text() != str(int(expected_signal)):
                         raise AssertionError(f"{stage}/{mode}: deferred signal was replaced by utility status")
         finally:
             if process and process.poll() is None:
@@ -1165,7 +1177,7 @@ with tempfile.TemporaryDirectory(prefix="runner-foreground-status-") as director
                 if child == 0:
                     time.sleep(0.005)
 
-print("Foreground startup statuses, removal errors, deferred signals and cleanup passed.")
+print("Foreground startup/poll statuses, removal errors, deferred signals and cleanup passed.")
 PY_STARTUP_STATUS
 }
 
@@ -1173,6 +1185,7 @@ test_monitor_runner_session_handoff() {
     python3 -I -B - "${SCRIPT_DIR}" <<'PY_MONITOR_HANDOFF'
 import ctypes
 import fcntl
+import json
 import os
 from pathlib import Path
 import pty
@@ -1260,7 +1273,48 @@ def wait_marker(path, process):
         if process.poll() is not None:
             raise AssertionError(f"monitor runner exited before {path.name}")
         time.sleep(0.005)
-    raise AssertionError(f"monitor runner did not publish {path.name}")
+    raise AssertionError(f"monitor runner did not publish {path.parent.name}/{path.name}")
+
+
+def terminal_failure_evidence(case, process, records, events, master, error):
+    # Capture the failed application state before releasing a barrier, signaling
+    # any rescue target, or harvesting an orphan through this test's subreaper.
+    observed = []
+    selected = list(records)
+    if process is not None and process.poll() is None:
+        runner_record = identity(process.pid)
+        if runner_record:
+            selected.append(runner_record)
+    for record in selected:
+        current = still_owned(record)
+        row = {"original": record, "current": current}
+        if current:
+            try:
+                row["status"] = Path(f"/proc/{record[0]}/status").read_text(encoding="ascii")
+                row["fds"] = {path.name: os.readlink(path)
+                              for path in Path(f"/proc/{record[0]}/fd").iterdir()}
+            except OSError as observation_error:
+                row["observation_error"] = str(observation_error)
+        observed.append(row)
+    try:
+        foreground = os.tcgetpgrp(master)
+    except OSError:
+        foreground = None
+    terminal_output = bytearray()
+    os.set_blocking(master, False)
+    while True:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        terminal_output.extend(chunk)
+    print(json.dumps({"terminal_case": case.name, "verdict": "FAIL-before-rescue",
+                      "error": str(error), "monotonic_ns": time.monotonic_ns(),
+                      "events": events, "foreground": foreground, "processes": observed,
+                      "terminal_output": terminal_output.decode(errors="replace")}),
+          file=sys.stderr, flush=True)
 
 
 def assert_monitor_output(returncode, expected, stdout, expected_stdout, stderr):
@@ -1411,6 +1465,21 @@ for fragment in (anchor, before, after):
 gated_source = source.replace(anchor, anchor + gate_definition)
 gated_source = gated_source.replace(before, '    monitor_handoff_gate("before")\n' + before)
 gated_source = gated_source.replace(after, '    monitor_handoff_gate("after")\n' + after)
+# The registered direct child is still alive at this gate. Delayed discovery
+# of orphaned group members must not postpone delivery to that known child.
+# Keep the original pending-signal deadline; model a slow unrelated /proc scan
+# only on the fallback that should not be needed before the gate is released.
+scan_anchor = 'test_runner_group_has_token() {\n'
+if gated_source.count(scan_anchor) != 1:
+    raise AssertionError("group discovery instrumentation anchor changed")
+gated_source = gated_source.replace(
+    scan_anchor,
+    scan_anchor + '''    if [[ ! -e ${MONITOR_HANDOFF_ROOT}/release ]]; then
+        : >"${MONITOR_HANDOFF_ROOT}/unnecessary-group-discovery"
+        sleep 1
+    fi
+''',
+)
 
 try:
     with tempfile.TemporaryDirectory(prefix="runner-monitor-handoff-") as directory:
@@ -1658,6 +1727,7 @@ exec /usr/bin/rm "$@"
                                    "/usr/bin/python3", str(terminal_fixture), str(case)])
                 process = None
                 records = []
+                events = [(time.monotonic_ns(), "case-start")]
                 master, slave = pty.openpty()
                 try:
                     previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, fatal_signals)
@@ -1678,6 +1748,7 @@ exec /usr/bin/rm "$@"
                         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
                     command_pid, pgid, sid = map(int, wait_marker(case / "fixture", process))
                     descendant_pid = int(wait_marker(case / "descendant", process)[0])
+                    events.append((time.monotonic_ns(), "fixture-and-descendant-ready"))
                     for pid in (pgid, command_pid, descendant_pid):
                         record = identity(pid)
                         if record is None:
@@ -1699,12 +1770,14 @@ exec /usr/bin/rm "$@"
                         if (record and record[3] == process.pid and
                                 foreground == poll_pid and
                                 argv[:2] == [b"/usr/bin/sleep", b"5"]):
+                            events.append((time.monotonic_ns(), "terminal-int", foreground))
                             os.write(master, b"\x03")
                             break
                         time.sleep(0.001)
                     else:
                         raise AssertionError("terminal runner never exposed a foreground scheduler poll")
                     wait_marker(case / "finally", process)
+                    events.append((time.monotonic_ns(), "fixture-finally-ready"))
                     if not (case / "received-int").exists():
                         raise AssertionError("terminal Ctrl+C was not relayed as INT")
                     if repeated:
@@ -1715,11 +1788,14 @@ exec /usr/bin/rm "$@"
                         if int(ignored, 16) & required != required:
                             raise AssertionError("terminal EXIT cleanup lacks its repeated-signal guard")
                         os.write(master, b"\x03")
+                        events.append((time.monotonic_ns(), "second-terminal-int"))
                         time.sleep(0.15)
                         if process.poll() is not None:
                             raise AssertionError("second terminal Ctrl+C interrupted child cleanup")
                     (case / "release").touch()
+                    events.append((time.monotonic_ns(), "cleanup-barrier-released"))
                     process.communicate(timeout=4)
+                    events.append((time.monotonic_ns(), "parent-exit", process.returncode))
                     os.set_blocking(master, False)
                     terminal_output = bytearray()
                     while True:
@@ -1739,6 +1815,9 @@ exec /usr/bin/rm "$@"
                         assert_stopped(
                             record, f"terminal case {entrypoint} stage={stage} repeated={repeated}",
                         )
+                except BaseException as error:
+                    terminal_failure_evidence(case, process, records, events, master, error)
+                    raise
                 finally:
                     (case / "release").touch()
                     stop(process, records)
@@ -2196,8 +2275,22 @@ with tempfile.TemporaryDirectory(prefix="real-tool-optimization-") as directory:
             (dash / f"init-stream{index}.m4s").touch()
             (dash / f"chunk-stream{index}-00001.m4s").touch()
         (project / "download-video.sh").write_text(engine_source, encoding="ascii")
+        # This oracle deliberately uses an invalid engine and inert media. The
+        # unisolated mutant reaches later native-witness construction after its
+        # assertions disappear; that must not acquire a real FFmpeg dependency.
+        binaries = case / "bin"
+        binaries.mkdir()
+        encoder = binaries / "ffmpeg"
+        encoder.write_text('''#!/bin/bash
+set -euo pipefail
+[[ ${!#} == "${OPTIMIZATION_TEST_ROOT}/media/"* ]] || exit 99
+printf 'inert optimization witness\\n' >"${!#}"
+printf 'generated\\n' >>"${OPTIMIZATION_TEST_ROOT}/encoder-calls"
+''', encoding="ascii")
+        encoder.chmod(0o700)
         environment = dict(os.environ, PYTHONOPTIMIZE="1",
                            YTDLP_ARIA2_YTDLP_BIN="/bin/true",
+                           PATH=f"{binaries}:{os.environ['PATH']}",
                            ARIA2_INVOCATION_LOG=str(case / "aria2-invocations.bin"),
                            OPTIMIZATION_TEST_ROOT=str(case))
         completed = subprocess.run(
@@ -2213,6 +2306,8 @@ with tempfile.TemporaryDirectory(prefix="real-tool-optimization-") as directory:
             )
         if "Real direct-two-streams repetition and metadata change preserve" in completed.stdout:
             raise AssertionError("failed repeated-output qualification reported success")
+        if (case / "encoder-calls").exists():
+            raise AssertionError("isolated oracle reached encoding before rejecting the invalid engine")
 
     check(implementation, "isolated")
     try:

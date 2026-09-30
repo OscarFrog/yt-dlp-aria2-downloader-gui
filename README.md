@@ -114,6 +114,7 @@ System commands required by the application are:
 - Bash **4.4 or newer**;
 - `aria2c` **1.37.0 or newer**;
 - Python **3.10 or newer**;
+- usable Linux pidfds, WNOWAIT and readable procfs process/thread inventories;
 - FFmpeg and `ffprobe`;
 - Zenity for the graphical interface;
 - `ca-certificates`, `curl`, GnuPG, and `unzip` for verified managed-runtime
@@ -883,9 +884,12 @@ supervisor freezes and inspects consumers before stopping them. Forced retiremen
 requires stable inventories of all stopped threads and confirmed shutdown of
 their authenticated children in the same session, while the parent stays frozen.
 A timed helper retains its child from a private session even after that child
-exits, until its own wait proves complete shutdown. This force path requires Linux pidfd support in the kernel and
-Python; unavailable support or
-failed checks leave shutdown unconfirmed and preserve resources. Timed helpers
+exits, until its own wait proves complete shutdown. Before media work starts,
+the GUI, engine and runtime manager check the necessary Python APIs, Linux
+pidfd/WAIT operations and procfs access using a private disposable child.
+Unavailable capabilities cause an early refusal with status **69**. A later
+permission or observation failure leaves shutdown unconfirmed and preserves
+resources. A zombie thread leader with live sibling threads is still active. Timed helpers
 retain supervision of their own command sessions until the consumers stop and
 the pinned child is reaped;
 duplicate graceful signals do not shorten their grace period. They repeat force

@@ -2,7 +2,8 @@
 """yt-dlp-aria2-downloader-gui tests/multi-instance-real.py.
 
 Qualify shared-destination GUI/CLI transfers with real media tools and local
-barriers. Zenity responses are scripted; this does not qualify desktop gestures.
+barriers. Zenity responses are scripted unless the optional isolated X11 event
+adapter is selected; neither mode claims human gestures.
 """
 
 import fcntl
@@ -56,6 +57,7 @@ def main():
     media = {}
     expected_final = {}
     succeeded = False
+    dialogs = None
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -157,6 +159,14 @@ elif '--progress' in args:
 elif '--question' in args: sys.exit(1)
 ''')
         zenity.chmod(0o700)
+        if os.environ.get('YTDLP_QUALIFY_ZENITY_EVENTS') == '1':
+            event_path = PROJECT / 'tests/zenity-x11-events.py'
+            event_spec = importlib.util.spec_from_file_location('zenity_events', event_path)
+            event_module = importlib.util.module_from_spec(event_spec)
+            event_spec.loader.exec_module(event_module)
+            dialogs = event_module.Session(root)
+            zenity.write_text('#!/usr/bin/python3\nimport os, sys\n'
+                              f'os.execv(sys.executable, [sys.executable, "-I", "-B", {str(event_path)!r}, *sys.argv[1:]])\n')
         ffmpeg = root / 'bin/ffmpeg'
         ffmpeg.write_text('''#!/usr/bin/python3
 import os, sys
@@ -175,6 +185,8 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
                       YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE='0', YTDLP_DISABLE_REMOTE_EJS='1',
                       FIXTURE_REAL_YTDLP=real_ytdlp, FIXTURE_REAL_FFMPEG=shutil.which('ffmpeg'),
                       FIXTURE_OUTPUT=str(output))
+        if dialogs is not None:
+            shared.update(dialogs.env)
         for key in ('YTDLP_ARIA2_YTDLP_BIN', 'YTDLP_ARIA2_DENO_BIN', 'YTDLP_ARIA2_SUPERVISED_SESSION',
                     'YTDLP_ARIA2_SKIP_RUNTIME_UPDATE'):
             shared.pop(key, None)
@@ -201,7 +213,7 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
             seed.chmod(0o600)
             token = os.urandom(24).hex()
             env = dict(shared, FIXTURE_SEED=str(seed), FIXTURE_URL=base + '/request/' + (request_label or label),
-                       YTDLP_QUALIFICATION_TOKEN=token)
+                       YTDLP_QUALIFICATION_TOKEN=token, FIXTURE_LABEL=label)
             if slow:
                 env['FIXTURE_SLOW_REMUX'] = str(root / f'{label}.remux')
             if plan_gate:
@@ -227,7 +239,7 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
             events.append((time.monotonic_ns(), label, 'launched'))
             return entry
 
-        def finish(entry, expected_status=0):
+        def finish(entry, expected_status=0, *, check_media=True):
             label, process, obs, index = entry
             wait_until(lambda: process.poll() is not None, f'{label} did not terminate', 30)
             events.append((time.monotonic_ns(), label, 'parent-exited'))
@@ -238,7 +250,7 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
             require(not state['live'], f'{label} left live descendants before rescue')
             require(not state['url_in_argv'], f'{label} exposed synthetic URL in process arguments')
             events.append((time.monotonic_ns(), label, 'consumers-observed-quiescent'))
-            if expected_status == 0:
+            if expected_status == 0 and check_media:
                 final = expected_final[process.pid]
                 require(final.is_file(), f'{label} did not publish directly in the selected directory')
                 require(decoded_hash(final) == expected[index], f'{label} produced the wrong media content')
@@ -248,6 +260,16 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
             wait_until(lambda: label in active or p.poll() is not None, f'{label} never reached transfer barrier')
             require(p.poll() is None, f'{label} exited before transfer: {root / (label + ".log")}')
             obs.sample()
+
+        if dialogs is not None:
+            for label in ('entry-window-close', 'entry-cancel'):
+                finish(launch(label, gui=True), check_media=False)
+                outcomes = [json.loads(line) for line in (root / 'dialog-events.jsonl').read_text().splitlines()]
+                require(any(row.get('event') == 'dialog-result' and row['status'] == 1
+                            and row['title'] == f'qualification:{label}:entry' for row in outcomes),
+                        f'{label} did not return a real dialog cancellation result')
+                require(not any(row.get('event') == 'adapter-failed-before-rescue' for row in outcomes),
+                        'event injection failed before the graphical verdict')
 
         # GUI/GUI and GUI/CLI share every HOME/XDG/runtime root, plus destination.
         for cycle, modes in enumerate(((True, True, True), (True, False, True), (False, False, False))):
@@ -266,8 +288,12 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
                 ffpid = int((root / f'{a[0]}.remux').read_text())
                 wait_until(lambda: Path(f'/proc/{ffpid}/comm').read_text().strip() == 'ffmpeg', 'FFmpeg did not exec')
             events.append((time.monotonic_ns(), a[0], 'closure-request'))
-            a[1].send_signal(signal.SIGTERM)
-            finish(a, 143)
+            if dialogs is not None and cycle < 2:
+                dialogs.progress_action(a[0], 'window-close' if cycle == 0 else 'cancel')
+                finish(a, 130)
+            else:
+                a[1].send_signal(signal.SIGTERM)
+                finish(a, 143)
             require(b[1].poll() is None and c[1].poll() is None, 'closing A interrupted B/C')
             d = launch(f'cycle{cycle}-D', 3, gui=False)
             wait_active(d)
@@ -283,6 +309,19 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
                 wait_active(resumed)
                 gates[resumed[0]].set()
                 finish(resumed)
+
+        if dialogs is not None:
+            restarted = launch('new-download', gui=True)
+            wait_active(restarted)
+            gates[restarted[0]].set()
+            finish(restarted)
+            require((root / 'new-download.new-download').is_file(),
+                    'real completion dialog did not restart the GUI')
+            dialog_events = [json.loads(line) for line in (root / 'dialog-events.jsonl').read_text().splitlines()]
+            require(any(row['title'] == 'qualification:new-download:entry'
+                        and row.get('event') == 'dialog-result' and row['status'] == 1
+                        for row in dialog_events),
+                    'New download did not present a new real entry dialog')
 
         # Distinct URLs with identical reserved filenames conflict in two CLIs;
         # a path alias and a different XDG_RUNTIME_DIR still use the same inode.
@@ -313,14 +352,28 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         gate = root / 'stopping-contender.plan-gate'
         wait_until(lambda: gate.with_suffix('.plan-gate.ready').exists(), 'conflict plan did not reach barrier')
         live = owner[2].sample()['live']
-        consumers = [(int(pid), row) for pid, row in live.items()
-                     if Path(f'/proc/{pid}/comm').read_text().strip() == 'aria2c']
+        consumers = []
+        for candidate, row in live.items():
+            try:
+                command = Path(f'/proc/{candidate}/comm').read_text().strip()
+            except FileNotFoundError:
+                # Short-lived siblings can exit after the observer snapshot.
+                # The actual barrier consumer must still be found uniquely.
+                continue
+            if command == 'aria2c':
+                consumers.append((int(candidate), row))
         require(len(consumers) == 1, 'real aria2 consumer was not observed')
         pid, identity = consumers[0]
         staging = [Path(os.readlink(fd)).parent for fd in Path(f'/proc/{pid}/fd').iterdir()
                    if '/.yt-dlp-aria2.' in os.readlink(fd) and os.readlink(fd).endswith('.download')]
         require(staging, 'aria2 did not retain an open staging media descriptor')
-        os.kill(pid, signal.SIGSTOP)
+        consumer_handle = os.pidfd_open(pid)
+        try:
+            require(observer_module.snapshot().get(pid, {}).get('start') == identity['start'],
+                    'aria2 identity changed before the cancellation barrier')
+            signal.pidfd_send_signal(consumer_handle, signal.SIGSTOP)
+        finally:
+            os.close(consumer_handle)
         wait_until(lambda: observer_module.snapshot().get(pid, {}).get('state') == 'T', 'aria2 did not stop at barrier')
         events.append((time.monotonic_ns(), owner[0], 'consumer-stopped-with-open-fd'))
         owner[1].send_signal(signal.SIGTERM)
@@ -332,7 +385,13 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         require(owner[1].poll() is None, 'GUI reported closure with a stopped live consumer')
         require(independent[1].poll() is None, 'independent request was interrupted')
         events.append((time.monotonic_ns(), owner[0], 'reservation-refused-before-last-access'))
-        os.kill(pid, signal.SIGCONT)
+        consumer_handle = os.pidfd_open(pid)
+        try:
+            require(observer_module.snapshot().get(pid, {}).get('start') == identity['start'],
+                    'aria2 identity changed before releasing the cancellation barrier')
+            signal.pidfd_send_signal(consumer_handle, signal.SIGCONT)
+        finally:
+            os.close(consumer_handle)
         finish(owner, 143)
         require(all(not path.exists() for path in staging), 'confirmed aria2 shutdown retained active staging')
         events.append((time.monotonic_ns(), owner[0], 'staging-cleaned'))
@@ -390,6 +449,10 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         current = external.stat()
         require((original.st_dev, original.st_ino, original.st_mtime_ns, original.st_ctime_ns) ==
                 (current.st_dev, current.st_ino, current.st_mtime_ns, current.st_ctime_ns), 'external identity changed')
+        if dialogs is not None:
+            outcomes = [json.loads(line) for line in (root / 'dialog-events.jsonl').read_text().splitlines()]
+            require(not any(row.get('event') == 'adapter-failed-before-rescue' for row in outcomes),
+                    'an event adapter failure cannot be converted into a passing graphical verdict')
         succeeded = True
         print('PASS: real shared-destination GUI/GUI, GUI/CLI, CLI conflicts, transfer/remux cancellation, D relaunch and decoded contents.', flush=True)
     finally:
@@ -414,6 +477,8 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         for gate in gates.values():
             gate.set()
         server.shutdown(); server.server_close()
+        if dialogs is not None:
+            dialogs.close()
         print('Qualification passed.' if succeeded else 'Qualification FAILED; evidence preserved.', flush=True)
 
 

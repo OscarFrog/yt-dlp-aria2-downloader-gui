@@ -6,7 +6,9 @@ Rescue happens only after assertions; test subreaping is not application reaping
 """
 
 import ctypes
+from contextlib import ExitStack, contextmanager
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -23,6 +25,25 @@ PROJECT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location('observer', PROJECT / 'tests/process-observer.py')
 observer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(observer)
+
+
+@contextmanager
+def denied_procfs_enumeration(error):
+    """Deny the OS boundary, including pathlib's cached Python 3.10 accessor."""
+    with ExitStack() as stack:
+        for owner in (os, getattr(Path, '_accessor', None)):
+            for name in ('scandir', 'listdir'):
+                original = getattr(owner, name, None)
+                if original is None:
+                    continue
+
+                def denied(path, original=original):
+                    if os.fspath(path) == '/proc':
+                        raise error
+                    return original(path)
+
+                stack.enter_context(mock.patch.object(owner, name, side_effect=denied))
+        yield
 
 
 class ProcessTests(unittest.TestCase):
@@ -119,6 +140,427 @@ while True:
 ''')
         return script
 
+    def supervisor_module(self):
+        spec = importlib.util.spec_from_file_location(
+            'process_supervisor', PROJECT / 'private-process-supervisor.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def thread_fixture(self):
+        script = self.root / 'thread-consumer.py'
+        script.write_text(r'''import ctypes, os, select, signal, sys, threading, time
+from pathlib import Path
+root = Path(sys.argv[1])
+release = int(sys.argv[2])
+if sys.argv[3] == 'orphan' and os.fork():
+    os._exit(23)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+def worker():
+    deadline = time.monotonic() + 3
+    while Path('/proc/self/stat').read_text().rsplit(') ', 1)[1].split()[0] != 'Z':
+        if time.monotonic() >= deadline: os._exit(90)
+        time.sleep(.001)
+    fd = os.open(root / 'thread-resource', os.O_WRONLY | os.O_CREAT, 0o600)
+    (root / 'thread-ready').write_text(str(os.getpid()))
+    if select.select([release], [], [], 3)[0]: os.read(release, 1)
+    os.write(fd, b'access after barrier')
+    os.close(fd)
+    (root / 'thread-last-access').write_text(str(time.monotonic_ns()))
+    os._exit(0)
+threading.Thread(target=worker).start()
+ctypes.CDLL(None).pthread_exit(None)
+''')
+        return script
+
+    def test_timed_supervisor_retains_zombie_leader_live_thread(self):
+        module = self.supervisor_module()
+        script = self.thread_fixture()
+        for orphan, expire in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(orphan=orphan, expire=expire):
+                for name in ('thread-ready', 'thread-last-access'):
+                    (self.root / name).unlink(missing_ok=True)
+                read_end, write_end = os.pipe()
+                process = subprocess.Popen(
+                    [sys.executable, '-I', '-B', str(PROJECT / 'private-process-supervisor.py'),
+                     '--timeout', '.3' if expire else '5', '--grace', '.1', '--',
+                     sys.executable, '-I', '-B', str(script), str(self.root),
+                     str(read_end), 'orphan' if orphan else 'direct'],
+                    pass_fds=(read_end,), start_new_session=True,
+                    env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.processes.append(process)
+                os.close(read_end)
+                try:
+                    consumer = int(self.wait_file('thread-ready', process))
+                    fields = Path(f'/proc/{consumer}/stat').read_text().rsplit(') ', 1)[1].split()
+                    self.assertEqual(fields[0], 'Z')
+                    self.assertTrue(module.session_alive(int(fields[3])))
+                    time.sleep(.08)
+                    self.assertIsNone(process.poll(), 'returned while sibling thread still owned its FD')
+                    self.assertFalse((self.root / 'thread-last-access').exists())
+                    if not expire:
+                        os.write(write_end, b'R')
+                    out, err = process.communicate(timeout=5)
+                    self.assertEqual(process.returncode, 137 if expire else (23 if orphan else 0), (out, err))
+                    self.assertFalse(module.session_alive(int(fields[3])))
+                    self.assertEqual((self.root / 'thread-last-access').exists(), not expire)
+                finally:
+                    os.close(write_end)
+
+    def test_observer_detects_orphan_zombie_leader_live_thread(self):
+        script = self.thread_fixture()
+        read_end, write_end = os.pipe()
+        unmarked_environment = dict(os.environ)
+        unmarked_environment.pop('YTDLP_QUALIFICATION_TOKEN', None)
+        unmarked_environment.pop('YTDLP_QUALIFICATION_EXTERNAL', None)
+        unrelated = subprocess.Popen(
+            [sys.executable, '-I', '-B', '-c',
+             'import os,select,sys; fd=int(sys.argv[1]); select.select([fd],[],[],3); os.read(fd,1)',
+             str(read_end), 'https://unrelated.invalid/observer-witness'],
+            pass_fds=(read_end,), env=unmarked_environment, start_new_session=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen(
+            [sys.executable, '-I', '-B', str(script), str(self.root), str(read_end),
+             'orphan', 'https://fixture.invalid/thread-observer'],
+            pass_fds=(read_end,), start_new_session=True,
+            env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.processes.extend((unrelated, process))
+        os.close(read_end)
+        try:
+            self.assertEqual(process.wait(timeout=3), 23)
+            self.assertFalse(Path(f'/proc/{process.pid}').exists())
+            deadline = time.monotonic() + 2
+            while not (self.root / 'thread-ready').exists():
+                self.assertLess(time.monotonic(), deadline, 'thread readiness missing')
+                time.sleep(.005)
+            consumer = int((self.root / 'thread-ready').read_text())
+            row = observer.process_row(Path(f'/proc/{consumer}/stat'))
+            self.assertEqual(row['state'], 'Z')
+            states = [observer.process_row(task / 'stat')['state']
+                      for task in Path(f'/proc/{consumer}/task').iterdir()]
+            self.assertTrue(any(state not in ('Z', 'X') for state in states))
+            self.assertIsNone(os.waitid(os.P_PID, consumer, os.WEXITED | os.WNOHANG | os.WNOWAIT))
+
+            def verdict(sample):
+                self.assertIn(str(consumer), sample['live'], 'observer lost a live sibling thread')
+                self.assertNotIn(consumer, sample['zombies'])
+                self.assertIn((consumer, row['start']), sample['url_in_argv'])
+                self.assertNotIn(str(unrelated.pid), sample['live'])
+                self.assertFalse(any(pid == unrelated.pid for pid, _ in sample['url_in_argv']))
+                self.assertIsNone(unrelated.poll(), 'observer changed an unrelated same-user process')
+                self.assertFalse((self.root / 'thread-last-access').exists(), 'fixture barrier already released')
+
+            # No observation of the launcher, or manually seeded PID identity:
+            # discovery must still come from the exact inherited launch token.
+            fresh = observer.Observer(self.token)
+            verdict(fresh.sample())
+            with mock.patch.object(observer, 'threads_are_quiescent',
+                                   side_effect=lambda _pid, observed: observed['state'] in ('Z', 'X')):
+                # Restore precisely the former classification, keeping token
+                # discovery intact so rejection is about the live sibling.
+                with self.assertRaisesRegex(self.failureException, 'observer lost a live sibling thread'):
+                    verdict(observer.Observer(self.token).sample())
+
+            verdict(fresh.sample())
+            # All positive/negative verdicts precede release and test harvesting.
+            os.close(write_end)
+            write_end = None
+            deadline = time.monotonic() + 2
+            while os.waitid(os.P_PID, consumer, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+                self.assertLess(time.monotonic(), deadline, 'consumer failed to exit after release')
+                time.sleep(.005)
+            stopped = fresh.sample()
+            self.assertNotIn(str(consumer), stopped['live'])
+            self.assertIn(consumer, stopped['zombies'])
+            self.assertTrue((self.root / 'thread-last-access').exists())
+            self.assertEqual(os.waitpid(consumer, 0)[1], 0)
+            unrelated.communicate(timeout=3)
+            process.communicate(timeout=3)
+            self.assertEqual(unrelated.returncode, 0)
+        finally:
+            if write_end is not None:
+                os.close(write_end)
+
+    def test_observer_rejects_incomplete_procfs_inventory(self):
+        for error in (PermissionError('procfs root denied'),
+                      FileNotFoundError('procfs root missing'), OSError('procfs root I/O error')):
+            with self.subTest(error=type(error).__name__), \
+                    denied_procfs_enumeration(error):
+                with self.assertRaisesRegex(OSError, 'procfs root'):
+                    self.observer.sample()
+        with mock.patch.object(Path, 'iterdir', return_value=iter(())):
+            with self.assertRaisesRegex(OSError, 'observer is absent'):
+                self.observer.sample()
+        own_stat = Path(f'/proc/{os.getpid()}/stat')
+        original_read = Path.read_text
+
+        def missing_own_stat(path, *args, **kwargs):
+            if path == own_stat:
+                raise FileNotFoundError('observer stat missing')
+            return original_read(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'read_text', new=missing_own_stat):
+            with self.assertRaisesRegex(OSError, 'observer stat is absent'):
+                self.observer.sample()
+
+    def test_observer_unreadable_stat_cannot_erase_known_identity(self):
+        child = self.child()
+        child.write_text(child.read_text().replace('while True:', "while not (root / 'release').exists():"))
+        process = self.launch([sys.executable, '-I', '-B', str(child)])
+        self.wait_file('ready', process)
+        first = self.observer.sample()
+        row = first['live'][str(process.pid)]
+        key = (process.pid, row['start'])
+        self.assertIn(key, self.observer.known)
+        original_read = Path.read_text
+        for failure in (PermissionError, OSError, IndexError):
+            def unreadable(path, *args, **kwargs):
+                if path == Path(f'/proc/{process.pid}/stat'):
+                    if failure is IndexError:
+                        return 'malformed proc stat'
+                    raise failure('attributed stat unavailable')
+                return original_read(path, *args, **kwargs)
+
+            with self.subTest(error=failure.__name__), \
+                    mock.patch.object(Path, 'read_text', new=unreadable):
+                with self.assertRaises(failure):
+                    self.observer.sample()
+                # Even a first sample may not drop an unreadable process merely
+                # because its inherited marker could not yet be inspected.
+                with self.assertRaises(failure):
+                    observer.Observer(self.token).sample()
+                self.assertIn(key, self.observer.known)
+            self.assertIsNone(process.poll(), 'observer interfered with the fixture')
+            self.assertIn(str(process.pid), self.observer.sample()['live'])
+        # A genuinely disappeared process is different from an unreadable one.
+        (self.root / 'release').touch()
+        process.communicate(timeout=3)
+        self.assertEqual(process.returncode, 0)
+        original_iterdir = Path.iterdir
+
+        def stale_enumeration(path):
+            entries = list(original_iterdir(path))
+            if path == Path('/proc'):
+                entries.append(Path(f'/proc/{process.pid}'))
+            return iter(entries)
+
+        with mock.patch.object(Path, 'iterdir', new=stale_enumeration):
+            self.assertNotIn(str(process.pid), self.observer.sample()['live'])
+
+    def test_observer_procfs_denial_rejects_stale_success_in_zenity_harness(self):
+        (self.root / 'processes-current.json').write_text(json.dumps({'live': {}, 'url_in_argv': []}))
+        wrapper = self.root / 'denied-observer.py'
+        wrapper.write_text('''import os, runpy, sys
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
+from unittest import mock
+''' + inspect.getsource(denied_procfs_enumeration) + '''
+with denied_procfs_enumeration(PermissionError('procfs root denied')):
+    sys.argv = sys.argv[1:]
+    runpy.run_path(sys.argv[0], run_name='__main__')
+''')
+        harness = self.root / 'harness-functions.sh'
+        harness.write_text((PROJECT / 'tests/zenity-real-session-qualification.sh').read_text().rsplit('\nmain "$@"', 1)[0])
+        verdict = subprocess.run(['bash', '-c', '''source "$1"
+"$3" -I -B "$2/denied-observer.py" "$4" "$5" "$2" "$2/stop" &
+WATCHER_PID=$!
+assert_no_residual_processes "$2" "$2/stop"
+''', 'bash', str(harness), str(self.root), sys.executable,
+                                  str(PROJECT / 'tests/process-observer.py'), self.token],
+                                 capture_output=True, timeout=5)
+        self.assertEqual(verdict.returncode, 1, 'Zenity harness accepted an incomplete observer inventory')
+        self.assertIn(b'PermissionError: procfs root denied', verdict.stderr)
+        self.assertNotIn(b'surviving qualification descendants', verdict.stderr)
+
+    def test_engine_gui_detect_and_retire_zombie_main_thread(self):
+        script = self.thread_fixture()
+        for filename, code in self.escalation_sources():
+            with self.subTest(target=filename):
+                (self.root / 'thread-ready').unlink(missing_ok=True)
+                read_end, write_end = os.pipe()
+                process = subprocess.Popen(
+                    [sys.executable, '-I', '-B', str(script), str(self.root), str(read_end), 'direct'],
+                    pass_fds=(read_end,), start_new_session=True,
+                    env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token,
+                             YTDLP_ARIA2_GUI_WORKER_TOKEN=self.token),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.processes.append(process)
+                os.close(read_end)
+                try:
+                    consumer = int(self.wait_file('thread-ready', process))
+                    fields = Path(f'/proc/{consumer}/stat').read_text().rsplit(') ', 1)[1].split()
+                    source = (PROJECT / filename).read_text()
+                    start = source.index('process_threads_are_quiescent() {')
+                    name = 'download_group_has_live_member' if filename == 'download-video.sh' else 'worker_group_has_live_member'
+                    end = source.index('\n}\n', source.index(name + '() {')) + 3
+                    setup = (f'DOWNLOAD_SESSION_ID={consumer}; DOWNLOAD_WORKER_PGID={consumer}\n'
+                             if filename == 'download-video.sh' else f'WORKER_PGID={consumer}\n')
+                    result = subprocess.run(['bash', '-c', source[start:end] + '\n' + setup + name],
+                                            capture_output=True, timeout=3)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    with mock.patch.object(sys, 'argv', ['probe', str(consumer), fields[19], fields[3]]):
+                        exec(compile(code, filename, 'exec'), {})
+                    self.assertEqual(process.wait(timeout=3), -signal.SIGKILL)
+                    self.assertFalse((self.root / 'thread-last-access').exists())
+                finally:
+                    os.close(write_end)
+
+    def test_procfs_enumeration_failure_is_unknown(self):
+        module = self.supervisor_module()
+        namespaces = []
+        for filename, code in self.escalation_sources():
+            namespace = {}
+            exec(compile(code.rsplit('\ntry:\n    retire', 1)[0], filename, 'exec'), namespace)
+            namespaces.append(namespace)
+        for error in (PermissionError('denied'), FileNotFoundError('missing'), OSError('I/O failure')):
+            with self.subTest(error=type(error).__name__), denied_procfs_enumeration(error):
+                # An impossible SID would be absent in a successful inventory;
+                # failed enumeration must still report uncertainty/presence.
+                self.assertTrue(module.session_alive(-1))
+                for namespace in namespaces:
+                    with self.assertRaises(OSError):
+                        namespace['other_session_members_quiescent'](os.getpid(), os.getsid(0))
+
+    def test_error_after_stop_resumes_the_authenticated_parent(self):
+        child = self.child()
+        for filename, code in self.escalation_sources():
+            with self.subTest(target=filename):
+                (self.root / 'ready').unlink(missing_ok=True)
+                (self.root / 'term').unlink(missing_ok=True)
+                process = self.launch([sys.executable, '-I', '-B', str(child)])
+                self.wait_file('ready', process)
+                fields = Path(f'/proc/{process.pid}/stat').read_text().rsplit(') ', 1)[1].split()
+                real_read = Path.read_text
+                real_send = signal.pidfd_send_signal
+                sent = []
+
+                def read(path, *args, **kwargs):
+                    if str(path).startswith(f'/proc/{process.pid}/task/'):
+                        raise PermissionError('task observation revoked after STOP')
+                    return real_read(path, *args, **kwargs)
+
+                def send(descriptor, number, *args):
+                    real_send(descriptor, number, *args)
+                    sent.append(number)
+
+                with mock.patch.object(Path, 'read_text', read), \
+                        mock.patch.object(signal, 'pidfd_send_signal', send), \
+                        mock.patch.object(sys, 'argv', ['probe', str(process.pid), fields[19], fields[3]]):
+                    with self.assertRaises(SystemExit) as result:
+                        exec(compile(code, filename, 'exec'), {})
+                self.assertEqual(result.exception.code, 1)
+                self.assertEqual(sent, [signal.SIGSTOP, signal.SIGCONT])
+                deadline = time.monotonic() + 1
+                while Path(f'/proc/{process.pid}/stat').read_text().rsplit(') ', 1)[1].split()[0] in ('T', 't'):
+                    self.assertLess(time.monotonic(), deadline, 'parent was left frozen')
+                    time.sleep(.005)
+                self.assertIsNone(process.poll())
+                self.assertTrue((self.root / 'resource').exists())
+                # The production verdict precedes ordinary fixture termination.
+                process.send_signal(signal.SIGTERM)
+                process.communicate(timeout=3)
+                self.assertEqual(process.returncode, 0)
+
+    def test_timed_signal_handle_survives_numeric_pid_reuse(self):
+        module = self.supervisor_module()
+        path = Path('/proc/42001/stat')
+        fields = ['S', '12', '42000', '42000'] + ['0'] * 15 + ['777']
+        state = {'reads': 0, 'replacement_signaled': False}
+
+        def read(_path):
+            state['reads'] += 1
+            return '42001 (fixture) ' + ' '.join(fields)
+
+        def pidfd_send(descriptor, number):
+            self.assertEqual((descriptor, number), (900001, signal.SIGKILL))
+            # The original exited after the second read. The handle remains
+            # attached to that original, rather than its numeric replacement.
+            self.assertEqual(state['reads'], 2)
+            raise ProcessLookupError('original task exited')
+
+        def numeric_send(_pid, _number):
+            state['replacement_signaled'] = True
+
+        with mock.patch.object(module, 'process_paths', return_value=[path]), \
+                mock.patch.object(Path, 'read_text', read), \
+                mock.patch.object(os, 'pidfd_open', return_value=900001), \
+                mock.patch.object(os, 'close') as close, \
+                mock.patch.object(signal, 'pidfd_send_signal', pidfd_send), \
+                mock.patch.object(os, 'kill', numeric_send):
+            module.signal_session(42000, signal.SIGKILL)
+            self.assertFalse(state['replacement_signaled'], 'signaled an unrelated recycled PID')
+            close.assert_called_once_with(900001)
+
+    def test_capability_refusal_precedes_consumer_launch(self):
+        module = self.supervisor_module()
+        real_fork = os.fork
+        for failure in ('api', 'open', 'send', 'continue', 'waitid', 'procfs'):
+            with self.subTest(failure=failure):
+                created = []
+
+                def fork():
+                    pid = real_fork()
+                    if pid:
+                        created.append(pid)
+                    return pid
+
+                real_send = signal.pidfd_send_signal
+
+                def send(descriptor, number):
+                    if failure == 'send' or (failure == 'continue' and number == signal.SIGCONT):
+                        raise PermissionError('synthetic pidfd delivery refused')
+                    return real_send(descriptor, number)
+
+                with mock.patch.object(os, 'fork', fork), mock.patch.object(signal, 'pidfd_send_signal', send):
+                    if failure == 'api':
+                        context = mock.patch.object(os, 'pidfd_open')
+                    elif failure == 'open':
+                        context = mock.patch.object(os, 'pidfd_open', side_effect=PermissionError('denied'))
+                    elif failure == 'waitid':
+                        context = mock.patch.object(os, 'waitid', side_effect=PermissionError('denied'))
+                    elif failure == 'procfs':
+                        context = denied_procfs_enumeration(PermissionError('denied'))
+                    else:
+                        context = mock.patch.object(module, 'time', wraps=time)
+                    with context:
+                        if failure == 'api':
+                            del os.pidfd_open
+                        status = module.supervise([sys.executable, '-c',
+                            'from pathlib import Path; Path("' + str(self.root / 'unexpected-consumer') + '").touch()'], 1, .1)
+                self.assertEqual(status, 69)
+                self.assertFalse((self.root / 'unexpected-consumer').exists())
+                for pid in created:
+                    self.assertFalse(Path(f'/proc/{pid}').exists(), 'capability probe was not reaped')
+
+    def test_waitid_failure_after_admission_keeps_consumer_supervised(self):
+        child = self.child(slow=True)
+        wrapper = self.root / 'waitid-denied.py'
+        wrapper.write_text('''import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location('supervisor', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+real_check = module.check_capabilities
+def check():
+    real_check()
+    def denied(*args): raise PermissionError('waitid revoked after admission')
+    os.waitid = denied
+module.check_capabilities = check
+sys.exit(module.supervise([sys.executable, sys.argv[2]], 5, 1))
+''')
+        process = self.launch([sys.executable, '-I', '-B', str(wrapper),
+                               str(PROJECT / 'private-process-supervisor.py'), str(child)])
+        self.wait_file('ready', process)
+        process.send_signal(signal.SIGTERM)
+        self.wait_file('term', process)
+        self.assertIsNone(process.poll())
+        out, err = process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 143, (out, err))
+        self.assertTrue((self.root / 'last-access').exists())
+        self.assertFalse((self.root / 'early-cleanup').exists())
+        self.assertFalse(self.observer.sample()['live'])
+
     def test_group_quiescence_rejects_fork_after_enumeration(self):
         program = '''import os, sys
 report, trigger, release = map(int, sys.argv[1:])
@@ -175,30 +617,30 @@ os._exit(0)
                 else:
                     self.assertEqual(process.wait(timeout=3), 23)
                     self.assertFalse(Path(f'/proc/{process.pid}').exists(), 'leader must be gone')
-                real_glob = Path.glob
+                real_iterdir = Path.iterdir
                 inventories = 0
                 late_child = None
 
-                def enumerate_then_fork(path, pattern):
+                def enumerate_then_fork(path):
                     nonlocal inventories, late_child
-                    snapshot = list(real_glob(path, pattern))
-                    if path != Path('/proc') or pattern != '[0-9]*/stat':
+                    snapshot = list(real_iterdir(path))
+                    if path != Path('/proc'):
                         return iter(snapshot)
                     inventories += 1
                     if inventories == 1:
-                        self.assertIn(Path(f'/proc/{orphan}/stat'), snapshot)
+                        self.assertIn(Path(f'/proc/{orphan}'), snapshot)
                         # Only scheduling is controlled: freeze real directory
                         # entries, fork, then let production read real stat data.
                         os.write(trigger_write, b'F')
                         late_child = record(report_read, 'B')
-                        self.assertNotIn(Path(f'/proc/{late_child}/stat'), snapshot)
+                        self.assertNotIn(Path(f'/proc/{late_child}'), snapshot)
                         deadline = time.monotonic() + 3
                         while fields(orphan)[0] != 'Z':
                             self.assertLess(time.monotonic(), deadline, 'orphan did not exit')
                             time.sleep(.005)
                     return iter(snapshot)
 
-                with mock.patch.object(Path, 'glob', enumerate_then_fork), \
+                with mock.patch.object(Path, 'iterdir', enumerate_then_fork), \
                         mock.patch.object(sys, 'argv', ['probe', str(process.pid)]):
                     if session_probe:
                         namespace = {'__name__': 'supervision_probe'}
@@ -433,7 +875,9 @@ esac
         sentinel_start = engine.index('            while true; do\n',
                                       engine.index('# Stay alive as the authenticated session leader'))
         sentinel_end = engine.index('            exit "${command_status}"\n', sentinel_start)
-        sentinel = engine[sentinel_start:sentinel_end] + 'exit "${command_status}"\n'
+        threads_start = engine.index('process_threads_are_quiescent() {')
+        threads_end = engine.index('\n}\n', threads_start) + 3
+        sentinel = engine[threads_start:threads_end] + engine[sentinel_start:sentinel_end] + 'exit "${command_status}"\n'
         for mode, code in (('engine', engine), ('gui', gui), ('sentinel', sentinel)):
             if mode == 'sentinel':
                 start, end = 0, len(code)
@@ -456,26 +900,32 @@ esac
         # No live process is created or signaled by the modeled state change.
         engine = (PROJECT / 'download-video.sh').read_text()
         gui = (PROJECT / 'download-video-gui.sh').read_text()
-        engine_probe = engine[engine.index('download_group_has_live_member() {'):
+        engine_probe = engine[engine.index('process_threads_are_quiescent() {'):
                               engine.index('download_group_is_absent() {')]
         engine_wait = engine[engine.index('wait_for_download_exit() {'):
                              engine.index('stop_download_worker() {')]
-        gui_probe = gui[gui.index('worker_group_has_live_member() {'):
+        gui_probe = gui[gui.index('process_threads_are_quiescent() {'):
                         gui.index('worker_group_is_absent() {')]
         gui_wait = gui[gui.index('worker_group_may_be_alive() {'):
                        gui.index('process_is_running() {', gui.index('worker_group_may_be_alive() {'))]
         sentinel_start = engine.index('            # Stay alive as the authenticated session leader')
         sentinel = engine[engine.index('            while true; do', sentinel_start):
                           engine.index('            exit "${command_status}"', sentinel_start)]
+        threads_start = engine.index('process_threads_are_quiescent() {')
+        threads_end = engine.index('\n}\n', threads_start) + 3
+        sentinel = engine[threads_start:threads_end] + sentinel
         prologue = r'''set -euo pipefail
 FIXTURE_ROOT=$1
 mkdir -p "$FIXTURE_ROOT/900000001"
 fixture_session=515151
 [[ $2 != sentinel ]] || fixture_session=$$
 write_state() {
+    mkdir -p "$FIXTURE_ROOT/$1/task/$1"
     printf '%s (fixture) %s 0 %s %s 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345\n' \
         "$1" "$2" "$fixture_session" "$fixture_session" >"$FIXTURE_ROOT/$1/stat"
+    cp "$FIXTURE_ROOT/$1/stat" "$FIXTURE_ROOT/$1/task/$1/stat"
 }
+write_state "$$" S
 write_state 900000001 S
 read() {
     if [[ ${*: -1} == process_stat &&
@@ -516,8 +966,6 @@ printf '%s\n' "$status"
                 with self.subTest(target=label, second_inventory=second_inventory):
                     code = probe if second_inventory else probe.replace(
                         'for observation in 1 2; do', 'for observation in 1; do', 1)
-                    code = code.replace('/proc/[1-9]*/stat', '"${FIXTURE_ROOT}"/[1-9]*/stat')
-                    code = code.replace('/proc/[0-9]*', '"${FIXTURE_ROOT}"/[0-9]*')
                     setup = prologue
                     if label == 'sentinel':
                         # A live modeled consumer must retain the sentinel.
@@ -525,6 +973,7 @@ printf '%s\n' "$status"
                         setup += "sleep() { printf 'held\\n'; exit 64; }\n"
                     directory = self.root / (label + str(second_inventory))
                     directory.mkdir()
+                    code = code.replace('/proc/', str(directory) + '/')
                     completed = subprocess.run(
                         ['bash', '-c', setup + code + suffix, 'bash', str(directory), label],
                         capture_output=True, text=True, timeout=5)
@@ -678,9 +1127,9 @@ else:
                 self.escalation_case(code, filename)
             # Model the old check-then-KILL path, retaining both inventories.
             start = code.index('        signal.pidfd_send_signal(descriptor, signal.SIGSTOP)\n')
-            end = code.index('        children = frozen_children(pid)\n', start)
-            mutant = code[:start] + code[end:]
-            state_guard = "            if fields[0] not in ('T', 't'):\n                raise ValueError('thread is not stopped')\n"
+            end = code.index('        for child in children:\n', start)
+            mutant = code[:start] + '        children = frozen_children(pid)\n' + code[end:]
+            state_guard = "            if fields[0] not in ('T', 't', 'Z', 'X'):\n                raise ValueError('thread is not stopped')\n"
             self.assertEqual(mutant.count(state_guard), 1)
             mutant = mutant.replace(state_guard, '', 1)
             with self.subTest(target=filename, freeze=False):
@@ -692,8 +1141,11 @@ else:
             with self.subTest(target=filename, all_threads=True):
                 self.escalation_case(code, filename, threaded=True)
             inventory = "for task in Path(f'/proc/{pid}/task').iterdir():"
-            self.assertEqual(code.count(inventory), 1)
-            mutant = code.replace(inventory, "for task in [Path(f'/proc/{pid}/task/{pid}')]:", 1)
+            start = code.index('def frozen_children(')
+            end = code.index('def other_session_members_quiescent(', start)
+            body = code[start:end]
+            self.assertEqual(body.count(inventory), 1)
+            mutant = code[:start] + body.replace(inventory, "for task in [Path(f'/proc/{pid}/task/{pid}')]:", 1) + code[end:]
             with self.subTest(target=filename, all_threads=False):
                 with self.assertRaisesRegex(self.failureException, 'worker-thread child owner'):
                     self.escalation_case(mutant, filename, threaded=True)
@@ -927,9 +1379,10 @@ WORKER_ENGINE_SUPERVISION=true
 # Reach real GUI escalation before the timed helper's own grace expires.
 eval "$(declare -f wait_for_worker_exit | sed '1s/wait_for_worker_exit/observed_wait_for_worker_exit/')"
 wait_for_worker_exit() { observed_wait_for_worker_exit 1; }
-kill() {
-    builtin kill "$@" || return "$?"
-    if [[ $1 == -CONT && ${3:-} == "${WORKER_PGID}" ]]; then
+eval "$(declare -f signal_owned_process | sed '1s/signal_owned_process/observed_signal_owned_process/')"
+signal_owned_process() {
+    observed_signal_owned_process "$@" || return "$?"
+    if [[ $4 == CONT && $1 == "${WORKER_PGID}" ]]; then
         printf delegated >"${FIXTURE_ROOT}/gui-force"
     fi
 }

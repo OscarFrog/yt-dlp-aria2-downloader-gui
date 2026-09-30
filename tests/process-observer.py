@@ -19,13 +19,57 @@ def process_row(path):
 
 
 def snapshot():
+    # glob can suppress an unreadable/missing procfs root into an empty match.
+    # Failure to observe is a qualification error, never evidence of shutdown.
+    paths = [entry / 'stat' for entry in Path('/proc').iterdir()
+             if entry.name.isdecimal()]
+    own_pid = os.getpid()
+    if Path(f'/proc/{own_pid}/stat') not in paths:
+        raise OSError('incomplete procfs inventory: observer is absent')
     rows = {}
-    for path in Path('/proc').glob('[0-9]*/stat'):
+    for path in paths:
         try:
             rows[int(path.parent.name)] = process_row(path)
-        except (OSError, ValueError, IndexError):
+        except FileNotFoundError:
+            # A process may disappear between enumeration and its stat read.
             continue
+    if own_pid not in rows:
+        raise OSError('incomplete procfs inventory: observer stat is absent')
     return rows
+
+
+def observation_paths(pid, row, name):
+    """The main thread's proc entries can be empty while siblings still run."""
+    yield Path(f'/proc/{pid}/{name}')
+    if row['state'] in ('Z', 'X'):
+        for task in Path(f'/proc/{pid}/task').iterdir():
+            if task.name.isdecimal() and task.name != str(pid):
+                yield task / name
+
+
+def threads_are_quiescent(pid, row):
+    """Classify the thread group independently of the production predicates."""
+    if row['state'] not in ('Z', 'X'):
+        return False
+    previous = None
+    try:
+        for _ in range(2):
+            tasks = set()
+            for task in Path(f'/proc/{pid}/task').iterdir():
+                state = process_row(task / 'stat')
+                if state['state'] not in ('Z', 'X'):
+                    return False
+                tasks.add((task.name, state['start']))
+            current = process_row(Path(f'/proc/{pid}/stat'))
+            if current['start'] != row['start'] or current['state'] not in ('Z', 'X'):
+                return False
+            if not tasks or (previous is not None and tasks != previous):
+                return False
+            previous = tasks
+    except (OSError, ValueError, IndexError):
+        # Incomplete observation of an attributed task cannot grant quiescence.
+        return False
+    return True
 
 
 class Observer:
@@ -45,11 +89,21 @@ class Observer:
             key = pid, row['start']
             marked = False
             try:
-                environment = Path(f'/proc/{pid}/environ').read_bytes().split(b'\0')
-                marked = self.marker in environment
-                if marked and b'YTDLP_QUALIFICATION_EXTERNAL=1' in environment:
-                    self.external.add(key)
-            except OSError:
+                for path in observation_paths(pid, row, 'environ'):
+                    try:
+                        environment = path.read_bytes().split(b'\0')
+                    except OSError:
+                        continue
+                    if self.marker not in environment:
+                        continue
+                    current = process_row(Path(f'/proc/{pid}/stat'))
+                    if current['start'] != row['start']:
+                        break
+                    marked = True
+                    if b'YTDLP_QUALIFICATION_EXTERNAL=1' in environment:
+                        self.external.add(key)
+                    break
+            except (OSError, ValueError, IndexError):
                 pass
             if marked or key in self.known:
                 selected[pid] = row
@@ -76,20 +130,25 @@ class Observer:
             key = pid, row['start']
             self.known.add(key)
             try:
-                argv = Path(f'/proc/{pid}/cmdline').read_bytes().lower()
-                # Revalidate after reading argv; a reused PID is not evidence.
-                current = process_row(Path(f'/proc/{pid}/stat'))
-                if current and current['start'] == row['start'] and (
-                    b'http://' in argv or b'https://' in argv
-                ):
-                    self.leaks.add(key)
+                for path in observation_paths(pid, row, 'cmdline'):
+                    try:
+                        argv = path.read_bytes().lower()
+                    except OSError:
+                        continue
+                    # Revalidate after reading argv; a reused PID is not evidence.
+                    current = process_row(Path(f'/proc/{pid}/stat'))
+                    if current['start'] != row['start']:
+                        break
+                    if b'http://' in argv or b'https://' in argv:
+                        self.leaks.add(key)
+                        break
             except (OSError, ValueError, IndexError):
                 pass
+        quiescent = {pid for pid, row in selected.items() if threads_are_quiescent(pid, row)}
         return {
             'monotonic_ns': time.monotonic_ns(),
-            'live': {str(pid): row for pid, row in selected.items()
-                     if row['state'] not in ('Z', 'X')},
-            'zombies': [pid for pid, row in selected.items() if row['state'] == 'Z'],
+            'live': {str(pid): row for pid, row in selected.items() if pid not in quiescent},
+            'zombies': [pid for pid, row in selected.items() if pid in quiescent and row['state'] == 'Z'],
             'url_in_argv': sorted(self.leaks),
         }
 

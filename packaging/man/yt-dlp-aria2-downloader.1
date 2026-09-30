@@ -56,6 +56,13 @@ insufficient. Uncertain shutdown preserves active state for manual inspection.
 Do not delete old-looking lock files. The shared legacy lock excludes an older
 2.3.29 instance's exclusive lock. This is not distributed exclusion and does
 not cover arbitrary external writers.
+.SH PROCESS SUPERVISION
+Linux pidfds, WNOWAIT and readable process/thread inventories in procfs are
+required in addition to Bash 4.4 and Python 3.10. The application checks their
+operation on a private disposable child before media work; unavailable
+capabilities cause an early refusal with status 69. A later observation or
+permission failure preserves resources and does not establish complete shutdown.
+A zombie thread leader with live sibling threads is still an active consumer.
 .SH FILES
 .TP
 .I ~/.local/share/yt-dlp-aria2-downloader/

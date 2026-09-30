@@ -7,6 +7,7 @@ Fixtures replace authenticated API reads; this suite never contacts GitHub.
 
 import copy
 from datetime import datetime, timedelta, timezone
+import hashlib
 import importlib.util
 import json
 import os
@@ -15,9 +16,11 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -170,6 +173,28 @@ class ProofTests(unittest.TestCase):
             with self.subTest(workflow=index), self.assertRaises(CHECK.Refusal):
                 self.verify()
             identity["steps"][0]["conclusion"] = "success"
+
+    def test_minimum_shell_and_shared_destination_steps_cannot_be_missing_or_skipped(self):
+        checks = (
+            (1, "Python 3.10 / Ubuntu", "Build and bind verified Bash 4.4 on the disposable runner"),
+            (1, "Python 3.10 / Ubuntu", "Bind every test interpreter to the minimum Python"),
+            (4, "Local media, pinned yt-dlp 2026.8.19", "Install verified Deno for shared-destination qualification"),
+            (4, "Local media, pinned yt-dlp 2026.8.19", "Run real shared-destination GUI and CLI qualification"),
+            (4, "Local media, pinned yt-dlp 2026.8.19", "Retain shared-destination verdicts and monotonic events"),
+        )
+        for index, name, step in checks:
+            for outcome in ("missing", "skipped", "failure"):
+                with self.subTest(job=name, step=step, outcome=outcome):
+                    api = fixture()
+                    jobs = api.responses[f"actions/runs/{index * 100}/attempts/1/jobs?per_page=100&page=1"]["jobs"]
+                    job = next(item for item in jobs if item["name"] == name)
+                    entry = next(item for item in job["steps"] if item["name"] == step)
+                    if outcome == "missing":
+                        job["steps"].remove(entry)
+                    else:
+                        entry["conclusion"] = outcome
+                    with self.assertRaises(CHECK.Refusal):
+                        CHECK.Verifier(api, NOW).verify(TARGET)
 
     def test_pr_association_may_be_empty_after_merge_and_fork_is_accepted(self):
         self.assertEqual(self.verify()["pull_request"], 23)
@@ -854,6 +879,53 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
                     with self.subTest(workflow=filename, job=name, step=step):
                         self.assertIn("- name: " + step + "\n", text)
 
+    def test_minimum_interpreters_share_one_full_run_and_bind_absolute_fixtures(self):
+        job = self.jobs(self.workflow("shell.yml"))["validate-python-minimum"]
+        self.assertEqual(job.count("./tests/run-all.sh --full --jobs 4"), 1)
+        self.assertIn("name: Python 3.10 / Ubuntu", job)
+        for guard in (
+            "${RUNNER_ENVIRONMENT} == github-hosted",
+            "readonly version=4.4", "readonly fingerprint=7C0135FB088AAF6C66C650B9BB5869F064EA74AB",
+            "${BASH_VERSINFO[2]} == 0", 'sudo ln -sfnT -- "${prefix}/bin/bash" /usr/bin/bash',
+            "env PATH=/usr/bin:/bin bash", 'sudo ln -sfnT -- "${python_binary}" /usr/bin/python3',
+            'printf \'%s\\n\' "${prefix}/bin" >>"${GITHUB_PATH}"',
+        ):
+            self.assertIn(guard, job)
+        self.assertLess(job.index("sha256sum --check"), job.index("tar --extract"))
+        self.assertLess(job.index('[[ ${signature_fingerprint} == "${fingerprint}" ]]'),
+                        job.index("tar --extract"))
+        self.assertLess(job.index("Confirm minimum Python and environment"),
+                        job.index("./tests/run-all.sh --full --jobs 4"))
+        self.assertIn("timeout --signal=TERM --kill-after=10s 5m", job)
+
+    def test_shared_destination_uses_one_verified_tool_entry_and_retains_only_diagnostics(self):
+        job = self.jobs(self.workflow("real-tools.yml"))["pinned-local-media"]
+        steps = re.split(r"(?m)^      - ", job)
+        install = next(step for step in steps if step.startswith("name: Install verified Deno"))
+        run = next(step for step in steps if step.startswith("name: Run real shared-destination"))
+        retain = next(step for step in steps if step.startswith("name: Retain shared-destination"))
+        for step in (install, run):
+            self.assertIn("if: matrix.yt_dlp_version == '2026.8.19'", step)
+        self.assertIn("always() && matrix.yt_dlp_version == '2026.8.19'", retain)
+        self.assertIn("readonly version=2.9.4", install)
+        self.assertIn("c24f955d9fbfe0ea5ae2b501c8e71ae76e31e4c9782390a54a284b3364fda725", install)
+        self.assertLess(install.index("sha256sum --check"), install.index("unzip -q"))
+        self.assertLess(install.index("sha256sum --check"), install.index('"${tool_dir}/deno" --version'))
+        self.assertIn('export YTDLP_REAL_BINARY="${RUNNER_TEMP}/yt-dlp-venv/bin/yt-dlp"', run)
+        self.assertIn("timeout --signal=TERM --kill-after=10s 8m", run)
+        self.assertIn("./tests/repeat-qualification.sh --runs 1 --jobs 1", run)
+        self.assertIn("python3 -B ./tests/multi-instance-real.py", run)
+        self.assertIn("set -Eeuo pipefail", run)
+        for field in ("HOME:", "XDG_CONFIG_HOME:", "XDG_STATE_HOME:", "XDG_DATA_HOME:"):
+            self.assertNotIn(field, run)
+        self.assertIn("if-no-files-found: error", retain)
+        self.assertIn("github.sha", retain)
+        self.assertIn("github.run_attempt", retain)
+        paths = [path for path in retain.split("          path: |\n", 1)[1].splitlines() if path.strip()]
+        self.assertTrue(paths)
+        for path in paths:
+            self.assertRegex(path.strip(), r"^\$\{\{ runner.temp \}\}/shared-destination-evidence/(?:qualification\.log|shared-destination-real-\*/(?:\*\.log|events\.json|\*\.(?:final-)?before-rescue\.json))$")
+
     def test_release_reuses_proof_and_preserves_artifact_qualification(self):
         text = self.workflow("release.yml")
         self.assertIn("scripts/ci-validation.py verify --commit", text)
@@ -1156,6 +1228,96 @@ class VersionBoundaryTests(unittest.TestCase):
         block = block.split("\n      - ", 1)[0].split("        run: |\n", 1)[1]
         return "\n".join(line[10:] for line in block.splitlines()
                          if line.startswith("          ")) + "\n"
+
+    def test_minimum_bash_bootstrap_authenticates_before_extracting_or_building(self):
+        script = self.step("shell.yml", "Build and bind verified Bash 4.4 on the disposable runner")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            upstream = root / "upstream/bash-4.4"
+            upstream.mkdir(parents=True)
+            configure = upstream / "configure"
+            configure.write_text('#!/bin/bash\nprintf build >>"${CHECK_BUILD}"\nexit 42\n')
+            configure.chmod(0o755)
+            archive = root / "source.tar.gz"
+            with tarfile.open(archive, "w:gz") as output:
+                output.add(upstream, arcname="bash-4.4")
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            script = re.sub(r"readonly source_sha=[0-9a-f]{64}", "readonly source_sha=" + digest, script)
+            fixture = r'''
+curl() {
+    local output='' url=''
+    while (($#)); do
+        case $1 in --output) output=$2; shift ;; https://*) url=$1 ;; esac
+        shift
+    done
+    printf download >>"${CHECK_DOWNLOAD}"
+    case ${url} in
+        *.tar.gz) cp -- "${CHECK_ARCHIVE}" "${output}" ;;
+        *) printf 'inert verification fixture\n' >"${output}" ;;
+    esac
+}
+gpgv() {
+    [[ ${CHECK_SIGNATURE} != failure ]] || return 23
+    local fingerprint=7C0135FB088AAF6C66C650B9BB5869F064EA74AB
+    [[ ${CHECK_SIGNATURE} != wrong ]] || fingerprint=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+    printf '[GNUPG:] VALIDSIG %s 2016-09-14 1473863216 0 4 0 17 2 00 %s\n' \
+        "${fingerprint}" "${fingerprint}"
+}
+tar() { printf extract >>"${CHECK_EXTRACT}"; command tar "$@"; }
+sudo() { printf 'Unexpected host mutation\n' >&2; return 99; }
+'''
+            for condition, expected in (("valid", 42), ("checksum", 1), ("wrong", 1),
+                                        ("failure", 23), ("self-hosted", 1)):
+                with self.subTest(condition=condition):
+                    run = root / condition
+                    run.mkdir()
+                    current = script.replace("readonly source_sha=" + digest,
+                                             "readonly source_sha=" + "0" * 64) if condition == "checksum" else script
+                    env = dict(os.environ, RUNNER_TEMP=str(run), GITHUB_PATH=str(run / "path"),
+                               GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="self-hosted" if condition == "self-hosted" else "github-hosted",
+                               CHECK_ARCHIVE=str(archive), CHECK_SIGNATURE=condition,
+                               CHECK_BUILD=str(run / "build"), CHECK_EXTRACT=str(run / "extract"),
+                               CHECK_DOWNLOAD=str(run / "download"))
+                    result = subprocess.run(["bash", "-c", fixture + current], env=env,
+                                            capture_output=True, timeout=10, check=False)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    self.assertEqual((run / "extract").exists(), condition == "valid")
+                    self.assertEqual((run / "build").exists(), condition == "valid")
+                    self.assertEqual((run / "download").exists(), condition != "self-hosted")
+
+    def test_deno_bootstrap_refuses_bad_digest_before_extracting_or_executing(self):
+        script = self.step("real-tools.yml", "Install verified Deno for shared-destination qualification")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "deno.zip"
+            with zipfile.ZipFile(archive, "w") as output:
+                output.writestr("deno", '#!/bin/bash\nprintf executed >>"${CHECK_EXECUTE}"\nprintf "deno 2.9.4\\n"\n')
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            fixture = r'''
+curl() {
+    while (($#)); do
+        if [[ $1 == --output ]]; then cp -- "${CHECK_ARCHIVE}" "$2"; return; fi
+        shift
+    done
+    return 99
+}
+unzip() { printf inspect >>"${CHECK_EXTRACT}"; command unzip "$@"; }
+'''
+            for valid in (False, True):
+                with self.subTest(valid=valid):
+                    run = root / str(valid)
+                    run.mkdir()
+                    current = re.sub(r"readonly archive_sha=[0-9a-f]{64}",
+                                     "readonly archive_sha=" + (digest if valid else "0" * 64), script)
+                    env = dict(os.environ, RUNNER_TEMP=str(run), GITHUB_PATH=str(run / "path"),
+                               CHECK_ARCHIVE=str(archive), CHECK_EXECUTE=str(run / "execute"),
+                               CHECK_EXTRACT=str(run / "extract"))
+                    result = subprocess.run(["bash", "-c", fixture + current], env=env,
+                                            capture_output=True, timeout=10, check=False)
+                    self.assertEqual(result.returncode, 0 if valid else 1, result.stderr)
+                    self.assertEqual((run / "extract").exists(), valid)
+                    self.assertEqual((run / "execute").exists(), valid)
+                    self.assertEqual((run / "path").exists(), valid)
 
     def test_development_artifact_names_bind_source_and_run_across_consumer_reruns(self):
         text = (PROJECT / ".github/workflows/packages.yml").read_text()
