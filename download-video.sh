@@ -1052,7 +1052,6 @@ process_threads_are_quiescent() {
 }
 
 download_group_has_live_member() {
-    local excluded_pid=${1:-}
     local process_path=''
     local process_stat=''
     local observation members='' previous_members='' inventory_self_seen=false
@@ -1070,7 +1069,6 @@ download_group_has_live_member() {
                 inventory_self_seen=true
                 continue
             fi
-            [[ ${process_path} != /proc/"${excluded_pid}"/stat ]] || continue
             process_stat=''
             if ! { IFS= read -r process_stat <"${process_path}"; } 2>/dev/null; then
                 [[ ! -d ${process_path%/stat} ]] || return 0
