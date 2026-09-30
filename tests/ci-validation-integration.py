@@ -1461,5 +1461,322 @@ gh() {
                         self.assertIn(b"differs byte-for-byte", result.stderr)
 
 
+class PassiveDiagnosticsTests(unittest.TestCase):
+    """Exercise passive reads and the real Ubuntu step without running suites."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            "ci_diagnostics", PROJECT / "scripts/ci-validation-diagnostics.py")
+        cls.helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.helper)
+
+    def directories(self, root):
+        diagnostics, logs = root / "diagnostics", root / "logs"
+        for directory in (diagnostics, logs):
+            directory.mkdir(mode=0o700)
+        return diagnostics, logs
+
+    def test_exact_vocabulary_does_not_disclose_valid_prefix_secrets(self):
+        helper = self.helper
+        accepted = b"Mock scenario: config-crlf"
+        self.assertEqual(helper.selected_line(accepted), accepted.decode())
+        for line in (b"Mock scenario: secret-token-valid-alnum",
+                     accepted + b"-secret-token", accepted + b" secret-token",
+                     b"Payload secret-token: " + b"a" * 64,
+                     b"Payload download-video.sh: " + b"x" * 64):
+            with self.subTest(line=line):
+                self.assertIsNone(helper.selected_line(line))
+        for line, expected in (
+            (b"FAIL: https://private.invalid/?secret-token", "failure-diagnostic-present"),
+            (b"Installed helper contract passed: /secret-token", "installed-helper-contract-passed"),
+            (b"Payload download-video.sh: " + b"a" * 64, "installed-payload-checked"),
+        ):
+            self.assertEqual(helper.selected_line(line), expected)
+            self.assertNotIn("secret-token", helper.selected_line(line))
+
+    def test_open_log_descriptors_preserve_late_data_after_unlink(self):
+        helper = self.helper
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics, logs = self.directories(Path(temporary))
+            helper.publish(str(diagnostics), str(logs))
+            directory = helper.private_directory(str(diagnostics))
+            reader = helper.LogReader(directory)
+            try:
+                self.assertEqual(set(reader.sample()), set(helper.LOG_NAMES))
+                with (logs / helper.LOG_NAMES[0]).open("ab") as producer:
+                    for name in helper.LOG_NAMES:
+                        (logs / name).unlink()
+                    logs.rmdir()
+                    producer.write(b"Mock scenario: config-crlf\nFAIL: secret-token\n")
+                    producer.flush()
+                    sample = reader.sample()[helper.LOG_NAMES[0]]
+                    self.assertEqual(sample["events"], ["Mock scenario: config-crlf",
+                                                        "failure-diagnostic-present"])
+                    self.assertNotIn("secret-token", json.dumps(sample))
+            finally:
+                reader.close()
+                os.close(directory)
+
+    def test_refuses_unsafe_paths_rendezvous_and_log_files_without_blocking(self):
+        helper = self.helper
+        variants = ("directory-link", "ancestor-link", "permissions", "wrong-owner",
+                    "record-link", "oversize-record", "wrong-identity", "log-link", "log-fifo")
+        for variant in variants:
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                diagnostics, logs = self.directories(root)
+                helper.publish(str(diagnostics), str(logs))
+                if variant in ("directory-link", "ancestor-link", "permissions", "wrong-owner"):
+                    target = str(diagnostics)
+                    if variant == "directory-link":
+                        (root / "alias").symlink_to(diagnostics)
+                        target = str(root / "alias")
+                    elif variant == "ancestor-link":
+                        (root / "alias").symlink_to(root)
+                        target = str(root / "alias/diagnostics")
+                    elif variant == "permissions":
+                        diagnostics.chmod(0o755)
+                    owner = os.geteuid() + (1 if variant == "wrong-owner" else 0)
+                    with patch.object(helper.os, "geteuid", return_value=owner):
+                        with self.assertRaises((OSError, ValueError)):
+                            helper.private_directory(target)
+                    continue
+                record = diagnostics / "logs.json"
+                if variant == "record-link":
+                    record.rename(diagnostics / "original")
+                    record.symlink_to(diagnostics / "original")
+                elif variant == "oversize-record":
+                    record.write_bytes(b"secret-token" * helper.MAX_READ)
+                elif variant == "wrong-identity":
+                    payload = json.loads(record.read_text())
+                    payload["inode"] += 1
+                    record.write_text(json.dumps(payload))
+                elif variant.startswith("log-"):
+                    (logs / helper.LOG_NAMES[0]).unlink()
+                    if variant == "log-link":
+                        (logs / helper.LOG_NAMES[0]).symlink_to(record)
+                    else:
+                        os.mkfifo(logs / helper.LOG_NAMES[0], 0o600)
+                directory = helper.private_directory(str(diagnostics))
+                reader = helper.LogReader(directory)
+                try:
+                    with self.assertRaises((OSError, ValueError)):
+                        reader.sample()
+                finally:
+                    reader.close()
+                    os.close(directory)
+
+    def test_unknown_and_oversized_lines_and_total_read_bound(self):
+        helper = self.helper
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics, logs = self.directories(Path(temporary))
+            helper.publish(str(diagnostics), str(logs))
+            path = logs / helper.LOG_NAMES[0]
+            path.write_bytes(b"x" * (helper.MAX_LINE + 1) + b"Mock scenario: config-crlf\n"
+                             b"Mock scenario: secret-token\nMock scenario: config-crlf\n")
+            directory = helper.private_directory(str(diagnostics))
+            reader = helper.LogReader(directory)
+            try:
+                sample = reader.sample()[helper.LOG_NAMES[0]]
+                self.assertEqual(sample["events"], ["Mock scenario: config-crlf"])
+                with patch.object(helper, "MAX_LOG_BYTES", sample["bytes_read"] + 7):
+                    with path.open("ab") as producer:
+                        producer.write(b"secret-token" * 50)
+                    bounded = reader.sample()[helper.LOG_NAMES[0]]
+                    self.assertTrue(bounded["size_bound"])
+                    self.assertEqual(bounded["bytes_read"], sample["bytes_read"] + 7)
+                    self.assertEqual(reader.sample()[helper.LOG_NAMES[0]]["events"], [])
+            finally:
+                reader.close()
+                os.close(directory)
+
+    def test_observer_real_counters_stop_and_finite_bound(self):
+        import contextlib
+        import io
+        helper = self.helper
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics, logs = self.directories(Path(temporary))
+            helper.publish(str(diagnostics), str(logs))
+            (diagnostics / "done").touch(mode=0o600)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(helper.observe(str(diagnostics)), 0)
+            row = json.loads(output.getvalue())
+            self.assertTrue(row["done"])
+            self.assertTrue(row["logs_attached"])
+            self.assertIn("/proc/stat", row["counters"])
+            self.assertEqual(len(row["counters"]["/proc/loadavg"]["value"].split()), 3)
+            (diagnostics / "done").unlink()
+            output = io.StringIO()
+            with patch.object(helper, "MAX_SAMPLES", 2), patch.object(helper.time, "sleep"), \
+                    contextlib.redirect_stdout(output):
+                self.assertEqual(helper.observe(str(diagnostics)), 70)
+            rows = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(rows[-1]["expired"])
+            with patch.object(helper.os, "open", side_effect=PermissionError(13, "secret-token")):
+                self.assertEqual(helper.counter("/proc/stat"), {"error": "PermissionError", "errno": 13})
+
+    def test_done_requires_handoff_and_drains_tail_beyond_one_chunk(self):
+        import contextlib
+        import io
+        helper = self.helper
+        for variant in ("missing", "tail", "size-bound"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as temporary:
+                diagnostics, logs = self.directories(Path(temporary))
+                if variant != "missing":
+                    helper.publish(str(diagnostics), str(logs))
+                    size = helper.MAX_READ * 2 if variant == "tail" else helper.MAX_LOG_BYTES + 1
+                    (logs / helper.LOG_NAMES[0]).write_bytes(
+                        b"x" * size + b"\nMock scenario: config-crlf\n")
+                (diagnostics / "done").touch(mode=0o600)
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    status = helper.observe(str(diagnostics))
+                row = json.loads(output.getvalue())
+                self.assertEqual(status, 0 if variant == "tail" else 65)
+                self.assertEqual(row["complete"], variant == "tail")
+                if variant == "tail":
+                    self.assertEqual(row["logs"][helper.LOG_NAMES[0]]["last_event"],
+                                     "Mock scenario: config-crlf")
+                elif variant == "size-bound":
+                    self.assertTrue(row["logs"][helper.LOG_NAMES[0]]["size_bound"])
+                    self.assertEqual(row["logs"][helper.LOG_NAMES[0]]["bytes_read"],
+                                     helper.MAX_LOG_BYTES)
+                else:
+                    self.assertFalse(row["logs_attached"])
+
+    def test_failed_fstat_closes_the_opened_descriptor(self):
+        helper = self.helper
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "done").touch(mode=0o600)
+            directory = helper.private_directory(str(root))
+            real_open = os.open
+            opened = []
+
+            def record_open(*args, **kwargs):
+                descriptor = real_open(*args, **kwargs)
+                opened.append(descriptor)
+                return descriptor
+
+            try:
+                with patch.object(helper.os, "open", side_effect=record_open), \
+                        patch.object(helper.os, "fstat", side_effect=OSError(5, "fixture")):
+                    with self.assertRaises(OSError):
+                        helper.private_file(directory, "done")
+                self.assertEqual(len(opened), 1)
+                with self.assertRaises(OSError):
+                    os.fstat(opened[0])
+            finally:
+                os.close(directory)
+
+    def test_publish_does_not_replace_existing_rendezvous(self):
+        helper = self.helper
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics, logs = self.directories(Path(temporary))
+            record = diagnostics / "logs.json"
+            record.write_text("preserve-me")
+            record.chmod(0o600)
+            with self.assertRaises(FileExistsError):
+                helper.publish(str(diagnostics), str(logs))
+            self.assertEqual(record.read_text(), "preserve-me")
+
+    def test_runner_consumes_optional_variable_before_any_child(self):
+        source = (PROJECT / "tests/run-all.sh").read_text()
+        main = source[source.rindex("\nmain() {\n"):]
+        fixture = r'''
+set -euo pipefail
+parse_arguments() { DOCTOR_ONLY=false; LIST_ONLY=false; PROFILE=full; JOBS=4; }
+validate_shell_file_arrays() { :; }
+validate_suite_manifest() { :; }
+test_runner_initialize() { TEST_RUNNER_LOG_DIR=${CHECK_LOGS}; }
+cleanup() { :; }
+test_runner_now_ms() { printf '1\n'; }
+test_runner_format_duration() { printf -v "$2" '0.000s'; }
+run_static_validation() {
+    python3 -c 'import os; assert "YTDLP_ARIA2_CI_DIAGNOSTICS_DIR" not in os.environ'
+    [[ -f ${CHECK_DIAGNOSTICS}/logs.json ]]
+    printf 'private rendezvous, child environment clean\n'
+}
+run_integration_suites() { run_static_validation; }
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics, logs = self.directories(Path(temporary))
+            result = subprocess.run(["bash", "-c", fixture + main], cwd=PROJECT,
+                                    env=dict(os.environ, PROJECT_DIR=str(PROJECT),
+                                             CHECK_LOGS=str(logs), CHECK_DIAGNOSTICS=str(diagnostics),
+                                             YTDLP_ARIA2_CI_DIAGNOSTICS_DIR=str(diagnostics)),
+                                    capture_output=True, text=True, timeout=5, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.count("child environment clean"), 2)
+            self.assertEqual(json.loads((diagnostics / "logs.json").read_text())["directory"], str(logs))
+
+    def test_real_workflow_step_preserves_statuses_and_observer_failure(self):
+        script = VersionBoundaryTests.step("shell.yml", "Run validation")
+        command = "timeout --signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --jobs 4"
+        self.assertIn(command, script)
+        fixture = r'''
+umask "${CHECK_INCOMING_UMASK}"
+python3() {
+    if [[ ${4:-} == observe && ${CHECK_OBSERVER_FAILURE} == 1 ]]; then
+        command python3 "$1" "$2" "$3" "$4" "${CHECK_INVALID_DIAGNOSTICS}"
+        return
+    fi
+    command python3 "$@"
+}
+timeout() {
+    [[ "$*" == '--signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --jobs 4' ]] || return 98
+    shift 3
+    if [[ ${CHECK_TIMEOUT} == 1 ]]; then
+        command timeout --signal=TERM --kill-after=10s 0.05s "$@"
+    else
+        "$@"
+    fi
+}
+'''
+        cases = ((0, False, False, 0), (23, False, False, 23),
+                 (0, True, False, 124), (0, False, True, 65), (23, False, True, 23))
+        for case, incoming_umask in ((case, mask) for case in cases for mask in ("0022", "0077")):
+            command_status, expired, observer_failed, expected = case
+            with self.subTest(status=expected, expired=expired, observer_failed=observer_failed,
+                              umask=incoming_umask), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                for directory in ("scripts", "tests", "runner-temp", "logs"):
+                    (root / directory).mkdir(mode=0o700)
+                (root / "invalid").mkdir(mode=0o755)
+                (root / "invalid").chmod(0o755)
+                shutil.copyfile(PROJECT / "scripts/ci-validation-diagnostics.py",
+                                root / "scripts/ci-validation-diagnostics.py")
+                (root / "tests/run-all.sh").write_text(r'''
+set -euo pipefail
+[[ $(umask) == "${CHECK_INCOMING_UMASK}" ]] || exit 96
+command python3 -I -B scripts/ci-validation-diagnostics.py publish \
+    "${YTDLP_ARIA2_CI_DIAGNOSTICS_DIR}" "${CHECK_LOGS}"
+printf 'Mock scenario: config-crlf\n' >"${CHECK_LOGS}/mock-gui-state.log"
+if [[ ${CHECK_TIMEOUT} == 1 ]]; then sleep 1; fi
+exit "${CHECK_COMMAND_STATUS}"
+''')
+                result = subprocess.run(["bash", "-c", fixture + script], cwd=root,
+                                        env=dict(os.environ, RUNNER_TEMP=str(root / "runner-temp"),
+                                                 CHECK_LOGS=str(root / "logs"),
+                                                 CHECK_INVALID_DIAGNOSTICS=str(root / "invalid"),
+                                                 CHECK_INCOMING_UMASK=incoming_umask,
+                                                 CHECK_COMMAND_STATUS=str(command_status),
+                                                 CHECK_TIMEOUT=str(int(expired)),
+                                                 CHECK_OBSERVER_FAILURE=str(int(observer_failed))),
+                                        capture_output=True, text=True, timeout=5, check=False)
+                self.assertEqual(result.returncode, expected, result.stderr + result.stdout)
+                records = list((root / "runner-temp").glob("*/samples.jsonl"))
+                self.assertEqual(len(records), 1)
+                self.assertTrue((records[0].parent / "done").is_file())
+                if not observer_failed:
+                    rows = [json.loads(line) for line in records[0].read_text().splitlines()]
+                    self.assertTrue(rows[-1]["done"])
+                self.assertIn(f"Validation status: {124 if expired else command_status};", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

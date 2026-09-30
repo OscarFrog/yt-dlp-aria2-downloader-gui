@@ -127,6 +127,21 @@ individual signal, shutdown and fixture deadlines, which remain unchanged.
 Ubuntu/Fedora jobs retain their five-minute suite budgets and every wrapper
 retains TERM followed by KILL after ten seconds.
 
+The Ubuntu `Run validation` step also records bounded passive diagnostics for
+its current execution. `scripts/ci-validation-diagnostics.py` reads aggregate
+resource counters and allowlisted progress from the GUI-state and packaging
+logs. The runner consumes its optional private rendezvous before starting
+sub-suites, so nested runners cannot overwrite that handoff. Reading an already
+opened log through its final drain preserves observations across ordinary
+cleanup without preventing cleanup or changing supervision. Raw log contents,
+process arguments and environments are not exported by this diagnostic.
+
+Missing or denied observations remain explicit. A nonzero validation status,
+including timeout 124, is preserved; missing diagnostic evidence must not turn
+into a successful qualification. Compare monotonic observations within their
+actual run and keep earlier failures distinct from later successful executions.
+The diagnostic's tests run in the canonical CI-validation integration suite.
+
 Some Linux fixtures deliberately use `/usr/bin/python3` or a restricted system
 PATH. After installing distribution dependencies, the disposable minimum-Python
 CI runner binds that path to its selected Python 3.10 and asserts both lookup

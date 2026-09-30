@@ -926,6 +926,15 @@ qualification. Historical content proof has no arbitrary calendar expiry; change
 new failure or missing evidence invalidates reuse. Current external inputs and
 explicit requalification/recovery are described in `TESTING.md`.
 
+The Ubuntu shell job can collect passive validation diagnostics through
+`scripts/ci-validation-diagnostics.py`. Its optional private rendezvous identifies
+only the current runner's log directory. The reader retains bounded, allowlisted
+progress from GUI-state and packaging logs, including bytes available after the
+runner unlinks an already opened log. Aggregate resource samples distinguish
+observed scheduling pressure from task occupancy; they do not establish the
+cause of an earlier timeout. This source-only diagnostic does not supervise or
+signal workers, replace their status, or extend the validation deadline.
+
 Each source workflow first checks its own immutable checkout identity, version
 coherence and Bash syntax. The full shell contract and the complementary
 qualifications then run independently: none holds a runner merely to poll for

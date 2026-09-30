@@ -1488,10 +1488,13 @@ run_integration_suites() {
 
 main() {
     local command_name=''
+    local diagnostic_directory=${YTDLP_ARIA2_CI_DIAGNOSTICS_DIR:-}
     local total_start_ms
     local total_end_ms
     local total_duration
 
+    # The rendezvous belongs to this invocation, never a nested runner fixture.
+    unset YTDLP_ARIA2_CI_DIAGNOSTICS_DIR
     parse_arguments "$@"
     validate_shell_file_arrays
     validate_suite_manifest
@@ -1522,6 +1525,11 @@ main() {
     trap 'test_runner_handle_signal HUP 129' HUP
     trap 'test_runner_handle_signal INT 130' INT
     trap 'test_runner_handle_signal TERM 143' TERM
+
+    if [[ -n ${diagnostic_directory} ]]; then
+        python3 -I -B "${PROJECT_DIR}/scripts/ci-validation-diagnostics.py" \
+            publish "${diagnostic_directory}" "${TEST_RUNNER_LOG_DIR}"
+    fi
 
     total_start_ms=$(test_runner_now_ms)
     printf 'Validation profile: %s (validation jobs: %d)\n\n' \

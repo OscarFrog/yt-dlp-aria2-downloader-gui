@@ -47,6 +47,9 @@
   provision checksum-pinned impersonation dependencies for managed-runtime CI.
 - Record startup-timeout process state before rescue and allowlisted GUI failure
   categories before fixture cleanup, without exposing requests or changing statuses.
+- Retain bounded, allowlisted progress from interrupted Ubuntu validation suites
+  with passive resource measurements, preserving the original validation status,
+  five-minute deadline and four-worker schedule.
 - Revalidate stale observer stat reads once without accepting uncertain shutdown;
   isolate second-inventory oracles from unrelated procfs races and retain a
   separate conservative-refusal control.

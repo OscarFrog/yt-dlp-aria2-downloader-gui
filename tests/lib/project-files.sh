@@ -125,6 +125,7 @@ PYTHON_FILES=(
     scripts/check-push-version.py
     scripts/prepare-source-version.py
     scripts/ci-validation.py
+    scripts/ci-validation-diagnostics.py
     scripts/verify-source-archive.py
     tests/ci-validation-integration.py
     tests/source-archive-integration.py

@@ -67,7 +67,35 @@ jobs:
       - name: Check workflow syntax and embedded shell
         run: bash ./scripts/check-workflows.sh
       - name: Run validation
-        run: timeout --signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --jobs 4
+        run: |
+          set -Eeuo pipefail
+          validation_umask=$(umask)
+          umask 077
+          diagnostic_dir=$(mktemp -d "${RUNNER_TEMP}/validation-diagnostics.XXXXXXXX")
+          python3 -I -B scripts/ci-validation-diagnostics.py observe "${diagnostic_dir}" \
+            >"${diagnostic_dir}/samples.jsonl" &
+          diagnostic_pid=$!
+          # shellcheck disable=SC2329 # EXIT invokes this collector; the step replay exercises that path.
+          finish_diagnostics() {
+            local validation_status=$?
+            local diagnostic_status=0
+            trap - EXIT
+            umask 077
+            : >"${diagnostic_dir}/done" || diagnostic_status=$?
+            wait "${diagnostic_pid}" || diagnostic_status=$?
+            cat -- "${diagnostic_dir}/samples.jsonl" || diagnostic_status=$?
+            printf 'Validation status: %d; diagnostic status: %d\n' \
+              "${validation_status}" "${diagnostic_status}" || diagnostic_status=$?
+            ((validation_status != 0)) || validation_status=${diagnostic_status}
+            exit "${validation_status}"
+          }
+          trap 'finish_diagnostics' EXIT
+          validation_status=0
+          umask "${validation_umask}"
+          YTDLP_ARIA2_CI_DIAGNOSTICS_DIR=${diagnostic_dir} \
+            timeout --signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --jobs 4 \
+            || validation_status=$?
+          exit "${validation_status}"
   validate-python-minimum:
     needs: identity
     name: Python 3.10 / Ubuntu
