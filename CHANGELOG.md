@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 2.4.0 - Unreleased
+
+### Maintenance
+
+- Add shared destination concurrency and harden process lifecycle
 
 ### Shared destinations
 
