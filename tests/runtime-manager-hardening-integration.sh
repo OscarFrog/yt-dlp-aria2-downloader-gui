@@ -256,6 +256,12 @@ for fd_path in /proc/$$/fd/*; do
     target=$(readlink -- "${fd_path}" 2>/dev/null || true)
     [[ ${target} != */yt-dlp-aria2-downloader/runtime/update.lock ]] || : >"${MOCK_FD_LEAK_MARKER:?}"
 done
+if [[ -n ${MOCK_DENO_EXTRACTION_MARKER:-} ]]; then
+    : >"${MOCK_DENO_EXTRACTION_MARKER}"
+fi
+if [[ -n ${MOCK_DENO_REAL_ARCHIVE:-} ]]; then
+    exec /usr/bin/unzip "$@"
+fi
 archive=''
 requested_deno=false
 for arg in "$@"; do
@@ -433,10 +439,19 @@ EOF_YTDLP
 */denoland/deno/releases/download/v*/*)
     version=${url#*/releases/download/v}; version=${version%%/*}; name=${url##*/}
     case ${name} in
-    deno-*.zip) printf 'deno-archive=%s\n' "${version}" >"${output}" ;;
+    deno-*.zip)
+        if [[ -n ${MOCK_DENO_REAL_ARCHIVE:-} ]]; then
+            cp -- "${MOCK_DENO_REAL_ARCHIVE}" "${output}"
+        else
+            printf 'deno-archive=%s\n' "${version}" >"${output}"
+        fi
+        ;;
     *.sha256sum)
         dir=${output%/*}; archive=${name%.sha256sum}
         hash=$(sha256sum -- "${dir}/${archive}"); hash=${hash%% *}
+        if [[ ${MOCK_DENO_WRONG_CHECKSUM:-0} == 1 ]]; then
+            hash=0000000000000000000000000000000000000000000000000000000000000000
+        fi
         printf '%s *%s\n' "${hash}" "${archive}" >"${output}"
         ;;
     *) exit 64 ;;
@@ -742,16 +757,15 @@ test_bounded_runtime_probes() {
 
 test_oversized_deno_versions() {
     local deno_overflow_case=''
-    local deno_overflow_name=''
     local deno_overflow_version=''
 
     # Deno version comparison must remain correct even when a syntactically
     # valid component is wider than Bash's fixed-width arithmetic.
     for deno_overflow_case in 'overflow-major:18446744073709551618.0.0' 'overflow-minor:2.18446744073709551618.0'; do
-        IFS=: read -r deno_overflow_name deno_overflow_version <<<"${deno_overflow_case}"
-        make_deno "${deno_root}/${deno_overflow_name}/deno" "${deno_overflow_version}"
+        IFS=: read -r _ deno_overflow_version <<<"${deno_overflow_case}"
+        make_deno "${deno_root}/${deno_overflow_version}/deno" "${deno_overflow_version}"
         rm -f -- "${deno_root}/current"
-        ln -s -- "${deno_overflow_name}" "${deno_root}/current"
+        ln -s -- "${deno_overflow_version}" "${deno_root}/current"
         MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" "${RUNTIME_MANAGER}" require >/dev/null || fail "Deno oversized semantic version was rejected: ${deno_overflow_version}"
     done
     rm -f -- "${deno_root}/current"
@@ -1108,6 +1122,91 @@ make_recovery_fixture() {
     ln -s 2.7.0 "${root}/deno/previous"
 }
 
+test_exact_active_runtime_admission() {
+    local component action data_home root asset active previous mismatch status channel
+    local -a operation=()
+    for channel in stable nightly; do
+        for component in yt-dlp deno; do
+            for action in require prepare-require ensure prepare-update; do
+                data_home="${TEST_ROOT}/exact-${channel}-${component}-${action}"
+                make_recovery_fixture "${data_home}"
+                root="${data_home}/yt-dlp-aria2-downloader/runtime/${component}"
+                if [[ ${component} == yt-dlp ]]; then
+                    asset=${YTDLP_ASSET}
+                    active=2026.06.09
+                    previous=2026.03.17
+                    mismatch=2026.07.04
+                    make_ytdlp "${root}/${active}/${asset}" "${mismatch}"
+                else
+                    asset=deno
+                    active=2.8.0
+                    previous=2.7.0
+                    mismatch=2.9.5
+                    make_deno "${root}/${active}/${asset}" "${mismatch}"
+                fi
+                case ${action} in
+                    require) operation=(require) ;;
+                    prepare-require) operation=(prepare require) ;;
+                    ensure) operation=(ensure) ;;
+                    prepare-update) operation=(prepare update) ;;
+                    *) return 64 ;;
+                esac
+                rm -f -- "${NETWORK_MARKER}"
+                status=0
+                "${runtime_env[@]}" XDG_DATA_HOME="${data_home}" \
+                    YTDLP_ARIA2_YTDLP_CHANNEL="${channel}" MOCK_NETWORK_FORBIDDEN=1 \
+                    "${RUNTIME_MANAGER}" "${operation[@]}" >"${data_home}/result" 2>"${data_home}/error" || status=$?
+                if [[ ${action} == *require ]]; then
+                    assert_equals 69 "${status}" 'exact active version is required offline'
+                    assert_link_target "${root}/current" "${active}" 'require never repairs activation'
+                    [[ ! -e ${NETWORK_MARKER} ]] || fail 'require consulted network for incoherent runtime'
+                else
+                    assert_equals 0 "${status}" 'local exact-version recovery succeeds'
+                    assert_link_target "${root}/current" "${previous}" 'local recovery selects exact previous'
+                fi
+            done
+        done
+    done
+}
+
+test_deno_checksum_before_extraction() {
+    local data_home="${TEST_ROOT}/checksum-admission"
+    local root archive extraction execution status
+    make_recovery_fixture "${data_home}"
+    root="${data_home}/yt-dlp-aria2-downloader/runtime"
+    archive="${data_home}/valid.zip"
+    extraction="${data_home}/extracted"
+    execution="${data_home}/executed"
+    python3 -I -B - "${archive}" <<'PY_VALID_ZIP'
+import sys
+import zipfile
+with zipfile.ZipFile(sys.argv[1], 'w') as archive:
+    info = zipfile.ZipInfo('deno')
+    info.external_attr = 0o100755 << 16
+    archive.writestr(info, '#!/bin/bash\nprintf executed >"${MOCK_DENO_EXEC_MARKER}"\nprintf "deno 2.9.5 (stable, release)\\n"\n')
+PY_VALID_ZIP
+    status=0
+    "${runtime_env[@]}" XDG_DATA_HOME="${data_home}" \
+        MOCK_DENO_REAL_ARCHIVE="${archive}" MOCK_DENO_WRONG_CHECKSUM=1 \
+        MOCK_DENO_EXTRACTION_MARKER="${extraction}" MOCK_DENO_EXEC_MARKER="${execution}" \
+        MOCK_YTDLP_STABLE_VERSION=2026.06.09 \
+        "${RUNTIME_MANAGER}" update >"${data_home}/result" 2>"${data_home}/error" || status=$?
+    # Update may keep the healthy installed pair; rejection is proven at the
+    # extraction/execution/activation boundaries, not by an incidental status.
+    assert_equals 0 "${status}" 'checksum failure retains a usable runtime'
+    [[ ! -e ${extraction} && ! -e ${execution} ]] || fail 'bad checksum reached extraction or execution'
+    assert_file_contains "${data_home}/error" 'checksum verification or extraction failed' 'wrong checksum diagnostic'
+    assert_link_target "${root}/deno/current" 2.8.0 'checksum rejection preserves active'
+    assert_link_target "${root}/deno/previous" 2.7.0 'checksum rejection preserves previous'
+    "${runtime_env[@]}" XDG_DATA_HOME="${data_home}" \
+        MOCK_DENO_REAL_ARCHIVE="${archive}" MOCK_DENO_WRONG_CHECKSUM=0 \
+        MOCK_DENO_EXTRACTION_MARKER="${extraction}" MOCK_DENO_EXEC_MARKER="${execution}" \
+        MOCK_YTDLP_STABLE_VERSION=2026.06.09 \
+        "${RUNTIME_MANAGER}" update >/dev/null
+    [[ -e ${extraction} && -e ${execution} ]] || fail 'valid archive control did not execute'
+    assert_link_target "${root}/deno/current" 2.9.5 'valid checksum activates valid archive'
+}
+
 test_rollback_candidate_admission() {
     local component scenario data_home root asset current previous candidate
     local status marker before after attestation
@@ -1386,7 +1485,7 @@ test_cached_runtime_file_identity() {
     local runtime_status=0
 
     mkdir -m 0700 -- "${comparison_bin}"
-    cat >"${comparison_bin}/timeout" <<'EOF_RUNTIME_IDENTITY_TIMEOUT'
+    cat >"${comparison_bin}/python3" <<'EOF_RUNTIME_IDENTITY_PROBE'
 #!/usr/bin/env bash
 set -euo pipefail
 for argument in "$@"; do
@@ -1398,8 +1497,8 @@ for argument in "$@"; do
         exit 124
     fi
 done
-exec /usr/bin/timeout "$@"
-EOF_RUNTIME_IDENTITY_TIMEOUT
+exec /usr/bin/python3 "$@"
+EOF_RUNTIME_IDENTITY_PROBE
     cat >"${comparison_bin}/cmp" <<'EOF_RUNTIME_IDENTITY_CMP'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1412,7 +1511,7 @@ for argument in "$@"; do
 done
 exec /usr/bin/cmp "$@"
 EOF_RUNTIME_IDENTITY_CMP
-    chmod 0755 -- "${comparison_bin}/timeout" "${comparison_bin}/cmp"
+    chmod 0755 -- "${comparison_bin}/python3" "${comparison_bin}/cmp"
 
     for component in yt-dlp deno; do
         case_root="${TEST_ROOT}/runtime-file-identity-${component}"
@@ -1656,6 +1755,8 @@ main() {
     test_signature_failure_bootstrap
     test_fresh_runtime_bootstrap
     test_no_network_require
+    test_exact_active_runtime_admission
+    test_deno_checksum_before_extraction
     test_rollback_candidate_admission
     test_structurally_missing_active_recovery
     test_missing_old_activation_journal

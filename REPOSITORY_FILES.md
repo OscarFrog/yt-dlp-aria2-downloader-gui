@@ -74,6 +74,7 @@ The first column contains every source path included in this inventory, includin
 | `packaging/rpm/yt-dlp-aria2-downloader-gui.spec` | RPM metadata | Source-only RPM definition for dependencies, build/install, file ownership and lifecycle scriptlets; invokes the common payload assembler with the supplied version. | KEEP |
 | `packaging/yt-dlp-aria2-downloader.desktop` | Desktop integration | Installed RPM/DEB system menu entry targeting the public GUI command and dedicated icon; portable entry generation is owned by the Python launcher helper. | KEEP |
 | `private-aria2-plan.py` | Python module/script | Installed Python helper: selects validated local metadata/disk roots, handles private aria2 plans and native video/audio collision preflight, checks local space, copies and publishes media without replacement, and cleans identity-bound active workspaces. | KEEP |
+| `private-process-supervisor.py` | Python helper | Installed RPM/DEB timed-command supervisor used by runtime and FFprobe callers; pins group leader identity until all live consumers stop and preserves first-signal/deadline status. | KEEP |
 | `private-launcher-manager.py` | Python helper | Source-only portable install/uninstall implementation called by `install-gui.sh`; anchors XDG directories, locks transactions, validates desktop data under unreaped-leader group supervision and rolls back partial publication. | KEEP |
 | `progress-monitor.sh` | Bash progress helper | Installed RPM/DEB helper called by the GUI; turns native/aria2/FFmpeg records into monotonic Zenity progress, including the final media-copy phase. | KEEP |
 | `runtime-manager.sh` | Bash runtime helper | Installed RPM/DEB helper and Git/ZIP component called by engine/bootstrap; authenticates, activates, attests and rolls back per-user yt-dlp/Deno versions under a lock. | KEEP |
@@ -133,8 +134,8 @@ The first column contains every source path included in this inventory, includin
 
 ## Inventory status
 
-- Tracked and new source files included: **101**.
-- Inventory entries: **101**.
-- Files retained: **101**.
+- Tracked and new source files included: **102**.
+- Inventory entries: **102**.
+- Files retained: **102**.
 - Historical files: **1** (`CHANGELOG.md`).
 These counts describe inventory coverage, not a defect-free audit verdict. All descriptions are in English; machine-readable filenames, command names, SPDX identifiers, package metadata and protocol tokens retain their required spelling.

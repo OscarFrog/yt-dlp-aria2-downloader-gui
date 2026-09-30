@@ -89,6 +89,8 @@ assert_packaged_executables() {
     done
 
     local private_aria2_helper="${private_dir}/private-aria2-plan.py"
+    assert_path_mode "${private_dir}/private-process-supervisor.py" 644 \
+        'private-process-supervisor.py permissions'
     local private_launcher_helper="${private_dir}/private-launcher-manager.py"
     [[ -f ${private_aria2_helper} &&
         ! -L ${private_aria2_helper} &&

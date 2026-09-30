@@ -292,6 +292,7 @@ requested_signal=${3}
 slot=${4}
 phase=${5}
 component=${6}
+SCRIPT_DIR=${7}
 RUNTIME_ROOT="${case_root}/runtime"
 LOCK_FILE="${RUNTIME_ROOT}/update.lock"
 RUNTIME_LOCK_WAIT_SECONDS=1
@@ -409,7 +410,7 @@ printf 'write-complete\n' >>"${1}/events"
 exit 7
 ''')
         env=dict(os.environ,PATH=str(bin_dir)+os.pathsep+os.environ['PATH'],MOCK_SIGNAL_CASE=str(case))
-        process=subprocess.Popen(['bash',str(harness),str(source),str(case),name,slot,phase,component],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
+        process=subprocess.Popen(['bash',str(harness),str(source),str(case),name,slot,phase,component,str(runtime_manager.parent)],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
         try:
             if phase == 'foreground':
                 deadline=time.monotonic()+3
