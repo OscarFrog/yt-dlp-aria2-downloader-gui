@@ -1038,6 +1038,13 @@ immutable Git objects and the reviewed workflow definition in the equal tree.
 This proves what the source passed with the qualification environment; it does
 not claim compatibility with every future distribution update.
 
+The latest pinned media job must prove installation of the hash-pinned
+impersonation prerequisites before shared-destination qualification. The two
+earlier pins must retain an explicitly skipped record for that conditional
+step. Missing records, failed installation, a skipped latest-pin installation
+or an unexpected execution in the earlier pins are refused. Regression fixtures
+model the workflow condition independently of the verifier's obligation tables.
+
 An authorized maintainer can inspect a merged candidate without publishing:
 
 ```bash

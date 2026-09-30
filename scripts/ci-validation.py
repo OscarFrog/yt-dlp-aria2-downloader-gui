@@ -78,6 +78,7 @@ REQUIRED_STEPS = {
         "Run aria2 direct-transfer behavior qualification",
         "Run real FFmpeg progress qualification", "Run HLS post-remux duration validation",
         "Install verified Deno for shared-destination qualification",
+        "Install pinned impersonation dependencies for shared qualification",
         "Run real shared-destination GUI and CLI qualification",
         "Retain shared-destination verdicts and monotonic events",
     } for version in ("2026.6.9", "2026.7.4", "2026.8.19")},
@@ -97,6 +98,7 @@ ALLOWED_SKIPS = {
       for version in ("2026.6.9", "2026.7.4")
       for step in ("Run real FFmpeg progress qualification", "Run HLS post-remux duration validation",
                    "Install verified Deno for shared-destination qualification",
+                   "Install pinned impersonation dependencies for shared qualification",
                    "Run real shared-destination GUI and CLI qualification",
                    "Retain shared-destination verdicts and monotonic events")),
 }

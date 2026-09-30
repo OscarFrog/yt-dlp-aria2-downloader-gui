@@ -945,6 +945,10 @@ missing proof or new failure cannot obtain
 release authority from a green status name. Source diagnostic dispatches and
 scheduled tool checks do not substitute for PR qualification.
 
+The shared-destination prerequisite installation is an explicit proof obligation:
+it must succeed on the latest pinned yt-dlp job and remain an explicitly skipped
+step on the two earlier pins. No missing or failed step inherits that exception.
+
 The final source ZIP is read as data and checked against exact Git blob contents,
 paths and extraction modes. Native release builds remain separate because their
 final containers/signatures and current installation/upgrade inputs differ from

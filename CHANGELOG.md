@@ -52,6 +52,8 @@
   separate conservative-refusal control.
 - Size the minimum-interpreter CI suite budget for the measured complete
   workload while preserving individual deadlines and the total job limit.
+- Require the shared-media prerequisite step in source qualification, with
+  skips restricted to the two matrix entries where its workflow condition is false.
 - Add optional injected events in isolated real Zenity windows, distinct from
   scripted responses and operator-assisted desktop qualification.
 

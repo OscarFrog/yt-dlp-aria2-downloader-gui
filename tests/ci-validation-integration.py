@@ -179,6 +179,7 @@ class ProofTests(unittest.TestCase):
             (1, "Python 3.10 / Ubuntu", "Build and bind verified Bash 4.4 on the disposable runner"),
             (1, "Python 3.10 / Ubuntu", "Bind every test interpreter to the minimum Python"),
             (4, "Local media, pinned yt-dlp 2026.8.19", "Install verified Deno for shared-destination qualification"),
+            (4, "Local media, pinned yt-dlp 2026.8.19", "Install pinned impersonation dependencies for shared qualification"),
             (4, "Local media, pinned yt-dlp 2026.8.19", "Run real shared-destination GUI and CLI qualification"),
             (4, "Local media, pinned yt-dlp 2026.8.19", "Retain shared-destination verdicts and monotonic events"),
         )
@@ -195,6 +196,28 @@ class ProofTests(unittest.TestCase):
                         entry["conclusion"] = outcome
                     with self.assertRaises(CHECK.Refusal):
                         CHECK.Verifier(api, NOW).verify(TARGET)
+
+    def test_shared_prerequisite_obligation_matches_the_pinned_matrix(self):
+        step_name = "Install pinned impersonation dependencies for shared qualification"
+        for version in ("2026.6.9", "2026.7.4", "2026.8.19"):
+            for outcome in ("expected", "missing", "failure", "opposite"):
+                with self.subTest(version=version, outcome=outcome):
+                    api = fixture()
+                    jobs = api.responses["actions/runs/400/attempts/1/jobs?per_page=100&page=1"]["jobs"]
+                    job = next(item for item in jobs if item["name"] == f"Local media, pinned yt-dlp {version}")
+                    # Model the workflow condition independently of checker tables.
+                    job["steps"] = [step for step in job["steps"] if step["name"] != step_name]
+                    expected = "success" if version == "2026.8.19" else "skipped"
+                    if outcome != "missing":
+                        conclusion = (expected if outcome == "expected" else "failure" if outcome == "failure"
+                                      else "skipped" if expected == "success" else "success")
+                        job["steps"].append({"name": step_name, "status": "completed", "conclusion": conclusion})
+                    verifier = CHECK.Verifier(api, NOW)
+                    if outcome == "expected":
+                        self.assertEqual(verifier.verify(TARGET)["tree"], TREE)
+                    else:
+                        with self.assertRaises(CHECK.Refusal, msg="matrix prerequisite obligation was not enforced"):
+                            verifier.verify(TARGET)
 
     def test_pr_association_may_be_empty_after_merge_and_fork_is_accepted(self):
         self.assertEqual(self.verify()["pull_request"], 23)
