@@ -1337,7 +1337,7 @@ controlled consumers; real-media cycles are qualified separately:
 | GUI shutdown after worker leader exit | A token-bearing GNU-timeout subgroup remains observable and is stopped before the GUI reports completion |
 | Zombie leader with surviving threads | Real orphan and direct-child witnesses retain a pipe after pthread_exit; observer, GUI/CLI predicates and timed supervisor must still detect and stop the live thread before return. A revalidated consumer pidfd must be readable immediately after helper wait, before pipe draining; a premature-return mutant fails this assertion before rescue |
 | Capability admission and degraded observation | Actual private-child pidfd/WNOWAIT probe, refusals injected before launch and waitid/procfs failures after admission; errors never become absence or cleanup authority |
-| Observer procfs failure | Root/stat failures reject the real Zenity harness even when a previous empty success JSON exists; only a vanished stat entry is tolerated |
+| Observer procfs failure | Root/stat failures reject the real Zenity harness even when a previous empty success JSON exists; an ESRCH stat read is reopened once, and only a confirmed vanished pathname is skipped. A fresh live identity is retained; repeated ESRCH, permission and I/O errors still fail observation |
 | Bash quiescence decisions | A private procfs model changes an enumerated parent to a zombie and adds a live child before its stat is read; GUI session reuse, GUI observation and the CLI sentinel retain supervision. Removing the second inventory fails each oracle without creating or signaling the modeled processes |
 
 The orphan control starts a marked worker in another session, waits for its
@@ -1360,6 +1360,11 @@ fixture while reading real task states, children and descriptors and delivering
 real pidfd signals. Their ambient-inventory control demonstrates how unrelated
 ESRCH can mask the intended missing-freeze mutation; separate uncertainty tests
 still require conservative production refusal.
+The late-fork oracle also bounds enumeration to its real, pinned participants
+and requires the late child in the second snapshot. Its single-inventory mutant
+must report the live child absent; an unrelated read error cannot mask that
+defect. A separate foreign-stat ESRCH witness requires conservative refusal,
+including rejection of a mutant that silently skips that error.
 Confirmed zombie-only state requires stable inventories of every
 thread; a zombie leader alone is insufficient. It means no live consumer can
 use a descriptor, not that the application reaped every descendant. Production engine/GUI
@@ -1373,6 +1378,10 @@ The timed-thread test uses its known consumer's pidfd as the independent stop
 oracle, not another global procfs scan. An unrelated process can exit between
 opening and reading its stat file: a real-kernel control requires this ESRCH to
 remain unknown in the production predicate, even after that process is reaped.
+The test observer independently reopens an ESRCH stat exactly once: it retains
+a revalidated live identity, skips only a now-missing pathname and propagates
+every repeated or different error. A real held-stat descriptor after child
+reaping and injected transient/persistent failures exercise these distinctions.
 Pidfd readiness proves all threads in this fixture's thread group have stopped;
 it does not prove general session quiescence or application reaping.
 The same requirement covers the Bash GUI, engine session-reuse and CLI sentinel

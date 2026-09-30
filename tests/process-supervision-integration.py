@@ -364,6 +364,77 @@ ctypes.CDLL(None).pthread_exit(None)
                     mock.patch.object(Path, 'read_text', side_effect=lambda: held.read()):
                 self.assertTrue(module.session_alive(-1))
 
+    def test_observer_revalidates_proc_stat_after_esrch(self):
+        import errno
+
+        departed = self.launch([sys.executable, '-I', '-B', '-c',
+                                'import time; time.sleep(3)'])
+        departed_path = Path(f'/proc/{departed.pid}/stat')
+        live = self.launch([sys.executable, '-I', '-B', '-c',
+                           'import time; time.sleep(30)'])
+        live_path = Path(f'/proc/{live.pid}/stat')
+        original_identity = observer.process_row(departed_path)['start']
+        live_identity = observer.process_row(live_path)['start']
+        real_read = Path.read_text
+        real_iterdir = Path.iterdir
+
+        def participant_inventory(path):
+            if path == Path('/proc'):
+                return iter((Path(f'/proc/{os.getpid()}'), departed_path.parent, live_path.parent))
+            return real_iterdir(path)
+
+        with departed_path.open() as held:
+            departed.terminate()
+            self.assertEqual(departed.wait(timeout=3), -signal.SIGTERM)
+            with self.assertRaises(ProcessLookupError) as disappeared:
+                held.read()
+            self.assertEqual(disappeared.exception.errno, errno.ESRCH)
+            reads = []
+
+            def stale_once(path, *args, **kwargs):
+                if path == departed_path:
+                    reads.append(path)
+                    if len(reads) == 1:
+                        return held.read()
+                return real_read(path, *args, **kwargs)
+
+            with mock.patch.object(Path, 'iterdir', participant_inventory), \
+                    mock.patch.object(Path, 'read_text', stale_once):
+                rows = observer.snapshot()
+            self.assertEqual(len(reads), 2, 'stale stat was not revalidated exactly once')
+            if departed.pid in rows:
+                self.assertNotEqual(rows[departed.pid]['start'], original_identity,
+                                    'departed identity was reported as live')
+            self.assertIn(live.pid, rows, 'live participant lost after unrelated disappearance')
+
+        # A transient read error cannot silently discard a still-live worker.
+        # Repeated errors must retain the observation failure, not become EOF.
+        for second_error in (None, ProcessLookupError(errno.ESRCH, 'still unknown'),
+                             PermissionError(errno.EACCES, 'denied'), OSError(errno.EIO, 'unreadable')):
+            with self.subTest(second_error=type(second_error).__name__):
+                reads = []
+
+                def live_read(path, *args, **kwargs):
+                    if path == live_path:
+                        reads.append(path)
+                        if len(reads) == 1:
+                            raise ProcessLookupError(errno.ESRCH, 'controlled transient read')
+                        if second_error is not None:
+                            raise second_error
+                    return real_read(path, *args, **kwargs)
+
+                with mock.patch.object(Path, 'iterdir', participant_inventory), \
+                        mock.patch.object(Path, 'read_text', live_read):
+                    if second_error is None:
+                        rows = observer.snapshot()
+                        self.assertEqual(rows[live.pid]['start'], live_identity,
+                                         'revalidated live identity was lost')
+                    else:
+                        with self.assertRaises(type(second_error)) as refusal:
+                            observer.snapshot()
+                        self.assertIs(refusal.exception, second_error)
+                self.assertEqual(len(reads), 2, 'observer retry was not bounded')
+
     def test_finish_reaps_only_revalidated_known_children(self):
         gates = set()
 
@@ -463,9 +534,10 @@ while Path('/proc/' + sys.argv[1]).exists():
                     with self.assertRaises(ProcessLookupError) as error:
                         observer.snapshot()
                     self.assertEqual(error.exception.errno, 3)
+                    self.assertEqual(stale_reads, 2, 'snapshot retry was not bounded')
                     self.assertIsNotNone(os.waitid(os.P_PID, known, os.WEXITED | os.WNOHANG | os.WNOWAIT))
                     out, err = self.finish(waiter)
-                    self.assertEqual(stale_reads, 1, 'finish inspected an unrelated process')
+                    self.assertEqual(stale_reads, 2, 'finish inspected an unrelated process')
             self.assertEqual(waiter.returncode, 0, (out, err))
             self.assertEqual(managed.wait(timeout=3), 31, 'finish stole the managed Popen status')
             with self.assertRaises(ChildProcessError):
@@ -897,6 +969,11 @@ os._exit(0)
                     snapshot = list(real_iterdir(path))
                     if path != Path('/proc'):
                         return iter(snapshot)
+                    # This oracle isolates its real, pinned fixture participants.
+                    # Unrelated procfs failures have separate conservative-refusal
+                    # coverage and must not mask the single-inventory mutant.
+                    participants = {str(os.getpid()), str(process.pid), str(orphan), str(late_child)}
+                    snapshot = [entry for entry in snapshot if entry.name in participants]
                     inventories += 1
                     if inventories == 1:
                         self.assertIn(Path(f'/proc/{orphan}'), snapshot)
@@ -909,6 +986,8 @@ os._exit(0)
                         while fields(orphan)[0] != 'Z':
                             self.assertLess(time.monotonic(), deadline, 'orphan did not exit')
                             time.sleep(.005)
+                    elif inventories == 2:
+                        self.assertIn(Path(f'/proc/{late_child}'), snapshot, 'late child absent from second real inventory')
                     return iter(snapshot)
 
                 with mock.patch.object(Path, 'iterdir', enumerate_then_fork), \
@@ -976,6 +1055,54 @@ os._exit(0)
         with self.subTest(target=filename, second_inventory=False):
             with self.assertRaisesRegex(self.failureException, 'accepted a live late-fork child'):
                 assert_refuses_late_fork(mutant, filename, 1, session_probe=True)
+
+    def test_session_presence_refuses_unreadable_foreign_stat(self):
+        import errno
+
+        code = (PROJECT / 'private-process-supervisor.py').read_text()
+        guard = '                except FileNotFoundError:\n                    continue'
+        self.assertEqual(code.count(guard), 1)
+        mutant = code.replace(
+            guard, '                except (FileNotFoundError, ProcessLookupError):\n                    continue', 1)
+        anchor = self.launch([sys.executable, '-B', '-c', 'import os; os._exit(23)'])
+        deadline = time.monotonic() + 3
+        while os.waitid(os.P_PID, anchor.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+            self.assertLess(time.monotonic(), deadline, 'quiet SID anchor did not exit')
+            time.sleep(.005)
+        anchor_stat = Path(f'/proc/{anchor.pid}/stat')
+        foreign_stat = Path(f'/proc/{os.getppid()}/stat')
+        real_read_text = Path.read_text
+        anchor_row = real_read_text(anchor_stat).rsplit(') ', 1)[1].split()
+        foreign_row = real_read_text(foreign_stat).rsplit(') ', 1)[1].split()
+        self.assertEqual(anchor_row[0], 'Z')
+        self.assertNotEqual(int(foreign_row[3]), anchor.pid, 'foreign witness belongs to the fixture SID')
+
+        def require_conservative_refusal(source, expected_reads):
+            namespace = {'__name__': 'supervision_probe'}
+            exec(compile(source, 'private-process-supervisor.py', 'exec'), namespace)
+            # Both directory entries and the pinned zombie remain real. Fix the
+            # view so another procfs refusal cannot mask the error-handling mutant.
+            namespace['process_paths'] = lambda: [foreign_stat, anchor_stat]
+            deadline = time.monotonic() + 3
+            while not namespace['process_quiescent'](str(anchor.pid), anchor_row[19]):
+                self.assertLess(time.monotonic(), deadline, 'SID anchor tasks did not become quiescent')
+                time.sleep(.005)
+            injected = []
+
+            def unreadable(path, *args, **kwargs):
+                if path == foreign_stat:
+                    injected.append(path)
+                    raise ProcessLookupError(errno.ESRCH, 'controlled unrelated procfs disappearance')
+                return real_read_text(path, *args, **kwargs)
+
+            with mock.patch.object(Path, 'read_text', unreadable):
+                alive = namespace['session_alive'](anchor.pid)
+            self.assertEqual(len(injected), expected_reads, 'foreign stat refusal was not exercised')
+            self.assertTrue(alive, 'unreadable foreign stat was accepted as an absent session')
+
+        require_conservative_refusal(code, 1)
+        with self.assertRaisesRegex(self.failureException, 'unreadable foreign stat was accepted as an absent session'):
+            require_conservative_refusal(mutant, 2)
 
     def test_bash_quiescence_rejects_fork_after_enumeration(self):
         producer = '''import os, sys

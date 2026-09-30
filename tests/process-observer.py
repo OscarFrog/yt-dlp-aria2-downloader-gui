@@ -33,6 +33,15 @@ def snapshot():
         except FileNotFoundError:
             # A process may disappear between enumeration and its stat read.
             continue
+        except ProcessLookupError:
+            # A stat opened before exit can fail with ESRCH when read later.
+            # Reopen once: a vanished pathname confirms disappearance, a live
+            # replacement supplies a fresh identity, and repeated or different
+            # errors still make the observation fail instead of proving a stop.
+            try:
+                rows[int(path.parent.name)] = process_row(path)
+            except FileNotFoundError:
+                continue
     if own_pid not in rows:
         raise OSError('incomplete procfs inventory: observer stat is absent')
     return rows

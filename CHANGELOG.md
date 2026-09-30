@@ -47,6 +47,9 @@
   provision checksum-pinned impersonation dependencies for managed-runtime CI.
 - Record startup-timeout process state before rescue and allowlisted GUI failure
   categories before fixture cleanup, without exposing requests or changing statuses.
+- Revalidate stale observer stat reads once without accepting uncertain shutdown;
+  isolate second-inventory oracles from unrelated procfs races and retain a
+  separate conservative-refusal control.
 - Add optional injected events in isolated real Zenity windows, distinct from
   scripted responses and operator-assisted desktop qualification.
 
