@@ -1715,7 +1715,7 @@ run_integration_suites() { run_static_validation; }
 
     def test_real_workflow_step_preserves_statuses_and_observer_failure(self):
         script = VersionBoundaryTests.step("shell.yml", "Run validation")
-        command = "timeout --signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --jobs 4"
+        command = "timeout --signal=TERM --kill-after=10s 7m bash ./tests/run-all.sh --jobs 4"
         self.assertIn(command, script)
         fixture = r'''
 umask "${CHECK_INCOMING_UMASK}"
@@ -1727,7 +1727,7 @@ python3() {
     command python3 "$@"
 }
 timeout() {
-    [[ "$*" == '--signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --jobs 4' ]] || return 98
+    [[ "$*" == '--signal=TERM --kill-after=10s 7m bash ./tests/run-all.sh --jobs 4' ]] || return 98
     # Exercise the EXIT path before normal collection or log handoff.
     if [[ ${CHECK_COMMAND_STATUS} == 27 ]]; then exit 27; fi
     shift 3

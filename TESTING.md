@@ -124,8 +124,15 @@ The paired minimum-interpreter job allows eight minutes for the complete
 four-worker suite, within its unchanged ten-minute job budget. This aggregate
 budget includes every static and integration task; it is separate from the
 individual signal, shutdown and fixture deadlines, which remain unchanged.
-Ubuntu/Fedora jobs retain their five-minute suite budgets and every wrapper
-retains TERM followed by KILL after ten seconds.
+Ubuntu allows seven minutes for its complete suite; Fedora retains five.
+Every wrapper retains TERM followed by KILL after ten seconds. The Ubuntu
+budget includes headroom for the measured workload: a complete remote Git-free
+Ubuntu run took 299.487 seconds, while a checkout run reached the former
+300-second boundary with 35 successful verdicts and two suites still progressing.
+The complete measurement plus a 25% allowance, rounded up to whole minutes,
+gives 420 seconds. Git-free and checkout environments are distinct; this budget
+does not attribute historical delays to unmeasured load. The ten-minute job cap,
+four-worker schedule and every individual fixture deadline remain unchanged.
 
 The Ubuntu `Run validation` step also records bounded passive diagnostics for
 its current execution. `scripts/ci-validation-diagnostics.py` reads aggregate
@@ -141,6 +148,8 @@ including timeout 124, is preserved; missing diagnostic evidence must not turn
 into a successful qualification. Compare monotonic observations within their
 actual run and keep earlier failures distinct from later successful executions.
 The diagnostic's tests run in the canonical CI-validation integration suite.
+Its reader has a separate finite 450-second, 451-sample ceiling, allowing
+collection after the seven-minute command and its termination grace period.
 
 Some Linux fixtures deliberately use `/usr/bin/python3` or a restricted system
 PATH. After installing distribution dependencies, the disposable minimum-Python

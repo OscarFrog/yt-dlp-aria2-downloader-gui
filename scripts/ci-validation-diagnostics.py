@@ -35,8 +35,8 @@ unsafe-tmpdir-fallback unsafe-xdg-home-fallback
 """.split())
 PAYLOAD_NAMES = frozenset(("private-process-supervisor.py", "private-aria2-plan.py",
                            "download-video.sh", "runtime-manager.sh"))
-MAX_SECONDS = 330
-MAX_SAMPLES = 331
+MAX_SECONDS = 450
+MAX_SAMPLES = 451
 MAX_READ = 8192
 MAX_LOG_BYTES = 1024 * 1024
 MAX_LINE = 512

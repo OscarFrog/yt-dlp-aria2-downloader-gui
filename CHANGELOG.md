@@ -49,9 +49,12 @@
   categories before fixture cleanup, without exposing requests or changing statuses.
 - Retain bounded, allowlisted progress from interrupted Ubuntu validation suites
   with passive resource measurements, preserving the original validation status,
-  five-minute deadline and four-worker schedule.
+  declared command deadline and four-worker schedule.
   Explicit normal and EXIT collection paths remain checked with supported
   ShellCheck versions and premature-exit status witnesses.
+- Set the aggregate Ubuntu suite budget to seven minutes from a complete remote
+  299.487-second workload and explicit margin; preserve every individual test
+  deadline, four workers and the ten-minute job cap.
 - Revalidate stale observer stat reads once without accepting uncertain shutdown;
   isolate second-inventory oracles from unrelated procfs races and retain a
   separate conservative-refusal control.

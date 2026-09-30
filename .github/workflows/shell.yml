@@ -92,7 +92,7 @@ jobs:
           validation_status=0
           umask "${validation_umask}"
           YTDLP_ARIA2_CI_DIAGNOSTICS_DIR=${diagnostic_dir} \
-            timeout --signal=TERM --kill-after=10s 5m bash ./tests/run-all.sh --jobs 4 \
+            timeout --signal=TERM --kill-after=10s 7m bash ./tests/run-all.sh --jobs 4 \
             || validation_status=$?
           finish_diagnostics "${validation_status}"
   validate-python-minimum:
