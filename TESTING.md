@@ -316,7 +316,9 @@ python3 -B tests/release-docs-integration.py
 The shfmt replay uses real disposable Git repositories and the pinned formatter,
 with controlled upstream and container stubs. It covers unchanged-version preparation,
 independent verification, altered bytes, incomplete manifests, no-op runs and
-branch creation races. A coherent replacement patch with unchanged version and
+branch creation races. It also covers rejected upstream API/tag/digest responses,
+downgrade no-ops, preserved historical or human-edited branches, and main changes
+before preparation, verification or publication. A coherent replacement patch with unchanged version and
 complete but stale tested-tree digests must fail the actual publisher checksum
 step. The release-docs replay executes the actual publisher
 shell and inline Python against a simulated API, including large streamed blobs,
