@@ -98,7 +98,15 @@ def check_capabilities():
                           (signal, ('pidfd_send_signal', 'pthread_sigmask'))):
         if any(not hasattr(module, name) for name in names):
             raise OSError('required process supervision API is unavailable')
-    process_paths()
+    # Session closure needs every visible process identity. Reject an already
+    # unreadable inventory before starting work that we could never retire.
+    for path in process_paths():
+        try:
+            fields = path.read_text().rsplit(') ', 1)[1].split()
+        except FileNotFoundError:
+            continue
+        if not fields[3].isdecimal() or not fields[19].isdecimal():
+            raise ValueError('invalid process identity')
     own = Path(f'/proc/{os.getpid()}/task/{os.getpid()}')
     (own / 'stat').read_text()
     (own / 'children').read_text()

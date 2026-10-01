@@ -1445,7 +1445,10 @@ quiescence, covering members missed by an earlier enumeration.
 The force path requires Linux pidfds and Python's `os.pidfd_open` and
 `signal.pidfd_send_signal`. Entry admission actually probes pidfd open and
 0/STOP/CONT/KILL delivery on a private child, WNOWAIT stop/exit observation,
-waitpid collection and procfs process/thread access. Missing APIs, kernel
+waitpid collection and procfs process/thread access. Admission also reads every
+visible process stat and validates its session/start identity fields; only a
+pathname that disappeared during enumeration is skipped. A pre-existing unreadable
+or malformed stat refuses admission before any command is launched. Missing APIs, kernel
 support or permissions cause status 69 before media activity. Revocation
 following admission preserves protection; it is not a successful shutdown.
 A TGID marked Z is not quiescent while sibling threads are live. Refusal and

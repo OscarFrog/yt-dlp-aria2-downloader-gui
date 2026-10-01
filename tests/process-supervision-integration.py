@@ -1014,6 +1014,46 @@ assert_no_residual_processes "$2" "$2/stop"
                 for pid in created:
                     self.assertFalse(Path(f'/proc/{pid}').exists(), 'capability probe was not reaped')
 
+    def test_capability_admission_requires_readable_process_inventory(self):
+        module = self.supervisor_module()
+        foreign = self.launch([sys.executable, '-I', '-B', '-c',
+                               'import time; time.sleep(10)'])
+        foreign_stat = Path(f'/proc/{foreign.pid}/stat')
+        own_stat = Path(f'/proc/{os.getpid()}/stat')
+        real_read = Path.read_text
+        real_read(foreign_stat)
+
+        for failure in ('permission', 'io', 'esrch', 'malformed', 'missing', None):
+            with self.subTest(failure=failure):
+                reads = []
+
+                def read(path, *args, **kwargs):
+                    if path == foreign_stat:
+                        reads.append(path)
+                        if failure == 'permission':
+                            raise PermissionError('pre-existing foreign stat denial')
+                        if failure == 'io':
+                            raise OSError('pre-existing foreign stat I/O failure')
+                        if failure == 'esrch':
+                            raise ProcessLookupError('foreign procfs stat observation failed')
+                        if failure == 'malformed':
+                            return 'invalid procfs stat'
+                        if failure == 'missing':
+                            raise FileNotFoundError('enumerated process disappeared')
+                    return real_read(path, *args, **kwargs)
+
+                # Keep the real disposable probe and known foreign process.
+                # An unrelated ambient procfs race must not mask this oracle.
+                with mock.patch.object(module, 'process_paths', return_value=[own_stat, foreign_stat]), \
+                        mock.patch.object(Path, 'read_text', read):
+                    if failure in ('permission', 'io', 'esrch', 'malformed'):
+                        with mock.patch.object(os, 'fork', side_effect=AssertionError(
+                                'process launched despite unreadable pre-existing stat')):
+                            self.assertEqual(module.supervise(['unused-command'], 1, .1), 69)
+                    else:
+                        module.check_capabilities()
+                self.assertEqual(reads, [foreign_stat])
+
     def test_waitid_failure_after_admission_keeps_consumer_supervised(self):
         child = self.child(slow=True)
         wrapper = self.root / 'waitid-denied.py'

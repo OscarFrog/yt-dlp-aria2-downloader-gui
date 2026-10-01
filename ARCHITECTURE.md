@@ -424,7 +424,11 @@ window between inspection and KILL. The path requires Python's
 `os.pidfd_open` and `signal.pidfd_send_signal` plus kernel support; missing APIs,
 errors or failed stop/identity checks refuse force delivery and leave uncertain
 resources protected. A stop already sent is released with CONT when possible.
-Process names or a shared UID never authorize a target.
+Process names or a shared UID never authorize a target. Admission reads the stat
+of each visible process and validates its session/start identity fields before
+starting work; only vanished pathnames are skipped. An already unreadable or
+malformed stat causes early refusal 69. This observation does not prevent later
+permission changes, which retain the existing shutdown veto.
 
 The GUI delegates force escalation to its authenticated real engine using CONT;
 the engine's trap records a persistent force request only after shutdown was
