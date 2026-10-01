@@ -428,8 +428,12 @@ Process names or a shared UID never authorize a target. Admission reads the stat
 of each visible process and validates its session/start identity fields before
 starting work; only vanished pathnames are skipped. An already unreadable or
 malformed stat causes early refusal 69. A stale stat descriptor returning ESRCH
-is reopened once; only a now-missing pathname can be skipped. A repeated or
-different read error still refuses admission. This observation does not prevent later
+or a coherent kernel reap sentinel (PPID 0, PGID/SID -1, numeric start and a
+known task state) permits one fresh read. These transitions share the same
+two-read limit per pathname; only a now-missing pathname can be skipped. A fresh
+normal identity is validated, while persistent sentinels or errors still refuse
+admission. The state may precede reap because the kernel samples it before
+locking the identity. This observation does not prevent later
 permission changes, which retain the existing shutdown veto.
 The timed helper and GUI/engine Python predicates read procfs identity fields as
 ASCII independently of the locale, preserving arbitrary bytes in the unused process/thread name with

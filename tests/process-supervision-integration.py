@@ -1109,6 +1109,86 @@ assert_no_residual_processes "$2" "$2/stop"
         finally:
             os.close(descriptor)
 
+    def test_capability_admission_confirms_reaped_stat_identity_once(self):
+        import errno
+
+        module = self.supervisor_module()
+        foreign_stat = Path('/proc/0/stat')
+        own_stat = Path(f'/proc/{os.getpid()}/stat')
+        real_read = Path.read_text
+        normal = real_read(own_stat, encoding='ascii', errors='surrogateescape')
+        # Captured from a real child while its parent reaped it, followed by
+        # ENOENT on a fresh open. Retain the kernel bytes for deterministic
+        # regression: reproducing the scheduling race is not a test premise.
+        reaped = ('1210922 (python3) X 0 -1 -1 0 -1 4227148 157 0 0 0 0 0 0 0 '
+                  '20 0 0 0 1625239 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 17 3 0 0 0 '
+                  '0 0 0 0 0 0 0 0 0 0\n')
+
+        def altered(source, index, value):
+            prefix, tail = source.rsplit(') ', 1)
+            fields = tail.split()
+            fields[index] = value
+            return prefix + ') ' + ' '.join(fields) + '\n'
+
+        missing = FileNotFoundError(errno.ENOENT, 'confirmed disappearance')
+        stale = ProcessLookupError(errno.ESRCH, 'stale descriptor')
+        denied = PermissionError(errno.EACCES, 'stat denied')
+        unreadable = OSError(errno.EIO, 'stat unreadable')
+        cases = [
+            ('captured-reap-missing', (reaped, missing), True),
+            ('captured-reap-live', (reaped, normal), True),
+            ('stale-live', (stale, normal), True),
+            ('stale-missing', (stale, missing), True),
+            ('normal', (normal,), True),
+            ('missing', (missing,), True),
+            ('persistent-reap', (reaped, reaped), False),
+            ('reap-then-stale', (reaped, stale), False),
+            ('stale-then-reap', (stale, reaped), False),
+            ('persistent-stale', (stale, stale), False),
+            ('reap-then-permission', (reaped, denied), False),
+            ('reap-then-io', (reaped, unreadable), False),
+            ('reap-then-malformed', (reaped, 'invalid procfs stat'), False),
+            ('reap-then-invalid-sid', (reaped, altered(normal, 3, '?')), False),
+            ('reap-then-invalid-start', (reaped, altered(normal, 19, '?')), False),
+            ('permission', (denied,), False),
+            ('io', (unreadable,), False),
+            ('malformed', ('invalid procfs stat',), False),
+        ]
+        # State is sampled before sighand acquisition in do_task_stat. A
+        # coherent sentinel in each real state grants only a confirmation.
+        for state in ('R', 'S', 'D', 'T', 't', 'X', 'Z', 'P', 'I'):
+            cases.append(('state-' + state, (altered(reaped, 0, state), missing), True))
+        # Unrelated invalid data cannot obtain a second read even if it would
+        # have appeared valid. The exact read count is part of the oracle.
+        for label, index, value in (('state', 0, '?'), ('state-pair', 0, 'XS'),
+                                    ('parent', 1, '1'), ('group', 2, '1'),
+                                    ('session', 3, '-2'), ('start', 19, '?')):
+            cases.append(('invalid-' + label, (altered(reaped, index, value),), False))
+
+        for label, replies, admitted in cases:
+            with self.subTest(case=label):
+                reads = []
+
+                def read(path, *args, **kwargs):
+                    if path != foreign_stat:
+                        return real_read(path, *args, **kwargs)
+                    reads.append(path)
+                    self.assertLessEqual(len(reads), len(replies), 'unbounded admission confirmation')
+                    result = replies[len(reads) - 1]
+                    if isinstance(result, BaseException):
+                        raise result
+                    return result
+
+                with mock.patch.object(module, 'process_paths', return_value=[own_stat, foreign_stat]), \
+                        mock.patch.object(Path, 'read_text', read):
+                    if admitted:
+                        module.check_capabilities()
+                    else:
+                        with mock.patch.object(os, 'fork', side_effect=AssertionError(
+                                'process launched with an unconfirmed stat identity')):
+                            self.assertEqual(module.supervise(['unused-command'], 1, .1), 69)
+                self.assertEqual(len(reads), len(replies), 'admission did not confirm exactly once')
+
     def test_procfs_identity_ignores_arbitrary_thread_name_bytes(self):
         module = self.supervisor_module()
         predicates = []

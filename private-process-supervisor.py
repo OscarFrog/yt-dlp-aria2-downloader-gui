@@ -108,19 +108,23 @@ def check_capabilities():
     # Session closure needs every visible process identity. Reject an already
     # unreadable inventory before starting work that we could never retire.
     for path in process_paths():
-        try:
-            fields = process_stat(path)
-        except FileNotFoundError:
-            continue
-        except ProcessLookupError:
-            # A stat opened before exit can fail with ESRCH after reaping.
-            # Reopen once: only a now-missing pathname proves disappearance;
-            # a repeated or different read error still refuses admission.
+        for attempt in (0, 1):
             try:
                 fields = process_stat(path)
             except FileNotFoundError:
+                break
+            except ProcessLookupError:
+                if attempt:
+                    raise
                 continue
-        if not fields[3].isdecimal() or not fields[19].isdecimal():
+            if fields[3].isdecimal() and fields[19].isdecimal():
+                break
+            # Concurrent reap can leave do_task_stat's identity sentinels.
+            # State was sampled earlier and need not yet be X. Like ESRCH,
+            # this permits only one fresh read, never an absence decision.
+            if (not attempt and fields[0] in ('R', 'S', 'D', 'T', 't', 'X', 'Z', 'P', 'I')
+                    and fields[1:4] == ['0', '-1', '-1'] and fields[19].isdecimal()):
+                continue
             raise ValueError('invalid process identity')
     own = Path(f'/proc/{os.getpid()}/task/{os.getpid()}')
     process_stat(own / 'stat')

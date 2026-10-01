@@ -1454,6 +1454,13 @@ or malformed stat refuses admission before any command is launched. A real stat
 descriptor held across an attributed child's normal exit and reap exercises
 ESRCH at the first read: admission reopens once, accepting confirmed ENOENT but
 rejecting repeated ESRCH, permission or I/O failure before a new process starts.
+A separately captured real stat from concurrent reap has PPID 0, PGID/SID -1
+and numeric start. Its deterministic replay requires the same confirmation;
+it never grants absence by itself. ESRCH and this coherent kernel sentinel
+share a two-read limit. Tests cover every known kernel state sampled before
+reap, a fresh valid identity, disappearance, persistent/transposed transient
+errors, permission/I/O errors and malformed identity fields. Refusals precede
+even the disposable capability probe; invalid tuples cannot request a retry.
 A named-thread witness covers ASCII, valid UTF-8 and kernel truncation inside a
 multibyte name. Readiness precedes the real stat read; an independent byte oracle
 checks SID/start while admission, presence and quiescence ignore name encoding,
