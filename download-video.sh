@@ -12,7 +12,7 @@ set -euo pipefail
 set +m
 umask 077
 
-readonly VERSION="2.3.29"
+readonly VERSION="2.4.0"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -27,6 +27,7 @@ VERSION_PARSE_VALID=false
 ARIA2_SUPPORTS_NO_NETRC=false
 ARIA2_HTTPS_DIRECT_SAFE=true
 FINAL_MEDIA_VALIDATION_REASON=''
+PROBE_OUTPUT_FILE=''
 MEDIA_TAIL_VALIDATION_REASON=''
 JS_RUNTIME_AVAILABLE=false
 MANAGED_RUNTIME_ATTESTED=false
@@ -76,14 +77,21 @@ PRIVATE_ARIA2_MANIFEST_IDENTITY=''
 OUTPUT_LOCK_FD=''
 OUTPUT_LOCK_FILE=''
 OUTPUT_LOCK_ROOT=''
+RESOURCE_LOCK_ROOT=''
+RESOURCE_STATE_FILE=''
+RESOURCE_STATE_ACTIVE=false
+RESOURCE_COMPLETED_PATH=''
+RESOURCE_LOCK_FDS=()
 DOWNLOAD_WORKER_PID=''
 DOWNLOAD_WORKER_START_TIME=''
 DOWNLOAD_WORKER_PGID=''
 DOWNLOAD_WORKER_PGID_START_TIME=''
+DOWNLOAD_SESSION_ID=''
 DOWNLOAD_PGID_FILE=''
 DOWNLOAD_READY_FILE=''
 DOWNLOAD_STATUS=125
 DOWNLOAD_WAITED_STATUS=''
+DOWNLOAD_FORCE_STOP=false
 REQUESTED_EXIT_STATUS=''
 SHUTDOWN_REQUESTED=false
 DEFERRED_SIGNAL_NAME=''
@@ -109,18 +117,34 @@ cleanup() {
     if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]]; then
         if declare -F stop_download_worker >/dev/null 2>&1; then
             # A descendant may still be using every private file after a
-            # bounded shutdown fails. Exit without unlinking state or explicitly
-            # unlocking the open file description shared with surviving children.
+            # bounded shutdown fails. Preserve state and, after admission, keep
+            # this reservation owner alive until the consumers have stopped.
             # shellcheck disable=SC2310 # Failed quiescence selects preservation.
             if ! stop_download_worker; then
                 printf '%s\n' \
                     'Warning: command shutdown could not be confirmed; preserving active temporary files.' >&2
-                exit "${status}"
+                if [[ ${RESOURCE_STATE_ACTIVE} == true ]]; then
+                    # An external tool may close inherited descriptors. Keep
+                    # the engine's historical shared lock too: an older engine
+                    # cannot understand our active ownership checkpoint.
+                    printf '%s\n' 'Warning: retaining reservation descriptors until consumers stop.' >&2
+                    # shellcheck disable=SC2310 # Uncertain presence keeps this owner alive.
+                    while ! wait_for_download_exit 10; do :; done
+                else
+                    exit "${status}"
+                fi
             fi
         else
             printf '%s\n' \
                 'Warning: command shutdown helper is unavailable; preserving active temporary files.' >&2
             exit "${status}"
+        fi
+    fi
+    if [[ ${RESOURCE_STATE_ACTIVE} == true ]]; then
+        if ! python3 "${PRIVATE_ARIA2_HELPER}" resource-state --action save \
+            --state "${RESOURCE_STATE_FILE}" --registry "${RESOURCE_LOCK_ROOT}" \
+            --completed-path "${RESOURCE_COMPLETED_PATH}"; then
+            printf '%s\n' 'Warning: resource ownership checkpoint failed; ambiguous media will not be resumed.' >&2
         fi
     fi
     if [[ -n ${DOWNLOAD_PGID_FILE} ]]; then
@@ -225,8 +249,11 @@ cleanup() {
                 "${MEDIA_WORKSPACE}" >&2
         fi
     fi
+    local resource_fd
+    for resource_fd in "${RESOURCE_LOCK_FDS[@]}"; do
+        exec {resource_fd}>&- 2>/dev/null || true
+    done
     if [[ -n ${OUTPUT_LOCK_FD} ]]; then
-        flock --unlock "${OUTPUT_LOCK_FD}" 2>/dev/null || true
         exec {OUTPUT_LOCK_FD}>&- 2>/dev/null || true
     fi
     exit "${status}"
@@ -783,6 +810,7 @@ acquire_output_lock() {
         return 73
     fi
 
+    RESOURCE_LOCK_ROOT=${destination_lock_root}
     OUTPUT_LOCK_FILE="${destination_lock_root}/${lock_key}.lock"
     if [[ -L ${OUTPUT_LOCK_FILE} ||
         (-e ${OUTPUT_LOCK_FILE} && ! -f ${OUTPUT_LOCK_FILE}) ]]; then
@@ -797,12 +825,80 @@ acquire_output_lock() {
         error 'unable to secure the destination lock.'
         return 73
     fi
-    if ! flock --exclusive --nonblock "${OUTPUT_LOCK_FD}"; then
+    if ! flock --shared --nonblock "${OUTPUT_LOCK_FD}"; then
         error "another download is already using the destination directory: ${output_dir}"
         return 75
     fi
 
     return 0
+}
+
+acquire_resource_reservations() {
+    local reservation_keys='' lock_mode lock_key resource_fd lock_path
+    local replay_output_template=''
+    local opened_identity visible_identity status=0
+    local -a profile_options=()
+    [[ ${YOUTUBE_HLS_FIREFOX} != true ]] || profile_options+=(--hls)
+    RESOURCE_STATE_FILE="${PRIVATE_ARIA2_METADATA}/resources.json"
+    reservation_keys=$(python3 "${PRIVATE_ARIA2_HELPER}" resource-plan \
+        --plan "${PRIVATE_ARIA2_PLAN}" --state "${RESOURCE_STATE_FILE}" \
+        --url-file "${YTDLP_BATCH_FILE_TMP}" --mode "${MODE}" \
+        --output-dir "${OUTPUT_DIR}" --final-output-dir "${FINAL_OUTPUT_DIR}" \
+        --final-output-identity "${FINAL_OUTPUT_IDENTITY}" "${profile_options[@]}") || return $?
+    while read -r lock_mode lock_key; do
+        [[ ${lock_mode} == shared || ${lock_mode} == exclusive ]] || return 65
+        [[ ${lock_key} =~ ^[a-f0-9]{64}$ ]] || return 65
+        lock_path="${RESOURCE_LOCK_ROOT}/resource-${lock_key}.lock"
+        [[ ! -L ${lock_path} && (! -e ${lock_path} || -f ${lock_path}) ]] || return 73
+        begin_signal_registration
+        if ! exec {resource_fd}>>"${lock_path}"; then
+            finish_signal_registration
+            return 73
+        fi
+        RESOURCE_LOCK_FDS+=("${resource_fd}")
+        opened_identity=$(stat -Lc '%d:%i:%u' -- "/proc/${BASHPID}/fd/${resource_fd}")
+        visible_identity=$(stat -c '%d:%i:%u' -- "${lock_path}")
+        if [[ ${opened_identity} != "${visible_identity}" || ${opened_identity##*:} != "${EUID}" ]]; then
+            finish_signal_registration
+            return 73
+        fi
+        status=0
+        flock "--${lock_mode}" --nonblock --conflict-exit-code 75 "${resource_fd}" || status=$?
+        if ((status != 0)); then
+            finish_signal_registration
+            if ((status == 75)); then
+                error 'media resources are currently reserved by another download; retry after it finishes.'
+                return 75
+            fi
+            error 'unable to acquire the media resource reservation safely.'
+            return 73
+        fi
+        finish_signal_registration
+    done <<<"${reservation_keys}"
+    begin_signal_registration
+    # Register cleanup before the helper can publish an active checkpoint.
+    # Its transaction identity makes cleanup a no-op if admission never commits
+    # or was refused; a signal after commit must not strand an active record.
+    RESOURCE_STATE_ACTIVE=true
+    python3 "${PRIVATE_ARIA2_HELPER}" resource-state --action admit \
+        --state "${RESOURCE_STATE_FILE}" --registry "${RESOURCE_LOCK_ROOT}" || status=$?
+    finish_signal_registration
+    if ((status == 1)); then
+        error 'media destination already exists or contains an ambiguous input; preserving it.'
+    fi
+    if ((status == 0)); then
+        # Loading an info JSON can transform its title again (notably for live
+        # media). Bind direct replay as well as native transfer to the admitted
+        # basename, before any media command can write outside its family.
+        replay_output_template=$(python3 "${PRIVATE_ARIA2_HELPER}" check-native-final \
+            --plan "${PRIVATE_ARIA2_PLAN}" --output-dir "${OUTPUT_DIR}" \
+            --final-output-dir "${FINAL_OUTPUT_DIR}" \
+            --final-output-identity "${FINAL_OUTPUT_IDENTITY}" --mode "${MODE}" \
+            --ownership "${RESOURCE_STATE_FILE}") || return $?
+        [[ -n ${replay_output_template} && ${replay_output_template} != *$'\n'* ]] || return 65
+        YT_DLP_OPTIONS+=(--output "${replay_output_template}")
+    fi
+    return "${status}"
 }
 
 process_is_running() {
@@ -927,32 +1023,71 @@ download_group_is_current() {
     [[ ${current_start_time} == "${DOWNLOAD_WORKER_PGID_START_TIME}" ]]
 }
 
+# A zombie leader can retain live sibling threads and their shared FDs.
+process_threads_are_quiescent() {
+    local pid=$1 expected_start=$2 task_path task_stat task_observation
+    local tasks="" previous_tasks=""
+    local -a fields=()
+
+    for task_observation in 1 2; do
+        tasks=""
+        for task_path in /proc/"${pid}"/task/[0-9]*/stat; do
+            if ! { IFS= read -r task_stat <"${task_path}"; } 2>/dev/null; then
+                return 1
+            fi
+            read -r -a fields <<<"${task_stat##*) }"
+            ((${#fields[@]} > 19)) || return 1
+            [[ ${fields[0]} == Z || ${fields[0]} == X ]] || return 1
+            tasks+="${task_path}:${fields[19]} "
+        done
+        [[ -n ${tasks} ]] || return 1
+        [[ ${task_observation} != 2 || ${tasks} == "${previous_tasks}" ]] || return 1
+        previous_tasks=${tasks}
+    done
+    if ! { IFS= read -r task_stat <"/proc/${pid}/stat"; } 2>/dev/null; then
+        return 1
+    fi
+    read -r -a fields <<<"${task_stat##*) }"
+    [[ ${fields[19]:-} == "${expected_start}" ]]
+}
+
 download_group_has_live_member() {
     local process_path=''
     local process_stat=''
-    local process_state=''
-    local process_group=''
-    local process_session=''
+    local observation members='' previous_members='' inventory_self_seen=false
     local -a process_fields=()
 
-    [[ -n ${DOWNLOAD_WORKER_PGID} ]] || return 1
-    for process_path in /proc/[1-9]*/stat; do
-        [[ -r ${process_path} ]] || continue
-        process_stat=''
-        if ! { IFS= read -r process_stat <"${process_path}"; } 2>/dev/null; then
-            continue
-        fi
-        process_fields=()
-        read -r -a process_fields <<<"${process_stat##*) }"
-        ((${#process_fields[@]} > 3)) || continue
-        process_state=${process_fields[0]}
-        process_group=${process_fields[2]}
-        process_session=${process_fields[3]}
-        if [[ ${process_state} != Z && ${process_state} != X &&
-            ${process_group} == "${DOWNLOAD_WORKER_PGID}" &&
-            ${process_session} == "${DOWNLOAD_WORKER_PGID}" ]]; then
+    local session_id=${DOWNLOAD_SESSION_ID:-${DOWNLOAD_WORKER_PGID}}
+    [[ -n ${session_id} ]] || return 1
+    # A member may fork after glob expansion and become a zombie before its
+    # stat is read. Only two unchanged, complete quiescent inventories suffice.
+    for observation in 1 2; do
+        members=''
+        inventory_self_seen=false
+        for process_path in /proc/[1-9]*/stat; do
+            if [[ ${process_path} == /proc/"${BASHPID}"/stat ]]; then
+                inventory_self_seen=true
+                continue
+            fi
+            process_stat=''
+            if ! { IFS= read -r process_stat <"${process_path}"; } 2>/dev/null; then
+                [[ ! -d ${process_path%/stat} ]] || return 0
+                continue
+            fi
+            process_fields=()
+            read -r -a process_fields <<<"${process_stat##*) }"
+            ((${#process_fields[@]} > 19)) || return 0
+            [[ ${process_fields[3]} == "${session_id}" ]] || continue
+            [[ ${process_fields[0]} == Z || ${process_fields[0]} == X ]] || return 0
+            # shellcheck disable=SC2310 # Any live task or uncertain read vetoes cleanup.
+            process_threads_are_quiescent "${process_stat%% *}" "${process_fields[19]}" || return 0
+            members+="${process_path}:${process_fields[19]} "
+        done
+        [[ ${inventory_self_seen} == true ]] || return 0
+        if [[ ${observation} == 2 && ${members} != "${previous_members}" ]]; then
             return 0
         fi
+        previous_members=${members}
     done
     return 1
 }
@@ -960,21 +1095,89 @@ download_group_has_live_member() {
 download_group_is_absent() {
     [[ ${DOWNLOAD_WORKER_PGID} =~ ^[1-9][0-9]*$ ]] || return 1
 
-    # After losing the leader, a /proc snapshot alone can miss a child forked
-    # during the scan. Only ESRCH proves the numeric group is absent; EPERM or
-    # any other uncertainty preserves state. Signal zero grants no authority
-    # to send a real signal to this possibly recycled group.
+    # After losing the leader, require ESRCH or stable zombie-only inventories.
+    # EPERM or incomplete observation preserves state. Signal zero grants no
+    # authority to send a real signal to this possibly recycled group.
     python3 - "${DOWNLOAD_WORKER_PGID}" <<'PY_GROUP_ABSENT'
 import os
+from pathlib import Path
 import sys
 
+def process_paths():
+    """An explicit directory scan must fail, rather than silently match nothing."""
+    paths = [entry / 'stat' for entry in Path('/proc').iterdir()
+             if entry.name.isdecimal()]
+    if Path(f'/proc/{os.getpid()}/stat') not in paths:
+        raise OSError('incomplete process inventory')
+    return paths
+
+
+def process_quiescent(pid, start):
+    """A zombie thread-group leader can still have running sibling threads."""
+    previous = None
+    for attempt in (0, 1):
+        fields = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
+        if fields[19] != str(start) or fields[0] not in ('Z', 'X'):
+            return False
+        tasks = set()
+        for task in Path(f'/proc/{pid}/task').iterdir():
+            row = (task / 'stat').read_text().rsplit(') ', 1)[1].split()
+            if row[0] not in ('Z', 'X'):
+                return False
+            tasks.add((task.name, row[19]))
+        if not tasks or (attempt and tasks != previous):
+            return False
+        previous = tasks
+    return True
+
+number = int(sys.argv[1])
 try:
-    os.kill(-int(sys.argv[1]), 0)
+    os.kill(-number, 0)
 except ProcessLookupError:
     sys.exit(0)
-except (OSError, ValueError, OverflowError):
-    pass
-sys.exit(1)
+except OSError:
+    sys.exit(1)
+# An orphaned zombie still makes kill(0) succeed, but owns no live descriptor
+# and cannot create a new child. Require a complete observation and revalidate
+# the positive zombie witnesses instead of waiting for an external reaper.
+zombies = []
+try:
+    for path in process_paths():
+        try:
+            fields = path.read_text().rsplit(') ', 1)[1].split()
+        except FileNotFoundError:
+            continue
+        if int(fields[2]) == number or int(fields[3]) == number:
+            if not process_quiescent(path.parent.name, fields[19]):
+                sys.exit(1)
+            zombies.append((path, fields[19]))
+    if not zombies:
+        sys.exit(1)
+    # A member can fork after the first /proc enumeration and then become a
+    # zombie. A second complete inventory must match before witnesses grant
+    # quiescence; checking only the previously enumerated PIDs misses that child.
+    repeated = []
+    for path in process_paths():
+        try:
+            fields = path.read_text().rsplit(') ', 1)[1].split()
+        except FileNotFoundError:
+            continue
+        if int(fields[2]) == number or int(fields[3]) == number:
+            if not process_quiescent(path.parent.name, fields[19]):
+                sys.exit(1)
+            repeated.append((path, fields[19]))
+    if set(repeated) != set(zombies):
+        sys.exit(1)
+    for path, start in zombies:
+        try:
+            fields = path.read_text().rsplit(') ', 1)[1].split()
+        except FileNotFoundError:
+            continue
+        if fields[19] != start or not process_quiescent(path.parent.name, start):
+            sys.exit(1)
+except (OSError, ValueError, IndexError):
+    sys.exit(1)
+sys.exit(0)
 PY_GROUP_ABSENT
 }
 
@@ -1088,18 +1291,232 @@ recover_download_pgid() {
     return 1
 }
 
+signal_owned_process() {
+    python3 -I -B - "$@" <<'PY_SIGNAL_OWNED'
+import os
+from pathlib import Path
+import signal
+import sys
+
+pid, start, session, name = sys.argv[1:]
+descriptor = None
+try:
+    descriptor = os.pidfd_open(int(pid))
+    fields = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
+    if fields[19] != start or fields[3] != session:
+        sys.exit(1)
+    signal.pidfd_send_signal(descriptor, getattr(signal, 'SIG' + name))
+except (AttributeError, OSError, ValueError, IndexError):
+    sys.exit(1)
+finally:
+    if descriptor is not None:
+        os.close(descriptor)
+PY_SIGNAL_OWNED
+}
+
+# Keep an authenticated parent frozen while its same-session children stop.
+# pidfds pin delivery; a child in a private SID keeps its supervisor alive.
+escalate_owned_process() {
+    python3 -I -B - "$@" <<'PY_ESCALATE_OWNED'
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+
+def process_paths():
+    """An explicit directory scan must fail, rather than silently match nothing."""
+    paths = [entry / 'stat' for entry in Path('/proc').iterdir()
+             if entry.name.isdecimal()]
+    if Path(f'/proc/{os.getpid()}/stat') not in paths:
+        raise OSError('incomplete process inventory')
+    return paths
+
+
+def process_quiescent(pid, start):
+    """A zombie thread-group leader can still have running sibling threads."""
+    previous = None
+    for attempt in (0, 1):
+        fields = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
+        if fields[19] != str(start) or fields[0] not in ('Z', 'X'):
+            return False
+        tasks = set()
+        for task in Path(f'/proc/{pid}/task').iterdir():
+            row = (task / 'stat').read_text().rsplit(') ', 1)[1].split()
+            if row[0] not in ('Z', 'X'):
+                return False
+            tasks.add((task.name, row[19]))
+        if not tasks or (attempt and tasks != previous):
+            return False
+        previous = tasks
+    return True
+
+
+def process_fields(pid):
+    return Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
+
+
+def frozen_children(pid):
+    previous_tasks = None
+    children = set()
+    for observation in range(2):
+        tasks = set()
+        for task in Path(f'/proc/{pid}/task').iterdir():
+            fields = (task / 'stat').read_text().rsplit(') ', 1)[1].split()
+            if fields[0] not in ('T', 't', 'Z', 'X'):
+                raise ValueError('thread is not stopped')
+            tasks.add((task.name, fields[19]))
+            # Children belong to the thread that created them. A frozen parent
+            # cannot create another thread or child between inspection and KILL.
+            children.update(map(int, (task / 'children').read_text().split()))
+        if not tasks or (observation and tasks != previous_tasks):
+            raise ValueError('thread inventory changed')
+        previous_tasks = tasks
+    return children
+
+
+def other_session_members_quiescent(pid, session):
+    previous = None
+    for observation in range(2):
+        members = set()
+        for path in process_paths():
+            if path.parent.name == str(pid):
+                continue
+            try:
+                fields = path.read_text().rsplit(') ', 1)[1].split()
+            except FileNotFoundError:
+                continue
+            if int(fields[3]) == session:
+                if not process_quiescent(path.parent.name, fields[19]):
+                    return False
+                members.add((path, fields[19]))
+        if observation and members != previous:
+            return False
+        previous = members
+    return True
+
+
+def retire(pid, expected_start, expected_session):
+    descriptor = os.pidfd_open(pid)
+    stopped = False
+
+    def identity():
+        fields = process_fields(pid)
+        if int(fields[19]) != expected_start or int(fields[3]) != expected_session:
+            raise ValueError('identity changed')
+        return fields[0]
+
+    try:
+        if identity() in ('Z', 'X') and process_quiescent(pid, expected_start):
+            return True
+        signal.pidfd_send_signal(descriptor, signal.SIGSTOP)
+        stopped = True
+        deadline = time.monotonic() + .05
+        while True:
+            state = identity()
+            if state in ('T', 't', 'Z', 'X'):
+                try:
+                    children = frozen_children(pid)
+                    break
+                except ValueError:
+                    # A dead main thread stays Z while its siblings finish the
+                    # group stop. Use the same original stop deadline for them.
+                    if time.monotonic() >= deadline:
+                        raise
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(.005)
+        for child in children:
+            try:
+                fields = process_fields(child)
+            except FileNotFoundError:
+                continue
+            if int(fields[3]) != expected_session:
+                # A timed helper pins a different SID even after its direct
+                # child becomes a zombie. Only that helper can finish its wait.
+                return False
+            if not process_quiescent(child, fields[19]):
+                # Keep this parent frozen: otherwise a startup wrapper can
+                # recreate a sleep between two outer escalation attempts.
+                retire(child, int(fields[19]), expected_session)
+        if children:
+            for child in frozen_children(pid):
+                try:
+                    fields = process_fields(child)
+                except FileNotFoundError:
+                    continue
+                if int(fields[3]) != expected_session or not process_quiescent(child, fields[19]):
+                    return False
+        if pid == expected_session and not other_session_members_quiescent(pid, expected_session):
+            return False
+        signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+        stopped = False
+        return True
+    finally:
+        if stopped:
+            # A timed helper interprets CONT as force only after its first
+            # graceful request; ordinary parents are simply allowed to resume.
+            try:
+                signal.pidfd_send_signal(descriptor, signal.SIGCONT)
+            except OSError:
+                pass
+        os.close(descriptor)
+
+
+try:
+    retire(*map(int, sys.argv[1:]))
+except (AttributeError, OSError, ValueError, IndexError, RecursionError):
+    sys.exit(1)
+PY_ESCALATE_OWNED
+}
+
+signal_download_session_members() {
+    local signal_name=$1 session_id=$2
+    local process_path process_stat process_pid start_time
+    local -a fields=() current=()
+
+    for process_path in /proc/[1-9]*/stat; do
+        [[ ${process_path} != /proc/"${BASHPID}"/stat ]] || continue
+        if ! { IFS= read -r process_stat <"${process_path}"; } 2>/dev/null; then
+            continue
+        fi
+        read -r -a fields <<<"${process_stat##*) }"
+        ((${#fields[@]} > 19)) || continue
+        [[ ${fields[3]} == "${session_id}" ]] || continue
+        # shellcheck disable=SC2310 # A zombie main thread can still own running tasks.
+        if [[ ${fields[0]} == Z || ${fields[0]} == X ]] \
+            && process_threads_are_quiescent "${process_stat%% *}" "${fields[19]}"; then
+            continue
+        fi
+        # Graceful signals may use the ordinary standalone group. KILL is
+        # individual: a supervising helper must retain its pinned children.
+        [[ ${signal_name} == KILL || ${REUSE_CURRENT_SESSION} == true || ${fields[2]} != "${session_id}" ]] || continue
+        process_pid=${process_stat%% *}
+        start_time=${fields[19]}
+        if ! { IFS= read -r process_stat <"${process_path}"; } 2>/dev/null; then
+            continue
+        fi
+        read -r -a current <<<"${process_stat##*) }"
+        [[ ${current[19]:-} == "${start_time}" && ${current[3]:-} == "${session_id}" ]] || continue
+        if [[ ${signal_name} == KILL ]]; then
+            # shellcheck disable=SC2310 # Failed force delivery retains the quiescence veto.
+            escalate_owned_process "${process_pid}" "${start_time}" "${session_id}" || true
+        else
+            # shellcheck disable=SC2310 # Failed delivery retains the independent presence veto.
+            signal_owned_process "${process_pid}" "${start_time}" "${session_id}" "${signal_name}" || true
+        fi
+    done
+}
+
 signal_download_worker() {
     local signal_name=$1
     local candidate_start_time=''
     local group_signaled=false
+    [[ ${signal_name} != KILL ]] || DOWNLOAD_FORCE_STOP=true
 
-    # When the GUI already created the session, the entire outer process group
-    # receives its signal directly. Avoid signaling our own group recursively;
-    # target the direct child only as a best-effort fallback.
     if [[ ${REUSE_CURRENT_SESSION} == true ]]; then
-        # shellcheck disable=SC2310 # A failed identity check forbids signaling.
-        if download_worker_is_current false; then
-            kill "-${signal_name}" -- "${DOWNLOAD_WORKER_PID}" 2>/dev/null || true
+        if [[ ${DOWNLOAD_SESSION_ID} == "${BASHPID}" ]]; then
+            signal_download_session_members "${signal_name}" "${DOWNLOAD_SESSION_ID}"
         fi
         return 0
     fi
@@ -1129,22 +1546,39 @@ signal_download_worker() {
         # Holding the authenticated sentinel leader alive across graceful
         # signals prevents its numeric process-group identity from being recycled.
         # shellcheck disable=SC2310 # Either predicate may safely revoke authority.
-        if download_group_is_current \
-            && download_group_has_live_member \
-            && kill "-${signal_name}" -- "-${DOWNLOAD_WORKER_PGID}" 2>/dev/null; then
-            group_signaled=true
+        if download_group_is_current && download_group_has_live_member; then
+            # Escalate subgroups while the retained leader still authenticates
+            # this session; main-group KILL can destroy that authority first.
+            signal_download_session_members "${signal_name}" "${DOWNLOAD_WORKER_PGID}"
+            if [[ ${signal_name} == KILL ]]; then
+                group_signaled=true
+            elif kill "-${signal_name}" -- "-${DOWNLOAD_WORKER_PGID}" 2>/dev/null; then
+                group_signaled=true
+            fi
         fi
         # Failed authority or delivery is not proof of quiescence. Retain the
         # observed group so wait/cleanup can still veto resource removal.
     fi
 
+    [[ ${signal_name} != KILL || ${group_signaled} != true ]] || return 0
     if [[ ${signal_name} == KILL || ${group_signaled} == false ]] \
         && [[ -n ${DOWNLOAD_WORKER_PID} ]]; then
         # shellcheck disable=SC2310 # Direct fallback requires the original child.
         if ! download_worker_is_current false; then
             return 0
         fi
-        kill "-${signal_name}" -- "${DOWNLOAD_WORKER_PID}" 2>/dev/null || true
+        if [[ ${signal_name} == KILL ]]; then
+            local worker_session=''
+            local -a fields=()
+            if { IFS= read -r worker_session <"/proc/${DOWNLOAD_WORKER_PID}/stat"; } 2>/dev/null; then
+                read -r -a fields <<<"${worker_session##*) }"
+                ((${#fields[@]} > 3)) || return 0
+                # shellcheck disable=SC2310 # Failed force delivery retains the quiescence veto.
+                escalate_owned_process "${DOWNLOAD_WORKER_PID}" "${DOWNLOAD_WORKER_START_TIME}" "${fields[3]}" || true
+            fi
+        else
+            kill "-${signal_name}" -- "${DOWNLOAD_WORKER_PID}" 2>/dev/null || true
+        fi
     fi
 
     return 0
@@ -1222,6 +1656,11 @@ wait_for_download_exit() {
     local wait_status=0
 
     for ((attempt = 0; attempt < attempts; attempt++)); do
+        if [[ ${DOWNLOAD_FORCE_STOP} == true ]]; then
+            # A consumer may fork between enumeration and signal delivery.
+            # Keep escalation active without resetting its original deadline.
+            signal_download_worker KILL
+        fi
         worker_alive=false
         worker_current=false
         group_alive=false
@@ -1248,6 +1687,16 @@ wait_for_download_exit() {
             # number only as a liveness veto, with no start-time authority.
             DOWNLOAD_WORKER_PGID=${DOWNLOAD_WORKER_PID}
             DOWNLOAD_WORKER_PGID_START_TIME=''
+        fi
+
+        if [[ ${worker_alive} != true && -n ${DOWNLOAD_SESSION_ID} ]]; then
+            # The supervisor itself is excluded by the observation predicate.
+            # shellcheck disable=SC2310 # Presence alone vetoes resource cleanup.
+            if download_group_has_live_member; then
+                group_alive=true
+            else
+                DOWNLOAD_SESSION_ID=''
+            fi
         fi
 
         if [[ ${worker_alive} != true && -n ${DOWNLOAD_WORKER_PGID} ]]; then
@@ -1328,8 +1777,17 @@ run_supervised_command() {
     DOWNLOAD_PGID_FILE=''
     DOWNLOAD_READY_FILE=''
     DOWNLOAD_WAITED_STATUS=''
+    DOWNLOAD_FORCE_STOP=false
 
     if [[ ${REUSE_CURRENT_SESSION} == true ]]; then
+        local engine_start_time=''
+        # shellcheck disable=SC2310 # Only our actual dedicated session grants this scope.
+        if ! process_is_session_group_leader "${BASHPID}" '' engine_start_time false; then
+            error 'supervised-session engine is not its session leader.'
+            return 0
+        fi
+        [[ -n ${engine_start_time} ]] || return 0
+        DOWNLOAD_SESSION_ID=${BASHPID}
         if ! DOWNLOAD_READY_FILE=$(mktemp \
             --tmpdir="${OUTPUT_LOCK_ROOT}" \
             '.worker-ready.XXXXXXXX'); then
@@ -1422,30 +1880,80 @@ run_supervised_command() {
             command_status=0
             wait "${command_pid}" || command_status=$?
 
+            process_threads_are_quiescent() {
+                local pid=$1 expected_start=$2 task_path task_stat task_observation
+                local tasks="" previous_tasks=""
+                local -a fields=()
+
+                for task_observation in 1 2; do
+                    tasks=""
+                    for task_path in /proc/"${pid}"/task/[0-9]*/stat; do
+                        if ! { IFS= read -r task_stat <"${task_path}"; } 2>/dev/null; then
+                            return 1
+                        fi
+                        read -r -a fields <<<"${task_stat##*) }"
+                        ((${#fields[@]} > 19)) || return 1
+                        [[ ${fields[0]} == Z || ${fields[0]} == X ]] || return 1
+                        tasks+="${task_path}:${fields[19]} "
+                    done
+                    [[ -n ${tasks} ]] || return 1
+                    [[ ${task_observation} != 2 || ${tasks} == "${previous_tasks}" ]] || return 1
+                    previous_tasks=${tasks}
+                done
+                if ! { IFS= read -r task_stat <"/proc/${pid}/stat"; } 2>/dev/null; then
+                    return 1
+                fi
+                read -r -a fields <<<"${task_stat##*) }"
+                [[ ${fields[19]:-} == "${expected_start}" ]]
+            }
             # Stay alive as the authenticated session leader until every
             # same-session descendant has exited. A command may otherwise
             # orphan work after returning and make its numeric PGID unsafe to
             # reuse as signaling authority.
             while true; do
                 group_member_alive=false
-                for process_path in /proc/[1-9]*/stat; do
-                    [[ -r ${process_path} ]] || continue
-                    process_stat=""
-                    if ! IFS= read -r process_stat <"${process_path}" 2>/dev/null; then
-                        continue
-                    fi
-                    process_pid=${process_stat%% *}
-                    [[ ${process_pid} != "$$" ]] || continue
-                    process_fields=()
-                    read -r -a process_fields <<<"${process_stat##*) }"
-                    ((${#process_fields[@]} > 3)) || continue
-                    if [[ ${process_fields[0]} != Z &&
-                        ${process_fields[0]} != X &&
-                        ${process_fields[2]} == "$$" &&
-                        ${process_fields[3]} == "$$" ]]; then
+                previous_members=""
+                for observation in 1 2; do
+                    members=""
+                    inventory_self_seen=false
+                    for process_path in /proc/[1-9]*/stat; do
+                        process_stat=""
+                        if ! { IFS= read -r process_stat <"${process_path}"; } 2>/dev/null; then
+                            if [[ -d ${process_path%/stat} ]]; then
+                                group_member_alive=true
+                                break
+                            fi
+                            continue
+                        fi
+                        process_pid=${process_stat%% *}
+                        if [[ ${process_pid} == "$$" ]]; then
+                            inventory_self_seen=true
+                            continue
+                        fi
+                        process_fields=()
+                        read -r -a process_fields <<<"${process_stat##*) }"
+                        if ((${#process_fields[@]} <= 19)); then
+                            group_member_alive=true
+                            break
+                        fi
+                        [[ ${process_fields[3]} == "$$" ]] || continue
+                        if [[ ${process_fields[0]} != Z && ${process_fields[0]} != X ]]; then
+                            group_member_alive=true
+                            break
+                        fi
+                        if ! process_threads_are_quiescent "${process_pid}" "${process_fields[19]}"; then
+                            group_member_alive=true
+                            break
+                        fi
+                        members+="${process_path}:${process_fields[19]} "
+                    done
+                    [[ ${inventory_self_seen} == true ]] || group_member_alive=true
+                    [[ ${group_member_alive} == false ]] || break
+                    if [[ ${observation} == 2 && ${members} != "${previous_members}" ]]; then
                         group_member_alive=true
                         break
                     fi
+                    previous_members=${members}
                 done
                 [[ ${group_member_alive} == true ]] || break
                 sleep 0.1
@@ -1555,6 +2063,7 @@ run_supervised_ytdlp() {
     # shellcheck disable=SC2016
     run_supervised_command bash -c '
         set -o pipefail
+        trap ":" HUP INT TERM
         forbidden_source_name=$(printf "\170\150\141\155\163\164\145\162")
         exec 3>&1
         {
@@ -1824,16 +2333,32 @@ report_abandoned_private_aria2_staging() {
     done
 }
 
-probe_media_summary() {
-    local media_path=$1
-    local -a probe_statuses=()
+capture_media_probe() {
+    local capture_file="${PRIVATE_ARIA2_METADATA}/probe.json"
+    PROBE_OUTPUT_FILE=${capture_file}
+    LC_ALL=C run_supervised_command python3 "${PROCESS_SUPERVISOR}" \
+        --timeout 15 --grace 2 -- ffprobe "$@" >"${capture_file}" 2>/dev/null
+    if [[ -n ${REQUESTED_EXIT_STATUS} ]]; then
+        exit "${REQUESTED_EXIT_STATUS}"
+    fi
+    if ((DOWNLOAD_STATUS != 0)); then
+        return "${DOWNLOAD_STATUS}"
+    fi
+    return 0
+}
 
-    LC_ALL=C timeout --signal=TERM --kill-after=2s 15s \
-        ffprobe -v error \
+probe_media_summary() {
+    local summary_variable=$1 media_path=$2
+    local summary_value='' probe_status=0
+
+    # shellcheck disable=SC2310 # Probe failures become explicit validation results.
+    capture_media_probe -v error \
         -show_entries 'format=start_time,duration:stream=codec_type:stream_disposition=attached_pic' \
         -of json \
-        "${media_path}" 2>/dev/null \
-        | python3 -c '
+        "${media_path}" || probe_status=$?
+    ((probe_status != 124 && probe_status != 137)) || return 124
+    ((probe_status == 0)) || return 1
+    summary_value=$(python3 -c '
 import json
 import sys
 from decimal import Decimal, InvalidOperation
@@ -1897,17 +2422,8 @@ print(
     start_microseconds,
     duration_microseconds,
 )
-'
-
-    probe_statuses=("${PIPESTATUS[@]}")
-    ((${#probe_statuses[@]} == 2)) || return 1
-    if ((probe_statuses[0] == 124 || probe_statuses[0] == 137)); then
-        return 124
-    fi
-    if ((probe_statuses[0] != 0)); then
-        return 1
-    fi
-    return "${probe_statuses[1]}"
+' <"${PROBE_OUTPUT_FILE}") || return 1
+    printf -v "${summary_variable}" '%s' "${summary_value}"
 }
 
 probe_duration_microseconds() {
@@ -1919,12 +2435,10 @@ probe_duration_microseconds() {
     local probe_duration_microseconds=''
     local seconds_bound_comparison=1
 
-    if probe_duration=$(
-        timeout --signal=TERM --kill-after=2s 15s \
-            ffprobe -v error -show_entries format=duration \
-            -of default=noprint_wrappers=1:nokey=1 \
-            "${media_path}" 2>/dev/null
-    ); then
+    # shellcheck disable=SC2310 # Missing duration remains an explicit unknown.
+    if capture_media_probe -v error -show_entries format=duration \
+        -of default=noprint_wrappers=1:nokey=1 "${media_path}"; then
+        probe_duration=$(<"${PROBE_OUTPUT_FILE}")
         probe_duration=${probe_duration%%$'\n'*}
         if [[ ${probe_duration} =~ ^([0-9]+)(\.([0-9]+))?$ ]]; then
             probe_seconds=${BASH_REMATCH[1]}
@@ -1951,21 +2465,22 @@ validate_stream_tail_reaches_target() {
     local selector=$2
     local seek_seconds=$3
     local target_seconds=$4
-    local -a probe_statuses=()
+    local probe_status=0 parser_status=0
 
     # Exit status contract:
     #   0 = the selected stream reaches the acceptance threshold
     #   1 = probe succeeded but the selected stream ends before the threshold
     #   2 = FFprobe/parser failure; fail closed
-    LC_ALL=C timeout --signal=TERM --kill-after=2s 15s \
-        ffprobe -v error \
+    # shellcheck disable=SC2310 # Probe failures become explicit validation results.
+    capture_media_probe -v error \
         -read_intervals "${seek_seconds}%" \
         -select_streams "${selector}" \
         -show_packets \
         -show_entries packet=pts_time,dts_time,duration_time \
         -of json \
-        "${media_path}" 2>/dev/null \
-        | python3 -c '
+        "${media_path}" || probe_status=$?
+    ((probe_status == 0)) || return 2
+    python3 -c '
 import json
 import sys
 from decimal import Decimal, InvalidOperation
@@ -2004,15 +2519,9 @@ for packet in payload.get("packets", []):
         raise SystemExit(0)
 
 raise SystemExit(1)
-' "${target_seconds}"
-
-    probe_statuses=("${PIPESTATUS[@]}")
-    if ((${#probe_statuses[@]} != 2 || probe_statuses[0] != 0)); then
-        return 2
-    fi
-
-    case ${probe_statuses[1]} in
-        0 | 1) return "${probe_statuses[1]}" ;;
+' "${target_seconds}" <"${PROBE_OUTPUT_FILE}" || parser_status=$?
+    case ${parser_status} in
+        0 | 1) return "${parser_status}" ;;
         *) return 2 ;;
     esac
 }
@@ -2133,10 +2642,10 @@ validate_final_media_file() {
         return 1
     fi
 
-    # probe_media_summary is a status-returning pipeline whose failure is
+    # probe_media_summary supervises the probe before parsing; failure is
     # deliberately converted into a stable validation reason.
     # shellcheck disable=SC2310
-    media_summary=$(probe_media_summary "${final_path}") \
+    probe_media_summary media_summary "${final_path}" \
         || media_summary_status=$?
     if ((media_summary_status != 0)); then
         if ((media_summary_status == 124)); then
@@ -2473,7 +2982,17 @@ initialize_runtime_dependencies() {
         error "private aria2 helper is missing or unsafe: ${PRIVATE_ARIA2_HELPER}"
         exit 66
     fi
+    PROCESS_SUPERVISOR="${script_dir}/private-process-supervisor.py"
+    if [[ ! -f ${PROCESS_SUPERVISOR} || -L ${PROCESS_SUPERVISOR} || ! -r ${PROCESS_SUPERVISOR} ]]; then
+        error 'the timed-command supervisor is missing or unsafe.'
+        exit 66
+    fi
+    readonly PROCESS_SUPERVISOR
     readonly PRIVATE_ARIA2_HELPER
+    if ! python3 -I -B "${PROCESS_SUPERVISOR}" --check-capabilities; then
+        error 'Linux process supervision is unavailable; refusing to start a download.'
+        exit 69
+    fi
 
     if [[ ${YTDLP_ARIA2_SKIP_RUNTIME_UPDATE:-0} == 1 ]]; then
         YTDLP_BIN=${YTDLP_ARIA2_YTDLP_BIN:-$(command -v yt-dlp 2>/dev/null || true)}
@@ -3137,6 +3656,7 @@ execute_selected_transport() {
         # shellcheck disable=SC2016 # Expanded by the intentionally nested shell.
         run_supervised_command bash -c '
             set -o pipefail
+            trap ":" HUP INT TERM
             # Keep both filters alive during cooperative cancellation so the
             # producer can finish its signal handler without a broken pipe.
             # Bytewise matching also redacts malformed diagnostic URL tokens.
@@ -3213,7 +3733,7 @@ execute_selected_transport() {
 
             run_supervised_ytdlp "${YTDLP_BIN}" \
                 "${YT_DLP_OPTIONS[@]}" \
-                --load-info-json "${PRIVATE_ARIA2_PLAN}"
+                --load-info-json "${PRIVATE_ARIA2_METADATA}/transfer-plan.json"
         else
             DOWNLOAD_STATUS=${aria2_status}
         fi
@@ -3225,7 +3745,8 @@ execute_selected_transport() {
             native_output_template=$(python3 "${PRIVATE_ARIA2_HELPER}" check-native-final \
                 --plan "${PRIVATE_ARIA2_PLAN}" --output-dir "${OUTPUT_DIR}" \
                 --final-output-dir "${FINAL_OUTPUT_DIR}" \
-                --final-output-identity "${FINAL_OUTPUT_IDENTITY}" --mode "${MODE}") \
+                --final-output-identity "${FINAL_OUTPUT_IDENTITY}" --mode "${MODE}" \
+                --ownership "${RESOURCE_STATE_FILE}") \
                 || native_preflight_status=$?
             if ((native_preflight_status == 1)); then
                 error 'final media destination already exists; refusing to overwrite it.'
@@ -3248,11 +3769,19 @@ execute_selected_transport() {
                 native_output_options+=(--format "(ba/b)[ext=${native_audio_extension}]")
             fi
         fi
+        if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
+            native_output_template=$(python3 "${PRIVATE_ARIA2_HELPER}" check-native-final \
+                --plan "${PRIVATE_ARIA2_PLAN}" --output-dir "${OUTPUT_DIR}" \
+                --final-output-dir "${FINAL_OUTPUT_DIR}" \
+                --final-output-identity "${FINAL_OUTPUT_IDENTITY}" --mode "${MODE}" \
+                --ownership "${RESOURCE_STATE_FILE}") || exit $?
+            native_output_options=(--output "${native_output_template}")
+        fi
         run_supervised_ytdlp \
             "${YTDLP_BIN}" \
             "${YT_DLP_OPTIONS[@]}" \
             "${native_output_options[@]}" \
-            --batch-file "${YTDLP_BATCH_FILE_TMP}"
+            --load-info-json "${PRIVATE_ARIA2_METADATA}/transfer-plan.json"
     fi
 
     if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]]; then
@@ -3773,6 +4302,7 @@ validate_and_publish_result() {
         emit_machine_postprocess finished MediaPublication
     fi
 
+    RESOURCE_COMPLETED_PATH=${final_media_path}
     if [[ -n ${RESULT_FILE} ]]; then
         # Reauthenticate both endpoints immediately before publication. The
         # hard link is sourced from the open descriptor so a pathname swap
@@ -3868,6 +4398,7 @@ main() {
     trap 'request_shutdown HUP 129' HUP
     trap 'request_shutdown INT 130' INT
     trap 'request_shutdown TERM 143' TERM
+    trap 'if [[ ${SHUTDOWN_REQUESTED} == true && ${DOWNLOAD_FORCE_STOP} != true ]]; then signal_download_worker KILL; fi' CONT
 
     parse_arguments "$@"
     resolve_requested_url
@@ -3880,6 +4411,7 @@ main() {
 
     configure_download_options
     plan_selected_transport
+    acquire_resource_reservations
     if [[ -n ${MEDIA_WORKSPACE} ]]; then
         if ! python3 "${PRIVATE_ARIA2_HELPER}" check-space \
             --plan "${PRIVATE_ARIA2_PLAN}" --output-dir "${OUTPUT_DIR}"; then

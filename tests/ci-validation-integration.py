@@ -7,6 +7,7 @@ Fixtures replace authenticated API reads; this suite never contacts GitHub.
 
 import copy
 from datetime import datetime, timedelta, timezone
+import hashlib
 import importlib.util
 import json
 import os
@@ -15,9 +16,11 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -170,6 +173,51 @@ class ProofTests(unittest.TestCase):
             with self.subTest(workflow=index), self.assertRaises(CHECK.Refusal):
                 self.verify()
             identity["steps"][0]["conclusion"] = "success"
+
+    def test_minimum_shell_and_shared_destination_steps_cannot_be_missing_or_skipped(self):
+        checks = (
+            (1, "Python 3.10 / Ubuntu", "Build and bind verified Bash 4.4 on the disposable runner"),
+            (1, "Python 3.10 / Ubuntu", "Bind every test interpreter to the minimum Python"),
+            (4, "Local media, pinned yt-dlp 2026.8.19", "Install verified Deno for shared-destination qualification"),
+            (4, "Local media, pinned yt-dlp 2026.8.19", "Install pinned impersonation dependencies for shared qualification"),
+            (4, "Local media, pinned yt-dlp 2026.8.19", "Run real shared-destination GUI and CLI qualification"),
+            (4, "Local media, pinned yt-dlp 2026.8.19", "Retain shared-destination verdicts and monotonic events"),
+        )
+        for index, name, step in checks:
+            for outcome in ("missing", "skipped", "failure"):
+                with self.subTest(job=name, step=step, outcome=outcome):
+                    api = fixture()
+                    jobs = api.responses[f"actions/runs/{index * 100}/attempts/1/jobs?per_page=100&page=1"]["jobs"]
+                    job = next(item for item in jobs if item["name"] == name)
+                    entry = next(item for item in job["steps"] if item["name"] == step)
+                    if outcome == "missing":
+                        job["steps"].remove(entry)
+                    else:
+                        entry["conclusion"] = outcome
+                    with self.assertRaises(CHECK.Refusal):
+                        CHECK.Verifier(api, NOW).verify(TARGET)
+
+    def test_shared_prerequisite_obligation_matches_the_pinned_matrix(self):
+        step_name = "Install pinned impersonation dependencies for shared qualification"
+        for version in ("2026.6.9", "2026.7.4", "2026.8.19"):
+            for outcome in ("expected", "missing", "failure", "opposite"):
+                with self.subTest(version=version, outcome=outcome):
+                    api = fixture()
+                    jobs = api.responses["actions/runs/400/attempts/1/jobs?per_page=100&page=1"]["jobs"]
+                    job = next(item for item in jobs if item["name"] == f"Local media, pinned yt-dlp {version}")
+                    # Model the workflow condition independently of checker tables.
+                    job["steps"] = [step for step in job["steps"] if step["name"] != step_name]
+                    expected = "success" if version == "2026.8.19" else "skipped"
+                    if outcome != "missing":
+                        conclusion = (expected if outcome == "expected" else "failure" if outcome == "failure"
+                                      else "skipped" if expected == "success" else "success")
+                        job["steps"].append({"name": step_name, "status": "completed", "conclusion": conclusion})
+                    verifier = CHECK.Verifier(api, NOW)
+                    if outcome == "expected":
+                        self.assertEqual(verifier.verify(TARGET)["tree"], TREE)
+                    else:
+                        with self.assertRaises(CHECK.Refusal, msg="matrix prerequisite obligation was not enforced"):
+                            verifier.verify(TARGET)
 
     def test_pr_association_may_be_empty_after_merge_and_fork_is_accepted(self):
         self.assertEqual(self.verify()["pull_request"], 23)
@@ -854,6 +902,54 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
                     with self.subTest(workflow=filename, job=name, step=step):
                         self.assertIn("- name: " + step + "\n", text)
 
+    def test_minimum_interpreters_share_one_full_run_and_bind_absolute_fixtures(self):
+        job = self.jobs(self.workflow("shell.yml"))["validate-python-minimum"]
+        self.assertEqual(job.count("./tests/run-all.sh --full --jobs 4"), 1)
+        self.assertIn("name: Python 3.10 / Ubuntu", job)
+        for guard in (
+            "${RUNNER_ENVIRONMENT} == github-hosted",
+            "readonly version=4.4", "readonly fingerprint=7C0135FB088AAF6C66C650B9BB5869F064EA74AB",
+            "${BASH_VERSINFO[2]} == 0", 'sudo ln -sfnT -- "${prefix}/bin/bash" /usr/bin/bash',
+            "env PATH=/usr/bin:/bin bash", 'sudo ln -sfnT -- "${python_binary}" /usr/bin/python3',
+            'printf \'%s\\n\' "${prefix}/bin" >>"${GITHUB_PATH}"',
+        ):
+            self.assertIn(guard, job)
+        self.assertLess(job.index("sha256sum --check"), job.index("tar --extract"))
+        self.assertLess(job.index('[[ ${signature_fingerprint} == "${fingerprint}" ]]'),
+                        job.index("tar --extract"))
+        self.assertLess(job.index("Confirm minimum Python and environment"),
+                        job.index("./tests/run-all.sh --full --jobs 4"))
+        self.assertIn("timeout --signal=TERM --kill-after=10s 8m", job)
+        self.assertIn("timeout-minutes: 10", job)
+
+    def test_shared_destination_uses_one_verified_tool_entry_and_retains_only_diagnostics(self):
+        job = self.jobs(self.workflow("real-tools.yml"))["pinned-local-media"]
+        steps = re.split(r"(?m)^      - ", job)
+        install = next(step for step in steps if step.startswith("name: Install verified Deno"))
+        run = next(step for step in steps if step.startswith("name: Run real shared-destination"))
+        retain = next(step for step in steps if step.startswith("name: Retain shared-destination"))
+        for step in (install, run):
+            self.assertIn("if: matrix.yt_dlp_version == '2026.8.19'", step)
+        self.assertIn("always() && matrix.yt_dlp_version == '2026.8.19'", retain)
+        self.assertIn("readonly version=2.9.4", install)
+        self.assertIn("c24f955d9fbfe0ea5ae2b501c8e71ae76e31e4c9782390a54a284b3364fda725", install)
+        self.assertLess(install.index("sha256sum --check"), install.index("unzip -q"))
+        self.assertLess(install.index("sha256sum --check"), install.index('"${tool_dir}/deno" --version'))
+        self.assertIn('export YTDLP_REAL_BINARY="${RUNNER_TEMP}/yt-dlp-venv/bin/yt-dlp"', run)
+        self.assertIn("timeout --signal=TERM --kill-after=10s 8m", run)
+        self.assertIn("./tests/repeat-qualification.sh --runs 1 --jobs 1", run)
+        self.assertIn("python3 -B ./tests/multi-instance-real.py", run)
+        self.assertIn("set -Eeuo pipefail", run)
+        for field in ("HOME:", "XDG_CONFIG_HOME:", "XDG_STATE_HOME:", "XDG_DATA_HOME:"):
+            self.assertNotIn(field, run)
+        self.assertIn("if-no-files-found: error", retain)
+        self.assertIn("github.sha", retain)
+        self.assertIn("github.run_attempt", retain)
+        paths = [path for path in retain.split("          path: |\n", 1)[1].splitlines() if path.strip()]
+        self.assertTrue(paths)
+        for path in paths:
+            self.assertRegex(path.strip(), r"^\$\{\{ runner.temp \}\}/shared-destination-evidence/(?:qualification\.log|shared-destination-real-\*/(?:\*\.log|events\.json|\*\.(?:final-)?before-rescue\.json))$")
+
     def test_release_reuses_proof_and_preserves_artifact_qualification(self):
         text = self.workflow("release.yml")
         self.assertIn("scripts/ci-validation.py verify --commit", text)
@@ -1157,6 +1253,96 @@ class VersionBoundaryTests(unittest.TestCase):
         return "\n".join(line[10:] for line in block.splitlines()
                          if line.startswith("          ")) + "\n"
 
+    def test_minimum_bash_bootstrap_authenticates_before_extracting_or_building(self):
+        script = self.step("shell.yml", "Build and bind verified Bash 4.4 on the disposable runner")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            upstream = root / "upstream/bash-4.4"
+            upstream.mkdir(parents=True)
+            configure = upstream / "configure"
+            configure.write_text('#!/bin/bash\nprintf build >>"${CHECK_BUILD}"\nexit 42\n')
+            configure.chmod(0o755)
+            archive = root / "source.tar.gz"
+            with tarfile.open(archive, "w:gz") as output:
+                output.add(upstream, arcname="bash-4.4")
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            script = re.sub(r"readonly source_sha=[0-9a-f]{64}", "readonly source_sha=" + digest, script)
+            fixture = r'''
+curl() {
+    local output='' url=''
+    while (($#)); do
+        case $1 in --output) output=$2; shift ;; https://*) url=$1 ;; esac
+        shift
+    done
+    printf download >>"${CHECK_DOWNLOAD}"
+    case ${url} in
+        *.tar.gz) cp -- "${CHECK_ARCHIVE}" "${output}" ;;
+        *) printf 'inert verification fixture\n' >"${output}" ;;
+    esac
+}
+gpgv() {
+    [[ ${CHECK_SIGNATURE} != failure ]] || return 23
+    local fingerprint=7C0135FB088AAF6C66C650B9BB5869F064EA74AB
+    [[ ${CHECK_SIGNATURE} != wrong ]] || fingerprint=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+    printf '[GNUPG:] VALIDSIG %s 2016-09-14 1473863216 0 4 0 17 2 00 %s\n' \
+        "${fingerprint}" "${fingerprint}"
+}
+tar() { printf extract >>"${CHECK_EXTRACT}"; command tar "$@"; }
+sudo() { printf 'Unexpected host mutation\n' >&2; return 99; }
+'''
+            for condition, expected in (("valid", 42), ("checksum", 1), ("wrong", 1),
+                                        ("failure", 23), ("self-hosted", 1)):
+                with self.subTest(condition=condition):
+                    run = root / condition
+                    run.mkdir()
+                    current = script.replace("readonly source_sha=" + digest,
+                                             "readonly source_sha=" + "0" * 64) if condition == "checksum" else script
+                    env = dict(os.environ, RUNNER_TEMP=str(run), GITHUB_PATH=str(run / "path"),
+                               GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="self-hosted" if condition == "self-hosted" else "github-hosted",
+                               CHECK_ARCHIVE=str(archive), CHECK_SIGNATURE=condition,
+                               CHECK_BUILD=str(run / "build"), CHECK_EXTRACT=str(run / "extract"),
+                               CHECK_DOWNLOAD=str(run / "download"))
+                    result = subprocess.run(["bash", "-c", fixture + current], env=env,
+                                            capture_output=True, timeout=10, check=False)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    self.assertEqual((run / "extract").exists(), condition == "valid")
+                    self.assertEqual((run / "build").exists(), condition == "valid")
+                    self.assertEqual((run / "download").exists(), condition != "self-hosted")
+
+    def test_deno_bootstrap_refuses_bad_digest_before_extracting_or_executing(self):
+        script = self.step("real-tools.yml", "Install verified Deno for shared-destination qualification")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "deno.zip"
+            with zipfile.ZipFile(archive, "w") as output:
+                output.writestr("deno", '#!/bin/bash\nprintf executed >>"${CHECK_EXECUTE}"\nprintf "deno 2.9.4\\n"\n')
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            fixture = r'''
+curl() {
+    while (($#)); do
+        if [[ $1 == --output ]]; then cp -- "${CHECK_ARCHIVE}" "$2"; return; fi
+        shift
+    done
+    return 99
+}
+unzip() { printf inspect >>"${CHECK_EXTRACT}"; command unzip "$@"; }
+'''
+            for valid in (False, True):
+                with self.subTest(valid=valid):
+                    run = root / str(valid)
+                    run.mkdir()
+                    current = re.sub(r"readonly archive_sha=[0-9a-f]{64}",
+                                     "readonly archive_sha=" + (digest if valid else "0" * 64), script)
+                    env = dict(os.environ, RUNNER_TEMP=str(run), GITHUB_PATH=str(run / "path"),
+                               CHECK_ARCHIVE=str(archive), CHECK_EXECUTE=str(run / "execute"),
+                               CHECK_EXTRACT=str(run / "extract"))
+                    result = subprocess.run(["bash", "-c", fixture + current], env=env,
+                                            capture_output=True, timeout=10, check=False)
+                    self.assertEqual(result.returncode, 0 if valid else 1, result.stderr)
+                    self.assertEqual((run / "extract").exists(), valid)
+                    self.assertEqual((run / "execute").exists(), valid)
+                    self.assertEqual((run / "path").exists(), valid)
+
     def test_development_artifact_names_bind_source_and_run_across_consumer_reruns(self):
         text = (PROJECT / ".github/workflows/packages.yml").read_text()
         rpm_names = re.findall(r"(?m)^          name: (rpm-under-test-.+)$", text)
@@ -1273,6 +1459,325 @@ gh() {
                     self.assertEqual(result.returncode, 65 if changed else 0, result.stderr)
                     if changed:
                         self.assertIn(b"differs byte-for-byte", result.stderr)
+
+
+class PassiveDiagnosticsTests(unittest.TestCase):
+    """Exercise passive reads and the real Ubuntu step without running suites."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            "ci_diagnostics", PROJECT / "scripts/ci-validation-diagnostics.py")
+        cls.helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.helper)
+
+    def directories(self, root):
+        diagnostics, logs = root / "diagnostics", root / "logs"
+        for directory in (diagnostics, logs):
+            directory.mkdir(mode=0o700)
+        return diagnostics, logs
+
+    def test_exact_vocabulary_does_not_disclose_valid_prefix_secrets(self):
+        helper = self.helper
+        accepted = b"Mock scenario: config-crlf"
+        self.assertEqual(helper.selected_line(accepted), accepted.decode())
+        for line in (b"Mock scenario: secret-token-valid-alnum",
+                     accepted + b"-secret-token", accepted + b" secret-token",
+                     b"Payload secret-token: " + b"a" * 64,
+                     b"Payload download-video.sh: " + b"x" * 64):
+            with self.subTest(line=line):
+                self.assertIsNone(helper.selected_line(line))
+        for line, expected in (
+            (b"FAIL: https://private.invalid/?secret-token", "failure-diagnostic-present"),
+            (b"Installed helper contract passed: /secret-token", "installed-helper-contract-passed"),
+            (b"Payload download-video.sh: " + b"a" * 64, "installed-payload-checked"),
+        ):
+            self.assertEqual(helper.selected_line(line), expected)
+            self.assertNotIn("secret-token", helper.selected_line(line))
+
+    def test_open_log_descriptors_preserve_late_data_after_unlink(self):
+        helper = self.helper
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics, logs = self.directories(Path(temporary))
+            helper.publish(str(diagnostics), str(logs))
+            directory = helper.private_directory(str(diagnostics))
+            reader = helper.LogReader(directory)
+            try:
+                self.assertEqual(set(reader.sample()), set(helper.LOG_NAMES))
+                with (logs / helper.LOG_NAMES[0]).open("ab") as producer:
+                    for name in helper.LOG_NAMES:
+                        (logs / name).unlink()
+                    logs.rmdir()
+                    producer.write(b"Mock scenario: config-crlf\nFAIL: secret-token\n")
+                    producer.flush()
+                    sample = reader.sample()[helper.LOG_NAMES[0]]
+                    self.assertEqual(sample["events"], ["Mock scenario: config-crlf",
+                                                        "failure-diagnostic-present"])
+                    self.assertNotIn("secret-token", json.dumps(sample))
+            finally:
+                reader.close()
+                os.close(directory)
+
+    def test_refuses_unsafe_paths_rendezvous_and_log_files_without_blocking(self):
+        helper = self.helper
+        variants = ("directory-link", "ancestor-link", "permissions", "wrong-owner",
+                    "record-link", "oversize-record", "wrong-identity", "log-link", "log-fifo")
+        for variant in variants:
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                diagnostics, logs = self.directories(root)
+                helper.publish(str(diagnostics), str(logs))
+                if variant in ("directory-link", "ancestor-link", "permissions", "wrong-owner"):
+                    target = str(diagnostics)
+                    if variant == "directory-link":
+                        (root / "alias").symlink_to(diagnostics)
+                        target = str(root / "alias")
+                    elif variant == "ancestor-link":
+                        (root / "alias").symlink_to(root)
+                        target = str(root / "alias/diagnostics")
+                    elif variant == "permissions":
+                        diagnostics.chmod(0o755)
+                    owner = os.geteuid() + (1 if variant == "wrong-owner" else 0)
+                    with patch.object(helper.os, "geteuid", return_value=owner):
+                        with self.assertRaises((OSError, ValueError)):
+                            helper.private_directory(target)
+                    continue
+                record = diagnostics / "logs.json"
+                if variant == "record-link":
+                    record.rename(diagnostics / "original")
+                    record.symlink_to(diagnostics / "original")
+                elif variant == "oversize-record":
+                    record.write_bytes(b"secret-token" * helper.MAX_READ)
+                elif variant == "wrong-identity":
+                    payload = json.loads(record.read_text())
+                    payload["inode"] += 1
+                    record.write_text(json.dumps(payload))
+                elif variant.startswith("log-"):
+                    (logs / helper.LOG_NAMES[0]).unlink()
+                    if variant == "log-link":
+                        (logs / helper.LOG_NAMES[0]).symlink_to(record)
+                    else:
+                        os.mkfifo(logs / helper.LOG_NAMES[0], 0o600)
+                directory = helper.private_directory(str(diagnostics))
+                reader = helper.LogReader(directory)
+                try:
+                    with self.assertRaises((OSError, ValueError)):
+                        reader.sample()
+                finally:
+                    reader.close()
+                    os.close(directory)
+
+    def test_unknown_and_oversized_lines_and_total_read_bound(self):
+        helper = self.helper
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics, logs = self.directories(Path(temporary))
+            helper.publish(str(diagnostics), str(logs))
+            path = logs / helper.LOG_NAMES[0]
+            path.write_bytes(b"x" * (helper.MAX_LINE + 1) + b"Mock scenario: config-crlf\n"
+                             b"Mock scenario: secret-token\nMock scenario: config-crlf\n")
+            directory = helper.private_directory(str(diagnostics))
+            reader = helper.LogReader(directory)
+            try:
+                sample = reader.sample()[helper.LOG_NAMES[0]]
+                self.assertEqual(sample["events"], ["Mock scenario: config-crlf"])
+                with patch.object(helper, "MAX_LOG_BYTES", sample["bytes_read"] + 7):
+                    with path.open("ab") as producer:
+                        producer.write(b"secret-token" * 50)
+                    bounded = reader.sample()[helper.LOG_NAMES[0]]
+                    self.assertTrue(bounded["size_bound"])
+                    self.assertEqual(bounded["bytes_read"], sample["bytes_read"] + 7)
+                    self.assertEqual(reader.sample()[helper.LOG_NAMES[0]]["events"], [])
+            finally:
+                reader.close()
+                os.close(directory)
+
+    def test_observer_real_counters_stop_and_finite_bound(self):
+        import contextlib
+        import io
+        helper = self.helper
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics, logs = self.directories(Path(temporary))
+            helper.publish(str(diagnostics), str(logs))
+            (diagnostics / "done").touch(mode=0o600)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(helper.observe(str(diagnostics)), 0)
+            row = json.loads(output.getvalue())
+            self.assertTrue(row["done"])
+            self.assertTrue(row["logs_attached"])
+            self.assertIn("/proc/stat", row["counters"])
+            self.assertEqual(len(row["counters"]["/proc/loadavg"]["value"].split()), 3)
+            (diagnostics / "done").unlink()
+            output = io.StringIO()
+            with patch.object(helper, "MAX_SAMPLES", 2), patch.object(helper.time, "sleep"), \
+                    contextlib.redirect_stdout(output):
+                self.assertEqual(helper.observe(str(diagnostics)), 70)
+            rows = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(rows[-1]["expired"])
+            with patch.object(helper.os, "open", side_effect=PermissionError(13, "secret-token")):
+                self.assertEqual(helper.counter("/proc/stat"), {"error": "PermissionError", "errno": 13})
+
+    def test_done_requires_handoff_and_drains_tail_beyond_one_chunk(self):
+        import contextlib
+        import io
+        helper = self.helper
+        for variant in ("missing", "tail", "size-bound"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as temporary:
+                diagnostics, logs = self.directories(Path(temporary))
+                if variant != "missing":
+                    helper.publish(str(diagnostics), str(logs))
+                    size = helper.MAX_READ * 2 if variant == "tail" else helper.MAX_LOG_BYTES + 1
+                    (logs / helper.LOG_NAMES[0]).write_bytes(
+                        b"x" * size + b"\nMock scenario: config-crlf\n")
+                (diagnostics / "done").touch(mode=0o600)
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    status = helper.observe(str(diagnostics))
+                row = json.loads(output.getvalue())
+                self.assertEqual(status, 0 if variant == "tail" else 65)
+                self.assertEqual(row["complete"], variant == "tail")
+                if variant == "tail":
+                    self.assertEqual(row["logs"][helper.LOG_NAMES[0]]["last_event"],
+                                     "Mock scenario: config-crlf")
+                elif variant == "size-bound":
+                    self.assertTrue(row["logs"][helper.LOG_NAMES[0]]["size_bound"])
+                    self.assertEqual(row["logs"][helper.LOG_NAMES[0]]["bytes_read"],
+                                     helper.MAX_LOG_BYTES)
+                else:
+                    self.assertFalse(row["logs_attached"])
+
+    def test_failed_fstat_closes_the_opened_descriptor(self):
+        helper = self.helper
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "done").touch(mode=0o600)
+            directory = helper.private_directory(str(root))
+            real_open = os.open
+            opened = []
+
+            def record_open(*args, **kwargs):
+                descriptor = real_open(*args, **kwargs)
+                opened.append(descriptor)
+                return descriptor
+
+            try:
+                with patch.object(helper.os, "open", side_effect=record_open), \
+                        patch.object(helper.os, "fstat", side_effect=OSError(5, "fixture")):
+                    with self.assertRaises(OSError):
+                        helper.private_file(directory, "done")
+                self.assertEqual(len(opened), 1)
+                with self.assertRaises(OSError):
+                    os.fstat(opened[0])
+            finally:
+                os.close(directory)
+
+    def test_publish_does_not_replace_existing_rendezvous(self):
+        helper = self.helper
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics, logs = self.directories(Path(temporary))
+            record = diagnostics / "logs.json"
+            record.write_text("preserve-me")
+            record.chmod(0o600)
+            with self.assertRaises(FileExistsError):
+                helper.publish(str(diagnostics), str(logs))
+            self.assertEqual(record.read_text(), "preserve-me")
+
+    def test_runner_consumes_optional_variable_before_any_child(self):
+        source = (PROJECT / "tests/run-all.sh").read_text()
+        main = source[source.rindex("\nmain() {\n"):]
+        fixture = r'''
+set -euo pipefail
+parse_arguments() { DOCTOR_ONLY=false; LIST_ONLY=false; PROFILE=full; JOBS=4; }
+validate_shell_file_arrays() { :; }
+validate_suite_manifest() { :; }
+test_runner_initialize() { TEST_RUNNER_LOG_DIR=${CHECK_LOGS}; }
+cleanup() { :; }
+test_runner_now_ms() { printf '1\n'; }
+test_runner_format_duration() { printf -v "$2" '0.000s'; }
+run_static_validation() {
+    python3 -c 'import os; assert "YTDLP_ARIA2_CI_DIAGNOSTICS_DIR" not in os.environ'
+    [[ -f ${CHECK_DIAGNOSTICS}/logs.json ]]
+    printf 'private rendezvous, child environment clean\n'
+}
+run_integration_suites() { run_static_validation; }
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics, logs = self.directories(Path(temporary))
+            result = subprocess.run(["bash", "-c", fixture + main], cwd=PROJECT,
+                                    env=dict(os.environ, PROJECT_DIR=str(PROJECT),
+                                             CHECK_LOGS=str(logs), CHECK_DIAGNOSTICS=str(diagnostics),
+                                             YTDLP_ARIA2_CI_DIAGNOSTICS_DIR=str(diagnostics)),
+                                    capture_output=True, text=True, timeout=5, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.count("child environment clean"), 2)
+            self.assertEqual(json.loads((diagnostics / "logs.json").read_text())["directory"], str(logs))
+
+    def test_real_workflow_step_preserves_statuses_and_observer_failure(self):
+        script = VersionBoundaryTests.step("shell.yml", "Run validation")
+        command = "timeout --signal=TERM --kill-after=10s 7m bash ./tests/run-all.sh --jobs 4"
+        self.assertIn(command, script)
+        fixture = r'''
+umask "${CHECK_INCOMING_UMASK}"
+python3() {
+    if [[ ${4:-} == observe && ${CHECK_OBSERVER_FAILURE} == 1 ]]; then
+        command python3 "$1" "$2" "$3" "$4" "${CHECK_INVALID_DIAGNOSTICS}"
+        return
+    fi
+    command python3 "$@"
+}
+timeout() {
+    [[ "$*" == '--signal=TERM --kill-after=10s 7m bash ./tests/run-all.sh --jobs 4' ]] || return 98
+    # Exercise the EXIT path before normal collection or log handoff.
+    if [[ ${CHECK_COMMAND_STATUS} == 27 ]]; then exit 27; fi
+    shift 3
+    if [[ ${CHECK_TIMEOUT} == 1 ]]; then
+        command timeout --signal=TERM --kill-after=10s 0.05s "$@"
+    else
+        "$@"
+    fi
+}
+'''
+        cases = ((0, False, False, 0), (23, False, False, 23), (27, False, False, 27),
+                 (0, True, False, 124), (0, False, True, 65), (23, False, True, 23))
+        for case, incoming_umask in ((case, mask) for case in cases for mask in ("0022", "0077")):
+            command_status, expired, observer_failed, expected = case
+            with self.subTest(status=expected, expired=expired, observer_failed=observer_failed,
+                              umask=incoming_umask), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                for directory in ("scripts", "tests", "runner-temp", "logs"):
+                    (root / directory).mkdir(mode=0o700)
+                (root / "invalid").mkdir(mode=0o755)
+                (root / "invalid").chmod(0o755)
+                shutil.copyfile(PROJECT / "scripts/ci-validation-diagnostics.py",
+                                root / "scripts/ci-validation-diagnostics.py")
+                (root / "tests/run-all.sh").write_text(r'''
+set -euo pipefail
+[[ $(umask) == "${CHECK_INCOMING_UMASK}" ]] || exit 96
+command python3 -I -B scripts/ci-validation-diagnostics.py publish \
+    "${YTDLP_ARIA2_CI_DIAGNOSTICS_DIR}" "${CHECK_LOGS}"
+printf 'Mock scenario: config-crlf\n' >"${CHECK_LOGS}/mock-gui-state.log"
+if [[ ${CHECK_TIMEOUT} == 1 ]]; then sleep 1; fi
+exit "${CHECK_COMMAND_STATUS}"
+''')
+                result = subprocess.run(["bash", "-c", fixture + script], cwd=root,
+                                        env=dict(os.environ, RUNNER_TEMP=str(root / "runner-temp"),
+                                                 CHECK_LOGS=str(root / "logs"),
+                                                 CHECK_INVALID_DIAGNOSTICS=str(root / "invalid"),
+                                                 CHECK_INCOMING_UMASK=incoming_umask,
+                                                 CHECK_COMMAND_STATUS=str(command_status),
+                                                 CHECK_TIMEOUT=str(int(expired)),
+                                                 CHECK_OBSERVER_FAILURE=str(int(observer_failed))),
+                                        capture_output=True, text=True, timeout=5, check=False)
+                self.assertEqual(result.returncode, expected, result.stderr + result.stdout)
+                records = list((root / "runner-temp").glob("*/samples.jsonl"))
+                self.assertEqual(len(records), 1)
+                self.assertTrue((records[0].parent / "done").is_file())
+                if not observer_failed:
+                    rows = [json.loads(line) for line in records[0].read_text().splitlines()]
+                    self.assertTrue(rows[-1]["done"])
+                self.assertIn(f"Validation status: {124 if expired else command_status};", result.stdout)
 
 
 if __name__ == "__main__":

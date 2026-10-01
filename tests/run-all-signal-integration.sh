@@ -120,6 +120,7 @@ import fcntl
 import os
 import pathlib
 import re
+import select
 import signal
 import struct
 import subprocess
@@ -268,23 +269,36 @@ def terminate_if_needed(pid: int, identity_token: str) -> None:
         pass
 
 
-# Fill the actual capture pipe before waiting: a wait-then-read controller would
-# block the signal handler before it can finish the runner's normal cleanup.
+# Establish actual capture backpressure before waiting: a wait-then-read
+# controller blocks the signal handler before it can finish normal cleanup.
 noise_marker = test_root / "stderr-ready.pid"
 noise_size_file = test_root / "stderr-size"
+noise_started_file = test_root / "stderr-write-started"
+noise_finished_file = test_root / "stderr-write-finished"
+noise_write_fd = None
 noise_fixture = r'''
 set -euo pipefail
 source "$1"
 size_file=$3
+started_file=$4
+finished_file=$5
 test_runner_initialize
 trap test_runner_cleanup EXIT
-trap 'size=$(<"${size_file}"); printf "%*s" "${size}" "" >&2; test_runner_handle_signal INT 130' INT
+noise_interrupt() {
+    size=$(<"${size_file}")
+    printf '%s\n' "${size}" >"${started_file}"
+    printf '%*s' "${size}" '' >&2
+    printf 'finished\n' >"${finished_file}"
+    test_runner_handle_signal INT 130
+}
+trap noise_interrupt INT
 printf '%s\n' "$$" >"$2"
 while :; do sleep 0.01; done
 '''
 noise_runner = subprocess.Popen(
     [real_bash, "-c", noise_fixture, "stderr-fixture",
-     str(project_dir / "tests/lib/test-runner.sh"), str(noise_marker), str(noise_size_file)],
+     str(project_dir / "tests/lib/test-runner.sh"), str(noise_marker), str(noise_size_file),
+     str(noise_started_file), str(noise_finished_file)],
     env={**os.environ, "TMPDIR": str(test_root)},
     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
 )
@@ -293,6 +307,19 @@ try:
     if noise_runner.stderr is None:
         raise AssertionError("stderr fixture has no capture pipe")
     capacity = fcntl.fcntl(noise_runner.stderr, fcntl.F_GETPIPE_SZ)
+    # Reopen our own capture pipe for write readiness, not a child's procfs FD.
+    # This adds no dependency on syscall/ptrace access and changes no FD flags.
+    noise_write_fd = os.open(
+        f"/proc/self/fd/{noise_runner.stderr.fileno()}", os.O_WRONLY | os.O_CLOEXEC
+    )
+    read_identity = os.fstat(noise_runner.stderr.fileno())
+    write_identity = os.fstat(noise_write_fd)
+    if ((read_identity.st_dev, read_identity.st_ino) !=
+            (write_identity.st_dev, write_identity.st_ino)):
+        raise AssertionError("write-readiness descriptor does not identify the capture pipe")
+    writable = select.poll()
+    writable.register(noise_write_fd, select.POLLOUT)
+    previous_blocked = None
     noise_size_file.write_text(str(capacity * 2), encoding="ascii")
     noise_runner.send_signal(signal.SIGINT)
     deadline = time.monotonic() + 3
@@ -300,13 +327,35 @@ try:
         pending = struct.unpack(
             "i", fcntl.ioctl(noise_runner.stderr, termios.FIONREAD, struct.pack("i", 0))
         )[0]
-        if pending == capacity:
-            break
+        events = writable.poll(0)
+        if any(mask & (select.POLLERR | select.POLLHUP | select.POLLNVAL)
+               for _, mask in events):
+            raise AssertionError("capture pipe write-readiness observation failed")
+        try:
+            started = noise_started_file.read_text(encoding="ascii")
+        except FileNotFoundError:
+            started = ""
+        # A partial libc padding write can exhaust slots below nominal capacity.
+        # No reader has drained the pipe. The only producer has started a load
+        # larger than capacity and has not finished it. Require two concordant
+        # nonwritable observations within the existing deadline/poll interval.
+        if (pending > 0 and not events and started == f"{capacity * 2}\n"
+                and not noise_finished_file.exists()):
+            current_blocked = (pending, started)
+            if current_blocked == previous_blocked:
+                break
+            previous_blocked = current_blocked
+        else:
+            previous_blocked = None
         if noise_runner.poll() is not None:
             raise AssertionError("stderr fixture exited before filling its capture pipe")
         time.sleep(0.01)
     else:
-        raise AssertionError("stderr fixture did not fill its capture pipe")
+        report_timeout(noise_runner)
+        raise AssertionError("stderr fixture did not establish capture backpressure")
+    # Our extra writer would retain EOF even after the real producer exits.
+    os.close(noise_write_fd)
+    noise_write_fd = None
     try:
         noise_output = wait_runner(noise_runner)
     except subprocess.TimeoutExpired:
@@ -315,6 +364,8 @@ try:
     if noise_runner.returncode != 130 or len(noise_output) != capacity * 2:
         raise AssertionError("stderr draining changed signal status or lost diagnostics")
 finally:
+    if noise_write_fd is not None:
+        os.close(noise_write_fd)
     if noise_runner.poll() is None:
         noise_runner.kill()
         noise_runner.wait(timeout=5)

@@ -51,7 +51,12 @@ SCHEDULED_JOB = "Scheduled current stable yt-dlp"
 REQUIRED_STEPS = {
     "Ubuntu": {"Check workflow syntax and embedded shell", "Run validation"},
     "Fedora 44": {"Run validation"},
-    "Python 3.10 / Ubuntu": {"Exercise the complete contract under Python 3.10"},
+    "Python 3.10 / Ubuntu": {
+        "Build and bind verified Bash 4.4 on the disposable runner",
+        "Bind every test interpreter to the minimum Python",
+        "Confirm minimum Python and environment",
+        "Exercise the complete contract under Python 3.10",
+    },
     "Git-free source archive": {"Build and retest Git-free source archive"},
     "Previous immutable release": {"Resolve previous semantic-version release", "Verify exact published previous packages"},
     "Fedora 44 RPM build-once": {"Build RPM once", "Qualify RPM v4/v6 signature semantics"},
@@ -72,6 +77,10 @@ REQUIRED_STEPS = {
         "Run direct, audio, HLS and DASH boundary qualification",
         "Run aria2 direct-transfer behavior qualification",
         "Run real FFmpeg progress qualification", "Run HLS post-remux duration validation",
+        "Install verified Deno for shared-destination qualification",
+        "Install pinned impersonation dependencies for shared qualification",
+        "Run real shared-destination GUI and CLI qualification",
+        "Retain shared-destination verdicts and monotonic events",
     } for version in ("2026.6.9", "2026.7.4", "2026.8.19")},
     **{f"Mock process/cancellation stress shard {shard}/4": {
         "Repeat race-sensitive integration scenarios with bounded jitter",
@@ -87,7 +96,11 @@ ALLOWED_SKIPS = {
     ("Fedora 44 RPM (ffmpeg-free)", "Test previous immutable release -> current RPM upgrade"),
     *((f"Local media, pinned yt-dlp {version}", step)
       for version in ("2026.6.9", "2026.7.4")
-      for step in ("Run real FFmpeg progress qualification", "Run HLS post-remux duration validation")),
+      for step in ("Run real FFmpeg progress qualification", "Run HLS post-remux duration validation",
+                   "Install verified Deno for shared-destination qualification",
+                   "Install pinned impersonation dependencies for shared qualification",
+                   "Run real shared-destination GUI and CLI qualification",
+                   "Retain shared-destination verdicts and monotonic events")),
 }
 
 

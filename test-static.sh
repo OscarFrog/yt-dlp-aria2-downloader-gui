@@ -28,7 +28,7 @@ fi
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 # The development tree can lead the latest installable GitHub release. Keep the
 # two contracts explicit so README package names never advertise absent assets.
-readonly EXPECTED_VERSION='2.3.29'
+readonly EXPECTED_VERSION='2.4.0'
 readonly EXPECTED_PUBLISHED_VERSION='2.3.29'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SOURCE_INVENTORY_FILE=''
@@ -1288,6 +1288,146 @@ print("Installed README contributor links: absolute targets in both languages.")
 PY_STATIC_HARNESS_REGRESSIONS
 }
 
+assert_real_tools_single_supervised_qualification() {
+    python3 -B - "${SCRIPT_DIR}" <<'PY_REAL_TOOLS_SINGLE_RUN'
+from pathlib import Path
+import sys
+
+source = (Path(sys.argv[1]) / ".github/workflows/real-tools.yml").read_text(encoding="utf-8")
+# The wrapper supplies supervision for one new fixture, never repetition of
+# complete media suites. Match the whole invocation, including its command.
+allowed = r"""          timeout --signal=TERM --kill-after=10s 8m \
+            bash ./tests/repeat-qualification.sh --runs 1 --jobs 1 \
+              --label 'Shared-destination real tools' -- \
+              python3 -B ./tests/multi-instance-real.py \
+            2>&1 | tee "${TMPDIR}/qualification.log"
+"""
+marker = "      - name: Run real shared-destination GUI and CLI qualification\n"
+diagnostic = "real-tools permits only one supervised --runs 1 --jobs 1 multi-instance invocation"
+
+
+def validate(text):
+    if text.count(marker) != 1 or text.count(allowed) != 1:
+        raise AssertionError(diagnostic)
+    step = text.split(marker, 1)[1].split("\n      - ", 1)[0] + "\n"
+    if allowed not in step or "repeat-qualification.sh" in text.replace(allowed, "", 1):
+        raise AssertionError(diagnostic)
+
+
+validate(source)
+mutations = (
+    ("more runs", source.replace("--runs 1 --jobs 1", "--runs 2 --jobs 1", 1)),
+    ("more jobs", source.replace("--runs 1 --jobs 1", "--runs 1 --jobs 2", 1)),
+    ("overridden count", source.replace("--runs 1 --jobs 1", "--runs 1 --jobs 1 --runs 2", 1)),
+    ("different Python fixture", source.replace("python3 -B ./tests/multi-instance-real.py",
+                                               "python3 -B ./tests/ci-validation-integration.py", 1)),
+    ("repeated media suite", source.replace("python3 -B ./tests/multi-instance-real.py",
+                                           "bash ./tests/real-tools-integration.sh", 1)),
+    ("command arguments", source.replace("python3 -B ./tests/multi-instance-real.py",
+                                        "python3 -B ./tests/multi-instance-real.py --repeat 2", 1)),
+    ("duplicate invocation", source.replace(allowed, allowed + allowed, 1)),
+    ("another wrapper", source + "\n          bash ./tests/repeat-qualification.sh --runs 2 --jobs 1 -- true\n"),
+    ("wrong step", source.replace(marker, "      - name: Other qualification\n", 1)),
+)
+for name, mutated in mutations:
+    if mutated == source:
+        raise AssertionError(f"ineffective single-run mutation: {name}")
+    try:
+        validate(mutated)
+    except AssertionError as error:
+        if str(error) != diagnostic:
+            raise
+    else:
+        raise AssertionError(f"single-run policy accepted mutation: {name}")
+print("Real-tools single-run supervision: exact multi-instance wrapper accepted; nine repetition/command mutations rejected.")
+
+# The shared GUI fixture enters the managed-runtime contract. A plain yt-dlp
+# wheel can report version/help successfully while every impersonation target
+# remains unavailable; its latest-only CI prerequisites must be installed first.
+prerequisite_marker = "      - name: Install pinned impersonation dependencies for shared qualification\n"
+prerequisite_condition = "        if: matrix.yt_dlp_version == '2026.8.19'\n"
+prerequisite_diagnostic = "shared qualification requires the pinned/hash-verified latest-only impersonation step before its run"
+pins = (
+    "certifi==2026.7.22 --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+    "cffi==2.1.1 --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf",
+    "curl-cffi==0.16.0 --hash=sha256:182416f07d71a342240554fa62c22e591999b78c225b21d3fe27d9f807420dd6",
+    "pycparser==3.0 --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+)
+requirements_assignment = '          requirements="${RUNNER_TEMP}/yt-dlp-impersonation-requirements.txt"\n'
+requirements_payload = '          cat >"${requirements}" <<\'EOF_REQUIREMENTS\'\n'
+requirements_payload += ''.join('          ' + pin + '\n' for pin in pins)
+requirements_payload += '          EOF_REQUIREMENTS\n'
+python_target = '          "${RUNNER_TEMP}/yt-dlp-venv/bin/python" -c \'import sys; assert sys.version_info[:2] == (3, 12)\'\n'
+install = r"""          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" --isolated install \
+            --disable-pip-version-check \
+            --index-url https://pypi.org/simple \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement "${requirements}"
+"""
+
+
+def prerequisite_step(text):
+    if text.count(prerequisite_marker) != 1:
+        raise AssertionError(prerequisite_diagnostic)
+    return prerequisite_marker + text.split(prerequisite_marker, 1)[1].split("\n      - ", 1)[0] + "\n"
+
+
+def validate_prerequisites(text):
+    step = prerequisite_step(text)
+    if (text.count("  pinned-local-media:\n") != 1 or
+            text.count("  current-stable-local-media:\n") != 1 or text.count(marker) != 1):
+        raise AssertionError(prerequisite_diagnostic)
+    pinned_job = text.split("  pinned-local-media:\n", 1)[1].split("  current-stable-local-media:\n", 1)[0]
+    conditions = [line + '\n' for line in step.splitlines() if line.startswith('        if:')]
+    if (step not in pinned_job or "    runs-on: ubuntu-24.04\n" not in pinned_job or
+            text.index(prerequisite_marker) >= text.index(marker) or
+            conditions != [prerequisite_condition]):
+        raise AssertionError(prerequisite_diagnostic)
+    for required in (requirements_assignment, requirements_payload, python_target, install):
+        if step.count(required) != 1:
+            raise AssertionError(prerequisite_diagnostic)
+    if any(text.count(pin) != 1 for pin in pins) or text.count(install) != 1:
+        raise AssertionError(prerequisite_diagnostic)
+
+
+validate_prerequisites(source)
+prerequisite = prerequisite_step(source)
+prerequisite_mutations = []
+for pin in pins:
+    package = pin.split('==', 1)[0]
+    wrong_version = package + '==0 ' + pin.split(' ', 1)[1]
+    wrong_hash = pin.rsplit(':', 1)[0] + ':' + '0' * 64
+    prerequisite_mutations.extend((
+        (package + ' version', source.replace(pin, wrong_version, 1)),
+        (package + ' digest', source.replace(pin, wrong_hash, 1)),
+    ))
+prerequisite_mutations.extend((
+    ('missing step', source.replace(prerequisite, '', 1)),
+    ('duplicate step', source.replace(prerequisite, prerequisite + prerequisite, 1)),
+    ('other matrix entry', source.replace(prerequisite, prerequisite.replace("'2026.8.19'", "'2026.7.4'", 1), 1)),
+    ('unconditional step', source.replace(prerequisite, prerequisite.replace(prerequisite_condition, '', 1), 1)),
+    ('late installation', source.replace(prerequisite, '', 1).replace(
+        '      - name: Retain shared-destination verdicts and monotonic events\n',
+        prerequisite + '      - name: Retain shared-destination verdicts and monotonic events\n', 1)),
+    ('no hash enforcement', source.replace(prerequisite, prerequisite.replace('            --require-hashes \\\n', '', 1), 1)),
+    ('source builds allowed', source.replace(prerequisite, prerequisite.replace('            --only-binary=:all: \\\n', '', 1), 1)),
+    ('different Python target', source.replace(prerequisite, prerequisite.replace('(3, 12)', '(3, 13)', 1), 1)),
+))
+for name, mutated in prerequisite_mutations:
+    if mutated == source:
+        raise AssertionError(f"ineffective prerequisite mutation: {name}")
+    try:
+        validate_prerequisites(mutated)
+    except AssertionError as error:
+        if str(error) != prerequisite_diagnostic:
+            raise
+    else:
+        raise AssertionError(f"shared-runtime prerequisite policy accepted mutation: {name}")
+print(f"Shared-runtime prerequisites: exact latest-only pins and hashes accepted; {len(prerequisite_mutations)} mutations rejected.")
+PY_REAL_TOOLS_SINGLE_RUN
+}
+
 assert_workflow_validator_regressions() {
     python3 -B - "${SCRIPT_DIR}" <<'PY_WORKFLOW_VALIDATOR_TESTS'
 from pathlib import Path
@@ -2521,7 +2661,7 @@ test_static_tooling_contracts() {
     local mock_gui_group mock_gui_suite mock_phase
     local mock_runtime_group mock_runtime_suite
     local runtime_phase scheduler_phase shfmt_phase signal_phase static_phase
-    local python_suite workflow_file
+    local hardening_suite python_suite workflow_file
 
     assert_source_inventory_is_canonical
     assert_repository_file_inventory_is_canonical
@@ -2646,6 +2786,11 @@ test_static_tooling_contracts() {
     done
     assert_text_contains "${ASSERT_OUTPUT}" 'runtime-manager-hardening' \
         'run-all suite list includes runtime hardening'
+    for hardening_suite in runtime-manager-rollback-admission runtime-manager-recovery \
+        runtime-manager-cache-identity runtime-manager-transactions; do
+        assert_text_contains "${ASSERT_OUTPUT}" "${hardening_suite}" \
+            "run-all suite list includes ${hardening_suite} coverage"
+    done
     for mock_engine_suite in \
         mock-engine-core \
         mock-engine-hls \
@@ -2805,12 +2950,13 @@ test_static_tooling_contracts() {
     assert_file_not_contains "${SCRIPT_DIR}/tests/run-all.sh" \
         'run_suite_batch() {' \
         'integration scheduler has no fixed-batch barrier'
-    for repeat_workflow in release packages real-tools stress; do
+    for repeat_workflow in release packages stress; do
         assert_file_not_contains \
             "${SCRIPT_DIR}/.github/workflows/${repeat_workflow}.yml" \
             'bash ./tests/repeat-qualification.sh' \
             "${repeat_workflow} does not repeat identical complete fixtures"
     done
+    assert_real_tools_single_supervised_qualification
     assert_file_not_contains \
         "${SCRIPT_DIR}/tests/ffmpeg-generation-qualification.sh" \
         'repeat-qualification.sh' \
@@ -3381,8 +3527,8 @@ test_static_release_contracts() {
         'engine destination-directory lock'
     # shellcheck disable=SC2016 # Literal shell-source assertion.
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        'flock --exclusive --nonblock "${OUTPUT_LOCK_FD}"' \
-        'nonblocking destination lock acquisition'
+        'flock --shared --nonblock "${OUTPUT_LOCK_FD}"' \
+        'shared legacy destination lock acquisition'
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         'worker_group_has_identity_token() {' \
         'worker group remains authenticated after session-leader exit'
@@ -3417,6 +3563,24 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
         $'      image: fedora:44\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
         'Fedora media qualification uses isolated local volumes'
+
+    local package_storage_workflow package_storage_job package_storage_block
+    for package_storage_workflow in packages release; do
+        if [[ ${package_storage_workflow} == packages ]]; then
+            package_storage_job=rpm
+        else
+            package_storage_job=rpm-test
+        fi
+        package_storage_block=$(workflow_job_block \
+            "${SCRIPT_DIR}/.github/workflows/${package_storage_workflow}.yml" \
+            "${package_storage_job}")
+        assert_text_contains "${package_storage_block}" \
+            $'    container:\n      image: fedora:44\n      volumes:\n        - /tmp\n        - /var/tmp' \
+            "${package_storage_workflow} RPM lifecycle has private local volumes"
+        assert_text_contains "${package_storage_block}" \
+            $'    env:\n      TMPDIR: /var/tmp\n      PACKAGE_TEST_HOME: /root' \
+            "${package_storage_workflow} RPM fixtures select the local disk volume"
+    done
 
     # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
@@ -4880,6 +5044,15 @@ test_static_runtime_regression_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
         'RUNTIME_HARDENING_CONTENTION_RUNS: 10' \
         'runtime hardening stress restores ten contention cycles per run'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
+        'for group in validation rollback-admission recovery cache-identity transactions; do' \
+        'runtime stress executes every semantic group exactly once'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
+        'timeout --signal=TERM --kill-after=10s 2m' \
+        'runtime stress keeps the two-minute group bound and escalation grace'
+    assert_file_contains "${SCRIPT_DIR}/tests/test-runner-integration.sh" \
+        'test_runtime_hardening_group_dispatch' \
+        'runtime group dispatch, failure statuses and workflow aggregation are exercised'
     assert_status 64 'runtime hardening rejects zero rollback repetitions' \
         env RUNTIME_HARDENING_ROLLBACK_RUNS=0 \
         "${SCRIPT_DIR}/tests/runtime-manager-hardening-integration.sh"

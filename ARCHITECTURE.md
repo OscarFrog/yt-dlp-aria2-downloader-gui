@@ -56,8 +56,8 @@ Native packages keep implementation files under a private libexec directory.
 `packaging/install-tree.sh` creates the shared RPM/DEB payload, public symlinks,
 desktop entry, icon, manpages, and user documentation. Python helpers remain
 mode `0644` and are invoked explicitly with `python3`; they are not public
-commands. Only the aria2 helper belongs to the native package payload, because
-the launcher helper is specific to ZIP and Git installations.
+commands. The aria2 and timed-process helpers belong to the native package
+payload; the launcher helper is specific to ZIP and Git installations.
 
 The portable launcher manager requires the data root and managed directories to
 be owned by the current user and not writable by group or others, rejects the
@@ -126,7 +126,7 @@ claiming post-return immutability.
 
 ## Graphical session lifecycle
 
-`download-video-gui.sh` performs one bounded session:
+`download-video-gui.sh` supervises one download session:
 
 1. Resolve physical GUI temporary, XDG configuration, and state paths; accept
    only system/current-user-owned chains whose shared writable components use
@@ -159,11 +159,20 @@ claiming post-return immutability.
    separately require preservation of the private live session.
 6. Run captured Zenity dialogs as registered children with 64 KiB in-memory
    ingestion bounds. On cancellation, HUP, INT, TERM, or failure, signal and
-   reap Zenity, the monitor, and the complete worker process group, escalating
-   within bounded waits when necessary.
+   reap Zenity and the monitor, and stop the worker's consumers before retiring
+   the engine. Graceful delivery covers authenticated worker groups; KILL
+   escalation is delegated with CONT to the authenticated engine launched with
+   `WORKER_ENGINE_SUPERVISION`. The engine alone freezes targets and checks all
+   their threads twice before leaf KILL or parent CONT, never worker-group KILL.
+   GUI freeze/inspection is reserved for orphan recovery or generic fixture
+   workers without engine supervision. If bounded waits
+   cannot confirm shutdown, the GUI preserves its private session and reports
+   the uncertainty; the admitted engine retains its reservation descriptors.
    A lost leader or unreadable descendant token revokes signaling authority,
    not the observation-only cleanup veto. An unauthenticated numeric group is
-   retained until an ESRCH probe proves absence; it never receives a real signal.
+   retained until ESRCH proves absence or two complete, matching inventories
+   and revalidated identities establish zombie-only presence. Neither proof
+   grants authority to send a real signal to an unauthenticated group.
 7. Accept success only when the worker succeeded and the private result record
    names a valid final path. Retain a sanitized diagnostic log only when useful;
    when its source exceeds 8 MiB, discard the first potentially partial tail
@@ -207,7 +216,8 @@ to the current single native-audio profile.
    by the current option contract, and require FFmpeg, FFprobe, and the other
    host commands used later in the pipeline.
 4. Resolve and record the final destination identity, then acquire the stable
-   same-user destination lock. A shared media destination need not have private
+   same-user destination lock in shared mode for legacy compatibility. Fine
+   filename-family reservations follow metadata planning. A shared media destination need not have private
    permissions. `private-aria2-plan.py media-local-safe` checks the actual
    filesystem and physical owner/write chain to decide whether external tools
    may safely work there. Otherwise a separate private local disk workspace
@@ -236,16 +246,13 @@ to the current single native-audio profile.
    `private-aria2-plan.py classify` whether the selected formats may use the
    direct aria2 path.
 7. Execute exactly one selected transport, while publishing structured progress
-   records when the GUI requested machine progress. Ordinary native video first
-   checks the planned final MKV name and binds subsequent extraction/retries to
-   that basename; metadata refresh must not redirect postprocessing to another
-   pre-existing final. Native audio applies the same preflight to the planned
-   input filename, which yt-dlp could otherwise reuse and modify in place.
-   Its last format selector retains the planned input extension; a refresh
-   lacking that extension fails before transfer instead of reusing a different
-   pre-existing audio file. Codec/container postprocessing remains yt-dlp's job.
-   Every destination template escapes literal percent and dollar characters
-   before yt-dlp receives it. The HLS/Firefox profile keeps its separate remux path.
+   records when the GUI requested machine progress. Native video/audio checks
+   all planned native inputs, components and final names against admitted
+   ownership. Replay uses the frozen selected formats, with no webpage
+   re-extraction fallback and a literal output template bound to the plan.
+   Codec/container postprocessing remains yt-dlp's job. Every destination
+   template escapes literal percent and dollar characters before yt-dlp receives
+   it. The HLS/Firefox profile keeps its separate remux path.
 8. Validate the produced media with FFprobe. The repaired YouTube HLS profile
    additionally checks duration/tail consistency and remuxes to a temporary MKV
    with FFmpeg before no-overwrite publication. The temporary inode is held by
@@ -267,32 +274,192 @@ to the current single native-audio profile.
    descriptor; the filesystem-compatibility fallback revalidates the parent and
    temporary pathname immediately before a no-clobber rename.
 
-Standalone engine commands use a dedicated process group; GUI-owned engines
-reuse the GUI's dedicated session rather than creating an escaping nested
-session. Child registration is signal-atomic. In
+### Shared destination reservations
+
+The engine implements the same protocol for GUI and standalone CLI. Before
+planning, only per-instance private metadata may be written. PLAN gives the
+already sanitized, byte-truncated basename and selected components. Admission
+reserves its normalized filename family (Unicode NFKC/casefold, conservatively
+excluding some names that are distinct on a case-sensitive filesystem).
+The root stem covers final extensions, native inputs, `.fFORMAT` tracks,
+`.part`, `.ytdl`, `.aria2`, fragments, and merge/remux/metadata suffixes. Private
+aria2 staging, probe captures and random HLS remux temporaries belong only to
+the instance. Component names that exceed the supported filesystem budget are
+rejected before transfer. No false final file is created as a reservation.
+
+Each dot-delimited ancestor family has a shared intention lock; the exact
+family has an exclusive lock. Thus `name` and `name.f137` conflict even when
+their final names differ, while `name.a` and `name.b` may coexist. Keys bind the
+physical destination device/inode and normalized family. All keys are acquired
+in sorted order without waiting; partial acquisition is closed on failure.
+Canonical symlink/dot aliases converge. Lock inodes live in the stable private
+UID root, independent of HOME/XDG settings, and are never unlinked as stale.
+The exact historical canonical-path lock remains shared throughout the new
+transaction, excluding an old instance's exclusive lock in both launch orders.
+The runtime update lock is unrelated and never spans the media transfer.
+
+Ownership checkpoints additionally bind the destination's incarnation to an
+opaque Linux file handle obtained from its authenticated open descriptor.
+The destination descriptor stays open through admission or checkpoint saving,
+so the inode cannot be recycled between that observation and the decision.
+This leaves lock keys unchanged across aliases and keeps records for distinct
+incarnations separate. Two valid handles from the same provider establish that
+an inode reused for a newly created directory is not the older destination.
+Neither directory timestamps nor disappearance of the old path supplies that
+proof. Missing or denied handle support and older active records without this
+identity remain uncertain; they cannot authorize clearing a reservation.
+A passive legacy checkpoint still needs the complete media binding and unchanged
+file snapshots to authorize resumption. No file handle is used to open a file
+or bypass path, permission, publication or ownership checks.
+
+Under reservation, admission rejects existing final entries (status 1), foreign
+native inputs and ambiguous partials. A native local resume requires an exact
+request/format/profile binding, the full extracted media ID and available
+`extractor`/`extractor_key` identity, and an unchanged
+device/inode/size/mtime/ctime snapshot from a prior confirmed stop. Per-download
+identity fields override inherited plan fields, including explicit null values.
+Missing or malformed media/extractor identity permits a fresh transfer but
+cannot authorize a resume. Filename truncation never supplies media identity;
+signed transfer URLs are excluded from the binding so they can refresh.
+Checkpoints made without the full identity binding cannot authorize resumption.
+Names or `.part` files alone confer no ownership. Records contain digests, never
+a URL or credential. Admission invalidates the prior checkpoint before launching
+tools and binds it to a private transaction nonce. The shell registers possible
+activation before starting the helper, so cancellation between atomic publication
+and its acknowledgement can safely checkpoint only its own transaction.
+Selected-download fields inherit the root metadata when omitted; the same merged
+view supplies planning, classification and the resume binding. Replay uses selected
+formats in a private frozen plan without yt-dlp's webpage re-extraction fallback;
+its literal output template remains bound to the planned name for direct and
+native replay, including live titles that yt-dlp would otherwise timestamp again.
+
+Normal cleanup checkpoints passive owned media only after consumers stop and
+closes reservation descriptors only after cleanup. It never calls `LOCK_UN`:
+that operation would release an open file description still inherited by a
+consumer. After admission (`RESOURCE_STATE_ACTIVE`), an unconfirmed stop keeps
+the engine alive with both historical and fine reservation descriptors until
+consumer quiescence is established. Thus an old executable is still excluded
+even if a consumer closed every inherited lock FD. Bounded escalation does not
+imply a bounded time to closure when a consumer cannot be stopped. The active
+ownership checkpoint remains in place until a confirmed stop permits a passive
+checkpoint and normal cleanup; preserved final media can then cause a distinct
+status-1 collision.
+
+An external SIGKILL or crash can destroy these supervisors and close their
+descriptors without running cleanup. A retained active checkpoint still refuses
+overlapping requests from the new protocol with status 75 pending inspection,
+but 2.3.29 cannot read it. Legacy exclusion after such a failure lasts only while
+a historical lock holder survives; neither crash-proof legacy exclusion nor
+repair of old shutdown defects is promised. These local same-user guarantees
+do not provide multi-host exclusion or resolve F1 BIS for arbitrary external
+writers.
+
+Standalone engine commands use a dedicated session and authenticated sentinel;
+GUI-owned engine wrappers reuse the GUI worker session. Timed commands have the
+separately supervised private sessions described below. Child registration is
+signal-atomic. In
 autonomous mode, job control remains disabled and an outer `env` ignores HUP,
 INT, and TERM until the no-fork `setsid --wait` process has become the new
 session leader; an inner `env` then restores default dispositions before the
 worker command is exposed as ready. In GUI-owned-session mode, readiness is
 likewise published only after default dispositions are restored. The critical
 section remains active until that readiness marker or PGID is published, so the
-first signal cannot disappear in the fork/exec window; a repeated signal still
-escalates immediately to KILL while retaining the first requested status.
+first signal cannot disappear in the fork/exec window; a repeated outer shutdown
+request selects escalation while retaining the first requested status.
+GUI, engine and runtime entry points verify usable pidfd, WNOWAIT and procfs
+operations on a disposable private child before admitting media work. The check
+actually stops, continues, kills and reaps that child; API names alone are not
+sufficient. Unavailable capabilities cause status 69. Failure after admission
+never grants cleanup permission. A zombie thread leader remains active while
+any sibling thread can still use resources.
+
+Timed runtime and FFprobe commands use `private-process-supervisor.py`. It
+remains in its caller's outer SID while its direct child creates a private SID
+before restoring signal dispositions and executing the command. The helper pins
+that child with `waitid(WNOWAIT)`, including after early leader exit. This
+unreaped session leader authenticates signaling across every process group in
+the private SID. Each target is attached to a pidfd before PID/start/SID
+membership is revalidated and the signal is delivered through that descriptor.
+Observed live members or unreadable/malformed process state veto return. The
+helper requires two complete inventories with unchanged private-session member
+identities and no live member before reaping its direct child and returning.
+This catches a fork after the first enumeration. It is not a daemon or production
+subreaper.
+
+Monotonic TERM/KILL deadlines govern timed commands. Duplicate ordinary graceful
+signals retain the first requested status and do not shorten the initial grace
+period. Outer KILL escalation instead sends CONT to a non-leaf supervisor: the
+helper treats CONT as a force request only after a graceful signal has already
+been recorded, then KILLs its own pinned private session. Before that first
+signal, CONT has no force effect. An outer supervisor does not KILL this helper
+while it still has children, including the pinned zombie leader; it must reap
+them first. After the deadline or force request, KILL delivery repeats while
+the helper remains alive, so newly observed private-session members are included.
+If KILL cannot stop a consumer, the helper keeps waiting. Expiration
+returns 124 (137 after KILL); a requested signal retains its first 128+signal
+status. No PID service, systemd or cgroups are required.
+
+The engine's GUI-session liveness check excludes the engine itself, but retains
+all other live session members after a wrapper exits. Standalone commands retain
+their existing authenticated session sentinel until the complete session is
+quiescent. The GUI observes the whole outer worker SID, including additional
+process groups; it authenticates individual targets through the inherited
+worker token and revalidated start identity. Private timed-command SIDs remain
+the helper's responsibility, with the live helper connecting their lifetime to
+outer supervision. For forced escalation the engine opens a Linux pidfd for an
+authenticated PID, checks its start identity and SID, sends STOP through the
+pidfd and verifies a stopped state (`T`/`t`) with unchanged identity. While the
+target is frozen, two complete task inventories must find every thread stopped
+and the same nonempty set of task IDs/start identities. Children of every thread
+are inspected. Authenticated children in the same session are stopped recursively
+while their parent remains frozen, preventing a startup wrapper from recreating
+a sleep between escalation attempts. Child state is then rechecked; only stopped
+zombies or absent same-session children permit parent retirement. A child in a
+different session, including a pinned zombie owned by a timed helper, vetoes
+retirement: that helper must finish its own private-session wait. The session
+leader additionally requires two complete quiescent inventories of every other
+session member. A protected parent receives pidfd CONT; a missing/unreadable
+task, non-stopped thread or changed inventory refuses KILL. This closes the fork
+window between inspection and KILL. The path requires Python's
+`os.pidfd_open` and `signal.pidfd_send_signal` plus kernel support; missing APIs,
+errors or failed stop/identity checks refuse force delivery and leave uncertain
+resources protected. A stop already sent is released with CONT when possible.
+Process names or a shared UID never authorize a target.
+
+The GUI delegates force escalation to its authenticated real engine using CONT;
+the engine's trap records a persistent force request only after shutdown was
+requested and its wait loop keeps escalating. GUI and engine therefore cannot
+race their own STOP/CONT decisions against the same consumer. Only the GUI's
+orphan/generic-worker fallback performs its own authenticated pidfd freeze.
+Engine/sentinel retirement remains last, after other live members and remaining
+children are quiescent; no global worker-group KILL is used. A numeric SID alone
+grants no signal authority, but observed live members still veto cleanup.
+Shell wrappers around producer/redactor pipelines catch
+graceful signals and keep waiting for the pipeline instead of abandoning it.
+
 Signals are relayed during runtime preparation, transfer, and post-processing,
 and cleanup removes only state owned by the current invocation after worker
 shutdown is confirmed. If bounded termination cannot confirm shutdown, cleanup
-warns and preserves active temporary files and the original exit status. It
-does not explicitly unlock the file description that surviving children may
-still hold; process exit closes the parent's descriptors. Before using a
-PID or negative process-group target, the supervisor revalidates its direct
+warns and preserves active temporary files and the original requested exit
+status. An admitted engine continues waiting with its reservation FDs; the GUI
+may report unconfirmed closure and preserve its session. Before using a PID or
+negative process-group target, the supervisor revalidates its direct
 parent where applicable and its Linux PID, PGID, SID, and start-time identity.
+GUI, engine (including GUI session reuse) and CLI sentinel quiescence checks
+require two complete scans with identical zombie PID/start identities; any live
+consumer, changed inventory or uncertain observation vetoes cleanup.
 The autonomous engine keeps an authenticated session-leader sentinel alive
 until every live same-session descendant has exited. If that leader disappears
 unexpectedly, its numeric PGID remains a cleanup veto, never renewed signaling
 authority. Observed live PGID/SID members prevent quiescence; when the leader
 cannot be authenticated and the process-table snapshot finds no live member,
-only a kernel ESRCH response to a signal-zero probe confirms group absence.
-Permission failures or other uncertainty preserve the state. Before readiness
+ESRCH from a signal-zero probe proves absence. A successful signal-zero probe
+can also describe an already stopped, unreaped zombie group. In that case the
+engine/GUI require two complete inventories with the same matching PGID/SID
+members and start identities, followed by zombie-state revalidation, before
+accepting quiescence. A live member, a changed inventory, permission/read/parse
+errors or any other uncertainty preserves the state. This proves no live
+consumer remains, not that the application reaped every descendant. Before readiness
 adoption, the no-fork worker PID supplies the same observation-only candidate.
 Unconfirmed shutdown preserves remaining readiness records and the private
 aria2 input as well as media resources; a new supervised command cannot discard
@@ -319,6 +486,7 @@ individual inode checks even begin.
 | --- | --- | --- |
 | `FINAL_OUTPUT_DIR`, identity, FD | `prepare_output_directory` records the canonical user destination; final validation and publication use it | Engine closes its FD; never recursively deletes the user's destination |
 | `OUTPUT_DIR` | Initially the requested destination; after output preparation it is the processing directory, either that destination or `MEDIA_WORKSPACE` | This name must not be used to infer the final destination after workspace selection |
+| `OUTPUT_LOCK_FD`, `RESOURCE_LOCK_FDS`, `RESOURCE_STATE_ACTIVE` | Engine holds the historical shared lock and fine filename-family reservations; admission writes an active ownership checkpoint | After admission an uncertain stop keeps the owner alive with its FDs. Confirmed quiescence permits checkpointing, cleanup and FD closure without explicit unlock; an external crash can leave only a checkpoint understood by new engines |
 | `MEDIA_WORKSPACE`, identity, FD, cleanup-safe flag | Output preparation allocates local media storage; tools process there; `publish-media` copies the validated result | Engine/helper remove only authenticated owned contents; unknown identity, mount, retained media or unsafe child cleanup preserves remaining state |
 | `PRIVATE_ARIA2_METADATA` and `PRIVATE_ARIA2_STAGING` triplets | `prepare_private_work_files` allocates and registers them; plan/credentials live in metadata, transfer bytes in staging | Engine removes current-session state only. Flat Bash staging cleanup checks identity, owner, mode, marker, regular types and its name allowlist; it does not recurse or inspect mount IDs. Metadata uses `cleanup-workspace`, including mount-ID checks, and can remove other authenticated regular files. Failed required checks preserve state |
 | `HLS_REMUX_TMP`, identity, FD | `remux_hls_result` registers before FFmpeg; publication consumes the verified inode | Engine removes the authenticated temporary or records its retained identity; failed publication does not authorize deleting the verified result |
@@ -340,6 +508,10 @@ large cosmetic rewrite of their callers.
 The initial yt-dlp pass resolves formats and filenames but does not download.
 `private-aria2-plan.py` provides the shared storage allocator and these transport commands:
 
+- `resource-plan` derives normalized filename-family locks and the full
+  media/request/format/profile resume binding, and writes the private frozen
+  replay plan; `resource-state` admits under those locks and checkpoints owned
+  files only after confirmed shutdown;
 - `classify` validates the plan and selects `direct` only for representable
   direct HTTP(S) formats whose headers can be safely replayed;
 - `check-native-final` refuses an existing ordinary-video MKV or planned native
@@ -628,9 +800,15 @@ uses that evidence to avoid deleting unrelated user data.
 
 Bootstrap work directories, temporary GnuPG homes, and staged executables are
 registered with an open descriptor and inode identity. HUP, INT, and TERM are
-deferred while each temporary is created and registered. Bash waits for the
-foreground command to finish before handling a pending signal; EXIT cleanup
-then removes authenticated temporaries before releasing the update lock.
+deferred while each temporary is created and registered. `run_timed` and
+`run_timed_in_dir` run in subshells which close the inherited runtime update-lock
+FD and directly `exec` the timed helper, without an intermediate waiting shell.
+The original manager retains that lock. Bash waits for the foreground command
+or capture pipeline to finish before handling a pending signal; the timed
+helper does not finish while its private-session consumers are alive. EXIT
+cleanup is guarded by the original manager's BASHPID, so a command substitution
+or probe subshell cannot remove its bootstrap files or release its lock.
+The owning manager removes authenticated temporaries before releasing the lock.
 Changed identities and a GnuPG home whose agent cannot be stopped are preserved
 with a warning. SIGKILL cannot run this cleanup. There is no global residue scan,
 and capture files created inside probe command substitutions remain outside this
@@ -726,9 +904,9 @@ architecture document. The source ZIP contains the tracked source tree.
 
 | Workflow | Responsibility |
 | --- | --- |
-| `shell.yml` | PR source identity/coherence/syntax gate, pinned workflow checks, full local suite on Ubuntu/Fedora and Python 3.10 |
+| `shell.yml` | PR source identity/coherence/syntax gate, pinned workflow checks, full local suite on Ubuntu/Fedora and paired Python 3.10/Bash 4.4.0 |
 | `packages.yml` | Git-free source archive, RPM/DEB construction, lifecycle, authentication, and previous-release upgrade |
-| `real-tools.yml` | Pinned real-tool behavior plus scheduled current-stable qualification |
+| `real-tools.yml` | Pinned real-tool behavior, required latest-pin shared-destination matrix and scheduled current-stable qualification |
 | `qualification.yml` | Supported FFmpeg/FFprobe generation matrix |
 | `stress.yml` | Twenty signal timing tuples and ten runtime transaction cycles; existing required check aggregates all five PR workflows |
 | `promotion.yml` | Main-only authenticated verification of the complete PR source qualification, without suite execution |
@@ -748,6 +926,15 @@ qualification. Historical content proof has no arbitrary calendar expiry; change
 new failure or missing evidence invalidates reuse. Current external inputs and
 explicit requalification/recovery are described in `TESTING.md`.
 
+The Ubuntu shell job can collect passive validation diagnostics through
+`scripts/ci-validation-diagnostics.py`. Its optional private rendezvous identifies
+only the current runner's log directory. The reader retains bounded, allowlisted
+progress from GUI-state and packaging logs, including bytes available after the
+runner unlinks an already opened log. Aggregate resource samples distinguish
+observed scheduling pressure from task occupancy; they do not establish the
+cause of an earlier timeout. This source-only diagnostic does not supervise or
+signal workers, replace their status, or extend the validation deadline.
+
 Each source workflow first checks its own immutable checkout identity, version
 coherence and Bash syntax. The full shell contract and the complementary
 qualifications then run independently: none holds a runner merely to poll for
@@ -766,6 +953,10 @@ controlling checkout identity. A direct unqualified commit, stale merge base,
 missing proof or new failure cannot obtain
 release authority from a green status name. Source diagnostic dispatches and
 scheduled tool checks do not substitute for PR qualification.
+
+The shared-destination prerequisite installation is an explicit proof obligation:
+it must succeed on the latest pinned yt-dlp job and remain an explicitly skipped
+step on the two earlier pins. No missing or failed step inherits that exception.
 
 The final source ZIP is read as data and checked against exact Git blob contents,
 paths and extraction modes. Native release builds remain separate because their
@@ -790,11 +981,35 @@ disabled. Jobs receive only the permissions they need. The Ubuntu validation
 job verifies the pinned actionlint archive before running the shared explicit
 workflow check; ordinary local fast/full validation does not provision this
 additional tool. A separate setup-python job exercises the complete suite with
-Python 3.10 and asserts the selected interpreter before starting.
+Python 3.10 together with authenticated GNU Bash 4.4.0, and asserts both selected
+interpreters before starting its single full run. The Bash archive must match
+its fixed SHA-256 and maintainer signature before extraction; its private build
+uses the historical C dialect. Only a GitHub-hosted disposable runner may bind
+the absolute interpreter paths after apt. User workstation interpreters stay intact.
+The latest pinned real-tools entry also requires the shared-destination matrix
+with digest/version-verified Deno and selectively retained pre-rescue evidence.
+A dedicated latest-only prerequisite step installs the four exact wheel/hash
+pins for the verified yt-dlp wheel's `pin-curl-cffi` dependencies into its
+Python 3.12 / Ubuntu 24.04 venv before that matrix. Production managed-runtime
+admission still requires a usable impersonation target; a plain wheel's successful
+version/help probes are insufficient. Static checks bind those prerequisites
+to their condition, target and execution order without adding a permanent helper
+or broadening the environments of the other matrix entries.
 
-Fedora jobs executing downloads use anonymous Docker volumes for `/tmp` and
-`/var/tmp`, so private-state and media-workspace tests exercise the host volume's
-actual local filesystem instead of an unqualified container overlay. The
+Runtime hardening is split into independent validation, rollback-admission,
+recovery, cache-identity and transaction fixtures. Full qualification schedules
+all five through the existing worker pool; stress executes each once under its
+bounded wrapper. The transaction fixture keeps updates, double rollbacks,
+journal recovery and lock contention in their original stateful order, including
+the ten stress cycles. The default standalone entry still runs the complete
+original sequence, and coverage checks require every phase exactly once.
+
+Fedora download and RPM lifecycle/upgrade jobs use anonymous Docker volumes
+for `/tmp` and `/var/tmp`, with `TMPDIR=/var/tmp`. Installed-payload checks also
+read private plans and enter the engine workspace paths, so their temporary
+fixtures must use the volume's actual local filesystem instead of an unqualified
+container overlay. This covers both RPM matrix scenarios in package and release
+CI; build-only and isolated signing jobs retain their existing storage setup. The
 isolated shfmt verifier likewise gets an anonymous `/var/tmp` disk volume while
 retaining its `/tmp` tmpfs, read-only checkout, disabled network and dropped
 capabilities. Its cleanup removes the disposable volume with the container.
@@ -912,7 +1127,9 @@ to its anchored group and escalates only to still-owned unreaped child PIDs.
 It preserves the command's failure status and rejects a nominal success when
 quiescence cannot be proved. Uncertain slots and logs remain tracked; after an
 authenticated collective KILL, a zombie-only group is quiescent. Without that
-proof, an unauthenticated group requires ESRCH before forgetting its identity.
+proof, the test runner requires ESRCH before forgetting an unauthenticated
+group's identity. This runner-specific rule is distinct from the production
+engine/GUI's two-inventory zombie-only proof described above.
 The canonical and repetition executables enable Bash monitor mode so trapped
 INT does not depend on Bash's foreground-child reaping handler. The sourced
 library does not alter its caller's options. A monitor-mode child initially
@@ -922,9 +1139,16 @@ changing PID. Group signaling additionally requires the authenticated process
 to belong to that dedicated session (SID equals PGID), not merely to the
 provisional group. A failed session transition exits 70 before starting the
 command; pending managed signals retain their original cancellation semantics.
-Terminal Ctrl-C can instead interrupt a foreground utility and take Bash
-directly to EXIT with status 130. Both runners preserve INT on that path and
-guard cleanup against repeated fatal signals. A provisional direct-child
+Cancellation uses the registered child's direct identity during this handoff;
+it does not wait for session readiness before delivering the first signal.
+Discovery of token-bearing orphaned group members is a fallback after direct
+authority is lost, so unrelated procfs traversal cannot delay the known child.
+Terminal Ctrl-C can instead interrupt a foreground utility. The scheduler
+handles the poll’s status 130 explicitly: Bash 4.4 may leave its INT trap
+undispatched, and callers collecting child statuses suppress implicit errexit.
+The EXIT path also preserves INT when Bash exits directly with status 130.
+Both runners guard cleanup against repeated fatal signals. Other failed polls
+propagate their status without inventing a completed child slot. A provisional direct-child
 identity is registered before foreground handoff polling or file removal, so
 EXIT can also stop a worker whose normal identity handshake is incomplete.
 The real-tool assembled-output fixture similarly lets the standalone engine
@@ -965,7 +1189,7 @@ The following repeated checks intentionally retain independent implementations:
 | --- | --- |
 | Engine / GUI YouTube classification | Remove the port, normalize host case and one terminal dot; recognize `youtube.com`, `youtu.be`, `youtube-nocookie.com` and their subdomains, not suffix lookalikes. GUI selects the experience; engine remains authoritative and revalidates profile eligibility |
 | Engine / GUI private directory chains | Root/current-user ownership; group/other writable ancestors require sticky protection; canonical physical paths. Shared policy does not require a sourced shell library |
-| Engine / GUI / runtime process handling | Common rule: numeric PID/PGID is not signaling authority and requested stop is not confirmed stop. Engine uses a leader/sentinel and observation-only lost-group veto; GUI additionally authenticates surviving token-bearing members; runtime bounds foreground probes and keeps child commands from retaining its lock FD |
+| Engine / GUI / runtime process handling | Numeric PID/PGID/SID, process name or UID alone is not signaling authority. GUI delegates force to its authenticated engine; pidfd STOP plus stable all-thread inventories keep parents frozen while their authenticated same-session children stop. Different-session pinned children veto parent retirement, and session leaders require complete quiescence before KILL; missing support or uncertain observations fail closed. GUI uses the same freeze only for orphan/generic-worker fallback. Timed helpers pin a private SID, repeat deadline KILL and require two unchanged complete quiescent inventories before reaping. Admission probes required APIs, pidfd operations, WNOWAIT and procfs on a private child and refuses with 69 before media work when unavailable. Zombie leaders with live threads remain consumers. The original runtime manager owns lock release and temporary cleanup |
 | GUI / monitor result checks | Both require a contained canonical regular file from the last nonempty result line; monitor gates display, GUI gates the user-visible outcome/cancellation race, engine owns media validation |
 | yt-dlp / Deno installation | Shared staging/activation primitives already exist; keep component-specific authentication, version and capability policies independent |
 | Launcher install / uninstall | Publication order is link, icon, desktop; removal order is desktop, link, icon. Attempt flags precede mutations and reverse rollback preserves unrestored backups; a generic transaction loop must not hide these asymmetries |

@@ -57,7 +57,7 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 update
           sudo env DEBIAN_FRONTEND=noninteractive \
             apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
-            aria2 ffmpeg python3-venv
+            aria2 curl ffmpeg python3-venv unzip
 
           case ${YT_DLP_VERSION} in
             2026.6.9)
@@ -87,6 +87,29 @@ jobs:
             --require-hashes \
             --requirement "${requirements}"
           echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
+      - name: Install verified Deno for shared-destination qualification
+        if: matrix.yt_dlp_version == '2026.8.19'
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          readonly version=2.9.4
+          # Digest from the immutable upstream release and its official checksum.
+          readonly archive_sha=c24f955d9fbfe0ea5ae2b501c8e71ae76e31e4c9782390a54a284b3364fda725
+          tool_dir=$(mktemp -d "${RUNNER_TEMP}/deno.XXXXXXXX")
+          archive=$(mktemp "${RUNNER_TEMP}/deno-archive.XXXXXXXX")
+          trap 'rm -f -- "${archive}"' EXIT
+          curl --fail --location --proto '=https' --proto-redir '=https' \
+            --tlsv1.2 --connect-timeout 15 --max-time 120 --retry 3 \
+            --output "${archive}" \
+            "https://github.com/denoland/deno/releases/download/v${version}/deno-x86_64-unknown-linux-gnu.zip"
+          printf '%s  %s\n' "${archive_sha}" "${archive}" | sha256sum --check
+          [[ $(unzip -Z1 "${archive}") == deno ]]
+          unzip -q "${archive}" deno -d "${tool_dir}"
+          chmod 0755 -- "${tool_dir}/deno"
+          resolved=$("${tool_dir}/deno" --version | awk 'NR == 1 { version = $2 } END { print version }')
+          [[ ${resolved} == "${version}" ]]
+          "${tool_dir}/deno" --version
+          printf '%s\n' "${tool_dir}" >>"${GITHUB_PATH}"
       - name: Record resolved tool versions
         env:
           EXPECTED_FFMPEG_VERSION: 6.1.1
@@ -129,6 +152,57 @@ jobs:
         run: |
           timeout --signal=TERM --kill-after=10s 5m \
             bash ./tests/hls-remux-duration-integration.sh
+      - name: Install pinned impersonation dependencies for shared qualification
+        if: matrix.yt_dlp_version == '2026.8.19'
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          # Versions from the verified yt-dlp wheel's pin-curl-cffi extra;
+          # wheel digests from the corresponding public PyPI release metadata.
+          requirements="${RUNNER_TEMP}/yt-dlp-impersonation-requirements.txt"
+          cat >"${requirements}" <<'EOF_REQUIREMENTS'
+          certifi==2026.7.22 --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+          cffi==2.1.1 --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf
+          curl-cffi==0.16.0 --hash=sha256:182416f07d71a342240554fa62c22e591999b78c225b21d3fe27d9f807420dd6
+          pycparser==3.0 --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+          EOF_REQUIREMENTS
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 12)'
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" --isolated install \
+            --disable-pip-version-check \
+            --index-url https://pypi.org/simple \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement "${requirements}"
+      - name: Run real shared-destination GUI and CLI qualification
+        if: matrix.yt_dlp_version == '2026.8.19'
+        env:
+          TMPDIR: ${{ runner.temp }}/shared-destination-evidence
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          mkdir -p -- "${TMPDIR}"
+          # All instances share the fixture's HOME/XDG; select only this job's
+          # verified executable, never a pre-existing personal runtime.
+          export YTDLP_REAL_BINARY="${RUNNER_TEMP}/yt-dlp-venv/bin/yt-dlp"
+          [[ $("${YTDLP_REAL_BINARY}" --ignore-config --no-plugin-dirs --version) == 2026.08.19 ]]
+          timeout --signal=TERM --kill-after=10s 8m \
+            bash ./tests/repeat-qualification.sh --runs 1 --jobs 1 \
+              --label 'Shared-destination real tools' -- \
+              python3 -B ./tests/multi-instance-real.py \
+            2>&1 | tee "${TMPDIR}/qualification.log"
+      - name: Retain shared-destination verdicts and monotonic events
+        if: ${{ always() && matrix.yt_dlp_version == '2026.8.19' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: shared-destination-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/shared-destination-evidence/qualification.log
+            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.log
+            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/events.json
+            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.before-rescue.json
+            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.final-before-rescue.json
 
   current-stable-local-media:
     needs: identity

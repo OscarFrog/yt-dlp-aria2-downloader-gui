@@ -24,6 +24,29 @@ Progress includes percentage, speed, estimated time remaining and processing
 phases, including the final destination copy. Local workspace details remain
 in the diagnostic log. Errors with a safely retained diagnostic offer direct
 View log and Close actions.
+.SH SHARED DESTINATIONS
+Independent GUI and CLI instances may transfer and process media concurrently
+in the same folder. Final files appear directly there. Overlapping filename
+families are refused with status 75; existing final files or unowned native
+inputs are preserved with status 1. No numeric suffix is added automatically.
+.PP
+Reservations cover the same user and host, including canonical path aliases.
+They remain held through consumer shutdown and cleanup. Native resume requires
+an unchanged ownership checkpoint from a confirmed stop; a .part name alone is
+insufficient. Uncertain shutdown preserves active state for manual inspection.
+A verified filesystem identity separates a recreated directory from an older
+checkpoint when its inode number is reused. Missing identity information does
+not authorize releasing an older active checkpoint.
+Do not delete old-looking lock files. The shared legacy lock excludes an older
+2.3.29 instance's exclusive lock. This is not distributed exclusion and does
+not cover arbitrary external writers.
+.SH PROCESS SUPERVISION
+Linux pidfds, WNOWAIT and readable process/thread inventories in procfs are
+required in addition to Bash 4.4 and Python 3.10. The application checks their
+operation on a private disposable child before media work; unavailable
+capabilities cause an early refusal with status 69. A later observation or
+permission failure preserves resources and does not establish complete shutdown.
+A zombie thread leader with live sibling threads is still an active consumer.
 .SH FILES
 .TP
 .I ~/.config/yt-dlp-aria2-downloader/gui.conf

@@ -115,11 +115,17 @@ ALL_SHELL_FILES=(
 # shellcheck disable=SC2034 # Array is read by test-static.sh.
 PYTHON_FILES=(
     private-aria2-plan.py
+    private-process-supervisor.py
+    tests/process-observer.py
+    tests/multi-instance-real.py
+    tests/zenity-x11-events.py
+    tests/process-supervision-integration.py
     private-launcher-manager.py
     scripts/update-published-version.py
     scripts/check-push-version.py
     scripts/prepare-source-version.py
     scripts/ci-validation.py
+    scripts/ci-validation-diagnostics.py
     scripts/verify-source-archive.py
     tests/ci-validation-integration.py
     tests/source-archive-integration.py

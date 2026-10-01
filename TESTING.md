@@ -18,6 +18,7 @@ project. It is intentionally independent of a particular release date.
 - [Covered behavior](#covered-behavior)
 - [GitHub Actions](#github-actions)
 - [Controlled real Zenity qualification](#controlled-real-zenity-qualification)
+- [Shared-destination and process qualification](#shared-destination-and-process-qualification)
 - [Release maintainer preflight](#release-maintainer-preflight)
 - [Post-release evidence qualification](#post-release-evidence-qualification)
 - [Real-world checks on Fedora 44](#real-world-checks-on-fedora-44)
@@ -112,9 +113,43 @@ suites and stdlib `unittest` tests are the test entry points; no pytest, Ruff or
 type-checker configuration is currently a project requirement. Compilation or
 typing alone cannot establish exception, subprocess or cancellation behavior.
 The `shell.yml` job **Python 3.10 / Ubuntu** selects the real minimum interpreter,
-asserts its minor version, and runs doctor plus the full contract. This job is
+asserts its minor version, and runs doctor plus the full contract together with
+GNU Bash 4.4.0. The Bash source archive is verified by fixed SHA-256 and the
+exact upstream maintainer signature before building. Both absolute and PATH
+lookups are bound and checked only on the disposable GitHub-hosted runner. This job is
 additional qualification; its addition does not change remote required-check
 settings.
+
+The paired minimum-interpreter job allows eight minutes for the complete
+four-worker suite, within its unchanged ten-minute job budget. This aggregate
+budget includes every static and integration task; it is separate from the
+individual signal, shutdown and fixture deadlines, which remain unchanged.
+Ubuntu allows seven minutes for its complete suite; Fedora retains five.
+Every wrapper retains TERM followed by KILL after ten seconds. The Ubuntu
+budget includes headroom for the measured workload: a complete remote Git-free
+Ubuntu run took 299.487 seconds, while a checkout run reached the former
+300-second boundary with 35 successful verdicts and two suites still progressing.
+The complete measurement plus a 25% allowance, rounded up to whole minutes,
+gives 420 seconds. Git-free and checkout environments are distinct; this budget
+does not attribute historical delays to unmeasured load. The ten-minute job cap,
+four-worker schedule and every individual fixture deadline remain unchanged.
+
+The Ubuntu `Run validation` step also records bounded passive diagnostics for
+its current execution. `scripts/ci-validation-diagnostics.py` reads aggregate
+resource counters and allowlisted progress from the GUI-state and packaging
+logs. The runner consumes its optional private rendezvous before starting
+sub-suites, so nested runners cannot overwrite that handoff. Reading an already
+opened log through its final drain preserves observations across ordinary
+cleanup without preventing cleanup or changing supervision. Raw log contents,
+process arguments and environments are not exported by this diagnostic.
+
+Missing or denied observations remain explicit. A nonzero validation status,
+including timeout 124, is preserved; missing diagnostic evidence must not turn
+into a successful qualification. Compare monotonic observations within their
+actual run and keep earlier failures distinct from later successful executions.
+The diagnostic's tests run in the canonical CI-validation integration suite.
+Its reader has a separate finite 450-second, 451-sample ceiling, allowing
+collection after the seven-minute command and its termination grace period.
 
 Some Linux fixtures deliberately use `/usr/bin/python3` or a restricted system
 PATH. After installing distribution dependencies, the disposable minimum-Python
@@ -385,7 +420,11 @@ shfmt check, static behavioral validation, and four ShellCheck inventories
 share the requested job limit. Parallel output is buffered separately and
 printed in canonical manifest order, so completion races do not produce
 interleaved logs. The integration manifest starts the latency-dominant signal
-and runner suites first, then staggers CPU-heavy mocks with wait-heavy suites.
+and runner suites first. Separate compact start/completion events expose the
+already recorded monotonic timestamps and statuses as tasks progress, so an
+outer timeout cannot erase the distinction between completed and active tasks.
+Detailed suite logs retain their canonical order. The manifest then
+staggers CPU-heavy mocks with wait-heavy suites.
 The scheduler immediately reuses a slot when any suite finishes; a short suite
 therefore cannot leave a worker idle while an unrelated long suite is still
 running. Reports and the first nonzero status remain selected in manifest order
@@ -416,16 +455,34 @@ library leaves caller options unchanged. Before starting a command, its Python
 supervisor moves from the provisional Bash process group into a dedicated
 session with managed signals blocked and the same PID. Group readiness and
 signaling require SID to equal PGID as well as the existing identity proof.
+Before that transition completes, cancellation signals the authenticated
+registered child directly. It does not wait for session readiness or scan for
+orphaned group members while that original child still provides authority.
+The handoff oracle retains its 0.8-second pending-signal deadline and injects a
+slow orphan lookup to prove that unrelated discovery cannot delay delivery to
+the known child. Grace-period and final cleanup measurements remain separate.
 The runner integration suite qualifies this transition, pending fatal signals,
 status/output preservation and rejection of provisional group identity. It
 also sends real terminal Ctrl-C during scheduler polling, incomplete identity
 handoff and handoff-file removal. It verifies the worker's received INT,
-descendant shutdown and cleanup after a second Ctrl-C, including the EXIT path
-that bypasses Bash's ordinary INT trap. Provisional supervision precedes every
+descendant shutdown and cleanup after a second Ctrl-C, including an explicitly
+handled poll status 130 under Bash 4.4 and the EXIT path that bypasses Bash’s
+ordinary INT trap. Failed or missing scheduler polls must preserve their exact
+status and clean active children without consuming a nonexistent completion slot.
+The startup stress records monotonic failure time, barrier states and the
+fixture parent/child procfs state before watchdog rescue. A timeout remains a
+failure even if that rescue succeeds. The GUI progress mock similarly retains
+only allowlisted failure categories before removing its private logs; it does
+not expose raw requests or replace the original exit status.
+Provisional supervision precedes every
 foreground command in the registration window. The full-profile signal suite
 retains its original time limits; diagnostics also
-cover failure to enter the reentrant-signal guard. No debugger is required by
-either canonical profile.
+cover failure to enter the reentrant-signal guard. Its stderr fixture establishes
+backpressure with two nonwritable POLLOUT observations after the producer starts
+an output larger than the capture pipe. Partial padding writes can exhaust pipe
+slots below nominal byte capacity. The identity-checked observation descriptor
+is closed before communicate, which must drain every byte and retain status 130;
+waiting before draining is rejected. No debugger is required by either profile.
 After escalation, the monitor test permits at most one second for an original
 descendant with an already pending SIGKILL to become a zombie or disappear.
 It authenticates PID/start-time around the signal snapshot and sends no extra
@@ -447,8 +504,9 @@ process as a Linux child subreaper through an isolated Python `prctl`/`exec`
 bootstrap. The PID and signal topology stay unchanged, and Bash harvests
 terminated orphan descendants instead of depending on the host or container's
 PID 1. This does not terminate live descendants or relax engine quiescence:
-after losing its leader, the engine still requires kernel-confirmed group
-absence before releasing tracked resources. Runner integration includes a
+after losing its leader, the engine still requires ESRCH or two complete matching
+zombie-only inventories with identity revalidation before releasing tracked
+resources. Runner integration includes a
 non-reaping outer parent, a no-bootstrap negative control, and live-child,
 identity and exit-status checks for this fixture lifecycle.
 
@@ -553,9 +611,10 @@ done
 option models explicit. `test-static.sh` verifies that those classifications
 remain inside the canonical inventory and that every executable begins with an
 approved top-level `set` declaration. Installed production and cleanup helpers
-target GNU Bash 4.4 or newer; exact minimum-version semantic compatibility also
-remains a review requirement because the supported distro CI environments may
-provide later Bash versions.
+target GNU Bash 4.4 or newer. The **Python 3.10 / Ubuntu** job exercises the
+full contract with Bash 4.4.0 as well as Python 3.10, including absolute-path
+and restricted-PATH fixtures; Ubuntu and Fedora jobs additionally cover their
+distribution interpreters. A version string or syntax parse alone is insufficient.
 
 ## ShellCheck
 
@@ -599,8 +658,10 @@ The automated suite checks, among other things:
   and conservative preservation after acquisition failures or replacement;
   directory replacement between descriptor open and path-identity capture must
   not grant deletion authority for metadata, media workspaces or aria2 staging;
-- preservation of active temporary files, inherited lock ownership, and the
-  original exit status when bounded worker shutdown cannot be confirmed;
+- preservation of active temporary files and the original requested exit status
+  when bounded worker shutdown cannot be confirmed; after admission the engine
+  stays alive holding historical and fine reservation FDs until consumers stop,
+  including consumers that closed all inherited lock descriptors;
 - aria2 diagnostic filters drain the producer's final cancellation message
   before closing, while unexpected redaction failures remain fatal;
 - trimming of leading and trailing whitespace entered in the GUI;
@@ -665,9 +726,15 @@ The automated suite checks, among other things:
   from hostile runtime/TMPDIR/XDG roots, acceptance of sticky shared parents,
   and descriptor-first HLS/result publication with no-clobber rename fallback
   when the filesystem does not support hard links;
-- rejection of a second writer targeting the same canonical output directory;
+- parallel independent writers in one canonical destination, and refusal of
+  overlapping filename families; legacy exclusive-lock compatibility during
+  supervised shutdown, without a guarantee after external SIGKILL removes the
+  historical lock holders;
 - explicit no-overwrite options and refusal of known final-video/native-audio collisions,
-  while preserving interrupted-download resume behavior; these checks do not
+  while preserving authenticated native resumes bound to the full media ID and
+  extractor identity; filename truncation, changed extractors and missing
+  identity cannot authorize adoption, while signed transfer URLs may refresh;
+  these checks do not
   establish atomic local yt-dlp postprocessing against unrelated writers;
 - complete staging-inventory admission, including empty/error, partial/error,
   unknown files and a file introduced after acquisition; the last file must
@@ -684,7 +751,12 @@ The automated suite checks, among other things:
   process-group discovery;
 - forwarding of termination signals during the wrapper-managed HLS FFmpeg remux;
 - preservation of immediate command failure statuses before PGID observation;
-- one shared process session for GUI, engine, yt-dlp, aria2c, FFmpeg, and Deno;
+- GUI-owned engine wrappers share the outer worker session; runtime and FFprobe
+  helpers stay in that SID while pinning their direct child's private SID with
+  WNOWAIT through all live subgroups; engine force escalation freezes an
+  authenticated target through a pidfd, then checks every thread's stopped
+  state, identity and children in two stable inventories before leaf KILL or
+  parent CONT;
 - FFprobe rejection of missing or structurally invalid expected media streams;
 - canonical destination validation before the progress monitor emits 100 percent;
 - no-target-directory publication when a destination changes into a directory;
@@ -695,6 +767,10 @@ The automated suite checks, among other things:
   to signal it: a real vanished-leader/live-descendant fixture verifies refusal
   to claim shutdown, preservation of private state and the inherited lock, no
   signal without authority, and cleanup after the descendant actually exits;
+- positive zombie-only quiescence without requiring an external reaper: after
+  lost leader authority, two complete matching PGID/SID inventories and final
+  PID/start/state revalidation are required; live members, changed inventories
+  and read/parse/permission errors cannot authorize cleanup;
 - Zenity timeout and unexpected-error handling;
 - folder-chooser fallback behavior on Zenity 4;
 - minimum versions, suffixed yt-dlp versions, required capabilities, and
@@ -986,6 +1062,13 @@ immutable Git objects and the reviewed workflow definition in the equal tree.
 This proves what the source passed with the qualification environment; it does
 not claim compatibility with every future distribution update.
 
+The latest pinned media job must prove installation of the hash-pinned
+impersonation prerequisites before shared-destination qualification. The two
+earlier pins must retain an explicitly skipped record for that conditional
+step. Missing records, failed installation, a skipped latest-pin installation
+or an unexpected execution in the earlier pins are refused. Regression fixtures
+model the workflow condition independently of the verifier's obligation tables.
+
 An authorized maintainer can inspect a merged candidate without publishing:
 
 ```bash
@@ -1042,8 +1125,9 @@ called by static validation, exercise rejected proofs and source archives and
 protect the graph against reintroducing full PR/main/release qualification.
 Dated baseline measurements and implementation evidence are in `CI_AUDIT.md`.
 
-The Fedora shell and FFmpeg qualification containers mount anonymous Docker
-volumes at `/tmp` and `/var/tmp`, with `TMPDIR=/var/tmp` for test fixtures. These
+The Fedora shell, FFmpeg and RPM lifecycle/upgrade qualification containers
+mount anonymous Docker volumes at `/tmp` and `/var/tmp`, with `TMPDIR=/var/tmp`
+for test fixtures. These
 provide separate local storage rather than treating the container's overlay
 filesystem as a qualified private filesystem. Production checks still validate
 the actual filesystem, ownership and modes; a volume whose backing filesystem
@@ -1051,9 +1135,13 @@ does not satisfy those checks fails qualification. The volumes belong to the
 disposable GitHub-hosted job and contain no host home or credential bind mounts.
 The isolated shfmt verifier retains its private `/tmp` tmpfs and adds an
 anonymous `/var/tmp` disk volume for the media workspace cases; both normal and
-failure cleanup remove that volume with the verifier container. RPM build and
-lifecycle jobs only exercise the engine's version command and do not need these
-download-workspace volumes.
+failure cleanup remove that volume with the verifier container. The RPM `rpm`
+job in `packages.yml` and `rpm-test` job in `release.yml` exercise installed
+helpers after installation and upgrade, including private JSON plans and engine
+workspace checks; both matrix scenarios require these volumes. RPM build-only
+and isolated signing jobs do not execute that helper contract and retain their
+existing storage setup. DEB lifecycle/upgrade and Git-free source qualification
+run directly on Ubuntu runners with their ordinary local temporary storage.
 
 `.github/workflows/packages.yml` validates both package formats. Before package
 upgrade testing, a dedicated `previous-release` job resolves the immediately
@@ -1110,8 +1198,20 @@ FFmpeg progress, and checks HLS post-remux duration consistency without
 contacting a public media service. Routing runs once per pinned yt-dlp version.
 HLS duration mocks yt-dlp and FFmpeg progress does not use it; those fixtures
 run once on the latest Ubuntu matrix entry with FFmpeg/FFprobe 6.1.1 verified.
+Before shared-destination qualification, that latest entry has a dedicated
+Python 3.12 / Ubuntu 24.04 prerequisite step. It installs curl-cffi 0.16.0,
+cffi 2.1.1, certifi 2026.7.22 and pycparser 3.0 into its disposable yt-dlp venv
+with exact wheel SHA-256 pins, `--require-hashes` and `--only-binary=:all:`.
+These versions come from the verified yt-dlp wheel's `pin-curl-cffi` metadata;
+the wheel hashes come from the corresponding public PyPI releases. The other
+matrix entries retain their existing environments. The static contract binds
+each version/hash, the Python target, installation flags and latest-only
+placement before the shared run, with discriminating source mutations.
 The FFmpeg 6 generation job adds only generation-specific compatibility fixtures;
 Fedora 8 and upstream 9 each run the common fixtures with their distinct tools.
+The verified upstream FFmpeg 9 build enables libvpx as well as libopus so the
+foreign native WebM witness contains real VP9/Opus media. Missing encoders are
+qualification failures; that preservation witness is never skipped.
 The controlled
 aria2 behavior suite repeats
 Range/no-Range/redirect/error three times, the silent-active quiescence
@@ -1255,6 +1355,239 @@ residual descendants. Its default output is under
 `qualification-evidence/zenity/`, which is ignored because it is local,
 generated evidence rather than permanent source documentation. Pass an
 explicit second path when another evidence store owns the result.
+
+## Shared-destination and process qualification
+
+Run the deterministic process/observer controls through the `signals` group
+(or `python3 -B tests/process-supervision-integration.py` while developing).
+The deterministic cases exercise production supervision functions with
+controlled consumers; real-media cycles are qualified separately:
+
+| Cases | Required observation before rescue |
+| --- | --- |
+| Orphan observer and intentional external viewer | The actual Zenity harness rejects a marked orphan in another SID and detects a synthetic URL in argv; the explicitly opened external viewer remains alive and excluded without being signaled |
+| Timed command with early leader exit | A resistant descendant in another process group retains its pipe/resource until the helper signals the pinned private SID and returns 137 after KILL |
+| Runtime timed probe | The actual runtime capture path retains the original manager's update lock and registered temporary through the child's last access, then cleans up and returns 124 |
+| Engine wrapper exit, GUI and CLI modes | The engine retains resources and locks after the command wrapper exits, delivers cancellation, and waits for last access; adopted zombies remain unreaped by the test until after the production verdict |
+| Engine FFprobe cancellation, GUI and CLI paths | The actual `capture_media_probe` path runs a controlled FFprobe executable with an early leader exit and resistant subgroup; cancellation returns 143 with no live marked consumer and removes the probe capture only after shutdown |
+| Uncertain stop with closed consumer lock FDs | With KILL failure injected only for that consumer, the admitted engine remains alive, preserves its resource and denies an old-style exclusive lock; an independent lock remains available and release occurs only after the consumer stops |
+| CLI escalation before sentinel retirement | Explicit escalation reaches the helper's private command session while its leader is pinned, before the outer sentinel can be retired |
+| GUI shutdown after worker leader exit | A token-bearing GNU-timeout subgroup remains observable and is stopped before the GUI reports completion |
+| Zombie leader with surviving threads | Real orphan and direct-child witnesses retain a pipe after pthread_exit; observer, GUI/CLI predicates and timed supervisor must still detect and stop the live thread before return. A revalidated consumer pidfd must be readable immediately after helper wait, before pipe draining; a premature-return mutant fails this assertion before rescue |
+| Capability admission and degraded observation | Actual private-child pidfd/WNOWAIT probe, refusals injected before launch and waitid/procfs failures after admission; errors never become absence or cleanup authority |
+| Observer procfs failure | Root/stat failures reject the real Zenity harness even when a previous empty success JSON exists; an ESRCH stat read is reopened once, and only a confirmed vanished pathname is skipped. A fresh live identity is retained; repeated ESRCH, permission and I/O errors still fail observation |
+| Bash quiescence decisions | A private procfs model changes an enumerated parent to a zombie and adds a live child before its stat is read; GUI session reuse, GUI observation and the CLI sentinel retain supervision. Removing the second inventory fails each oracle without creating or signaling the modeled processes |
+
+The orphan control starts a marked worker in another session, waits for its
+parent to exit, and requires the real Zenity harness verdict to fail before
+rescue. The observer follows the launch marker and recorded PID/start identity,
+not all processes of the user. It neither ptraces nor reaps the application.
+The open-folder scenario marks the deliberately launched external viewer via
+its fixture launcher; the observer excludes that application and its children.
+An independent positive control verifies this exception without signaling it.
+Polling cannot prove absence of a process that erased its marker and escaped
+before any observation. Test-only subreaping changes reparenting and collects
+already stopped zombies; it is never counted as application wait-status proof.
+The engine wrapper cases deliberately defer that collection until after their
+verdict. The test-only `finish()` service harvests only already attributed
+children of its controller, revalidates PID/start/parent and WNOWAIT exit state,
+and leaves managed Popen statuses to their owner. Its real ESRCH counterexample
+must not turn an unrelated process's stat race into a harvesting prerequisite.
+The frozen-parent causal tests bound the root inventory to their complete known
+fixture while reading real task states, children and descriptors and delivering
+real pidfd signals. Their ambient-inventory control demonstrates how unrelated
+ESRCH can mask the intended missing-freeze mutation; separate uncertainty tests
+still require conservative production refusal.
+The late-fork oracle also bounds enumeration to its real, pinned participants
+and requires the late child in the second snapshot. Its single-inventory mutant
+must report the live child absent; an unrelated read error cannot mask that
+defect. A separate foreign-stat ESRCH witness requires conservative refusal,
+including rejection of a mutant that silently skips that error.
+The direct zombie-leader retirement oracle likewise enumerates only its complete
+known fixture, with real task/child/FD reads and real pidfd signals. Every subcase
+has separate resource paths so a conservatively refused predecessor cannot leave
+a last-access marker for the next case. The leader-only mutant must be rejected
+while its sibling thread still owns the release pipe, before release or rescue.
+The correct case observes pidfd readiness after delivered KILL and before wait or
+pipe draining; this test observation does not claim application status collection.
+A held foreign stat descriptor produces real ESRCH after reaping: retirement must
+refuse, resume the authenticated parent and leave its sibling/pipe alive until
+the test releases its own barrier after the verdict.
+Confirmed zombie-only state requires stable inventories of every
+thread; a zombie leader alone is insufficient. It means no live consumer can
+use a descriptor, not that the application reaped every descendant. Production engine/GUI
+lost-authority checks require two complete, stable inventories and identity/state
+revalidation, with uncertain observations preserving state. Timed helpers also
+require two complete unchanged member inventories with no live member, then
+reap their own direct child retained through WNOWAIT. A child forked after
+the first `/proc` enumeration must be caught by the second complete inventory;
+rechecking only the already enumerated zombie PIDs is insufficient.
+The timed-thread test uses its known consumer's pidfd as the independent stop
+oracle, not another global procfs scan. An unrelated process can exit between
+opening and reading its stat file: a real-kernel control requires this ESRCH to
+remain unknown in the production predicate, even after that process is reaped.
+The test observer independently reopens an ESRCH stat exactly once: it retains
+a revalidated live identity, skips only a now-missing pathname and propagates
+every repeated or different error. A real held-stat descriptor after child
+reaping and injected transient/persistent failures exercise these distinctions.
+Pidfd readiness proves all threads in this fixture's thread group have stopped;
+it does not prove general session quiescence or application reaping.
+The same requirement covers the Bash GUI, engine session-reuse and CLI sentinel
+paths: two complete inventories must retain identical zombie PID/start identities,
+with any live consumer, changed inventory or uncertainty vetoing cleanup.
+
+Ordinary duplicate TERM delivery must retain the helper's original grace
+deadline. The outer supervisor's CONT control forces private-session KILL only
+after a graceful signal was recorded; a helper with a pinned child cannot be
+retired as an outer leaf. Deadline/forced KILL repeats until private-session
+quiescence, covering members missed by an earlier enumeration.
+
+The force path requires Linux pidfds and Python's `os.pidfd_open` and
+`signal.pidfd_send_signal`. Entry admission actually probes pidfd open and
+0/STOP/CONT/KILL delivery on a private child, WNOWAIT stop/exit observation,
+waitpid collection and procfs process/thread access. Missing APIs, kernel
+support or permissions cause status 69 before media activity. Revocation
+following admission preserves protection; it is not a successful shutdown.
+A TGID marked Z is not quiescent while sibling threads are live. Refusal and
+post-admission failure injections complement real minimum-interpreter runs. Its safety assertions require an authenticated
+PID/start/SID and pidfd STOP, followed by two complete inspections while frozen:
+every live thread must be in `T`/`t`, terminated threads may be `Z`/`X`,
+and the nonempty sets of task IDs/start identities must match. Every thread's children are checked; same-session children are stopped
+while the parent stays frozen, then revalidated as quiescent before its retirement.
+A different-session child vetoes retirement even when it is a pinned zombie of
+a timed helper. A child created by a non-leader thread must not be missed when the
+leader's children list is empty. The pre-env double-signal fixture retains its
+two-second limit and verifies that a startup loop cannot recreate a child between
+escalation attempts. Its private readiness marker is published from the registration
+loop after the first signal handler returns, so a second INT tests escalation
+instead of signal coalescing while an instrumented handler is still active.
+Uncertain-stop fixtures publish their first escalation
+observation once, so retries cannot truncate a witness while it is being read.
+The runtime contention fixture uses exec for its lock-holding sleep: the waited
+PID owns the descriptor whose lifetime the assertion measures.
+Session-leader retirement additionally requires two complete
+quiescent inventories of its other members. A running,
+missing or unreadable thread, or changed task inventory, must also refuse KILL.
+Parents resume with CONT. Missing pidfd support or any failed observation must
+refuse unsafe force delivery and preserve
+unconfirmed resources; process names and UID matching are never substitutes.
+With `WORKER_ENGINE_SUPERVISION` on a real engine launch, GUI escalation sends
+CONT to the authenticated engine and its persistent force loop owns subsequent
+freezes. The GUI may freeze targets itself only on the orphan/generic-worker
+fallback, avoiding concurrent GUI/engine STOP/CONT decisions that reopen the
+fork race. These escalation deadlines do not bound closure of an
+uninterruptible consumer. A retained active checkpoint protects new-protocol
+admission after a crash, but an old executable cannot read it. The controlled
+legacy-lock fixture qualifies owner retention during uncertain shutdown, not
+exclusion after external SIGKILL destroys every historical lock holder.
+
+```bash
+python3 -B tests/multi-instance-real.py
+```
+
+This local qualification also runs in the required latest pinned yt-dlp CI
+entry, after verified Deno provisioning and the pinned impersonation prerequisites.
+Its managed-runtime admission requires a usable `curl_cffi` target: successful
+`--version`, `--help` or `--list-impersonate-targets` exit statuses alone do not
+satisfy that contract. A wheel without those dependencies is refused with 69;
+the fixture does not bypass admission or fabricate an impersonation target.
+It uses real yt-dlp, aria2, FFprobe and FFmpeg,
+a loopback media server and scripted Zenity answers. It shares HOME, all XDG
+roots, preferences and managed runtimes between instances. HTTP barriers prove
+active transfer overlap, decoded frame hashes verify distinctive content,
+and monotonic events record closure and quiescence before any rescue. It covers
+three bounded GUI/GUI, GUI/CLI and CLI/CLI cycles, transfer and real remux
+cancellation, D admission while B/C run, and authorized native partial resume.
+These are bounded qualification cycles, not an unbounded soak test; barrier
+expiry or a closure deadline failure remains a failure before rescue.
+It also covers two URLs with identical names, different profiles sharing an
+input, title truncation, and conflicts through a destination alias and a
+different XDG runtime root. A real aria2 consumer paused with an open staging
+descriptor proves that both staging and reservations survive until its stop;
+independent transfers continue during that interval. Legacy exclusive locking
+is exercised in both launch orders against the historical inode. To also run
+an available, separately preserved 2.3.29 executable, set
+`YTDLP_LEGACY_ENGINE=/absolute/path/to/old/download-video.sh`; its adjacent
+helpers must be from that version. Application workspaces remain private
+`/tmp/shared-destination-real-*` directories, independent of an artifact root
+whose ancestors may not satisfy the application's private-directory policy.
+If `TMPDIR` selects another evidence store, only the exact launched labels'
+logs, statuses, pre-rescue inventories and fixture metadata/events are copied
+there. Media, seeds, configuration and runtimes are never exported. The printed
+evidence directory retains ancestor modes/filesystem metadata and redacted
+scripted-dialog diagnostics so a startup refusal cannot become an empty log.
+Scripted answers do not
+qualify visible desktop gestures; the interactive Zenity procedure remains
+separate. No network outage or actual CIFS qualification is implied.
+
+On a graphical Linux host with Xwayland, Zenity, D-Bus, libX11 and libXtst,
+run the optional real-event variant through the same bounded wrapper:
+
+```bash
+YTDLP_QUALIFY_ZENITY_EVENTS=1 ./tests/repeat-qualification.sh --runs 1 --jobs 1 -- \
+    python3 -B tests/multi-instance-real.py
+```
+
+`tests/zenity-x11-events.py` starts a dedicated X11 server and a private bus
+without service activation. Startup reads the complete newline-terminated
+Xwayland display reply before closing its pipe. A canonical headless regression
+uses a real pipe with a separately gated newline and rejects the premature-read
+control, incomplete EOF, malformed replies and oversized frames. Before semantic keyboard actions,
+a disposable private window must receive two complete KeyPress/KeyRelease pairs
+with matching window/keycode within a bounded readiness wait; accepted XTest
+requests alone do not prove delivery. Readiness records carry their own `title`
+so the New download reader can consume the shared event stream.
+
+The adapter injects window-close and activates the real Cancel button in
+entry/progress windows, including transfer and real remux cancellation while
+other instances continue. It selects New download in a real completion dialog
+and closes the new real entry. Ordinary URL/profile/folder selection is still
+scripted. Event records identify real windows and monotonic emission times;
+this is neither a human gesture nor a substitute for the operator-assisted
+procedure. Missing graphical capabilities fail this opt-in run, never silently
+turn it into a scripted PASS. Cancel uses Tab then Space for entry and Space on
+the initially focused Cancel button for progress; `escape` is a separate action.
+Short response controls distinguish `ZENITY_CANCEL=41` from `ZENITY_ESC=42` and
+retain the normal cancellation status 1; progress input stays open until the
+verdict so EOF cannot fake cancellation. Keyboard readiness does not extend the
+adapter's 10-second dialog-result timeout or retry a failed semantic action.
+The ordinary headless CI matrix remains independent.
+
+The private-plan suite exercises shared/exclusive ancestor reservations,
+Unicode/case aliases, different URLs and overlapping intermediate families,
+unchanged owned resumes, ambiguous legacy partials and active-record retention
+after uncertain shutdown. Incarnation cases distinguish a recreated destination
+from an active checkpoint for an older directory while retaining lock keys,
+old records, alias convergence and refusal when handle identity is unavailable.
+A bounded real inode-reuse experiment complements the deterministic checkpoint
+oracle; failure to obtain reuse is inconclusive, not a successful witness.
+The descriptor barrier replaces the visible destination after observation and
+requires refusal while the authenticated inode remains pinned. The real shared
+matrix compares checkpoint digests before and after its own cycles: its records
+must become passive, while older active records must remain byte-identical.
+Resume cases keep the request, filename and formats
+fixed while changing the full media ID beyond its 64-byte filename prefix, or
+changing either extractor field. Both inherited and per-download identities
+are covered; refreshed signed URLs and either available extractor field remain
+valid positive controls. Missing, null or malformed identities permit a fresh
+transfer but never authenticate its later partial. Pre-identity checkpoints are
+not upgraded into ownership. The regression must fail against the former
+binding; removing the missing-binding admission guard must also fail.
+
+Qualify the following four independent oracles on disposable source copies.
+Each mutant must fail its intended assertion before rescue; a startup error,
+unrelated timeout or rescue killing the witness is not an oracle success.
+
+| Oracle | Controlled input and positive control | Mutation that must be detected |
+| --- | --- | --- |
+| Process observation | Marked orphan in a new SID, plus the intentionally opened external viewer | Disable marker observation: the actual Zenity verdict must no longer satisfy the orphan-rejection assertion |
+| Deno checksum | A valid ZIP with a deliberately wrong expected checksum; reject before extraction, execution or activation | Disable checksum verification: the integrity/no-extraction assertion must fail |
+| Copy stability | Change the source in place after the first destination write, at both constant and changed size; unchanged source succeeds | Disable post-copy source-stability verification: mutated-source publication must violate the rejection assertion |
+| GUI result containment | A separate engine returns success with an outside path; an inside path is the positive control | Disable GUI containment: the outside-result rejection assertion must fail |
+
+Record source identity, the intended assertion and pre-rescue outcome for each
+run. These procedures describe qualification requirements, not evidence that a
+particular working tree or mutant has already passed.
 
 ## Release maintainer preflight
 
@@ -1400,8 +1733,21 @@ The unrelated engine, GUI configuration, installer and static scenarios remain i
 the full suite and are not repeated for each timing tuple. Each shard retains
 five bounded five-minute iterations and ten-second termination grace periods.
 
-The runtime-manager job runs the hardening suite once with ten internal
-lock-contention and double-rollback cycles. This retains stateful transaction
+The runtime-manager job runs each hardening group once: `validation`,
+`rollback-admission`, `recovery`, `cache-identity` and `transactions`. Each group
+has its own initialized private fixtures and a two-minute wrapper with the
+existing ten-second termination grace. The job records every group status and
+fails if any group fails; its required check name and job deadline are unchanged.
+The transaction group retains ten internal lock-contention and double-rollback
+cycles, with updates, rollbacks and journal recovery sharing their state in the
+original order. No scenario is removed or repeated merely to fill a group.
+
+The full runner schedules the same five groups through its existing bounded
+worker pool. Direct invocation without `--group` still runs every phase in the
+original order. These semantic groups cover the expanded exact-admission and
+recovery matrices without imposing one serial deadline on all independent
+fixtures. The runner-manifest and phase-coverage controls require their union to
+execute every original phase exactly once. This retains stateful transaction
 stress without multiplying ten internal cycles by ten complete-suite wrappers.
 Deterministic package-cleanup scenarios are already covered in the full suite
 on each supported environment and have no separate stress repetition. The

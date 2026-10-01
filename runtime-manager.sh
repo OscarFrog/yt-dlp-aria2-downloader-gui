@@ -505,7 +505,8 @@ run_timed_in_dir() (
         exec {LOCK_FD}>&- || return 1
     fi
     cd -- "${directory}" || return 1
-    exec timeout --signal=TERM --kill-after=5s "${seconds}s" "$@"
+    exec python3 "${SCRIPT_DIR}/private-process-supervisor.py" \
+        --timeout "${seconds}" --grace 5 -- "$@"
 )
 
 run_curl() {
@@ -520,11 +521,15 @@ run_curl() {
         "$@"
 }
 
-run_timed() {
+run_timed() (
     local seconds=$1
     shift
-    run_child timeout --signal=TERM --kill-after=5s "${seconds}s" "$@"
-}
+    if [[ -n ${LOCK_FD:-} ]]; then
+        exec {LOCK_FD}>&- || return 1
+    fi
+    exec python3 "${SCRIPT_DIR}/private-process-supervisor.py" \
+        --timeout "${seconds}" --grace 5 -- "$@"
+)
 
 capture_bounded_timed_output() {
     local output_variable=$1
@@ -1227,8 +1232,7 @@ reuse_installed_ytdlp_version() {
     [[ -d ${YTDLP_ROOT}/${version} && ! -L ${YTDLP_ROOT}/${version} ]] \
         || return 1
     [[ -f ${candidate} && ! -L ${candidate} && -x ${candidate} ]] || return 1
-    validate_ytdlp "${candidate}" >/dev/null 2>&1 || return 1
-    [[ ${VALIDATED_YTDLP_VERSION} == "${version}" ]] || return 1
+    validate_installed_runtime yt-dlp "${candidate}" >/dev/null 2>&1 || return 1
     activate_version "${YTDLP_ROOT}" "${version}"
 }
 
@@ -1239,8 +1243,7 @@ reuse_installed_deno_version() {
     [[ -d ${DENO_ROOT}/${version} && ! -L ${DENO_ROOT}/${version} ]] \
         || return 1
     [[ -f ${candidate} && ! -L ${candidate} && -x ${candidate} ]] || return 1
-    validate_deno "${candidate}" >/dev/null 2>&1 || return 1
-    [[ ${VALIDATED_DENO_VERSION} == "${version}" ]] || return 1
+    validate_installed_runtime deno "${candidate}" >/dev/null 2>&1 || return 1
     activate_version "${DENO_ROOT}" "${version}"
 }
 
@@ -1511,24 +1514,40 @@ update_deno() {
     bootstrap_deno_version "${latest_version}"
 }
 
+# Admission of a persisted runtime is stricter than validation of a freshly
+# downloaded candidate: the immutable directory must name its exact version.
+validate_installed_runtime() {
+    local component=$1 candidate=$2 version_dir expected_version
+    version_dir=${candidate%/*}
+    expected_version=${version_dir##*/}
+    [[ -d ${version_dir} && ! -L ${version_dir} &&
+        -f ${candidate} && ! -L ${candidate} && -x ${candidate} ]] || return 1
+    case ${component} in
+        yt-dlp)
+            [[ ${candidate} == "${YTDLP_ROOT}/${expected_version}/${YTDLP_ASSET}" ]] || return 1
+            validate_ytdlp "${candidate}" || return 1
+            [[ ${VALIDATED_YTDLP_VERSION} == "${expected_version}" ]] || return 1
+            ;;
+        deno)
+            [[ ${candidate} == "${DENO_ROOT}/${expected_version}/deno" ]] || return 1
+            validate_deno "${candidate}" || return 1
+            [[ ${VALIDATED_DENO_VERSION} == "${expected_version}" ]] || return 1
+            ;;
+        *) return 2 ;;
+    esac
+}
+
 ensure_runtime() {
-    if ! component_path yt-dlp >/dev/null 2>&1; then
-        recover_invalid_active_runtime yt-dlp || return 1
-    fi
-    if ! component_path deno >/dev/null 2>&1; then
-        recover_invalid_active_runtime deno || return 1
-    fi
-    return 0
+    recover_invalid_active_runtimes
 }
 
 validate_active_runtimes() {
-    local active_ytdlp=''
-    local active_deno=''
+    local active_ytdlp='' active_deno=''
 
     active_ytdlp=$(component_path yt-dlp) || return 1
     active_deno=$(component_path deno) || return 1
-    validate_ytdlp "${active_ytdlp}" || return 1
-    validate_deno "${active_deno}" || return 1
+    validate_installed_runtime yt-dlp "${active_ytdlp}" || return 1
+    validate_installed_runtime deno "${active_deno}" || return 1
     return 0
 }
 
@@ -1587,8 +1606,8 @@ recover_invalid_active_runtime() {
 
     if active=$(component_path "${component}"); then
         case ${component} in
-            yt-dlp) validate_ytdlp "${active}" && return 0 ;;
-            deno) validate_deno "${active}" && return 0 ;;
+            yt-dlp) validate_installed_runtime yt-dlp "${active}" && return 0 ;;
+            deno) validate_installed_runtime deno "${active}" && return 0 ;;
             *) return 2 ;;
         esac
     fi
@@ -1607,8 +1626,8 @@ recover_invalid_active_runtime() {
 
     active=$(component_path "${component}") || return 1
     case ${component} in
-        yt-dlp) validate_ytdlp "${active}" ;;
-        deno) validate_deno "${active}" ;;
+        yt-dlp) validate_installed_runtime yt-dlp "${active}" ;;
+        deno) validate_installed_runtime deno "${active}" ;;
         *) return 2 ;;
     esac
 }
@@ -1651,6 +1670,7 @@ acquire_runtime_lock_or_use_active() {
 
 update_runtime() {
     local lock_acquired=false
+    local active='' update_ytdlp_allowed=false update_deno_allowed=false
 
     acquire_runtime_lock_or_use_active lock_acquired \
         'unable to acquire the runtime update lock safely.' || return $?
@@ -1660,12 +1680,20 @@ update_runtime() {
         error 'unable to recover an interrupted runtime activation.'
         return 1
     }
+    # Recovery is local when a healthy previous exists. Do not immediately
+    # replace that recovered component with an unrelated network update.
+    if active=$(component_path yt-dlp) && validate_installed_runtime yt-dlp "${active}"; then
+        update_ytdlp_allowed=true
+    fi
+    if active=$(component_path deno) && validate_installed_runtime deno "${active}"; then
+        update_deno_allowed=true
+    fi
     ensure_runtime || return 1
 
-    if ! update_ytdlp; then
+    if [[ ${update_ytdlp_allowed} == true ]] && ! update_ytdlp; then
         warning 'yt-dlp update check failed; keeping the last verified runtime.'
     fi
-    if ! update_deno; then
+    if [[ ${update_deno_allowed} == true ]] && ! update_deno; then
         warning 'Deno update check failed; keeping the last verified runtime.'
     fi
 
@@ -1773,6 +1801,16 @@ initialize_runtime_platform() {
         return 66
     }
     readonly SCRIPT_DIR=${script_path%/*}
+    if [[ ! -f ${SCRIPT_DIR}/private-process-supervisor.py ||
+        -L ${SCRIPT_DIR}/private-process-supervisor.py ||
+        ! -r ${SCRIPT_DIR}/private-process-supervisor.py ]]; then
+        error 'the timed-command supervisor is missing or unsafe.'
+        return 66
+    fi
+    if ! python3 -I -B "${SCRIPT_DIR}/private-process-supervisor.py" --check-capabilities; then
+        error 'Linux process supervision is unavailable; refusing runtime preparation.'
+        return 69
+    fi
 
     if [[ -f ${SCRIPT_DIR}/keys/yt-dlp-public.key ]]; then
         YTDLP_PUBLIC_KEY=${SCRIPT_DIR}/keys/yt-dlp-public.key
@@ -1803,7 +1841,7 @@ initialize_runtime_platform() {
 
     for command_name in \
         bash cmp curl flock gpg gpgconf grep head install ln mkdir mktemp mv readlink realpath rm \
-        sha256sum stat timeout uname unzip; do
+        python3 sha256sum stat timeout uname unzip; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             error "required runtime-manager command is absent: ${command_name}"
             return 127

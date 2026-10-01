@@ -17,6 +17,10 @@ readonly PROJECT_DIR
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/assert.sh
 source "${SCRIPT_DIR}/lib/assert.sh"
+# Exercise the same helper contract in staging and installed RPM/DEB lifecycles.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/package-lifecycle.sh
+source "${SCRIPT_DIR}/lib/package-lifecycle.sh"
 
 for command_name in desktop-file-validate readlink stat; do
     command -v "${command_name}" >/dev/null 2>&1 || {
@@ -70,6 +74,8 @@ test_alternate_private_directory() {
         "${alternate_root}/usr/bin/yt-dlp-aria2-downloader" \
         '../libexec/yt-dlp-aria2-downloader/download-video.sh' \
         'packaged CLI libexec symlink target'
+    assert_package_helper_behavior \
+        "${alternate_root}/usr/bin/yt-dlp-aria2-downloader"
 }
 
 assert_packaged_executables() {
@@ -89,6 +95,11 @@ assert_packaged_executables() {
     done
 
     local private_aria2_helper="${private_dir}/private-aria2-plan.py"
+    [[ -f ${private_dir}/private-process-supervisor.py &&
+        ! -L ${private_dir}/private-process-supervisor.py ]] \
+        || fail 'Missing or unsafe packaged process supervisor.'
+    assert_path_mode "${private_dir}/private-process-supervisor.py" 644 \
+        'private-process-supervisor.py permissions'
     local private_launcher_helper="${private_dir}/private-launcher-manager.py"
     [[ -f ${private_aria2_helper} &&
         ! -L ${private_aria2_helper} &&
@@ -185,6 +196,7 @@ test_packaged_install_tree() {
     assert_packaged_entrypoints
     assert_packaged_desktop_entry
     assert_packaged_assets "${private_dir}"
+    assert_package_helper_behavior "${root}/usr/bin/yt-dlp-aria2-downloader"
 }
 
 main() {

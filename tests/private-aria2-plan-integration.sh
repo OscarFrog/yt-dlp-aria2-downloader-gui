@@ -1211,6 +1211,38 @@ with patch.object(module.os, "write", inspect_copy):
 assert seen_copy and source.read_bytes() == (output / source.name).read_bytes()
 assert len(list(output.iterdir())) == 1
 
+# Modify the opened source inode only after the first destination write.
+# The constant-size case specifically needs the post-copy timestamp check;
+# checking only the destination length cannot detect its mixed generation.
+for change_size in (False, True):
+    source, output, args = prepare(f"in-place-source-{change_size}")
+    original_inode = identity(source)
+    changed = False
+
+    def mutate_during_copy(descriptor, data):
+        global changed
+        count = real_write(descriptor, data)
+        if not changed:
+            changed = True
+            with source.open("r+b") as writer:
+                writer.write(b"changed generation")
+                if change_size:
+                    writer.truncate(source.stat().st_size + 1024)
+                writer.flush()
+                os.fsync(writer.fileno())
+        return count
+
+    with patch.object(module.os, "write", mutate_during_copy):
+        try:
+            module.publish_media(args)
+        except module.PlanError:
+            pass
+        else:
+            raise AssertionError(f'in-place source mutation accepted: changed-size={change_size}')
+    assert changed and identity(source) == original_inode
+    assert source.read_bytes().startswith(b"changed generation")
+    assert not list(output.iterdir()), "unstable source published or temporary leaked"
+
 # Exercise an actual device boundary when the host offers one. This is a real
 # filesystem copy qualification, not an SMB mount qualification.
 source, output, args = prepare("cross-device")
@@ -2076,6 +2108,834 @@ PY_UNIQUE_HEADER
         'unique field spelling and value remain unchanged'
 }
 
+test_resource_directory_incarnation() {
+    new_case 'resource-directory-incarnation'
+    python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_DIRECTORY_INCARNATION'
+import argparse
+import contextlib
+import copy
+import ctypes
+import errno
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import sys
+from types import SimpleNamespace
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location('incarnations', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = Path(sys.argv[2])
+output = root / 'output'
+identity = (output.stat().st_dev, output.stat().st_ino)
+
+# Real optional capability: never turn its absence into a claimed real PASS.
+actual = module.directory_incarnation(output, identity)
+if actual is None:
+    print('Real directory file-handle capability unavailable; conservative fallback tested below.')
+else:
+    alias = root / 'alias'
+    alias.symlink_to(output, target_is_directory=True)
+    assert module.directory_incarnation(alias.resolve(), identity) == actual
+    moved = root / 'renamed-output'
+    output.rename(moved)
+    try:
+        assert module.directory_incarnation(moved, identity) == actual, 'rename changed incarnation'
+        content = moved / 'unrelated-content'
+        content.write_bytes(b'content is not a directory incarnation')
+        assert module.directory_incarnation(moved, identity) == actual, 'directory contents changed incarnation'
+        content.unlink()
+    finally:
+        moved.rename(output)
+    print('Real file handle remains stable across symlink alias, rename and directory content changes.')
+
+class Header(ctypes.Structure):
+    _fields_ = [('size', ctypes.c_uint32), ('kind', ctypes.c_int32),
+                ('data', ctypes.c_ubyte * 128)]
+
+assert ctypes.sizeof(Header) == 136 and Header.data.offset == 8
+real_fstat = module.os.fstat
+observations = []
+
+class Provider:
+    def __init__(self, error=0, size=8, kind=1):
+        self.error, self.size, self.kind = error, size, kind
+
+    def __call__(self, descriptor, name, buffer, mount_id, flags):
+        info = real_fstat(descriptor)
+        assert (info.st_dev, info.st_ino) == identity
+        assert name == b'' and flags == 0x1000
+        header = ctypes.cast(buffer, ctypes.POINTER(Header)).contents
+        assert header.size == 128, 'unbounded provider allocation'
+        header.size, header.kind = self.size, self.kind
+        for index in range(min(self.size, 128)):
+            header.data[index] = index + 1
+        # Different mount IDs must never distinguish aliases of one directory.
+        ctypes.cast(mount_id, ctypes.POINTER(ctypes.c_int)).contents.value = 123 + len(observations)
+        observations.append(descriptor)
+        ctypes.set_errno(self.error)
+        return -1 if self.error else 0
+
+for error in (errno.ENOSYS, errno.EOPNOTSUPP, errno.EPERM, errno.EACCES, errno.EIO, errno.EOVERFLOW):
+    with patch.object(module.ctypes, 'CDLL', return_value=SimpleNamespace(name_to_handle_at=Provider(error))):
+        assert module.directory_incarnation(output, identity) is None, ('provider error became proof', error)
+for size, kind in ((0, 1), (129, 1), (8, -1)):
+    with patch.object(module.ctypes, 'CDLL', return_value=SimpleNamespace(name_to_handle_at=Provider(size=size, kind=kind))):
+        assert module.directory_incarnation(output, identity) is None, 'malformed provider result became proof'
+with patch.object(module.ctypes, 'CDLL', return_value=SimpleNamespace()):
+    assert module.directory_incarnation(output, identity) is None
+with patch.object(module.ctypes, 'CDLL', side_effect=OSError(errno.EIO, 'provider unavailable')):
+    assert module.directory_incarnation(output, identity) is None
+with patch.object(module.ctypes, 'CDLL', return_value=SimpleNamespace(name_to_handle_at=Provider())):
+    first = module.directory_incarnation(output, identity)
+    assert first == module.directory_incarnation(output, identity), 'mount ID entered the incarnation token'
+    assert first['handle'] == '0102030405060708'
+    calls = []
+    def changed_fstat(descriptor):
+        info = real_fstat(descriptor)
+        calls.append(descriptor)
+        if len(calls) == 2:
+            return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino + 1, st_mode=info.st_mode)
+        return info
+    with patch.object(module.os, 'fstat', changed_fstat):
+        try:
+            module.directory_incarnation(output, identity)
+        except module.PlanError:
+            pass
+        else:
+            raise AssertionError('post-provider FD identity change was ignored')
+    assert len(calls) == 2
+    try:
+        module.directory_incarnation(output, (identity[0], identity[1] + 1))
+    except module.PlanError:
+        pass
+    else:
+        raise AssertionError('provider accepted a descriptor of another destination')
+
+token_a = {'provider': 'linux-file-handle', 'schema': 1, 'type': 1, 'handle': '01' * 8}
+token_b = {**token_a, 'handle': '02' * 8}
+# Fresh token-B admission below is the discriminating positive oracle.
+for unknown in (None, {}, {**token_a, 'schema': 2}, {**token_a, 'provider': 'future'},
+                {**token_a, 'type': 2}, {**token_a, 'handle': '02' * 12},
+                {**token_a, 'handle': 'not-hex'}, {**token_a, 'schema': True}):
+    assert not module.different_directory_incarnations(unknown, token_b)
+    assert not module.different_directory_incarnations(token_b, unknown)
+
+# The state-machine oracle injects only the provider token. Actual inode reuse
+# is qualified separately on a filesystem that demonstrably reuses an inode.
+current = None
+sequence = 0
+registry = root / 'registry'
+registry.mkdir(mode=0o700)
+
+def plan(name, request='same-request'):
+    global sequence
+    sequence += 1
+    private = root / ('plan-' + str(sequence))
+    private.mkdir(mode=0o700)
+    info = {'id': 'fixture', 'extractor_key': 'Generic', 'format_id': 'audio',
+            'ext': 'webm', 'protocol': 'http', 'filename': str(output / (name + '.webm'))}
+    source = private / 'plan.json'
+    source.write_text(json.dumps({**info, 'requested_downloads': [dict(info)]}))
+    url = private / 'request'
+    url.write_text('https://example.invalid/' + request)
+    args = argparse.Namespace(plan=str(source), state=str(private / 'resources.json'),
+                              output_dir=str(output), final_output_dir=str(output),
+                              final_output_identity=f'{identity[0]}:{identity[1]}',
+                              url_file=str(url), mode='audio', hls=False)
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        module.resource_plan(args)
+    return args, captured.getvalue()
+
+def action(args, name):
+    return module.resource_state(argparse.Namespace(state=args.state, registry=str(registry), action=name))
+
+def record(args):
+    name = module.resource_record_name(json.loads(Path(args.state).read_text()))
+    records = list(registry.glob('resources-*/' + name))
+    assert len(records) == 1, ('checkpoint path is not unique', records)
+    return records[0]
+
+def refused(error, function, *args):
+    try:
+        function(*args)
+    except error:
+        return
+    raise AssertionError('missing expected refusal: ' + error.__name__)
+
+with patch.object(module, 'directory_incarnation', side_effect=lambda *args: copy.deepcopy(current)):
+    current = token_a
+    owner, old_keys = plan('incarnation')
+    action(owner, 'admit')
+    old_record = record(owner)
+    preserved = old_record.read_bytes()
+    same, same_keys = plan('incarnation')
+    assert same_keys == old_keys
+    refused(module.ResourceBusyError, action, same, 'admit')
+    current = token_b
+    fresh, new_keys = plan('incarnation')
+    assert old_keys == new_keys, 'incarnation split the flock namespace'
+    assert json.loads(Path(owner.state).read_text())['binding'] != json.loads(Path(fresh.state).read_text())['binding']
+    action(fresh, 'admit')
+    assert record(fresh) != old_record
+    assert record(fresh).parent == old_record.parent, 'incarnation split the dev/ino bucket'
+    assert old_record.read_bytes() == preserved, 'new incarnation changed the prior active checkpoint'
+    action(same, 'save')
+    assert old_record.read_bytes() == preserved, 'refused transaction released the active old incarnation'
+    refused(module.PlanError, action, owner, 'save')
+    assert old_record.read_bytes() == preserved, 'old owner checkpointed another directory incarnation'
+    action(fresh, 'save')
+
+    for label, old_token, new_token in (('old-unknown', None, token_b),
+                                        ('new-unknown', token_a, None),
+                                        ('both-unknown', None, None)):
+        current = old_token
+        owner, _ = plan(label)
+        action(owner, 'admit')
+        saved = record(owner).read_bytes()
+        current = new_token
+        retry, _ = plan(label)
+        refused(module.ResourceBusyError, action, retry, 'admit')
+        action(retry, 'save')
+        assert record(owner).read_bytes() == saved, 'unknown incarnation lost its active protection'
+
+    current = None
+    ordinary_unknown, _ = plan('ordinary-without-provider')
+    action(ordinary_unknown, 'admit')
+    action(ordinary_unknown, 'save')
+    assert json.loads(record(ordinary_unknown).read_text())['active'] is False
+
+    current = token_a
+    lost_owner, _ = plan('provider-lost-with-active-owner')
+    action(lost_owner, 'admit')
+    lost_record = record(lost_owner).read_bytes()
+    lost_retry, _ = plan('provider-lost-with-active-owner')
+    current = None
+    refused(module.ResourceBusyError, action, lost_retry, 'admit')
+    refused(module.PlanError, action, lost_owner, 'save')
+    assert record(lost_owner).read_bytes() == lost_record
+
+    # A v1 active record remains authoritative; a valid new token supplies no
+    # missing historic generation and cannot grant an inspection-free reset.
+    current = None
+    legacy_active, _ = plan('legacy-active')
+    action(legacy_active, 'admit')
+    legacy_path = record(legacy_active)
+    legacy = json.loads(legacy_path.read_text())
+    legacy['version'] = 1
+    del legacy['incarnation']
+    legacy_path.write_text(json.dumps(legacy))
+    legacy_active_bytes = legacy_path.read_bytes()
+    current = token_b
+    retry, _ = plan('legacy-active')
+    refused(module.ResourceBusyError, action, retry, 'admit')
+    assert legacy_path.read_bytes() == legacy_active_bytes
+
+    # Migrate a demonstrably quiescent v1 resume without replacing that record.
+    current = None
+    legacy_owner, _ = plan('legacy-resume')
+    action(legacy_owner, 'admit')
+    partial = output / 'legacy-resume.webm.part'
+    partial.write_bytes(b'owned legacy partial')
+    action(legacy_owner, 'save')
+    legacy_path = record(legacy_owner)
+    legacy = json.loads(legacy_path.read_text())
+    legacy['version'] = 1
+    del legacy['incarnation']
+    legacy_path.write_text(json.dumps(legacy))
+    legacy_bytes = legacy_path.read_bytes()
+    current = token_b
+    foreign, _ = plan('legacy-resume', 'foreign-request')
+    refused(module.DestinationExistsError, action, foreign, 'admit')
+    retry, _ = plan('legacy-resume')
+    action(retry, 'admit')
+    assert legacy_path.read_bytes() == legacy_bytes
+    assert record(retry) != legacy_path
+    assert json.loads(Path(retry.state).read_text())['owned']
+    action(retry, 'save')
+    partial.write_bytes(b'foreign bytes after the valid checkpoint')
+    altered, _ = plan('legacy-resume')
+    refused(module.DestinationExistsError, action, altered, 'admit')
+    assert partial.read_bytes() == b'foreign bytes after the valid checkpoint'
+
+    current = token_a
+    unstable, _ = plan('provider-lost-before-admit')
+    current = None
+    refused(module.PlanError, action, unstable, 'admit')
+    assert not list(registry.glob('resources-*/' + module.resource_record_name(json.loads(Path(unstable.state).read_text()))))
+
+    # A generation observation must remain anchored through the decision.
+    # At the provider->snapshot barrier, replace only this fixture's directory;
+    # verify an authenticated FD still pins the old inode and the current path
+    # fails validation before a new checkpoint can be published.
+    current = token_a
+    pinned_owner, _ = plan('pin-barrier')
+    action(pinned_owner, 'admit')
+    pinned_record = record(pinned_owner)
+    pinned_bytes = pinned_record.read_bytes()
+    current = token_b
+    replaced, _ = plan('pin-barrier')
+    real_descriptor = module.directory_descriptor
+    real_snapshot = module.resource_snapshot
+    open_destination_descriptors = []
+    barrier = []
+
+    @contextlib.contextmanager
+    def tracked_descriptor(path, **kwargs):
+        with real_descriptor(path, **kwargs) as descriptor:
+            relevant = path == output
+            if relevant:
+                open_destination_descriptors.append(descriptor)
+            try:
+                yield descriptor
+            finally:
+                if relevant:
+                    open_destination_descriptors.remove(descriptor)
+
+    def replaced_snapshot(state):
+        assert open_destination_descriptors, 'incarnation FD no longer pinned at snapshot'
+        descriptor = open_destination_descriptors[-1]
+        before = os.fstat(descriptor)
+        assert (before.st_dev, before.st_ino) == identity
+        moved = root / 'moved-before-snapshot'
+        output.rename(moved)
+        output.mkdir(mode=0o700)
+        protected = output / 'pin-barrier.webm.part'
+        protected.write_bytes(b'foreign replacement must remain untouched')
+        after = os.fstat(descriptor)
+        assert (after.st_dev, after.st_ino) == identity, 'old inode lost its FD anchor'
+        assert (output.stat().st_dev, output.stat().st_ino) != identity
+        barrier.append((descriptor, identity))
+        return real_snapshot(state)
+
+    with patch.object(module, 'directory_descriptor', tracked_descriptor), \
+            patch.object(module, 'resource_snapshot', replaced_snapshot):
+        refused(module.PlanError, action, replaced, 'admit')
+    assert len(barrier) == 1 and not open_destination_descriptors
+    assert pinned_record.read_bytes() == pinned_bytes
+    assert (output / 'pin-barrier.webm.part').read_bytes() == b'foreign replacement must remain untouched'
+    assert not list(registry.glob('resources-*/' + module.resource_record_name(json.loads(Path(replaced.state).read_text()))))
+
+print('Incarnation provider, conservative fallback, independent checkpoints and authenticated legacy resume passed.')
+PY_DIRECTORY_INCARNATION
+}
+
+test_frozen_replay_contract() {
+    new_case 'frozen-replay'
+    python3 -I -B - "${PROJECT_DIR}" "${CASE_ROOT}" <<'PY_FROZEN_REPLAY'
+import argparse
+import contextlib
+import copy
+import importlib.util
+import io
+import json
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+
+project, case = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location('helper', project / 'private-aria2-plan.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+output = case / 'output'
+identity = output.stat()
+source = (project / 'download-video.sh').read_text().rsplit('main "$@"', 1)[0]
+common = {'id': 'fixture', 'extractor': 'generic', 'extractor_key': 'Generic'}
+original_template = str(output / '%(title).160B [%(id).64B].%(ext)s')
+for label, plan in (
+        ('inherited', {**common, 'title': 'Inherited', 'format_id': 'av', 'ext': 'mp4',
+            'url': 'http://example.invalid/media.mp4', 'protocol': 'http',
+            'requested_downloads': [{'filename': str(output / 'Inherited [fixture].mp4')}]}),
+        ('live', {**common, 'title': 'Live 2026-09-30 13:51', 'is_live': True,
+            'webpage_url': 'http://example.invalid/do-not-reextract',
+            'formats': [{'format_id': 'unselected', 'url': 'http://example.invalid/other'}],
+            'requested_downloads': [{'filename': str(output / 'Live 2026-09-30 13_51 [fixture].mkv'),
+                'requested_formats': [
+                    {'format_id': 'v', 'ext': 'mp4', 'protocol': 'http',
+                     'vcodec': 'h264', 'acodec': 'none', 'url': 'http://example.invalid/v.mp4'},
+                    {'format_id': 'a', 'ext': 'm4a', 'protocol': 'http',
+                     'vcodec': 'none', 'acodec': 'aac', 'url': 'http://example.invalid/a.m4a'}]}]})):
+    root = case / label
+    root.mkdir(mode=0o700)
+    (root / 'registry').mkdir(mode=0o700)
+    (root / 'private').mkdir(mode=0o700)
+    plan_file = root / 'private/plan.json'
+    plan_file.write_text(json.dumps(plan))
+    request = root / 'private/request'
+    request.write_text('http://example.invalid/request\n')
+    engine = root / 'engine.sh'
+    engine.write_text(source + '\n' + f'''
+PRIVATE_ARIA2_HELPER={shlex.quote(str(project / 'private-aria2-plan.py'))}
+PRIVATE_ARIA2_METADATA={shlex.quote(str(root / 'private'))}
+PRIVATE_ARIA2_PLAN="${{PRIVATE_ARIA2_METADATA}}/plan.json"
+YTDLP_BATCH_FILE_TMP="${{PRIVATE_ARIA2_METADATA}}/request"
+OUTPUT_DIR={shlex.quote(str(output))}
+FINAL_OUTPUT_DIR=${{OUTPUT_DIR}}
+FINAL_OUTPUT_IDENTITY={shlex.quote(f'{identity.st_dev}:{identity.st_ino}')}
+MODE=video
+YOUTUBE_HLS_FIREFOX=false
+YT_DLP_OPTIONS=(--output {shlex.quote(original_template)})
+resolve_lock_root() {{ printf -v "${{1:-OUTPUT_LOCK_ROOT}}" '%s' {shlex.quote(str(root / 'registry'))}; }}
+trap cleanup EXIT
+acquire_output_lock "${{OUTPUT_DIR}}"
+acquire_resource_reservations
+printf '%s\\0' "${{YT_DLP_OPTIONS[@]}}"
+''')
+    result = subprocess.run(['bash', str(engine)], capture_output=True, check=True)
+    options = result.stdout.decode().rstrip('\0').split('\0')
+    template = options[-1]
+    planned = plan['requested_downloads'][0]['filename']
+    expected = str(Path(planned).with_suffix('')).replace('%', '%%').replace('$', '%(id&$|$)s') + '.%(ext)s'
+    assert options[-2] == '--output' and template == expected, 'engine replay did not freeze its admitted basename'
+    frozen = json.loads((root / 'private/transfer-plan.json').read_text())
+    assert 'webpage_url' not in frozen
+    assert all('webpage_url' not in f and 'original_url' not in f for f in frozen['formats'])
+    if label == 'inherited':
+        actual = frozen['formats'][0]
+        assert tuple(actual.get(key) for key in ('format_id', 'ext', 'protocol', 'url')) == (
+            'av', 'mp4', 'http', plan['url']), 'inherited format was lost during replay freezing'
+        # Classification and component publication must agree with the same
+        # effective selected format, not merely the requested_downloads delta.
+        capture = io.StringIO()
+        with contextlib.redirect_stdout(capture):
+            module.classify_plan(argparse.Namespace(plan=str(plan_file), allow_https_direct=True))
+        assert 'transport=direct' in capture.getvalue()
+        ownership = root / 'private/resources.json'
+        state_args = argparse.Namespace(state=str(ownership), registry=str(root / 'registry'), action='admit')
+        module.resource_state(state_args)
+        partial = Path(planned + '.part')
+        partial.write_bytes(b'owned partial of the inherited format')
+        state_args.action = 'save'
+        module.resource_state(state_args)
+        for field, value in (('format_id', 'different'), ('ext', 'webm'), ('protocol', 'https')):
+            changed = {**plan, field: value}
+            candidate = root / ('changed-' + field)
+            candidate.mkdir(mode=0o700)
+            (candidate / 'plan.json').write_text(json.dumps(changed))
+            (candidate / 'request').write_text('http://example.invalid/request\n')
+            args = argparse.Namespace(plan=str(candidate / 'plan.json'),
+                state=str(candidate / 'resources.json'), url_file=str(candidate / 'request'),
+                output_dir=str(output), final_output_dir=str(output),
+                final_output_identity=f'{identity.st_dev}:{identity.st_ino}', mode='video', hls=False)
+            with contextlib.redirect_stdout(io.StringIO()):
+                module.resource_plan(args)
+            try:
+                module.resource_state(argparse.Namespace(state=args.state,
+                    registry=str(root / 'registry'), action='admit'))
+            except module.DestinationExistsError:
+                pass
+            else:
+                raise AssertionError('changed inherited format was adopted for resume: ' + field)
+        partial.unlink()
+    else:
+        assert [f['format_id'] for f in frozen['formats']] == ['v', 'a']
+    # The full contract stays hermetic without the optional yt-dlp package.
+    # When available, also execute its real template/format processing without
+    # transfer, network access, postprocessing or cache writes.
+    try:
+        from yt_dlp import YoutubeDL
+    except ImportError:
+        print('Optional real yt-dlp replay check unavailable; engine/helper contract checked.')
+    else:
+        options = dict(quiet=True, simulate=True, skip_download=True, cachedir=False,
+                       format='bv*+ba/b', merge_output_format='mkv', outtmpl=template)
+        with YoutubeDL(options) as downloader:
+            replayed = downloader.process_ie_result(copy.deepcopy(frozen), download=True)
+        assert replayed['requested_downloads'][0]['filename'] == planned, 'real replay escaped the admitted name'
+        if label == 'live':
+            with YoutubeDL({**options, 'outtmpl': original_template}) as downloader:
+                unbound = downloader.process_ie_result(copy.deepcopy(frozen), download=True)
+            assert unbound['requested_downloads'][0]['filename'] != planned, 'live naming negative control was not discriminating'
+print('Frozen direct/native replay and inherited-format contract passed.')
+PY_FROZEN_REPLAY
+}
+
+test_resource_activation_signal_handoff() {
+    new_case 'resource-activation-signal'
+    python3 -I -B - "${PROJECT_DIR}" "${CASE_ROOT}" <<'PY_RESOURCE_SIGNAL'
+import json
+import os
+from pathlib import Path
+import shlex
+import signal
+import subprocess
+import sys
+import time
+
+project, root = map(Path, sys.argv[1:])
+engine_source = (project / 'download-video.sh').read_text().rsplit('main "$@"', 1)[0]
+gui_source = (project / 'download-video-gui.sh').read_text().rsplit('main "$@"', 1)[0]
+events = []
+for phase in ('before-activation', 'after-activation'):
+    case = root / phase
+    case.mkdir(mode=0o700)
+    for name in ('output', 'private', 'registry'):
+        (case / name).mkdir(mode=0o700)
+    output = case / 'output'
+    plan = {'id': 'fixture', 'extractor_key': 'Generic', 'requested_downloads': [{
+        'filename': str(output / 'fixture.mp4'), 'format_id': 'av', 'ext': 'mp4',
+        'protocol': 'http', 'url': 'http://example.invalid/media'}]}
+    (case / 'private/plan.json').write_text(json.dumps(plan))
+    (case / 'private/request').write_text('http://example.invalid/request\n')
+    helper = case / 'helper.py'
+    helper.write_text('''import importlib.util, json, os, signal, sys, time
+from pathlib import Path
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location('helper', sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+case = Path(sys.argv[2]); phase = sys.argv[3]
+sys.argv = [sys.argv[1], *sys.argv[4:]]
+real_replace = m.os.replace
+def replace(source, target, *args, **kwargs):
+    admission = ('admit' in sys.argv and str(target).endswith('.resume.json'))
+    if not admission or phase == 'after-activation':
+        result = real_replace(source, target, *args, **kwargs)
+    if admission:
+        assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+        (case / 'ready').write_text(str(os.getpid()))
+        while True:
+            signal.pause()
+    return result
+m.os.replace = replace
+raise SystemExit(m.main())
+''')
+    # Keep the command interface real; instrumentation only gates its atomic
+    # replacement. The signal comes from the actual GUI worker-group path.
+    shim = case / 'helper-shim.py'
+    shim.write_text('import os,sys\nos.execv(sys.executable, [sys.executable, ' +
+                    repr(str(helper)) + ', ' + repr(str(project / 'private-aria2-plan.py')) +
+                    ', ' + repr(str(case)) + ', ' + repr(phase) + ', *sys.argv[1:]])\n')
+    engine = case / 'engine.sh'
+    engine.write_text(engine_source + '\n' + f'''
+PRIVATE_ARIA2_HELPER={shlex.quote(str(shim))}
+PRIVATE_ARIA2_METADATA={shlex.quote(str(case / 'private'))}
+PRIVATE_ARIA2_PLAN="${{PRIVATE_ARIA2_METADATA}}/plan.json"
+YTDLP_BATCH_FILE_TMP="${{PRIVATE_ARIA2_METADATA}}/request"
+OUTPUT_DIR={shlex.quote(str(output))}
+FINAL_OUTPUT_DIR=${{OUTPUT_DIR}}
+FINAL_OUTPUT_IDENTITY=$(stat -c '%d:%i' -- "${{OUTPUT_DIR}}")
+MODE=video
+YOUTUBE_HLS_FIREFOX=false
+YT_DLP_OPTIONS=()
+resolve_lock_root() {{ printf -v "${{1:-OUTPUT_LOCK_ROOT}}" '%s' {shlex.quote(str(case / 'registry'))}; }}
+trap cleanup EXIT
+trap 'request_shutdown TERM 143' TERM
+acquire_output_lock "${{OUTPUT_DIR}}"
+acquire_resource_reservations
+exit 91
+''')
+    gui = case / 'gui.sh'
+    token = os.urandom(24).hex()
+    gui.write_text(gui_source + '\n' + f'''
+PGID_FILE={shlex.quote(str(case / 'pgid'))}
+LOG_FILE={shlex.quote(str(case / 'engine.log'))}
+WORKER_IDENTITY_TOKEN={shlex.quote(token)}
+COMMAND=(bash {shlex.quote(str(engine))})
+start_download_worker
+IFS= read -r action
+[[ ${{action}} == cancel ]] || exit 92
+signal_worker_tree TERM
+status=0
+wait "${{WORKER_PID}}" || status=$?
+exit "${{status}}"
+''')
+    process = subprocess.Popen(['bash', str(gui)], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 5
+        while not (case / 'ready').exists():
+            assert process.poll() is None, ('GUI exited before admission barrier', process.communicate())
+            assert time.monotonic() < deadline, 'activation barrier was not reached'
+            time.sleep(.01)
+        events.append((time.monotonic_ns(), phase, 'activation-barrier'))
+        events.append((time.monotonic_ns(), phase, 'gui-cancel-request'))
+        stdout, stderr = process.communicate(b'cancel\n', timeout=8)
+        events.append((time.monotonic_ns(), phase, 'gui-and-worker-exited'))
+        assert process.returncode == 143, (phase, process.returncode, stdout, stderr)
+        live = []
+        for entry in Path('/proc').glob('[0-9]*'):
+            try:
+                fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+                if (fields[0] not in ('Z', 'X') and
+                        ('YTDLP_ARIA2_GUI_WORKER_TOKEN=' + token).encode() in
+                        (entry / 'environ').read_bytes().split(b'\0')):
+                    live.append(entry.name)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except PermissionError:
+                continue
+        assert not live, ('live admission consumers before rescue', live)
+        records = [json.loads(p.read_text()) for p in (case / 'registry').glob('resources-*/*.resume.json')]
+        (case / 'before-rescue.json').write_text(json.dumps({'status': process.returncode,
+                                                         'live': live, 'records': records}))
+        assert all(not item['active'] for item in records), 'GUI cancellation left an active admission checkpoint'
+        assert not list(output.iterdir()), 'admission unexpectedly modified media'
+        # Exercise actual new admission, not merely absence of a live process.
+        retry = case / 'retry'
+        retry.mkdir(mode=0o700)
+        info = output.stat()
+        state = retry / 'resources.json'
+        common = [sys.executable, str(project / 'private-aria2-plan.py')]
+        request = retry / 'request'
+        request.write_text('http://example.invalid/request\n')
+        subprocess.run([*common, 'resource-plan', '--plan', str(case / 'private/plan.json'),
+            '--state', str(state), '--url-file', str(request), '--mode', 'video',
+            '--output-dir', str(output), '--final-output-dir', str(output),
+            '--final-output-identity', f'{info.st_dev}:{info.st_ino}'], check=True,
+            stdout=subprocess.PIPE)
+        subprocess.run([*common, 'resource-state', '--action', 'admit', '--state', str(state),
+                        '--registry', str(case / 'registry')], check=True)
+        subprocess.run([*common, 'resource-state', '--action', 'save', '--state', str(state),
+                        '--registry', str(case / 'registry')], check=True)
+        events.append((time.monotonic_ns(), phase, 'new-admission-succeeded'))
+    finally:
+        (root / 'events.json').write_text(json.dumps(events))
+        # Record/assert first. Rescue only this fixture's direct GUI process and
+        # its published, still-authenticated group; rescue never creates PASS.
+        if process.poll() is None:
+            for entry in Path('/proc').glob('[0-9]*'):
+                try:
+                    if ('YTDLP_ARIA2_GUI_WORKER_TOKEN=' + token).encode() not in (entry / 'environ').read_bytes().split(b'\0'):
+                        continue
+                    descriptor = os.pidfd_open(int(entry.name))
+                    try:
+                        if ('YTDLP_ARIA2_GUI_WORKER_TOKEN=' + token).encode() in (entry / 'environ').read_bytes().split(b'\0'):
+                            signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                    finally:
+                        os.close(descriptor)
+                except (FileNotFoundError, ProcessLookupError, PermissionError):
+                    continue
+            process.terminate()
+            try:
+                process.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=2)
+print('GUI admission signal handoff before/after activation passed.')
+PY_RESOURCE_SIGNAL
+}
+
+test_resource_reservations_and_resume() {
+    new_case 'resource-reservations'
+    python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_RESOURCES'
+import argparse
+import contextlib
+import fcntl
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location('resources', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = Path(sys.argv[2])
+output = root / 'output'
+registry = root / 'registry'
+registry.mkdir(mode=0o700)
+alias = root / 'alias'
+alias.symlink_to(output, target_is_directory=True)
+sequence = 0
+
+def plan(name, request='one', directory=output, formats=None, mode='video', *,
+         identity=None, download_identity=None, media_url='https://example.invalid/media?signature=one'):
+    global sequence
+    sequence += 1
+    private = root / str(sequence)
+    private.mkdir(mode=0o700)
+    source = private / 'plan.json'
+    url = private / 'request'
+    url.write_text('https://example.invalid/' + request)
+    if identity is None:
+        identity = {'id': 'fixture-media', 'extractor': 'generic', 'extractor_key': 'Generic'}
+    source.write_text(json.dumps({**identity, 'webpage_url': 'https://example.invalid/reextract',
+        'requested_downloads': [{'filename': str(directory / name),
+            'format_id': 'av', 'ext': Path(name).suffix[1:], 'protocol': 'http',
+            'url': media_url, **(download_identity or {}),
+            **({'requested_formats': formats} if formats else {})}]}))
+    info = output.stat()
+    args = argparse.Namespace(output_dir=str(directory), final_output_dir=str(directory),
+        final_output_identity=f'{info.st_dev}:{info.st_ino}', plan=str(source),
+        state=str(private / 'resources.json'), url_file=str(url), mode=mode, hls=False)
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        module.resource_plan(args)
+    frozen = json.loads((private / 'transfer-plan.json').read_text())
+    assert 'webpage_url' not in frozen, 'replay can reextract outside its plan'
+    return args, [line.split() for line in captured.getvalue().splitlines()]
+
+def acquire(keys):
+    opened = []
+    try:
+        for mode, key in keys:
+            fd = os.open(registry / (key + '.lock'), os.O_CREAT | os.O_RDWR, 0o600)
+            opened.append(fd)
+            fcntl.flock(fd, fcntl.LOCK_NB | (fcntl.LOCK_SH if mode == 'shared' else fcntl.LOCK_EX))
+        return opened
+    except BlockingIOError:
+        for fd in opened:
+            os.close(fd)
+        return None
+
+def release(opened):
+    for fd in opened:
+        os.close(fd)
+
+def state(args, action):
+    return module.resource_state(argparse.Namespace(state=args.state, registry=str(registry), action=action))
+
+def rejected(error, function, *arguments):
+    try:
+        function(*arguments)
+    except error:
+        return
+    raise AssertionError(f'{error.__name__} was not raised')
+
+# Equal paths, aliases, Unicode normalization/case, different URLs, and an
+# overlapping component with a different final basename all exclude each other.
+for left, right in [('Film.mp4', 'Film.webm'), ('café.mp4', 'CAFE\u0301.webm'),
+                    ('a.mkv', 'a.f137.webm'), ('x % $.mp4', 'x % $.webm')]:
+    _, keys = plan(left)
+    first = acquire(keys)
+    assert first is not None
+    _, keys2 = plan(right, 'other-url', alias)
+    assert acquire(keys2) is None, (left, right)
+    independent, independent_keys = plan('independent.mp4')
+    other = acquire(independent_keys)
+    assert other is not None
+    release(other)
+    release(first)
+    next_owner = acquire(keys2)
+    assert next_owner is not None
+    release(next_owner)
+
+args, _ = plan('resume.mp4')
+part = output / 'resume.mp4.part'
+part.write_bytes(b'ambiguous legacy state')
+before = part.stat()
+rejected(module.DestinationExistsError, state, args, 'admit')
+assert part.read_bytes() == b'ambiguous legacy state' and part.stat() == before
+part.unlink()
+state(args, 'admit')
+part.write_bytes(b'owned partial transfer')
+# An uncertain stop cannot release protection, even when no FD survives.
+same, _ = plan('resume.mp4')
+rejected(module.ResourceBusyError, state, same, 'admit')
+records = list(registry.rglob(module.resource_record_name(json.loads(Path(args.state).read_text()))))
+assert len(records) == 1, 'admitted resource checkpoint is not unique'
+record = records[0]
+active_record = record.read_bytes()
+# Cleanup was prudently registered before attempted admission. It must neither
+# release somebody else's active record nor invent ownership after a refusal.
+state(same, 'save')
+assert record.read_bytes() == active_record, 'failed admission cleared another transaction'
+overlap, _ = plan('resume.mp4.f137.mp4')
+rejected(module.ResourceBusyError, state, overlap, 'admit')
+state(args, 'save')
+state(same, 'admit')
+state(same, 'save')
+foreign_request, _ = plan('resume.mp4', 'different-request')
+rejected(module.DestinationExistsError, state, foreign_request, 'admit')
+passive_record = record.read_bytes()
+state(foreign_request, 'save')
+assert record.read_bytes() == passive_record, 'failed admission adopted foreign resources'
+with part.open('r+b') as handle:
+    handle.write(b'foreign modification')
+changed, _ = plan('resume.mp4')
+rejected(module.DestinationExistsError, state, changed, 'admit')
+
+# Full media IDs can differ beyond the output template's 64-byte truncation.
+# The same request, filename and formats must not adopt another media's bytes.
+prefix = 'i' * 64
+identity = {'id': prefix + '-first', 'extractor': 'generic', 'extractor_key': 'Generic'}
+name = f'identity [{prefix}].mp4'
+owner, _ = plan(name, identity=identity)
+state(owner, 'admit')
+partial = output / (name + '.part')
+partial.write_bytes(b'partial bytes belonging only to the first media')
+before = partial.stat()
+state(owner, 'save')
+for field, value in (('id', prefix + '-second'), ('extractor', 'other'), ('extractor_key', 'Other')):
+    changed_identity = {**identity, field: value}
+    for metadata in ({'identity': changed_identity},
+                     {'identity': identity, 'download_identity': {field: value}}):
+        candidate, _ = plan(name, **metadata)
+        rejected(module.DestinationExistsError, state, candidate, 'admit')
+assert partial.read_bytes() == b'partial bytes belonging only to the first media'
+after = partial.stat()
+assert (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) == (
+    after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+
+# Moving inherited identity to the download and refreshing a signed transfer URL
+# does not change the media. The unchanged owned partial remains resumable.
+refreshed, _ = plan(name, identity={}, download_identity=identity,
+                    media_url='https://example.invalid/media?signature=refreshed')
+state(refreshed, 'admit')
+state(refreshed, 'save')
+
+# Either extractor identity field is sufficient when the other is unavailable.
+for field in ('extractor', 'extractor_key'):
+    available = {'id': identity['id'], field: identity[field]}
+    available_name = f'available-{field}.mp4'
+    owner, _ = plan(available_name, identity=available)
+    state(owner, 'admit')
+    (output / (available_name + '.part')).write_bytes(b'owned with one extractor identity')
+    state(owner, 'save')
+    retry, _ = plan(available_name, identity=available,
+                    media_url='https://example.invalid/media?signature=refreshed')
+    state(retry, 'admit')
+    state(retry, 'save')
+
+# Missing/malformed identity permits a fresh transfer, never a later adoption.
+for index, metadata in enumerate((
+        {'identity': {}},
+        {'identity': {'id': 'only-id'}},
+        {'identity': {'extractor_key': 'Generic'}},
+        {'identity': {**identity, 'id': ''}},
+        {'identity': {**identity, 'id': 123}},
+        {'identity': {**identity, 'extractor_key': []}},
+        {'identity': identity, 'download_identity': {'id': None}})):
+    missing_name = f'missing-identity-{index}.mp4'
+    unidentified, _ = plan(missing_name, **metadata)
+    state(unidentified, 'admit')
+    missing_partial = output / (missing_name + '.part')
+    missing_partial.write_bytes(b'partial without a stable extracted identity')
+    state(unidentified, 'save')
+    retry, _ = plan(missing_name, **metadata)
+    rejected(module.DestinationExistsError, state, retry, 'admit')
+    assert missing_partial.read_bytes() == b'partial without a stable extracted identity'
+
+# Final and native entries remain passive user data; they are not lock errors.
+for extension in ('mkv', 'mp4', 'webm'):
+    witness = output / ('external.' + extension)
+    witness.write_bytes(b'another media')
+    before = witness.stat()
+    candidate, _ = plan('external.' + ('mp4' if extension == 'mkv' else extension))
+    rejected(module.DestinationExistsError, state, candidate, 'admit')
+    assert witness.stat() == before and witness.read_bytes() == b'another media'
+    witness.unlink()
+rejected(module.PlanError, plan, 'x' * 240 + '.mp4')
+rejected(module.PlanError, plan, 'ordinary.mkv', 'one', output,
+         [{'format_id': '../escape', 'ext': 'mp4'}])
+converted, _ = plan('converted.webm', mode='audio')
+state(converted, 'admit')
+final = output / 'converted.opus'
+final.write_bytes(b'completed native audio in its extracted container')
+module.resource_state(argparse.Namespace(state=converted.state, registry=str(registry),
+                                        action='save', completed_path=str(final)))
+repeated, _ = plan('converted.webm', mode='audio')
+rejected(module.DestinationExistsError, state, repeated, 'admit')
+print('Resource families, alias exclusion, independent locks, uncertain-stop protection and authenticated resume passed.')
+PY_RESOURCES
+}
+
 main() {
     require_test_command python3
     require_test_command stat
@@ -2089,6 +2949,10 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
+    test_resource_directory_incarnation
+    test_frozen_replay_contract
+    test_resource_activation_signal_handoff
+    test_resource_reservations_and_resume
     test_workspace_mount_oracle_ignores_optimization
     test_workspace_mount_boundaries
     test_network_media_permissions

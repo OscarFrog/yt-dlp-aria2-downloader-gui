@@ -71,6 +71,7 @@ fi
 %{_libexecdir}/yt-dlp-aria2-downloader/download-video-gui.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/progress-monitor.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/private-aria2-plan.py
+%{_libexecdir}/yt-dlp-aria2-downloader/private-process-supervisor.py
 %{_libexecdir}/yt-dlp-aria2-downloader/runtime-manager.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/package-user-cleanup.sh
 %dir %{_libexecdir}/yt-dlp-aria2-downloader/keys
@@ -86,6 +87,9 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Wed Sep 30 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.4.0-1
+- Add shared destination concurrency and harden process lifecycle
+
 * Sun Sep 27 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.3.29-1
 - Fix audited correctness recovery confidentiality and qualification defects
 

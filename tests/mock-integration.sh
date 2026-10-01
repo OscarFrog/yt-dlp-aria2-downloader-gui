@@ -178,7 +178,7 @@ mkdir -p -- \
 chmod 700 -- "${RUNTIME_DIR}"
 
 install -m 0755 -- "${PROJECT_DIR}/download-video.sh" "${MANAGED_ENGINE_UNDER_TEST}"
-# Observe the first deferred handler only in the private engine fixture.
+# Observe return from the first deferred handler only in the private fixture.
 python3 -I -B - "${MANAGED_ENGINE_UNDER_TEST}" <<'PY_DEFERRED_SIGNAL_ACK'
 from pathlib import Path
 import sys
@@ -188,14 +188,24 @@ source = path.read_text(encoding="utf-8")
 needle = "            DEFERRED_SIGNAL_NAME=${signal_name}\n"
 if source.count(needle) != 1:
     raise SystemExit("expected one deferred-signal registration in the engine fixture")
-acknowledgement = r'''            if [[ -n ${MOCK_DEFERRED_SIGNAL_MARKER:-} ]]; then
-                printf '%s\n' "${DEFERRED_SIGNAL_STATUS}" \
-                    >"${MOCK_DEFERRED_SIGNAL_MARKER}.tmp"
-                mv -Tf -- "${MOCK_DEFERRED_SIGNAL_MARKER}.tmp" \
-                    "${MOCK_DEFERRED_SIGNAL_MARKER}"
-            fi
+# A marker published inside the INT trap becomes visible before that trap
+# returns. Bash 4.4 can consume a second INT during the external mv without
+# entering the handler again. Both registration polling loops run this probe
+# only after the first handler has returned, retaining the same two-INT test.
+acknowledgement = r'''        if [[ -n ${DEFERRED_SIGNAL_STATUS} &&
+            -n ${MOCK_DEFERRED_SIGNAL_RETURNED_MARKER:-} &&
+            ! -e ${MOCK_DEFERRED_SIGNAL_RETURNED_MARKER} ]]; then
+            mock_trace_pre_env handler-return-observed
+            printf '%s\n' "${DEFERRED_SIGNAL_STATUS}" \
+                >"${MOCK_DEFERRED_SIGNAL_RETURNED_MARKER}.tmp"
+            mv -Tf -- "${MOCK_DEFERRED_SIGNAL_RETURNED_MARKER}.tmp" \
+                "${MOCK_DEFERRED_SIGNAL_RETURNED_MARKER}"
+        fi
 '''
-source = source.replace(needle, needle + acknowledgement, 1)
+registration_poll = "    for ((attempt = 0; attempt < 500; attempt++)); do\n"
+if source.count(registration_poll) != 2:
+    raise SystemExit("expected both engine registration polling loops")
+source = source.replace(registration_poll, registration_poll + acknowledgement)
 # Only the private pre-env fixture enables this bounded, builtin-only trace.
 # Never record argv, environment contents, or private authentication tokens.
 trace_function = r'''
@@ -246,6 +256,8 @@ PY_DEFERRED_SIGNAL_ACK
 install -m 0644 -- \
     "${PROJECT_DIR}/private-aria2-plan.py" \
     "${MANAGED_ENGINE_DIR}/private-aria2-plan.py"
+install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
+    "${MANAGED_ENGINE_DIR}/private-process-supervisor.py"
 cat >"${MANAGED_ENGINE_DIR}/runtime-manager.sh" <<'EOF_RUNTIME_MANAGER'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -697,12 +709,12 @@ if [[ ${dump_single_json} == true ]]; then
     fi
 
     if [[ ${plan_youtube_hls} == true ]]; then
-        plan_filename="${MOCK_OUTPUT_DIR}/Mock media [abc123].${youtube_hls_source_ext}"
+        plan_filename="${MOCK_OUTPUT_DIR}/${MOCK_MEDIA_BASENAME:-Mock media [abc123]}.${youtube_hls_source_ext}"
         plan_protocol='m3u8_native'
         plan_url='https://example.invalid/mock-manifest.m3u8'
         plan_ext=${youtube_hls_source_ext}
     else
-        plan_filename="${MOCK_OUTPUT_DIR}/Mock media [abc123].webm"
+        plan_filename="${MOCK_OUTPUT_DIR}/${MOCK_MEDIA_BASENAME:-Mock media [abc123]}.webm"
         plan_protocol='http'
         plan_url='https://example.invalid/mock-media.webm'
         plan_ext='webm'
@@ -761,13 +773,13 @@ result_file=''
 youtube_hls_mode=false
 no_overwrites=false
 no_post_overwrites=false
-load_info_json=false
+skip_download=false
 previous=''
 for argument in "$@"; do
     case ${argument} in
     --no-overwrites) no_overwrites=true ;;
     --no-post-overwrites) no_post_overwrites=true ;;
-    --load-info-json) load_info_json=true ;;
+    --skip-download) skip_download=true ;;
     *) ;;
     esac
     if [[ ${argument} == '--cookies-from-browser' ]]; then
@@ -787,7 +799,12 @@ for argument in "$@"; do
     fi
 done
 
-if [[ ${load_info_json} != true ]]; then
+# Direct aria2 replay already has its native input. A frozen native plan also
+# uses --load-info-json, but still performs its transfer and emits progress.
+if [[ -f ${MOCK_OUTPUT_DIR}/${MOCK_MEDIA_BASENAME:-Mock media [abc123]}.webm ]]; then
+    skip_download=true
+fi
+if [[ ${skip_download} != true ]]; then
     if [[ ${MOCK_ARIA_NO_PERCENT:-0} == 1 ]]; then
         printf '\r[#a1b2c3 4.0MiB/0B CN:8 DL:1.00MiB]\r'
     elif [[ ${MOCK_ARIA_ONLY:-0} == 1 ]]; then
@@ -878,7 +895,7 @@ while True:
     exit "${MOCK_DESCENDANT_PARENT_STATUS:-23}"
 fi
 
-if [[ ${load_info_json} != true ]]; then
+if [[ ${skip_download} != true ]]; then
     if [[ -z ${progress_ready_marker} ]]; then
         # Scenarios that must observe intermediate progress synchronize through
         # explicit marker files. Other scenarios need only a minimal scheduling
@@ -910,10 +927,10 @@ elif [[ -z ${postprocess_ready_marker} ]]; then
 fi
 
 if [[ ${youtube_hls_mode} == true ]]; then
-    output_path="${MOCK_OUTPUT_DIR}/Mock media [abc123].${youtube_hls_source_ext}"
+    output_path="${MOCK_OUTPUT_DIR}/${MOCK_MEDIA_BASENAME:-Mock media [abc123]}.${youtube_hls_source_ext}"
     printf 'YTDLP_POSTPROCESS|started|FixupM3u8\n'
 else
-    output_path="${MOCK_OUTPUT_DIR}/Mock media [abc123].webm"
+    output_path="${MOCK_OUTPUT_DIR}/${MOCK_MEDIA_BASENAME:-Mock media [abc123]}.webm"
 fi
 if [[ ${MOCK_RESULT_OUTSIDE_OUTPUT:-0} == 1 ]]; then
     output_path=${MOCK_OUTSIDE_RESULT_PATH:?}
@@ -1747,6 +1764,9 @@ case " $* " in
         printf '%s\n' "${MOCK_OUTPUT_DIR}"
         ;;
     *' --progress '*)
+        if [[ -n ${MOCK_FAKE_ENGINE_READY:-} ]]; then
+            printf ready >"${MOCK_FAKE_ENGINE_READY}"
+        fi
         block_for_signal progress
         if [[ -n ${MOCK_ZENITY_PROGRESS_STATUS:-} ]]; then
             IFS= read -r _ || true
@@ -3078,7 +3098,7 @@ test_mock_engine_video_downloads() {
     assert_file_has_line "${existing_audio_path}" 'preserve existing audio result' \
         'existing final media is preserved'
     assert_text_contains "${ASSERT_OUTPUT}" \
-        'destination already exists: Mock media [abc123].webm' \
+        'Destination: Mock media [abc123].webm' \
         'existing media collision helper diagnostic'
     assert_text_contains "${ASSERT_OUTPUT}" \
         'final media destination already exists; refusing to overwrite it.' \
@@ -3176,7 +3196,7 @@ test_mock_engine_youtube_hls() {
     printf 'preserve existing MKV\n' >"${hls_existing_target}"
     hls_collision_result="${TEST_ROOT}/youtube-hls-collision-result.txt"
     prepare_argument_log 'youtube-hls-existing-target'
-    assert_status 13 'YouTube HLS refuses to overwrite an existing MKV' \
+    assert_status 1 'YouTube HLS refuses an existing MKV before transfer' \
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${OUTPUT_DIR}" --mode video \
         --youtube-hls-firefox \
@@ -3185,12 +3205,12 @@ test_mock_engine_youtube_hls() {
     assert_file_has_line "${hls_existing_target}" 'preserve existing MKV' \
         'existing YouTube HLS MKV is preserved'
     assert_text_contains "${ASSERT_OUTPUT}" \
-        'final MKV already exists; refusing to overwrite it' \
+        'final media destination already exists; refusing to overwrite it' \
         'existing YouTube HLS MKV diagnostic'
     [[ ! -e ${hls_collision_result} ]] \
         || fail 'An HLS target collision published a result file.'
-    [[ -f "${OUTPUT_DIR}/Mock media [abc123].mp4" ]] \
-        || fail 'An HLS target collision did not retain the repaired MP4.'
+    [[ ! -e "${OUTPUT_DIR}/Mock media [abc123].mp4" && ! -s ${MOCK_POST_CALL_LOG} ]] \
+        || fail 'An HLS target collision started a transfer before admission.'
     rm -f -- "${hls_existing_target}" "${OUTPUT_DIR}/Mock media [abc123].mp4"
 
     # yt-dlp can already expose the repaired HLS artifact with an MKV suffix.
@@ -3255,6 +3275,7 @@ test_mock_engine_youtube_hls() {
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].mkv"
     prepare_argument_log 'retained-hls-remux-survives-next-session'
     assert_status 0 'explicitly retained HLS remux survives the next session' \
+        env MOCK_MEDIA_BASENAME='Independent media [def456]' \
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${OUTPUT_DIR}" --mode audio \
         -- 'https://example.com/watch?v=retained-hls-remux'
@@ -3265,6 +3286,7 @@ test_mock_engine_youtube_hls() {
     rm -f -- \
         "${hls_publish_collision_result}" \
         "${hls_publish_collision_temps[@]}" \
+        "${OUTPUT_DIR}/Independent media [def456].webm" \
         "${OUTPUT_DIR}/Mock media [abc123].webm" \
         "${OUTPUT_DIR}/Mock media [abc123].mp4" \
         "${OUTPUT_DIR}/Mock media [abc123].mkv"
@@ -4115,8 +4137,17 @@ test_mock_engine_private_staging() {
         >"${cross_candidate}/.yt-dlp-aria2-owner-v1"
     chmod 600 -- "${cross_candidate}/.yt-dlp-aria2-owner-v1"
 
+    prepare_argument_log 'private-staging-crash-reservation'
+    assert_status 75 'uncertain crash keeps conflicting media reserved' \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=private-staging-crash'
+    [[ ! -s ${MOCK_POST_CALL_LOG} && ! -s ${MOCK_ARIA2_ARG_LOG} ]] \
+        || fail 'An unconfirmed crash allowed another transfer into its resources.'
+
     prepare_argument_log 'private-staging-preservation'
     assert_status 0 'abandoned private staging preservation' \
+        env MOCK_MEDIA_BASENAME='Independent media [def456]' \
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${OUTPUT_DIR}" \
         --mode audio \
@@ -4154,7 +4185,7 @@ test_mock_engine_private_staging() {
         "${symlink_candidate}" \
         "${staging_symlink_target}" \
         "${other_output}"
-    rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+    rm -f -- "${OUTPUT_DIR}/Independent media [def456].webm"
 }
 
 test_mock_engine_network_destination() {
@@ -4660,7 +4691,7 @@ run_selected_mock_engine_group() {
 
 test_mock_gui_aria_progress() {
     local aria_unknown_capture gui_aria2_arguments_text gui_url_seen_log
-    local trimmed_gui_url
+    local trimmed_gui_url status=0
     local -a gui_arguments gui_aria2_arguments
 
     # Scenario: aria2 GUI progress with an unknown total size.
@@ -4671,7 +4702,53 @@ test_mock_gui_aria_progress() {
         MOCK_URL_SEEN_LOG="${gui_url_seen_log}" \
         MOCK_ARIA_ONLY=1 \
         MOCK_PROGRESS_CAPTURE="${PROGRESS_CAPTURE}" \
-        "${GUI_UNDER_TEST}"
+        "${GUI_UNDER_TEST}" || status=$?
+    if ((status != 0)); then
+        # Keep only allowlisted failure categories before the private fixture's
+        # cleanup removes its logs. Never print raw media requests or headers.
+        python3 -I -B - "${XDG_STATE_HOME}" "${OUTPUT_DIR}" "${status}" <<'PY_GUI_FAILURE' || true
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import time
+
+categories = {
+    'legacy-lock': b'another download is already using the destination directory',
+    'family-lock': b'media resources are currently reserved by another download',
+    'active-checkpoint': b'media resources remain reserved after an unconfirmed shutdown',
+    'foreign-input': b'media destination already exists or contains an ambiguous input',
+}
+observed = set()
+logs_read = 0
+root = Path(sys.argv[1]) / 'yt-dlp-aria2-downloader'
+for path in sorted(root.glob('download-*.log'))[-4:]:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        continue
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_size > 8 * 1024 * 1024:
+            continue
+        data = os.read(descriptor, 8 * 1024 * 1024)
+        observed.update(label for label, marker in categories.items() if marker in data)
+        logs_read += 1
+    finally:
+        os.close(descriptor)
+try:
+    info = Path(sys.argv[2]).stat()
+    destination = [info.st_dev, info.st_ino]
+except OSError as error:
+    destination = {'unavailable_errno': error.errno}
+print(json.dumps({'event': 'gui-aria-percent-failure-before-fixture-cleanup',
+                  'monotonic_ns': time.monotonic_ns(), 'status': int(sys.argv[3]),
+                  'destination': destination, 'logs_read': logs_read,
+                  'categories': sorted(observed)}, sort_keys=True), flush=True)
+PY_GUI_FAILURE
+        return "${status}"
+    fi
     assert_file_has_line "${PROGRESS_CAPTURE}" '39' 'aria2 progress maps into the global download phase'
     assert_file_contains "${PROGRESS_CAPTURE}" \
         '# Downloading the audio track - 40% (aria2c) - 1.00MiB - 6s remaining' \
@@ -4741,6 +4818,8 @@ test_mock_gui_profiles() {
         "${profile_bundle}/progress-monitor.sh"
     install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
         "${profile_bundle}/private-aria2-plan.py"
+    install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
+        "${profile_bundle}/private-process-supervisor.py"
     sed '$d' "${PROJECT_DIR}/download-video.sh" >"${profile_bundle}/engine-source.sh"
     cat >"${profile_bundle}/download-video.sh" <<'EOF_PROFILE_ENGINE'
 #!/usr/bin/env bash
@@ -5018,6 +5097,8 @@ test_mock_gui_progress_completion() {
         "${new_download_bundle}/"
     install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
         "${new_download_bundle}/private-aria2-plan.py"
+    install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
+        "${new_download_bundle}/private-process-supervisor.py"
     prepare_argument_log 'gui-renamed-new-download'
     assert_status 0 'New download re-execs the resolved renamed GUI path' \
         env MOCK_GUI_REAL="${renamed_gui}" \
@@ -5553,6 +5634,8 @@ test_mock_gui_diagnostic_logs() {
         "${PROJECT_DIR}/progress-monitor.sh" "${single_line_bundle}/"
     install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
         "${single_line_bundle}/private-aria2-plan.py"
+    install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
+        "${single_line_bundle}/private-process-supervisor.py"
     cat >"${single_line_bundle}/download-video.sh" <<'EOF_SINGLE_LINE_ENGINE'
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
@@ -5682,6 +5765,8 @@ EOF_SINGLE_LINE_MONITOR
         "${PROJECT_DIR}/progress-monitor.sh" "${final_result_bundle}/"
     install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
         "${final_result_bundle}/private-aria2-plan.py"
+    install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
+        "${final_result_bundle}/private-process-supervisor.py"
     cat >"${final_result_bundle}/download-video.sh" <<'EOF_MISSING_FINAL_ENGINE'
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
@@ -5696,6 +5781,21 @@ set -euo pipefail
 if (($# == 1)) && [[ $1 == --version ]]; then
     printf '%s\n' 'yt-dlp-aria2-downloader-gui 9.9.9'
     exit 0
+fi
+if [[ -n ${MOCK_FAKE_ENGINE_FINAL:-} ]]; then
+    while (($#)); do
+        if [[ $1 == --result-file ]]; then
+            printf '%s\n' "${MOCK_FAKE_ENGINE_FINAL}" >"$2"
+            break
+        fi
+        shift
+    done
+    printf '%s\n' 'Independent fake engine returned success.'
+    for _ in {1..500}; do
+        [[ -s ${MOCK_FAKE_ENGINE_READY} ]] && exit 0
+        sleep 0.01
+    done
+    exit 70
 fi
 printf '%s\n' 'Simulated worker success without a final result.'
 sleep 0.2
@@ -5716,6 +5816,27 @@ EOF_MISSING_FINAL_ENGINE
         'GUI final-result validation diagnostic'
     [[ ! -s ${final_result_text_info_log} ]] \
         || fail 'Close unexpectedly opened the final-result diagnostic log.'
+
+    outside_result_path="${TEST_ROOT}/independent-outside.webm"
+    printf 'foreign independent media\n' >"${outside_result_path}"
+    prepare_argument_log 'gui-independent-outside-result'
+    assert_status 1 'GUI itself rejects a successful engine outside the destination' \
+        env MOCK_GUI_REAL="${final_result_bundle}/download-video-gui.sh" \
+        MOCK_FAKE_ENGINE_FINAL="${outside_result_path}" \
+        MOCK_FAKE_ENGINE_READY="${TEST_ROOT}/outside-engine-ready" \
+        MOCK_QUESTION_ARGS_LOG="${final_result_question_log}" \
+        "${GUI_UNDER_TEST}"
+    assert_diagnostic_question "${final_result_question_log}" \
+        'final media file could not be confirmed' 'independent GUI containment refusal'
+    assert_file_has_line "${outside_result_path}" 'foreign independent media' \
+        'GUI preserves the outside media'
+    printf 'independent valid media\n' >"${OUTPUT_DIR}/independent.webm"
+    prepare_argument_log 'gui-independent-inside-result'
+    assert_status 0 'GUI accepts a successful engine inside the destination' \
+        env MOCK_GUI_REAL="${final_result_bundle}/download-video-gui.sh" \
+        MOCK_FAKE_ENGINE_FINAL="${OUTPUT_DIR}/independent.webm" \
+        MOCK_FAKE_ENGINE_READY="${TEST_ROOT}/inside-engine-ready" "${GUI_UNDER_TEST}"
+    rm -- "${OUTPUT_DIR}/independent.webm" "${outside_result_path}"
 
     prepare_argument_log 'gui-final-probe-diagnostic'
     final_probe_question_log="${TEST_ROOT}/final-probe-question.bin"
@@ -6551,10 +6672,13 @@ EOF_CLEANUP_QUIESCENCE
                 || fail 'Confirmed stop retained the owned private staging directory.'
             [[ ! -s ${diagnostic_log} ]] \
                 || fail 'Confirmed cleanup emitted an unexpected warning.'
-            flock --exclusive --nonblock "${lock_file}" true \
-                || fail 'Confirmed stop did not release the destination lock.'
+            if flock --exclusive --nonblock "${lock_file}" true; then
+                fail 'Cleanup explicitly unlocked a reservation still inherited by a consumer.'
+            fi
         fi
         exec {retained_lock_fd}>&-
+        flock --exclusive --nonblock "${lock_file}" true \
+            || fail 'The reservation remained locked after the last descriptor closed.'
     done
 }
 
@@ -8443,7 +8567,7 @@ PY_PRE_ENV_CONTROL
 
 test_mock_signal_cli_pre_env_registration() {
     local cli_engine_pid cli_engine_start_time cli_engine_status continue_marker delay_marker
-    local elapsed_milliseconds first_signal_marker mode runtime_signal_log signal_finished_at
+    local elapsed_milliseconds first_handler_returned_marker mode runtime_signal_log signal_finished_at
     local observer_status process_stat signal_started_at kernel_version
     local parent_pid=${BASHPID}
     local -a registration_leftovers=()
@@ -8461,7 +8585,7 @@ test_mock_signal_cli_pre_env_registration() {
         continue_marker="${TEST_ROOT}/pre-env-${mode}-continue"
         runtime_signal_log="${TEST_ROOT}/pre-env-${mode}.log"
 
-        /usr/bin/env \
+        "${REAL_SETSID}" --wait /usr/bin/env \
             --default-signal=HUP \
             --default-signal=INT \
             --default-signal=TERM \
@@ -8529,10 +8653,10 @@ test_mock_signal_cli_pre_env_registration() {
     for mode in "${session_modes[@]}"; do
         delay_marker="${TEST_ROOT}/pre-env-escalate-${mode}-delayed"
         continue_marker="${TEST_ROOT}/pre-env-escalate-${mode}-continue"
-        first_signal_marker="${TEST_ROOT}/pre-env-escalate-${mode}-first-signal"
+        first_handler_returned_marker="${TEST_ROOT}/pre-env-escalate-${mode}-first-handler-returned"
         runtime_signal_log="${TEST_ROOT}/pre-env-escalate-${mode}.log"
 
-        /usr/bin/env \
+        "${REAL_SETSID}" --wait /usr/bin/env \
             --default-signal=HUP \
             --default-signal=INT \
             --default-signal=TERM \
@@ -8540,7 +8664,7 @@ test_mock_signal_cli_pre_env_registration() {
             MOCK_ENV_DELAY_MARKER="${delay_marker}" \
             MOCK_ENV_CONTINUE_MARKER="${continue_marker}" \
             MOCK_PRE_ENV_TRACE="${runtime_signal_log%.log}.trace" \
-            MOCK_DEFERRED_SIGNAL_MARKER="${first_signal_marker}" \
+            MOCK_DEFERRED_SIGNAL_RETURNED_MARKER="${first_handler_returned_marker}" \
             MOCK_RUNTIME_MANAGER_BLOCK=1 \
             MOCK_RUNTIME_STARTED_MARKER="${TEST_ROOT}/pre-env-escalate-${mode}-runtime-started" \
             MOCK_RUNTIME_TERMINATION_MARKER="${TEST_ROOT}/pre-env-escalate-${mode}-runtime-terminated" \
@@ -8560,14 +8684,14 @@ test_mock_signal_cli_pre_env_registration() {
         printf 'Pre-env mode=%s phase=escalation-delay-observed monotonic=%s pid=%s start=%s\n' \
             "${mode}" "${signal_finished_at}" "${cli_engine_pid}" "${cli_engine_start_time}"
         kill -INT -- "${cli_engine_pid}"
-        # Standard signals can coalesce while pending. Confirm that the first
-        # handler ran before sending the distinct signal that requests escalation.
+        # Standard signals can coalesce while pending. Confirm return from the
+        # first handler before sending the second INT that requests escalation.
         wait_for_mock_pre_env_marker "${cli_engine_pid}" "${cli_engine_start_time}" \
-            "${first_signal_marker}" "pre-env escalation ${mode} first SIGINT acknowledgement" \
+            "${first_handler_returned_marker}" "pre-env escalation ${mode} first SIGINT handler return" \
             "${runtime_signal_log}"
-        assert_file_has_line "${first_signal_marker}" 130 \
+        assert_file_has_line "${first_handler_returned_marker}" 130 \
             "pre-env escalation ${mode} first SIGINT is deferred"
-        printf 'Pre-env mode=%s phase=first-handler-acknowledged\n' "${mode}"
+        printf 'Pre-env mode=%s phase=first-handler-return-observed\n' "${mode}"
         # Measure escalation from its trigger, after the first-handler barrier.
         read -r signal_started_at signal_finished_at </proc/uptime
         kill -INT -- "${cli_engine_pid}"
@@ -8579,7 +8703,7 @@ test_mock_signal_cli_pre_env_registration() {
             "${delay_marker}" "${continue_marker}" \
             "${TEST_ROOT}/pre-env-escalate-${mode}-runtime-started" \
             "${TEST_ROOT}/pre-env-escalate-${mode}-runtime-terminated" \
-            "${first_signal_marker}") || observer_status=$?
+            "${first_handler_returned_marker}") || observer_status=$?
         reap_mock_pre_env_child "${cli_engine_pid}" "${cli_engine_start_time}" \
             cli_engine_status "pre-env-escalate-${mode}" "${observer_status}"
         if ((observer_status != 0)); then
@@ -8875,11 +8999,12 @@ test_mock_signal_cli_ffmpeg() {
     ffmpeg_termination_marker="${TEST_ROOT}/ffmpeg-worker-terminated"
     ffmpeg_signal_log="${TEST_ROOT}/ffmpeg-signal.log"
     prepare_argument_log 'cli-ffmpeg-signal-forwarding'
+    mkdir -- "${TEST_ROOT}/cli-ffmpeg-output"
     env MOCK_LONG_FFMPEG=1 \
         MOCK_FFMPEG_STARTED_MARKER="${ffmpeg_started_marker}" \
         MOCK_FFMPEG_TERMINATION_MARKER="${ffmpeg_termination_marker}" \
         "${PROJECT_DIR}/download-video.sh" \
-        --output-dir "${OUTPUT_DIR}" --mode video \
+        --output-dir "${TEST_ROOT}/cli-ffmpeg-output" --mode video \
         --youtube-hls-firefox \
         -- 'https://www.youtube.com/watch?v=cli-ffmpeg-signal' \
         >"${ffmpeg_signal_log}" 2>&1 &
@@ -9360,6 +9485,8 @@ test_mock_signal_gui_cancellation() {
         "${cancel_monitor_bundle}/"
     install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
         "${cancel_monitor_bundle}/private-aria2-plan.py"
+    install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
+        "${cancel_monitor_bundle}/private-process-supervisor.py"
     cat >"${cancel_monitor_bundle}/progress-monitor.sh" <<'EOF_CANCEL_SIGPIPE_MONITOR'
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
@@ -9590,6 +9717,7 @@ test_mock_signal_zenity_status() {
 }
 
 run_mock_signal_group() {
+    python3 -B "${PROJECT_DIR}/tests/process-supervision-integration.py"
     test_mock_signal_unbound_directory_registration
     test_mock_signal_private_media_registration
     test_mock_signal_cli_lost_group_leader
@@ -9874,8 +10002,10 @@ test_mock_runtime_dependencies() {
     # shellcheck disable=SC2034 # Read through nameref assertion helpers.
     tls_transport_arguments=()
     read_arguments "${MOCK_ARG_LOG}" tls_transport_arguments
-    assert_array_contains tls_transport_arguments '--batch-file' \
-        'affected aria2 GnuTLS build retains native yt-dlp URL transport'
+    assert_array_contains tls_transport_arguments '--load-info-json' \
+        'affected aria2 GnuTLS build uses the frozen native yt-dlp plan'
+    assert_array_not_contains tls_transport_arguments '--skip-download' \
+        'affected aria2 GnuTLS build retains native yt-dlp transfer'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     prepare_argument_log 'aria2-fixed-gnutls-https-direct'
@@ -10045,6 +10175,8 @@ test_mock_runtime_progress_errors() {
         "${PROJECT_DIR}/download-video.sh" "${monitor_bundle}/"
     install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
         "${monitor_bundle}/private-aria2-plan.py"
+    install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
+        "${monitor_bundle}/private-process-supervisor.py"
     cat >"${monitor_bundle}/progress-monitor.sh" <<'EOF_PROGRESS_MONITOR_FAILURE'
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT

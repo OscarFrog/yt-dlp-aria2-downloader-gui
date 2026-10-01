@@ -49,6 +49,10 @@ readonly -a FULL_SUITE_IDS=(
     mock-signals
     test-runner
     runtime-manager-hardening
+    runtime-manager-rollback-admission
+    runtime-manager-recovery
+    runtime-manager-cache-identity
+    runtime-manager-transactions
     mock-engine-core
     progress-monitor
     run-all-signal
@@ -87,7 +91,11 @@ readonly -a FAST_SUITE_IDS=(
 declare -Ar SUITE_LABELS=(
     ['runtime-manager']='Runtime-manager integration'
     ['run-all-signal']='run-all signal/descendant integration'
-    ['runtime-manager-hardening']='Runtime-manager hardening integration'
+    ['runtime-manager-hardening']='Runtime-manager validation integration'
+    ['runtime-manager-rollback-admission']='Runtime-manager rollback admission integration'
+    ['runtime-manager-recovery']='Runtime-manager recovery integration'
+    ['runtime-manager-cache-identity']='Runtime-manager file identity integration'
+    ['runtime-manager-transactions']='Runtime-manager transaction integration'
     ['mock-engine-core']='Mock engine core/storage integration'
     ['mock-engine-hls']='Mock engine YouTube HLS integration'
     ['mock-engine-staging']='Mock engine private-staging integration'
@@ -112,6 +120,10 @@ declare -Ar SUITE_PATHS=(
     ['runtime-manager']='./tests/runtime-manager-integration.sh'
     ['run-all-signal']='./tests/run-all-signal-integration.sh'
     ['runtime-manager-hardening']='./tests/runtime-manager-hardening-integration.sh'
+    ['runtime-manager-rollback-admission']='./tests/runtime-manager-hardening-integration.sh'
+    ['runtime-manager-recovery']='./tests/runtime-manager-hardening-integration.sh'
+    ['runtime-manager-cache-identity']='./tests/runtime-manager-hardening-integration.sh'
+    ['runtime-manager-transactions']='./tests/runtime-manager-hardening-integration.sh'
     ['mock-engine-core']='./tests/mock-integration.sh'
     ['mock-engine-hls']='./tests/mock-integration.sh'
     ['mock-engine-staging']='./tests/mock-integration.sh'
@@ -133,6 +145,11 @@ declare -Ar SUITE_PATHS=(
 )
 
 declare -Ar SUITE_GROUP_ARGUMENTS=(
+    ['runtime-manager-hardening']='validation'
+    ['runtime-manager-rollback-admission']='rollback-admission'
+    ['runtime-manager-recovery']='recovery'
+    ['runtime-manager-cache-identity']='cache-identity'
+    ['runtime-manager-transactions']='transactions'
     ['mock-engine-core']='engine-core'
     ['mock-engine-hls']='engine-hls'
     ['mock-engine-staging']='engine-staging'
@@ -1242,6 +1259,8 @@ start_static_validation() {
     STATIC_VALIDATION_SLOT_INDEX[slot]=${validation_index}
 
     printf 'Starting: %s\n' "${label}"
+    printf 'Runner event: phase=static task=%s event=start monotonic_ms=%s\n' \
+        "${validation_id}" "${STATIC_VALIDATION_STARTS[validation_index]}"
     test_runner_start_timed_child \
         "${slot}" "${log_file}" "${completion_file}" \
         "${validation_command[@]}"
@@ -1257,6 +1276,7 @@ collect_completed_static_validation() {
     # read-only validators.
     # shellcheck disable=SC2310
     test_runner_wait_any completed_slot || status=$?
+    [[ -n ${completed_slot} ]] || return "${status}"
     validation_index=${STATIC_VALIDATION_SLOT_INDEX[${completed_slot}]}
     # Missing completion metadata falls back to the conservative reap time.
     # shellcheck disable=SC2310
@@ -1266,6 +1286,8 @@ collect_completed_static_validation() {
     fi
     STATIC_VALIDATION_ENDS[validation_index]=${end_ms}
     STATIC_VALIDATION_STATUSES[validation_index]=${status}
+    printf 'Runner event: phase=static task=%s event=complete monotonic_ms=%s status=%d\n' \
+        "${STATIC_VALIDATION_IDS[validation_index]}" "${end_ms}" "${status}"
     unset 'STATIC_VALIDATION_SLOT_INDEX[completed_slot]'
 }
 
@@ -1372,6 +1394,8 @@ start_integration_suite() {
     INTEGRATION_SLOT_SUITE_INDEX[slot]=${suite_index}
 
     printf 'Starting: %s\n' "${label}"
+    printf 'Runner event: phase=integration task=%s event=start monotonic_ms=%s\n' \
+        "${suite_id}" "${INTEGRATION_SUITE_STARTS[suite_index]}"
     test_runner_start_timed_child \
         "${slot}" "${log_file}" "${completion_file}" \
         "${suite_command[@]}"
@@ -1387,6 +1411,7 @@ collect_completed_integration_suite() {
     # suite has been reaped.
     # shellcheck disable=SC2310
     test_runner_wait_any completed_slot || status=$?
+    [[ -n ${completed_slot} ]] || return "${status}"
     suite_index=${INTEGRATION_SLOT_SUITE_INDEX[${completed_slot}]}
     # A missing record falls back to the conservative observed completion time.
     # shellcheck disable=SC2310
@@ -1396,6 +1421,8 @@ collect_completed_integration_suite() {
     fi
     INTEGRATION_SUITE_ENDS[suite_index]=${end_ms}
     INTEGRATION_SUITE_STATUSES[suite_index]=${status}
+    printf 'Runner event: phase=integration task=%s event=complete monotonic_ms=%s status=%d\n' \
+        "${INTEGRATION_SUITE_IDS[suite_index]}" "${end_ms}" "${status}"
     unset 'INTEGRATION_SLOT_SUITE_INDEX[completed_slot]'
 }
 
@@ -1461,10 +1488,13 @@ run_integration_suites() {
 
 main() {
     local command_name=''
+    local diagnostic_directory=${YTDLP_ARIA2_CI_DIAGNOSTICS_DIR:-}
     local total_start_ms
     local total_end_ms
     local total_duration
 
+    # The rendezvous belongs to this invocation, never a nested runner fixture.
+    unset YTDLP_ARIA2_CI_DIAGNOSTICS_DIR
     parse_arguments "$@"
     validate_shell_file_arrays
     validate_suite_manifest
@@ -1495,6 +1525,11 @@ main() {
     trap 'test_runner_handle_signal HUP 129' HUP
     trap 'test_runner_handle_signal INT 130' INT
     trap 'test_runner_handle_signal TERM 143' TERM
+
+    if [[ -n ${diagnostic_directory} ]]; then
+        python3 -I -B "${PROJECT_DIR}/scripts/ci-validation-diagnostics.py" \
+            publish "${diagnostic_directory}" "${TEST_RUNNER_LOG_DIR}"
+    fi
 
     total_start_ms=$(test_runner_now_ms)
     printf 'Validation profile: %s (validation jobs: %d)\n\n' \

@@ -566,7 +566,16 @@ test_runner_wait_any() {
                 return "${status}"
             fi
         done
-        sleep 0.01
+        # Callers collect child failures with ||, disabling errexit here. Bash
+        # 4.4 does not relay terminal INT from a foreground poll to its INT trap.
+        # Preserve that poll's 130 explicitly instead of starting another poll.
+        if sleep 0.01; then
+            :
+        else
+            status=$?
+            ((status != 130)) || test_runner_handle_signal INT 130
+            return "${status}"
+        fi
     done
 }
 
@@ -757,20 +766,26 @@ test_runner_signal_slot() {
     local pgid=${TEST_RUNNER_CHILD_PGIDS[${slot}]:-${pid}}
     local child_token=${TEST_RUNNER_CHILD_TOKENS[${slot}]:-}
     local child_start_time=${TEST_RUNNER_CHILD_START_TIMES[${slot}]:-}
+    local signal_target=''
 
     [[ -n ${pid} && -n ${pgid} ]] || return 1
     if test_runner_pid_has_group_identity \
-        "${pid}" "${pgid}" "${child_token}" "${child_start_time}" \
-        || test_runner_group_has_token "${pgid}" "${child_token}"; then
-        kill "-${signal_name}" -- "-${pgid}" 2>/dev/null || return
-        if [[ ${signal_name} == KILL ]]; then
-            TEST_RUNNER_KILLED_GROUPS[slot]=true
-        fi
-    elif test_runner_pid_has_token "${pid}" "${child_token}" \
-        || test_runner_pid_has_start_time "${pid}" "${child_start_time}"; then
-        kill "-${signal_name}" -- "${pid}" 2>/dev/null
+        "${pid}" "${pgid}" "${child_token}" "${child_start_time}"; then
+        signal_target=-${pgid}
+    elif test_runner_pid_has_start_time "${pid}" "${child_start_time}" \
+        || test_runner_pid_has_token "${pid}" "${child_token}"; then
+        # A live registered launcher already provides direct-child authority.
+        # Its blocked signal survives the session handoff; scanning unrelated
+        # processes for orphaned group members would only delay this delivery.
+        signal_target=${pid}
+    elif test_runner_group_has_token "${pgid}" "${child_token}"; then
+        signal_target=-${pgid}
     else
         return 1
+    fi
+    kill "-${signal_name}" -- "${signal_target}" 2>/dev/null || return
+    if [[ ${signal_name} == KILL && ${signal_target} == -* ]]; then
+        TEST_RUNNER_KILLED_GROUPS[slot]=true
     fi
 }
 
@@ -780,32 +795,14 @@ test_runner_terminate_children() {
     (($# == 1)) || return 2
     local signal_name=$1
     local slot
-    local pid
     local poll_attempt
 
     test_runner_release_inactive_children
 
     for slot in "${!TEST_RUNNER_CHILD_PIDS[@]}"; do
-        pid=${TEST_RUNNER_CHILD_PIDS[${slot}]}
-
-        # Wait briefly for os.setsid() to publish the dedicated session. This
-        # keeps delivery deterministic when interruption races with startup.
-        for _ in {1..20}; do
-            if test_runner_pid_has_group_identity \
-                "${pid}" "${pid}" \
-                "${TEST_RUNNER_CHILD_TOKENS[${slot}]}" \
-                "${TEST_RUNNER_CHILD_START_TIMES[${slot}]}"; then
-                break
-            fi
-            if ! test_runner_pid_has_token \
-                "${pid}" "${TEST_RUNNER_CHILD_TOKENS[${slot}]}" \
-                && ! test_runner_pid_has_start_time \
-                    "${pid}" "${TEST_RUNNER_CHILD_START_TIMES[${slot}]}"; then
-                break
-            fi
-            sleep 0.01
-        done
-
+        # Signal the authenticated launcher even during its private-session
+        # handoff. Waiting for that handoff makes cancellation depend on startup
+        # scheduling, although direct-child authority is already available.
         test_runner_signal_slot "${slot}" "${signal_name}" || true
     done
 
