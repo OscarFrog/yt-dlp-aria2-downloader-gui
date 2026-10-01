@@ -1450,7 +1450,11 @@ The force path requires Linux pidfds and Python's `os.pidfd_open` and
 waitpid collection and procfs process/thread access. Admission also reads every
 visible process stat and validates its session/start identity fields; only a
 pathname that disappeared during enumeration is skipped. A pre-existing unreadable
-or malformed stat refuses admission before any command is launched. Missing APIs, kernel
+or malformed stat refuses admission before any command is launched. A real stat
+descriptor held across an attributed child's normal exit and reap exercises
+ESRCH at the first read: admission reopens once, accepting confirmed ENOENT but
+rejecting repeated ESRCH, permission or I/O failure before a new process starts.
+Missing APIs, kernel
 support or permissions cause status 69 before media activity. Revocation
 following admission preserves protection; it is not a successful shutdown.
 A TGID marked Z is not quiescent while sibling threads are live. Refusal and

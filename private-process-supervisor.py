@@ -105,6 +105,14 @@ def check_capabilities():
             fields = path.read_text().rsplit(') ', 1)[1].split()
         except FileNotFoundError:
             continue
+        except ProcessLookupError:
+            # A stat opened before exit can fail with ESRCH after reaping.
+            # Reopen once: only a now-missing pathname proves disappearance;
+            # a repeated or different read error still refuses admission.
+            try:
+                fields = path.read_text().rsplit(') ', 1)[1].split()
+            except FileNotFoundError:
+                continue
         if not fields[3].isdecimal() or not fields[19].isdecimal():
             raise ValueError('invalid process identity')
     own = Path(f'/proc/{os.getpid()}/task/{os.getpid()}')

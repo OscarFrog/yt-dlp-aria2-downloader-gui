@@ -1052,7 +1052,60 @@ assert_no_residual_processes "$2" "$2/stop"
                             self.assertEqual(module.supervise(['unused-command'], 1, .1), 69)
                     else:
                         module.check_capabilities()
-                self.assertEqual(reads, [foreign_stat])
+                self.assertEqual(reads, [foreign_stat] * (2 if failure == 'esrch' else 1))
+
+    def test_capability_admission_reopens_a_stale_foreign_stat_once(self):
+        import errno
+
+        module = self.supervisor_module()
+        foreign = subprocess.Popen(
+            [sys.executable, '-I', '-B', '-c', 'import os; os.read(0, 1)'],
+            env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
+        self.processes.append(foreign)
+        foreign_stat = Path(f'/proc/{foreign.pid}/stat')
+        own_stat = Path(f'/proc/{os.getpid()}/stat')
+        descriptor = os.open(foreign_stat, os.O_RDONLY)
+        real_read = Path.read_text
+        try:
+            # Retain the real stat descriptor across a synchronized normal exit
+            # and reap. Reading that descriptor now produces kernel ESRCH.
+            foreign.communicate(b'x', timeout=3)
+            self.assertEqual(foreign.returncode, 0)
+            self.assertFalse(foreign_stat.exists())
+            for replacement in ('missing', 'esrch', 'permission', 'io'):
+                with self.subTest(replacement=replacement):
+                    errors = []
+
+                    def read(path, *args, **kwargs):
+                        if path != foreign_stat:
+                            return real_read(path, *args, **kwargs)
+                        try:
+                            if not errors or replacement == 'esrch':
+                                return os.read(descriptor, 4096).decode()
+                            if replacement == 'permission':
+                                raise PermissionError(errno.EACCES, 'reopened stat denied')
+                            if replacement == 'io':
+                                raise OSError(errno.EIO, 'reopened stat I/O failure')
+                            return real_read(path, *args, **kwargs)
+                        except OSError as error:
+                            errors.append(error.errno)
+                            raise
+
+                    with mock.patch.object(module, 'process_paths', return_value=[own_stat, foreign_stat]), \
+                            mock.patch.object(Path, 'read_text', read):
+                        if replacement == 'missing':
+                            module.check_capabilities()
+                        else:
+                            with mock.patch.object(os, 'fork', side_effect=AssertionError(
+                                    'process launched after an unconfirmed stat reopen')):
+                                self.assertEqual(module.supervise(['unused-command'], 1, .1), 69)
+                    expected = {'missing': errno.ENOENT, 'esrch': errno.ESRCH,
+                                'permission': errno.EACCES, 'io': errno.EIO}[replacement]
+                    self.assertEqual(errors, [errno.ESRCH, expected])
+        finally:
+            os.close(descriptor)
 
     def test_waitid_failure_after_admission_keeps_consumer_supervised(self):
         child = self.child(slow=True)
