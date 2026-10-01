@@ -3077,7 +3077,7 @@ import subprocess
 import sys
 
 source = Path(sys.argv[1]).read_text()
-match = re.search(r'if ! (python3 [^\n]+) <<\x27PY_READY_DOCTOR\x27; then\n(.*?)\nPY_READY_DOCTOR',
+match = re.search(r'if ! (python3 [^\n]+) <<\x27PY_READY_DOCTOR\x27\n(.*?)\nPY_READY_DOCTOR\n[ \t]+then\n',
                   source, flags=re.S)
 if match is None:
     raise AssertionError("cannot locate the actual doctor readiness oracle")
