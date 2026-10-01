@@ -5,10 +5,12 @@ Independent process observation and deterministic session/timeout regressions.
 Rescue happens only after assertions; test subreaping is not application reaping.
 """
 
+import ast
 import ctypes
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, redirect_stderr
 import importlib.util
 import inspect
+import io
 import json
 import os
 from pathlib import Path
@@ -361,7 +363,7 @@ ctypes.CDLL(None).pthread_exit(None)
             with self.assertRaises(ProcessLookupError):
                 held.read()
             with mock.patch.object(module, 'process_paths', return_value=[path]), \
-                    mock.patch.object(Path, 'read_text', side_effect=lambda: held.read()):
+                    mock.patch.object(Path, 'read_text', side_effect=lambda **kwargs: held.read()):
                 self.assertTrue(module.session_alive(-1))
 
     def test_observer_revalidates_proc_stat_after_esrch(self):
@@ -949,7 +951,7 @@ assert_no_residual_processes "$2" "$2/stop"
         fields = ['S', '12', '42000', '42000'] + ['0'] * 15 + ['777']
         state = {'reads': 0, 'replacement_signaled': False}
 
-        def read(_path):
+        def read(_path, **kwargs):
             state['reads'] += 1
             return '42001 (fixture) ' + ' '.join(fields)
 
@@ -1106,6 +1108,116 @@ assert_no_residual_processes "$2" "$2/stop"
                     self.assertEqual(errors, [errno.ESRCH, expected])
         finally:
             os.close(descriptor)
+
+    def test_procfs_identity_ignores_arbitrary_thread_name_bytes(self):
+        module = self.supervisor_module()
+        predicates = []
+        for filename, absent in (('download-video.sh', 'PY_GROUP_ABSENT'),
+                                 ('download-video-gui.sh', 'PY_GUI_GROUP_ABSENT')):
+            source = (PROJECT / filename).read_text(encoding='utf-8')
+            for marker in (absent, 'PY_ESCALATE_OWNED'):
+                code = source.split(f"<<'{marker}'\n", 1)[1].split(f'\n{marker}', 1)[0]
+                tree = ast.parse(code)
+                # Execute actual reusable production predicates, excluding the
+                # entrypoint that would signal or exit this test controller.
+                tree.body = [node for node in tree.body if isinstance(
+                    node, (ast.Import, ast.ImportFrom, ast.FunctionDef))]
+                namespace = {}
+                exec(compile(tree, f'{filename}:{marker}', 'exec'), namespace)
+                predicates.append((filename, marker, namespace))
+        worker = r'''import ctypes, os, sys, threading
+def named_thread():
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(15, bytes.fromhex(sys.argv[1]), 0, 0, 0):
+        os._exit(90)
+    os.write(1, str(threading.get_native_id()).encode('ascii') + b'\n')
+    if os.read(0, 1) != b'X':
+        os._exit(91)
+thread = threading.Thread(target=named_thread)
+thread.start()
+thread.join()
+'''
+        # Only a non-leader thread has this name. It is absent from /proc's
+        # root PID inventory, so the fixture cannot poison unrelated suites.
+        for name in (b'private-worker', 'révision'.encode(), ('a' * 14 + 'é').encode()):
+            with self.subTest(name=name.hex()):
+                child = subprocess.Popen(
+                    [sys.executable, '-I', '-B', '-c', worker, name.hex()],
+                    env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token),
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    start_new_session=True)
+                self.processes.append(child)
+                try:
+                    self.assertTrue(select.select([child.stdout], [], [], 3)[0],
+                                    'named thread did not publish readiness')
+                    thread = int(child.stdout.readline())
+                    self.assertNotEqual(thread, child.pid)
+                    path = Path(f'/proc/{child.pid}/task/{thread}/stat')
+                    raw = path.read_bytes()
+                    self.assertEqual(raw.split(b' (', 1)[1].rsplit(b') ', 1)[0], name[:15])
+                    expected = raw.rsplit(b') ', 1)[1].split()
+                    self.assertEqual(int(expected[3]), child.pid)
+                    self.assertGreater(int(expected[19]), 0)
+                    if len(name) > 15:
+                        with self.assertRaises(UnicodeDecodeError):
+                            raw.decode('utf-8')
+                    # An independent byte oracle validates the kernel identity.
+                    # First exercise admission, so the former implementation
+                    # fails on its real decoding error before any new helper.
+                    with mock.patch.object(module, 'process_paths', return_value=[path]):
+                        module.check_capabilities()
+                        self.assertFalse(module.session_alive(-1),
+                                         'foreign comm bytes vetoed an empty session')
+                        self.assertTrue(module.session_alive(child.pid))
+                    self.assertFalse(module.process_quiescent(thread, expected[19].decode('ascii')))
+                    for filename, marker, namespace in predicates:
+                        with self.subTest(source=filename, predicate=marker):
+                            self.assertFalse(namespace['process_quiescent'](
+                                thread, expected[19].decode('ascii')))
+                            if 'process_fields' in namespace:
+                                fields = namespace['process_fields'](thread)
+                                self.assertEqual(fields[3], expected[3].decode('ascii'))
+                                self.assertEqual(fields[19], expected[19].decode('ascii'))
+                finally:
+                    # Release only the attributed fixture after the verdict;
+                    # no global signal or harness rescue is a successful stop.
+                    child.communicate(b'X', timeout=3)
+                    self.assertEqual(child.returncode, 0)
+
+    def test_capability_refusal_diagnostic_excludes_private_exception_data(self):
+        import errno
+
+        module = self.supervisor_module()
+        private = 'synthetic_private_capability_marker'
+        custom = type(private, (OSError,), {})
+        cases = [(PermissionError(errno.EACCES, private, f'/private/{private}'),
+                  'PermissionError', str(errno.EACCES)),
+                 (ProcessLookupError(errno.ESRCH, private), 'ProcessLookupError', str(errno.ESRCH)),
+                 (FileNotFoundError(errno.ENOENT, private), 'FileNotFoundError', str(errno.ENOENT)),
+                 (UnicodeDecodeError('utf-8', private.encode() + b'\xff', 0, 1, private),
+                  'UnicodeDecodeError', 'none'),
+                 (AttributeError(private), 'AttributeError', 'none'),
+                 (IndexError(private), 'IndexError', 'none'),
+                 (ValueError(private), 'ValueError', 'none'),
+                 (custom(errno.EIO, private), 'OSError', str(errno.EIO)),
+                 (custom(private, private), 'OSError', 'none'),
+                 (custom(100000, private), 'OSError', 'none')]
+        for error, kind, number in cases:
+            for entrypoint in ('check', 'supervise'):
+                with self.subTest(kind=kind, errno=number, entrypoint=entrypoint):
+                    output = io.StringIO()
+                    with mock.patch.object(module, 'check_capabilities', side_effect=error), \
+                            mock.patch.object(sys, 'argv', ['supervisor', '--check-capabilities']), \
+                            mock.patch.object(os, 'fork', side_effect=AssertionError(
+                                'diagnostic refusal launched work')), redirect_stderr(output):
+                        status = (module.main() if entrypoint == 'check'
+                                  else module.supervise(['unused-command'], 1, .1))
+                    self.assertEqual(status, 69)
+                    self.assertNotIn(private, output.getvalue(),
+                                     'capability diagnostic leaked private exception data')
+                    self.assertEqual(output.getvalue(),
+                                     'Error: required Linux process supervision capabilities are unavailable. '
+                                     f'cause={kind} errno={number}\n')
 
     def test_waitid_failure_after_admission_keeps_consumer_supervised(self):
         child = self.child(slow=True)

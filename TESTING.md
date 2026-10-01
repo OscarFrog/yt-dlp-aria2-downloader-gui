@@ -1454,6 +1454,15 @@ or malformed stat refuses admission before any command is launched. A real stat
 descriptor held across an attributed child's normal exit and reap exercises
 ESRCH at the first read: admission reopens once, accepting confirmed ENOENT but
 rejecting repeated ESRCH, permission or I/O failure before a new process starts.
+A named-thread witness covers ASCII, valid UTF-8 and kernel truncation inside a
+multibyte name. Readiness precedes the real stat read; an independent byte oracle
+checks SID/start while admission, presence and quiescence ignore name encoding,
+including the actual Python predicates extracted from the GUI and engine.
+Only a non-leader thread is renamed, keeping other parallel suites' root procfs
+inventories unaffected. Its private barrier is released after the verdict.
+Refusal diagnostics retain status 69 and expose only a bounded category/errno;
+injected private exception messages, filenames and custom type names must remain
+absent from both the capability CLI and timed-command boundary.
 Missing APIs, kernel
 support or permissions cause status 69 before media activity. Revocation
 following admission preserves protection; it is not a successful shutdown.
