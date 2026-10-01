@@ -679,7 +679,7 @@ PY_RECYCLED_CHILD
 test_delayed_child_identity_handshake() {
     local runner_library="${SCRIPT_DIR}/lib/test-runner.sh"
 
-    if ! bash -s -- "${runner_library}" <<'BASH_DELAYED_IDENTITY'; then
+    if ! bash -s -- "${runner_library}" <<'BASH_DELAYED_IDENTITY'
 set -euo pipefail
 source "$1"
 
@@ -708,6 +708,7 @@ test_runner_wait_child 0
 test_runner_cleanup
 trap - EXIT
 BASH_DELAYED_IDENTITY
+    then
         fail 'runner accepted or leaked a delayed child identity handshake'
     fi
 }
@@ -715,7 +716,7 @@ BASH_DELAYED_IDENTITY
 test_partial_child_identity_handshake() {
     local runner_library="${SCRIPT_DIR}/lib/test-runner.sh"
 
-    if ! bash -s -- "${runner_library}" <<'BASH_PARTIAL_IDENTITY'; then
+    if ! bash -s -- "${runner_library}" <<'BASH_PARTIAL_IDENTITY'
 set -euo pipefail
 source "$1"
 
@@ -768,6 +769,7 @@ test_runner_wait_child 0
 test_runner_cleanup
 trap - EXIT
 BASH_PARTIAL_IDENTITY
+    then
         fail 'runner lost a child identity after observing a partial handoff'
     fi
 }
@@ -3075,7 +3077,7 @@ import subprocess
 import sys
 
 source = Path(sys.argv[1]).read_text()
-match = re.search(r'if ! (python3 [^\n]+) <<\x27PY_READY_DOCTOR\x27; then\n(.*?)\nPY_READY_DOCTOR',
+match = re.search(r'if ! (python3 [^\n]+) <<\x27PY_READY_DOCTOR\x27\n(.*?)\nPY_READY_DOCTOR\n[ \t]+then\n',
                   source, flags=re.S)
 if match is None:
     raise AssertionError("cannot locate the actual doctor readiness oracle")
@@ -3252,7 +3254,7 @@ EOF_MOCK_PYTHON
         SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
         "${run_all}" --doctor --json
     doctor_output=${ASSERT_OUTPUT}
-    if ! python3 -I -B - "${doctor_output}" <<'PY_READY_DOCTOR'; then
+    if ! python3 -I -B - "${doctor_output}" <<'PY_READY_DOCTOR'
 import json
 import sys
 
@@ -3268,6 +3270,7 @@ assert checks["shfmt-cache"]["status"] == "pass"
 assert checks["shfmt-ready"]["status"] == "pass"
 assert checks["repository-state"]["status"] == "pass"
 PY_READY_DOCTOR
+    then
         fail 'doctor ready report is invalid or incomplete'
     fi
 
@@ -3281,7 +3284,7 @@ PY_READY_DOCTOR
         SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
         "${run_all}" --doctor --json
     doctor_output=${ASSERT_OUTPUT}
-    if ! python3 -I -B - "${doctor_output}" <<'PY_OFFLINE_DOCTOR'; then
+    if ! python3 -I -B - "${doctor_output}" <<'PY_OFFLINE_DOCTOR'
 import json
 import sys
 
@@ -3296,6 +3299,7 @@ assert report["optional"]["missing"] == len(missing_checks)
 assert report["optional"]["missing"] >= 1
 assert checks["external-https"]["status"] == "missing"
 PY_OFFLINE_DOCTOR
+    then
         fail 'doctor optional-network report is invalid'
     fi
 
@@ -3309,7 +3313,7 @@ PY_OFFLINE_DOCTOR
         SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
         "${run_all}" --doctor --json
     doctor_output=${ASSERT_OUTPUT}
-    if ! python3 -I -B - "${doctor_output}" <<'PY_BLOCKED_DOCTOR'; then
+    if ! python3 -I -B - "${doctor_output}" <<'PY_BLOCKED_DOCTOR'
 import json
 import sys
 
@@ -3319,6 +3323,7 @@ assert report["ready"] is False
 assert report["required"]["failed"] == 1
 assert checks["loopback-bind"]["status"] == "fail"
 PY_BLOCKED_DOCTOR
+    then
         fail 'doctor blocked-loopback report is invalid'
     fi
 
@@ -3331,7 +3336,7 @@ PY_BLOCKED_DOCTOR
         SHFMT_TOOL_ROOT=/dev/null \
         "${run_all}" --doctor --json
     doctor_output=${ASSERT_OUTPUT}
-    if ! python3 -I -B - "${doctor_output}" <<'PY_UNUSABLE_SHFMT_DOCTOR'; then
+    if ! python3 -I -B - "${doctor_output}" <<'PY_UNUSABLE_SHFMT_DOCTOR'
 import json
 import sys
 
@@ -3341,6 +3346,7 @@ assert report["ready"] is False
 assert checks["shfmt-cache"]["status"] == "unavailable"
 assert checks["shfmt-ready"]["status"] == "fail"
 PY_UNUSABLE_SHFMT_DOCTOR
+    then
         fail 'doctor unusable-shfmt report is invalid'
     fi
 
@@ -3356,7 +3362,7 @@ PY_UNUSABLE_SHFMT_DOCTOR
         SHFMT_TOOL_ROOT="${offline_shfmt_root}" \
         "${run_all}" --doctor --json
     doctor_output=${ASSERT_OUTPUT}
-    if ! python3 -I -B - "${doctor_output}" <<'PY_OFFLINE_SHFMT_DOCTOR'; then
+    if ! python3 -I -B - "${doctor_output}" <<'PY_OFFLINE_SHFMT_DOCTOR'
 import json
 import sys
 
@@ -3366,6 +3372,7 @@ assert report["ready"] is False
 assert checks["external-https"]["status"] == "missing"
 assert checks["shfmt-ready"]["status"] == "fail"
 PY_OFFLINE_SHFMT_DOCTOR
+    then
         fail 'doctor offline-shfmt report is invalid'
     fi
     [[ ! -e ${offline_shfmt_root} ]] \
@@ -3382,7 +3389,7 @@ PY_OFFLINE_SHFMT_DOCTOR
             SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
             "${run_all}" --doctor --json
         doctor_output=${ASSERT_OUTPUT}
-        if ! python3 -I -B - "${doctor_output}" <<'PY_UNUSABLE_GIT_DOCTOR'; then
+        if ! python3 -I -B - "${doctor_output}" <<'PY_UNUSABLE_GIT_DOCTOR'
 import json
 import sys
 
@@ -3392,6 +3399,7 @@ assert report["ready"] is False
 assert checks["repository-state"]["level"] == "required"
 assert checks["repository-state"]["status"] == "fail"
 PY_UNUSABLE_GIT_DOCTOR
+        then
             fail 'doctor unusable-Git report is invalid'
         fi
     else
@@ -3405,7 +3413,7 @@ PY_UNUSABLE_GIT_DOCTOR
             SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
             "${run_all}" --doctor --json
         doctor_output=${ASSERT_OUTPUT}
-        if ! python3 -I -B - "${doctor_output}" <<'PY_ARCHIVE_GIT_DOCTOR'; then
+        if ! python3 -I -B - "${doctor_output}" <<'PY_ARCHIVE_GIT_DOCTOR'
 import json
 import sys
 
@@ -3416,6 +3424,7 @@ assert checks["repository-state"]["level"] == "info"
 assert checks["repository-state"]["status"] == "pass"
 assert "source-archive" in checks["repository-state"]["detail"]
 PY_ARCHIVE_GIT_DOCTOR
+        then
             fail 'doctor source-archive Git report is invalid'
         fi
     fi
@@ -3430,7 +3439,7 @@ PY_ARCHIVE_GIT_DOCTOR
         SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
         "${run_all}" --doctor --json
     doctor_output=${ASSERT_OUTPUT}
-    if ! python3 -I -B - "${doctor_output}" <<'PY_CONTROL_JSON_DOCTOR'; then
+    if ! python3 -I -B - "${doctor_output}" <<'PY_CONTROL_JSON_DOCTOR'
 import json
 import sys
 
@@ -3438,6 +3447,7 @@ report = json.loads(sys.argv[1])
 checks = {item["id"]: item for item in report["checks"]}
 assert checks["version:aria2c"]["detail"] == "aria2 version \x01control"
 PY_CONTROL_JSON_DOCTOR
+    then
         fail 'doctor C0-control JSON report is invalid'
     fi
 
@@ -3453,7 +3463,7 @@ PY_CONTROL_JSON_DOCTOR
             SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
             "${run_all}" --doctor --json
         doctor_output=${ASSERT_OUTPUT}
-        if ! python3 -I -B - "${doctor_output}" <<'PY_BOUNDED_VERSION_DOCTOR'; then
+        if ! python3 -I -B - "${doctor_output}" <<'PY_BOUNDED_VERSION_DOCTOR'
 import json
 import sys
 
@@ -3462,6 +3472,7 @@ checks = {item["id"]: item for item in report["checks"]}
 assert report["ready"] is True
 assert checks["version:aria2c"]["status"] == "unavailable"
 PY_BOUNDED_VERSION_DOCTOR
+        then
             fail "doctor ${aria2_probe_mode} version report is invalid"
         fi
     done

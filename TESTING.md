@@ -316,7 +316,9 @@ python3 -B tests/release-docs-integration.py
 The shfmt replay uses real disposable Git repositories and the pinned formatter,
 with controlled upstream and container stubs. It covers unchanged-version preparation,
 independent verification, altered bytes, incomplete manifests, no-op runs and
-branch creation races. A coherent replacement patch with unchanged version and
+branch creation races. It also covers rejected upstream API/tag/digest responses,
+downgrade no-ops, preserved historical or human-edited branches, and main changes
+before preparation, verification or publication. A coherent replacement patch with unchanged version and
 complete but stale tested-tree digests must fail the actual publisher checksum
 step. The release-docs replay executes the actual publisher
 shell and inline Python against a simulated API, including large streamed blobs,
@@ -1445,7 +1447,30 @@ quiescence, covering members missed by an earlier enumeration.
 The force path requires Linux pidfds and Python's `os.pidfd_open` and
 `signal.pidfd_send_signal`. Entry admission actually probes pidfd open and
 0/STOP/CONT/KILL delivery on a private child, WNOWAIT stop/exit observation,
-waitpid collection and procfs process/thread access. Missing APIs, kernel
+waitpid collection and procfs process/thread access. Admission also reads every
+visible process stat and validates its session/start identity fields; only a
+pathname that disappeared during enumeration is skipped. A pre-existing unreadable
+or malformed stat refuses admission before any command is launched. A real stat
+descriptor held across an attributed child's normal exit and reap exercises
+ESRCH at the first read: admission reopens once, accepting confirmed ENOENT but
+rejecting repeated ESRCH, permission or I/O failure before a new process starts.
+A separately captured real stat from concurrent reap has PPID 0, PGID/SID -1
+and numeric start. Its deterministic replay requires the same confirmation;
+it never grants absence by itself. ESRCH and this coherent kernel sentinel
+share a two-read limit. Tests cover every known kernel state sampled before
+reap, a fresh valid identity, disappearance, persistent/transposed transient
+errors, permission/I/O errors and malformed identity fields. Refusals precede
+even the disposable capability probe; invalid tuples cannot request a retry.
+A named-thread witness covers ASCII, valid UTF-8 and kernel truncation inside a
+multibyte name. Readiness precedes the real stat read; an independent byte oracle
+checks SID/start while admission, presence and quiescence ignore name encoding,
+including the actual Python predicates extracted from the GUI and engine.
+Only a non-leader thread is renamed, keeping other parallel suites' root procfs
+inventories unaffected. Its private barrier is released after the verdict.
+Refusal diagnostics retain status 69 and expose only a bounded category/errno;
+injected private exception messages, filenames and custom type names must remain
+absent from both the capability CLI and timed-command boundary.
+Missing APIs, kernel
 support or permissions cause status 69 before media activity. Revocation
 following admission preserves protection; it is not a successful shutdown.
 A TGID marked Z is not quiescent while sibling threads are live. Refusal and

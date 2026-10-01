@@ -1116,12 +1116,12 @@ def process_quiescent(pid, start):
     """A zombie thread-group leader can still have running sibling threads."""
     previous = None
     for attempt in (0, 1):
-        fields = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
+        fields = Path(f'/proc/{pid}/stat').read_text(encoding='ascii', errors='surrogateescape').rsplit(') ', 1)[1].split()
         if fields[19] != str(start) or fields[0] not in ('Z', 'X'):
             return False
         tasks = set()
         for task in Path(f'/proc/{pid}/task').iterdir():
-            row = (task / 'stat').read_text().rsplit(') ', 1)[1].split()
+            row = (task / 'stat').read_text(encoding='ascii', errors='surrogateescape').rsplit(') ', 1)[1].split()
             if row[0] not in ('Z', 'X'):
                 return False
             tasks.add((task.name, row[19]))
@@ -1144,7 +1144,7 @@ zombies = []
 try:
     for path in process_paths():
         try:
-            fields = path.read_text().rsplit(') ', 1)[1].split()
+            fields = path.read_text(encoding='ascii', errors='surrogateescape').rsplit(') ', 1)[1].split()
         except FileNotFoundError:
             continue
         if int(fields[2]) == number or int(fields[3]) == number:
@@ -1159,7 +1159,7 @@ try:
     repeated = []
     for path in process_paths():
         try:
-            fields = path.read_text().rsplit(') ', 1)[1].split()
+            fields = path.read_text(encoding='ascii', errors='surrogateescape').rsplit(') ', 1)[1].split()
         except FileNotFoundError:
             continue
         if int(fields[2]) == number or int(fields[3]) == number:
@@ -1170,7 +1170,7 @@ try:
         sys.exit(1)
     for path, start in zombies:
         try:
-            fields = path.read_text().rsplit(') ', 1)[1].split()
+            fields = path.read_text(encoding='ascii', errors='surrogateescape').rsplit(') ', 1)[1].split()
         except FileNotFoundError:
             continue
         if fields[19] != start or not process_quiescent(path.parent.name, start):
@@ -1302,7 +1302,7 @@ pid, start, session, name = sys.argv[1:]
 descriptor = None
 try:
     descriptor = os.pidfd_open(int(pid))
-    fields = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
+    fields = Path(f'/proc/{pid}/stat').read_text(encoding='ascii', errors='surrogateescape').rsplit(') ', 1)[1].split()
     if fields[19] != start or fields[3] != session:
         sys.exit(1)
     signal.pidfd_send_signal(descriptor, getattr(signal, 'SIG' + name))
@@ -1337,12 +1337,12 @@ def process_quiescent(pid, start):
     """A zombie thread-group leader can still have running sibling threads."""
     previous = None
     for attempt in (0, 1):
-        fields = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
+        fields = Path(f'/proc/{pid}/stat').read_text(encoding='ascii', errors='surrogateescape').rsplit(') ', 1)[1].split()
         if fields[19] != str(start) or fields[0] not in ('Z', 'X'):
             return False
         tasks = set()
         for task in Path(f'/proc/{pid}/task').iterdir():
-            row = (task / 'stat').read_text().rsplit(') ', 1)[1].split()
+            row = (task / 'stat').read_text(encoding='ascii', errors='surrogateescape').rsplit(') ', 1)[1].split()
             if row[0] not in ('Z', 'X'):
                 return False
             tasks.add((task.name, row[19]))
@@ -1353,7 +1353,7 @@ def process_quiescent(pid, start):
 
 
 def process_fields(pid):
-    return Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
+    return Path(f'/proc/{pid}/stat').read_text(encoding='ascii', errors='surrogateescape').rsplit(') ', 1)[1].split()
 
 
 def frozen_children(pid):
@@ -1362,7 +1362,7 @@ def frozen_children(pid):
     for observation in range(2):
         tasks = set()
         for task in Path(f'/proc/{pid}/task').iterdir():
-            fields = (task / 'stat').read_text().rsplit(') ', 1)[1].split()
+            fields = (task / 'stat').read_text(encoding='ascii', errors='surrogateescape').rsplit(') ', 1)[1].split()
             if fields[0] not in ('T', 't', 'Z', 'X'):
                 raise ValueError('thread is not stopped')
             tasks.add((task.name, fields[19]))
@@ -1383,7 +1383,7 @@ def other_session_members_quiescent(pid, session):
             if path.parent.name == str(pid):
                 continue
             try:
-                fields = path.read_text().rsplit(') ', 1)[1].split()
+                fields = path.read_text(encoding='ascii', errors='surrogateescape').rsplit(') ', 1)[1].split()
             except FileNotFoundError:
                 continue
             if int(fields[3]) == session:

@@ -886,8 +886,9 @@ their authenticated children in the same session, while the parent stays frozen.
 A timed helper retains its child from a private session even after that child
 exits, until its own wait proves complete shutdown. Before media work starts,
 the GUI, engine and runtime manager check the necessary Python APIs, Linux
-pidfd/WAIT operations and procfs access using a private disposable child.
-Unavailable capabilities cause an early refusal with status **69**. A later
+pidfd/WAIT operations using a private disposable child, and the readability and
+identity fields of every visible procfs process. Unavailable capabilities cause
+an early refusal with status **69**. A later
 permission or observation failure leaves shutdown unconfirmed and preserves
 resources. A zombie thread leader with live sibling threads is still active. Timed helpers
 retain supervision of their own command sessions until the consumers stop and

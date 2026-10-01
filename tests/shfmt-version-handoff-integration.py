@@ -133,12 +133,19 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
                 if args[:2] == ["auth", "setup-git"]:
                     raise SystemExit(0)
                 endpoint = args[1]
+                failure_suffix = os.environ.get("MOCK_GH_FAILURE_SUFFIX")
+                if failure_suffix and endpoint.endswith(failure_suffix):
+                    print("controlled API failure", file=sys.stderr)
+                    raise SystemExit(42)
                 if endpoint.endswith("/releases/latest"):
                     print("v" + os.environ["MOCK_UPSTREAM"])
                 elif "/git/ref/tags/" in endpoint:
-                    print("tag\\t" + "1" * 40)
+                    print(os.environ.get("MOCK_TAG_TYPE", "tag") + "\\t" +
+                          os.environ.get("MOCK_TAG_SHA", "1" * 40))
                 elif "/git/tags/" in endpoint:
-                    print("v" + os.environ["MOCK_UPSTREAM"] + "\\tcommit\\ttrue\\tvalid")
+                    print("v" + os.environ["MOCK_UPSTREAM"] + "\\tcommit\\t" +
+                          os.environ.get("MOCK_TAG_VERIFIED", "true") + "\\t" +
+                          os.environ.get("MOCK_TAG_REASON", "valid"))
                 elif "/releases/tags/" in endpoint:
                     print("sha256:" + os.environ["MOCK_ASSET_SHA"])
                 else:
@@ -420,6 +427,159 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
         self.assertIn("preserve and review", result.stderr)
         self.assertEqual(self.git(self.seed, "ls-remote", "--heads", "origin", f"refs/heads/{branch}").stdout,
                          before)
+
+    def test_absent_candidate_detects_update_without_mutating_the_checkout(self):
+        result = self.run_step("Detect latest stable shfmt release", self.seed)
+        self.assertIn("Latest shfmt:", result.stdout)
+        self.assertEqual((self.runtime / "output").read_text(),
+                         f"update=true\nlatest={UPSTREAM}\n")
+        self.assertEqual(self.git(self.seed, "diff", "--name-only").stdout, "")
+        self.assertEqual(self.git(self.seed, "ls-remote", "--heads", "origin",
+                                 f"refs/heads/automation/shfmt-v{UPSTREAM}").stdout, "")
+        self.assertNotIn("docker ", (self.runtime / "tools.log").read_text())
+
+    def test_older_upstream_is_noop_without_a_downgrade(self):
+        self.env["MOCK_UPSTREAM"] = "0.0.1"
+        result = self.run_step("Detect latest stable shfmt release", self.seed)
+        self.assertIn("refusing downgrade", result.stdout)
+        self.assertEqual((self.runtime / "output").read_text(), "update=false\n")
+        self.assertEqual(self.git(self.seed, "diff", "--name-only").stdout, "")
+
+    def test_api_failure_cannot_become_a_current_pin_noop(self):
+        self.env["MOCK_UPSTREAM"] = CURRENT_PIN
+        for suffix in ("/releases/latest", f"/git/ref/tags/v{CURRENT_PIN}",
+                       "/git/tags/" + "1" * 40):
+            with self.subTest(endpoint=suffix):
+                self.env["MOCK_GH_FAILURE_SUFFIX"] = suffix
+                result = self.run_step("Detect latest stable shfmt release", self.seed, success=False)
+                self.assertEqual(result.returncode, 42)
+                self.assertIn("controlled API failure", result.stderr)
+                self.assertFalse((self.runtime / "output").exists())
+        self.assertEqual(self.git(self.seed, "diff", "--name-only").stdout, "")
+
+    def test_malformed_upstream_release_tag_is_rejected(self):
+        for upstream in ("", "not-a-version", "3.14.1\n3.14.2"):
+            with self.subTest(upstream=upstream):
+                self.env["MOCK_UPSTREAM"] = upstream
+                result = self.run_step("Detect latest stable shfmt release", self.seed, success=False)
+                self.assertEqual(result.returncode, 65)
+                self.assertIn("unexpected upstream shfmt release tag", result.stderr)
+                self.assertFalse((self.runtime / "output").exists())
+
+    def test_invalid_tag_identity_is_rejected_even_when_the_pin_is_current(self):
+        self.env["MOCK_UPSTREAM"] = CURRENT_PIN
+        variants = ({"MOCK_TAG_TYPE": "commit"}, {"MOCK_TAG_SHA": "not-an-object"},
+                    {"MOCK_TAG_VERIFIED": "false"}, {"MOCK_TAG_REASON": "unknown_key"})
+        for variant in variants:
+            with self.subTest(variant=variant):
+                self.env.update(variant)
+                result = self.run_step("Detect latest stable shfmt release", self.seed, success=False)
+                self.assertEqual(result.returncode, 65)
+                self.assertFalse((self.runtime / "output").exists())
+                for key in variant:
+                    self.env.pop(key)
+
+    def test_malformed_asset_digest_is_rejected_before_download(self):
+        original = (self.seed / PIN_PATH).read_bytes()
+        self.env["MOCK_ASSET_SHA"] = "not-a-digest"
+        result = self.run_step("Update pin and checksums", self.seed, success=False)
+        self.assertEqual(result.returncode, 65)
+        self.assertIn("missing or invalid GitHub release digest", result.stderr)
+        self.assertNotIn("curl ", (self.runtime / "tools.log").read_text())
+        self.assertEqual((self.seed / PIN_PATH).read_bytes(), original)
+        self.assertFalse((self.runtime / "shfmt-candidate-binary").exists())
+
+    def test_download_checksum_mismatch_preserves_the_pin(self):
+        original = (self.seed / PIN_PATH).read_bytes()
+        self.env["MOCK_ASSET_PAYLOAD"] = "different formatter bytes\n"
+        result = self.run_step("Update pin and checksums", self.seed, success=False)
+        self.assertEqual(result.returncode, 65)
+        self.assertIn("downloaded shfmt digest mismatch", result.stderr)
+        self.assertEqual((self.seed / PIN_PATH).read_bytes(), original)
+        self.assertFalse((self.runtime / "shfmt-candidate-binary").exists())
+        self.assertNotIn("docker ", (self.runtime / "tools.log").read_text())
+
+    def test_verifier_independently_rejects_a_changed_upstream_digest(self):
+        self.prepare()
+        self.env["MOCK_ASSET_SHA"] = "0" * 64
+        result = self.verify(success=False)
+        self.assertEqual(result.returncode, 65)
+        self.assertIn("candidate pin does not match GitHub release digest", result.stderr)
+        self.assertNotIn("docker ", (self.runtime / "tools.log").read_text())
+        self.assertFalse((self.runtime / "shfmt-verified-handoff/shfmt-update.patch").exists())
+
+    def test_current_pin_noop_preserves_an_existing_historical_branch(self):
+        branch = f"refs/heads/automation/shfmt-v{CURRENT_PIN}"
+        self.git(self.seed, "-c", "core.hooksPath=/dev/null", "commit", "--allow-empty", "-m", "Historical base")
+        self.git(self.seed, "-c", "core.hooksPath=/dev/null", "commit", "--allow-empty", "-m", "Historical work")
+        self.git(self.seed, "push", "origin", f"HEAD:{branch}")
+        before = self.git(self.seed, "ls-remote", "--heads", "origin", branch).stdout
+        checkout = self.clone("detect")
+        self.env["MOCK_UPSTREAM"] = CURRENT_PIN
+        self.run_step("Detect latest stable shfmt release", checkout)
+        self.assertEqual((self.runtime / "output").read_text(), "update=false\n")
+        self.assertEqual(self.git(checkout, "diff", "--name-only").stdout, "")
+        self.assertEqual(self.git(self.seed, "ls-remote", "--heads", "origin", branch).stdout, before)
+
+    def test_same_base_foreign_work_is_preserved_for_review_without_republication(self):
+        self.prepare()
+        with (self.seed / "README.md").open("a") as output:
+            output.write("\nPreserved human documentation change.\n")
+        self.git(self.seed, "add", ".")
+        self.git(self.seed, "-c", "core.hooksPath=/dev/null", "commit", "-m", "Candidate with human prose")
+        branch = f"refs/heads/automation/shfmt-v{UPSTREAM}"
+        self.git(self.seed, "push", "origin", f"HEAD:{branch}")
+        before = self.git(self.seed, "ls-remote", "--heads", "origin", branch).stdout
+        checkout = self.clone("detect")
+        (self.runtime / "output").write_text("")
+        result = self.run_step("Detect latest stable shfmt release", checkout)
+        self.assertIn("review it without another push", result.stdout)
+        self.assertEqual((self.runtime / "output").read_text(), "update=false\n")
+        self.assertEqual(self.git(self.seed, "ls-remote", "--heads", "origin", branch).stdout, before)
+        self.assertNotIn("docker ", (self.runtime / "tools.log").read_text())
+        self.assertFalse((self.runtime / "shfmt-verified-handoff").exists())
+
+    def advance_remote_main(self):
+        mover = self.clone("main-mover")
+        self.git(mover, "-c", "core.hooksPath=/dev/null", "commit", "--allow-empty", "-m", "Concurrent main work")
+        self.git(mover, "push", "origin", "HEAD:refs/heads/main")
+        return self.git(mover, "rev-parse", "HEAD").stdout.strip()
+
+    def test_main_change_before_preparation_is_rejected(self):
+        advanced = self.advance_remote_main()
+        result = self.run_step("Verify unchanged source version before candidate execution",
+                               self.seed, success=False)
+        self.assertIn("stale or invalid shfmt source-version baseline", result.stderr)
+        self.assertEqual(self.git(self.seed, "diff", "--name-only").stdout, "")
+        self.assertEqual(self.git(self.seed, "ls-remote", "--heads", "origin",
+                                 "refs/heads/main").stdout.split()[0], advanced)
+
+    def test_main_change_before_verification_is_rejected(self):
+        self.prepare()
+        self.candidate_handoff()
+        verifier = self.clone("verifier")
+        self.advance_remote_main()
+        result = self.run_step("Verify unchanged source version, formatter semantics and upstream provenance",
+                               verifier, success=False)
+        self.assertEqual(result.returncode, 75)
+        self.assertIn("refusing stale shfmt candidate", result.stderr)
+        self.assertFalse((self.runtime / "tools.log").exists())
+        self.assertFalse((self.runtime / "shfmt-verified-handoff").exists())
+
+    def test_main_change_before_publisher_application_is_rejected(self):
+        self.prepare()
+        self.verify()
+        handoff = self.runtime / "shfmt-update-handoff"
+        shutil.rmtree(handoff)
+        shutil.copytree(self.runtime / "shfmt-verified-handoff", handoff)
+        publisher = self.clone("publisher")
+        self.advance_remote_main()
+        result = self.run_step("Verify base and apply allowlisted patch", publisher, success=False)
+        self.assertEqual(result.returncode, 75)
+        self.assertIn("refusing stale shfmt handoff", result.stderr)
+        self.assertEqual(self.git(publisher, "diff", "--name-only").stdout, "")
+        self.assertEqual(self.git(self.seed, "ls-remote", "--heads", "origin",
+                                 f"refs/heads/automation/shfmt-v{UPSTREAM}").stdout, "")
 
 
 if __name__ == "__main__":

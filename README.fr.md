@@ -941,7 +941,8 @@ session, pendant que le parent reste suspendu. Un auxiliaire temporisé conserve
 son enfant d'une session privée, même après sa mort, jusqu'à ce que sa propre
 attente confirme l'arrêt complet. Avant toute activité média, la GUI, le moteur
 et le gestionnaire de runtime vérifient les API Python, les opérations Linux
-pidfd/WAIT et l'accès procfs avec un enfant privé jetable. Une capacité absente
+pidfd/WAIT avec un enfant privé jetable, ainsi que la lisibilité et les champs
+d'identité de chaque processus visible dans procfs. Une capacité absente
 entraîne un refus anticipé de statut **69**. Un refus de permission ou une
 observation impossible après admission laisse l'arrêt non confirmé et préserve
 les ressources. Un leader de threads zombie dont d'autres threads vivent reste actif. Les auxiliaires temporisés

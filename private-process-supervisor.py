@@ -13,6 +13,13 @@ import sys
 import time
 
 
+def process_stat(path):
+    """Decode identity fields independently of locale and arbitrary comm bytes."""
+    # Linux truncates comm at a byte boundary, including inside UTF-8. Its
+    # uninterpreted bytes do not make the following ASCII identity unreadable.
+    return path.read_text(encoding='ascii', errors='surrogateescape').rsplit(') ', 1)[1].split()
+
+
 def process_paths():
     """An explicit directory scan must fail, rather than silently match nothing."""
     paths = [entry / 'stat' for entry in Path('/proc').iterdir()
@@ -26,12 +33,12 @@ def process_quiescent(pid, start):
     """A zombie thread-group leader can still have running sibling threads."""
     previous = None
     for attempt in (0, 1):
-        fields = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
+        fields = process_stat(Path(f'/proc/{pid}/stat'))
         if fields[19] != str(start) or fields[0] not in ('Z', 'X'):
             return False
         tasks = set()
         for task in Path(f'/proc/{pid}/task').iterdir():
-            row = (task / 'stat').read_text().rsplit(') ', 1)[1].split()
+            row = process_stat(task / 'stat')
             if row[0] not in ('Z', 'X'):
                 return False
             tasks.add((task.name, row[19]))
@@ -49,7 +56,7 @@ def session_alive(session):
             members = set()
             for path in process_paths():
                 try:
-                    fields = path.read_text().rsplit(') ', 1)[1].split()
+                    fields = process_stat(path)
                 except FileNotFoundError:
                     continue
                 if int(fields[3]) == session:
@@ -74,13 +81,13 @@ def signal_session(session, number):
     for path in paths:
         descriptor = None
         try:
-            fields = path.read_text().rsplit(') ', 1)[1].split()
+            fields = process_stat(path)
             if int(fields[3]) != session:
                 continue
             # The SID anchor does not pin each member's numeric PID. Acquire
             # the signal handle before revalidating its observed membership.
             descriptor = os.pidfd_open(int(path.parent.name))
-            current = path.read_text().rsplit(') ', 1)[1].split()
+            current = process_stat(path)
             if current[19] == fields[19] and int(current[3]) == session:
                 signal.pidfd_send_signal(descriptor, number)
         except (AttributeError, OSError, ValueError, IndexError):
@@ -98,9 +105,29 @@ def check_capabilities():
                           (signal, ('pidfd_send_signal', 'pthread_sigmask'))):
         if any(not hasattr(module, name) for name in names):
             raise OSError('required process supervision API is unavailable')
-    process_paths()
+    # Session closure needs every visible process identity. Reject an already
+    # unreadable inventory before starting work that we could never retire.
+    for path in process_paths():
+        for attempt in (0, 1):
+            try:
+                fields = process_stat(path)
+            except FileNotFoundError:
+                break
+            except ProcessLookupError:
+                if attempt:
+                    raise
+                continue
+            if fields[3].isdecimal() and fields[19].isdecimal():
+                break
+            # Concurrent reap can leave do_task_stat's identity sentinels.
+            # State was sampled earlier and need not yet be X. Like ESRCH,
+            # this permits only one fresh read, never an absence decision.
+            if (not attempt and fields[0] in ('R', 'S', 'D', 'T', 't', 'X', 'Z', 'P', 'I')
+                    and fields[1:4] == ['0', '-1', '-1'] and fields[19].isdecimal()):
+                continue
+            raise ValueError('invalid process identity')
     own = Path(f'/proc/{os.getpid()}/task/{os.getpid()}')
-    (own / 'stat').read_text()
+    process_stat(own / 'stat')
     (own / 'children').read_text()
     descriptor = None
     managed = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
@@ -143,11 +170,23 @@ def check_capabilities():
             signal.pthread_sigmask(signal.SIG_SETMASK, mask)
 
 
+def report_capability_error(error):
+    """Expose a bounded failure category, never exception text or private data."""
+    kinds = (PermissionError, ProcessLookupError, FileNotFoundError,
+             UnicodeDecodeError, AttributeError, IndexError, ValueError, OSError)
+    kind = next((known.__name__ for known in kinds if isinstance(error, known)), 'unknown')
+    number = getattr(error, 'errno', None)
+    if type(number) is not int or not 1 <= number <= 4095:
+        number = 'none'
+    print('Error: required Linux process supervision capabilities are unavailable. '
+          f'cause={kind} errno={number}', file=sys.stderr)
+
+
 def supervise(command, seconds, grace):
     try:
         check_capabilities()
-    except (AttributeError, OSError, ValueError, IndexError):
-        print('Error: required Linux process supervision capabilities are unavailable.', file=sys.stderr)
+    except (AttributeError, OSError, ValueError, IndexError) as error:
+        report_capability_error(error)
         return 69
     requested = 0
     count = 0
@@ -211,7 +250,7 @@ def supervise(command, seconds, grace):
         alive = session_alive(session)
         if leader is None and not alive:
             try:
-                fields = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
+                fields = process_stat(Path(f'/proc/{pid}/stat'))
                 # A failed waitid does not abandon the command. Complete SID
                 # quiescence plus its pinned, terminated child permits waitpid.
                 alive = not process_quiescent(pid, fields[19])
@@ -254,8 +293,8 @@ def main():
     if sys.argv[1:] == ['--check-capabilities']:
         try:
             check_capabilities()
-        except (AttributeError, OSError, ValueError, IndexError):
-            print('Error: required Linux process supervision capabilities are unavailable.', file=sys.stderr)
+        except (AttributeError, OSError, ValueError, IndexError) as error:
+            report_capability_error(error)
             return 69
         return 0
     parser = argparse.ArgumentParser()

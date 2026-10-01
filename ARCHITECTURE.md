@@ -424,7 +424,24 @@ window between inspection and KILL. The path requires Python's
 `os.pidfd_open` and `signal.pidfd_send_signal` plus kernel support; missing APIs,
 errors or failed stop/identity checks refuse force delivery and leave uncertain
 resources protected. A stop already sent is released with CONT when possible.
-Process names or a shared UID never authorize a target.
+Process names or a shared UID never authorize a target. Admission reads the stat
+of each visible process and validates its session/start identity fields before
+starting work; only vanished pathnames are skipped. An already unreadable or
+malformed stat causes early refusal 69. A stale stat descriptor returning ESRCH
+or a coherent kernel reap sentinel (PPID 0, PGID/SID -1, numeric start and a
+known task state) permits one fresh read. These transitions share the same
+two-read limit per pathname; only a now-missing pathname can be skipped. A fresh
+normal identity is validated, while persistent sentinels or errors still refuse
+admission. The state may precede reap because the kernel samples it before
+locking the identity. This observation does not prevent later
+permission changes, which retain the existing shutdown veto.
+The timed helper and GUI/engine Python predicates read procfs identity fields as
+ASCII independently of the locale, preserving arbitrary bytes in the unused process/thread name with
+surrogate escapes. A name truncated inside a multibyte character is not a
+failure to read its session/start identity. Actual read errors and invalid
+identity fields retain their admission refusal or post-admission shutdown veto.
+Admission refusals expose only an allowlisted builtin exception category and a
+bounded numeric errno, never the exception message, pathname or procfs content.
 
 The GUI delegates force escalation to its authenticated real engine using CONT;
 the engine's trap records a persistent force request only after shutdown was

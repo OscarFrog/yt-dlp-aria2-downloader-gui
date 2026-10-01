@@ -255,7 +255,7 @@ validate_runtime_path_chain() {
         fi
         mode_value=$((8#${mode}))
         if ((mode_value & 0022)); then
-            if [[ ${owner} != "${root_owner}" ]] || ((!(mode_value & 01000))); then
+            if [[ ${owner} != "${root_owner}" ]] || ((! (mode_value & 01000))); then
                 error "managed-runtime path component is replaceable by another user: ${current_path}"
                 return 73
             fi
