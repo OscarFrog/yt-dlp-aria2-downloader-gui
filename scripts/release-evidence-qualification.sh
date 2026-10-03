@@ -168,14 +168,24 @@ assert_schedule_fresh() {
     local now_epoch
     local age_seconds
     local max_age_seconds
+    local timestamp_pattern='\A[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,9})?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])\z'
 
     if [[ -z ${run_json} ]]; then
         fail_qualification "no successful scheduled run found for ${workflow}."
+        return 65
     fi
 
-    created_at=$(jq -r '.createdAt' <<<"${run_json}")
+    # gh exports a Go time.Time as RFC3339, including optional nanoseconds.
+    # Validate the JSON string before Bash can discard trailing LF or NUL bytes.
+    if ! created_at=$(jq -er --arg pattern "${timestamp_pattern}" '
+        .createdAt | strings | select(test($pattern))
+    ' <<<"${run_json}"); then
+        fail_qualification "invalid createdAt timestamp for ${workflow}."
+        return 65
+    fi
     if ! created_epoch=$(date -d "${created_at}" +%s); then
         fail_qualification "invalid createdAt timestamp for ${workflow}: ${created_at}."
+        return 65
     fi
     now_epoch=$(date +%s)
     age_seconds=$((now_epoch - created_epoch))
@@ -184,6 +194,7 @@ assert_schedule_fresh() {
     if ((age_seconds < 0 || age_seconds > max_age_seconds)); then
         fail_qualification \
             "latest successful scheduled run for ${workflow} is older than ${max_age_days} days."
+        return 65
     fi
 }
 
