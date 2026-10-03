@@ -1719,6 +1719,21 @@ former optional extended-qualification flag no longer changes this contract.
 By default, the generated Markdown report is written below `qualification-evidence/`, an ignored local output.
 Supply a third path to place it in a separately managed evidence archive.
 
+Scheduled evidence uses the original `createdAt` timestamp exported by GitHub
+CLI, never a rerun's update time. The collector requires a complete absolute
+RFC3339 string with a timezone (`Z` or a numeric offset), allows optional
+fractional seconds through nanosecond precision, and checks calendar validity.
+It validates the JSON value before shell extraction can discard trailing LF or
+NUL bytes. Empty, relative, malformed and partially recognized dates fail with
+65. The existing whole-second comparison rejects future dates and ages greater
+than fourteen days; the exact fourteen-day boundary remains admissible.
+`ScheduleDateTests` in `tests/ci-validation-integration.py` exercises these
+boundaries with an independent fixed clock, timezone variants and a mutation
+that removes the JSON date guard. The test clock does not change the host clock
+or provide a production override. Schedule selection, attempts and job evidence
+retain their existing contracts; strict date parsing adds no new provenance
+claim.
+
 ## Real-world checks on Fedora 44
 
 After the automated suite passes, perform lawful manual tests:

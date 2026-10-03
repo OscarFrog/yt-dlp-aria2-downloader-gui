@@ -604,6 +604,179 @@ fi
                 self.assertEqual(CHECK.GitHub().get("actions/workflows/shell.yml"), {"id": 123})
 
 
+class ScheduleDateTests(unittest.TestCase):
+    """Exercise the real Bash selection/date boundary with an independent clock."""
+
+    REFERENCE_EPOCH = 1790856000  # 2026-10-01T12:00:00Z
+
+    @classmethod
+    def setUpClass(cls):
+        source = (PROJECT / "scripts/release-evidence-qualification.sh").read_text(encoding="utf-8")
+        functions = []
+        for name in ("fail_qualification", "select_latest_successful_schedule", "assert_schedule_fresh"):
+            start = source.index(name + "() {\n")
+            end = source.index("\n}\n", start) + 3
+            functions.append(source[start:end])
+        cls.functions = "\n".join(functions)
+
+    @staticmethod
+    def run_record(**changes):
+        record = dict(databaseId=123, event="schedule", status="completed", conclusion="success",
+                      createdAt="2026-09-30T12:00:00Z")
+        record.update(changes)
+        return record
+
+    def check_records(self, records, zone="UTC", reference=None, source=None):
+        # Only the reference clock is replaced. GNU date still performs every
+        # candidate conversion; no production clock override is introduced.
+        script = "set -Eeuo pipefail\n" + (self.functions if source is None else source) + r'''
+REFERENCE_EPOCH=$2
+date() {
+    if [[ $# == 1 && $1 == +%s ]]; then
+        printf '%s\n' "${REFERENCE_EPOCH}"
+    else
+        command date "$@"
+    fi
+}
+selected=$(select_latest_successful_schedule "$1")
+# The conditional also proves refusals do not depend on caller errexit.
+if assert_schedule_fresh "${selected}" shfmt-update.yml 14; then
+    printf '%s\n' "${selected}"
+else
+    exit "$?"
+fi
+'''
+        environment = dict(os.environ, TZ=zone, LC_ALL="C")
+        environment.pop("BASH_ENV", None)
+        return subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", script, "schedule-date-fixture",
+             json.dumps(records), str(self.REFERENCE_EPOCH if reference is None else reference)],
+            capture_output=True, text=True, timeout=5, check=False, env=environment,
+        )
+
+    def assert_invalid_timestamp(self, record, **options):
+        result = self.check_records([record], **options)
+        self.assertEqual(result.returncode, 65, "invalid timestamp was accepted: " + result.stdout)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("invalid createdAt timestamp", result.stderr)
+
+    def test_missing_empty_and_non_string_dates_are_rejected(self):
+        missing = self.run_record()
+        del missing["createdAt"]
+        self.assert_invalid_timestamp(missing)
+        for value in (None, "", " ", "\t\n", False, True, 0, 1790856000, [], {}):
+            with self.subTest(value=value):
+                self.assert_invalid_timestamp(self.run_record(createdAt=value))
+
+    def test_relative_partial_and_unzoned_dates_are_rejected(self):
+        for value in (
+            "2026-10-01T12:00:00Z yesterday", "2026-10-01T12:00:00Z -1 day",
+            "yesterday", "now", "2026-09-30", "2026-09-30T12:00:00",
+            "2026-09-30 12:00:00Z", "2026-9-30T12:00:00Z", "2026-09-30T12:00:00UTC",
+            " 2026-09-30T12:00:00Z", "2026-09-30T12:00:00Z ",
+            "2026-09-30T12:00:00Z\n", "2026-09-30T12:00:00Z\x00",
+            "2026-09-30T12:00:00.1234567890Z", "2026-09-30T12:00:00.Z",
+            "2026-09-30T12:00:00Zjunk", "junk2026-09-30T12:00:00Z",
+        ):
+            with self.subTest(value=value):
+                self.assert_invalid_timestamp(self.run_record(createdAt=value))
+
+    def test_impossible_calendar_clock_and_offsets_are_rejected(self):
+        for value in (
+            "2026-02-29T12:00:00Z", "2026-02-30T12:00:00Z", "2026-04-31T12:00:00Z",
+            "2026-00-30T12:00:00Z", "2026-13-30T12:00:00Z", "2026-09-00T12:00:00Z",
+            "2026-09-31T12:00:00Z", "2026-09-30T24:00:00Z", "2026-09-30T12:60:00Z",
+            "2026-09-30T12:00:60Z", "2026-09-30T12:00:00+24:00",
+            "2026-09-30T12:00:00+00:60", "2026-09-30T12:00:00-99:00",
+        ):
+            with self.subTest(value=value):
+                self.assert_invalid_timestamp(self.run_record(createdAt=value))
+
+    def test_absolute_timezone_and_fraction_variants_are_accepted(self):
+        for value in (
+            "2026-09-30T12:00:00Z", "2026-09-30T12:00:00+00:00",
+            "2026-09-30T12:00:00-00:00", "2026-09-30T17:30:00+05:30",
+            "2026-09-30T04:00:00-08:00", "2026-09-30T12:00:00.1Z",
+            "2026-09-30T12:00:00.123456Z", "2026-09-30T12:00:00.123456789Z",
+            "2026-09-30T17:30:00.123456789+05:30",
+        ):
+            with self.subTest(value=value):
+                result = self.check_records([self.run_record(createdAt=value)])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["createdAt"], value)
+
+    def test_leap_day_is_valid_in_a_leap_year(self):
+        reference = int(datetime(2024, 3, 1, 12, tzinfo=timezone.utc).timestamp())
+        result = self.check_records([self.run_record(createdAt="2024-02-29T12:00:00Z")],
+                                    reference=reference)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_exact_freshness_boundaries_are_timezone_independent(self):
+        # POSIX TZ rules do not silently fall back to UTC when tzdata is absent.
+        for zone, offset in (("UTC0", "+0000"), ("HST10", "-1000"), ("JST-9", "+0900")):
+            actual = subprocess.run(
+                ["date", "-d", "@1790856000", "+%z"],
+                env=dict(os.environ, TZ=zone, LC_ALL="C"), capture_output=True,
+                text=True, timeout=5, check=False,
+            )
+            self.assertEqual(actual.returncode, 0, actual.stderr)
+            self.assertEqual(actual.stdout.strip(), offset)
+            for value, expected in (
+                ("2026-09-17T12:00:00Z", 0),
+                ("2026-09-17T12:00:01Z", 0),
+                ("2026-09-17T11:59:59Z", 65),
+                ("2026-10-01T12:00:00Z", 0),
+                ("2026-10-01T12:00:01Z", 65),
+                ("2026-09-17T17:30:00+05:30", 0),
+                ("2026-09-17T17:29:59+05:30", 65),
+                ("2026-09-17T04:00:00-08:00", 0),
+                # Preserve the existing whole-second comparison, including
+                # fractions in the boundary second; do not tighten freshness.
+                ("2026-09-17T12:00:00.999999999Z", 0),
+                ("2026-09-17T11:59:59.999999999Z", 65),
+                ("2026-10-01T12:00:00.999999999Z", 0),
+            ):
+                with self.subTest(zone=zone, value=value):
+                    result = self.check_records([self.run_record(createdAt=value)], zone=zone)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    if expected:
+                        self.assertIn("older than 14 days", result.stderr)
+
+    def test_rerun_metadata_does_not_refresh_original_creation(self):
+        result = self.check_records([self.run_record(
+            createdAt="2026-09-17T11:59:59Z", updatedAt="2026-10-01T12:00:00Z", runAttempt=2)])
+        self.assertEqual(result.returncode, 65, result.stderr)
+        self.assertIn("older than 14 days", result.stderr)
+
+    def test_schedule_selection_policy_is_preserved(self):
+        excluded = [self.run_record(event="workflow_dispatch"),
+                    self.run_record(conclusion="failure"), self.run_record(status="in_progress")]
+        result = self.check_records(excluded)
+        self.assertEqual(result.returncode, 65, result.stderr)
+        self.assertIn("no successful scheduled run", result.stderr)
+        earlier = self.run_record(databaseId=122, createdAt="2026-09-20T12:00:00Z")
+        result = self.check_records(excluded + [earlier])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["databaseId"], 122)
+        # Selection still uses the first successful schedule in API order; an
+        # invalid selected timestamp must not fall back to an older success.
+        self.assert_invalid_timestamp(self.run_record(createdAt="yesterday"))
+        result = self.check_records([self.run_record(createdAt="yesterday"), earlier])
+        self.assertEqual(result.returncode, 65, result.stderr)
+
+    def test_removing_json_date_guard_is_detected_by_negative_witness(self):
+        start = self.functions.index('    if ! created_at=$(jq -er --arg pattern ')
+        end = self.functions.index('    if ! created_epoch=', start)
+        mutant = (self.functions[:start] +
+                  '    created_at=$(jq -r ".createdAt" <<<"${run_json}")\n' + self.functions[end:])
+        witness = self.run_record(createdAt="2026-10-01T12:00:00Z yesterday")
+        self.assert_invalid_timestamp(witness)
+        result = self.check_records([witness], source=mutant)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with self.assertRaisesRegex(AssertionError, "invalid timestamp was accepted"):
+            self.assert_invalid_timestamp(witness, source=mutant)
+
+
 class PreflightTests(unittest.TestCase):
     @staticmethod
     def metadata():
