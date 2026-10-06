@@ -171,13 +171,16 @@ def main():
     observer = Observer(args.token)
     with (args.evidence / 'process-topology.jsonl').open('a') as log:
         while True:
+            # The terminal observation must start after the stop request, not
+            # return a sample captured while the application was still exiting.
+            stopping = args.stop.exists()
             state = observer.sample()
             log.write(json.dumps(state) + '\n')
             log.flush()
             temporary = args.evidence / '.processes-current.tmp'
             temporary.write_text(json.dumps(state))
             os.replace(temporary, args.evidence / 'processes-current.json')
-            if args.stop.exists():
+            if stopping:
                 return
             time.sleep(0.05)
 

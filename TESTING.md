@@ -1390,6 +1390,11 @@ An independent positive control verifies this exception without signaling it.
 Polling cannot prove absence of a process that erased its marker and escaped
 before any observation. Test-only subreaping changes reparenting and collects
 already stopped zombies; it is never counted as application wait-status proof.
+The terminal observer sample starts after the harness's stop request is observed.
+A real-process gate holds a pre-exit sample until the child has exited and been
+reaped and the harness has requested stop. The final sample must refresh that
+state; a still-live orphan or a final procfs observation failure remains a refusal.
+The former sample-before-stop ordering must fail these independent controls.
 The engine wrapper cases deliberately defer that collection until after their
 verdict. The test-only `finish()` service harvests only already attributed
 children of its controller, revalidates PID/start/parent and WNOWAIT exit state,

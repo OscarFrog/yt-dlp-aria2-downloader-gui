@@ -24,6 +24,8 @@
   and the formatter handoff protocol.
 - Publish thread-fixture readiness atomically so qualification cannot read an
   incomplete PID; retain a deterministic premature-publication counterexample.
+- Start the final qualification observation after its stop request, preventing
+  stale exit snapshots while still refusing live consumers and procfs failures.
 - Require absolute RFC3339 creation timestamps for scheduled release evidence
   while preserving the fourteen-day freshness window.
 
