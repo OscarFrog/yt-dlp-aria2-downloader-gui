@@ -1412,6 +1412,10 @@ a last-access marker for the next case. The leader-only mutant must be rejected
 while its sibling thread still owns the release pipe, before release or rescue.
 The correct case observes pidfd readiness after delivered KILL and before wait or
 pipe draining; this test observation does not claim application status collection.
+The thread witness publishes its PID marker by renaming a completed private
+file. A gated real open pauses its writer before any bytes are written: the
+final marker must remain absent. The same oracle rejects direct publication
+before releasing the writer or the consumer, without changing readiness deadlines.
 A held foreign stat descriptor produces real ESRCH after reaping: retirement must
 refuse, resume the authenticated parent and leave its sibling/pipe alive until
 the test releases its own barrier after the verdict.

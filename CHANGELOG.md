@@ -22,6 +22,8 @@
   with its canonical heredoc layout, retaining the Python isolation guard.
 - Extend regressions for admission, process-name bytes, disappearance races
   and the formatter handoff protocol.
+- Publish thread-fixture readiness atomically so qualification cannot read an
+  incomplete PID; retain a deterministic premature-publication counterexample.
 - Require absolute RFC3339 creation timestamps for scheduled release evidence
   while preserving the fourteen-day freshness window.
 

@@ -264,7 +264,9 @@ def worker():
         if time.monotonic() >= deadline: os._exit(90)
         time.sleep(.001)
     fd = os.open(root / 'thread-resource', os.O_WRONLY | os.O_CREAT, 0o600)
-    (root / 'thread-ready').write_text(str(os.getpid()))
+    ready = root / '.thread-ready.tmp'
+    ready.write_text(str(os.getpid()))
+    ready.replace(root / 'thread-ready')
     if select.select([release], [], [], 3)[0]: os.read(release, 1)
     os.write(fd, b'access after barrier')
     os.close(fd)
@@ -274,6 +276,89 @@ threading.Thread(target=worker).start()
 ctypes.CDLL(None).pthread_exit(None)
 ''')
         return script
+
+    def test_thread_readiness_is_published_after_complete_write(self):
+        script = self.thread_fixture()
+        source = script.read_text()
+        publication = """    ready = root / '.thread-ready.tmp'
+    ready.write_text(str(os.getpid()))
+    ready.replace(root / 'thread-ready')
+"""
+        self.assertEqual(source.count(publication), 1)
+        premature = self.root / 'premature-thread-readiness.py'
+        premature.write_text(source.replace(
+            publication, "    (root / 'thread-ready').write_text(str(os.getpid()))\n"))
+        driver = self.root / 'thread-readiness-driver.py'
+        driver.write_text(r'''import os, runpy, select, sys
+from pathlib import Path
+script, directory, release, opened, proceed = sys.argv[1:]
+root = Path(directory)
+opened, proceed = int(opened), int(proceed)
+real_open = Path.open
+def gated_open(path, mode='r', *args, **kwargs):
+    stream = real_open(path, mode, *args, **kwargs)
+    if (mode == 'w' and path.parent == root
+            and path.name in ('.thread-ready.tmp', 'thread-ready')):
+        os.write(opened, b'O')
+        os.close(opened)
+        if not select.select([proceed], [], [], 3)[0]: os._exit(91)
+        if os.read(proceed, 1) != b'W': os._exit(92)
+        os.close(proceed)
+    return stream
+Path.open = gated_open
+sys.argv = [script, directory, release, 'direct']
+runpy.run_path(script, run_name='__main__')
+''')
+        for mutant in (False, True):
+            with self.subTest(premature_publication=mutant):
+                case = self.root / ('premature-ready' if mutant else 'complete-ready')
+                case.mkdir()
+                opened_read, opened_write = os.pipe()
+                proceed_read, proceed_write = os.pipe()
+                release_read, release_write = os.pipe()
+                descriptors = [opened_read, opened_write, proceed_read, proceed_write,
+                               release_read, release_write]
+                try:
+                    process = subprocess.Popen(
+                        [sys.executable, '-I', '-B', str(driver),
+                         str(premature if mutant else script), str(case),
+                         str(release_read), str(opened_write), str(proceed_read)],
+                        pass_fds=(release_read, opened_write, proceed_read),
+                        start_new_session=True,
+                        env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token),
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    self.processes.append(process)
+                    for descriptor in (opened_write, proceed_read, release_read):
+                        os.close(descriptor)
+                        descriptors.remove(descriptor)
+                    self.assertTrue(select.select([opened_read], [], [], 3)[0],
+                                    'readiness writer did not open its file')
+                    self.assertEqual(os.read(opened_read, 1), b'O')
+                    opened_path = case / ('thread-ready' if mutant else '.thread-ready.tmp')
+                    self.assertEqual(opened_path.stat().st_size, 0)
+
+                    def assert_unpublished():
+                        self.assertFalse((case / 'thread-ready').exists(),
+                                         'thread readiness published before complete write')
+
+                    # The real open has created an empty file, but write_text has
+                    # not received its stream. Judge publication before release.
+                    if mutant:
+                        with self.assertRaisesRegex(
+                                self.failureException, 'published before complete write'):
+                            assert_unpublished()
+                    else:
+                        assert_unpublished()
+                    self.assertFalse((case / 'thread-last-access').exists())
+                    os.write(proceed_write, b'W')
+                    self.assertEqual(int(self.wait_file(f'{case.name}/thread-ready', process)),
+                                     process.pid)
+                    os.write(release_write, b'R')
+                    out, err = process.communicate(timeout=3)
+                    self.assertEqual(process.returncode, 0, (out, err))
+                finally:
+                    for descriptor in descriptors:
+                        os.close(descriptor)
 
     def test_timed_supervisor_retains_zombie_leader_live_thread(self):
         module = self.supervisor_module()
