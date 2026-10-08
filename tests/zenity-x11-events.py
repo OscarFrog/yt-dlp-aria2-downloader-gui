@@ -1,23 +1,28 @@
 # SPDX-License-Identifier: MIT
 """yt-dlp-aria2-downloader-gui tests/zenity-x11-events.py.
 
-Optional isolated X11 event adapter for the real multi-instance qualification.
+Isolated X11 event adapter for multi-instance and autonomous qualification.
 Input/profile/folder answers are scripted; progress, cancellation, completion
 and the second entry after New download are real Zenity windows. No human
 gesture is claimed. The dedicated display never selects personal windows.
 """
 
+import ast
 import ctypes as c
 import ctypes.util
+import hashlib
 import json
 import os
 from pathlib import Path
 import select
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
 import traceback
+from urllib.parse import unquote, urlsplit
 
 
 def read_display_number(read_fd):
@@ -72,6 +77,31 @@ class Event(c.Union):
     _fields_ = [('client', Client), ('key', Key), ('padding', c.c_long * 24)]
 
 
+class Image(c.Structure):
+    _fields_ = [('width', c.c_int), ('height', c.c_int), ('xoffset', c.c_int),
+                ('format', c.c_int), ('data', c.c_void_p), ('byte_order', c.c_int),
+                ('bitmap_unit', c.c_int), ('bitmap_bit_order', c.c_int),
+                ('bitmap_pad', c.c_int), ('depth', c.c_int), ('bytes_per_line', c.c_int),
+                ('bits_per_pixel', c.c_int), ('red_mask', c.c_ulong),
+                ('green_mask', c.c_ulong), ('blue_mask', c.c_ulong)]
+
+
+def record_event(record, **fields):
+    row = dict(monotonic_ns=time.monotonic_ns(), **fields)
+    encoded = (json.dumps(row, separators=(',', ':')) + '\n').encode()
+    fd = os.open(record, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    try:
+        if os.write(fd, encoded) != len(encoded):
+            raise RuntimeError('Incomplete graphical evidence record')
+    finally:
+        os.close(fd)
+
+
+class DialogSignal(BaseException):
+    def __init__(self, number):
+        self.number = number
+
+
 class Display:
     def __init__(self):
         self.x = c.CDLL(ctypes.util.find_library('X11'))
@@ -91,6 +121,10 @@ class Display:
             'XQueryTree': ([c.c_void_p, c.c_ulong, c.POINTER(c.c_ulong), c.POINTER(c.c_ulong),
                             c.POINTER(c.POINTER(c.c_ulong)), c.POINTER(c.c_uint)], c.c_int),
             'XFetchName': ([c.c_void_p, c.c_ulong, c.POINTER(c.c_void_p)], c.c_int),
+            'XGetWindowProperty': ([c.c_void_p, c.c_ulong, c.c_ulong, c.c_long, c.c_long,
+                                    c.c_int, c.c_ulong, c.POINTER(c.c_ulong), c.POINTER(c.c_int),
+                                    c.POINTER(c.c_ulong), c.POINTER(c.c_ulong),
+                                    c.POINTER(c.c_void_p)], c.c_int),
             'XGetWindowAttributes': ([c.c_void_p, c.c_ulong, c.POINTER(Attributes)], c.c_int),
             'XInternAtom': ([c.c_void_p, c.c_char_p, c.c_int], c.c_ulong),
             'XSendEvent': ([c.c_void_p, c.c_ulong, c.c_int, c.c_long, c.c_void_p], c.c_int),
@@ -100,6 +134,10 @@ class Display:
             'XSync': ([c.c_void_p, c.c_int], c.c_int),
             'XFree': ([c.c_void_p], c.c_int),
             'XCloseDisplay': ([c.c_void_p], c.c_int),
+            'XGetImage': ([c.c_void_p, c.c_ulong, c.c_int, c.c_int, c.c_uint,
+                          c.c_uint, c.c_ulong, c.c_int], c.POINTER(Image)),
+            'XGetPixel': ([c.POINTER(Image), c.c_int, c.c_int], c.c_ulong),
+            'XDestroyImage': ([c.POINTER(Image)], c.c_int),
         }
         for name, (arguments, result) in bindings.items():
             function = getattr(self.x, name)
@@ -128,32 +166,104 @@ class Display:
 
     def wait_window(self, title):
         deadline = time.monotonic() + 15
-        root = self.x.XDefaultRootWindow(self.display)
         while time.monotonic() < deadline:
-            actual_root, parent, count = c.c_ulong(), c.c_ulong(), c.c_uint()
-            children = c.POINTER(c.c_ulong)()
-            if not self.x.XQueryTree(self.display, root, c.byref(actual_root), c.byref(parent),
-                                    c.byref(children), c.byref(count)):
-                raise RuntimeError('Cannot enumerate the dedicated display')
-            found = None
-            try:
-                for index in range(count.value):
-                    name, attrs = c.c_void_p(), Attributes()
-                    window = children[index]
-                    if self.x.XFetchName(self.display, window, c.byref(name)) and name.value:
-                        value = c.string_at(name).decode(errors='replace')
-                        self.x.XFree(name)
-                        if value == title and self.x.XGetWindowAttributes(self.display, window, c.byref(attrs)):
-                            if attrs.map_state == 2:
-                                found = window
-            finally:
-                if children:
-                    self.x.XFree(children)
-            self.synchronize()
-            if found:
-                return found
+            matches = [row['window'] for row in self.mapped_windows() if row['title'] == title]
+            if len(matches) > 1:
+                raise AssertionError('Ambiguous real qualification window')
+            if matches:
+                return matches[0]
             time.sleep(.02)
         raise AssertionError(f'No mapped real Zenity window: {title}')
+
+    def mapped_windows(self):
+        root = self.x.XDefaultRootWindow(self.display)
+        actual_root, parent, count = c.c_ulong(), c.c_ulong(), c.c_uint()
+        children = c.POINTER(c.c_ulong)()
+        if not self.x.XQueryTree(self.display, root, c.byref(actual_root), c.byref(parent),
+                                c.byref(children), c.byref(count)):
+            raise RuntimeError('Cannot enumerate the dedicated display')
+        rows = []
+        try:
+            for index in range(count.value):
+                attrs = Attributes()
+                window = children[index]
+                title = self.window_title(window)
+                if title is not None:
+                    if self.x.XGetWindowAttributes(self.display, window, c.byref(attrs)) and attrs.map_state == 2:
+                        rows.append(dict(window=window, title=title))
+        finally:
+            if children:
+                self.x.XFree(children)
+        self.synchronize()
+        return rows
+
+    def window_title(self, window):
+        # GTK's legacy WM_NAME can use Latin-1. Read the bounded UTF-8 property
+        # first so a selected folder containing accents retains its identity.
+        prop = self.x.XInternAtom(self.display, b'_NET_WM_NAME', 0)
+        utf8 = self.x.XInternAtom(self.display, b'UTF8_STRING', 0)
+        actual, length, remaining = c.c_ulong(), c.c_ulong(), c.c_ulong()
+        fmt, value = c.c_int(), c.c_void_p()
+        status = self.x.XGetWindowProperty(self.display, window, prop, 0, 2048, 0, utf8,
+                                          c.byref(actual), c.byref(fmt), c.byref(length),
+                                          c.byref(remaining), c.byref(value))
+        try:
+            if status != 0:
+                raise RuntimeError('Cannot read qualification window title')
+            if actual.value:
+                if actual.value != utf8 or fmt.value != 8 or (length.value and not value.value):
+                    raise RuntimeError('Invalid qualification window title property')
+                if remaining.value or length.value > 8192:
+                    raise RuntimeError('Oversized qualification window title')
+                return c.string_at(value, length.value).decode('utf-8')
+        finally:
+            if value.value:
+                self.x.XFree(value)
+        value = c.c_void_p()
+        if self.x.XFetchName(self.display, window, c.byref(value)) and value.value:
+            try:
+                return c.string_at(value).decode('latin-1')
+            finally:
+                self.x.XFree(value)
+        return None
+
+    def capture(self, title, record):
+        """Retain pixels from a known fixture window, never the desktop root."""
+        window = self.wait_window(title)
+        attrs = Attributes()
+        if not self.x.XGetWindowAttributes(self.display, window, c.byref(attrs)):
+            raise RuntimeError('Cannot inspect the qualification window')
+        if not (1 <= attrs.width <= 4096 and 1 <= attrs.height <= 4096):
+            raise RuntimeError('Qualification window dimensions are out of bounds')
+        value = self.x.XGetImage(self.display, window, 0, 0, attrs.width, attrs.height,
+                                c.c_ulong(-1).value, 2)
+        self.synchronize()
+        if not value:
+            raise RuntimeError('Cannot capture the qualification window')
+        try:
+            masks = [value.contents.red_mask, value.contents.green_mask, value.contents.blue_mask]
+            if any(mask == 0 for mask in masks):
+                raise RuntimeError('Unsupported qualification image format')
+            shifts = [(mask & -mask).bit_length() - 1 for mask in masks]
+            maxima = [mask >> shift for mask, shift in zip(masks, shifts)]
+            pixels = bytearray()
+            for y in range(attrs.height):
+                for x in range(attrs.width):
+                    pixel = self.x.XGetPixel(value, x, y)
+                    pixels.extend(((pixel & mask) >> shift) * 255 // maximum
+                                  for mask, shift, maximum in zip(masks, shifts, maxima))
+            first_pixel = pixels[:3]
+            if all(pixels[index:index + 3] == first_pixel for index in range(0, len(pixels), 3)):
+                raise RuntimeError('Qualification window rendered no distinguishable pixels')
+            data = f'P6\n{attrs.width} {attrs.height}\n255\n'.encode() + pixels
+            name = f'window-{window}-{time.monotonic_ns()}.ppm'
+            with (Path(record).parent / name).open('xb') as output:
+                output.write(data)
+            return dict(window=window, real_window=True, screenshot=name,
+                        screenshot_sha256=hashlib.sha256(data).hexdigest(),
+                        width=attrs.width, height=attrs.height)
+        finally:
+            self.x.XDestroyImage(value)
 
     def prepare_keyboard(self, record):
         # Xwayland can accept the first XTest pair without delivering it while
@@ -261,6 +371,8 @@ class Display:
                 symbol = 0x20
             elif action == 'escape':
                 symbol = 0xff1b
+            elif action == 'open-folder':
+                symbol = 0xff0d
             else:
                 raise ValueError(action)
             key(symbol, 1)
@@ -329,6 +441,17 @@ class Session:
     def progress_action(self, label, action):
         self.display.action(f'qualification:{label}:progress', action, self.env['FIXTURE_X11_EVENTS'])
 
+    def wait_window(self, label, kind):
+        return self.display.wait_window(f'qualification:{label}:{kind}')
+
+    def mapped_windows(self):
+        return self.display.mapped_windows()
+
+    def assert_no_windows(self, label):
+        prefix = f'qualification:{label}:'
+        if any(row['title'].startswith(prefix) for row in self.mapped_windows()):
+            raise AssertionError('Qualification left a mapped application window')
+
     def close(self):
         failures = []
         try:
@@ -367,6 +490,8 @@ class Session:
 
 
 def dialog(args):
+    if os.environ.get('FIXTURE_AUTONOMOUS') == '1':
+        return autonomous_dialog(args)
     label = os.environ['FIXTURE_LABEL']
     record = os.environ['FIXTURE_X11_EVENTS']
     new_marker = Path(record).parent / f'{label}.new-download'
@@ -429,9 +554,266 @@ def dialog(args):
                     process.wait(timeout=10)
 
 
+def autonomous_dialog(args):
+    """Drive real outcome dialogs; fixture request selections are explicit data."""
+    label = os.environ['FIXTURE_LABEL']
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', label):
+        raise ValueError('Invalid autonomous scenario label')
+    scenario = os.environ['FIXTURE_SCENARIO']
+    record = os.environ['FIXTURE_X11_EVENTS']
+    marker = Path(record).parent / f'{label}.new-download'
+    if '--version' in args:
+        os.execv(os.environ['FIXTURE_REAL_ZENITY'], [os.environ['FIXTURE_REAL_ZENITY'], *args])
+    kind = next((name for name in ('entry', 'progress', 'question', 'info', 'error', 'text-info')
+                 if '--' + name in args), '')
+    if kind == 'entry' and scenario != 'signal-entry' and not marker.exists():
+        print(os.environ['FIXTURE_URL'])
+        return 0
+    if '--file-selection' in args:
+        print(os.environ['FIXTURE_OUTPUT'])
+        return 0
+    if '--list' in args:
+        print('Complete video (MKV)')
+        return 0
+    if not kind:
+        raise RuntimeError('Unsupported autonomous dialog')
+    text = next((arg[7:] for arg in args if arg.startswith('--text=')), '')
+    classification = ('success' if text.startswith('The download is complete.') else
+                      'error' if kind == 'error' or '--ok-label=View log' in args else 'other')
+    title = f'qualification:{label}:{kind}'
+    common = dict(title=title, dialog=kind, classification=classification)
+    args = [arg for arg in args if not arg.startswith('--title=')] + ['--title=' + title]
+    command = [os.environ['FIXTURE_REAL_ZENITY'], *args]
+    process = None
+    display = None
+    old_handlers = {}
+
+    def forward_signal(number, _frame):
+        # The application's registered Zenity PID is this adapter. Retain its
+        # ordinary shutdown semantics by forwarding to and collecting our own
+        # real dialog child before the registered process can finish.
+        for observed_signal in old_handlers:
+            signal.signal(observed_signal, signal.SIG_IGN)
+        if process is not None and process.poll() is None:
+            process.send_signal(number)
+            process.wait(timeout=10)
+        raise DialogSignal(number)
+
+    try:
+        if classification == 'success':
+            expected = Path(os.environ['FIXTURE_EXPECTED_FINAL'])
+            if (text != 'The download is complete.\n\nFile: ' + str(expected)
+                    or not expected.is_file() or expected.is_symlink() or '--no-markup' not in args):
+                raise AssertionError('Completion dialog does not identify the verified final file')
+            common['displayed_path_exact'] = True
+            common['displayed_path_sha256'] = hashlib.sha256(os.fsencode(expected)).hexdigest()
+        process = subprocess.Popen(command, stdin=subprocess.PIPE if kind == 'progress' else None,
+                                   stdout=subprocess.PIPE)
+        old_handlers = {number: signal.signal(number, forward_signal)
+                        for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)}
+        display = Display()
+        display.wait_window(title)
+        # A mapped window can precede GTK's first paint. This bounded readiness
+        # pause does not retry an action or extend its ten-second result budget.
+        time.sleep(.1)
+        record_event(record, event='window-mapped', **common, **display.capture(title, record))
+        if kind == 'progress':
+            pending = b''
+            captured_progress = False
+            input_open = True
+            publication_hold = None
+            while process.poll() is None:
+                if publication_hold is not None and time.monotonic() >= publication_hold:
+                    raise AssertionError('Published-result graphical race action timed out')
+                if not input_open:
+                    if publication_hold is None:
+                        process.wait(timeout=10)
+                        break
+                    time.sleep(.02)
+                    continue
+                if not select.select([sys.stdin.buffer], [], [], .05)[0]:
+                    continue
+                data = os.read(sys.stdin.fileno(), 65536)
+                if not data:
+                    input_open = False
+                    if publication_hold is None:
+                        process.stdin.close()
+                    continue
+                pending += data
+                if len(pending) > 65536:
+                    raise RuntimeError('Oversized autonomous progress frame')
+                while b'\n' in pending:
+                    line, pending = pending.split(b'\n', 1)
+                    hold = (line == b'100' and scenario == 'cancel-success-race'
+                            and os.environ.get('FIXTURE_RACE_SIDE') == 'after-publication')
+                    if hold:
+                        if publication_hold is None:
+                            publication_hold = time.monotonic() + 10
+                            record_event(record, event='race-publication-barrier', **common)
+                    elif publication_hold is None:
+                        try:
+                            process.stdin.write(line + b'\n')
+                            process.stdin.flush()
+                        except BrokenPipeError:
+                            process.wait(timeout=10)
+                            break
+                    if re.fullmatch(rb'[0-9]{1,3}', line):
+                        value = int(line)
+                        if not 0 <= value <= 100:
+                            raise RuntimeError('Invalid autonomous progress percentage')
+                        record_event(record, event='progress-value', value=value, **common)
+                        if 5 <= value < 100 and not captured_progress:
+                            time.sleep(.05)
+                            record_event(record, event='progress-rendered', value=value,
+                                         **common, **display.capture(title, record))
+                            captured_progress = True
+            output = process.stdout.read()
+            selected = None
+        elif scenario == 'signal-entry' and kind == 'entry':
+            # The coordinator sends TERM to the GUI only after this proof is
+            # visible. The ordinary GUI supervisor owns the dialog shutdown.
+            output, _ = process.communicate(timeout=30)
+            selected = None
+        else:
+            selected = ('new-download' if scenario == 'new-download' and classification == 'success'
+                        else 'open-folder' if scenario == 'open-folder' and classification == 'success'
+                        else 'cancel' if kind == 'entry' else 'window-close')
+            display.action(title, selected, record,
+                           extra_buttons=sum(arg.startswith('--extra-button=') for arg in args))
+            output, _ = process.communicate(timeout=10)
+            if selected == 'new-download':
+                if process.returncode not in (0, 1) or output.strip() != b'New download':
+                    raise AssertionError('Real completion New download mismatch: '
+                                         f'status={process.returncode}, selected={output.strip() == b"New download"}')
+                marker.write_text('real New download button selected\n')
+            if selected == 'open-folder' and (process.returncode != 0 or output.strip()):
+                raise AssertionError('Real completion did not select Open folder')
+        record_event(record, event='dialog-result', status=process.returncode,
+                     selected_action=selected, **common)
+        sys.stdout.buffer.write(output)
+        return process.returncode
+    except DialogSignal as stopped:
+        record_event(record, event='dialog-signal', signal=stopped.number, **common)
+        return 128 + stopped.number
+    except BaseException:
+        record_event(record, event='adapter-failed-before-rescue', **common)
+        raise
+    finally:
+        try:
+            if display is not None:
+                display.close()
+        finally:
+            try:
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=10)
+            finally:
+                for number, handler in old_handlers.items():
+                    signal.signal(number, handler)
+
+
+def autonomous_open_folder(args):
+    """Open the exact selected synthetic directory on the private display/bus."""
+    record = os.environ['FIXTURE_X11_EVENTS']
+    label = os.environ['FIXTURE_LABEL']
+    title = f'qualification:{label}:folder'
+    display = None
+    process = None
+    manager = shutil.which('nautilus')
+    try:
+        expected = Path(os.environ['FIXTURE_OUTPUT'])
+        if len(args) != 1 or Path(args[0]) != expected or expected.is_symlink() or not expected.is_dir():
+            raise AssertionError('Open folder did not name the exact selected directory')
+        if not manager:
+            raise RuntimeError('Autonomous Open folder requires Nautilus')
+        process = subprocess.Popen([manager, '--new-window', str(expected)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        display = Display()
+        display.wait_window(expected.name)
+        deadline = time.monotonic() + 10
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError('Selected file-manager location was not initialized')
+            locations = subprocess.run(
+                ['gdbus', 'call', '--session', '--dest', 'org.gnome.Nautilus',
+                 '--object-path', '/org/freedesktop/FileManager1',
+                 '--method', 'org.freedesktop.DBus.Properties.Get',
+                 'org.freedesktop.FileManager1', 'OpenLocations'],
+                check=True, timeout=remaining, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            encoded = locations.stdout.strip()
+            if encoded not in ('(<@as []>,)', '(<[]>,)'):
+                break
+            # The mapped window can precede its initial navigation property.
+            # Only an explicitly empty property permits this readiness wait.
+            time.sleep(.02)
+        if len(encoded) > 16384 or not encoded.startswith('(<[') or not encoded.endswith(']>,)'):
+            raise AssertionError('File manager did not expose its selected location')
+        opened = ast.literal_eval(encoded[2:-3])
+        if not isinstance(opened, list) or len(opened) != 1 or not isinstance(opened[0], str):
+            raise AssertionError('File manager exposed ambiguous selected locations')
+        location = urlsplit(opened[0])
+        if (location.scheme != 'file' or location.netloc or location.query or location.fragment
+                or unquote(location.path, errors='strict') != str(expected)):
+            raise AssertionError('File manager did not navigate to the selected destination')
+        proof = display.capture(expected.name, record)
+        record_event(record, event='folder-mapped', title=title, destination_exact=True,
+                     location_property_exact=True,
+                     destination_sha256=hashlib.sha256(os.fsencode(expected)).hexdigest(), **proof)
+        release = Path(record).parent / f'{label}.viewer-release'
+        deadline = time.monotonic() + 10
+        while not release.exists():
+            if process.poll() is not None or time.monotonic() >= deadline:
+                raise AssertionError('Folder viewer did not survive until the GUI exit observation')
+            time.sleep(.02)
+        display.action(expected.name, 'window-close', record)
+        deadline = time.monotonic() + 10
+        while any(row['title'] == expected.name for row in display.mapped_windows()):
+            if time.monotonic() >= deadline:
+                raise AssertionError('Selected folder window did not close')
+            time.sleep(.02)
+        # Nautilus may keep its private application alive after its last window.
+        # This shutdown addresses only the service-free bus owned by this fixture.
+        quit_status = None
+        if process.poll() is None:
+            quit_status = subprocess.run([manager, '--quit'], timeout=10,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+        process.wait(timeout=10)
+        if process.returncode != 0:
+            raise AssertionError('Isolated file manager failed')
+        # The remote --quit client can return 255 after delivering the request.
+        # The owned primary's successful exit and absence of its window, rather
+        # than that client's convention, are the actual viewer shutdown proof.
+        record_event(record, event='folder-closed', title=title,
+                     viewer_status=process.returncode, quit_client_status=quit_status)
+        return 0
+    except BaseException:
+        record_event(record, event='adapter-failed-before-rescue', title=title)
+        raise
+    finally:
+        try:
+            if display is not None:
+                display.close()
+        finally:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+
+
 if __name__ == '__main__':
     try:
-        result = dialog(sys.argv[1:])
+        if sys.argv[1:2] == ['--autonomous-open-folder'] and os.environ.get('FIXTURE_AUTONOMOUS') == '1':
+            result = autonomous_open_folder(sys.argv[2:])
+        else:
+            result = dialog(sys.argv[1:])
     except Exception:
         traceback.print_exc()
         result = 70

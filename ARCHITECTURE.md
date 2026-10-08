@@ -1088,8 +1088,36 @@ The `fast` profile is a development loop; the default `full` profile is the
 complete hermetic local contract. Its separate `doctor` mode diagnoses command,
 filesystem, loopback, formatter-bootstrap, network, and repository capabilities
 without running tests or provisioning tools. Real tools, privileged package
-lifecycle, interactive Zenity, release evidence, upstream generations, and
+lifecycle, real Zenity, release evidence, upstream generations, and
 stress runs are separate qualifications documented in `TESTING.md`.
+
+Real Zenity qualification has two complete routes: the existing operator-led
+protocol and `tests/zenity-autonomous-qualification.py`. The autonomous route
+uses real tools and loopback media, private HOME/XDG roots, and the dedicated
+Xwayland/service-free D-Bus adapter in `tests/zenity-x11-events.py`. It binds
+mapped dialogs, delivered progress and button events to output contents,
+statuses, argument privacy and process/window quiescence before fixture
+rescue. The deliberately opened real folder viewer remains independent of GUI
+cleanup and is owned by the isolated fixture; this route currently supports
+Nautilus on Fedora 44 or Ubuntu 24.04 Wayland sessions. Captures of owned
+windows retain dimensions and SHA-256 identity under the isolated Cairo
+renderer. Nautilus's D-Bus location property binds its mapped window to the
+selected directory. Dialog arguments, real
+responses and outputs establish the semantic assertions; the harness does not
+use OCR or assess layout. Initial request selection may be scripted; human
+gestures and visual aesthetics are outside this route's claims. Missing
+capabilities or evidence and deadline failures refuse
+qualification. All nine scenarios, including ten completion/cancel races,
+must pass on the same candidate tree. Five real Cancel actions precede final
+result confirmation during late remux; five follow verified confirmation while a
+bounded adapter input barrier holds the monitor's 100% line before Zenity
+auto-closes. The attributed engine's actual atomic result record establishes
+confirmation; a retained native partial with a media filename remains
+unconfirmed and is preserved under the existing cancellation contract.
+The optional multi-instance event
+subset cannot replace this complete proof. The headless validator regressions
+in `tests/zenity-autonomous-integration.py` run in the ordinary local contract
+without launching graphical qualification or changing publication authority.
 
 Contributor control is layered around that runner. Repository skills route a
 task to the relevant policy; issue and pull-request templates make scope,

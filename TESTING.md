@@ -69,6 +69,7 @@ and imports when the change crosses a boundary.
 | Engine, formats or transports | `ARCHITECTURE.md` engine/transport sections; `download-video.sh`, `private-aria2-plan.py` | `./tests/mock-integration.sh --group engine`; private aria2 plan and auth-header suites |
 | Network destination or private state | Same engine/helper boundary; network section below | `./tests/mock-integration.sh --group engine-network`; `./tests/private-aria2-plan-integration.sh`; opt-in real-tools/network qualification |
 | GUI, progress or cancellation | GUI/progress sections; `download-video-gui.sh`, `progress-monitor.sh` | `./tests/mock-integration.sh --group gui`; progress-monitor suite; `--group signals` when supervision changes |
+| Autonomous real Zenity protocol | Controlled real Zenity section below; `tests/zenity-autonomous-qualification.py`, `tests/zenity-x11-events.py` | `python3 -B tests/zenity-autonomous-integration.py`; complete graphical qualification separately |
 | Managed runtimes | Managed-runtimes section; `runtime-manager.sh` | Runtime-manager and runtime-manager-hardening suites; mocks `--group runtime` |
 | Launcher/install/cleanup | Entrypoints/packaging sections; `install-gui.sh`, `private-launcher-manager.py`, `packaging/` | Installer and package-user-cleanup suites; lifecycle/upgrade qualification as applicable |
 | Versioning/contributor guards | Version section below; `scripts/check-push-version.py`, `.githooks/pre-push` | `python3 -B scripts/check-push-version.py coherence`; `python3 -B tests/push-version-integration.py` |
@@ -383,8 +384,9 @@ Run from the repository root:
 The default is intentionally the complete hermetic `full` profile with one
 integration suite at a time. It is the complete local contract and gives the
 most readable live output. A release additionally requires the real-tools,
-distribution packaging, external-version and interactive qualification jobs
-documented below; `--full` alone does not claim those environments.
+distribution packaging, external-version and real Zenity qualifications
+documented below. Real Zenity permits a complete manual or autonomous route;
+`--full` alone does not claim those environments.
 
 ## Fast feedback, timing and concurrency
 
@@ -432,9 +434,10 @@ therefore cannot leave a worker idle while an unrelated long suite is still
 running. Reports and the first nonzero status remain selected in manifest order
 rather than completion order.
 
-The Python version, source-archive, CI-proof, automation-handoff and formatter
-bootstrap suites are explicit timed tasks in that same bounded static phase,
-not serial subprocesses hidden inside the source-assertion task. Both canonical
+The Python version, source-archive, CI-proof, automation-handoff, formatter
+bootstrap and autonomous Zenity evidence suites are explicit timed tasks in
+that same bounded static phase, not serial subprocesses hidden inside the
+source-assertion task. Both canonical
 profiles execute each family exactly once. Standalone `./test-static.sh` keeps
 the complete contract; `./test-static.sh --source-only` intentionally omits
 these separately scheduled behavioral suites and is not a qualification profile.
@@ -1331,11 +1334,27 @@ causes publication to fail explicitly. Only the final job receives
 
 ## Controlled real Zenity qualification
 
+The real Zenity requirement can be satisfied by either a complete manual route
+or the complete autonomous route below. Human gestures and visual confirmation
+are required only for the manual route. Both routes exercise the actual GUI,
+engine and real Zenity dialogs; headless mock answers alone do not qualify
+graphical behavior. Neither route is part of the ordinary `tests/run-all.sh`
+or GitHub Actions matrix. The autonomous validator's headless regression tests
+are part of that matrix, but do not constitute graphical qualification.
+
+Retain evidence for the exact candidate source tree and environment. All nine
+scenarios must pass, including ten `cancel-success-race` repetitions, under one
+complete route. Partial manual results, isolated real-event runs and earlier
+candidate evidence must not be assembled into an autonomous PASS. Changing
+the protocol or candidate contents requires qualification of the resulting
+tree. These procedures authorize no tag, publication or external mutation;
+the other source, packaging and release requirements continue to apply.
+
+### Manual route
+
 `tests/zenity-real-session-qualification.sh` is the interactive end-to-end
-protocol for behavior that a headless mock cannot prove. It deliberately does
-not run in `tests/run-all.sh` or GitHub Actions because an operator must perform
-and confirm visible desktop interactions in a real Fedora 44 or Ubuntu 24.04
-graphical session.
+protocol. An operator performs and confirms visible desktop interactions in a
+real Fedora 44 or Ubuntu 24.04 graphical session.
 
 Run one documented scenario at a time:
 
@@ -1357,6 +1376,106 @@ residual descendants. Its default output is under
 `qualification-evidence/zenity/`, which is ignored because it is local,
 generated evidence rather than permanent source documentation. Pass an
 explicit second path when another evidence store owns the result.
+
+### Autonomous route
+
+Use Fedora 44 or Ubuntu 24.04 in a graphical Wayland session with Zenity,
+Xwayland, D-Bus, `gdbus`, libX11, libXtst and Nautilus. Nautilus is currently the only
+supported autonomous folder viewer. The real tool prerequisites are usable
+yt-dlp (including its `curl_cffi` impersonation dependencies), Deno, aria2c,
+FFmpeg and FFprobe. An explicit
+`YTDLP_REAL_BINARY=/absolute/path/to/yt-dlp` may select an existing candidate
+binary under the same admission checks. Run from the source checkout:
+
+```bash
+python3 -B tests/zenity-autonomous-qualification.py
+```
+
+This entry point uses private HOME/XDG roots, loopback media fixtures, real
+download/remux tools and the isolated display adapter in
+`tests/zenity-x11-events.py`. It reports its local evidence directory. The
+optional `--evidence-dir DIR` selects another store for the report, while
+application state remains in its private temporary roots. That destination
+must not already exist; exports contain selected JSON, JSONL, log and PPM
+evidence, excluding private request seeds and runtime/media data. The
+dedicated Xwayland server and service-free D-Bus prevent selection of personal
+windows or activation of personal desktop services. Initial URL, profile and
+destination answers may be scripted; progression, completion, error,
+cancellation, restarted entry and folder-viewer observations must concern real
+mapped windows belonging to the fixture. Keyboard readiness proves receipt of
+complete key pairs in a disposable window before semantic actions; accepting
+an XTest request alone is insufficient. The fixture selects
+`GSK_RENDERER=cairo` only in its isolated graphical environment; other
+renderers are outside this qualification.
+
+| Scenario | Required autonomous evidence |
+| --- | --- |
+| `success` | A mapped progress dialog receives numeric progress; the mapped success dialog agrees with the engine's confirmed result record and the final file's content and location. |
+| `error` | A controlled real transfer failure produces a mapped error dialog, no success and no confirmed result record. |
+| `cancel-transfer` | The actual Cancel button is activated while transfer is observed; the GUI reports cancellation and the transfer stops within the existing deadline. |
+| `cancel-ffmpeg` | The actual Cancel button is activated while real FFmpeg remux is observed; remux stops without confirming an incomplete result, preserving permitted native partials. |
+| `cancel-success-race` | Ten actual Cancel actions: five before result confirmation during late real FFmpeg progress, requiring status 130 and no confirmed result record; five after verified confirmation, requiring status 0 and the correct success dialog/file. |
+| `new-download` | The actual New download control opens a new real entry dialog after success; closing it leaves no stale session, descendant or window. |
+| `open-folder` | The actual Open folder control starts isolated Nautilus; its `OpenLocations` D-Bus property equals the selected directory URI, its window is captured and survives GUI exit, and its owned primary later exits with status 0. |
+| `signal-entry` | TERM is sent only to the GUI PID after the real entry window is mapped; status is 143 with no residual application process or window. |
+| `signal-progress` | TERM is sent only to the GUI PID after a real progress window and active transfer are observed; status is 143 with no residual application process or window. |
+
+The five pre-publication races require progress of at least 97%, a live real
+FFmpeg remux and absence of the engine's confirmed result record before the
+actual Cancel action.
+For the five post-publication races, the adapter holds the monitor's real 100%
+line before forwarding it to Zenity, for at most ten seconds. The coordinator
+verifies the engine's atomic result record and the named media's decoded
+content before activating the still mapped dialog's Cancel button. This
+controlled input barrier makes both sides
+of the completion boundary observable without changing an application timeout
+or substituting a synthetic result. Expiry fails; an already closed window
+does not count as an actual Cancel action.
+
+Publication evidence follows the actual private `--result-file` record passed
+by the GUI to its attributed engine. The presence of a media-shaped filename
+alone is insufficient: a canceled native transfer or remux may legitimately
+retain a partial under that name. Qualification preserves those permitted
+partials and records them as unconfirmed; it never promotes them to successful
+results or requires their deletion. A confirmed result must name the expected
+contained file and pass the content check.
+
+Each scenario records source/environment identity, mapped-window and monotonic
+event evidence, dialog responses, GUI status, output assertions, privacy
+observations and attributed process topology. Captures contain only owned
+fixture windows in PPM format, with dimensions and SHA-256 identity; uniform
+images are rejected. Dialog classification combines the application's dialog
+arguments with the real response and actual output state. Progress records
+identify the monitor's values and capture the painted real dialog; only the
+explicit post-publication 100% barrier withholds a value from that dialog.
+This does not perform OCR, verify every rendered word or pixel, or
+judge visual layout. A screenshot alone cannot prove button semantics,
+consumer shutdown or file contents. No human gesture, manual visual judgment,
+personal file-manager integration or unsupported desktop configuration is
+claimed by the autonomous route.
+
+The schema-1 `summary.json` requires all eighteen trial records, with separate
+source identity, tool/environment versions and per-trial continuous topology
+and pre-rescue observations. The complete tracked/non-ignored source inventory
+is bound before the run and checked again afterwards; a changed candidate
+cannot retain a PASS.
+
+The application verdict is established before fixture rescue or destruction of
+the dedicated display. It requires complete process observation, no private
+URL/header exposure, no residual application window or live consumer, and the
+expected output/cleanup state. The deliberately opened viewer is identified
+separately and must survive application cleanup before the fixture closes its
+own viewer. Missing graphical/tool capabilities, unsupported environments,
+incomplete observations, absent required events, a deadline failure or an
+uncertain cleanup fail the qualification; none may become a skip or a scripted
+PASS. Fixture rescue is bounded, restricted to authenticated owned processes,
+and cannot repair a failing verdict. Individual application, event and
+shutdown deadlines remain unchanged.
+
+`python3 -B tests/zenity-autonomous-integration.py` exercises the evidence
+validator with valid controls and rejected incomplete or contradictory
+records. This headless proof protects the oracle; only the complete real run
+above can satisfy the autonomous graphical requirement.
 
 ## Shared-destination and process qualification
 
@@ -1550,9 +1669,9 @@ logs, statuses, pre-rescue inventories and fixture metadata/events are copied
 there. Media, seeds, configuration and runtimes are never exported. The printed
 evidence directory retains ancestor modes/filesystem metadata and redacted
 scripted-dialog diagnostics so a startup refusal cannot become an empty log.
-Scripted answers do not
-qualify visible desktop gestures; the interactive Zenity procedure remains
-separate. No network outage or actual CIFS qualification is implied.
+Scripted answers do not qualify visible desktop gestures; complete real Zenity
+qualification, through either route above, remains separate. No network outage
+or actual CIFS qualification is implied.
 
 On a graphical Linux host with Xwayland, Zenity, D-Bus, libX11 and libXtst,
 run the optional real-event variant through the same bounded wrapper:
@@ -1577,10 +1696,12 @@ entry/progress windows, including transfer and real remux cancellation while
 other instances continue. It selects New download in a real completion dialog
 and closes the new real entry. Ordinary URL/profile/folder selection is still
 scripted. Event records identify real windows and monotonic emission times;
-this is neither a human gesture nor a substitute for the operator-assisted
-procedure. Missing graphical capabilities fail this opt-in run, never silently
-turn it into a scripted PASS. Cancel uses Tab then Space for entry and Space on
-the initially focused Cancel button for progress; `escape` is a separate action.
+this is not a human gesture. This subset alone does not satisfy either complete
+real Zenity route; the autonomous entry point above uses the adapter with the
+remaining scenarios and outcome assertions. Missing graphical capabilities
+fail this opt-in run, never silently turn it into a scripted PASS. Cancel uses
+Tab then Space for entry and Space on the initially focused Cancel button for
+progress; `escape` is a separate action.
 Short response controls distinguish `ZENITY_CANCEL=41` from `ZENITY_ESC=42` and
 retain the normal cancellation status 1; progress input stays open until the
 verdict so EOF cannot fake cancellation. Keyboard readiness does not extend the

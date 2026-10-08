@@ -26,6 +26,9 @@
   incomplete PID; retain a deterministic premature-publication counterexample.
 - Start the final qualification observation after its stop request, preventing
   stale exit snapshots while still refusing live consumers and procfs failures.
+- Allow autonomous real-Zenity qualification with isolated windows, synthetic
+  media, verified result records and cancellation checks on both sides of
+  successful publication; retain the operator-assisted procedure.
 - Require absolute RFC3339 creation timestamps for scheduled release evidence
   while preserving the fourteen-day freshness window.
 
