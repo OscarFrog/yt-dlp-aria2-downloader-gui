@@ -13,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
+import select
 import signal
 import subprocess
 import sys
@@ -730,21 +731,57 @@ class PublicationWitnessTests(unittest.TestCase):
         self.final.write_bytes(b'unconfirmed native remux bytes')
         self.observer = load_module('result_observer', PROJECT / 'tests/process-observer.py')
         self.child = subprocess.Popen(
-            [sys.executable, '-I', '-B', '-c', 'import sys; sys.stdin.buffer.read()',
-             str(PROJECT / 'download-video.sh'), '--result-file', str(self.record), 'argv-sentinel'],
+            self.child_command(),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         self.addCleanup(self.stop_child)
+        # Popen can return while exec still exposes an empty /proc cmdline.
+        # Observe only after this attributed child has initialized itself.
+        self.wait_child_message(self.child, b'publication-ready\n')
         self.identity = self.observer.process_row(Path(f'/proc/{self.child.pid}/stat'))
         self.state = {'live': {str(self.child.pid): self.identity}}
         self.witness = CHECK.ResultWitness(self.final, self.observer)
         self.addCleanup(self.witness.close)
 
-    def stop_child(self):
+    def child_command(self):
+        code = "import os, sys; os.write(1, b'publication-ready\\n'); sys.stdin.buffer.read()"
+        return [sys.executable, '-I', '-B', '-c', code,
+                str(PROJECT / 'download-video.sh'), '--result-file', str(self.record), 'argv-sentinel']
+
+    def wait_child_message(self, child, expected):
+        readable, _, _ = select.select([child.stdout], [], [], 5)
+        self.assertTrue(readable, 'publication fixture child did not acknowledge initialization')
+        self.assertEqual(os.read(child.stdout.fileno(), 4096), expected)
+
+    def stop_child(self, child=None):
+        child = self.child if child is None else child
         try:
-            self.child.communicate(input=b'', timeout=5)
+            child.communicate(input=b'', timeout=5)
         except subprocess.TimeoutExpired:
-            self.child.kill()
-            self.child.communicate(timeout=5)
+            child.kill()
+            child.communicate(timeout=5)
+
+    def test_initializing_child_is_observed_only_after_exec_acknowledgement(self):
+        code = ('import os, sys\n'
+                'os.write(1, b"initializing\\n")\n'
+                'assert sys.stdin.buffer.read(2) == b"go"\n'
+                f'os.execv(sys.executable, {self.child_command()!r})\n')
+        child = subprocess.Popen([sys.executable, '-I', '-B', '-c', code],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.addCleanup(self.stop_child, child)
+        self.wait_child_message(child, b'initializing\n')
+        identity = self.observer.process_row(Path(f'/proc/{child.pid}/stat'))
+        state = {'live': {str(child.pid): identity}}
+        witness = CHECK.ResultWitness(self.final, self.observer)
+        self.addCleanup(witness.close)
+        self.assertIsNone(child.poll())
+        self.assertFalse(witness.observe(state)['result_discovered'])
+        os.write(child.stdin.fileno(), b'go')
+        self.wait_child_message(child, b'publication-ready\n')
+        current = self.observer.process_row(Path(f'/proc/{child.pid}/stat'))
+        self.assertEqual(current['start'], identity['start'])
+        observed = witness.observe(state)
+        self.assertTrue(observed['result_discovered'])
+        self.assertFalse(observed['result_published'])
 
     def publish(self, payload=None):
         temporary = self.parent / 'pending'
