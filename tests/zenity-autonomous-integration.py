@@ -672,6 +672,100 @@ class EvidenceStreamTests(unittest.TestCase):
             self.assertEqual(CHECK.read_events(path, 'success', complete=True), [chosen])
 
 
+class MediaRouteTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='zenity-media-route-')
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.content = b'0123456789abcdef'
+        self.source = self.root / 'fixture-media'
+        self.source.write_bytes(self.content)
+        self.proof = self.root / 'predeclared-proof.json'
+        self.events = self.root / 'events.jsonl'
+        self.active = set()
+        self.gate = mock.Mock()
+        self.gate.wait.return_value = True
+        routes = {
+            '/registered.mp4': ('internal-label', self.source, self.gate, self.proof, False),
+            '/error.mp4': ('controlled-error', self.source, self.gate, self.proof, True),
+        }
+        self.handler = CHECK.make_media_handler(routes, self.active, self.events)
+
+    def request(self, target, headers=''):
+        raw = f'GET {target} HTTP/1.0\r\nHost: fixture.invalid\r\n{headers}\r\n'.encode('ascii')
+
+        class Request(self.handler):
+            def setup(request):
+                request.rfile = io.BytesIO(raw)
+                request.wfile = io.BytesIO()
+
+            def finish(request):
+                pass
+
+        request = Request(None, ('127.0.0.1', 12345), object())
+        head, body = request.wfile.getvalue().split(b'\r\n\r\n', 1)
+        return int(head.split(b' ', 2)[1]), head, body
+
+    def test_registered_media_and_range_use_the_preconstructed_record(self):
+        # BaseHTTPRequestHandler reduces a leading // to / before dispatch.
+        for target in ('/registered.mp4', '//registered.mp4'):
+            with self.subTest(target=target):
+                status, _, body = self.request(target)
+                self.assertEqual((status, body), (200, self.content))
+        status, head, body = self.request('/registered.mp4', 'Range: bytes=4-\r\n')
+        self.assertEqual((status, body), (206, self.content[4:]))
+        self.assertIn(b'Content-Range: bytes 4-15/16\r\n', head + b'\r\n')
+        self.assertEqual(self.gate.wait.call_count, 3)
+        self.assertEqual(self.active, set())
+        self.assertFalse(self.events.exists())
+        self.assertFalse(self.proof.exists())
+
+    def test_unknown_alias_and_traversal_targets_cannot_access_media_or_evidence(self):
+        targets = ('/unknown.mp4', '/nested/registered.mp4', '/x/../registered.mp4',
+                   '/../registered.mp4', '/%2e%2e/registered.mp4', '/%72egistered.mp4',
+                   '/registered.more.mp4', '/registered.mp4?query=ignored',
+                   '/registered.mp4#ignored', 'http://fixture.invalid/registered.mp4',
+                   '/REGISTERED.mp4', '/nested/error.mp4', '/error.mp4?query=ignored')
+        for target in targets:
+            with self.subTest(target=target), \
+                    mock.patch.object(Path, 'read_bytes', side_effect=AssertionError('unregistered media read')), \
+                    mock.patch.object(CHECK, 'write_json', side_effect=AssertionError('unregistered proof write')):
+                status, _, _ = self.request(target)
+                self.assertEqual(status, 404)
+        self.gate.wait.assert_not_called()
+        self.assertEqual(self.active, set())
+        self.assertEqual({path.name for path in self.root.iterdir()}, {'fixture-media'})
+        self.assertEqual(self.source.read_bytes(), self.content)
+
+    def test_transfer_timeout_writes_only_the_preconstructed_failure_path(self):
+        def timeout(_deadline):
+            self.assertEqual(self.active, {'internal-label'})
+            return False
+
+        self.gate.wait.side_effect = timeout
+        with mock.patch.object(CHECK, 'write_json', wraps=CHECK.write_json) as write:
+            status, _, body = self.request('//registered.mp4')
+        self.assertEqual(status, 200)
+        self.assertEqual(body, self.content[:len(self.content) // 2])
+        write.assert_called_once_with(self.proof, {'barrier_timeout': True})
+        self.assertEqual(json.loads(self.proof.read_text()), {'barrier_timeout': True})
+        self.assertEqual({path.name for path in self.root.iterdir()}, {'fixture-media', 'predeclared-proof.json'})
+        self.assertEqual(self.active, set())
+
+    def test_controlled_http_error_uses_the_registered_label_without_media_access(self):
+        with mock.patch.object(Path, 'read_bytes', side_effect=AssertionError('error route read media')):
+            status, _, _ = self.request('/error.mp4')
+        self.assertEqual(status, 404)
+        events = [json.loads(line) for line in self.events.read_text().splitlines()]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]['event'], 'http-error-response')
+        self.assertEqual(events[0]['label'], 'controlled-error')
+        self.assertEqual(events[0]['status'], 404)
+        self.assertGreater(events[0]['monotonic_ns'], 0)
+        self.gate.wait.assert_not_called()
+        self.assertFalse(self.proof.exists())
+
+
 class WindowTitleTests(unittest.TestCase):
     @staticmethod
     def display(payload=b'output 100% $ \xc3\xa9', *, status=0, actual=2, fmt=8,

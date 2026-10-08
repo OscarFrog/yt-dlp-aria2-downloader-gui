@@ -551,44 +551,27 @@ os.execv(os.environ['FIXTURE_REAL_YTDLP'], [os.environ['FIXTURE_REAL_YTDLP'], *a
                                        yt_dlp_sha256=hashlib.sha256(target.read_bytes()).hexdigest()))
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--evidence-dir', type=Path)
-    args = parser.parse_args()
-    os.umask(0o077)
-    root = Path(tempfile.mkdtemp(prefix='zenity-autonomous-', dir='/tmp'))
-    evidence = args.evidence_dir.resolve() if args.evidence_dir else root
-    if evidence != root:
-        evidence.mkdir(mode=0o700, parents=True, exist_ok=False)
-    print(f'Evidence: {evidence}\nPrivate fixture: {root}', flush=True)
-    observer_module = load_module('autonomous_observer', 'process-observer.py')
-    events_module = load_module('autonomous_events', 'zenity-x11-events.py')
-    rows, children, gates, active, paths = [], [], {}, set(), {}
-    session = None
-    server = None
-    passed = False
-    failure = None
-
-    def interrupted(number, _frame):
-        raise InterruptedError(f'Qualification interrupted by signal {number}')
-
-    old_handlers = {number: signal.signal(number, interrupted)
-                    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
-
+def make_media_handler(routes, active, event_log):
+    """Resolve exact HTTP targets to trusted, preconstructed fixture records."""
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_args):
             pass
 
         def do_GET(self):
-            label = self.path.rsplit('/', 1)[-1].split('.')[0]
-            if label not in paths or label == 'error':
-                if label == 'error':
-                    with (root / 'dialog-events.jsonl').open('a') as stream:
-                        stream.write(json.dumps(dict(event='http-error-response', label=label,
-                                                     monotonic_ns=time.monotonic_ns(), status=404)) + '\n')
+            # Request data selects a prepared record; filenames and labels
+            # come exclusively from fixture preparation, never from the URL.
+            route = routes.get(self.path)
+            if route is None:
                 self.send_error(404)
                 return
-            content = paths[label].read_bytes()
+            label, source, gate, failure_path, fail_http = route
+            if fail_http:
+                with event_log.open('a') as stream:
+                    stream.write(json.dumps(dict(event='http-error-response', label=label,
+                                                 monotonic_ns=time.monotonic_ns(), status=404)) + '\n')
+                self.send_error(404)
+                return
+            content = source.read_bytes()
             start = 0
             if self.headers.get('Range'):
                 start = int(self.headers['Range'].split('=')[1].split('-')[0])
@@ -604,8 +587,8 @@ def main():
                 self.wfile.write(content[start:start + prefix])
                 self.wfile.flush()
                 active.add(label)
-                if not gates[label].wait(30):
-                    write_json(root / (label + '.barrier-failed.json'), {'barrier_timeout': True})
+                if not gate.wait(30):
+                    write_json(failure_path, {'barrier_timeout': True})
                     return
                 self.wfile.write(content[start + prefix:])
                 self.wfile.flush()
@@ -613,6 +596,33 @@ def main():
                 pass
             finally:
                 active.discard(label)
+
+    return Handler
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--evidence-dir', type=Path)
+    args = parser.parse_args()
+    os.umask(0o077)
+    root = Path(tempfile.mkdtemp(prefix='zenity-autonomous-', dir='/tmp'))
+    evidence = args.evidence_dir.resolve() if args.evidence_dir else root
+    if evidence != root:
+        evidence.mkdir(mode=0o700, parents=True, exist_ok=False)
+    print(f'Evidence: {evidence}\nPrivate fixture: {root}', flush=True)
+    observer_module = load_module('autonomous_observer', 'process-observer.py')
+    events_module = load_module('autonomous_events', 'zenity-x11-events.py')
+    rows, children, gates, active, routes = [], [], {}, set(), {}
+    session = None
+    server = None
+    passed = False
+    failure = None
+
+    def interrupted(number, _frame):
+        raise InterruptedError(f'Qualification interrupted by signal {number}')
+
+    old_handlers = {number: signal.signal(number, interrupted)
+                    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
 
     try:
         os_release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
@@ -682,7 +692,8 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         expected_hash = decoded_hash(source, ffmpeg)
         write_json(root / 'environment.json', dict(python=sys.version, kernel=os.uname().release,
                    os_release=Path('/etc/os-release').read_text(), display_isolated=True, renderer='cairo'))
-        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        handler = make_media_handler(routes, active, root / 'dialog-events.jsonl')
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
         server.daemon_threads = True
         threading.Thread(target=server.serve_forever, daemon=True).start()
         base = f'http://127.0.0.1:{server.server_port}'
@@ -690,7 +701,9 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         matrix += [('cancel-success-race', f'cancel-success-race-{index:02}') for index in range(10)]
         for scenario, label in matrix:
             print(f'Running {label}', flush=True)
-            paths[label], gates[label] = source, threading.Event()
+            gates[label] = threading.Event()
+            routes['/' + label + '.mp4'] = (label, source, gates[label],
+                                           root / (label + '.barrier-failed.json'), scenario == 'error')
             seed = root / (label + '.seed.json')
             write_json(seed, dict(id=label, title=label, extractor='generic', extractor_key='Generic',
                                  webpage_url=base + '/request/' + label, duration=4,
