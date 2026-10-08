@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.4.1 - Unreleased
+
+### Maintenance
+
+- Fix procfs admission and process identity handling
+
+### Process supervision
+
+- Refuse unavailable or unreadable process identity metadata before starting
+  media work, preserving status 69 and conservative shutdown after admission.
+- Accept valid identities when Linux truncates a multibyte process or thread
+  name, while still rejecting malformed identities and observation failures.
+  Keep refusal diagnostics bounded and free of private exception text or paths.
+- Confirm transient procfs disappearance states within one shared two-read
+  budget; a negative session ID alone never proves that a process has exited.
+
+### Qualification and maintenance
+
+- Update the pinned shfmt tool to 3.14.1 and align the doctor isolation oracle
+  with its canonical heredoc layout, retaining the Python isolation guard.
+- Extend regressions for admission, process-name bytes, disappearance races
+  and the formatter handoff protocol.
+- Publish thread-fixture readiness atomically so qualification cannot read an
+  incomplete PID; retain a deterministic premature-publication counterexample.
+- Start the final qualification observation after its stop request, preventing
+  stale exit snapshots while still refusing live consumers and procfs failures.
+- Allow autonomous real-Zenity qualification with isolated windows, synthetic
+  media, verified result records and cancellation checks on both sides of
+  successful publication; retain the operator-assisted procedure.
+- Require absolute RFC3339 creation timestamps for scheduled release evidence
+  while preserving the fourteen-day freshness window.
+
 ## 2.4.0 - Unreleased
 
 ### Maintenance

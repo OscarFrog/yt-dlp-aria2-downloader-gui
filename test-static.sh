@@ -28,7 +28,7 @@ fi
 readonly STANDARD_HEADER_PROJECT='yt-dlp-aria2-downloader-gui'
 # The development tree can lead the latest installable GitHub release. Keep the
 # two contracts explicit so README package names never advertise absent assets.
-readonly EXPECTED_VERSION='2.4.0'
+readonly EXPECTED_VERSION='2.4.1'
 readonly EXPECTED_PUBLISHED_VERSION='2.4.0'
 readonly STANDARD_HEADER_SEPARATOR='# =============================================================================='
 SOURCE_INVENTORY_FILE=''
@@ -1120,7 +1120,7 @@ assert_shell_policy_lists_are_canonical() {
 '''
     expected = [str(root / f"tests/{name}-integration.py") for name in (
         "push-version", "release-docs", "shfmt-version-handoff",
-        "ci-validation", "source-archive", "shfmt-bootstrap",
+        "ci-validation", "source-archive", "shfmt-bootstrap", "zenity-autonomous",
     )]
 
     def check(arguments, entries, status=0, overrides=None):
@@ -2782,7 +2782,7 @@ test_static_tooling_contracts() {
     assert_status 0 'run-all lists its canonical integration suites' \
         "${SCRIPT_DIR}/tests/run-all.sh" --list
     for python_suite in push-version release-docs shfmt-version-handoff \
-        ci-validation source-archive shfmt-bootstrap; do
+        ci-validation source-archive shfmt-bootstrap zenity-autonomous; do
         assert_text_contains "${ASSERT_OUTPUT}" "${python_suite}" \
             "run-all suite list exposes ${python_suite} coverage"
     done
@@ -2997,6 +2997,8 @@ test_static_python_behavioral_suites() {
         python3 -B "${SCRIPT_DIR}/tests/source-archive-integration.py"
     assert_status 0 'shfmt bootstrap publishes one authenticated concurrent cache entry' \
         python3 -B "${SCRIPT_DIR}/tests/shfmt-bootstrap-integration.py"
+    assert_status 0 'autonomous Zenity qualification rejects incomplete or contradictory evidence' \
+        python3 -B "${SCRIPT_DIR}/tests/zenity-autonomous-integration.py"
 }
 
 test_static_python_interface_contracts() {

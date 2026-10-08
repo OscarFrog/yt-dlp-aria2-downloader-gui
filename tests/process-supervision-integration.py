@@ -264,7 +264,9 @@ def worker():
         if time.monotonic() >= deadline: os._exit(90)
         time.sleep(.001)
     fd = os.open(root / 'thread-resource', os.O_WRONLY | os.O_CREAT, 0o600)
-    (root / 'thread-ready').write_text(str(os.getpid()))
+    ready = root / '.thread-ready.tmp'
+    ready.write_text(str(os.getpid()))
+    ready.replace(root / 'thread-ready')
     if select.select([release], [], [], 3)[0]: os.read(release, 1)
     os.write(fd, b'access after barrier')
     os.close(fd)
@@ -274,6 +276,89 @@ threading.Thread(target=worker).start()
 ctypes.CDLL(None).pthread_exit(None)
 ''')
         return script
+
+    def test_thread_readiness_is_published_after_complete_write(self):
+        script = self.thread_fixture()
+        source = script.read_text()
+        publication = """    ready = root / '.thread-ready.tmp'
+    ready.write_text(str(os.getpid()))
+    ready.replace(root / 'thread-ready')
+"""
+        self.assertEqual(source.count(publication), 1)
+        premature = self.root / 'premature-thread-readiness.py'
+        premature.write_text(source.replace(
+            publication, "    (root / 'thread-ready').write_text(str(os.getpid()))\n"))
+        driver = self.root / 'thread-readiness-driver.py'
+        driver.write_text(r'''import os, runpy, select, sys
+from pathlib import Path
+script, directory, release, opened, proceed = sys.argv[1:]
+root = Path(directory)
+opened, proceed = int(opened), int(proceed)
+real_open = Path.open
+def gated_open(path, mode='r', *args, **kwargs):
+    stream = real_open(path, mode, *args, **kwargs)
+    if (mode == 'w' and path.parent == root
+            and path.name in ('.thread-ready.tmp', 'thread-ready')):
+        os.write(opened, b'O')
+        os.close(opened)
+        if not select.select([proceed], [], [], 3)[0]: os._exit(91)
+        if os.read(proceed, 1) != b'W': os._exit(92)
+        os.close(proceed)
+    return stream
+Path.open = gated_open
+sys.argv = [script, directory, release, 'direct']
+runpy.run_path(script, run_name='__main__')
+''')
+        for mutant in (False, True):
+            with self.subTest(premature_publication=mutant):
+                case = self.root / ('premature-ready' if mutant else 'complete-ready')
+                case.mkdir()
+                opened_read, opened_write = os.pipe()
+                proceed_read, proceed_write = os.pipe()
+                release_read, release_write = os.pipe()
+                descriptors = [opened_read, opened_write, proceed_read, proceed_write,
+                               release_read, release_write]
+                try:
+                    process = subprocess.Popen(
+                        [sys.executable, '-I', '-B', str(driver),
+                         str(premature if mutant else script), str(case),
+                         str(release_read), str(opened_write), str(proceed_read)],
+                        pass_fds=(release_read, opened_write, proceed_read),
+                        start_new_session=True,
+                        env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token),
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    self.processes.append(process)
+                    for descriptor in (opened_write, proceed_read, release_read):
+                        os.close(descriptor)
+                        descriptors.remove(descriptor)
+                    self.assertTrue(select.select([opened_read], [], [], 3)[0],
+                                    'readiness writer did not open its file')
+                    self.assertEqual(os.read(opened_read, 1), b'O')
+                    opened_path = case / ('thread-ready' if mutant else '.thread-ready.tmp')
+                    self.assertEqual(opened_path.stat().st_size, 0)
+
+                    def assert_unpublished():
+                        self.assertFalse((case / 'thread-ready').exists(),
+                                         'thread readiness published before complete write')
+
+                    # The real open has created an empty file, but write_text has
+                    # not received its stream. Judge publication before release.
+                    if mutant:
+                        with self.assertRaisesRegex(
+                                self.failureException, 'published before complete write'):
+                            assert_unpublished()
+                    else:
+                        assert_unpublished()
+                    self.assertFalse((case / 'thread-last-access').exists())
+                    os.write(proceed_write, b'W')
+                    self.assertEqual(int(self.wait_file(f'{case.name}/thread-ready', process)),
+                                     process.pid)
+                    os.write(release_write, b'R')
+                    out, err = process.communicate(timeout=3)
+                    self.assertEqual(process.returncode, 0, (out, err))
+                finally:
+                    for descriptor in descriptors:
+                        os.close(descriptor)
 
     def test_timed_supervisor_retains_zombie_leader_live_thread(self):
         module = self.supervisor_module()
@@ -718,6 +803,163 @@ assert_no_residual_processes "$2" "$2/stop"
         self.assertEqual(verdict.returncode, 1, 'Zenity harness accepted an incomplete observer inventory')
         self.assertIn(b'PermissionError: procfs root denied', verdict.stderr)
         self.assertNotIn(b'surviving qualification descendants', verdict.stderr)
+
+    def test_observer_final_sample_follows_the_stop_request(self):
+        source = (PROJECT / 'tests/process-observer.py').read_text()
+        before = '            stopping = args.stop.exists()\n'
+        after = '            if stopping:\n'
+        self.assertEqual(source.count(before), 1)
+        self.assertEqual(source.count(after), 1)
+        premature = self.root / 'premature-final-observer.py'
+        premature.write_text(source.replace(before, '').replace(
+            after, '            if args.stop.exists():\n'))
+        harness = self.root / 'final-observer-harness.sh'
+        harness.write_text((PROJECT / 'tests/zenity-real-session-qualification.sh')
+                           .read_text().rsplit('\nmain "$@"', 1)[0])
+        wrapper = self.root / 'gated-final-observer.py'
+        wrapper.write_text('''import importlib.util, json, os, select, sys
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
+from unittest import mock
+''' + inspect.getsource(denied_procfs_enumeration) + '''
+source, token, evidence, stop, reported, proceed, case = sys.argv[1:]
+reported, proceed = int(reported), int(proceed)
+spec = importlib.util.spec_from_file_location('controlled_observer', source)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+real_sample = module.Observer.sample
+count = 0
+def gated_sample(observer):
+    global count
+    count += 1
+    if count == 2 and case == 'denied':
+        with denied_procfs_enumeration(PermissionError('final procfs root denied')):
+            return real_sample(observer)
+    state = real_sample(observer)
+    if count == 1:
+        (Path(evidence) / 'held-sample.json').write_text(json.dumps(state))
+        os.write(reported, b'S')
+        os.close(reported)
+        if not select.select([proceed], [], [], 3)[0]: os._exit(91)
+        if os.read(proceed, 1) != b'P': os._exit(92)
+        os.close(proceed)
+    return state
+module.Observer.sample = gated_sample
+sys.argv = [source, token, evidence, stop]
+module.main()
+''')
+        consumer_code = '''import os, sys
+report, release = map(int, sys.argv[1:])
+if os.fork(): os._exit(23)
+os.setsid()
+os.write(report, (str(os.getpid()) + '\\n').encode())
+os.close(report)
+os.read(release, 1)
+os._exit(0)
+'''
+        for case_name, mutant in (('stopped', False), ('stopped', True),
+                                  ('orphan', False), ('denied', False), ('denied', True)):
+            with self.subTest(case=case_name, premature_final_sample=mutant):
+                case = self.root / f'final-{case_name}-{mutant}'
+                case.mkdir()
+                stop = case / 'stop'
+                child_read, child_write = os.pipe()
+                release_read, release_write = os.pipe()
+                report_read, report_write = os.pipe()
+                proceed_read, proceed_write = os.pipe()
+                request_read, request_write = os.pipe()
+                descriptors = [child_read, child_write, release_read, release_write,
+                               report_read, report_write, proceed_read, proceed_write,
+                               request_read, request_write]
+                try:
+                    consumer = subprocess.Popen(
+                        [sys.executable, '-I', '-B', '-c', consumer_code,
+                         str(child_write), str(release_read)],
+                        pass_fds=(child_write, release_read), start_new_session=True,
+                        env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token),
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    self.processes.append(consumer)
+                    self.assertTrue(select.select([child_read], [], [], 3)[0],
+                                    'orphan fixture did not publish its identity')
+                    child = int(os.read(child_read, 100))
+                    self.assertEqual(consumer.wait(timeout=3), 23)
+                    if case_name == 'denied':
+                        os.write(release_write, b'R')
+                        self.assertEqual(os.waitpid(child, 0)[1], 0)
+                    environment = dict(os.environ, FIXTURE_PYTHON=sys.executable,
+                                       FIXTURE_WRAPPER=str(wrapper), FIXTURE_SOURCE=str(
+                                           premature if mutant else PROJECT / 'tests/process-observer.py'),
+                                       FIXTURE_TOKEN=self.token, FIXTURE_EVIDENCE=str(case),
+                                       FIXTURE_STOP=str(stop), FIXTURE_REPORT=str(report_write),
+                                       FIXTURE_PROCEED=str(proceed_read), FIXTURE_CASE=case_name,
+                                       FIXTURE_REQUEST=str(request_read))
+                    verdict = subprocess.Popen(['bash', '-c', '''source "$1"
+"${FIXTURE_PYTHON}" -I -B "${FIXTURE_WRAPPER}" "${FIXTURE_SOURCE}" \
+    "${FIXTURE_TOKEN}" "${FIXTURE_EVIDENCE}" "${FIXTURE_STOP}" \
+    "${FIXTURE_REPORT}" "${FIXTURE_PROCEED}" "${FIXTURE_CASE}" &
+WATCHER_PID=$!
+IFS= read -r request <&"${FIXTURE_REQUEST}"
+assert_no_residual_processes "${FIXTURE_EVIDENCE}" "${FIXTURE_STOP}"
+''', 'bash', str(harness)], env=environment,
+                                               pass_fds=(report_write, proceed_read, request_read),
+                                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    self.processes.append(verdict)
+                    for descriptor in (child_write, release_read, report_write,
+                                       proceed_read, request_read):
+                        os.close(descriptor)
+                        descriptors.remove(descriptor)
+                    self.assertTrue(select.select([report_read], [], [], 3)[0],
+                                    'observer did not hold its real first sample')
+                    self.assertEqual(os.read(report_read, 1), b'S')
+                    held = json.loads((case / 'held-sample.json').read_text())
+                    if case_name == 'denied':
+                        self.assertFalse(held['live'])
+                    else:
+                        self.assertIn(str(child), held['live'])
+                    if case_name == 'stopped':
+                        os.write(release_write, b'R')
+                        self.assertEqual(os.waitpid(child, 0)[1], 0)
+                        self.assertFalse(Path(f'/proc/{child}').exists())
+                    # The real harness requests stop only after the observed
+                    # child has exited/reaped, or while the orphan stays live.
+                    os.write(request_write, b'stop\n')
+                    deadline = time.monotonic() + 3
+                    while not stop.exists():
+                        self.assertLess(time.monotonic(), deadline, 'harness did not request observer stop')
+                        time.sleep(.005)
+                    os.write(proceed_write, b'P')
+                    out, err = verdict.communicate(timeout=3)
+                    final = json.loads((case / 'processes-current.json').read_text())
+                    if case_name == 'stopped':
+                        def assert_fresh():
+                            self.assertEqual(verdict.returncode, 0,
+                                             'observer used a sample taken before stop')
+                            self.assertFalse(final['live'])
+                        if mutant:
+                            with self.assertRaisesRegex(self.failureException, 'sample taken before stop'):
+                                assert_fresh()
+                            self.assertEqual(verdict.returncode, 65, (out, err))
+                            self.assertIn(str(child), final['live'])
+                        else:
+                            assert_fresh()
+                    elif case_name == 'orphan':
+                        self.assertEqual(verdict.returncode, 65, (out, err))
+                        self.assertIn(str(child), final['live'])
+                        self.assertIsNone(os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT))
+                        # The live-orphan refusal precedes release and rescue.
+                        os.write(release_write, b'R')
+                        self.assertEqual(os.waitpid(child, 0)[1], 0)
+                    elif mutant:
+                        with self.assertRaisesRegex(self.failureException, 'accepted final procfs denial'):
+                            self.assertEqual(verdict.returncode, 1, 'accepted final procfs denial')
+                        self.assertEqual(verdict.returncode, 0, (out, err))
+                    else:
+                        self.assertEqual(verdict.returncode, 1, (out, err))
+                        self.assertIn(b'PermissionError: final procfs root denied', err)
+                        self.assertFalse(final['live'], 'stale successful JSON was not the control')
+                finally:
+                    for descriptor in descriptors:
+                        os.close(descriptor)
 
     def test_engine_gui_detect_and_retire_zombie_main_thread(self):
         script = self.thread_fixture()

@@ -87,6 +87,9 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Tue Oct 06 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.4.1-1
+- Fix procfs admission and process identity handling
+
 * Wed Sep 30 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.4.0-1
 - Add shared destination concurrency and harden process lifecycle
 

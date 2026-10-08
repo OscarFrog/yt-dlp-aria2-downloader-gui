@@ -119,6 +119,8 @@ PYTHON_FILES=(
     tests/process-observer.py
     tests/multi-instance-real.py
     tests/zenity-x11-events.py
+    tests/zenity-autonomous-qualification.py
+    tests/zenity-autonomous-integration.py
     tests/process-supervision-integration.py
     private-launcher-manager.py
     scripts/update-published-version.py
