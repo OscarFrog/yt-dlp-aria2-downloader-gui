@@ -313,16 +313,20 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         for key in ('YTDLP_ARIA2_YTDLP_BIN', 'YTDLP_ARIA2_DENO_BIN', 'YTDLP_ARIA2_SUPERVISED_SESSION',
                     'YTDLP_ARIA2_SKIP_RUNTIME_UPDATE'):
             shared.pop(key, None)
-        lock_root = Path(subprocess.check_output(['python3', str(PROJECT / 'private-aria2-plan.py'),
-                                                  'private-root', '--no-runtime'], env=shared, text=True).strip())
+        lock_roots = [Path(line) for line in subprocess.check_output(
+            ['python3', str(PROJECT / 'private-aria2-plan.py'), 'coordination-roots'],
+            env=shared, text=True).splitlines()]
+        require(lock_roots, 'no historical coordination roots were qualified')
         info = output.stat()
-        bucket = lock_root / ('resources-' + hashlib.sha256(str((info.st_dev, info.st_ino)).encode()).hexdigest())
+        buckets = [root / ('resources-' + hashlib.sha256(str((info.st_dev, info.st_ino)).encode()).hexdigest())
+                   for root in lock_roots]
         # A new directory may reuse an old inode. Retained records from earlier
         # incarnations must remain intact, not count as activity of this fixture.
         initial_records = {}
-        for path in bucket.glob('*.resume.json'):
-            payload = path.read_bytes()
-            initial_records[path.name] = (hashlib.sha256(payload).hexdigest(), json.loads(payload)['active'])
+        for bucket in buckets:
+            for path in bucket.glob('*.resume.json'):
+                payload = path.read_bytes()
+                initial_records[path] = (hashlib.sha256(payload).hexdigest(), json.loads(payload)['active'])
 
         for index, color in enumerate(('red', 'green', 'blue', 'yellow')):
             path = root / f'source-{index}.mp4'
@@ -540,20 +544,21 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         # Exact historical inode, both launch orders. No old executable is
         # patched or credited with the new supervisor's guarantees.
         legacy_key = hashlib.sha256((str(output.resolve()) + '\0').encode()).hexdigest()
-        legacy = (lock_root / (legacy_key + '.lock')).open('a')
-        fcntl.flock(legacy, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        rejected = launch('old-before-new', 1)
-        finish(rejected, 75)
-        legacy.close()
+        for index, lock_root in enumerate(lock_roots):
+            with (lock_root / (legacy_key + '.lock')).open('a') as legacy:
+                fcntl.flock(legacy, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                rejected = launch(f'old-before-new-{index}', 1)
+                finish(rejected, 75)
         new = launch('new-before-old', 3)
         wait_active(new)
-        with (lock_root / (legacy_key + '.lock')).open('a') as legacy:
-            try:
-                fcntl.flock(legacy, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                pass
-            else:
-                raise AssertionError('old exclusive protocol bypassed a new active writer')
+        for lock_root in lock_roots:
+            with (lock_root / (legacy_key + '.lock')).open('a') as legacy:
+                try:
+                    fcntl.flock(legacy, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                else:
+                    raise AssertionError('old exclusive protocol bypassed a new active writer')
         gates[new[0]].set(); finish(new)
         if os.environ.get('YTDLP_LEGACY_ENGINE'):
             legacy_engine = Path(os.environ['YTDLP_LEGACY_ENGINE']).resolve(strict=True)
@@ -575,14 +580,17 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         finish(truncated, 143); gates[truncated[0]].set()
         changed_records = []
         final_digests = {}
-        for path in bucket.glob('*.resume.json'):
-            payload = path.read_bytes()
-            digest = hashlib.sha256(payload).hexdigest()
-            final_digests[path.name] = digest
-            if initial_records.get(path.name, (None, False))[0] != digest:
-                changed_records.append(json.loads(payload))
-        require(changed_records and all(not row['active'] for row in changed_records),
-                'completed cycles accumulated an active reservation')
+        for bucket in buckets:
+            root_records = []
+            for path in bucket.glob('*.resume.json'):
+                payload = path.read_bytes()
+                digest = hashlib.sha256(payload).hexdigest()
+                final_digests[path] = digest
+                if initial_records.get(path, (None, False))[0] != digest:
+                    root_records.append(json.loads(payload))
+            require(root_records and all(not row['active'] for row in root_records),
+                    'completed cycles left an active or missing coordination checkpoint')
+            changed_records.extend(root_records)
         require(all(final_digests.get(name) == digest for name, (digest, active) in initial_records.items() if active),
                 'fixture changed or removed an older active checkpoint')
         require(not any(event[2] == 'barrier-timeout' for event in events), 'a transfer barrier expired')

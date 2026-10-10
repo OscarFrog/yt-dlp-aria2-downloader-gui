@@ -160,55 +160,60 @@ def private_root_candidates(*, disk: bool, no_runtime: bool) -> list[tuple[Path,
     return candidates
 
 
-def select_private_root(*, disk: bool = False, no_runtime: bool = False) -> Path:
+def prepare_private_root(parent: Path, *, runtime: bool, disk: bool) -> Path:
     """Create only our own leaf, then prove its privacy before any secret write."""
     leaf = f"yt-dlp-aria2-downloader-{os.geteuid()}"
+    reject_controls(str(parent), "private root", reject_whitespace=False)
+    with directory_descriptor(parent, trusted_chain=True) as parent_fd:
+        require_local_filesystem(parent_fd, disk=disk)
+        if runtime:
+            require_private_directory_descriptor(parent_fd)
+        try:
+            os.mkdir(leaf, mode=0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        root_fd = os.open(
+            leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_fd,
+        )
+        try:
+            require_private_directory_descriptor(root_fd)
+            require_local_filesystem(root_fd, disk=disk)
+            probe_name = f".probe-{secrets.token_hex(16)}"
+            probe_fd = os.open(
+                probe_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600, dir_fd=root_fd,
+            )
+            try:
+                probe_stat = os.fstat(probe_fd)
+                if (
+                    not stat.S_ISREG(probe_stat.st_mode)
+                    or probe_stat.st_uid != os.geteuid()
+                    or stat.S_IMODE(probe_stat.st_mode) != 0o600
+                ):
+                    raise PlanError("filesystem does not enforce private file permissions")
+                os.write(probe_fd, b"private storage probe\n")
+                os.fsync(probe_fd)
+            finally:
+                os.close(probe_fd)
+                os.unlink(probe_name, dir_fd=root_fd)
+            root_stat = os.fstat(root_fd)
+            visible = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            if (visible.st_dev, visible.st_ino) != (root_stat.st_dev, root_stat.st_ino):
+                raise PlanError("private directory changed during validation")
+            if directory_identity(parent / leaf) != (root_stat.st_dev, root_stat.st_ino):
+                raise PlanError("private directory path changed during validation")
+            return parent / leaf
+        finally:
+            os.close(root_fd)
+
+
+def select_private_root(*, disk: bool = False, no_runtime: bool = False) -> Path:
+    """Temporary storage may fall back; coordination must use every old root."""
     for parent, runtime in private_root_candidates(disk=disk, no_runtime=no_runtime):
         try:
-            reject_controls(str(parent), "private root", reject_whitespace=False)
-            with directory_descriptor(parent, trusted_chain=True) as parent_fd:
-                require_local_filesystem(parent_fd, disk=disk)
-                if runtime:
-                    require_private_directory_descriptor(parent_fd)
-                try:
-                    os.mkdir(leaf, mode=0o700, dir_fd=parent_fd)
-                except FileExistsError:
-                    pass
-                root_fd = os.open(
-                    leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                    dir_fd=parent_fd,
-                )
-                try:
-                    require_private_directory_descriptor(root_fd)
-                    require_local_filesystem(root_fd, disk=disk)
-                    probe_name = f".probe-{secrets.token_hex(16)}"
-                    probe_fd = os.open(
-                        probe_name,
-                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                        0o600, dir_fd=root_fd,
-                    )
-                    try:
-                        probe_stat = os.fstat(probe_fd)
-                        if (
-                            not stat.S_ISREG(probe_stat.st_mode)
-                            or probe_stat.st_uid != os.geteuid()
-                            or stat.S_IMODE(probe_stat.st_mode) != 0o600
-                        ):
-                            raise PlanError("filesystem does not enforce private file permissions")
-                        os.write(probe_fd, b"private storage probe\n")
-                        os.fsync(probe_fd)
-                    finally:
-                        os.close(probe_fd)
-                        os.unlink(probe_name, dir_fd=root_fd)
-                    root_stat = os.fstat(root_fd)
-                    visible = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
-                    if (visible.st_dev, visible.st_ino) != (root_stat.st_dev, root_stat.st_ino):
-                        raise PlanError("private directory changed during validation")
-                    if directory_identity(parent / leaf) != (root_stat.st_dev, root_stat.st_ino):
-                        raise PlanError("private directory path changed during validation")
-                    return parent / leaf
-                finally:
-                    os.close(root_fd)
+            return prepare_private_root(parent, runtime=runtime, disk=disk)
         except (OSError, PlanError):
             # No candidate receives secrets until every privacy check passes.
             # Existing user directories are never chmod'ed to make them usable.
@@ -219,6 +224,24 @@ def select_private_root(*, disk: bool = False, no_runtime: bool = False) -> Path
 
 def private_root(args: argparse.Namespace) -> int:
     print(select_private_root(disk=args.disk, no_runtime=args.no_runtime))
+    return 0
+
+
+def coordination_roots(_args: argparse.Namespace) -> int:
+    """Require every historical lock namespace, even after a transient failure."""
+    roots = []
+    identities = set()
+    for parent, runtime in private_root_candidates(disk=False, no_runtime=True):
+        root = prepare_private_root(parent, runtime=runtime, disk=False)
+        identity = directory_identity(root)
+        # Authenticate each path before deduplicating aliases of the same root.
+        if identity not in identities:
+            roots.append(root)
+            identities.add(identity)
+    if not roots:
+        raise PlanError('no coordination directory is available')
+    for root in roots:
+        print(root)
     return 0
 
 
@@ -900,10 +923,8 @@ def replace_private_json(path: Path, payload: dict) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def resource_state(args: argparse.Namespace) -> int:
-    state_path = Path(args.state)
-    state = read_json(state_path, 'resource plan')
-    registry = Path(args.registry)
+def resource_registry(registry: Path, state: dict) -> Path:
+    """Authenticate the destination bucket without changing existing entries."""
     with directory_descriptor(registry, trusted_chain=True) as descriptor:
         require_private_directory_descriptor(descriptor)
         bucket = 'resources-' + hashlib.sha256(str(tuple(state['identity'])).encode()).hexdigest()
@@ -914,16 +935,60 @@ def resource_state(args: argparse.Namespace) -> int:
     registry = registry / bucket
     with directory_descriptor(registry, trusted_chain=True) as descriptor:
         require_private_directory_descriptor(descriptor)
-    record = registry / resource_record_name(state)
-    if args.action == 'save':
-        previous = read_json(record, 'resource ownership') if record.exists() else {}
-        # The shell registers cleanup before admission can commit. A signal
-        # may interrupt either side of that commit; only our exact active
-        # transaction may be made passive. A refused request must not clear an
-        # older active checkpoint or adopt the files of a previous owner.
-        if (not state.get('transaction') or not previous.get('active') or
-                previous.get('transaction') != state['transaction']):
-            return 0
+    return registry
+
+
+def read_resource_record(path: Path, *, missing_ok: bool = True) -> dict:
+    """Only a confirmed missing name is an absent checkpoint."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        if not missing_ok:
+            raise PlanError('resource ownership inventory changed during admission')
+        return {}
+    record = read_json(path, 'resource ownership')
+    if (not isinstance(record, dict) or type(record.get('active')) is not bool
+            or not isinstance(record.get('family'), str) or not record['family']
+            or not isinstance(record.get('identity'), list) or len(record['identity']) != 2
+            or any(type(value) is not int or value < 0 for value in record['identity'])):
+        raise PlanError('invalid resource ownership checkpoint')
+    return record
+
+
+def resource_state(args: argparse.Namespace) -> int:
+    state_path = Path(args.state)
+    state = read_json(state_path, 'resource plan')
+    roots = [args.registry] if isinstance(args.registry, str) else args.registry
+    registries = []
+    failure = None
+    identities = set()
+    for root in roots:
+        try:
+            registry = resource_registry(Path(root), state)
+            identity = directory_identity(registry)
+            if identity in identities:
+                continue
+            identities.add(identity)
+            record = registry / resource_record_name(state)
+            if args.action == 'save':
+                previous = read_resource_record(record)
+                # Partial activation is possible. Only this exact active nonce
+                # grants cleanup authority, separately in every old registry.
+                if (not state.get('transaction') or not previous.get('active') or
+                        previous.get('transaction') != state['transaction']):
+                    continue
+            registries.append((registry, record))
+        except (OSError, PlanError) as exc:
+            if args.action == 'admit':
+                raise
+            # A failed registry must not prevent checkpointing our other copies;
+            # it still makes the overall save fail, never an apparent success.
+            if failure is None:
+                failure = exc
+    if not registries:
+        if failure is not None:
+            raise failure
+        return 0
     # Keep this authenticated inode alive until checkpoint publication. Closing
     # the observation FD before the decision would permit inode recycling
     # between the generation proof and the pathname-based resource snapshot.
@@ -937,8 +1002,16 @@ def resource_state(args: argparse.Namespace) -> int:
             # A failed/uncertain stop must retain protection even if a consumer
             # closed inherited lock descriptors. These are per-resource ownership
             # checkpoints, never a PID registry or an authority to signal anyone.
-            for path in registry.glob('*.resume.json'):
-                other = read_json(path, 'resource ownership')
+            checkpoints = []
+            for registry, _ in registries:
+                with directory_descriptor(registry, trusted_chain=True) as descriptor:
+                    require_private_directory_descriptor(descriptor)
+                    names = os.listdir(descriptor)
+                # Unlike glob's best-effort iteration, an unreadable inventory
+                # must fail before any activation can replace an old checkpoint.
+                checkpoints.extend(read_resource_record(registry / name, missing_ok=False)
+                                   for name in names if name.endswith('.resume.json'))
+            for other in checkpoints:
                 if other.get('active') and other.get('identity') == state['identity']:
                     if (incarnation == state.get('incarnation') and
                             different_directory_incarnations(other.get('incarnation'), incarnation)):
@@ -960,40 +1033,57 @@ def resource_state(args: argparse.Namespace) -> int:
                       'transaction': state['transaction'],
                       'identity': state['identity'], 'family': state['family'], 'active': False}
         if args.action == 'admit':
-            previous = read_json(record, 'resource ownership') if record.exists() else {}
-            legacy_record = registry / (state['key'] + '.resume.json')
-            if not previous and legacy_record != record and legacy_record.exists():
-                previous = read_json(legacy_record, 'legacy resource ownership')
+            previous_records = []
+            for registry, record in registries:
+                previous = read_resource_record(record)
+                legacy_record = registry / (state['key'] + '.resume.json')
+                if not previous and legacy_record != record:
+                    previous = read_resource_record(legacy_record)
+                previous_records.append(previous)
             # A legacy passive checkpoint still proves ownership only through its
             # complete original request/media/format binding and unchanged files.
             # Migration writes a separate current record; it never deletes the old
             # record or uses legacy metadata to dismiss an uncertain active owner.
-            legacy_resume = (previous.get('version') in (1, 2) and
-                             previous.get('incarnation') is None and
-                             previous.get('active') is False and
-                             previous.get('identity') == state['identity'] and
-                             previous.get('family') == state['family'])
-            expected_binding = state.get('legacy_binding', state['binding']) if legacy_resume else state['binding']
+            resumable = False
+            for previous in previous_records:
+                legacy_resume = (previous.get('version') in (1, 2) and
+                                 previous.get('incarnation') is None and
+                                 previous.get('active') is False and
+                                 previous.get('identity') == state['identity'] and
+                                 previous.get('family') == state['family'])
+                expected_binding = state.get('legacy_binding', state['binding']) if legacy_resume else state['binding']
+                if (previous.get('active') is False and
+                        previous.get('binding') == expected_binding and
+                        previous.get('owned') == snapshot):
+                    resumable = True
             # A .part name is no proof. Only this protocol's previous quiescent
             # checkpoint, media/request/format binding and unchanged file identities can
             # authorize a local native resumption. Network workspaces still restart.
             final_alias = normalized_resource_name(state['final_name'])
+            completed_names = {item.get('completed') for item in previous_records
+                               if isinstance(item.get('completed'), str)}
             for name in snapshot:
                 if (normalized_resource_name(name) == final_alias or
-                        name == previous.get('completed')):
+                        name in completed_names):
                     raise DestinationExistsError('final media destination already exists; refusing to overwrite it. Destination: ' + name)
             if snapshot and (not state['binding'] or state['output'] != state['final'] or
-                             previous.get('binding') != expected_binding or
-                             previous.get('owned') != snapshot):
+                             not resumable):
                 raise DestinationExistsError('pre-existing or ambiguous media resources; preserved, not an authorized resume')
             state['owned'] = snapshot
             replace_private_json(state_path, state)
             # Invalidate the previous checkpoint before tools run. A crash cannot
             # turn an unobserved write into a new ownership proof.
             checkpoint.update(active=True, owned={})
-            replace_private_json(record, checkpoint)
-        else:
-            replace_private_json(record, checkpoint)
+        for _, record in registries:
+            try:
+                replace_private_json(record, checkpoint)
+            except (OSError, PlanError) as exc:
+                if args.action == 'admit':
+                    raise
+                if failure is None:
+                    failure = exc
+        if failure is not None:
+            raise failure
         return 0
 
 
@@ -1336,7 +1426,8 @@ def check_space(args: argparse.Namespace) -> int:
     downloads = plan.get("requested_downloads")
     if not isinstance(downloads, list) or len(downloads) != 1 or not isinstance(downloads[0], dict):
         raise PlanError("yt-dlp plan must contain exactly one requested download")
-    selected = downloads[0].get("requested_formats") or downloads
+    download = selected_download(plan)
+    selected = download.get("requested_formats") or [download]
     if not isinstance(selected, list):
         raise PlanError("requested_formats must be an array")
     estimate = 0
@@ -1722,6 +1813,9 @@ def create_parser() -> argparse.ArgumentParser:
     root.add_argument("--no-runtime", action="store_true")
     root.set_defaults(handler=private_root)
 
+    coordination = subparsers.add_parser('coordination-roots', help='require every historical coordination root')
+    coordination.set_defaults(handler=coordination_roots)
+
     local = subparsers.add_parser("media-local-safe", help="check whether media may stay in the selected directory")
     local.add_argument("--output-dir", required=True)
     local.set_defaults(handler=media_local_safe)
@@ -1754,7 +1848,7 @@ def create_parser() -> argparse.ArgumentParser:
     ownership = subparsers.add_parser('resource-state', help='admit or checkpoint owned local media')
     ownership.add_argument('--action', choices=('admit', 'save'), required=True)
     ownership.add_argument('--state', required=True)
-    ownership.add_argument('--registry', required=True)
+    ownership.add_argument('--registry', required=True, action='append')
     ownership.add_argument('--completed-path', default='')
     ownership.set_defaults(handler=resource_state)
 

@@ -1075,7 +1075,7 @@ test_mock_engine_private_staging() {
     local active_file_result active_file_staging active_file_started
     local active_file_status active_file_termination_marker
     local ambiguous_marked attempt candidate candidate_ambiguous candidate_pgid
-    local candidate_pid crash_log crash_pgid crash_pid crash_result crash_metadata
+    local candidate_pid crash_log crash_pgid crash_pid crash_result crash_metadata crash_output
     local crash_staging crash_started crash_started_seen cross_candidate
     local invalid_mode legacy_exact other_output owned_staging_leftover
     local replacement_log replacement_original replacement_pid
@@ -1350,6 +1350,10 @@ test_mock_engine_private_staging() {
     # SIGKILL cannot run cleanup. A later session must preserve all legacy
     # residues because familiar names and markers do not authenticate the
     # previous session's identities or prove its descendants have stopped.
+    # Keep the deliberately active crash checkpoint separate from later
+    # scenarios; all crash/residue assertions still share this destination.
+    crash_output="${TEST_ROOT}/private-staging-crash-output"
+    mkdir -p -- "${crash_output}"
     crash_started="${TEST_ROOT}/private-staging-crash-started"
     crash_result="${TEST_ROOT}/private-staging-crash-result.txt"
     crash_log="${TEST_ROOT}/private-staging-crash.log"
@@ -1357,11 +1361,12 @@ test_mock_engine_private_staging() {
     prepare_argument_log 'private-staging-crash'
 
     setsid env \
+        MOCK_OUTPUT_DIR="${crash_output}" \
         YTDLP_ARIA2_SUPERVISED_SESSION=true \
         MOCK_LONG_DOWNLOAD=1 \
         MOCK_STARTED_MARKER="${crash_started}" \
         "${PROJECT_DIR}/download-video.sh" \
-        --output-dir "${OUTPUT_DIR}" \
+        --output-dir "${crash_output}" \
         --mode audio \
         --result-file "${crash_result}" \
         -- 'https://example.com/watch?v=private-staging-crash' \
@@ -1381,7 +1386,7 @@ test_mock_engine_private_staging() {
 
     crash_staging=''
     for ((attempt = 0; attempt < 100; attempt++)); do
-        crash_staging=$(find "${OUTPUT_DIR}" \
+        crash_staging=$(find "${crash_output}" \
             -mindepth 1 -maxdepth 1 -type d \
             -name '.yt-dlp-aria2.????????' -print -quit 2>/dev/null || true)
         [[ -n ${crash_staging} ]] && break
@@ -1452,11 +1457,11 @@ test_mock_engine_private_staging() {
     [[ ! -e ${crash_result} ]] \
         || fail 'SIGKILL crash published a result-file.'
 
-    legacy_exact="${OUTPUT_DIR}/.yt-dlp-aria2.LEGACY01"
-    ambiguous_marked="${OUTPUT_DIR}/.yt-dlp-aria2.AMBIG001"
-    invalid_mode="${OUTPUT_DIR}/.yt-dlp-aria2.BADMODE1"
+    legacy_exact="${crash_output}/.yt-dlp-aria2.LEGACY01"
+    ambiguous_marked="${crash_output}/.yt-dlp-aria2.AMBIG001"
+    invalid_mode="${crash_output}/.yt-dlp-aria2.BADMODE1"
     staging_symlink_target="${TEST_ROOT}/private-staging-symlink-target"
-    symlink_candidate="${OUTPUT_DIR}/.yt-dlp-aria2.SYMLINK1"
+    symlink_candidate="${crash_output}/.yt-dlp-aria2.SYMLINK1"
     other_output="${TEST_ROOT}/private-staging-other-output"
     cross_candidate="${other_output}/.yt-dlp-aria2.CROSS001"
 
@@ -1505,17 +1510,19 @@ test_mock_engine_private_staging() {
 
     prepare_argument_log 'private-staging-crash-reservation'
     assert_status 75 'uncertain crash keeps conflicting media reserved' \
+        env MOCK_OUTPUT_DIR="${crash_output}" \
         "${PROJECT_DIR}/download-video.sh" \
-        --output-dir "${OUTPUT_DIR}" --mode audio \
+        --output-dir "${crash_output}" --mode audio \
         -- 'https://example.com/watch?v=private-staging-crash'
     [[ ! -s ${MOCK_POST_CALL_LOG} && ! -s ${MOCK_ARIA2_ARG_LOG} ]] \
         || fail 'An unconfirmed crash allowed another transfer into its resources.'
 
     prepare_argument_log 'private-staging-preservation'
     assert_status 0 'abandoned private staging preservation' \
-        env MOCK_MEDIA_BASENAME='Independent media [def456]' \
+        env MOCK_OUTPUT_DIR="${crash_output}" \
+        MOCK_MEDIA_BASENAME='Independent media [def456]' \
         "${PROJECT_DIR}/download-video.sh" \
-        --output-dir "${OUTPUT_DIR}" \
+        --output-dir "${crash_output}" \
         --mode audio \
         -- 'https://example.com/watch?v=private-staging-preservation'
 
@@ -1551,7 +1558,7 @@ test_mock_engine_private_staging() {
         "${symlink_candidate}" \
         "${staging_symlink_target}" \
         "${other_output}"
-    rm -f -- "${OUTPUT_DIR}/Independent media [def456].webm"
+    rm -f -- "${crash_output}/Independent media [def456].webm"
 }
 
 test_mock_engine_network_destination() {
@@ -1826,10 +1833,7 @@ test_mock_engine_network_signals() {
     done
 }
 
-test_mock_engine_network_cleanup_boundaries() {
-    local source_copy="${TEST_ROOT}/cleanup-boundaries-source.sh"
-    local harness="${TEST_ROOT}/cleanup-boundaries-harness.sh"
-    local case_name workspace_record workspace_path
+mock_engine_internal_record_cleanup() {
     local internal_record_log="${TEST_ROOT}/internal-record-replacement-path"
     local internal_record=''
 
@@ -1850,6 +1854,14 @@ test_mock_engine_network_cleanup_boundaries() {
         || fail 'Preserved internal-record replacement retained authentication metadata.'
     rm -rf -- "${internal_record%/*}"
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+}
+
+test_mock_engine_network_cleanup_boundaries() {
+    local source_copy="${TEST_ROOT}/cleanup-boundaries-source.sh"
+    local harness="${TEST_ROOT}/cleanup-boundaries-harness.sh"
+    local case_name workspace_record workspace_path
+
+    mock_engine_internal_record_cleanup
 
     sed '$d' "${PROJECT_DIR}/download-video.sh" >"${source_copy}"
     cat >"${harness}" <<'EOF_NETWORK_CLEANUP_BOUNDARIES'
@@ -2028,6 +2040,11 @@ run_mock_engine_hls_group() {
 run_mock_engine_staging_group() {
     test_mock_active_staging_inventory
     test_mock_engine_private_staging
+    # The isolated scheduler group must also exercise the later shared-output
+    # scenario. Aggregates already reach it in their normal network sequence.
+    if [[ ${MOCK_GROUP} == engine-staging ]]; then
+        mock_engine_internal_record_cleanup
+    fi
 }
 
 run_mock_engine_group() {

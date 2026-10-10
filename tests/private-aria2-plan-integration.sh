@@ -994,6 +994,102 @@ test_network_media_permissions() {
     assert_status 65 'private local media staging remains strict' run_commit
 }
 
+test_space_admission_before_transfer() {
+    new_case 'space-admission-before-transfer'
+    python3 -I -B - "${PROJECT_DIR}" "${CASE_ROOT}" <<'PY_SPACE_ADMISSION'
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+
+project, root = map(Path, sys.argv[1:])
+source = (project / 'download-video.sh').read_text().rsplit('main "$@"', 1)[0]
+controlled = root / 'controlled-space.py'
+controlled.write_text('''import importlib.util
+import os
+import sys
+from types import SimpleNamespace
+
+assert sys.argv[2] == 'check-space'
+spec = importlib.util.spec_from_file_location('original_helper', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+# Only filesystem type/capacity are synthetic; JSON and directory checks run.
+module.filesystem_type = lambda descriptor: 0xEF53
+module.os.fstatvfs = lambda descriptor: SimpleNamespace(
+    f_bavail=int(os.environ['FIXTURE_CAPACITY']), f_frsize=1)
+sys.argv = sys.argv[1:]
+raise SystemExit(module.main())
+''')
+floor = 64 * 1024 * 1024
+plans = (
+    ('inherited-size', {'filesize': 30, 'requested_downloads': [{}]}),
+    ('inherited-components', {'requested_formats': [{'filesize': 10}, {'filesize_approx': 20}],
+                              'requested_downloads': [{}]}),
+    ('expanded-size', {'requested_downloads': [{'filesize': 30}]}),
+)
+for label, payload in plans:
+    for available, expected in ((floor + 89, 73), (floor + 90, 0)):
+        case = root / f'{label}-{available}'
+        case.mkdir(mode=0o700)
+        output, final = case / 'workspace', case / 'final'
+        output.mkdir(mode=0o700)
+        final.mkdir(mode=0o700)
+        plan = case / 'plan.json'
+        plan.write_text(json.dumps(payload))
+        events = case / 'events'
+        engine = case / 'engine.sh'
+        # Execute production main() and its actual check-space branch. Earlier
+        # setup is controlled; independently observable transfer/publication
+        # phases prove both refusal and that the positive path can reach them.
+        engine.write_text(source + '\n' + f'''
+cleanup() {{ :; }}
+parse_arguments() {{ :; }}
+resolve_requested_url() {{ :; }}
+validate_mode_selection() {{ :; }}
+initialize_runtime_dependencies() {{ :; }}
+prepare_output_directory() {{
+    OUTPUT_DIR={shlex.quote(str(output))}
+    FINAL_OUTPUT_DIR={shlex.quote(str(final))}
+    MEDIA_WORKSPACE=${{OUTPUT_DIR}}
+}}
+prepare_private_work_files() {{
+    PRIVATE_ARIA2_HELPER={shlex.quote(str(project / 'private-aria2-plan.py'))}
+    PRIVATE_ARIA2_PLAN={shlex.quote(str(plan))}
+}}
+configure_download_options() {{ :; }}
+plan_selected_transport() {{ :; }}
+acquire_resource_reservations() {{ :; }}
+configure_download_reporting() {{ printf '%s\\n' reporting >>{shlex.quote(str(events))}; }}
+execute_selected_transport() {{
+    printf '%s\\n' transport >>{shlex.quote(str(events))}
+    printf '%s\\n' 'synthetic transferred media' >"${{OUTPUT_DIR}}/media.bin"
+}}
+finalize_download() {{
+    printf '%s\\n' publication >>{shlex.quote(str(events))}
+    cp -- "${{OUTPUT_DIR}}/media.bin" "${{FINAL_OUTPUT_DIR}}/media.bin"
+}}
+python3() {{ command {shlex.quote(sys.executable)} -I -B {shlex.quote(str(controlled))} "$@"; }}
+main "$@"
+''')
+        result = subprocess.run(['bash', str(engine)], env={**os.environ, 'FIXTURE_CAPACITY': str(available)},
+                                text=True, capture_output=True, timeout=10)
+        phases = events.read_text().splitlines() if events.exists() else []
+        workspace_files, final_files = list(output.iterdir()), list(final.iterdir())
+        assert result.returncode == expected, (label, result.returncode, expected, phases,
+                                               workspace_files, final_files, result.stderr)
+        if expected:
+            assert 'insufficient local disk space' in result.stderr, (label, result.stderr)
+            assert not phases and not workspace_files and not final_files, label
+        else:
+            assert phases == ['reporting', 'transport', 'publication'], (label, phases)
+            assert (final / 'media.bin').read_bytes() == b'synthetic transferred media\n', label
+print('Engine space admission refuses insufficient inherited sizes before transfer and publication.')
+PY_SPACE_ADMISSION
+}
+
 test_private_roots_and_media_faults() {
     printf '%s\n' 'Private aria2 plan scenario: private roots and publication fault boundaries'
     new_case 'network-publication-boundaries'
@@ -1153,27 +1249,56 @@ known = {"requested_downloads": [{"requested_formats": [
 ]}]}
 mixed = {"requested_downloads": [{"requested_formats": [{"filesize": 10}, {}]}]}
 unknown = {"requested_downloads": [{}]}
-for payload, available, succeeds, warns in (
-    (known, floor + 89, False, False),
-    (known, floor + 90, True, False),
-    (mixed, floor + 29, False, False),
-    (mixed, floor + 30, True, True),
-    (unknown, floor - 1, False, False),
-    (unknown, floor, True, True),
-):
-    space_plan.write_text(json.dumps(payload), encoding="utf-8")
-    diagnostics = io.StringIO()
-    with patch.object(module, "filesystem_type", return_value=0xEF53), \
-            patch.object(module.os, "fstatvfs", return_value=SimpleNamespace(f_bavail=available, f_frsize=1)), \
-            redirect_stderr(diagnostics):
-        try:
-            status = module.check_space(space_args)
-        except module.PlanError as exc:
-            assert not succeeds and "insufficient local disk space" in str(exc)
-        else:
-            assert succeeds and status == 0
-    assert ("media size is unknown" in diagnostics.getvalue()) == warns
+estimates = [
+    ("selected components", known, 30, False),
+    ("mixed sizes", mixed, 10, True),
+    ("unknown size", unknown, 0, True),
+    ("inherited exact size", {"filesize": 30, "requested_downloads": [{}]}, 30, False),
+    ("inherited approximate size", {"filesize_approx": 30, "requested_downloads": [{}]}, 30, False),
+    ("selected size overrides root", {"filesize": 100, "requested_downloads": [{"filesize": 30}]}, 30, False),
+    ("explicit null exact size", {"filesize": 100, "requested_downloads": [{"filesize": None}]}, 0, True),
+    ("explicit null approximate size", {"filesize_approx": 100,
+        "requested_downloads": [{"filesize_approx": None}]}, 0, True),
+    ("null exact size permits approximation", {"filesize": 100, "filesize_approx": 30,
+        "requested_downloads": [{"filesize": None}]}, 30, False),
+    ("inherited components", {"requested_formats": known["requested_downloads"][0]["requested_formats"],
+        "requested_downloads": [{}]}, 30, False),
+    ("selected components override root", {"requested_formats": [{"filesize": 100}],
+        **known}, 30, False),
+    ("explicit null components", {"filesize": 20, "requested_formats": [{"filesize": 100}],
+        "requested_downloads": [{"requested_formats": None}]}, 20, False),
+    ("exact size precedes approximation", {"filesize": 20, "filesize_approx": 100,
+        "requested_downloads": [{}]}, 20, False),
+    ("fractional size keeps integer estimate", {"filesize": 30.75,
+        "requested_downloads": [{}]}, 30, False),
+    ("zero size permits approximation", {"filesize": 0, "filesize_approx": 30,
+        "requested_downloads": [{}]}, 30, False),
+    ("invalid truthy size does not permit approximation", {"filesize": -1, "filesize_approx": 30,
+        "requested_downloads": [{}]}, 0, True),
+]
+for invalid_size in (True, False, "30", -1, 0, 2**63, float("inf"), float("nan")):
+    estimates.append((f"invalid inherited size {invalid_size!r}",
+                      {"filesize": invalid_size, "requested_downloads": [{}]}, 0, True))
+    estimates.append((f"invalid selected size overrides root {invalid_size!r}",
+                      {"filesize": 100, "requested_downloads": [{"filesize": invalid_size}]}, 0, True))
+for label, payload, expected_bytes, incomplete in estimates:
+    required = floor + 3 * expected_bytes
+    for available, succeeds in ((required - 1, False), (required, True)):
+        space_plan.write_text(json.dumps(payload), encoding="utf-8")
+        diagnostics = io.StringIO()
+        with patch.object(module, "filesystem_type", return_value=0xEF53), \
+                patch.object(module.os, "fstatvfs", return_value=SimpleNamespace(f_bavail=available, f_frsize=1)), \
+                redirect_stderr(diagnostics):
+            try:
+                status = module.check_space(space_args)
+            except module.PlanError as exc:
+                assert not succeeds and "insufficient local disk space" in str(exc), label
+            else:
+                assert succeeds and status == 0, label
+        assert ("media size is unknown" in diagnostics.getvalue()) == (succeeds and incomplete), label
 for payload in ([], {}, {"requested_downloads": []}, {"requested_downloads": ["invalid"]},
+                {"requested_formats": "invalid", "requested_downloads": [{}]},
+                {"requested_formats": ["invalid"], "requested_downloads": [{}]},
                 {"requested_downloads": [{"requested_formats": "invalid"}]},
                 {"requested_downloads": [{"requested_formats": ["invalid"]}]}):
     space_plan.write_text(json.dumps(payload), encoding="utf-8")
@@ -2481,6 +2606,11 @@ MODE=video
 YOUTUBE_HLS_FIREFOX=false
 YT_DLP_OPTIONS=(--output {shlex.quote(original_template)})
 resolve_lock_root() {{ printf -v "${{1:-OUTPUT_LOCK_ROOT}}" '%s' {shlex.quote(str(root / 'registry'))}; }}
+resolve_coordination_roots() {{
+    RESOURCE_LOCK_ROOT={shlex.quote(str(root / 'registry'))}
+    RESOURCE_LOCK_ROOTS=("${{RESOURCE_LOCK_ROOT}}")
+    RESOURCE_REGISTRY_OPTIONS=()
+}}
 trap cleanup EXIT
 acquire_output_lock "${{OUTPUT_DIR}}"
 acquire_resource_reservations
@@ -2623,6 +2753,11 @@ MODE=video
 YOUTUBE_HLS_FIREFOX=false
 YT_DLP_OPTIONS=()
 resolve_lock_root() {{ printf -v "${{1:-OUTPUT_LOCK_ROOT}}" '%s' {shlex.quote(str(case / 'registry'))}; }}
+resolve_coordination_roots() {{
+    RESOURCE_LOCK_ROOT={shlex.quote(str(case / 'registry'))}
+    RESOURCE_LOCK_ROOTS=("${{RESOURCE_LOCK_ROOT}}")
+    RESOURCE_REGISTRY_OPTIONS=()
+}}
 trap cleanup EXIT
 trap 'request_shutdown TERM 143' TERM
 acquire_output_lock "${{OUTPUT_DIR}}"
@@ -2953,9 +3088,11 @@ main() {
     test_frozen_replay_contract
     test_resource_activation_signal_handoff
     test_resource_reservations_and_resume
+    python3 -I -B "${PROJECT_DIR}/tests/coordination-integration.py"
     test_workspace_mount_oracle_ignores_optimization
     test_workspace_mount_boundaries
     test_network_media_permissions
+    test_space_admission_before_transfer
     test_private_roots_and_media_faults
     test_private_plan_classification
     test_private_plan_protocol_metadata

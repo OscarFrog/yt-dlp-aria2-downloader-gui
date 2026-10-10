@@ -867,13 +867,17 @@ An existing final or an unowned native input is a separate collision (status
 **1**), preserved without overwrite, adoption or an automatic “(1)” suffix.
 
 Coordination covers the same host and user, including canonical path aliases
-and different XDG roots. Stable lock inodes live in the revalidated private
-`/tmp/yt-dlp-aria2-downloader-UID` root (or its `/var/tmp` fallback); they are
-never deleted as stale. Private session files prefer the validated
+and different XDG roots. Stable lock inodes are held in both revalidated private
+`/tmp/yt-dlp-aria2-downloader-UID` and `/var/tmp/yt-dlp-aria2-downloader-UID`
+roots; they are never deleted as stale. If either coordination root is
+unavailable or unsafe, admission fails with **73**, rather than switching to
+an independent registry. Private session files retain their fallback and prefer the validated
 `$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader-UID` root. A shared hold on the historic
-destination lock excludes an old 2.3.29 instance using its exclusive protocol,
-in either launch order; new instances use finer reservations concurrently.
-This does not repair an old executable's shutdown defects.
+destination lock in each root excludes an old 2.3.29 instance using its exclusive
+protocol, in either launch order; new instances use finer reservations concurrently.
+Checkpoints in both roots are inspected and activated before transfer. Active
+or ambiguous historical records are preserved. This does not repair two old
+executables choosing different roots or an old executable's shutdown defects.
 
 Reservations last through consumer shutdown and cleanup. Closing one instance
 does not signal another instance. If shutdown remains uncertain after admission,
@@ -945,8 +949,9 @@ suitable local workspace and a safe publication primitive are available.
 Full media are never staged in `XDG_RUNTIME_DIR` or tmpfs by default.
 
 Local staging needs space for selected streams, merged media and any HLS
-remux. Before transfer, known sizes are checked with a three-times estimate
-plus 64 MiB of headroom. Unknown sizes, quotas, simultaneous writers and later
+remux. Before transfer, known sizes (including inherited selected metadata) are
+checked with a three-times estimate plus 64 MiB of headroom. This does not reserve
+disk space. Unknown sizes, quotas, simultaneous writers and later
 disk exhaustion cannot be predicted; write errors remain failures. The log
 identifies the local workspace. The progress dialog shows the current phase,
 percentage, speed and estimated time remaining when available, including the

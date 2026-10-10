@@ -3618,10 +3618,33 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'acquire_output_lock "${OUTPUT_DIR}"' \
         'engine destination-directory lock'
-    # shellcheck disable=SC2016 # Literal shell-source assertion.
-    assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
-        'flock --shared --nonblock "${OUTPUT_LOCK_FD}"' \
-        'shared legacy destination lock acquisition'
+    # Both historical namespaces must be held before resource admission. The
+    # first descriptor keeps its compatibility name; every additional one stays
+    # registered for cleanup and uses the same shared nonblocking protocol.
+    # shellcheck disable=SC2016 # Ordered fragments are literal shell source.
+    assert_file_fragments_ordered "${SCRIPT_DIR}/download-video.sh" \
+        'shared legacy destination locks across all historical roots' \
+        'resolve_coordination_roots() {' \
+        '"${PRIVATE_ARIA2_HELPER}" coordination-roots' \
+        'mapfile -t RESOURCE_LOCK_ROOTS' \
+        'acquire_output_lock() {' \
+        'if ! resolve_coordination_roots; then' \
+        'for destination_lock_root in "${RESOURCE_LOCK_ROOTS[@]}"; do' \
+        'lock_file="${destination_lock_root}/${lock_key}.lock"' \
+        'OUTPUT_LOCK_FD=${lock_fd}' \
+        'RESOURCE_LOCK_FDS+=("${lock_fd}")' \
+        'flock --shared --nonblock --conflict-exit-code 75 "${lock_fd}"' \
+        'if ((status == 75)); then' \
+        'return 75'
+    assert_file_fragments_ordered "${SCRIPT_DIR}/private-aria2-plan.py" \
+        'coordination requires both authenticated historical roots' \
+        'def private_root_candidates(' \
+        'candidates.extend(((Path("/tmp"), False), (Path("/var/tmp"), False)))' \
+        'def coordination_roots(' \
+        'for parent, runtime in private_root_candidates(disk=False, no_runtime=True):' \
+        'root = prepare_private_root(parent, runtime=runtime, disk=False)' \
+        'for root in roots:' \
+        'print(root)'
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         'worker_group_has_identity_token() {' \
         'worker group remains authenticated after session-leader exit'
