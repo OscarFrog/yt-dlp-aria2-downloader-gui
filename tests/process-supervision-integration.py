@@ -713,6 +713,46 @@ while Path('/proc/' + sys.argv[1]).exists():
             if write_end is not None:
                 os.close(write_end)
 
+    def test_observer_process_row_ignores_name_encoding(self):
+        raw = Path('/proc/self/stat').read_bytes()
+        prefix, fields = raw.split(b' (', 1)[0], raw.rsplit(b') ', 1)[1].split()
+        expected = dict(start=int(fields[19]), state=fields[0].decode('ascii'),
+                        parent=int(fields[1]), group=int(fields[2]), session=int(fields[3]))
+        path = self.root / 'synthetic-stat'
+        for name in (b'worker', 'révision'.encode(), b'a' * 14 + b'\xc3', b'worker ) (\xff'):
+            with self.subTest(name=name.hex()):
+                path.write_bytes(prefix + b' (' + name + b') ' + b' '.join(fields) + b'\n')
+                self.assertEqual(observer.process_row(path), expected)
+
+    def test_observer_invalid_identity_cannot_prove_absence(self):
+        raw = Path('/proc/self/stat').read_bytes()
+        prefix, tail = raw.rsplit(b') ', 1)
+        invalid = [(b'missing stat fields', IndexError), (prefix + b') S 1', IndexError)]
+        for index in (1, 2, 3, 19):
+            for value in (b'?', b'\xff'):
+                fields = tail.split()
+                fields[index] = value
+                invalid.append((prefix + b') ' + b' '.join(fields), ValueError))
+        path = self.root / 'invalid-stat'
+        foreign = Path('/proc/0/stat')
+        own = Path(f'/proc/{os.getpid()}')
+        real_read = Path.read_text
+
+        def read(candidate, *args, **kwargs):
+            return real_read(path if candidate == foreign else candidate, *args, **kwargs)
+
+        for payload, error in invalid:
+            with self.subTest(payload=payload):
+                path.write_bytes(payload)
+                with self.assertRaises(error):
+                    observer.process_row(path)
+                # Even an unmarked foreign entry must be readable before the
+                # complete inventory can support a claim of no live consumer.
+                with mock.patch.object(Path, 'iterdir', return_value=iter((own, foreign.parent))), \
+                        mock.patch.object(Path, 'read_text', read):
+                    with self.assertRaises(error):
+                        observer.Observer(self.token).sample()
+
     def test_observer_rejects_incomplete_procfs_inventory(self):
         for error in (PermissionError('procfs root denied'),
                       FileNotFoundError('procfs root missing'), OSError('procfs root I/O error')):
@@ -1483,6 +1523,22 @@ thread.join()
                     if len(name) > 15:
                         with self.assertRaises(UnicodeDecodeError):
                             raw.decode('utf-8')
+                    row = observer.process_row(path)
+                    for key, index in (('parent', 1), ('group', 2), ('session', 3), ('start', 19)):
+                        self.assertEqual(row[key], int(expected[index]))
+                    # Include the real non-leader task in a controlled root
+                    # inventory: an unrelated name must not break selection.
+                    # Its root alias is real procfs, not synthetic stat data.
+                    real_iterdir = Path.iterdir
+
+                    def inventory(directory):
+                        if directory == Path('/proc'):
+                            return iter((Path(f'/proc/{os.getpid()}'), Path(f'/proc/{thread}')))
+                        return real_iterdir(directory)
+
+                    with mock.patch.object(Path, 'iterdir', inventory):
+                        self.assertEqual(observer.snapshot()[thread]['start'], int(expected[19]))
+                        self.assertFalse(observer.Observer(self.token + '-unrelated').sample()['live'])
                     # An independent byte oracle validates the kernel identity.
                     # First exercise admission, so the former implementation
                     # fails on its real decoding error before any new helper.

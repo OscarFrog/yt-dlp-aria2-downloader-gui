@@ -254,6 +254,44 @@ assert_shell_policy_lists_are_canonical() {
     done
 }
 
+# Check the caller-visible state after loading a library. Generated shell in a
+# quoted heredoc is inert data and must not be mistaken for top-level options.
+assert_sourced_shell_state() {
+    local absolute_path=$1
+    local observed=''
+    local initial_state=''
+
+    for initial_state in enabled disabled; do
+        observed=$(bash --noprofile --norc -c '
+if [[ $2 == enabled ]]; then
+    set -euo pipefail
+    shopt -s nullglob
+    umask 027
+    trap : EXIT HUP INT TERM
+else
+    set +eu
+    set +o pipefail
+    shopt -u nullglob
+    umask 077
+    trap - EXIT HUP INT TERM
+fi
+before_options=${SHELLOPTS}
+before_shopt=${BASHOPTS}
+before_traps=$(trap -p)
+before_umask=$(umask)
+before_directory=$PWD
+source "$1"
+source_status=$?
+((source_status == 0)) || exit 65
+[[ ${SHELLOPTS} == "${before_options}" && ${BASHOPTS} == "${before_shopt}" &&
+   $(trap -p) == "${before_traps}" && $(umask) == "${before_umask}" &&
+   ${PWD} == "${before_directory}" ]] || exit 65
+printf "\\nsourced-state-preserved\\n"
+' sourced-state "${absolute_path}" "${initial_state}") || return 65
+        [[ ${observed##*$'\n'} == sourced-state-preserved ]] || return 65
+    done
+}
+
 assert_shell_option_contract() {
     local relative_path=$1
     local absolute_path="${SCRIPT_DIR}/${relative_path}"
@@ -261,7 +299,6 @@ assert_shell_option_contract() {
     local is_no_errexit=false
     local is_sourced=false
     local option_line=''
-    local option_line_count=''
 
     for classified_file in "${SOURCED_SHELL_FILES[@]}"; do
         if [[ ${relative_path} == "${classified_file}" ]]; then
@@ -276,12 +313,12 @@ assert_shell_option_contract() {
         fi
     done
 
-    option_line_count=$(grep -Ec '^set[[:space:]]' "${absolute_path}" || true)
     option_line=$(grep -Em1 '^set[[:space:]]' "${absolute_path}" || true)
 
     if [[ ${is_sourced} == true ]]; then
-        [[ ${option_line_count} == 0 ]] \
-            || fail "sourced shell file changes top-level options: ${relative_path}"
+        # shellcheck disable=SC2310 # This probe returns its checked status explicitly.
+        assert_sourced_shell_state "${absolute_path}" \
+            || fail "sourced shell file changes caller state: ${relative_path}"
         return 0
     fi
 
@@ -1038,6 +1075,7 @@ for name in (
     "cleanup_static_test",
     "assert_repository_file_inventory_is_canonical",
     "assert_standard_python_header",
+    "assert_sourced_shell_state",
     "assert_file_fragments_ordered",
 ):
     match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", source, re.M | re.S)
@@ -1175,6 +1213,22 @@ with tempfile.TemporaryDirectory(prefix="static-harness-") as temporary:
 
     validate_static_dispatch(root)
 
+    library = root / "library.sh"
+    for body, expected in (
+        ("function_only() { cat <<'SHELL'\nset -euo pipefail\nSHELL\n}\n", 0),
+        ("EXPORTED_FIXTURE=value\nexport EXPORTED_FIXTURE\n", 0),
+        ("set +e\n", 65), ("set +u\n", 65), ("set +o pipefail\n", 65),
+        ("set -e\n", 65), ("set -u\n", 65), ("set -o pipefail\n", 65),
+        ("shopt -u nullglob\n", 65), ("shopt -s nullglob\n", 65),
+        ("trap - EXIT\n", 65), ("trap : EXIT\n", 65),
+        ("trap : USR1\n", 65), ("umask 022\n", 65),
+        ("cd /\n", 65), ("exit 0\n", 65),
+    ):
+        library.write_text(body, encoding="utf-8")
+        subprocess.run(["bash", "-n", str(library)], check=True)
+        validate(root, "assert_sourced_shell_state", expected, str(library))
+    print("Sourced libraries: inert heredocs/exports accepted; option, trap, umask, directory and premature-exit changes rejected.")
+
     ordered_source = root / "ordered source é.txt"
     ordered_cases = (
         (b"first middle last", ("first", "last"), 0),
@@ -1305,32 +1359,49 @@ allowed = r"""          timeout --signal=TERM --kill-after=10s 8m \
             2>&1 | tee "${TMPDIR}/qualification.log"
 """
 marker = "      - name: Run real shared-destination GUI and CLI qualification\n"
-diagnostic = "real-tools permits only one supervised --runs 1 --jobs 1 multi-instance invocation"
+scheduled_marker = "      - name: Run current-stable shared-destination GUI and CLI qualification\n"
+diagnostic = "real-tools permits exactly one supervised --runs 1 --jobs 1 multi-instance invocation per tool job"
+
+
+def tool_jobs(text):
+    if text.count("  pinned-local-media:\n") != 1 or text.count("  current-stable-local-media:\n") != 1:
+        raise AssertionError(diagnostic)
+    pinned, scheduled = text.split("  current-stable-local-media:\n", 1)
+    return ((marker, pinned.split("  pinned-local-media:\n", 1)[1]), (scheduled_marker, scheduled))
 
 
 def validate(text):
-    if text.count(marker) != 1 or text.count(allowed) != 1:
-        raise AssertionError(diagnostic)
-    step = text.split(marker, 1)[1].split("\n      - ", 1)[0] + "\n"
-    if allowed not in step or "repeat-qualification.sh" in text.replace(allowed, "", 1):
+    for required_marker, job in tool_jobs(text):
+        if text.count(required_marker) != 1 or job.count(allowed) != 1:
+            raise AssertionError(diagnostic)
+        step = job.split(required_marker, 1)[1].split("\n      - ", 1)[0] + "\n"
+        if allowed not in step:
+            raise AssertionError(diagnostic)
+    if "repeat-qualification.sh" in text.replace(allowed, ""):
         raise AssertionError(diagnostic)
 
 
 validate(source)
-mutations = (
-    ("more runs", source.replace("--runs 1 --jobs 1", "--runs 2 --jobs 1", 1)),
-    ("more jobs", source.replace("--runs 1 --jobs 1", "--runs 1 --jobs 2", 1)),
-    ("overridden count", source.replace("--runs 1 --jobs 1", "--runs 1 --jobs 1 --runs 2", 1)),
-    ("different Python fixture", source.replace("python3 -B ./tests/multi-instance-real.py",
-                                               "python3 -B ./tests/ci-validation-integration.py", 1)),
-    ("repeated media suite", source.replace("python3 -B ./tests/multi-instance-real.py",
-                                           "bash ./tests/real-tools-integration.sh", 1)),
-    ("command arguments", source.replace("python3 -B ./tests/multi-instance-real.py",
-                                        "python3 -B ./tests/multi-instance-real.py --repeat 2", 1)),
-    ("duplicate invocation", source.replace(allowed, allowed + allowed, 1)),
-    ("another wrapper", source + "\n          bash ./tests/repeat-qualification.sh --runs 2 --jobs 1 -- true\n"),
-    ("wrong step", source.replace(marker, "      - name: Other qualification\n", 1)),
-)
+mutations = []
+for required_marker, job in tool_jobs(source):
+    replacements = (
+        ("more runs", "--runs 1 --jobs 1", "--runs 2 --jobs 1"),
+        ("more jobs", "--runs 1 --jobs 1", "--runs 1 --jobs 2"),
+        ("overridden count", "--runs 1 --jobs 1", "--runs 1 --jobs 1 --runs 2"),
+        ("different Python fixture", "python3 -B ./tests/multi-instance-real.py",
+         "python3 -B ./tests/ci-validation-integration.py"),
+        ("repeated media suite", "python3 -B ./tests/multi-instance-real.py",
+         "bash ./tests/real-tools-integration.sh"),
+        ("command arguments", "python3 -B ./tests/multi-instance-real.py",
+         "python3 -B ./tests/multi-instance-real.py --repeat 2"),
+        ("duplicate invocation", allowed, allowed + allowed),
+        ("missing invocation", allowed, ""),
+        ("wrong step", required_marker, "      - name: Other qualification\n"),
+    )
+    for name, old, new in replacements:
+        mutations.append((required_marker.strip() + ": " + name,
+                          source.replace(job, job.replace(old, new, 1), 1)))
+mutations.append(("another wrapper", source + "\n          bash ./tests/repeat-qualification.sh --runs 2 --jobs 1 -- true\n"))
 for name, mutated in mutations:
     if mutated == source:
         raise AssertionError(f"ineffective single-run mutation: {name}")
@@ -1341,7 +1412,7 @@ for name, mutated in mutations:
             raise
     else:
         raise AssertionError(f"single-run policy accepted mutation: {name}")
-print("Real-tools single-run supervision: exact multi-instance wrapper accepted; nine repetition/command mutations rejected.")
+print(f"Real-tools single-run supervision: one wrapper per tool job accepted; {len(mutations)} repetition/command mutations rejected.")
 
 # The shared GUI fixture enters the managed-runtime contract. A plain yt-dlp
 # wheel can report version/help successfully while every impersonation target
@@ -2846,39 +2917,57 @@ test_static_tooling_contracts() {
     done
     assert_status 2 'mock integration rejects an unknown group' \
         "${SCRIPT_DIR}/tests/mock-integration.sh" --group unknown
+    assert_file_contains "${SCRIPT_DIR}/tests/lib/mock-common.sh" \
+        'initialize_mock_integration() {' \
+        'mock fixture environment initialization'
     for mock_phase in \
-        initialize_mock_integration \
         run_mock_engine_group \
         run_mock_engine_core_group \
         run_mock_engine_hls_group \
         run_mock_engine_staging_group \
-        run_selected_mock_engine_group \
-        run_mock_gui_progress_group \
-        run_mock_gui_state_group \
-        run_mock_gui_group \
-        run_selected_mock_gui_group \
-        run_mock_signal_group \
-        run_mock_runtime_compat_group \
-        run_mock_runtime_validation_group \
-        run_mock_runtime_group \
-        run_selected_mock_runtime_group \
-        report_mock_integration_completion; do
-        assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+        run_selected_mock_engine_group; do
+        assert_file_contains "${SCRIPT_DIR}/tests/lib/mock-engine.sh" \
             "${mock_phase}() {" \
             "mock integration phase ${mock_phase}"
     done
+    for mock_phase in \
+        run_mock_gui_progress_group \
+        run_mock_gui_state_group \
+        run_mock_gui_group \
+        run_selected_mock_gui_group; do
+        assert_file_contains "${SCRIPT_DIR}/tests/lib/mock-gui.sh" \
+            "${mock_phase}() {" \
+            "mock integration phase ${mock_phase}"
+    done
+    assert_file_contains "${SCRIPT_DIR}/tests/lib/mock-signals.sh" \
+        'run_mock_signal_group() {' \
+        'mock signal group dispatch'
+    for mock_phase in \
+        run_mock_runtime_compat_group \
+        run_mock_runtime_validation_group \
+        run_mock_runtime_group \
+        run_selected_mock_runtime_group; do
+        assert_file_contains "${SCRIPT_DIR}/tests/lib/mock-runtime.sh" \
+            "${mock_phase}() {" \
+            "mock integration phase ${mock_phase}"
+    done
+    assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+        'report_mock_integration_completion() {' \
+        'mock integration completion phase'
     for engine_phase in \
-        test_mock_cleanup_owner_guard \
         test_mock_engine_log_retention \
         test_mock_engine_audio_downloads \
         test_mock_engine_video_downloads \
         test_mock_engine_youtube_hls \
         test_mock_engine_failure_paths \
         test_mock_engine_private_staging; do
-        assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+        assert_file_contains "${SCRIPT_DIR}/tests/lib/mock-engine.sh" \
             "${engine_phase}() {" \
             "mock engine phase ${engine_phase}"
     done
+    assert_file_contains "${SCRIPT_DIR}/tests/lib/mock-common.sh" \
+        'test_mock_cleanup_owner_guard() {' \
+        'mock fixture cleanup owner guard'
     for gui_phase in \
         test_mock_gui_aria_progress \
         test_mock_gui_profiles \
@@ -2888,7 +2977,7 @@ test_static_tooling_contracts() {
         test_mock_gui_diagnostic_logs \
         test_mock_gui_state_initialization \
         test_mock_gui_input_validation; do
-        assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+        assert_file_contains "${SCRIPT_DIR}/tests/lib/mock-gui.sh" \
             "${gui_phase}() {" \
             "mock GUI phase ${gui_phase}"
     done
@@ -2902,7 +2991,7 @@ test_static_tooling_contracts() {
         test_mock_signal_gui_cancellation \
         test_mock_signal_gui_startup_error \
         test_mock_signal_zenity_status; do
-        assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+        assert_file_contains "${SCRIPT_DIR}/tests/lib/mock-signals.sh" \
             "${signal_phase}() {" \
             "mock signal phase ${signal_phase}"
     done
@@ -2914,7 +3003,7 @@ test_static_tooling_contracts() {
         test_mock_runtime_dependencies \
         test_mock_runtime_progress_errors \
         test_mock_runtime_missing_zenity; do
-        assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+        assert_file_contains "${SCRIPT_DIR}/tests/lib/mock-runtime.sh" \
             "${runtime_phase}() {" \
             "mock runtime phase ${runtime_phase}"
     done
@@ -3326,7 +3415,7 @@ test_static_shell_interface_contracts() {
         'readonly TEST_OWNER_BASHPID=${BASHPID}' \
         'mock-suite cleanup owner identity'
     # shellcheck disable=SC2016
-    assert_file_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
+    assert_file_contains "${SCRIPT_DIR}/tests/lib/mock-common.sh" \
         '[[ ${BASHPID} != "${TEST_OWNER_BASHPID}" ]]' \
         'non-owner test cleanup protection'
 }
@@ -4240,6 +4329,7 @@ test_static_packaging_signing_contracts() {
 }
 
 test_static_application_contracts() {
+    local mock_source
     local aria2_header_test_phase engine_phase gui_phase monitor_phase
     local ffmpeg_progress_test_phase ffmpeg_real_test_phase monitor_test_phase
     local hls_remux_test_phase private_plan_test_phase
@@ -4364,9 +4454,12 @@ test_static_application_contracts() {
     assert_file_contains "${SCRIPT_DIR}/tests/test-runner-integration.sh" \
         'YTDLP_ARIA2_TEST_CHILD_TOKEN' \
         'test runner stress binds PID checks to fixture identity'
-    assert_file_not_contains "${SCRIPT_DIR}/tests/mock-integration.sh" \
-        'timeout --preserve-status' \
-        'GUI signal watchdog expiry remains distinguishable as status 124'
+    for mock_source in "${SCRIPT_DIR}/tests/mock-integration.sh" \
+        "${SCRIPT_DIR}"/tests/lib/mock-*.sh; do
+        assert_file_not_contains "${mock_source}" \
+            'timeout --preserve-status' \
+            'GUI signal watchdog expiry remains distinguishable as status 124'
+    done
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'readonly YTDLP_NO_PLUGINS=1' \
         'yt-dlp plugins disabled by default'

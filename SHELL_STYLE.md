@@ -376,6 +376,13 @@ classification, startup shell-option model, headers, `main()` structure, Bash
 syntax, shfmt layout, ShellCheck diagnostics, and selected durable comment and
 workflow contracts.
 
+Sourced-library state is checked by loading each library in an isolated Bash
+under both enabled and disabled option states, then comparing shell options
+(including errexit), shopt options, traps, umask and working directory. Quoted
+heredoc contents are data, so generated fixture shell
+is not confused with commands executed when the library is loaded. Positive
+and negative controls cover that distinction and actual state changes.
+
 Review remains responsible for semantic naming, function cohesion, comment and
 API accuracy, Bash 4.4 compatibility, locale boundaries, diagnostic secrecy,
 safe path ownership, cleanup scope, and whether an exception is genuinely

@@ -923,7 +923,7 @@ architecture document. The source ZIP contains the tracked source tree.
 | --- | --- |
 | `shell.yml` | PR source identity/coherence/syntax gate, pinned workflow checks, full local suite on Ubuntu/Fedora and paired Python 3.10/Bash 4.4.0 |
 | `packages.yml` | Git-free source archive, RPM/DEB construction, lifecycle, authentication, and previous-release upgrade |
-| `real-tools.yml` | Pinned real-tool behavior, required latest-pin shared-destination matrix and scheduled current-stable qualification |
+| `real-tools.yml` | Pinned real-tool behavior and shared-destination qualification on both the latest pin and scheduled current-stable yt-dlp |
 | `qualification.yml` | Supported FFmpeg/FFprobe generation matrix |
 | `stress.yml` | Twenty signal timing tuples and ten runtime transaction cycles; existing required check aggregates all five PR workflows |
 | `promotion.yml` | Main-only authenticated verification of the complete PR source qualification, without suite execution |
@@ -975,6 +975,15 @@ The shared-destination prerequisite installation is an explicit proof obligation
 it must succeed on the latest pinned yt-dlp job and remain an explicitly skipped
 step on the two earlier pins. No missing or failed step inherits that exception.
 
+Scheduled evidence independently requires the complete current-stable job,
+including its runtime prerequisites, resolved versions, shared-destination
+verdicts and diagnostic upload. The read-only verifier binds the selected
+schedule's source identity, repository, workflow, main branch and exact
+run/attempt, then rechecks the run before accepting it. Its skipped pinned
+matrix is one unexpanded GitHub job. A green older schedule lacking a required
+step cannot establish the extended qualification; the collector's creation-date
+freshness window and successful-schedule selection remain unchanged.
+
 The final source ZIP is read as data and checked against exact Git blob contents,
 paths and extraction modes. Native release builds remain separate because their
 final containers/signatures and current installation/upgrade inputs differ from
@@ -1012,6 +1021,20 @@ admission still requires a usable impersonation target; a plain wheel's successf
 version/help probes are insufficient. Static checks bind those prerequisites
 to their condition, target and execution order without adding a permanent helper
 or broadening the environments of the other matrix entries.
+
+The weekly job first reads the current stable version from a bounded HTTPS PyPI
+metadata response, refusing redirects, prereleases and withdrawn releases. It
+then installs that exact version's `pin-curl-cffi` extra through isolated pip
+against HTTPS PyPI. Unavailable dependencies or an incompatible interpreter
+must fail rather than let pip backtrack to an older yt-dlp. The selected source,
+observation time and package version accompany the resolved dependency versions. It
+uses the same digest/version-verified Deno baseline, but additionally evaluates
+that runtime against the selected wheel's `deno` compatibility requirement.
+Missing, unsupported or incompatible metadata fails qualification rather than
+reusing an older wheel's requirements. The selected executable version is bound
+to the shared run, and its tool/dependency versions accompany the same selective
+pre-rescue evidence. This weekly resolution does not replace the approved PR
+wheel hashes or claim their reproducibility.
 
 Runtime hardening is split into independent validation, rollback-admission,
 recovery, cache-identity and transaction fixtures. Full qualification schedules
@@ -1158,6 +1181,15 @@ A shared development version never authorizes changing a published tag or its
 assets. `tests/push-version-integration.py` exercises same-version pushes,
 incoherence, ref races and preparation in real temporary Git repositories;
 CI integration also replays tag mismatch and changed-publication rejection.
+
+The mock entry point separates command-fixture creation and common harness
+helpers from four scenario domains (`engine`, `gui`, `signals`, `runtime`) in
+six sourced libraries. Declarations retain existing caller-global values and
+attributes. Only explicit calls initialize fixtures or run scenarios;
+loading a library does not change caller options, traps or process topology.
+The original entry point retains its subreaper bootstrap, private root ownership
+and ordered group dispatch. Independent runner controls preserve each scenario
+boundary, aggregate ordering and failure propagation, including Git-free use.
 
 Tests use private temporary homes, mock binaries, fixtures, and bounded process
 supervision. The parallel runner binds cancellation to a child-published Linux

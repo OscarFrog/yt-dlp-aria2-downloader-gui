@@ -13,7 +13,9 @@ import time
 
 
 def process_row(path):
-    fields = path.read_text().rsplit(') ', 1)[1].split()
+    # comm is an arbitrary byte string, possibly truncated inside UTF-8.
+    # Keep identity parsing independent and let malformed fields/read errors fail.
+    fields = path.read_text(encoding='ascii', errors='surrogateescape').rsplit(') ', 1)[1].split()
     return {'start': int(fields[19]), 'state': fields[0],
             'parent': int(fields[1]), 'group': int(fields[2]), 'session': int(fields[3])}
 

@@ -49,6 +49,18 @@ WORKFLOWS = {
 }
 SCHEDULED_JOB = "Scheduled current stable yt-dlp"
 REQUIRED_STEPS = {
+    SCHEDULED_JOB: {
+        "Install real engines and current yt-dlp stable",
+        "Install verified Deno for current-stable shared qualification",
+        "Validate current-stable shared prerequisites",
+        "Record resolved current-stable tool versions",
+        "Run current-stable routing qualification",
+        "Run current-stable aria2 direct-transfer behavior qualification",
+        "Run current-stable real FFmpeg progress qualification",
+        "Run current-stable HLS duration validation",
+        "Run current-stable shared-destination GUI and CLI qualification",
+        "Retain current-stable shared-destination verdicts and monotonic events",
+    },
     "Ubuntu": {"Check workflow syntax and embedded shell", "Run validation"},
     "Fedora 44": {"Run validation"},
     "Python 3.10 / Ubuntu": {
@@ -405,6 +417,61 @@ class Verifier:
                                for workflow, run, source in proofs],
         }
 
+    def scheduled(self, run_id, sha):
+        """Check the selected scheduled run without substituting PR evidence."""
+        run_id, sha = integer(run_id), oid(sha)
+        workflow = self.workflow("real-tools.yml")
+        run = self.api.get(f"actions/runs/{run_id}")
+
+        def validate_metadata(current):
+            require(current["id"] == run_id and current["head_sha"] == sha,
+                    "Scheduled run identity differs from the selected evidence.")
+            integer(current["run_attempt"])
+            require(current["workflow_id"] == workflow["id"] and current["path"] == workflow["path"],
+                    "Scheduled workflow identity or definition path differs.")
+            require(current["repository"]["full_name"] == REPOSITORY
+                    and current["head_repository"]["full_name"] == REPOSITORY,
+                    "Scheduled evidence belongs to another repository.")
+            require(current["event"] == "schedule" and current["head_branch"] == "main",
+                    "Current-stable qualification must be scheduled on canonical main.")
+            require(current["status"] == "completed" and current["conclusion"] == "success",
+                    "The selected scheduled run did not complete successfully.")
+            require(self.observed_timestamp(current["created_at"]) <= self.observed_timestamp(current["updated_at"]),
+                    "Scheduled run timestamps are inconsistent.")
+
+        validate_metadata(run)
+        jobs = self.pages(f"actions/runs/{run_id}/attempts/{run['run_attempt']}/jobs", "jobs")
+        identity = IDENTITY_PREFIX + sha
+        # GitHub evaluates a job condition before expanding its matrix. A
+        # scheduled run exposes the literal matrix name once, as skipped.
+        pinned = "Local media, pinned yt-dlp ${{ matrix.yt_dlp_version }}"
+        names = [job["name"] for job in jobs]
+        require(len(names) == 3 and set(names) == {identity, SCHEDULED_JOB, pinned},
+                "Scheduled qualification job inventory is incomplete or changed.")
+        for job in jobs:
+            require(job["run_id"] == run_id and job["status"] == "completed",
+                    "Scheduled qualification job is incomplete or belongs to another run.")
+            if job["name"] == pinned:
+                require(job["conclusion"] == "skipped", "Pinned qualification must remain separate from scheduled tools.")
+                continue
+            require(job["conclusion"] == "success", "A scheduled qualification job did not succeed.")
+            steps = job["steps"]
+            require(isinstance(steps, list) and steps, "Scheduled qualification step metadata is empty.")
+            step_names = [step["name"] for step in steps]
+            require(all(step_names.count(name) == 1 for name in required_steps(job["name"])),
+                    "Required scheduled qualification steps are missing or duplicated.")
+            require(all(step["status"] == "completed" and step["conclusion"] == "success" for step in steps),
+                    "A scheduled qualification step failed, is incomplete or was skipped.")
+            require(timestamp(run["created_at"]) <= self.observed_timestamp(job["completed_at"])
+                    <= timestamp(run["updated_at"]), "Scheduled job timestamp is outside its run.")
+        source = self.commit(sha)
+        current = self.api.get(f"actions/runs/{run_id}")
+        validate_metadata(current)
+        require(self.snapshot(current) == self.snapshot(run) and current["created_at"] == run["created_at"],
+                "Scheduled run or attempt changed during verification.")
+        return {"workflow": workflow["path"], "run_id": run_id, "run_attempt": run["run_attempt"],
+                "source_commit": sha, "source_tree": source["tree"]["sha"]}
+
     def qualification(self, sha, pull, filename):
         workflow = self.workflow(filename)
         run = self.latest(workflow, pull)
@@ -456,14 +523,19 @@ def main():
     for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, interrupt)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("verify", "wait-required"))
+    parser.add_argument("command", choices=("verify", "wait-required", "verify-schedule"))
     parser.add_argument("--commit", required=True)
+    parser.add_argument("--run-id", type=int)
     args = parser.parse_args()
     try:
         oid(args.commit)
         require(os.environ.get("GITHUB_REPOSITORY", REPOSITORY) == REPOSITORY,
                 "Qualification promotion is restricted to the canonical repository.")
         api = GitHub()
+        if args.command == "verify-schedule":
+            print(json.dumps(Verifier(api).scheduled(args.run_id, args.commit), sort_keys=True, indent=2))
+            return 0
+        require(args.run_id is None, "A run ID is only valid for scheduled qualification.")
         if args.command == "verify":
             print(json.dumps(Verifier(api).verify(args.commit), sort_keys=True, indent=2))
             return 0

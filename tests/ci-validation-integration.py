@@ -604,6 +604,180 @@ fi
                 self.assertEqual(CHECK.GitHub().get("actions/workflows/shell.yml"), {"id": 123})
 
 
+SCHEDULED_STEPS = {
+    "Install real engines and current yt-dlp stable",
+    "Install verified Deno for current-stable shared qualification",
+    "Validate current-stable shared prerequisites",
+    "Record resolved current-stable tool versions",
+    "Run current-stable routing qualification",
+    "Run current-stable aria2 direct-transfer behavior qualification",
+    "Run current-stable real FFmpeg progress qualification",
+    "Run current-stable HLS duration validation",
+    "Run current-stable shared-destination GUI and CLI qualification",
+    "Retain current-stable shared-destination verdicts and monotonic events",
+}
+
+
+class ScheduledProofTests(unittest.TestCase):
+    """A green historical schedule cannot omit current shared qualification."""
+
+    def setUp(self):
+        self.api = FixtureAPI()
+        self.api.responses["actions/workflows/real-tools.yml"] = {
+            "id": 4, "path": ".github/workflows/real-tools.yml", "state": "active",
+        }
+        self.run = {
+            "id": 600, "run_attempt": 2, "workflow_id": 4, "path": ".github/workflows/real-tools.yml",
+            "repository": {"full_name": CHECK.REPOSITORY}, "head_repository": {"full_name": CHECK.REPOSITORY},
+            "head_sha": SOURCE, "head_branch": "main", "event": "schedule",
+            "status": "completed", "conclusion": "success", "created_at": RECENT, "updated_at": RECENT,
+        }
+        self.api.responses["actions/runs/600"] = self.run
+        self.jobs = [{"run_id": 600, "name": name, "status": "completed", "completed_at": RECENT,
+                      "conclusion": "skipped" if skipped else "success",
+                      "steps": [{"name": step, "status": "completed", "conclusion": "success"}
+                                for step in sorted(steps)]}
+                     for name, skipped, steps in (
+                         (CHECK.IDENTITY_PREFIX + SOURCE, False, {"Bind validation to the event source"}),
+                         ("Scheduled current stable yt-dlp", False, SCHEDULED_STEPS),
+                         ("Local media, pinned yt-dlp ${{ matrix.yt_dlp_version }}", True, set()),
+                     )]
+        self.api.responses["actions/runs/600/attempts/2/jobs?per_page=100&page=1"] = {"jobs": self.jobs}
+        self.api.responses[f"git/commits/{SOURCE}"] = {
+            "sha": SOURCE, "tree": {"sha": TREE}, "parents": [{"sha": BASE}],
+        }
+        self.verifier = CHECK.Verifier(self.api, NOW)
+
+    def test_complete_attempt_binds_source_and_rechecks_run(self):
+        result = self.verifier.scheduled(600, SOURCE)
+        self.assertEqual(result, {"workflow": ".github/workflows/real-tools.yml", "run_id": 600,
+                                  "run_attempt": 2, "source_commit": SOURCE, "source_tree": TREE})
+        self.assertEqual(self.api.calls.count("actions/runs/600"), 2)
+        self.assertIn("actions/runs/600/attempts/2/jobs?per_page=100&page=1", self.api.calls)
+        self.assertEqual(CHECK.required_steps("Scheduled current stable yt-dlp"), SCHEDULED_STEPS)
+
+    def test_required_weekly_steps_must_each_succeed_exactly_once(self):
+        original = copy.deepcopy(self.jobs[1]["steps"])
+        for name in sorted(SCHEDULED_STEPS):
+            for variant in ("missing", "duplicate", "failure", "skipped", "incomplete"):
+                with self.subTest(step=name, variant=variant):
+                    steps = copy.deepcopy(original)
+                    item = next(step for step in steps if step["name"] == name)
+                    if variant == "missing":
+                        steps.remove(item)
+                    elif variant == "duplicate":
+                        steps.append(copy.deepcopy(item))
+                    elif variant == "incomplete":
+                        item["status"] = "in_progress"
+                    else:
+                        item["conclusion"] = variant
+                    self.jobs[1]["steps"] = steps
+                    with self.assertRaisesRegex(CHECK.Refusal, "steps are missing or duplicated|step failed"):
+                        self.verifier.scheduled(600, SOURCE)
+        self.jobs[1]["steps"] = original
+
+    def test_identity_and_required_job_inventory_cannot_be_replaced_by_green_status(self):
+        original = copy.deepcopy(self.jobs)
+        for variant in ("missing-identity", "wrong-source", "missing-shared-job", "duplicate-job",
+                        "shared-job-skipped", "pinned-job-ran", "other-run", "empty-steps", "failed-identity"):
+            with self.subTest(variant=variant):
+                self.jobs[:] = copy.deepcopy(original)
+                if variant == "missing-identity":
+                    self.jobs.pop(0)
+                elif variant == "wrong-source":
+                    self.jobs[0]["name"] = CHECK.IDENTITY_PREFIX + OTHER
+                elif variant == "missing-shared-job":
+                    self.jobs.pop(1)
+                elif variant == "duplicate-job":
+                    self.jobs.append(copy.deepcopy(self.jobs[1]))
+                elif variant == "shared-job-skipped":
+                    self.jobs[1]["conclusion"] = "skipped"
+                elif variant == "pinned-job-ran":
+                    self.jobs[2]["conclusion"] = "success"
+                elif variant == "other-run":
+                    self.jobs[1]["run_id"] = 601
+                elif variant == "empty-steps":
+                    self.jobs[1]["steps"] = []
+                else:
+                    self.jobs[0]["steps"][0]["conclusion"] = "failure"
+                with self.assertRaises(CHECK.Refusal):
+                    self.verifier.scheduled(600, SOURCE)
+
+    def test_run_provenance_and_attempt_are_checked(self):
+        for field, value in (("id", 601), ("head_sha", OTHER), ("workflow_id", 9),
+                             ("path", ".github/workflows/other.yml"), ("event", "workflow_dispatch"),
+                             ("head_branch", "feature"), ("status", "in_progress"), ("conclusion", "failure"),
+                             ("run_attempt", 0), ("repository", {"full_name": "other/repo"}),
+                             ("head_repository", {"full_name": "other/repo"}),
+                             ("created_at", "2026-09-12T11:30:00Z"),
+                             ("updated_at", "2026-09-13T11:00:00Z")):
+            with self.subTest(field=field):
+                original = self.run[field]
+                self.run[field] = value
+                with self.assertRaises(CHECK.Refusal):
+                    self.verifier.scheduled(600, SOURCE)
+                self.run[field] = original
+
+    def test_incomplete_pagination_and_changed_latest_attempt_are_refused(self):
+        original = self.api.responses["actions/runs/600/attempts/2/jobs?per_page=100&page=1"]
+        self.api.responses["actions/runs/600/attempts/2/jobs?per_page=100&page=1"] = {"jobs": self.jobs * 34}
+        with self.assertRaisesRegex(CHECK.Refusal, "pagination"):
+            self.verifier.scheduled(600, SOURCE)
+        self.api.responses["actions/runs/600/attempts/2/jobs?per_page=100&page=1"] = original
+        for field, value in (("run_attempt", 3), ("conclusion", "failure"), ("head_sha", OTHER),
+                             ("event", "workflow_dispatch"), ("updated_at", "2026-09-12T11:30:00Z")):
+            with self.subTest(field=field):
+                reads = []
+
+                def change_run(result):
+                    reads.append(True)
+                    if len(reads) == 2:
+                        result[field] = value
+                    return result
+
+                self.api.transforms["actions/runs/600"] = change_run
+                with self.assertRaises(CHECK.Refusal):
+                    self.verifier.scheduled(600, SOURCE)
+                self.assertEqual(len(reads), 2)
+
+    def test_release_collector_propagates_refusal_and_binds_selected_schedule(self):
+        text = (PROJECT / "scripts/release-evidence-qualification.sh").read_text(encoding="utf-8")
+        functions = []
+        for name in ("fail_qualification", "verify_scheduled_real_tools", "collect_scheduled_runs"):
+            start = text.index(name + "() {\n")
+            end = text.index("\n}\n", start) + 3
+            functions.append(text[start:end])
+        script = "\n".join(functions) + r'''
+PROJECT_DIR=/fixture
+GH_TOKEN=fixture-token
+real_result=unpublished
+shfmt_result=unpublished
+retry_qualification_capture() { printf '{"databaseId":600,"headSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'; }
+select_latest_successful_schedule() { printf '%s' "$1"; }
+assert_schedule_fresh() { return 0; }
+python3() {
+    [[ $* == '-I /fixture/scripts/ci-validation.py verify-schedule --commit bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --run-id 600' ]] || return 99
+    printf '{"run_attempt":2,"source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","source_tree":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}'
+    return "${CHECK_STATUS}"
+}
+if collect_scheduled_runs OscarFrog/yt-dlp-aria2-downloader-gui 14 real_result shfmt_result; then
+    [[ ${CHECK_STATUS} == 0 ]]
+    [[ $(jq -r '.qualification.run_attempt' <<<"${real_result}") == 2 ]]
+else
+    status=$?
+    [[ ${CHECK_STATUS} == 17 && ${status} == 65 && ${real_result} == unpublished && ${shfmt_result} == unpublished ]]
+fi
+'''
+        for status in (0, 17):
+            with self.subTest(status=status):
+                result = subprocess.run(["bash", "-c", script], env=dict(os.environ, CHECK_STATUS=str(status)),
+                                        capture_output=True, timeout=10, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+                self.assertEqual(result.stdout, b"")
+                if status:
+                    self.assertIn(b"scheduled current-stable qualification was refused", result.stderr)
+
+
 class ScheduleDateTests(unittest.TestCase):
     """Exercise the real Bash selection/date boundary with an independent clock."""
 
@@ -1123,6 +1297,77 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
         for path in paths:
             self.assertRegex(path.strip(), r"^\$\{\{ runner.temp \}\}/shared-destination-evidence/(?:qualification\.log|shared-destination-real-\*/(?:\*\.log|events\.json|\*\.(?:final-)?before-rescue\.json))$")
 
+    def assert_current_stable_shared_contract(self, text):
+        job = self.jobs(text)["current-stable-local-media"]
+        self.assertEqual(self.dependencies(job), {"identity"})
+        self.assertIn("if: github.event_name == 'schedule'", job)
+        self.assertIn("timeout-minutes: 25", job)
+        steps = {step.splitlines()[0][6:]: step for step in re.split(r"(?m)^      - ", job)
+                 if step.startswith("name: ")}
+        self.assertEqual(set(steps), SCHEDULED_STEPS)
+        for name, step in steps.items():
+            if name.startswith("Retain "):
+                self.assertIn("if: ${{ always() }}", step)
+            else:
+                self.assertNotRegex(step, r"(?m)^        if:")
+        install = steps["Install real engines and current yt-dlp stable"]
+        for required in ("--isolated --no-cache-dir install", "--index-url https://pypi.org/simple",
+                         "--only-binary=:all:", '"yt-dlp[pin-curl-cffi]==${package_version}"',
+                         "https://pypi.org/pypi/yt-dlp/json", "response.read(limit + 1)",
+                         "timeout=30", "info['yanked'] is not False", "class NoRedirect", "curl", "unzip"):
+            self.assertIn(required, install)
+        for forbidden in ("--pre", "--trusted-host", "--no-deps", "--upgrade", "2026.8.19"):
+            self.assertNotIn(forbidden, install)
+        self.assertLess(install.index("package_version=$("), install.index("--isolated --no-cache-dir install"))
+        self.assertIn('[[ ${installed} == "${package_version}" ]]', install)
+        compatibility = steps["Validate current-stable shared prerequisites"]
+        self.assertIn("requires('yt-dlp')", compatibility)
+        self.assertIn("item.marker.evaluate({'extra': 'deno'})", compatibility)
+        self.assertIn("version not in item.specifier", compatibility)
+        self.assertIn("not applicable", compatibility)
+        self.assertIn("raise SystemExit", compatibility)
+        record = steps["Record resolved current-stable tool versions"]
+        self.assertIn('>>"${GITHUB_ENV}"', record)
+        self.assertIn('[[ ${resolved} =~', record)
+        self.assertLess(record.index('[[ ${resolved} =~'), record.index('>>"${GITHUB_ENV}"'))
+        self.assertIn("list --format=freeze", record)
+        self.assertIn('[[ ${installed} == "${CURRENT_STABLE_YTDLP_PACKAGE_VERSION}" ]]', record)
+        run = steps["Run current-stable shared-destination GUI and CLI qualification"]
+        self.assertIn('export YTDLP_REAL_BINARY="${RUNNER_TEMP}/yt-dlp-venv/bin/yt-dlp"', run)
+        self.assertIn('== "${CURRENT_STABLE_YTDLP_VERSION}" ]]', run)
+        self.assertIn("timeout --signal=TERM --kill-after=10s 8m", run)
+        self.assertIn("./tests/repeat-qualification.sh --runs 1 --jobs 1", run)
+        self.assertEqual(run.count("python3 -B ./tests/multi-instance-real.py"), 1)
+        self.assertIn("set -Eeuo pipefail", run)
+        for prerequisite in ("Install verified Deno", "Validate current-stable shared prerequisites",
+                             "Record resolved current-stable tool versions"):
+            self.assertLess(job.index(prerequisite), job.index("Run current-stable shared-destination"))
+        retain = steps["Retain current-stable shared-destination verdicts and monotonic events"]
+        self.assertIn("if-no-files-found: error", retain)
+        self.assertIn("name: shared-destination-current-stable-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}", retain)
+        paths = [path.strip() for path in retain.split("          path: |\n", 1)[1].splitlines() if path.strip()]
+        self.assertEqual(len(paths), 7)
+        for path in paths:
+            self.assertRegex(path, r"^\$\{\{ runner.temp \}\}/shared-destination-evidence/(?:stable-resolution\.json|tool-versions\.log|qualification\.log|shared-destination-real-\*/(?:\*\.log|events\.json|\*\.(?:final-)?before-rescue\.json))$")
+
+    def test_current_stable_requires_shared_fixture_and_its_resolved_prerequisites(self):
+        self.assert_current_stable_shared_contract(self.workflow("real-tools.yml"))
+
+    def test_current_stable_cannot_omit_skip_or_unbind_shared_qualification(self):
+        text = self.workflow("real-tools.yml")
+        for old, new in (
+            ("name: Run current-stable shared-destination GUI and CLI qualification\n",
+             "name: Run current-stable shared-destination GUI and CLI qualification\n        if: false\n"),
+            ('"yt-dlp[pin-curl-cffi]==${package_version}"', "--upgrade 'yt-dlp[pin-curl-cffi]'"),
+            ('== "${CURRENT_STABLE_YTDLP_VERSION}" ]]', '== 2026.08.19 ]]'),
+            ("version not in item.specifier", "False"),
+            ("shared-destination-evidence/tool-versions.log", "shared-destination-evidence/private-seeds.json"),
+        ):
+            with self.subTest(mutation=old):
+                self.assertIn(old, text)
+                with self.assertRaises(AssertionError):
+                    self.assert_current_stable_shared_contract(text.replace(old, new))
+
     def test_release_reuses_proof_and_preserves_artifact_qualification(self):
         text = self.workflow("release.yml")
         self.assertIn("scripts/ci-validation.py verify --commit", text)
@@ -1483,38 +1728,213 @@ sudo() { printf 'Unexpected host mutation\n' >&2; return 99; }
                     self.assertEqual((run / "download").exists(), condition != "self-hosted")
 
     def test_deno_bootstrap_refuses_bad_digest_before_extracting_or_executing(self):
-        script = self.step("real-tools.yml", "Install verified Deno for shared-destination qualification")
+        for step_name in ("Install verified Deno for shared-destination qualification",
+                          "Install verified Deno for current-stable shared qualification"):
+            script = self.step("real-tools.yml", step_name)
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                archive = root / "deno.zip"
+                with zipfile.ZipFile(archive, "w") as output:
+                    output.writestr("deno", '#!/bin/bash\nprintf executed >>"${CHECK_EXECUTE}"\nprintf "deno 2.9.4\\n"\n')
+                digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+                fixture = r'''
+    curl() {
+        while (($#)); do
+            if [[ $1 == --output ]]; then cp -- "${CHECK_ARCHIVE}" "$2"; return; fi
+            shift
+        done
+        return 99
+    }
+    unzip() { printf inspect >>"${CHECK_EXTRACT}"; command unzip "$@"; }
+    '''
+                for valid in (False, True):
+                    with self.subTest(valid=valid):
+                        run = root / str(valid)
+                        run.mkdir()
+                        current = re.sub(r"readonly archive_sha=[0-9a-f]{64}",
+                                         "readonly archive_sha=" + (digest if valid else "0" * 64), script)
+                        env = dict(os.environ, RUNNER_TEMP=str(run), GITHUB_PATH=str(run / "path"),
+                                   CHECK_ARCHIVE=str(archive), CHECK_EXECUTE=str(run / "execute"),
+                                   CHECK_EXTRACT=str(run / "extract"))
+                        result = subprocess.run(["bash", "-c", fixture + current], env=env,
+                                                capture_output=True, timeout=10, check=False)
+                        self.assertEqual(result.returncode, 0 if valid else 1, result.stderr)
+                        self.assertEqual((run / "extract").exists(), valid)
+                        self.assertEqual((run / "execute").exists(), valid)
+                        self.assertEqual((run / "path").exists(), valid)
+
+    def test_current_stable_metadata_requires_bounded_official_stable_release(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        import urllib.error
+        import urllib.request
+
+        script = self.step("real-tools.yml", "Install real engines and current yt-dlp stable")
+        program = script.split("<<'PY_STABLE_VERSION'\n", 1)[1].split("\nPY_STABLE_VERSION", 1)[0]
+        valid = {"name": "yt-dlp", "version": "2026.8.19", "yanked": False, "requires_python": ">=3.10"}
+        variants = [("valid", json.dumps({"info": valid}).encode(), True)]
+        for name, replacement in (("prerelease", {"version": "2026.8.19rc1"}),
+                                  ("development", {"version": "2026.8.19.dev1"}),
+                                  ("multiline", {"version": "2026.8.19\nFORGED=value"}),
+                                  ("invalid-calendar", {"version": "2026.2.30"}),
+                                  ("non-string", {"version": 2026}),
+                                  ("other-project", {"name": "other-project"}),
+                                  ("yanked", {"yanked": True})):
+            variants.append((name, json.dumps({"info": dict(valid, **replacement)}).encode(), False))
+        variants.extend((("missing-info", b"{}", False), ("invalid-json", b"broken", False),
+                         ("oversized", b" " * (8 * 1024 * 1024 + 1), False)))
+        with tempfile.TemporaryDirectory() as temporary:
+            for name, payload, accepted in variants:
+                with self.subTest(variant=name):
+                    destination = Path(temporary) / (name + ".json")
+                    calls = []
+
+                    def read(size):
+                        calls.append(("read", size))
+                        return payload
+
+                    def open_response(source, timeout):
+                        calls.append(("open", source, timeout))
+                        return contextlib.nullcontext(SimpleNamespace(read=read))
+
+                    def opener(handler):
+                        with self.assertRaisesRegex(ValueError, "redirects"):
+                            handler.redirect_request(None, None, 302, "redirect", {}, "http://fixture.invalid/")
+                        return SimpleNamespace(open=open_response)
+
+                    output = io.StringIO()
+                    with patch.object(sys, "argv", ["-", str(destination)]), \
+                            patch.object(urllib.request, "build_opener", side_effect=opener), \
+                            contextlib.redirect_stdout(output):
+                        if accepted:
+                            exec(compile(program, "workflow-stable-metadata", "exec"), {})
+                        else:
+                            with self.assertRaises((ValueError, KeyError)):
+                                exec(compile(program, "workflow-stable-metadata", "exec"), {})
+                    self.assertEqual(calls, [("open", "https://pypi.org/pypi/yt-dlp/json", 30),
+                                             ("read", 8 * 1024 * 1024 + 1)])
+                    self.assertEqual(destination.exists(), accepted)
+                    self.assertEqual(output.getvalue(), "2026.8.19\n" if accepted else "")
+                    if accepted:
+                        record = json.loads(destination.read_text())
+                        self.assertEqual(record["package_version"], valid["version"])
+                        self.assertEqual(record["source"], "https://pypi.org/pypi/yt-dlp/json")
+                        self.assertIsNotNone(datetime.fromisoformat(record["observed_at"]).tzinfo)
+            with patch.object(urllib.request, "build_opener", side_effect=urllib.error.URLError("unavailable")):
+                with self.assertRaises(urllib.error.URLError):
+                    exec(compile(program, "workflow-stable-metadata", "exec"), {})
+
+    def test_current_stable_installs_exact_selected_version_or_preserves_failure(self):
+        script = self.step("real-tools.yml", "Install real engines and current yt-dlp stable")
+        # Exercise the real resolution/install boundary without apt or network.
+        script = "set -Eeuo pipefail\n" + script[script.index('python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"'):]
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            archive = root / "deno.zip"
-            with zipfile.ZipFile(archive, "w") as output:
-                output.writestr("deno", '#!/bin/bash\nprintf executed >>"${CHECK_EXECUTE}"\nprintf "deno 2.9.4\\n"\n')
-            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-            fixture = r'''
-curl() {
-    while (($#)); do
-        if [[ $1 == --output ]]; then cp -- "${CHECK_ARCHIVE}" "$2"; return; fi
-        shift
-    done
-    return 99
-}
-unzip() { printf inspect >>"${CHECK_EXTRACT}"; command unzip "$@"; }
+            for variant, pip_status, installed, expected in (("valid", 0, "2026.8.19", 0),
+                                                            ("dependency-refusal", 23, "2026.8.19", 23),
+                                                            ("substituted-version", 0, "2026.7.4", 1)):
+                with self.subTest(variant=variant):
+                    run = root / variant
+                    binary = run / "yt-dlp-venv/bin"
+                    binary.mkdir(parents=True)
+                    python = binary / "python"
+                    python.write_text('#!/bin/bash\nif [[ $1 == - ]]; then printf "2026.8.19\\n"; '
+                                      'else printf "%s\\n" "${CHECK_INSTALLED}"; fi\n')
+                    python.chmod(0o755)
+                    pip = binary / "pip"
+                    pip.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >"${CHECK_ARGUMENTS}"\n'
+                                   'exit "${CHECK_PIP_STATUS}"\n')
+                    pip.chmod(0o755)
+                    env = dict(os.environ, RUNNER_TEMP=str(run), GITHUB_ENV=str(run / "env"),
+                               GITHUB_PATH=str(run / "path"), CHECK_ARGUMENTS=str(run / "arguments"),
+                               CHECK_INSTALLED=installed, CHECK_PIP_STATUS=str(pip_status))
+                    result = subprocess.run(["bash", "-c", "python3() { return 0; }\n" + script],
+                                            env=env, capture_output=True, timeout=10, check=False)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    arguments = (run / "arguments").read_text().splitlines()
+                    self.assertEqual(arguments[-1], "yt-dlp[pin-curl-cffi]==2026.8.19")
+                    self.assertNotIn("--upgrade", arguments)
+                    self.assertEqual((run / "env").exists(), not expected)
+                    self.assertEqual((run / "path").exists(), not expected)
+
+    def test_current_stable_version_record_rejects_multiline_and_run_rejects_substitution(self):
+        record = self.step("real-tools.yml", "Record resolved current-stable tool versions")
+        run = self.step("real-tools.yml", "Run current-stable shared-destination GUI and CLI qualification")
+        fixture = r'''
+deno() { printf 'deno 2.9.4\n'; }
+aria2c() { printf 'aria2 fixture\n'; }
+ffmpeg() { printf 'ffmpeg fixture\n'; }
+ffprobe() { printf 'ffprobe fixture\n'; }
+timeout() { printf invoked >"${CHECK_RUN}"; }
 '''
-            for valid in (False, True):
-                with self.subTest(valid=valid):
-                    run = root / str(valid)
-                    run.mkdir()
-                    current = re.sub(r"readonly archive_sha=[0-9a-f]{64}",
-                                     "readonly archive_sha=" + (digest if valid else "0" * 64), script)
-                    env = dict(os.environ, RUNNER_TEMP=str(run), GITHUB_PATH=str(run / "path"),
-                               CHECK_ARCHIVE=str(archive), CHECK_EXECUTE=str(run / "execute"),
-                               CHECK_EXTRACT=str(run / "extract"))
-                    result = subprocess.run(["bash", "-c", fixture + current], env=env,
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "yt-dlp-venv/bin"
+            binary.mkdir(parents=True)
+            for name, body in (("yt-dlp", 'printf "%s\\n" "${CHECK_VERSION}"'),
+                               ("python", 'printf "%s\\n" "${CHECK_PACKAGE_VERSION}"'),
+                               ("pip", 'printf "fixture==1\\n"')):
+                path = binary / name
+                path.write_text("#!/bin/bash\n" + body + "\n")
+                path.chmod(0o755)
+            evidence = root / "shared-destination-evidence"
+            evidence.mkdir()
+            (evidence / "stable-resolution.json").write_text('{"package_version":"2026.8.19"}\n')
+            env = dict(os.environ, RUNNER_TEMP=str(root), GITHUB_ENV=str(root / "env"),
+                       TMPDIR=str(root / "evidence"), CHECK_RUN=str(root / "invoked"),
+                       CURRENT_STABLE_YTDLP_PACKAGE_VERSION="2026.8.19", CHECK_PACKAGE_VERSION="2026.8.19")
+            for version, expected in (("2026.08.19\nFORGED=value", 1), ("2026.08.19", 0)):
+                with self.subTest(version=version):
+                    result = subprocess.run(["bash", "-c", fixture + record],
+                                            env=dict(env, CHECK_VERSION=version), capture_output=True,
+                                            timeout=10, check=False)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    self.assertEqual((root / "env").exists(), not expected)
+            self.assertEqual((root / "env").read_text(), "CURRENT_STABLE_YTDLP_VERSION=2026.08.19\n")
+            for selected, expected in (("2026.07.04", 1), ("2026.08.19", 0)):
+                with self.subTest(selected=selected):
+                    result = subprocess.run(["bash", "-c", fixture + run],
+                                            env=dict(env, CHECK_VERSION="2026.08.19", CURRENT_STABLE_YTDLP_VERSION=selected),
                                             capture_output=True, timeout=10, check=False)
-                    self.assertEqual(result.returncode, 0 if valid else 1, result.stderr)
-                    self.assertEqual((run / "extract").exists(), valid)
-                    self.assertEqual((run / "execute").exists(), valid)
-                    self.assertEqual((run / "path").exists(), valid)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    self.assertEqual((root / "invoked").exists(), not expected)
+
+    def test_current_stable_deno_metadata_policy_fails_closed(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        from importlib import metadata
+
+        script = self.step("real-tools.yml", "Validate current-stable shared prerequisites")
+        program = script.split("<<'PY_DENO_COMPAT'\n", 1)[1].split("\nPY_DENO_COMPAT", 1)[0]
+        # pip supplies PEP 508 parsing in the workflow venv. Replace only that
+        # external parser so ordinary repository validation need not install pip.
+        usable = SimpleNamespace(name="deno", marker=None, url=None, specifier={"2.9.4"})
+        too_new = copy.copy(usable)
+        too_new.specifier = {"99.0.0"}
+        direct = copy.copy(usable)
+        direct.url = "https://fixture.invalid/deno.whl"
+        other_extra = copy.copy(too_new)
+        other_extra.marker = SimpleNamespace(evaluate=lambda context: context["extra"] == "pin-deno")
+        unrelated = copy.copy(too_new)
+        unrelated.name = "other-runtime"
+        modules = {
+            "pip._vendor.packaging.requirements": SimpleNamespace(Requirement=lambda value: value),
+            "pip._vendor.packaging.version": SimpleNamespace(Version=lambda value: value),
+        }
+        for requirements, accepted in (([usable], True), ([usable, other_extra, unrelated], True),
+                                        ([], False), ([other_extra], False), ([too_new], False),
+                                        ([usable, too_new], False), ([direct], False)):
+            with self.subTest(requirements=requirements), patch.dict(sys.modules, modules), \
+                    patch.object(sys, "argv", ["-", "2.9.4"]), \
+                    patch.object(metadata, "requires", return_value=requirements), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                if accepted:
+                    exec(compile(program, "workflow-deno-compatibility", "exec"), {})
+                else:
+                    with self.assertRaisesRegex(SystemExit, "does not satisfy"):
+                        exec(compile(program, "workflow-deno-compatibility", "exec"), {})
 
     def test_development_artifact_names_bind_source_and_run_across_consumer_reruns(self):
         text = (PROJECT / ".github/workflows/packages.yml").read_text()

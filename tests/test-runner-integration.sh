@@ -2576,7 +2576,7 @@ PY_MOCK_SUBREAPING
 }
 
 test_mock_process_scan_contract() {
-    python3 -I -B - "${SCRIPT_DIR}/mock-integration.sh" <<'PY_PROCESS_SCAN'
+    python3 -I -B - "${SCRIPT_DIR}/lib/mock-common.sh" <<'PY_PROCESS_SCAN'
 import ctypes
 import os
 from pathlib import Path
@@ -2685,6 +2685,171 @@ else:
         libc.prctl(36, 0, 0, 0, 0)
 print("Mock process scan: argv boundaries, disappearance, foreign processes and orphan witness passed.")
 PY_PROCESS_SCAN
+}
+
+test_mock_group_dispatch() {
+    python3 -I -B - "${SCRIPT_DIR}" <<'PY_MOCK_DISPATCH'
+from collections import Counter
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+tests = Path(sys.argv[1])
+source = (tests / "mock-integration.sh").read_text(encoding="utf-8")
+libraries = ["fixtures", "common", "engine", "gui", "signals", "runtime"]
+core = ["cleanup_owner_guard", "engine_log_retention", "engine_audio_downloads",
+        "engine_video_downloads", "engine_failure_paths"]
+hls = ["engine_youtube_hls"]
+staging = ["active_staging_inventory", "engine_private_staging"]
+network = ["engine_network_destination", "engine_network_failures",
+           "engine_network_signals", "engine_network_cleanup_boundaries"]
+progress = ["gui_aria_progress", "gui_profiles", "gui_progress_completion"]
+state = ["gui_url_redaction_cases", "gui_live_log_retention_unconfirmed_shutdown",
+         "gui_cleanup_unconfirmed_shutdown", "gui_config_recovery",
+         "gui_settings_signal_cleanup", "gui_file_selection", "gui_prune_metadata",
+         "gui_diagnostic_logs", "gui_state_initialization", "gui_input_validation"]
+signals = ["process-supervision", "signal_unbound_directory_registration",
+           "signal_private_media_registration", "signal_cli_lost_group_leader",
+           "signal_transport_preserves_active_input", "signal_cli_download",
+           "signal_cli_aria2_diagnostic", "signal_cleanup_requires_quiescence",
+           "signal_private_record_registration", "signal_cli_leader_exit_descendant",
+           "signal_cli_worker_registration", "signal_cli_runtime_preparation",
+           "pre_env_observer_controls", "signal_cli_pre_env_registration",
+           "signal_registration_handoff", "signal_cli_foreground_group_registration",
+           "signal_cli_pgid_discovery_race", "signal_cli_ffmpeg", "signal_gui_session",
+           "signal_gui_blocked_entry", "signal_gui_zenity_diagnostic_cleanup",
+           "signal_gui_worker_registration", "signal_gui_group_identity_after_leader_exit",
+           "signal_gui_untrusted_group_presence", "signal_gui_foreground_group_registration",
+           "signal_gui_blocked_progress", "signal_gui_cancellation",
+           "signal_gui_startup_error", "signal_zenity_status"]
+runtime = ["managed_runtime_attestation", "runtime_version_formats",
+           "runtime_worker_failure", "runtime_version_overflow", "runtime_media_validation",
+           "runtime_dependencies", "runtime_progress_errors", "runtime_missing_zenity"]
+groups = {
+    "engine-core": core, "engine-hls": hls, "engine-staging": staging,
+    "engine-network": network, "gui-progress": progress, "gui-state": state,
+    "signals": signals, "runtime-compat": [runtime[i] for i in (0, 1, 3, 5)],
+    "runtime-validation": [runtime[i] for i in (2, 4, 6, 7)],
+}
+expected_all = core + hls + staging + network + progress + state + signals + runtime
+assert len(expected_all) == len(set(expected_all)) == 62
+assert source.endswith('main "$@"\n')
+# The actual entry point still parses options, bootstraps its subreaper,
+# creates fixtures and initializes/cleans their environment. Replace only
+# scenario bodies at its final call site, preserving every dispatch function.
+record = r'''
+mock_dispatch_record() {
+    [[ -n ${TEST_ROOT} && ${TEST_ROOT} == "${TMPDIR}/"tmp.* &&
+       ${HOME} == "${TEST_ROOT}/home" && -d ${HOME} &&
+       ${TEST_OWNER_BASHPID} == "${BASHPID}" &&
+       -x ${MANAGED_ENGINE_UNDER_TEST} && -x ${MOCK_BIN}/zenity &&
+       -x ${MOCK_NO_DENO_BIN}/yt-dlp && ! -e ${MOCK_NO_DENO_BIN}/deno &&
+       ! -L ${TEST_ROOT} ]] || return 90
+    printf '%s\n' "$1" >>"${MOCK_DISPATCH_LOG}"
+    if [[ ${MOCK_DISPATCH_FAIL_PHASE:-} == "$1" ]]; then
+        if [[ -n ${MOCK_DISPATCH_FAIL_SIGNAL:-} ]]; then
+            kill -"${MOCK_DISPATCH_FAIL_SIGNAL}" "${BASHPID}"
+        fi
+        return 23
+    fi
+}
+'''
+stubs = ''.join(f'test_mock_{name}() {{ mock_dispatch_record {name}; }}\n'
+                for name in expected_all if name != "process-supervision")
+with tempfile.TemporaryDirectory(prefix="mock-dispatch-") as directory:
+    root = Path(directory)
+    project = root / "project"
+    library_root = project / "tests/lib"
+    library_root.mkdir(parents=True)
+    for name in ("download-video.sh", "private-aria2-plan.py", "private-process-supervisor.py"):
+        shutil.copy2(tests.parent / name, project / name)
+    shutil.copy2(tests / "lib/assert.sh", library_root / "assert.sh")
+    for name in libraries:
+        shutil.copy2(tests / f"lib/mock-{name}.sh", library_root / f"mock-{name}.sh")
+    specimen = project / "tests/mock-integration.sh"
+    specimen.write_text(source[:-len('main "$@"\n')] + record + stubs + 'main "$@"\n')
+    (project / "tests/process-supervision-integration.py").write_text(
+        'import os\nwith open(os.environ["MOCK_DISPATCH_LOG"], "a") as log:\n'
+        '    log.write("process-supervision\\n")\n')
+    assert not (project / ".git").exists()
+    bash = shutil.which("bash")
+    # Library loading itself must leave the caller's process-wide state alone.
+    load = r'''
+set -euo pipefail
+umask 027
+trap ':' HUP INT TERM
+before_options=${SHELLOPTS}
+before_shopt=${BASHOPTS}
+before_traps=$(trap -p)
+before_umask=$(umask)
+before_directory=$PWD
+before_path=$PATH
+before_home=$HOME
+readonly PROJECT_DIR="caller project"
+export OUTPUT_DIR="caller output"
+TEST_PROCESS_PIDS=(first second)
+before_globals=$(declare -p PROJECT_DIR OUTPUT_DIR TEST_PROCESS_PIDS)
+unset MANAGED_ENGINE_DIR
+load_mock_libraries() {
+    for library in "$@"; do source "${library}"; done
+    [[ $(declare -p PROJECT_DIR OUTPUT_DIR TEST_PROCESS_PIDS) == "${before_globals}" &&
+       ! ${MANAGED_ENGINE_DIR+x} ]]
+}
+load_mock_libraries "$@"
+[[ ${SHELLOPTS} == "${before_options}" && ${BASHOPTS} == "${before_shopt}" &&
+   $(trap -p) == "${before_traps}" &&
+   $(umask) == "${before_umask}" && ${PWD} == "${before_directory}" &&
+   ${PATH} == "${before_path}" && ${HOME} == "${before_home}" ]]
+'''
+    subprocess.run([bash, "-c", load, "library-state",
+                    *(str(library_root / f"mock-{name}.sh") for name in libraries)],
+                   check=True, capture_output=True, timeout=5)
+    sequence = 0
+
+    def run(arguments, expected, status=0, **extra):
+        global sequence
+        sequence += 1
+        case = root / str(sequence)
+        case.mkdir()
+        log = case / "phases"
+        environment = dict(os.environ, TMPDIR=str(case), MOCK_DISPATCH_LOG=str(log), **extra)
+        result = subprocess.run([bash, str(specimen), *arguments], env=environment,
+                                capture_output=True, text=True, timeout=10)
+        actual = log.read_text().splitlines() if log.exists() else []
+        if result.returncode != status or actual != expected:
+            raise AssertionError((arguments, result.returncode, status, actual, expected, result.stderr))
+        if status and "integration group passed" in result.stdout:
+            raise AssertionError("failed mock dispatch announced success")
+        if any(path.is_dir() for path in case.iterdir()):
+            raise AssertionError("mock dispatch did not clean its private fixture")
+        return actual
+
+    run([], expected_all)
+    run(["--group", "all"], expected_all)
+    union = []
+    for group, phases in groups.items():
+        union.extend(run(["--group", group], phases))
+        failing = next(name for name in phases if name != "process-supervision")
+        run(["--group", group], phases[:phases.index(failing) + 1], 23,
+            MOCK_DISPATCH_FAIL_PHASE=failing)
+    assert Counter(union) == Counter(expected_all)
+    run(["--group=engine"], core + hls + staging + network)
+    run(["--group", "gui"], progress + state)
+    run(["--group", "runtime"], runtime)
+    run(["--group", "stress-signals"], signals + ["engine_network_signals", "runtime_progress_errors"])
+    for arguments in (["--group"], ["engine"], ["--group", "unknown"], ["--group", ""]):
+        run(arguments, [], 2)
+    for arguments in (["--help"], ["-h"], ["--list-groups"]):
+        run(arguments, [])
+    for signal_name, status in (("HUP", 129), ("INT", 130), ("TERM", 143)):
+        run(["--group", "engine-core"], core[:1], status,
+            MOCK_DISPATCH_FAIL_PHASE=core[0], MOCK_DISPATCH_FAIL_SIGNAL=signal_name)
+
+print("Mock dispatch: all 61 test functions plus process supervision, group/aggregate order, failures, signals, library state and Git-free entry point passed.")
+PY_MOCK_DISPATCH
 }
 
 test_runtime_hardening_group_dispatch() {
@@ -3625,6 +3790,7 @@ main() {
     test_real_tool_optimization_isolation
     test_mock_child_subreaping
     test_mock_process_scan_contract
+    test_mock_group_dispatch
     test_runtime_hardening_group_dispatch
     test_run_all_manifest_execution
     test_run_all_doctor_contract
