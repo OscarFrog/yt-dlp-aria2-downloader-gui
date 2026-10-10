@@ -531,6 +531,40 @@ Use `./tests/mock-integration.sh --list-groups` to list the accepted group
 names. These groups use independent temporary homes, output directories, and
 mock binaries when the top-level runner executes them concurrently.
 
+The compatible entry point owns argument parsing, the PID-preserving subreaper
+bootstrap, private paths, traps and final cross-domain dispatch. Its sourced
+libraries declare caller-owned globals without assigning values and define
+functions without changing shell state:
+
+| Library under `tests/lib/` | Scenarios and shared responsibilities |
+| --- | --- |
+| `mock-fixtures.sh` | Explicit creation of command doubles and the private instrumented engine before HOME/PATH changes |
+| `mock-common.sh` | Argument/log assertions, process observation, cleanup ownership and isolated environment initialization |
+| `mock-engine.sh` | `engine-core`, `engine-hls`, `engine-staging`, `engine-network` and the ordered `engine` aggregate |
+| `mock-gui.sh` | `gui-progress`, `gui-state` and the ordered `gui` aggregate |
+| `mock-signals.sh` | Process-supervision suite, CLI/GUI registration, cancellation, descendant and pre-env observer controls |
+| `mock-runtime.sh` | `runtime-compat`, `runtime-validation` and the historical interleaved `runtime` aggregate |
+
+The 61 `test_mock_*` functions retain their assertions and parameterized cases.
+The `engine` aggregate orders core, HLS, staging and network; `gui` orders
+progress then state. The `runtime` aggregate retains its original interleaving
+of compatibility and validation scenarios rather than concatenating subgroups.
+The default order remains engine, GUI, signals and runtime; explicit
+`stress-signals` adds network-signal and runtime-progress-error cases after the
+signal group. Runner integration executes the real entry point with inert
+scenario bodies against an independent ordered manifest, including first-error
+and signal propagation, shared initialization and cleanup in a Git-free copy.
+It also checks that loading the libraries leaves options, traps, umask,
+working directory, HOME and PATH unchanged.
+
+Fixture initialization remains shared and unconditional. Command doubles are
+multimode: GUI scenarios exercise engine transports, runtime validation uses
+Zenity, and signal scenarios use the engine/runtime and network fixtures.
+The private engine's counted source probes retain the precise post-handler
+readiness transition; function-only production copies still depend on the
+statically checked final `main` invocation. The extraction does not add a
+production test hook or claim an initialization performance improvement.
+
 List the integration manifest and fast-profile membership without running any
 validation:
 
@@ -1222,7 +1256,26 @@ aria2 behavior suite repeats
 Range/no-Range/redirect/error three times, the silent-active quiescence
 negative control ten times, and interrupted resume ten times. A separate weekly
 scheduled job resolves and logs the current stable yt-dlp
-version and runs the same qualification without changing PR pins.
+version and runs the same qualification, including shared-destination GUI/CLI
+cycles, without changing PR pins. It first selects the published stable version
+from `https://pypi.org/pypi/yt-dlp/json`, with an eight-MiB response bound and a
+30-second request timeout. Redirects, prereleases, malformed versions and
+withdrawn releases fail explicitly. Its isolated pip installation then requires
+that exact version with its own `pin-curl-cffi` extra over the explicit HTTPS
+PyPI index instead of copying the earlier wheel's four dependency pins. Only
+wheels are accepted. Unavailable dependencies or an incompatible interpreter
+must fail; resolver backtracking cannot silently select an older yt-dlp.
+The version installed in the same venv must match the selected package version.
+The verified Deno baseline must satisfy that selected wheel's `deno`
+compatibility metadata; missing metadata or a newer minimum fails explicitly.
+Pip's bundled PEP 508 parser evaluates markers and version constraints in this
+disposable venv; it is not a new dependency of the local test suite. The weekly
+run records the PyPI source, observation time and selected package version in
+`stable-resolution.json`, records every resolved tool/package version, checks
+the selected yt-dlp version again before the shared fixture, and retains these
+records and allowlisted
+pre-rescue diagnostics under a source/run/attempt-specific artifact name.
+The existing 25-minute job budget and fixture deadlines are unchanged.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the exact-source qualification proof and release-specific identity checks, verifies
@@ -1593,6 +1646,11 @@ A named-thread witness covers ASCII, valid UTF-8 and kernel truncation inside a
 multibyte name. Readiness precedes the real stat read; an independent byte oracle
 checks SID/start while admission, presence and quiescence ignore name encoding,
 including the actual Python predicates extracted from the GUI and engine.
+The independent test observer reads that same real task, including its root
+procfs alias in a controlled inventory with an unrelated marker. Synthetic
+stat fixtures additionally cover arbitrary name bytes and invalid identity
+fields: neither malformed identities nor incomplete or denied inventories may
+become successful empty observations. The observer retains its own parser.
 Only a non-leader thread is renamed, keeping other parallel suites' root procfs
 inventories unaffected. Its private barrier is released after the verdict.
 Refusal diagnostics retain status 69 and expose only a bounded category/errno;
@@ -1639,7 +1697,10 @@ python3 -B tests/multi-instance-real.py
 ```
 
 This local qualification also runs in the required latest pinned yt-dlp CI
-entry, after verified Deno provisioning and the pinned impersonation prerequisites.
+entry and the weekly current-stable job. Both provision verified Deno first;
+the pinned entry keeps its hash-pinned impersonation prerequisites, while the
+weekly entry resolves the selected stable wheel's own extra and checks Deno
+compatibility as described above.
 Its managed-runtime admission requires a usable `curl_cffi` target: successful
 `--version`, `--help` or `--list-impersonate-targets` exit statuses alone do not
 satisfy that contract. A wheel without those dependencies is refused with 69;
@@ -1848,6 +1909,17 @@ All five source workflows, including `qualification.yml`, are mandatory; the
 former optional extended-qualification flag no longer changes this contract.
 By default, the generated Markdown report is written below `qualification-evidence/`, an ignored local output.
 Supply a third path to place it in a separately managed evidence archive.
+
+The selected current-stable schedule additionally passes
+`scripts/ci-validation.py verify-schedule`: its canonical repository, main
+branch, workflow path, source-identity job and current run/attempt must agree.
+Every weekly prerequisite, version record, media qualification, shared GUI/CLI
+run and evidence upload must appear exactly once and succeed. An omitted,
+failed or skipped required step refuses a nominally green schedule, including
+an older run predating this contract. The verifier rereads run metadata before
+acceptance and the report records the verified attempt and source tree. This
+binds the schedule's selected `headSha`; scheduled diagnostics remain separate
+from exact-release-SHA and PR-tree qualification.
 
 Scheduled evidence uses the original `createdAt` timestamp exported by GitHub
 CLI, never a rerun's update time. The collector requires a complete absolute

@@ -430,6 +430,42 @@ collect_content_qualification() {
     printf -v "${output_variable}" '%s' "${qualification_result}"
 }
 
+verify_scheduled_real_tools() {
+    local repo=$1
+    local run_json=$2
+    local output_variable=$3
+    local selected_sha=''
+    local selected_run_id=''
+    local qualification_result=''
+    local github_token=${GH_TOKEN:-${GITHUB_TOKEN:-}}
+
+    [[ ${repo} == OscarFrog/yt-dlp-aria2-downloader-gui ]] || {
+        fail_qualification 'scheduled qualification requires the canonical repository.'
+        return 65
+    }
+    if ! selected_sha=$(jq -er '.headSha | strings' <<<"${run_json}") \
+        || ! selected_run_id=$(jq -er '.databaseId | numbers' <<<"${run_json}"); then
+        fail_qualification 'scheduled qualification source or run identity is missing.'
+        return 65
+    fi
+    if [[ -z ${github_token} ]]; then
+        if ! github_token=$(gh auth token --hostname github.com); then
+            fail_qualification 'unable to obtain authenticated GitHub CLI access.'
+            return 65
+        fi
+    fi
+    # A successful workflow may omit a newly required step. Bind all weekly
+    # prerequisites, verdicts and retained evidence to this exact source/run.
+    if ! qualification_result=$(
+        GH_TOKEN="${github_token}" python3 -I "${PROJECT_DIR}/scripts/ci-validation.py" \
+            verify-schedule --commit "${selected_sha}" --run-id "${selected_run_id}"
+    ); then
+        fail_qualification 'scheduled current-stable qualification was refused.'
+        return 65
+    fi
+    printf -v "${output_variable}" '%s' "${qualification_result}"
+}
+
 collect_scheduled_runs() {
     local repo=$1
     local max_schedule_age_days=$2
@@ -437,6 +473,8 @@ collect_scheduled_runs() {
     local shfmt_output_variable=$4
     local real_tools_runs_json=''
     local real_tools_result=''
+    local real_tools_proof=''
+    local real_tools_status=0
     local shfmt_runs_json=''
     local shfmt_result=''
 
@@ -449,6 +487,13 @@ collect_scheduled_runs() {
         --json databaseId,workflowName,event,status,conclusion,headSha,createdAt,url)
     real_tools_result=$(select_latest_successful_schedule "${real_tools_runs_json}")
     assert_schedule_fresh "${real_tools_result}" real-tools.yml "${max_schedule_age_days}"
+    verify_scheduled_real_tools "${repo}" "${real_tools_result}" real_tools_proof
+    real_tools_status=$?
+    if ((real_tools_status != 0)); then
+        return "${real_tools_status}"
+    fi
+    real_tools_result=$(jq -c --argjson proof "${real_tools_proof}" \
+        '. + {qualification: $proof}' <<<"${real_tools_result}")
 
     shfmt_runs_json=$(retry_qualification_capture \
         'unable to list scheduled shfmt runs' \
@@ -501,6 +546,10 @@ write_scheduled_run_line() {
     run_url=$(jq -r '.url' <<<"${run}")
     printf -- "- %s: \`%s\` — \`%s\` — %s\n" \
         "${label}" "${run_id}" "${run_created}" "${run_url}"
+    if jq -e 'has("qualification")' <<<"${run}" >/dev/null; then
+        jq -r '"  - Verified attempt \(.qualification.run_attempt), source `\(.qualification.source_commit)`, tree `\(.qualification.source_tree)`."' \
+            <<<"${run}"
+    fi
 }
 
 write_qualification_report() {

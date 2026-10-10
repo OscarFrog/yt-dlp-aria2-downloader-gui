@@ -40,6 +40,12 @@ TEST_SHELL_FILES=(
     tests/repeat-qualification.sh
     tests/test-runner-integration.sh
     tests/lib/assert.sh
+    tests/lib/mock-fixtures.sh
+    tests/lib/mock-common.sh
+    tests/lib/mock-engine.sh
+    tests/lib/mock-gui.sh
+    tests/lib/mock-signals.sh
+    tests/lib/mock-runtime.sh
     tests/lib/package-lifecycle.sh
     tests/lib/package-runtime-preservation.sh
     tests/lib/project-files.sh
@@ -82,6 +88,12 @@ DEVELOPMENT_SHELL_FILES=(
 # shellcheck disable=SC2034 # Array is read by test-static.sh.
 SOURCED_SHELL_FILES=(
     tests/lib/assert.sh
+    tests/lib/mock-fixtures.sh
+    tests/lib/mock-common.sh
+    tests/lib/mock-engine.sh
+    tests/lib/mock-gui.sh
+    tests/lib/mock-signals.sh
+    tests/lib/mock-runtime.sh
     tests/lib/package-lifecycle.sh
     tests/lib/package-runtime-preservation.sh
     tests/lib/project-files.sh
