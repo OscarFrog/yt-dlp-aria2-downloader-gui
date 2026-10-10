@@ -1269,6 +1269,39 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
         self.assertIn("timeout --signal=TERM --kill-after=10s 8m", job)
         self.assertIn("timeout-minutes: 10", job)
 
+    def test_fedora_suite_budget_preserves_workers_and_validation_status(self):
+        job = self.jobs(self.workflow("shell.yml"))["validate-fedora"]
+        self.assertEqual(re.findall(r"(?m)^    timeout-minutes: (\d+)$", job), ["10"])
+        commands = re.findall(r"(?m)^      - name: Run validation\n        run: (.+)$", job)
+        self.assertEqual(commands, [
+            "timeout --signal=TERM --kill-after=10s 7m bash ./tests/run-all.sh --jobs 4",
+        ])
+        self.assertEqual(job.count("./tests/run-all.sh"), 1)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "tests").mkdir()
+            (root / "tests/run-all.sh").write_text(r'''
+set -euo pipefail
+[[ "$*" == '--jobs 4' ]] || exit 97
+printf 'validation fixture started\n'
+if [[ ${CHECK_EXPIRED} == 1 ]]; then
+    while :; do :; done
+fi
+exit "${CHECK_VALIDATION_STATUS}"
+''')
+            for status, expired, expected in ((0, False, 0), (23, False, 23),
+                                              (143, False, 143), (0, True, 124)):
+                with self.subTest(status=status, expired=expired):
+                    # Compress only the aggregate deadline; execute GNU timeout
+                    # with the real TERM/KILL policy and command status handling.
+                    command = commands[0].replace(" 7m ", " 0.05s ") if expired else commands[0]
+                    result = subprocess.run(["bash", "-c", command], cwd=root,
+                                            env=dict(os.environ, CHECK_EXPIRED=str(int(expired)),
+                                                     CHECK_VALIDATION_STATUS=str(status)),
+                                            capture_output=True, text=True, timeout=5, check=False)
+                    self.assertEqual(result.stdout, "validation fixture started\n", result.stderr)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+
     def test_shared_destination_uses_one_verified_tool_entry_and_retains_only_diagnostics(self):
         job = self.jobs(self.workflow("real-tools.yml"))["pinned-local-media"]
         steps = re.split(r"(?m)^      - ", job)

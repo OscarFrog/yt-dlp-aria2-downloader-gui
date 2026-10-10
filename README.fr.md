@@ -920,14 +920,18 @@ une entrée native sans preuve d’appartenance est une collision distincte
 
 La coordination couvre le même hôte et le même utilisateur, y compris les
 alias de chemins canoniques et les racines XDG différentes. Les inodes des
-verrous restent dans la racine privée revalidée
-`/tmp/yt-dlp-aria2-downloader-UID` (ou son repli `/var/tmp`) et ne sont jamais
-supprimés pour leur âge. Les sessions privées privilégient la racine validée
+verrous sont détenus dans les deux racines privées revalidées
+`/tmp/yt-dlp-aria2-downloader-UID` et `/var/tmp/yt-dlp-aria2-downloader-UID`, et ne
+sont jamais supprimés pour leur âge. Si une racine de coordination est indisponible
+ou non sûre, l'admission échoue avec **73**, sans basculer vers un registre
+indépendant. Les sessions privées conservent leur repli et privilégient la racine validée
 `$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader-UID`. Le verrou historique de destination
-est conservé en mode partagé : il exclut une ancienne instance 2.3.29 utilisant
+est conservé en mode partagé dans chaque racine : il exclut une ancienne instance 2.3.29 utilisant
 son protocole exclusif, dans les deux ordres de lancement. Les nouvelles
-instances emploient en parallèle des réservations plus fines. Cela ne corrige
-pas rétroactivement les défauts d’arrêt de l’ancien exécutable.
+instances emploient en parallèle des réservations plus fines. Les checkpoints
+des deux racines sont examinés et activés avant transfert. Les enregistrements
+historiques actifs ou ambigus sont conservés. Cela ne corrige ni deux anciens
+exécutables choisissant des racines différentes, ni les défauts d’arrêt de l’ancien exécutable.
 
 Les réservations durent jusqu’à l’arrêt des consommateurs et la fin du
 nettoyage. Fermer une instance ne signale pas les autres. Si l'arrêt reste
@@ -1006,9 +1010,10 @@ Les médias complets ne sont jamais placés par défaut dans `XDG_RUNTIME_DIR`
 ou tmpfs.
 
 Le stockage local doit pouvoir contenir les pistes sélectionnées, le média
-assemblé et le remux HLS éventuel. Avant le transfert, les tailles connues sont
-comparées à l'espace disponible avec une estimation triple et une marge de
-64 Mio. Les tailles inconnues, quotas, écritures concurrentes et saturations
+assemblé et le remux HLS éventuel. Avant le transfert, les tailles connues, y
+compris celles héritées des métadonnées sélectionnées, sont comparées à l'espace
+disponible avec une estimation triple et une marge de 64 Mio. Ce contrôle ne
+réserve pas l'espace disque. Les tailles inconnues, quotas, écritures concurrentes et saturations
 ultérieures ne sont pas prévisibles ; les erreurs d'écriture restent des
 échecs. Le journal indique l'espace local. La fenêtre de progression affiche
 l'étape actuelle, le pourcentage, la vitesse et le temps restant estimé lorsque

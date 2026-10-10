@@ -2704,6 +2704,7 @@ core = ["cleanup_owner_guard", "engine_log_retention", "engine_audio_downloads",
         "engine_video_downloads", "engine_failure_paths"]
 hls = ["engine_youtube_hls"]
 staging = ["active_staging_inventory", "engine_private_staging"]
+composition = "engine_internal_record_cleanup"
 network = ["engine_network_destination", "engine_network_failures",
            "engine_network_signals", "engine_network_cleanup_boundaries"]
 progress = ["gui_aria_progress", "gui_profiles", "gui_progress_completion"]
@@ -2729,7 +2730,7 @@ runtime = ["managed_runtime_attestation", "runtime_version_formats",
            "runtime_worker_failure", "runtime_version_overflow", "runtime_media_validation",
            "runtime_dependencies", "runtime_progress_errors", "runtime_missing_zenity"]
 groups = {
-    "engine-core": core, "engine-hls": hls, "engine-staging": staging,
+    "engine-core": core, "engine-hls": hls, "engine-staging": staging + [composition],
     "engine-network": network, "gui-progress": progress, "gui-state": state,
     "signals": signals, "runtime-compat": [runtime[i] for i in (0, 1, 3, 5)],
     "runtime-validation": [runtime[i] for i in (2, 4, 6, 7)],
@@ -2759,6 +2760,7 @@ mock_dispatch_record() {
 '''
 stubs = ''.join(f'test_mock_{name}() {{ mock_dispatch_record {name}; }}\n'
                 for name in expected_all if name != "process-supervision")
+stubs += f'mock_engine_internal_record_cleanup() {{ mock_dispatch_record {composition}; }}\n'
 with tempfile.TemporaryDirectory(prefix="mock-dispatch-") as directory:
     root = Path(directory)
     project = root / "project"
@@ -2835,7 +2837,7 @@ load_mock_libraries "$@"
         failing = next(name for name in phases if name != "process-supervision")
         run(["--group", group], phases[:phases.index(failing) + 1], 23,
             MOCK_DISPATCH_FAIL_PHASE=failing)
-    assert Counter(union) == Counter(expected_all)
+    assert Counter(union) == Counter(expected_all + [composition])
     run(["--group=engine"], core + hls + staging + network)
     run(["--group", "gui"], progress + state)
     run(["--group", "runtime"], runtime)
@@ -2848,7 +2850,7 @@ load_mock_libraries "$@"
         run(["--group", "engine-core"], core[:1], status,
             MOCK_DISPATCH_FAIL_PHASE=core[0], MOCK_DISPATCH_FAIL_SIGNAL=signal_name)
 
-print("Mock dispatch: all 61 test functions plus process supervision, group/aggregate order, failures, signals, library state and Git-free entry point passed.")
+print("Mock dispatch: all 61 test functions plus process supervision, isolated crash/cleanup composition, group/aggregate order, failures, signals, library state and Git-free entry point passed.")
 PY_MOCK_DISPATCH
 }
 

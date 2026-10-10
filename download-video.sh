@@ -82,6 +82,8 @@ RESOURCE_STATE_FILE=''
 RESOURCE_STATE_ACTIVE=false
 RESOURCE_COMPLETED_PATH=''
 RESOURCE_LOCK_FDS=()
+RESOURCE_LOCK_ROOTS=()
+RESOURCE_REGISTRY_OPTIONS=()
 DOWNLOAD_WORKER_PID=''
 DOWNLOAD_WORKER_START_TIME=''
 DOWNLOAD_WORKER_PGID=''
@@ -143,6 +145,7 @@ cleanup() {
     if [[ ${RESOURCE_STATE_ACTIVE} == true ]]; then
         if ! python3 "${PRIVATE_ARIA2_HELPER}" resource-state --action save \
             --state "${RESOURCE_STATE_FILE}" --registry "${RESOURCE_LOCK_ROOT}" \
+            "${RESOURCE_REGISTRY_OPTIONS[@]}" \
             --completed-path "${RESOURCE_COMPLETED_PATH}"; then
             printf '%s\n' 'Warning: resource ownership checkpoint failed; ambiguous media will not be resumed.' >&2
         fi
@@ -781,22 +784,38 @@ resolve_lock_root() {
     printf -v "${output_variable}" '%s' "${candidate}"
 }
 
+resolve_coordination_roots() {
+    local candidates='' root
+    if ! candidates=$(python3 "${PRIVATE_ARIA2_HELPER}" coordination-roots); then
+        error 'unable to authenticate every historical coordination directory; refusing admission.'
+        return 73
+    fi
+    mapfile -t RESOURCE_LOCK_ROOTS <<<"${candidates}"
+    RESOURCE_REGISTRY_OPTIONS=()
+    for root in "${RESOURCE_LOCK_ROOTS[@]}"; do
+        [[ ${root} == /* && -d ${root} && ! -L ${root} ]] || return 73
+        RESOURCE_REGISTRY_OPTIONS+=(--registry "${root}")
+    done
+    RESOURCE_LOCK_ROOT=${RESOURCE_LOCK_ROOTS[0]}
+    RESOURCE_REGISTRY_OPTIONS=("${RESOURCE_REGISTRY_OPTIONS[@]:2}")
+}
+
 acquire_output_lock() {
     local output_dir=$1
     local lock_key
     local destination_lock_root=''
+    local lock_file lock_fd status=0 opened_identity visible_identity
 
     # shellcheck disable=SC2310 # Failure is converted to a lock setup status.
-    if ! resolve_lock_root || [[ -z ${OUTPUT_LOCK_ROOT} ]]; then
+    if ! resolve_lock_root OUTPUT_LOCK_ROOT true || [[ -z ${OUTPUT_LOCK_ROOT} ]]; then
         error 'unable to resolve the download-lock directory.'
         return 73
     fi
 
-    # Every invocation must lock the same inode, including launches with
-    # different XDG_RUNTIME_DIR values. Keep private work files under the
-    # existing runtime root, but place destination locks in a stable UID root.
+    # Old engines can choose either UID root after a temporary-storage failure.
+    # Hold both historical inodes, without serializing independent new families.
     # shellcheck disable=SC2310 # Failure is converted to a lock setup status.
-    if ! resolve_lock_root destination_lock_root false; then
+    if ! resolve_coordination_roots; then
         return 73
     fi
 
@@ -810,31 +829,49 @@ acquire_output_lock() {
         return 73
     fi
 
-    RESOURCE_LOCK_ROOT=${destination_lock_root}
-    OUTPUT_LOCK_FILE="${destination_lock_root}/${lock_key}.lock"
-    if [[ -L ${OUTPUT_LOCK_FILE} ||
-        (-e ${OUTPUT_LOCK_FILE} && ! -f ${OUTPUT_LOCK_FILE}) ]]; then
-        error 'the destination lock exists but is not a regular file.'
-        return 73
-    fi
-    if ! exec {OUTPUT_LOCK_FD}>>"${OUTPUT_LOCK_FILE}"; then
-        error 'unable to open the destination lock.'
-        return 73
-    fi
-    if ! chmod 600 -- "${OUTPUT_LOCK_FILE}"; then
-        error 'unable to secure the destination lock.'
-        return 73
-    fi
-    if ! flock --shared --nonblock "${OUTPUT_LOCK_FD}"; then
-        error "another download is already using the destination directory: ${output_dir}"
-        return 75
-    fi
+    for destination_lock_root in "${RESOURCE_LOCK_ROOTS[@]}"; do
+        lock_file="${destination_lock_root}/${lock_key}.lock"
+        if [[ -L ${lock_file} || (-e ${lock_file} && ! -f ${lock_file}) ]]; then
+            error 'the destination lock exists but is not a regular file.'
+            return 73
+        fi
+        begin_signal_registration
+        if ! exec {lock_fd}>>"${lock_file}"; then
+            finish_signal_registration
+            error 'unable to open the destination lock.'
+            return 73
+        fi
+        if [[ -z ${OUTPUT_LOCK_FD} ]]; then
+            OUTPUT_LOCK_FD=${lock_fd}
+            # shellcheck disable=SC2034 # Sourced coordination fixtures inspect the primary historical inode.
+            OUTPUT_LOCK_FILE=${lock_file}
+        else
+            RESOURCE_LOCK_FDS+=("${lock_fd}")
+        fi
+        if ! opened_identity=$(stat -Lc '%d:%i:%u' -- "/proc/${BASHPID}/fd/${lock_fd}") \
+            || ! visible_identity=$(stat -c '%d:%i:%u' -- "${lock_file}") \
+            || [[ ${opened_identity} != "${visible_identity}" || ${opened_identity##*:} != "${EUID}" ]] \
+            || ! chmod 600 -- "${lock_file}"; then
+            finish_signal_registration
+            error 'unable to authenticate the destination lock.'
+            return 73
+        fi
+        flock --shared --nonblock --conflict-exit-code 75 "${lock_fd}" || status=$?
+        finish_signal_registration
+        if ((status == 75)); then
+            error "another download is already using the destination directory: ${output_dir}"
+            return 75
+        elif ((status != 0)); then
+            error 'unable to acquire the destination lock safely.'
+            return 73
+        fi
+    done
 
     return 0
 }
 
 acquire_resource_reservations() {
-    local reservation_keys='' lock_mode lock_key resource_fd lock_path
+    local reservation_keys='' lock_mode lock_key resource_fd lock_path registry
     local replay_output_template=''
     local opened_identity visible_identity status=0
     local -a profile_options=()
@@ -845,43 +882,46 @@ acquire_resource_reservations() {
         --url-file "${YTDLP_BATCH_FILE_TMP}" --mode "${MODE}" \
         --output-dir "${OUTPUT_DIR}" --final-output-dir "${FINAL_OUTPUT_DIR}" \
         --final-output-identity "${FINAL_OUTPUT_IDENTITY}" "${profile_options[@]}") || return $?
-    while read -r lock_mode lock_key; do
-        [[ ${lock_mode} == shared || ${lock_mode} == exclusive ]] || return 65
-        [[ ${lock_key} =~ ^[a-f0-9]{64}$ ]] || return 65
-        lock_path="${RESOURCE_LOCK_ROOT}/resource-${lock_key}.lock"
-        [[ ! -L ${lock_path} && (! -e ${lock_path} || -f ${lock_path}) ]] || return 73
-        begin_signal_registration
-        if ! exec {resource_fd}>>"${lock_path}"; then
-            finish_signal_registration
-            return 73
-        fi
-        RESOURCE_LOCK_FDS+=("${resource_fd}")
-        opened_identity=$(stat -Lc '%d:%i:%u' -- "/proc/${BASHPID}/fd/${resource_fd}")
-        visible_identity=$(stat -c '%d:%i:%u' -- "${lock_path}")
-        if [[ ${opened_identity} != "${visible_identity}" || ${opened_identity##*:} != "${EUID}" ]]; then
-            finish_signal_registration
-            return 73
-        fi
-        status=0
-        flock "--${lock_mode}" --nonblock --conflict-exit-code 75 "${resource_fd}" || status=$?
-        if ((status != 0)); then
-            finish_signal_registration
-            if ((status == 75)); then
-                error 'media resources are currently reserved by another download; retry after it finishes.'
-                return 75
+    for registry in "${RESOURCE_LOCK_ROOTS[@]}"; do
+        while read -r lock_mode lock_key; do
+            [[ ${lock_mode} == shared || ${lock_mode} == exclusive ]] || return 65
+            [[ ${lock_key} =~ ^[a-f0-9]{64}$ ]] || return 65
+            lock_path="${registry}/resource-${lock_key}.lock"
+            [[ ! -L ${lock_path} && (! -e ${lock_path} || -f ${lock_path}) ]] || return 73
+            begin_signal_registration
+            if ! exec {resource_fd}>>"${lock_path}"; then
+                finish_signal_registration
+                return 73
             fi
-            error 'unable to acquire the media resource reservation safely.'
-            return 73
-        fi
-        finish_signal_registration
-    done <<<"${reservation_keys}"
+            RESOURCE_LOCK_FDS+=("${resource_fd}")
+            if ! opened_identity=$(stat -Lc '%d:%i:%u' -- "/proc/${BASHPID}/fd/${resource_fd}") \
+                || ! visible_identity=$(stat -c '%d:%i:%u' -- "${lock_path}") \
+                || [[ ${opened_identity} != "${visible_identity}" || ${opened_identity##*:} != "${EUID}" ]]; then
+                finish_signal_registration
+                return 73
+            fi
+            status=0
+            flock "--${lock_mode}" --nonblock --conflict-exit-code 75 "${resource_fd}" || status=$?
+            if ((status != 0)); then
+                finish_signal_registration
+                if ((status == 75)); then
+                    error 'media resources are currently reserved by another download; retry after it finishes.'
+                    return 75
+                fi
+                error 'unable to acquire the media resource reservation safely.'
+                return 73
+            fi
+            finish_signal_registration
+        done <<<"${reservation_keys}"
+    done
     begin_signal_registration
     # Register cleanup before the helper can publish an active checkpoint.
     # Its transaction identity makes cleanup a no-op if admission never commits
     # or was refused; a signal after commit must not strand an active record.
     RESOURCE_STATE_ACTIVE=true
     python3 "${PRIVATE_ARIA2_HELPER}" resource-state --action admit \
-        --state "${RESOURCE_STATE_FILE}" --registry "${RESOURCE_LOCK_ROOT}" || status=$?
+        --state "${RESOURCE_STATE_FILE}" --registry "${RESOURCE_LOCK_ROOT}" \
+        "${RESOURCE_REGISTRY_OPTIONS[@]}" || status=$?
     finish_signal_registration
     if ((status == 1)); then
         error 'media destination already exists or contains an ambiguous input; preserving it.'
@@ -3012,7 +3052,7 @@ initialize_runtime_dependencies() {
                 ;;
         esac
         # shellcheck disable=SC2310 # Failure becomes a bounded setup diagnostic.
-        if ! resolve_lock_root || [[ -z ${OUTPUT_LOCK_ROOT} ]]; then
+        if ! resolve_lock_root OUTPUT_LOCK_ROOT true || [[ -z ${OUTPUT_LOCK_ROOT} ]]; then
             error 'unable to resolve the runtime-attestation directory.'
             exit 73
         fi

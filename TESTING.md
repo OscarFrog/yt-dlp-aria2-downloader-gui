@@ -125,7 +125,7 @@ The paired minimum-interpreter job allows eight minutes for the complete
 four-worker suite, within its unchanged ten-minute job budget. This aggregate
 budget includes every static and integration task; it is separate from the
 individual signal, shutdown and fixture deadlines, which remain unchanged.
-Ubuntu allows seven minutes for its complete suite; Fedora retains five.
+Ubuntu and Fedora allow seven minutes for their complete suites.
 Every wrapper retains TERM followed by KILL after ten seconds. The Ubuntu
 budget includes headroom for the measured workload: a complete remote Git-free
 Ubuntu run took 299.487 seconds, while a checkout run reached the former
@@ -134,6 +134,16 @@ The complete measurement plus a 25% allowance, rounded up to whole minutes,
 gives 420 seconds. Git-free and checkout environments are distinct; this budget
 does not attribute historical delays to unmeasured load. The ten-minute job cap,
 four-worker schedule and every individual fixture deadline remain unchanged.
+
+Fedora's seven-minute command leaves 170 seconds within its ten-minute job cap
+for preparation and final cleanup after allowing the ten-second termination
+grace. This is a workload budget, not a guarantee about runner speed. Its native
+runner events retain each suite's start, completion, status and monotonic time
+in the Actions log without additional instrumentation. Integration log bodies
+are emitted after the phase completes; an interrupted suite without a completion
+event remains unqualified even when other suites have succeeded. The existing
+events identify the unfinished work and last recorded progress; they do not
+establish the cause of a timeout or an unobserved final duration.
 
 The Ubuntu `Run validation` step also records bounded passive diagnostics for
 its current execution. `scripts/ci-validation-diagnostics.py` reads aggregate
@@ -546,6 +556,12 @@ functions without changing shell state:
 | `mock-runtime.sh` | `runtime-compat`, `runtime-validation` and the historical interleaved `runtime` aggregate |
 
 The 61 `test_mock_*` functions retain their assertions and parameterized cases.
+The crash/residue scenario shares one dedicated destination for its crash,
+conflicting retry and independent-media control; its active checkpoint cannot
+contaminate unrelated scenarios. The isolated `engine-staging` group additionally
+runs the existing internal-record cleanup case against the normal fixture output
+after that crash. This checks their composition without repeating the engine
+campaign. The aggregates already reach this same case in the network sequence.
 The `engine` aggregate orders core, HLS, staging and network; `gui` orders
 progress then state. The `runtime` aggregate retains its original interleaving
 of compatibility and validation scenarios rather than concatenating subgroups.
@@ -1770,6 +1786,23 @@ adapter's 10-second dialog-result timeout or retry a failed semantic action.
 The ordinary headless CI matrix remains independent.
 
 The private-plan suite exercises shared/exclusive ancestor reservations,
+including `tests/coordination-integration.py` against isolated copies of both
+historical UID roots. Real locks cover nominal conflicts, old/new launch orders,
+independent families, transient write-probe failure and recovery. Checkpoint
+controls cover the other registry's active/ambiguous record, passive ownership,
+partial activation and nonce-bound cleanup. ENOSPC is injected at the probe;
+the actual disk is never filled. A failed or unreadable registry must not become
+a new coordination namespace. Cancellation retains both sets of descriptors
+until consumers are confirmed stopped.
+
+Disk-space controls compare inherited and explicit selected metadata at exact
+thresholds, with overrides, null/invalid sizes, approximations and multiple
+formats. The actual engine admission branch must refuse before transport and
+publication sentinels can write media; its adequate-space control reaches both.
+The original delta-only estimator must fail that oracle, independently of the
+diagnostic wording. This does not claim to reserve disk capacity.
+
+The remaining private-plan cases exercise
 Unicode/case aliases, different URLs and overlapping intermediate families,
 unchanged owned resumes, ambiguous legacy partials and active-record retention
 after uncertain shutdown. Incarnation cases distinguish a recreated destination

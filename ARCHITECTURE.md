@@ -292,10 +292,17 @@ family has an exclusive lock. Thus `name` and `name.f137` conflict even when
 their final names differ, while `name.a` and `name.b` may coexist. Keys bind the
 physical destination device/inode and normalized family. All keys are acquired
 in sorted order without waiting; partial acquisition is closed on failure.
-Canonical symlink/dot aliases converge. Lock inodes live in the stable private
-UID root, independent of HOME/XDG settings, and are never unlinked as stale.
-The exact historical canonical-path lock remains shared throughout the new
-transaction, excluding an old instance's exclusive lock in both launch orders.
+Canonical symlink/dot aliases converge. Lock inodes live in both historical
+private UID roots, `/tmp` and `/var/tmp`, independently of HOME/XDG settings,
+and are never unlinked as stale. Temporary storage can fall back; coordination
+cannot select a different namespace after an I/O failure. Both roots must pass
+the private-directory and write-probe checks, otherwise setup refuses with 73.
+Creation uses exclusive names and authenticates existing directory identities;
+physical aliases are deduplicated only after both paths have been validated.
+Every root's exact historical canonical-path lock remains shared throughout
+the transaction, excluding an old instance's exclusive lock in either root
+and either launch order. Fine family locks are acquired in both roots before
+admission; independent families still run concurrently.
 The runtime update lock is unrelated and never spans the media transfer.
 
 Ownership checkpoints additionally bind the destination's incarnation to an
@@ -312,7 +319,23 @@ A passive legacy checkpoint still needs the complete media binding and unchanged
 file snapshots to authorize resumption. No file handle is used to open a file
 or bypass path, permission, publication or ownership checks.
 
-Under reservation, admission rejects existing final entries (status 1), foreign
+Under all reservations, admission reads the complete checkpoint inventories
+from both roots before deciding once. A conflicting active checkpoint remains
+a refusal (75); malformed or unreadable observations fail explicitly. A passive
+checkpoint in either historical root may prove an unchanged resume, but a
+completed-file veto in the other root still applies. Admission activates both
+registries with the same transaction nonce before any media command launches.
+Partial activation grants no transfer authority. Cleanup attempts each registry,
+making passive only its own active nonce after confirmed consumer shutdown;
+a failure remains a nonzero helper result even if another copy is saved. As with
+other cleanup failures, the engine warns and preserves its original exit status.
+No active or ambiguous historical record is moved or silently adopted. This coordinates
+new/old engines while their locks exist and leaves active records in both roots
+for checkpoint-aware older engines after a crash. It cannot repair two old
+engines choosing different roots, or make pre-checkpoint engines understand a
+record after every lock holder was externally killed.
+
+Admission rejects existing final entries (status 1), foreign
 native inputs and ambiguous partials. A native local resume requires an exact
 request/format/profile binding, the full extracted media ID and available
 `extractor`/`extractor_key` identity, and an unchanged
@@ -328,8 +351,8 @@ tools and binds it to a private transaction nonce. The shell registers possible
 activation before starting the helper, so cancellation between atomic publication
 and its acknowledgement can safely checkpoint only its own transaction.
 Selected-download fields inherit the root metadata when omitted; the same merged
-view supplies planning, classification and the resume binding. Replay uses selected
-formats in a private frozen plan without yt-dlp's webpage re-extraction fallback;
+view supplies planning, classification, disk-space estimation and the resume
+binding. Replay uses selected formats in a private frozen plan without yt-dlp's webpage re-extraction fallback;
 its literal output template remains bound to the planned name for direct and
 native replay, including live titles that yt-dlp would otherwise timestamp again.
 
