@@ -807,7 +807,7 @@ acquire_output_lock() {
     local lock_file lock_fd status=0 opened_identity visible_identity
 
     # shellcheck disable=SC2310 # Failure is converted to a lock setup status.
-    if ! resolve_lock_root || [[ -z ${OUTPUT_LOCK_ROOT} ]]; then
+    if ! resolve_lock_root OUTPUT_LOCK_ROOT true || [[ -z ${OUTPUT_LOCK_ROOT} ]]; then
         error 'unable to resolve the download-lock directory.'
         return 73
     fi
@@ -3052,7 +3052,7 @@ initialize_runtime_dependencies() {
                 ;;
         esac
         # shellcheck disable=SC2310 # Failure becomes a bounded setup diagnostic.
-        if ! resolve_lock_root || [[ -z ${OUTPUT_LOCK_ROOT} ]]; then
+        if ! resolve_lock_root OUTPUT_LOCK_ROOT true || [[ -z ${OUTPUT_LOCK_ROOT} ]]; then
             error 'unable to resolve the runtime-attestation directory.'
             exit 73
         fi
