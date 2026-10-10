@@ -87,6 +87,9 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sat Oct 10 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.4.2-1
+- Harden shared destination admission and qualification.
+
 * Tue Oct 06 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.4.1-1
 - Fix procfs admission and process identity handling
 

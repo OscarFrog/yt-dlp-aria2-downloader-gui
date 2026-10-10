@@ -1,5 +1,53 @@
 # Changelog
 
+## 2.4.2 - 2026-10-10
+
+### Maintenance
+
+- Harden shared destination admission and qualification.
+
+### Shared destinations and disk-space admission
+
+- Keep destination locks and ownership checkpoints coordinated across both
+  historical per-user registries in `/tmp` and `/var/tmp`. Temporary-storage
+  fallback can no longer create an independent coordination domain. Both roots
+  must be available and safe; otherwise admission is conservatively refused.
+  Independent filename families remain concurrent. This protects corrected
+  instances but cannot repair two older executables choosing different registries.
+- Read both checkpoint inventories before admission, activate both copies before
+  media transfer, and bind cleanup to the current transaction. Preserve
+  reservations until consumers have stopped, including after partial failures.
+- Restore inherited yt-dlp selection metadata when estimating local disk space.
+  Equivalent inherited and explicit format selections now receive the same
+  admission decision, so known insufficient space is rejected before transfer.
+  The check remains an estimate and does not reserve disk capacity.
+
+### Qualification and maintenance
+
+- Make the independent process observer accept arbitrary process-name bytes,
+  including Linux names truncated inside a multibyte character. Keep malformed
+  identities and incomplete observations as explicit failures, with regressions
+  for synthetic records and real Linux processes outside the tested download.
+- Split mock integration fixtures and scenarios into six domain libraries while
+  retaining the public entry point, groups, scenario order, assertions, process
+  topology and cleanup contracts. Check dispatch and library shell-state
+  preservation, including negative controls.
+- Isolate the crash/residue fixture from later engine scenarios while retaining
+  the shared destination used by its crash, conflicting retry and independent
+  transfer controls. Check the previously failing scenario composition.
+- Add focused regressions for cross-registry locking, checkpoint ownership,
+  partial acquisition and activation, and inherited disk-space metadata.
+- Extend weekly current-stable yt-dlp qualification to shared-destination
+  GUI/GUI, GUI/CLI and CLI/CLI cycles with synthetic local media. Select the exact
+  current stable version, install its declared impersonation dependencies,
+  verify Deno compatibility, and retain resolved versions and observations
+  captured before rescue cleanup. Preserve the reproducible pinned matrix.
+- Increase Fedora's complete validation command budget from five to seven
+  minutes while retaining four workers, individual fixture deadlines and the
+  ten-minute job limit. Completed campaigns verify the new budget without
+  establishing the cause of earlier timeouts. Keep private-root calls explicit
+  for supported ShellCheck versions.
+
 ## 2.4.1 - Unreleased
 
 ### Maintenance
