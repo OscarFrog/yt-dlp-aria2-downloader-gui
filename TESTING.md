@@ -1073,11 +1073,15 @@ The mock signal group exercises the worker boundary with the production
 registration and cleanup functions in the exact launch-handler-PID-replay
 order. A static ordered-source assertion binds that composed regression to
 `start_download_worker`; adjacent blocked-entry and blocked-progress scenarios
-independently deliver real HUP, INT, and TERM signals. Their outer watchdogs
-retain timeout status 124, so a watchdog-delivered TERM cannot impersonate the
-original signal. This separation avoids the version-specific semantics of
-delivering a signal from inside Bash's `DEBUG` trap while retaining both
-behavioral guarantees.
+independently deliver real HUP, INT, and TERM signals. The blocked-entry scenario
+retains its outer watchdog. Blocked progress separately bounds preparation and
+shutdown to eight seconds each, with all readiness markers sharing the first
+deadline and an additional 6000-ms shutdown assertion. Its test-only observer
+pins the direct child identity and preserves the real Bash wait status. Both
+scenarios retain watchdog status 124 as failure even if diagnostic rescue later
+produces an expected signal status. This separation avoids the version-specific
+semantics of delivering a signal from inside Bash's `DEBUG` trap while retaining
+both behavioral guarantees.
 
 ## GitHub Actions
 
