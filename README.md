@@ -974,6 +974,10 @@ remain subject to the server and mount policy.
 
 On a failed or uncertain publication, the validated local source is retained
 and its path is reported. Ambiguous remote temporaries are preserved. HUP,
+INT or TERM received during publication prevents a success result even if the
+server has already created the final name; that file is preserved as well.
+Publication I/O diagnostics identify the operation and numeric errno without
+including raw exception text or upstream data. HUP,
 INT, TERM and GUI cancellation supervise the process groups; cleanup waits for
 confirmed shutdown. SIGKILL cannot run cleanup, and a kernel-blocked network
 operation can outlast the bounded cancellation waits. Concurrent instances on
@@ -993,6 +997,10 @@ CIFS qualification. The opt-in SMB/CIFS procedure in `TESTING.md` requires an
 explicitly authorized disposable test share. Ordinary native HLS/DASH are the
 qualified transports; unsupported/live HLS variants that yt-dlp delegates to
 an external downloader require separate privacy qualification.
+The qualification checks the filesystem of opened directory descriptors before
+writing to the share and again before its final verdict. A local directory or
+unavailable filesystem observation produces `CIFS qualification: NOT EXECUTED`;
+simulation cannot be combined with the real-share option.
 
 ## Tests
 

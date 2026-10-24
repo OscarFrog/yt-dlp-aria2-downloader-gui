@@ -1771,6 +1771,58 @@ module.filesystem_type = network_filesystem_type
 raise SystemExit(module.main())
 PY_NETWORK_FILESYSTEM
 fi
+if [[ -n ${MOCK_NETWORK_PUBLICATION_FAULT:-} &&
+    ${1##*/} == private-aria2-plan.py && ${2:-} == publish-media ]]; then
+    exec /usr/bin/python3 -I -B - "$@" <<'PY_NETWORK_PUBLICATION'
+import errno
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+
+sys.argv = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("network_publication", sys.argv[0])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+source = Path(sys.argv[sys.argv.index("--source") + 1])
+metadata = source.stat()
+record = Path(os.environ["MOCK_NETWORK_PHASE_LOG"] + ".source")
+record.write_text(json.dumps({
+    "path": str(source), "device": metadata.st_dev, "inode": metadata.st_ino,
+    "size": metadata.st_size, "mtime": metadata.st_mtime_ns,
+    "digest": hashlib.sha256(source.read_bytes()).hexdigest(),
+}), encoding="utf-8")
+fault = os.environ["MOCK_NETWORK_PUBLICATION_FAULT"]
+marker = Path(os.environ["MOCK_NETWORK_PHASE_LOG"] + ".fault")
+real_rename = module.rename_without_overwrite
+
+
+def write(descriptor, payload):
+    # Only publish-media is intercepted; planning and transport remain real.
+    marker.write_text(fault, encoding="ascii")
+    raise OSError(errno.ENOSPC, "NETWORK_FIXTURE_PUBLICATION_SECRET")
+
+
+def rename(*arguments, **keywords):
+    real_rename(*arguments, **keywords)
+    marker.write_text(fault, encoding="ascii")
+    if fault == "rename-uncertain":
+        raise OSError(errno.EIO, "NETWORK_FIXTURE_PUBLICATION_SECRET")
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+if fault == "write-enospc":
+    module.os.write = write
+elif fault in {"rename-uncertain", "rename-term"}:
+    module.rename_without_overwrite = rename
+else:
+    raise SystemExit("unknown publication fault")
+raise SystemExit(module.main())
+PY_NETWORK_PUBLICATION
+fi
 exec /usr/bin/python3 "$@"
 EOF_NETWORK_PYTHON
     chmod 0755 -- "${MOCK_BIN}/python3"

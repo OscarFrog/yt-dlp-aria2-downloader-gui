@@ -1037,7 +1037,11 @@ restent soumises au serveur et au montage.
 
 Si la publication échoue ou reste incertaine, la source locale validée est
 conservée et son chemin signalé. Les temporaires distants ambigus sont
-préservés. HUP, INT, TERM et l'annulation GUI supervisent les groupes de
+préservés. HUP, INT ou TERM reçu pendant la publication empêche un résultat
+annonçant une réussite, même si le serveur a déjà créé le nom final ; ce fichier
+est également préservé. Les diagnostics d'entrées-sorties indiquent l'opération
+et l'errno numérique, sans texte brut d'exception ni données amont.
+HUP, INT, TERM et l'annulation GUI supervisent les groupes de
 processus ; le nettoyage attend un arrêt confirmé. SIGKILL ne permet pas ce
 nettoyage, et une opération réseau bloquée dans le noyau peut dépasser les
 délais d'annulation. Les instances d'une même machine utilisent le verrou de
@@ -1060,6 +1064,11 @@ pas le fonctionnement sur CIFS réel. La procédure SMB/CIFS opt-in de
 qualifiés sont HLS/DASH natifs ordinaires ; les variantes HLS live ou non prises
 en charge que yt-dlp délègue à un outil externe nécessitent une qualification
 supplémentaire de confidentialité.
+La qualification contrôle le système de fichiers des descripteurs de répertoires
+ouverts avant toute écriture sur le partage et avant son verdict final. Un
+répertoire local ou une observation impossible produit
+`CIFS qualification: NOT EXECUTED` (« NON EXÉCUTÉ ») ; la simulation ne peut pas
+être combinée avec l'option de partage réel.
 
 ## Tests
 

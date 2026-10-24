@@ -2249,6 +2249,272 @@ print("Real-tool engine timeout, signal registration and separate-session shutdo
 PY_REAL_SUPERVISION
 }
 
+test_real_tool_cifs_qualification_gate() {
+    python3 -I -B - "${SCRIPT_DIR}/.." <<'PY_CIFS_QUALIFICATION'
+import contextlib
+import ctypes
+import errno
+import io
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+from unittest import mock
+
+source = (Path(sys.argv[1]) / "tests/real-tools-integration.sh").read_text(encoding="utf-8")
+start = source.index("verify_cifs_directory() {\n")
+end = source.index("\nmain() {\n", start)
+implementation = source[start:end]
+body = implementation.split("<<'PY_CIFS_DIRECTORY'\n", 1)[1].split("\nPY_CIFS_DIRECTORY", 1)[0]
+compiled = compile(body, "actual-cifs-qualification-probe", "exec")
+dependency_start = source.index("for command_name in ")
+dependency_end = source.index("\nTEST_ROOT=$(mktemp -d)", dependency_start)
+dependencies = source[dependency_start:dependency_end]
+for missing in ("aria2c", "yt-dlp"):
+    # Exercise the actual early exit without requiring installed media tools.
+    probe = '''set -euo pipefail
+command() {
+    [[ $1 == -v && $2 != "$MISSING_TOOL" ]]
+}
+''' + dependencies + '\nprintf "unexpected admission\\n"\n'
+    result = subprocess.run(["bash", "-s"], input=probe, text=True,
+                            env=dict(os.environ, MISSING_TOOL=missing),
+                            capture_output=True, timeout=5)
+    if (result.returncode != 77 or result.stdout
+            or "CIFS qualification: NOT EXECUTED" not in result.stderr
+            or f"required command is absent: {missing}" not in result.stderr):
+        raise AssertionError("missing tools did not report unexecuted CIFS qualification")
+prefix = '''set -euo pipefail
+umask 077
+SIMULATE_NETWORK=false
+NETWORK_DESTINATION=''
+NETWORK_DESTINATION_FD=''
+NETWORK_MEDIA_FD=''
+'''
+
+with tempfile.TemporaryDirectory(prefix="cifs-qualification-gate-") as directory:
+    root = Path(directory)
+
+    def run_parser(actual, label, arguments):
+        target = root / label / "réseau e\u0301 % $ destination"
+        target.mkdir(parents=True)
+        sentinel = target / "existing-media"
+        sentinel.write_bytes(b"preserve preexisting media\x00")
+
+        def snapshot():
+            value = sentinel.stat()
+            return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns,
+                    value.st_ctime_ns, sentinel.read_bytes(), sorted(target.iterdir()))
+
+        before = snapshot()
+        arguments = [str(target) if value == 'TARGET' else value for value in arguments]
+        result = subprocess.run(["bash", "-s", "--", *arguments],
+                                input=prefix + actual + '\nparse_qualification_arguments "$@"\n',
+                                capture_output=True, text=True, timeout=5)
+        after = snapshot()
+        return result, before, after
+
+    def assert_local_refusal(result, before, after):
+        if result.returncode != 77 or "CIFS qualification: NOT EXECUTED" not in result.stderr:
+            raise AssertionError("local filesystem was accepted as a CIFS qualification")
+        if before != after:
+            raise AssertionError("non-CIFS refusal mutated the selected destination")
+        if "Authorized network qualification" in result.stdout:
+            raise AssertionError("rejected local directory was announced as qualified")
+
+    assert_local_refusal(*run_parser(implementation, "local", ['--network-destination', 'TARGET']))
+
+    # Removing the check must fail this same externally observable oracle. This
+    # models the former parser, which accepted a local path and allocated there.
+    mutant = "\n".join(line for line in implementation.splitlines()
+                       if not line.lstrip().startswith('verify_cifs_directory "'))
+    observed = run_parser(mutant, "mutant", ['--network-destination', 'TARGET'])
+    if observed[0].returncode != 0 or len(observed[2][-1]) != 2:
+        raise AssertionError("gate-deletion mutant did not reproduce local allocation")
+    try:
+        assert_local_refusal(*observed)
+    except AssertionError as error:
+        if str(error) != "local filesystem was accepted as a CIFS qualification":
+            raise
+    else:
+        raise AssertionError("CIFS gate deletion escaped the local-filesystem oracle")
+
+    before_create = '        verify_cifs_directory "${NETWORK_DESTINATION}" "${NETWORK_DESTINATION_FD}"\n'
+    if implementation.count(before_create) != 2:
+        raise AssertionError("CIFS gate no longer surrounds directory allocation")
+    late_probe = implementation.replace(before_create, "", 1)
+    observed = run_parser(late_probe, "late-probe", ['--network-destination', 'TARGET'])
+    if observed[0].returncode != 77 or len(observed[2][-1]) != 2:
+        raise AssertionError("late-probe mutant did not allocate before refusal")
+    try:
+        assert_local_refusal(*observed)
+    except AssertionError as error:
+        if str(error) != "non-CIFS refusal mutated the selected destination":
+            raise
+    else:
+        raise AssertionError("late CIFS probe escaped the no-mutation oracle")
+
+    for label, suffix, expected in (
+        ("mixed-first", ['--simulate-network', '--network-destination', 'TARGET'], 64),
+        ("mixed-last", ['--network-destination', 'TARGET', '--simulate-network'], 64),
+        ("simulation", ['--simulate-network'], 0),
+        ("ordinary", [], 0),
+    ):
+        result, before, after = run_parser(implementation, label, suffix)
+        if result.returncode != expected or before != after:
+            raise AssertionError((label, result.returncode, result.stderr))
+        if expected == 0 and "CIFS qualification: NOT EXECUTED" not in result.stdout:
+            raise AssertionError("local/simulated qualification omitted its real-CIFS exclusion")
+
+    target = root / "descriptor"
+    target.mkdir()
+    descriptor = os.open(target, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        def probe(filesystem=None, failure=None):
+            calls = []
+
+            class Fstatfs:
+                def __call__(self, fd, buffer):
+                    if fd != descriptor:
+                        raise AssertionError("probe inspected a pathname instead of its inherited descriptor")
+                    calls.append(fd)
+                    if failure is not None:
+                        ctypes.set_errno(failure)
+                        return -1
+                    ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ulong))[0] = filesystem
+                    return 0
+
+            diagnostic = io.StringIO()
+            library = type("Library", (), {"fstatfs": Fstatfs()})()
+            with mock.patch.object(ctypes, "CDLL", return_value=library), \
+                    mock.patch.object(sys, "argv", ["probe", str(target), str(descriptor)]), \
+                    contextlib.redirect_stderr(diagnostic):
+                try:
+                    exec(compiled, {})
+                except SystemExit as error:
+                    status = error.code
+                else:
+                    status = 0
+            return status, diagnostic.getvalue(), calls
+
+        for filesystem in (0xff534d42, 0xfe534d42):
+            status, diagnostic, calls = probe(filesystem)
+            if status or diagnostic or calls != [descriptor]:
+                raise AssertionError("controlled CIFS/SMB2 positive probe failed")
+        for filesystem in (0xef53, 0x6969, 0x65735546, 0):
+            status, diagnostic, calls = probe(filesystem)
+            if status != 77 or "NOT EXECUTED" not in diagnostic or calls != [descriptor]:
+                raise AssertionError("unqualified filesystem probe was accepted")
+        for number in (errno.EIO, errno.ESTALE, errno.ENOTCONN, errno.EACCES):
+            status, diagnostic, calls = probe(failure=number)
+            if status != 77 or f"errno={number}" not in diagnostic or calls != [descriptor]:
+                raise AssertionError("failed filesystem observation was accepted")
+
+        target.rename(root / "old-descriptor")
+        target.mkdir()
+        status, diagnostic, calls = probe(0xff534d42)
+        if status != 77 or "identity changed" not in diagnostic or calls:
+            raise AssertionError("replacement directory was accepted through the pinned descriptor")
+    finally:
+        os.close(descriptor)
+
+    # Exercise the actual main orchestration separately from the syscall probe.
+    # Inert media phases make its final revalidation cheap to qualify without
+    # a real share; the type/identity/error probes above retain that boundary.
+    main_source = source[end:]
+    if not main_source.endswith('main "$@"\n'):
+        raise AssertionError("real-tool main entry point changed")
+    main_stubs = r'''
+record_phase() {
+    printf '%s\n' "$1" >>"${MAIN_CIFS_TRACE}"
+}
+cleanup() {
+    record_phase cleanup
+}
+parse_qualification_arguments() {
+    NETWORK_DESTINATION=/fixture/authorized-share
+    MEDIA_ROOT=/fixture/authorized-share/media
+    NETWORK_DESTINATION_FD=44
+    NETWORK_MEDIA_FD=45
+    record_phase parse
+}
+prepare_real_tool_fixtures() {
+    record_phase prepare
+}
+test_real_direct_audio_scenarios() {
+    record_phase direct
+}
+test_real_existing_assembled_output() {
+    record_phase existing
+}
+test_real_media_validation_mutations() {
+    record_phase mutations
+}
+test_real_fragment_routing_and_mutations() {
+    record_phase fragments
+}
+verify_cifs_directory() {
+    local role=''
+    case $1:$2 in
+        /fixture/authorized-share:44) role=parent ;;
+        /fixture/authorized-share/media:45) role=child ;;
+        *) return 70 ;;
+    esac
+    record_phase "${role}"
+    if [[ ${MAIN_CIFS_FAILURE} == "${role}" ]]; then
+        printf 'CIFS qualification: NOT EXECUTED (injected final %s observation).\n' "${role}" >&2
+        return 77
+    fi
+    return 0
+}
+'''
+    phase_prefix = ["parse", "prepare", "direct", "existing", "mutations", "fragments"]
+
+    def run_main(actual, label, failure):
+        trace = root / f"main-{label}.trace"
+        result = subprocess.run(["bash", "-s"], input=prefix + main_stubs + actual,
+                                env=dict(os.environ, MAIN_CIFS_TRACE=str(trace),
+                                         MAIN_CIFS_FAILURE=failure),
+                                capture_output=True, text=True, timeout=5)
+        return result, trace.read_text(encoding="utf-8").splitlines()
+
+    def assert_final_refusal(result, trace, role):
+        expected = phase_prefix + (["parent"] if role == "parent" else ["parent", "child"]) + ["cleanup"]
+        if (result.returncode != 77 or result.stdout or trace != expected
+                or f"injected final {role} observation" not in result.stderr):
+            raise AssertionError("failed final CIFS observation was accepted or bypassed")
+
+    positive, trace = run_main(main_source, "positive", "")
+    if (positive.returncode or positive.stderr
+            or trace != phase_prefix + ["parent", "child", "cleanup"]
+            or positive.stdout.count("Real CIFS/SMB2 filesystem qualification passed.") != 1):
+        raise AssertionError("valid final CIFS observations did not reach the real verdict")
+
+    for role, call in (
+        ("parent", '        verify_cifs_directory "${NETWORK_DESTINATION}" "${NETWORK_DESTINATION_FD}"\n'),
+        ("child", '        verify_cifs_directory "${MEDIA_ROOT}" "${NETWORK_MEDIA_FD}"\n'),
+    ):
+        assert_final_refusal(*run_main(main_source, role, role), role)
+        if main_source.count(call) != 1:
+            raise AssertionError("expected one final CIFS observation per directory")
+        mutated = main_source.replace(call, "", 1)
+        observed = run_main(mutated, f"mutant-{role}", role)
+        if (observed[0].returncode != 0 or role in observed[1]
+                or "Real CIFS/SMB2 filesystem qualification passed." not in observed[0].stdout):
+            raise AssertionError("final-gate mutant did not reproduce false qualification")
+        try:
+            assert_final_refusal(*observed, role)
+        except AssertionError as error:
+            if str(error) != "failed final CIFS observation was accepted or bypassed":
+                raise
+        else:
+            raise AssertionError("final CIFS observation deletion escaped its refusal oracle")
+
+print("Real-tool CIFS gate: local refusal, controlled type/error probes, identity, final verdict and mutation checks passed; no real CIFS mount tested.")
+PY_CIFS_QUALIFICATION
+}
+
 test_real_tool_optimization_isolation() {
     python3 -I -B - "${SCRIPT_DIR}/.." <<'PY_REAL_TOOL_OPTIMIZATION'
 import os
@@ -2706,6 +2972,7 @@ hls = ["engine_youtube_hls"]
 staging = ["active_staging_inventory", "engine_private_staging"]
 composition = "engine_internal_record_cleanup"
 network = ["engine_network_destination", "engine_network_failures",
+           "engine_network_publication_failures",
            "engine_network_signals", "engine_network_cleanup_boundaries"]
 progress = ["gui_aria_progress", "gui_profiles", "gui_progress_completion"]
 state = ["gui_url_redaction_cases", "gui_live_log_retention_unconfirmed_shutdown",
@@ -2736,7 +3003,7 @@ groups = {
     "runtime-validation": [runtime[i] for i in (2, 4, 6, 7)],
 }
 expected_all = core + hls + staging + network + progress + state + signals + runtime
-assert len(expected_all) == len(set(expected_all)) == 62
+assert len(expected_all) == len(set(expected_all)) == 63
 assert source.endswith('main "$@"\n')
 # The actual entry point still parses options, bootstraps its subreaper,
 # creates fixtures and initializes/cleans their environment. Replace only
@@ -2850,7 +3117,7 @@ load_mock_libraries "$@"
         run(["--group", "engine-core"], core[:1], status,
             MOCK_DISPATCH_FAIL_PHASE=core[0], MOCK_DISPATCH_FAIL_SIGNAL=signal_name)
 
-print("Mock dispatch: all 61 test functions plus process supervision, isolated crash/cleanup composition, group/aggregate order, failures, signals, library state and Git-free entry point passed.")
+print(f"Mock dispatch: all {len(expected_all) - 1} test functions plus process supervision, isolated crash/cleanup composition, group/aggregate order, failures, signals, library state and Git-free entry point passed.")
 PY_MOCK_DISPATCH
 }
 
@@ -3790,6 +4057,7 @@ main() {
     test_monitor_runner_session_handoff
     test_real_tool_engine_supervision
     test_real_tool_optimization_isolation
+    test_real_tool_cifs_qualification_gate
     test_mock_child_subreaping
     test_mock_process_scan_contract
     test_mock_group_dispatch
