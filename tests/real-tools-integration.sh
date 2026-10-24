@@ -670,7 +670,7 @@ def final_snapshot(final):
 
 def two_http_streams():
     return [
-        {"format_id": "a1", "url": base + "/audio.m4a", "ext": "m4a",
+        {"format_id": "VOF-audio_0-français", "url": base + "/audio.m4a", "ext": "m4a",
          "protocol": "http", "vcodec": "none", "acodec": "aac", "abr": 128},
         {"format_id": "v1", "url": base + "/video-only.mp4", "ext": "mp4",
          "protocol": "http", "vcodec": "h264", "acodec": "none", "height": 90},

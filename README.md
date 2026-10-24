@@ -745,6 +745,13 @@ A direct-transfer destination that already exists is refused before downloading;
 publication checks again for a collision. Headers repeated with different casing
 keep the transfer on native yt-dlp.
 
+Format identifiers may contain Unicode letters, numbers and colons, including
+localized audio labels. Path separators and control characters remain rejected
+when deriving component filenames.
+These identifiers stay unchanged in the frozen transfer plan and component
+names. Network destinations process components in a private local workspace;
+this does not certify colon-bearing filenames on every SMB/Windows server.
+
 For ordinary video, both direct and native transports check the assembled/remuxed MKV
 in the actual final destination, even when processing uses a separate local
 workspace. A known collision fails before media transfer instead of

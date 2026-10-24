@@ -326,6 +326,30 @@ PY
     [[ -f ${OUTPUT_DIR}/merged.fa1.m4a ]] \
         || fail 'Audio component was not published.'
 
+    new_case 'localized-format-identifiers'
+    write_double_plan
+    python3 -I -B - "${PLAN_FILE}" <<'PY_LOCALIZED'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+plan = json.loads(path.read_text())
+formats = plan['requested_downloads'][0]['requested_formats']
+formats[0]['format_id'] = 'vidéo:1080'
+formats[1]['format_id'] = 'audio:日本語'
+path.write_text(json.dumps(plan))
+PY_LOCALIZED
+    assert_status 0 'localized format classification' run_classify
+    assert_text_contains "${ASSERT_OUTPUT}" 'transport=direct' 'localized direct formats'
+    assert_status 0 'localized format build' run_build
+    printf '%s\n' 'video-component' >"${STAGING_DIR}/item-000.download"
+    printf '%s\n' 'audio-component' >"${STAGING_DIR}/item-001.download"
+    assert_status 0 'localized format publication' run_commit
+    [[ -f ${OUTPUT_DIR}/merged.fvidéo:1080.mp4 &&
+        -f ${OUTPUT_DIR}/merged.faudio:日本語.m4a ]] \
+        || fail 'Localized format component names were not preserved.'
+
     # Replay-safe HTTP transfers whose component metadata cannot be represented
     # by the private direct builder must fall back to native yt-dlp.
     printf '%s\n' 'Private aria2 plan scenario: unrepresentable direct metadata'
@@ -2781,7 +2805,7 @@ for label, plan in (
                 'requested_formats': [
                     {'format_id': 'v', 'ext': 'mp4', 'protocol': 'http',
                      'vcodec': 'h264', 'acodec': 'none', 'url': 'http://example.invalid/v.mp4'},
-                    {'format_id': 'a', 'ext': 'm4a', 'protocol': 'http',
+                    {'format_id': 'VOF-audio_0-français', 'ext': 'm4a', 'protocol': 'http',
                      'vcodec': 'none', 'acodec': 'aac', 'url': 'http://example.invalid/a.m4a'}]}]})):
     root = case / label
     root.mkdir(mode=0o700)
@@ -2861,7 +2885,7 @@ printf '%s\\0' "${{YT_DLP_OPTIONS[@]}}"
                 raise AssertionError('changed inherited format was adopted for resume: ' + field)
         partial.unlink()
     else:
-        assert [f['format_id'] for f in frozen['formats']] == ['v', 'a']
+        assert [f['format_id'] for f in frozen['formats']] == ['v', 'VOF-audio_0-français']
     # The full contract stays hermetic without the optional yt-dlp package.
     # When available, also execute its real template/format processing without
     # transfer, network access, postprocessing or cache writes.
@@ -3065,6 +3089,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('resources', sys.argv[1])
 module = importlib.util.module_from_spec(spec)
@@ -3078,7 +3103,8 @@ alias.symlink_to(output, target_is_directory=True)
 sequence = 0
 
 def plan(name, request='one', directory=output, formats=None, mode='video', *,
-         identity=None, download_identity=None, media_url='https://example.invalid/media?signature=one'):
+         identity=None, download_identity=None, media_url='https://example.invalid/media?signature=one',
+         final_directory=None):
     global sequence
     sequence += 1
     private = root / str(sequence)
@@ -3093,8 +3119,9 @@ def plan(name, request='one', directory=output, formats=None, mode='video', *,
             'format_id': 'av', 'ext': Path(name).suffix[1:], 'protocol': 'http',
             'url': media_url, **(download_identity or {}),
             **({'requested_formats': formats} if formats else {})}]}))
-    info = output.stat()
-    args = argparse.Namespace(output_dir=str(directory), final_output_dir=str(directory),
+    final = directory if final_directory is None else final_directory
+    info = final.stat()
+    args = argparse.Namespace(output_dir=str(directory), final_output_dir=str(final),
         final_output_identity=f'{info.st_dev}:{info.st_ino}', plan=str(source),
         state=str(private / 'resources.json'), url_file=str(url), mode=mode, hls=False)
     captured = io.StringIO()
@@ -3134,6 +3161,7 @@ def rejected(error, function, *arguments):
 # Equal paths, aliases, Unicode normalization/case, different URLs, and an
 # overlapping component with a different final basename all exclude each other.
 for left, right in [('Film.mp4', 'Film.webm'), ('café.mp4', 'CAFE\u0301.webm'),
+                    ('Ａudio.mp4', 'audio.webm'),
                     ('a.mkv', 'a.f137.webm'), ('x % $.mp4', 'x % $.webm')]:
     _, keys = plan(left)
     first = acquire(keys)
@@ -3148,6 +3176,141 @@ for left, right in [('Film.mp4', 'Film.webm'), ('café.mp4', 'CAFE\u0301.webm'),
     next_owner = acquire(keys2)
     assert next_owner is not None
     release(next_owner)
+
+# Admission budgets are UTF-8 bytes, including the 24-byte fragment/metadata
+# reserve. Only the filesystem limit is controlled; planning, component names,
+# private output and the frozen replay use the production implementations.
+with patch.object(module.os, 'pathconf', return_value=255):
+    for identifier in ('x' * 220, 'é' * 110, '日' * 73 + 'x', '𐐀' * 55):
+        component = 'short.f' + identifier + '.mp4'
+        assert len(component.encode('utf-8')) == 231
+        accepted, _ = plan('short.mkv', formats=[{'format_id': identifier, 'ext': 'mp4'}])
+        replay = json.loads(Path(accepted.state).with_name('transfer-plan.json').read_text())
+        assert replay['formats'][0]['format_id'] == identifier, 'format ID was rewritten'
+        assert module.component_destination(output / 'short.mkv', replay['formats'][0]) == output / component, 'derived component ID was rewritten'
+        for suffix, expected_bytes in (('x', 232), ('é', 233)):
+            oversized = identifier + suffix
+            assert len(('short.f' + oversized + '.mp4').encode('utf-8')) == expected_bytes
+            try:
+                plan('short.mkv', formats=[{'format_id': oversized, 'ext': 'mp4'}])
+            except module.PlanError as exc:
+                assert 'too long' in str(exc), 'oversized component failed for an unrelated reason'
+            else:
+                raise AssertionError('UTF-8 component exceeding the reserved byte budget was admitted')
+            private = root / str(sequence)
+            assert not (private / 'resources.json').exists()
+            assert not (private / 'transfer-plan.json').exists()
+
+# Reservation aliases may normalize, but selected IDs and filenames remain
+# literal. Component processing stays private when the final directory has
+# permissive modes. Real-tools tests separately qualify actual media assembly.
+local = root / 'Unicode processing'
+local.mkdir(mode=0o700)
+shared = root / 'Shared destination é 日本語'
+shared.mkdir(mode=0o777)
+shared.chmod(0o777)
+assert shared.stat().st_mode & 0o777 == 0o777
+identifiers = ['VOF-audio_0-français', 'Ａudio:日本語']
+literal, _ = plan('ARTE français 日本語.mkv', directory=local, final_directory=shared,
+    formats=[{'format_id': identifier, 'ext': 'mp4', 'protocol': 'http',
+              'url': 'http://example.invalid/synthetic'} for identifier in identifiers])
+private = Path(literal.state).parent
+staging = local / '.unicode-components'
+staging.mkdir(mode=0o700)
+components = [local / 'ARTE français 日本語.fVOF-audio_0-français.mp4',
+              local / 'ARTE français 日本語.fＡudio:日本語.mp4']
+with contextlib.redirect_stdout(io.StringIO()):
+    assert module.build_plan(argparse.Namespace(plan=literal.plan, output_dir=str(local),
+        staging_dir=str(staging), private_dir=str(private), aria2_input=str(private / 'input'),
+        manifest=str(private / 'manifest.json'), allow_https_direct=False,
+        final_output_dir=str(shared), final_output_identity=literal.final_output_identity,
+        final_extension='mkv')) == 0
+manifest = json.loads((private / 'manifest.json').read_text())
+assert [item['destination'] for item in manifest['items']] == [str(path) for path in components], 'component ID was normalized or case-folded'
+replay = json.loads((private / 'transfer-plan.json').read_text())
+assert [item['format_id'] for item in replay['formats']] == identifiers
+component_payloads = [b'audio fixture', b'video fixture']
+for index, payload in enumerate(component_payloads):
+    (staging / f'item-{index:03d}.download').write_bytes(payload)
+with contextlib.redirect_stdout(io.StringIO()):
+    assert module.commit_plan(argparse.Namespace(manifest=str(private / 'manifest.json'))) == 0
+assert [path.read_bytes() for path in components] == component_payloads
+assert not list(staging.iterdir()) and not list(shared.iterdir())
+
+def file_snapshot(path):
+    info = path.stat()
+    return path.read_bytes(), (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+def publish(arguments):
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with patch.object(sys, 'argv', arguments), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        status = module.main()
+    return status, stdout.getvalue(), stderr.getvalue()
+
+assembled = local / 'ARTE français 日本語.mkv'
+assembled.write_bytes(b'assembled fixture\n' + b'|'.join(path.read_bytes() for path in components))
+source_before = file_snapshot(assembled)
+witness = shared / 'Existing user media'
+witness.write_bytes(b'preserve this unrelated media')
+witness_before = file_snapshot(witness)
+info = assembled.stat()
+publish_arguments = [sys.argv[1], 'publish-media', '--source', str(assembled),
+    '--source-identity', f'{info.st_dev}:{info.st_ino}', '--output-dir', str(shared),
+    '--output-identity', literal.final_output_identity]
+status, stdout, stderr = publish(publish_arguments)
+final_media = shared / 'ARTE français 日本語.mkv'
+assert status == 0 and stdout == str(final_media) + '\n', (status, stdout, stderr)
+assert final_media.read_bytes() == source_before[0]
+assert file_snapshot(assembled) == source_before and file_snapshot(witness) == witness_before
+final_before = file_snapshot(final_media)
+assembled.write_bytes(b'a different assembled media must not replace the first')
+source_before = file_snapshot(assembled)
+status, stdout, stderr = publish(publish_arguments)
+assert status == 1 and not stdout, (status, stdout, stderr)
+assert file_snapshot(final_media) == final_before, 'Unicode collision replaced the published media'
+assert file_snapshot(assembled) == source_before and file_snapshot(witness) == witness_before
+assert set(shared.iterdir()) == {final_media, witness}
+assert [path.read_bytes() for path in components] == component_payloads
+staging.rmdir()
+
+def check_component_budget(name_limit):
+    overhead = len('boundary.f.mp4'.encode('utf-8'))
+    identifier_bytes = name_limit - 24 - overhead
+    assert identifier_bytes > 0, 'filesystem cannot hold the component test and its suffix reserve'
+    identifier = 'é' * (identifier_bytes // 2) + 'x' * (identifier_bytes % 2)
+    component = 'boundary.f' + identifier + '.mp4'
+    assert len(component.encode('utf-8')) + 24 == name_limit
+    accepted, _ = plan('boundary.mkv', directory=local, final_directory=shared,
+                      formats=[{'format_id': identifier, 'ext': 'mp4'}])
+    replay = json.loads(Path(accepted.state).with_name('transfer-plan.json').read_text())
+    assert replay['formats'][0]['format_id'] == identifier
+    try:
+        plan('boundary.mkv', directory=local, final_directory=shared,
+             formats=[{'format_id': identifier + 'x', 'ext': 'mp4'}])
+    except module.PlanError as exc:
+        assert 'too long' in str(exc), 'component budget failed for an unrelated reason'
+    else:
+        raise AssertionError('component exceeded the smaller processing/final byte budget')
+    private = root / str(sequence)
+    assert not (private / 'resources.json').exists()
+    assert not (private / 'transfer-plan.json').exists()
+
+# First exercise the real filesystem limits, with no patched observation.
+processing_limit = os.pathconf(local, 'PC_NAME_MAX')
+final_limit = os.pathconf(shared, 'PC_NAME_MAX')
+check_component_budget(min(processing_limit, final_limit))
+print(f'Real PC_NAME_MAX component boundary passed: processing={processing_limit}, final={final_limit}.')
+
+# Each side must constrain admission independently, even without a second mount.
+for processing_limit, final_limit in ((255, 254), (254, 255)):
+    limits = {local.resolve(): processing_limit, shared.resolve(): final_limit}
+
+    def controlled_name_limit(path, option):
+        assert option == 'PC_NAME_MAX'
+        return limits[Path(path).resolve()]
+
+    with patch.object(module.os, 'pathconf', side_effect=controlled_name_limit):
+        check_component_budget(254)
 
 args, _ = plan('resume.mp4')
 part = output / 'resume.mp4.part'
@@ -3255,8 +3418,12 @@ for extension in ('mkv', 'mp4', 'webm'):
     assert witness.stat() == before and witness.read_bytes() == b'another media'
     witness.unlink()
 rejected(module.PlanError, plan, 'x' * 240 + '.mp4')
-rejected(module.PlanError, plan, 'ordinary.mkv', 'one', output,
-         [{'format_id': '../escape', 'ext': 'mp4'}])
+for unsafe_id in ('../escape', 'a/b', 'a\\b', 'a\nheader=value', 'a\r', 'a\t',
+                  'a\0', '', None, 123, 'a b', 'a+b', 'a[0]', 'a\u202e',
+                  'a\u200d', 'a\ufe0f', 'franc\u0327ais', 'a*b', 'a?b', 'a<b',
+                  'a>b', 'a|b', 'a"b'):
+    rejected(module.PlanError, plan, 'ordinary.mkv', 'one', output,
+             [{'format_id': unsafe_id, 'ext': 'mp4'}])
 converted, _ = plan('converted.webm', mode='audio')
 state(converted, 'admit')
 final = output / 'converted.opus'
