@@ -599,6 +599,14 @@ path checks remain mandatory on their respective paths. Header names repeated
 with different casing are not replayed through aria2. Rejected protocol fields
 are never copied into diagnostics.
 
+Component format IDs accept Unicode word characters, dots, hyphens and colons
+as literal filename data; separators, whitespace and control characters remain
+invalid for both resource reservation and direct/native component preflight.
+IDs remain unchanged in the replay and component names; NFKC/casefold applies
+only to reservation families. Network destinations process components in a
+private local workspace. This admission does not qualify colon-bearing names
+against every SMB/Windows server's filename rules.
+
 URLs and replayed HTTP headers are written to private files rather than command
 arguments. aria2 diagnostics pass through byte-oriented, scheme-case-insensitive
 URL redaction, including malformed UTF-8 input. GUI snapshots and Zenity

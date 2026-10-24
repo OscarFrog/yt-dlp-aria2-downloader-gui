@@ -44,7 +44,10 @@ DIRECT_REPLAY_SAFE_HEADERS = frozenset(
         "user-agent",
     }
 )
-FORMAT_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# yt-dlp retains Unicode letters/numbers and colons in format identifiers.
+# They are literal component-name data, never selectors or shell arguments.
+# Keep path separators, whitespace and control characters outside this set.
+FORMAT_ID_RE = re.compile(r"^[\w.:-]+$")
 EXTENSION_RE = re.compile(r"^[A-Za-z0-9]+$")
 STAGING_NAME_RE = re.compile(r"^item-[0-9]{3}\.download$")
 LOCAL_DISK_FILESYSTEMS = frozenset({0xEF53, 0x58465342, 0x9123683E, 0x2FC12FC1})

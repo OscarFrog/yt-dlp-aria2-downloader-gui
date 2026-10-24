@@ -1802,6 +1802,29 @@ publication sentinels can write media; its adequate-space control reaches both.
 The original delta-only estimator must fail that oracle, independently of the
 diagnostic wording. This does not claim to reserve disk capacity.
 
+The private-plan reservation tests also fix a 255-byte filesystem name limit
+and independently exercise 231-byte derived names plus the 24-byte suffix
+reserve. ASCII and two-, three- and four-byte UTF-8 identifiers are admitted
+at that boundary; 232- and 233-byte components are rejected before state or
+replay publication. Counting characters instead of bytes, or reducing the
+suffix reserve, must fail these oracles. A separate unpatched observation reads
+the actual `PC_NAME_MAX` of the processing and final directories and exercises
+its exact reserved byte boundary. Controlled limits `(255, 254)` and `(254, 255)`
+prove that either directory can impose the smaller budget without a mount.
+
+Literal ARTE and compatibility-character IDs remain unchanged in the frozen
+replay and direct manifest, separately from NFKC/casefold alias exclusion for
+reservation families. The helper then commits these components privately and
+publishes a synthetic assembled Unicode file to a distinct permissive directory.
+A different second source cannot replace that published file: status, bytes,
+identities, timestamps and the unrelated witness are checked independently.
+Real media assembly is qualified separately by the real-tools suite; the
+permissive local fixture never claims CIFS validation. Separators, controls,
+metacharacters, bidi/joiner/variation marks and decomposed combining marks in
+format IDs remain refused; the tests do not silently normalize those IDs.
+Colon-bearing IDs are accepted literally, without claiming their filename
+portability on every SMB/Windows server.
+
 The remaining private-plan cases exercise
 Unicode/case aliases, different URLs and overlapping intermediate families,
 unchanged owned resumes, ambiguous legacy partials and active-record retention

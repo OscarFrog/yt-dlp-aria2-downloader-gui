@@ -790,6 +790,15 @@ téléchargement ; la publication vérifie à nouveau l'absence de collision.
 Des en-têtes répétés avec des casses différentes maintiennent le transfert sur
 yt-dlp natif.
 
+Les identifiants de formats peuvent contenir des lettres Unicode, des chiffres
+et des deux-points, notamment pour les libellés audio localisés. Les séparateurs
+de chemins et les caractères de contrôle restent refusés lors de la construction
+des noms de fichiers des composants.
+Ces identifiants restent inchangés dans le plan de transfert figé et les noms
+des composants. Les destinations réseau traitent les composants dans un espace
+local privé ; cela ne certifie pas les noms contenant des deux-points sur tous
+les serveurs SMB/Windows.
+
 Pour la vidéo ordinaire, les transports direct et natif vérifient le MKV
 assemblé/remuxé dans la véritable destination finale, même si le traitement
 utilise un espace de travail local distinct. Une collision connue provoque un
