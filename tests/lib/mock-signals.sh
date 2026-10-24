@@ -2883,10 +2883,11 @@ test_mock_signal_gui_foreground_group_registration() {
 }
 
 test_mock_signal_gui_blocked_progress() {
-    local controller_pid elapsed_milliseconds expected_status gui_pid gui_status
-    local index signal_finished_at signal_log signal_name signal_pid_file
+    local controller_pid controller_start elapsed_milliseconds expected_status gui_pid gui_status
+    local index marker observer_status preparation_started signal_log signal_name signal_pid_file
     local shutdown_budget_milliseconds=6000
-    local signal_started_at signal_tmpdir worker_started_marker
+    local signal_started_at signal_tmpdir unused worker_started_marker
+    local parent_pid=${BASHPID}
     local worker_termination_marker
     local zenity_started_marker zenity_termination_marker
     local -a expected_statuses=(129 130 143)
@@ -2911,8 +2912,8 @@ test_mock_signal_gui_blocked_progress() {
             "${OUTPUT_DIR}/Mock media [abc123].webm"
         prepare_argument_log "gui-signal-blocked-progress-${signal_name}"
 
-        timeout --signal=TERM --kill-after=2s 8s \
-            env TMPDIR="${signal_tmpdir}" \
+        read -r preparation_started unused </proc/uptime
+        env TMPDIR="${signal_tmpdir}" \
             MOCK_GUI_SIGNAL_PID_FILE="${signal_pid_file}" \
             MOCK_PLAN_PROTOCOL='m3u8_native' \
             MOCK_LONG_DOWNLOAD=1 \
@@ -2922,29 +2923,55 @@ test_mock_signal_gui_blocked_progress() {
             MOCK_ZENITY_WAIT_FOR_WORKER_START=1 \
             MOCK_ZENITY_STARTED_MARKER="${zenity_started_marker}" \
             MOCK_ZENITY_TERMINATION_MARKER="${zenity_termination_marker}" \
-            "${GUI_SIGNAL_UNDER_TEST}" >"${signal_log}" 2>&1 &
+            "${REAL_SETSID}" --wait "${GUI_SIGNAL_UNDER_TEST}" >"${signal_log}" 2>&1 &
         controller_pid=$!
-        wait_for_file "${signal_pid_file}" 5 \
-            "blocked-progress ${signal_name} GUI PID publication"
-        wait_for_file "${worker_started_marker}" 10 \
-            "blocked-progress ${signal_name} worker startup"
-        wait_for_file "${zenity_started_marker}" 5 \
-            "blocked-progress ${signal_name} Zenity startup"
+        # Pin the direct child before any foreground external command. The
+        # launch fixture restores signal dispositions before it execs the GUI.
+        # shellcheck disable=SC2310 # Missing identity is an explicit fixture failure.
+        read_mock_process_start_time controller_start "${controller_pid}" \
+            || fail "Blocked-progress ${signal_name}: GUI identity unavailable."
+        for marker in "${signal_pid_file}" "${worker_started_marker}" "${zenity_started_marker}"; do
+            observer_status=0
+            # Preparation shares one deadline; readiness must not consume the
+            # separate shutdown watchdog or its stricter duration assertion.
+            # shellcheck disable=SC2310 # Preserve the observer's explicit failure status.
+            wait_for_mock_pre_env_exit --marker \
+                "${controller_pid}" "${controller_start}" "${parent_pid}" \
+                "${preparation_started}" 8 "blocked-progress-${signal_name}-preparation" \
+                "${signal_log}" "${marker}" >/dev/null || observer_status=$?
+            if ((observer_status != 0)); then
+                reap_mock_pre_env_child "${controller_pid}" "${controller_start}" gui_status \
+                    "blocked-progress-${signal_name}-preparation" "${observer_status}"
+                fail "Blocked-progress ${signal_name} preparation observer failed with status ${observer_status}; child=${gui_status}."
+            fi
+        done
         IFS= read -r gui_pid <"${signal_pid_file}"
         [[ ${gui_pid} =~ ^[1-9][0-9]*$ ]] \
             || fail "Invalid blocked-progress GUI PID: ${gui_pid}"
 
-        signal_started_at=$(date +%s%3N)
+        assert_equals "${controller_pid}" "${gui_pid}" \
+            "blocked-progress ${signal_name} direct GUI identity"
+        read -r signal_started_at unused </proc/uptime
         kill "-${signal_name}" -- "${gui_pid}"
-        gui_status=0
-        wait "${controller_pid}" || gui_status=$?
-        signal_finished_at=$(date +%s%3N)
-        elapsed_milliseconds=$((signal_finished_at - signal_started_at))
+        observer_status=0
+        # shellcheck disable=SC2310 # Expiration remains failure after diagnostic rescue.
+        elapsed_milliseconds=$(wait_for_mock_pre_env_exit \
+            "${controller_pid}" "${controller_start}" "${parent_pid}" \
+            "${signal_started_at}" 8 "blocked-progress-${signal_name}-shutdown" \
+            "${signal_log}" "${worker_termination_marker}" "${zenity_termination_marker}") \
+            || observer_status=$?
+        reap_mock_pre_env_child "${controller_pid}" "${controller_start}" gui_status \
+            "blocked-progress-${signal_name}-shutdown" "${observer_status}"
+        if ((observer_status != 0)); then
+            fail "Blocked-progress ${signal_name} shutdown observer failed with status ${observer_status}; child=${gui_status}."
+        fi
+        [[ ${elapsed_milliseconds} =~ ^[0-9]+$ ]] \
+            || fail "Blocked-progress ${signal_name}: invalid elapsed duration."
         assert_equals "${expected_status}" "${gui_status}" \
             "blocked-progress GUI ${signal_name} status"
         # Worker TERM/KILL polling can consume five seconds. Leave bounded CI
-        # scheduling headroom while the independent eight-second watchdog
-        # continues to distinguish a stalled cleanup path.
+        # scheduling headroom while the independent eight-second shutdown
+        # watchdog continues to distinguish a stalled cleanup path.
         ((elapsed_milliseconds < shutdown_budget_milliseconds)) \
             || fail "Blocked-progress ${signal_name} handling took ${elapsed_milliseconds}ms."
         wait_for_file "${worker_termination_marker}" 5 \
