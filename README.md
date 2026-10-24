@@ -42,7 +42,7 @@ direct downloads through a private aria2 input file, and FFmpeg to merge,
 remux, or extract streams. HTTPS automatically stays on yt-dlp's native
 transport when the installed aria2 TLS backend lacks the required certificate
 validation hardening. DASH and HLS streams also remain native. The current
-development version is **2.4.2**.
+development version is **2.4.3**.
 The latest published package release is **2.4.2**.
 
 ## Recommended installation
@@ -253,8 +253,8 @@ version below, this command is applicable only after its signed tag is created:
 
 ```bash
 gh workflow run release.yml \
-  --ref v2.4.2 \
-  -f tag=v2.4.2 \
+  --ref v2.4.3 \
+  -f tag=v2.4.3 \
   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 

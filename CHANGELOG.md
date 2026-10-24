@@ -1,5 +1,55 @@
 # Changelog
 
+## 2.4.3 - 2026-10-24
+
+### Maintenance
+
+- Improve error diagnostics and support localized ARTE formats
+
+### Network publication
+
+- Reject success after a late HUP, INT or TERM during media publication,
+  including file closure and signal-handler restoration. Preserve an already
+  published final name and recoverable local media instead of retrying an
+  uncertain server-side operation.
+- Require the opt-in CIFS qualification to verify the opened filesystem and
+  directory identities before and after its tests. Local simulations cannot
+  report that a real CIFS share was qualified.
+- Retain atomic no-overwrite publication, identity checks, private local
+  workspaces, source recovery and conservative temporary-file cleanup.
+
+### Unicode format identifiers
+
+- Accept localized Unicode format identifiers such as ARTE's
+  `VOF-audio_0-français`, preserving their literal values in replay and component
+  names. Keep normalization confined to reservation families and continue to
+  reject path separators, controls and other unsafe characters.
+- Cover UTF-8 byte boundaries, fragment-suffix headroom, actual directory name
+  limits and equivalent reservation families with permanent regressions.
+
+### Human-readable diagnostics
+
+- Explain important storage, publication, validation, dependency and runtime
+  failures with stable diagnostic identifiers and concrete inspection advice.
+  Keep bounded errno details and distinguish interruption, warning and failure.
+- Remove private exception text, header/component names and rejected runtime
+  values from the affected diagnostics. Preserve existing exit codes and all
+  machine-readable progress and result protocols.
+- Describe recovery according to observed state. An uncertain publication may
+  already have produced the final file; an absent or replaced source is not
+  advertised as a confirmed recovery copy. Show View log guidance only when a
+  safe diagnostic is available, with matching English and French documentation.
+
+### Qualification
+
+- Preserve the 75 publication-injection cases and Unicode regressions; add
+  independent diagnostic, confidentiality, coordination-save and recovery-race
+  assertions, checked with targeted mutation campaigns.
+- Keep copy blocks, synchronization, process supervision, dependencies and CI
+  deadlines unchanged. No copy-loop refactoring or performance gain is claimed.
+- Real CIFS/SMB share qualification and online ARTE downloads remain outside
+  the executed fixture-based qualification; local simulation proves neither.
+
 ## 2.4.2 - 2026-10-10
 
 ### Maintenance
