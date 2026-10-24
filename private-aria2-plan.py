@@ -58,11 +58,22 @@ NO_REPLACE_UNSUPPORTED = frozenset(
 
 
 class PlanError(Exception):
-    """Expected validation failure."""
+    """Expected failure whose message contains only controlled diagnostic data."""
+
+    diagnostic_id = "PLAN_INVALID"
+
+    def __init__(self, message: str, *, diagnostic_id: str | None = None,
+                 errno_number: object = None) -> None:
+        super().__init__(message)
+        if diagnostic_id is not None:
+            self.diagnostic_id = diagnostic_id
+        self.errno_number = errno_number
 
 
 class PublicationInterrupted(PlanError):
     """A catchable signal interrupted publication."""
+
+    diagnostic_id = "PUB_INTERRUPTED"
 
     def __init__(self, signal_number: int) -> None:
         super().__init__("component publication was interrupted")
@@ -72,9 +83,135 @@ class PublicationInterrupted(PlanError):
 class DestinationExistsError(PlanError):
     """A final destination already exists and must not be overwritten."""
 
+    diagnostic_id = "DESTINATION_EXISTS"
+
 
 class ResourceBusyError(PlanError):
     """A resource remains protected until its owner's cleanup is confirmed."""
+
+    diagnostic_id = "RESOURCE_BUSY"
+
+
+DIAGNOSTIC_ACTIONS = {
+    "PLAN_INVALID": "Check the reported validation reason and the selected download settings.",
+    "IO_ERROR": "Check the affected storage and its permissions before starting another download.",
+    "PRIVATE_STORAGE": "Check that a writable private local storage location is available.",
+    "SPACE": "Check free space and quotas on the private local media disk.",
+    "SPACE_UNKNOWN": "Check available local space; the required capacity could not be established.",
+    "FORMAT_UNSAFE": "Check the selected formats or update the extractor; keep format identifiers unchanged.",
+    "NAME_TOO_LONG": "Use a shorter media name; component and fragment suffixes also need space.",
+    "DESTINATION_EXISTS": "Inspect the existing media or choose a different destination; do not overwrite it.",
+    "RESOURCE_BUSY": "Wait for a confirmed shutdown or inspect the preserved session; do not remove its locks or checkpoints.",
+    "CLEANUP_PRESERVED": "Inspect the preserved entries after consumers have stopped; do not remove ambiguous data automatically.",
+    "PUB_REFUSED": "Check the source and destination identities; keep any recovery files for inspection.",
+    "PUB_IO": "Check the storage involved in the reported publication step.",
+    "PUB_UNCERTAIN": "Inspect the destination and local recovery files before starting another download; do not delete uncertain files.",
+    "PUB_INTERRUPTED": "Inspect any remaining media before deciding whether to start another download.",
+    "PUB_UNSUPPORTED": "Choose a destination that supports atomic no-overwrite publication.",
+    "TEMPORARY_PRESERVED": "Inspect the destination temporary after consumers have stopped; do not remove an uncertain file automatically.",
+}
+PUBLICATION_OPERATIONS = {
+    "source-directory": "opening the local source directory",
+    "destination-directory": "opening the destination directory",
+    "collision-check": "checking the destination for existing media",
+    "source-open": "opening the local source",
+    "source-validation": "checking the source identity",
+    "temporary-create": "creating the destination copy",
+    "temporary-validation": "checking the destination temporary",
+    "copy-read": "reading the local source",
+    "copy-write": "copying media to the destination",
+    "sync": "synchronizing the destination copy (fsync)",
+    "copy-validation": "checking the completed copy",
+    "identity-validation": "rechecking the destination identity",
+    "rename": "publishing the final name atomically",
+    "link": "publishing the final name with an atomic hard link",
+    "confirmation": "confirming the published result",
+    "close-temporary": "closing the destination copy",
+    "close-source": "closing the local source",
+}
+
+
+def diagnostic_errno(number: object) -> int | str:
+    """Never stringify an exception-owned value or confuse bool with errno."""
+    return number if type(number) is int and 1 <= number <= 4095 else "none"
+
+
+def render_diagnostic(identifier: str, message: str, *, severity: str = "Error",
+                      errno_number: object = None, io_failure: bool = False,
+                      publication: tuple | None = None) -> None:
+    """Render controlled stderr data only; never select status or perform recovery."""
+    identifier = identifier if identifier in DIAGNOSTIC_ACTIONS else "PLAN_INVALID"
+    fields = []
+    source_state, attempted, published = "unverified", False, False
+    if publication is not None:
+        stage, source_state, attempted, published = publication
+        stage = stage if stage in PUBLICATION_OPERATIONS else "unknown"
+        fields.append(f"stage={stage}")
+        message += " while " + PUBLICATION_OPERATIONS.get(stage, "performing an unknown publication operation")
+    number = diagnostic_errno(errno_number)
+    if io_failure or errno_number is not None:
+        fields.append(f"errno={number}")
+        fields.append("code=" + errno.errorcode.get(number, "UNKNOWN"))
+    details = " (" + ", ".join(fields) + ")" if fields else ""
+    print(f"{severity}: [{identifier}] {message}{details}", file=sys.stderr)
+    if io_failure or errno_number is not None:
+        causes = {
+            errno.EIO: "The storage operation reported an input/output error.",
+            errno.ESTALE: "The filesystem reported a stale handle; its visible state needs rechecking.",
+            errno.ENOTCONN: "The filesystem connection is unavailable.",
+            errno.EACCES: "Access was denied by the filesystem or its permissions.",
+            errno.EPERM: "The filesystem did not permit the operation.",
+            errno.EROFS: "The filesystem is read-only.",
+            errno.ENOSPC: "The filesystem reported insufficient free space.",
+            errno.EDQUOT: "The filesystem reported that a storage quota was exceeded.",
+            errno.EOPNOTSUPP: "The filesystem does not support the requested operation.",
+        }
+        print("Cause: " + causes.get(number, "The cause of the operating-system failure is unknown."), file=sys.stderr)
+    action = DIAGNOSTIC_ACTIONS[identifier]
+    if identifier in {"IO_ERROR", "PUB_IO"}:
+        action = {
+            errno.ENOSPC: "Check available space and quotas on the storage involved; use a location with sufficient capacity.",
+            errno.EDQUOT: "Check the storage quota with its owner or choose another authorized location.",
+            errno.EACCES: "Check access permissions with the storage owner and use an authorized writable location.",
+            errno.EPERM: "Check access permissions with the storage owner and use an authorized writable location.",
+            errno.EROFS: "Check whether the mount is read-only or choose an authorized writable location.",
+            errno.ENOTCONN: "Check the network mount connection and its state before making another request.",
+            errno.ESTALE: "Recheck the mount and directory identity before making another request.",
+            errno.EIO: "Inspect the storage or connection involved and keep any recovery files.",
+            errno.EOPNOTSUPP: "Check that the filesystem supports the reported operation.",
+        }.get(number, action)
+    print("Action: " + action, file=sys.stderr)
+    if publication is not None:
+        source_messages = {
+            "unverified": "The source has not been verified by this publication attempt.",
+            "identity-checked": "Publication did not delete the local source; verify it before recovery.",
+            "copy-checked": "The local source passed the copy checks and was not deleted by this operation; inspect it before recovery.",
+            "changed": "The source or copy changed; keep the remaining files for inspection.",
+        }
+        outcome = ("A destination result may already exist; success was not acknowledged."
+                   if attempted or published else "No new final name was published by this attempt.")
+        print("Recovery: " + source_messages.get(source_state, source_messages["unverified"]) + " " + outcome, file=sys.stderr)
+
+
+def report_error(error: PlanError | OSError, command: str) -> None:
+    """Keep useful controlled validation reasons, never raw OS exception data."""
+    publication = getattr(error, "publication_diagnostic", None)
+    uncertain = publication is not None and (publication[2] or publication[3])
+    if isinstance(error, OSError):
+        render_diagnostic("PUB_UNCERTAIN" if uncertain else "PUB_IO" if publication is not None else "IO_ERROR",
+                          "media publication failed" if publication is not None else "operating-system failure",
+                          errno_number=error.errno, io_failure=True, publication=publication)
+        return
+    identifier = error.diagnostic_id
+    if uncertain and identifier not in {"PUB_INTERRUPTED", "DESTINATION_EXISTS"}:
+        identifier = "PUB_UNCERTAIN"
+    if identifier == "PLAN_INVALID":
+        identifier = {"private-root": "PRIVATE_STORAGE", "coordination-roots": "PRIVATE_STORAGE",
+                      "cleanup-workspace": "CLEANUP_PRESERVED", "publish-media": "PUB_REFUSED"}.get(command, identifier)
+    render_diagnostic(identifier, str(error),
+                      severity="Interrupted" if isinstance(error, PublicationInterrupted) else "Error",
+                      errno_number=error.errno_number,
+                      publication=publication)
 
 
 def filesystem_type(descriptor: int) -> int:
@@ -452,12 +589,12 @@ def validate_headers(value: object) -> dict[str, str]:
             raise PlanError("unsafe HTTP header name in yt-dlp plan")
 
         if not isinstance(raw_value, str):
-            raise PlanError(f"HTTP header {raw_name} value must be a string")
+            raise PlanError("HTTP header value must be a string")
 
         header_value = raw_value
         reject_controls(
             header_value,
-            f"HTTP header {raw_name}",
+            "HTTP header value",
             reject_whitespace=False,
         )
         headers[raw_name] = header_value
@@ -495,7 +632,7 @@ def component_destination(
     extension = format_info.get("ext")
 
     if not format_id_is_representable(format_id):
-        raise PlanError("requested format has an unsafe format_id")
+        raise PlanError("requested format has an unsafe format_id", diagnostic_id="FORMAT_UNSAFE")
 
     if not extension_is_representable(extension):
         raise PlanError("requested format has an unsafe extension")
@@ -520,7 +657,7 @@ def write_private_new(path: Path, payload: str) -> None:
             require_local_filesystem(parent_fd)
             descriptor = os.open(path.name, flags, 0o600, dir_fd=parent_fd)
     except OSError as exc:
-        raise PlanError(f"unable to create private file: {path.name}") from exc
+        raise PlanError("unable to create private file", diagnostic_id="PRIVATE_STORAGE", errno_number=exc.errno) from exc
 
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
@@ -539,7 +676,7 @@ def write_private_new(path: Path, payload: str) -> None:
             path.unlink(missing_ok=True)
         except OSError:
             pass
-        raise PlanError(f"unable to write private file: {path.name}") from exc
+        raise PlanError("unable to write private file", diagnostic_id="PRIVATE_STORAGE") from exc
     except OSError:
         try:
             path.unlink(missing_ok=True)
@@ -630,7 +767,7 @@ def build_plan(args: argparse.Namespace) -> int:
     for destination in dict.fromkeys([root_destination, *destinations]):
         if os.path.lexists(destination):
             raise DestinationExistsError(
-                f"destination already exists: {destination.name}"
+                "destination already exists"
             )
 
     aria2_input_path = resolve_private_output_path(
@@ -834,7 +971,7 @@ def resource_plan(args: argparse.Namespace) -> int:
     # filesystem truncation; it must never escape the reserved family.
     name_limit = min(os.pathconf(output, 'PC_NAME_MAX'), os.pathconf(final, 'PC_NAME_MAX'))
     if any(len(os.fsencode(name)) + 24 > name_limit for name in names):
-        raise PlanError('planned component filename is too long for safe resource reservation')
+        raise PlanError('planned component filename is too long for safe resource reservation', diagnostic_id="NAME_TOO_LONG")
     family = normalized_resource_name(destination.stem)
     if not family or family.startswith('.') or '/' in family:
         raise PlanError('invalid resource family')
@@ -1068,7 +1205,7 @@ def resource_state(args: argparse.Namespace) -> int:
             for name in snapshot:
                 if (normalized_resource_name(name) == final_alias or
                         name in completed_names):
-                    raise DestinationExistsError('final media destination already exists; refusing to overwrite it. Destination: ' + name)
+                    raise DestinationExistsError('final media destination already exists; refusing to overwrite it')
             if snapshot and (not state['binding'] or state['output'] != state['final'] or
                              not resumable):
                 raise DestinationExistsError('pre-existing or ambiguous media resources; preserved, not an authorized resume')
@@ -1286,6 +1423,14 @@ def publish_media(args: argparse.Namespace) -> int:
     expected_source = parse_identity(args.source_identity)
     requested_signal = 0
     stage = "source-directory"
+    source_state = "unverified"
+    publication_attempted = False
+    published = False
+
+    def publication_error(error):
+        # Diagnostic observations never authorize publication, retry or cleanup.
+        error.publication_diagnostic = (stage, source_state, publication_attempted, published)
+        return error
 
     def remember_signal(number: int, _frame: object) -> None:
         nonlocal requested_signal
@@ -1294,7 +1439,7 @@ def publish_media(args: argparse.Namespace) -> int:
 
     def checkpoint() -> None:
         if requested_signal:
-            raise PublicationInterrupted(requested_signal)
+            raise publication_error(PublicationInterrupted(requested_signal))
 
     previous_handlers = {}
     try:
@@ -1328,6 +1473,7 @@ def publish_media(args: argparse.Namespace) -> int:
                         or (original.st_dev, original.st_ino) != expected_source
                     ):
                         raise PlanError("publication source must be nonempty media owned by the current user")
+                    source_state = "identity-checked"
                     temporary_name = f".yt-dlp-publish.{secrets.token_hex(16)}.partial"
                     stage = "temporary-create"
                     temporary_fd = os.open(
@@ -1336,8 +1482,6 @@ def publish_media(args: argparse.Namespace) -> int:
                         0o600, dir_fd=output_fd,
                     )
                     temporary_identity = None
-                    publication_attempted = False
-                    published = False
                     try:
                         stage = "temporary-validation"
                         temporary_stat = os.fstat(temporary_fd)
@@ -1367,7 +1511,9 @@ def publish_media(args: argparse.Namespace) -> int:
                                 original.st_mtime_ns, original.st_ctime_ns)
                             or os.fstat(temporary_fd).st_size != original.st_size
                         ):
+                            source_state = "changed"
                             raise PlanError("local media changed during publication")
+                        source_state = "copy-checked"
                         stage = "identity-validation"
                         if (
                             directory_identity(output) != expected_output
@@ -1406,8 +1552,8 @@ def publish_media(args: argparse.Namespace) -> int:
                                 if link_error.errno in NO_REPLACE_UNSUPPORTED | {errno.EPERM, errno.EXDEV}:
                                     publication_attempted = False
                                     raise PlanError(
-                                        "destination supports neither atomic no-replace rename nor hard links "
-                                        f"(stage=link, errno={link_error.errno})"
+                                        "destination supports neither atomic no-replace rename nor hard links",
+                                        diagnostic_id="PUB_UNSUPPORTED", errno_number=link_error.errno,
                                     ) from link_error
                                 raise
                         published = True
@@ -1420,7 +1566,7 @@ def publish_media(args: argparse.Namespace) -> int:
                             not anchored_file_matches(output_fd, source.name, temporary_identity)
                             or directory_identity(output) != expected_output
                         ):
-                            raise PlanError("media publication outcome is uncertain; local source was preserved")
+                            raise PlanError("media publication outcome is uncertain")
                     finally:
                         try:
                             os.close(temporary_fd)
@@ -1430,13 +1576,13 @@ def publish_media(args: argparse.Namespace) -> int:
                         # An ambiguous network publication may have completed.
                         # Preserve its remaining name and always retain source.
                         if temporary_identity is None:
-                            print("Warning: preserving unconfirmed media publication temporary file", file=sys.stderr)
+                            render_diagnostic("TEMPORARY_PRESERVED", "preserving unconfirmed media publication temporary file", severity="Warning")
                         elif not publication_attempted or published:
                             try:
                                 if anchored_file_matches(output_fd, temporary_name, temporary_identity):
                                     os.unlink(temporary_name, dir_fd=output_fd)
                             except OSError:
-                                print("Warning: preserving unconfirmed media publication temporary file", file=sys.stderr)
+                                render_diagnostic("TEMPORARY_PRESERVED", "preserving unconfirmed media publication temporary file", severity="Warning")
                 finally:
                     try:
                         os.close(source_fd)
@@ -1446,10 +1592,12 @@ def publish_media(args: argparse.Namespace) -> int:
     except OSError as exc:
         # Exception text and filenames may contain private upstream data.
         # Preserve the errno/status contract while emitting only our stage.
-        raise OSError(
+        raise publication_error(OSError(
             exc.errno,
-            f"media publication failed (stage={stage}, errno={exc.errno}); local source was preserved",
-        ) from exc
+            "media publication failed",
+        )) from exc
+    except PlanError as exc:
+        raise publication_error(exc)
     finally:
         for number, previous in previous_handlers.items():
             signal.signal(number, previous)
@@ -1486,9 +1634,9 @@ def check_space(args: argparse.Namespace) -> int:
     # Selected components, an assembled file and the HLS repair can coexist.
     required = estimate * 3 + 64 * 1024 * 1024
     if available < required:
-        raise PlanError("insufficient local disk space for downloaded media and post-processing")
+        raise PlanError("insufficient local disk space for downloaded media and post-processing", diagnostic_id="SPACE")
     if not complete:
-        print("Warning: media size is unknown; local disk space cannot be guaranteed", file=sys.stderr)
+        render_diagnostic("SPACE_UNKNOWN", "media size is unknown; local disk space cannot be guaranteed", severity="Warning")
     return 0
 
 
@@ -1605,7 +1753,7 @@ def publish_without_overwrite(
         source_stat = source.lstat()
     except OSError as exc:
         raise PlanError(
-            f"unable to inspect downloaded component: {source.name}"
+            "unable to inspect downloaded component", errno_number=exc.errno
         ) from exc
 
     source_identity = (source_stat.st_dev, source_stat.st_ino)
@@ -1615,12 +1763,12 @@ def publish_without_overwrite(
         os.link(source, destination, follow_symlinks=False)
     except FileExistsError as exc:
         raise DestinationExistsError(
-            f"destination already exists: {destination.name}"
+            "destination already exists"
         ) from exc
     except OSError as exc:
         if exc.errno not in NO_REPLACE_UNSUPPORTED | {errno.EPERM}:
             raise PlanError(
-                f"unable to publish downloaded component: {destination.name}"
+                "unable to publish downloaded component", errno_number=exc.errno
             ) from exc
         # A private local staging parent protects this pathname. Verify its
         # identity again before the filesystem's atomic no-replace operation.
@@ -1631,7 +1779,7 @@ def publish_without_overwrite(
             renamed = True
         except FileExistsError as collision:
             raise DestinationExistsError(
-                f"destination already exists: {destination.name}"
+                "destination already exists"
             ) from collision
         except OSError as rename_error:
             raise PlanError(
@@ -1644,7 +1792,7 @@ def publish_without_overwrite(
 
     if not path_matches_identity(destination, source_identity):
         raise PlanError(
-            f"published destination changed unexpectedly: {destination.name}"
+            "published destination changed unexpectedly"
         )
 
     try:
@@ -1794,7 +1942,7 @@ def commit_plan(args: argparse.Namespace) -> int:
 
         if os.path.lexists(destination):
             raise DestinationExistsError(
-                f"destination already exists: {destination.name}"
+                "destination already exists"
             )
 
         publications.append((source, destination))
@@ -1950,21 +2098,21 @@ def main() -> int:
     try:
         return int(args.handler(args))
     except PublicationInterrupted as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        report_error(exc, args.command)
         return 128 + exc.signal_number
     except KeyboardInterrupt:
         return 130
     except DestinationExistsError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        report_error(exc, args.command)
         return 1
     except ResourceBusyError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        report_error(exc, args.command)
         return 75
     except PlanError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        report_error(exc, args.command)
         return EXIT_VALIDATION
     except OSError as exc:
-        print(f"Error: operating-system failure: {exc}", file=sys.stderr)
+        report_error(exc, args.command)
         return EXIT_IO
 
 

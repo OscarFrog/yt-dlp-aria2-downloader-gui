@@ -3002,6 +3002,8 @@ initialize_runtime_dependencies() {
     for command_name in aria2c env ffmpeg ffprobe python3 sed stdbuf tr realpath grep ln mktemp mv rm rmdir chmod flock mkdir sha256sum stat setsid sleep timeout find; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             error "required command \"${command_name}\" was not found."
+            printf '%s\n' \
+                '[DEPENDENCY_MISSING] Dependency check failed. Install the package providing the command named above, then retry.' >&2
             exit 127
         fi
     done
@@ -3540,6 +3542,11 @@ plan_selected_transport() {
     if ((plan_status != 0)); then
         printf '\nDownload failed during format planning with exit code %d.\n' \
             "${plan_status}" >&2
+        if [[ ${SHUTDOWN_REQUESTED} != true ]] \
+            && ((plan_status != 129 && plan_status != 130 && plan_status != 143)); then
+            printf '%s\n' \
+                '[ENGINE_PLAN] Format planning failed. The exit status alone does not distinguish access, network or format-selection problems. Review the diagnostic output before retrying.' >&2
+        fi
         exit "${plan_status}"
     fi
 
@@ -4297,8 +4304,34 @@ validate_and_publish_result() {
         error "the final media file failed FFprobe validation: ${final_media_path}"
         printf 'Media validation reason: %s\n' \
             "${FINAL_MEDIA_VALIDATION_REASON:-unknown}" >&2
+        case ${FINAL_MEDIA_VALIDATION_REASON:-unknown} in
+            missing-or-empty-file)
+                printf '%s\n' '[MEDIA_VALIDATION] Final media validation failed: the file is missing or empty. Inspect the reported media location before retrying.' >&2
+                ;;
+            missing-audio)
+                printf '%s\n' '[MEDIA_VALIDATION] Final media validation found no audio stream. Inspect the retained media and selected format before retrying.' >&2
+                ;;
+            missing-content-video)
+                printf '%s\n' '[MEDIA_VALIDATION] Final media validation found no content video stream. Inspect the retained media and selected video format before retrying.' >&2
+                ;;
+            unexpected-content-video)
+                printf '%s\n' '[MEDIA_VALIDATION] Final audio validation found a content video stream. Inspect the retained media and selected audio format before retrying.' >&2
+                ;;
+            probe-timeout)
+                printf '%s\n' '[MEDIA_VALIDATION] FFprobe validation exceeded its time limit. Inspect the retained media and storage availability before retrying.' >&2
+                ;;
+            probe-error | probe-tail-error)
+                printf '%s\n' '[MEDIA_VALIDATION] FFprobe could not validate the media contents. Inspect the retained media before retrying.' >&2
+                ;;
+            tail-inconsistent)
+                printf '%s\n' '[MEDIA_VALIDATION] Final media validation could not confirm the declared end of the media. Inspect the retained media before retrying.' >&2
+                ;;
+            *)
+                printf '%s\n' '[MEDIA_VALIDATION] Final media validation could not confirm a usable result. Inspect the retained media and diagnostic output before retrying.' >&2
+                ;;
+        esac
         printf '%s\n' \
-            'The media file was retained for diagnosis and was not published as a successful result.' >&2
+            'Validation did not confirm a usable media result. Inspect the media location and any remaining files; no successful result was published.' >&2
         if [[ -n ${HLS_SOURCE_TO_CLEAN} ]]; then
             printf 'The repaired HLS intermediate was retained at: %s\n' \
                 "${HLS_SOURCE_TO_CLEAN}" >&2
@@ -4325,7 +4358,7 @@ validate_and_publish_result() {
         if ((DOWNLOAD_STATUS != 0)); then
             emit_machine_postprocess error MediaPublication
             error "unable to publish the final media safely (status ${DOWNLOAD_STATUS})."
-            print_human_line "Validated local media retained at: ${MEDIA_RETAINED_PATH}" >&2
+            print_human_line "Media passed validation before publication. Recheck the local recovery location before use: ${MEDIA_RETAINED_PATH}" >&2
             exit "${DOWNLOAD_STATUS}"
         fi
         if ! IFS= read -r final_media_path <"${publication_record}" \
@@ -4421,6 +4454,11 @@ finalize_download() {
     if ((DOWNLOAD_STATUS != 0)); then
         status=${DOWNLOAD_STATUS}
         printf '\nDownload failed with exit code %d.\n' "${status}" >&2
+        if [[ ${SHUTDOWN_REQUESTED} != true ]] \
+            && ((status != 129 && status != 130 && status != 143)); then
+            printf '%s\n' \
+                '[ENGINE_DOWNLOAD] Media transfer failed. The exit status alone does not distinguish access, network or format-selection problems. Review the diagnostic output before retrying.' >&2
+        fi
         exit "${status}"
     fi
 

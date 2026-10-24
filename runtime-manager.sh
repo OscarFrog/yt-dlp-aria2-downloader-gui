@@ -190,7 +190,7 @@ validate_bounded_uint() {
     local numeric_value=0
 
     if [[ ! ${value} =~ ^0*([0-9]+)$ ]]; then
-        error "${name} must be an integer between ${minimum} and ${maximum}; found ${value}."
+        error "${name} must be an integer between ${minimum} and ${maximum}. [RUNTIME_SETTING] Correct or unset the corresponding runtime timeout setting before retrying."
         return 1
     fi
     normalized=${BASH_REMATCH[1]}
@@ -198,13 +198,13 @@ validate_bounded_uint() {
     # All configured maxima are intentionally small. Bound digit length before
     # Bash arithmetic so a fixed-width integer overflow can never wrap into range.
     if ((${#normalized} > ${#maximum})); then
-        error "${name} must be an integer between ${minimum} and ${maximum}; found ${value}."
+        error "${name} must be an integer between ${minimum} and ${maximum}. [RUNTIME_SETTING] Correct or unset the corresponding runtime timeout setting before retrying."
         return 1
     fi
 
     numeric_value=$((10#${normalized}))
     if ((numeric_value < minimum || numeric_value > maximum)); then
-        error "${name} must be an integer between ${minimum} and ${maximum}; found ${value}."
+        error "${name} must be an integer between ${minimum} and ${maximum}. [RUNTIME_SETTING] Correct or unset the corresponding runtime timeout setting before retrying."
         return 1
     fi
 
@@ -1764,7 +1764,7 @@ initialize_runtime_policy() {
             YTDLP_CHANNEL_VERSION_PATTERN='^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{6}$'
             ;;
         *)
-            error "unsupported yt-dlp channel: ${YTDLP_CHANNEL}; expected stable or nightly."
+            error 'unsupported yt-dlp channel; expected stable or nightly. [RUNTIME_CHANNEL] Set YTDLP_ARIA2_YTDLP_CHANNEL to stable or nightly before retrying.'
             return 64
             ;;
     esac

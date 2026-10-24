@@ -697,6 +697,18 @@ features can select native transport before all fields are inspected;
 malformed fields encountered during validation are errors, while native
 fallback leaves unsupported transport handling to yt-dlp.
 
+Human diagnostics are separate from these machine interfaces. Stable bracketed
+identifiers classify important failures without changing their numeric status.
+The helper renders controlled reasons, operation labels and bounded system error
+numbers; raw OS exception text and private header/component names do not cross
+this boundary. Publication context distinguishes work that has not reached an
+atomic attempt from an uncertain final outcome, and does not promise a validated
+recovery source before its identity/content checks. Advice cannot authorize a
+retry, cleanup, overwrite or process signal. The engine preserves its existing
+status/validation lines and machine events, and adds only contextual advice.
+GUI advice to open a log is attached only after a safe diagnostic is available;
+the fallback must never offer the raw live log.
+
 | Exchange | Producer / consumer | Schema and rejection policy |
 | --- | --- | --- |
 | yt-dlp plan | Planning pass / `classify`, `build`, `check-native-final` | UTF-8 JSON from `--dump-single-json --no-clean-info-json`; upstream schema, not a project version. Exactly one `requested_downloads` object is required. Unknown yt-dlp metadata is not globally rejected; selected fields, component count and paths are validated before use |

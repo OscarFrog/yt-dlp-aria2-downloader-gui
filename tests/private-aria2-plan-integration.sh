@@ -625,7 +625,7 @@ test_private_plan_existing_destinations() {
         fi
 
         assert_status 1 "${collision_kind} collision is rejected before transfer" run_build
-        assert_text_contains "${ASSERT_OUTPUT}" 'destination already exists:' \
+        assert_text_contains "${ASSERT_OUTPUT}" 'destination already exists' \
             "${collision_kind} early collision diagnostic"
         [[ ! -e ${ARIA2_INPUT} && ! -e ${MANIFEST} ]] \
             || fail "${collision_kind} early collision created transfer artifacts."
@@ -1581,6 +1581,9 @@ for stage in ("sync", "rename", "link", "confirmation"):
             status, stdout, stderr = publish_result(args)
         assert delivered and status == 128 + number and stdout == "", (
             "late publication signal was reported as success", stage, number, status, stdout, stderr)
+        assert "Interrupted: [PUB_INTERRUPTED]" in stderr and "Error:" not in stderr
+        assert "The local source passed the copy checks" in stderr
+        assert ("A destination result may already exist" in stderr) == (stage != "sync")
         unchanged(snapshots)
         if stage == "sync":
             assert list(output.iterdir()) == [snapshots[1][0]]
@@ -1617,6 +1620,13 @@ for stage in ("copy-read", "copy-write", "sync", "rename", "link", "confirmation
         assert secret not in stderr and "PRIVATE_FILENAME_TOKEN" not in stderr, (stage, stderr)
         expected_stage = "link" if stage == "rename" and number == errno.EOPNOTSUPP else stage
         assert f"stage={expected_stage}" in stderr and f"errno={number}" in stderr, (stage, number, stderr)
+        expected_id = ("PUB_UNSUPPORTED" if expected_status == 65 else
+                       "PUB_UNCERTAIN" if stage in {"rename", "link", "confirmation"} else "PUB_IO")
+        assert f"[{expected_id}]" in stderr and f"code={errno.errorcode[number]}" in stderr
+        assert "Cause: " in stderr and "Action: " in stderr and "Recovery: " in stderr
+        assert ("A destination result may already exist" in stderr) == (expected_id == "PUB_UNCERTAIN")
+        if expected_id == "PUB_UNCERTAIN":
+            assert "Action: Inspect the destination and local recovery files" in stderr
         unchanged(snapshots)
         if stage == "confirmation":
             assert (output / source.name).read_bytes() == snapshots[0][1]
@@ -1657,6 +1667,8 @@ for stage in ("temporary-create", "close-temporary", "close-source"):
         assert injected and status == 70 and not stdout, (stage, number, status, stderr)
         assert f"stage={stage}" in stderr and f"errno={number}" in stderr, (stage, number, stderr)
         assert secret not in stderr and "PRIVATE_FILENAME_TOKEN" not in stderr
+        assert ("[PUB_UNCERTAIN]" in stderr) == (stage != "temporary-create")
+        assert ("A destination result may already exist" in stderr) == (stage != "temporary-create")
         unchanged(snapshots)
         assert (output / source.name).exists() == (stage != "temporary-create")
 
@@ -1675,6 +1687,7 @@ with patch.object(module, "rename_without_overwrite", fail_with(errno.EOPNOTSUPP
         patch.object(module.os, "link", link_collision):
     status, stdout, stderr = publish_result(args)
 assert status == 1 and not stdout, (status, stderr)
+assert "[DESTINATION_EXISTS]" in stderr
 unchanged(snapshots)
 assert len(list(output.iterdir())) == 2
 
@@ -1697,6 +1710,8 @@ for stage in ("rename", "link"):
             status, stdout, stderr = publish_result(args)
         assert status == 70 and not stdout and secret not in stderr
         assert f"stage={stage}" in stderr and f"errno={number}" in stderr
+        assert "[PUB_UNCERTAIN]" in stderr and "A destination result may already exist" in stderr
+        assert "The local source passed the copy checks" in stderr
         unchanged(snapshots)
         assert (output / source.name).read_bytes() == snapshots[0][1]
         assert len(list(output.iterdir())) == (2 if stage == "rename" else 3)
@@ -1723,6 +1738,119 @@ for stage in ("sync", "rename"):
     assert list(output.iterdir()) == [output / source.name]
     unchanged([snapshots[0], (previous_output / snapshots[1][0].name, *snapshots[1][1:])])
     assert (previous_output / source.name).exists() == (stage == "rename")
+
+# Human diagnostics distinguish unverified sources from recovery data and
+# preserve the same boundary statuses without trusting exception payloads.
+for stage in ("source-directory", "source-open", "source-validation"):
+    source, output, args, snapshots = guarded_case(f"diagnostic-{stage}")
+    original_fstat = module.os.fstat
+
+    def source_open_failure(path, flags, *positional, **keywords):
+        if str(path) == source.name and not flags & os.O_CREAT:
+            raise OSError(errno.EACCES, secret, "PRIVATE_FILENAME_TOKEN")
+        return real_open(path, flags, *positional, **keywords)
+
+    def unverified_source(descriptor):
+        info = original_fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (snapshots[0][2].st_dev, snapshots[0][2].st_ino):
+            return SimpleNamespace(st_mode=info.st_mode, st_size=0, st_uid=info.st_uid,
+                                   st_dev=info.st_dev, st_ino=info.st_ino)
+        return info
+
+    owner, operation, replacement = {
+        "source-directory": (module, "require_local_filesystem", fail_with(errno.EIO)),
+        "source-open": (module.os, "open", source_open_failure),
+        "source-validation": (module.os, "fstat", unverified_source),
+    }[stage]
+    with patch.object(owner, operation, replacement):
+        status, stdout, stderr = publish_result(args)
+    assert status == (65 if stage == "source-validation" else 70) and not stdout
+    assert f"stage={stage}" in stderr and "source has not been verified" in stderr
+    assert "The local source passed the copy checks" not in stderr
+    assert "No new final name was published by this attempt." in stderr
+    assert secret not in stderr and "PRIVATE_FILENAME_TOKEN" not in stderr
+    unchanged(snapshots)
+    assert list(output.iterdir()) == [snapshots[1][0]]
+
+for number, action_hint in ((errno.EROFS, "mount is read-only"), (errno.EDQUOT, "storage quota"),
+                            (errno.ENOSPC, "available space"), (errno.EACCES, "access permissions"),
+                            (errno.EPERM, "access permissions"), (errno.ENOTCONN, "network mount connection"),
+                            (errno.ESTALE, "mount and directory identity")):
+    source, output, args, snapshots = guarded_case(f"diagnostic-extra-errno-{number}")
+    with patch.object(module.os, "write", fail_with(number)):
+        status, stdout, stderr = publish_result(args)
+    assert status == 70 and not stdout and "[PUB_IO]" in stderr
+    assert "copying media to the destination" in stderr
+    assert f"errno={number}" in stderr and f"code={errno.errorcode[number]}" in stderr
+    assert action_hint in next(line for line in stderr.splitlines() if line.startswith("Action: "))
+    unchanged(snapshots)
+    assert list(output.iterdir()) == [snapshots[1][0]]
+
+# Signals delivered by descriptor close or handler restoration must reach the
+# final checkpoint. This also exercises the after-publication recovery wording.
+for boundary in ("temporary-close", "source-close", "handler-restoration"):
+    for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        source, output, args, snapshots = guarded_case(f"diagnostic-signal-{boundary}-{number}")
+        initial = {sig: signal.getsignal(sig) for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)}
+        real_signal = signal.signal
+        delivered = False
+
+        def close_and_signal(descriptor):
+            global delivered
+            observed = os.readlink(f"/proc/self/fd/{descriptor}")
+            selected = ((boundary == "temporary-close" and observed == str(output / source.name)) or
+                        (boundary == "source-close" and observed == str(source)))
+            real_close(descriptor)
+            if selected and not delivered:
+                delivered = True
+                os.kill(os.getpid(), number)
+
+        def restore_and_signal(sig, handler):
+            global delivered
+            if boundary == "handler-restoration" and sig == signal.SIGHUP and handler == initial[sig] and not delivered:
+                delivered = True
+                os.kill(os.getpid(), number)
+            return real_signal(sig, handler)
+
+        with patch.object(module.os, "close", close_and_signal), patch.object(signal, "signal", restore_and_signal):
+            status, stdout, stderr = publish_result(args)
+        assert delivered and status == 128 + number and not stdout
+        assert "Interrupted: [PUB_INTERRUPTED]" in stderr and "Error:" not in stderr
+        assert "A destination result may already exist" in stderr
+        assert "The local source passed the copy checks" in stderr
+        assert all(signal.getsignal(sig) == handler for sig, handler in initial.items())
+        unchanged(snapshots)
+        assert (output / source.name).read_bytes() == snapshots[0][1]
+
+# Only a bounded integer errno is diagnostic data. Unknown errno and arbitrary
+# exception class names, strerror, filename and filename2 must never be echoed.
+private_marker = "PRIVATE_DIAGNOSTIC_TOKEN"
+private_error = type(private_marker, (OSError,), {})
+for raw_errno in (None, True, False, 0, -1, 4096, private_marker, 4095, errno.EIO):
+    injected = private_error(raw_errno, secret + private_marker, private_marker, None, private_marker)
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with patch.object(module, "select_private_root", side_effect=injected), \
+            patch.object(sys, "argv", [sys.argv[1], "private-root"]), redirect_stdout(stdout), redirect_stderr(stderr):
+        status = module.main()
+    diagnostic = stderr.getvalue()
+    expected = raw_errno if type(raw_errno) is int and 1 <= raw_errno <= 4095 else "none"
+    assert status == 70 and not stdout.getvalue() and "[IO_ERROR]" in diagnostic
+    assert f"errno={expected}" in diagnostic
+    assert private_marker not in diagnostic and secret not in diagnostic
+    if expected in {"none", 4095}:
+        assert "code=UNKNOWN" in diagnostic and "cause of the operating-system failure is unknown" in diagnostic
+
+# Exercise the real header validator and CLI boundary without downloading.
+for value in (123, "unsafe\nvalue"):
+    metadata = {"requested_downloads": [{"protocol": "http", "url": "http://example.invalid/media",
+                                        "http_headers": {private_marker: value}}]}
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with patch.object(module, "read_json", return_value=metadata), \
+            patch.object(sys, "argv", [sys.argv[1], "classify", "--plan", "unused"]), \
+            redirect_stdout(stdout), redirect_stderr(stderr):
+        status = module.main()
+    assert status == 65 and not stdout.getvalue()
+    assert "HTTP header value" in stderr.getvalue() and private_marker not in stderr.getvalue()
 
 source, output, args = prepare("replaced-source")
 source.rename(source.with_name("original retained inode"))
@@ -2167,10 +2295,14 @@ PY_ROLLBACK_FAILURE
     printf '%s\n' 'Private aria2 plan scenario: private-file I/O error class'
     new_case 'private-file-io-error'
     python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_PRIVATE_IO'
+from contextlib import redirect_stderr, redirect_stdout
+import errno
 import importlib.util
+import io
 import os
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 helper_path = Path(sys.argv[1])
 case_root = Path(sys.argv[2])
@@ -2200,6 +2332,38 @@ finally:
     module.os.fsync = real_fsync
 
 assert not os.path.lexists(target)
+
+# Exercise the real writer and main boundary, retaining its create/encode/fsync
+# status distinctions while denying private basenames and exception payloads.
+marker = "PRIVATE_WRITER_TOKEN"
+target = case_root / marker
+real_open = module.os.open
+
+def denied_open(path, flags, *arguments, **keywords):
+    if str(path) == marker:
+        raise OSError(errno.EACCES, marker, marker)
+    return real_open(path, flags, *arguments, **keywords)
+
+for phase, expected_status in (("create", 65), ("encode", 65), ("sync", 70)):
+    def write_fixture(_args):
+        module.write_private_new(target, "\ud800" if phase == "encode" else "payload\n")
+        return 0
+
+    def sync_fixture(descriptor):
+        if phase == "sync":
+            raise OSError(errno.EIO, marker, marker)
+        return real_fsync(descriptor)
+
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with patch.object(module, "private_root", write_fixture), \
+            patch.object(module.os, "open", denied_open if phase == "create" else real_open), \
+            patch.object(module.os, "fsync", sync_fixture):
+        with patch.object(sys, "argv", [str(helper_path), "private-root"]), redirect_stdout(stdout), redirect_stderr(stderr):
+            status = module.main()
+    assert status == expected_status and not stdout.getvalue(), (phase, status)
+    assert marker not in stderr.getvalue(), phase
+    assert ("[IO_ERROR]" if phase == "sync" else "[PRIVATE_STORAGE]") in stderr.getvalue()
+    assert not os.path.lexists(target), phase
 PY_PRIVATE_IO
 
     # If a previously published destination is replaced before a later item
@@ -3082,6 +3246,7 @@ test_resource_reservations_and_resume() {
     python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_RESOURCES'
 import argparse
 import contextlib
+import errno
 import fcntl
 import importlib.util
 import io
@@ -3424,6 +3589,65 @@ for unsafe_id in ('../escape', 'a/b', 'a\\b', 'a\nheader=value', 'a\r', 'a\t',
                   'a>b', 'a|b', 'a"b'):
     rejected(module.PlanError, plan, 'ordinary.mkv', 'one', output,
              [{'format_id': unsafe_id, 'ext': 'mp4'}])
+
+# Upstream basenames remain private even on collisions observed by admission,
+# early build or final commit. Observe real CLI statuses and unchanged inodes.
+marker = 'PRIVATE_DESTINATION_TOKEN'
+candidate, _ = plan(marker + '.mp4')
+witness = output / (marker + '.mkv')
+witness.write_bytes(b'existing private-name media')
+before = file_snapshot(witness)
+status, stdout, stderr = publish([sys.argv[1], 'resource-state', '--state', candidate.state,
+    '--registry', str(registry), '--action', 'admit'])
+assert status == 1 and not stdout and '[DESTINATION_EXISTS]' in stderr
+assert 'final media destination already exists; refusing to overwrite it' in stderr
+assert marker not in stderr and file_snapshot(witness) == before
+witness.unlink()
+witness = output / (marker + '.mp4')
+witness.write_bytes(b'existing private-name component')
+before = file_snapshot(witness)
+private = Path(candidate.state).parent
+staging = output / '.private-diagnostic-components'
+staging.mkdir(mode=0o700)
+build_arguments = [sys.argv[1], 'build', '--plan', candidate.plan, '--output-dir', str(output),
+    '--staging-dir', str(staging), '--private-dir', str(private), '--aria2-input', str(private / 'input'),
+    '--manifest', str(private / 'manifest.json'), '--allow-https-direct']
+status, stdout, stderr = publish(build_arguments)
+assert status == 1 and not stdout and '[DESTINATION_EXISTS]' in stderr
+assert marker not in stderr and file_snapshot(witness) == before
+assert not (private / 'input').exists() and not (private / 'manifest.json').exists()
+witness.unlink()
+status, stdout, stderr = publish(build_arguments)
+assert status == 0, (status, stderr)
+component = staging / 'item-000.download'
+component.write_bytes(b'completed synthetic component')
+component_before = file_snapshot(component)
+witness.write_bytes(b'new private-name collision')
+before = file_snapshot(witness)
+status, stdout, stderr = publish([sys.argv[1], 'commit', '--manifest', str(private / 'manifest.json')])
+assert status == 1 and not stdout and '[DESTINATION_EXISTS]' in stderr
+assert marker not in stderr and file_snapshot(witness) == before
+assert file_snapshot(component) == component_before
+real_link = module.os.link
+real_rename = module.rename_without_overwrite
+for atomic in ('link', 'rename'):
+    witness.unlink()
+
+    def late_collision(*arguments, **keywords):
+        witness.write_bytes(b'concurrent private-name media')
+        return (real_link if atomic == 'link' else real_rename)(*arguments, **keywords)
+
+    with contextlib.ExitStack() as stack:
+        if atomic == 'rename':
+            stack.enter_context(patch.object(module.os, 'link', side_effect=OSError(errno.EOPNOTSUPP, marker)))
+            stack.enter_context(patch.object(module, 'rename_without_overwrite', late_collision))
+        else:
+            stack.enter_context(patch.object(module.os, 'link', late_collision))
+        status, stdout, stderr = publish([sys.argv[1], 'commit', '--manifest', str(private / 'manifest.json')])
+    assert status == 1 and not stdout and '[DESTINATION_EXISTS]' in stderr
+    assert marker not in stderr and witness.read_bytes() == b'concurrent private-name media'
+    assert file_snapshot(component) == component_before
+
 converted, _ = plan('converted.webm', mode='audio')
 state(converted, 'admit')
 final = output / 'converted.opus'

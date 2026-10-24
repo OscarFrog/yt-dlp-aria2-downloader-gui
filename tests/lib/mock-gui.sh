@@ -393,6 +393,9 @@ test_mock_gui_progress_completion() {
     assert_diagnostic_question "${completion_error_question_log}" \
         'Zenity could not display the completion dialog.' \
         'completion-dialog technical diagnostic'
+    assert_file_contains "${completion_error_question_log}" \
+        'Select View log to inspect the private interface diagnostic.' \
+        'interface failure identifies its private diagnostic action'
     shopt -s nullglob
     completion_error_logs=("${completion_error_log_dir}"/download-*.log)
     shopt -u nullglob
@@ -867,6 +870,9 @@ test_mock_gui_diagnostic_logs() {
     assert_diagnostic_question "${failure_question_log}" \
         'The download failed with status 7.' \
         'downloader-failure diagnostic'
+    assert_file_contains "${failure_question_log}" \
+        'Select View log to inspect the sanitized diagnostic.' \
+        'download failure identifies its sanitized diagnostic action'
     logs_after=$(count_logs)
     assert_equals "$((logs_before + 1))" "${logs_after}" \
         'a failed download retains one new log'
@@ -1216,6 +1222,8 @@ EOF_MISSING_FINAL_ENGINE
     assert_file_contains "${sanitization_error_capture}" \
         'A safe diagnostic log could not be prepared.' \
         'failed-sanitization safe fallback'
+    assert_file_not_contains "${sanitization_error_capture}" 'Select View log' \
+        'failed sanitization never recommends an unavailable diagnostic action'
     assert_file_not_contains "${sanitization_error_capture}" \
         'UNSANITIZED_DIAGNOSTIC_SECRET' \
         'failed-sanitization fallback hides the raw diagnostic URL'

@@ -498,6 +498,7 @@ test_runtime_setting_bounds() {
     local diagnostic_name=''
     local invalid_value=''
     local validation_error=''
+    local validation_stdout="${TEST_ROOT}/validation-stdout"
     local status=0
 
     mkdir -p -- "${validation_bin}"
@@ -522,7 +523,8 @@ EOF_VALIDATION_EXTERNAL
         for invalid_value in \
             18446744073709551617 \
             99999999999999999999999999999999999999 \
-            '300:1:1' '9999:0:99999' '15:1' $'15\nignored'; do
+            '300:1:1' '9999:0:99999' '15:1' $'15\nignored' \
+            $'https://example.invalid/PRIVATE_RUNTIME_SETTING\nPRIVATE_RUNTIME_SECOND_LINE'; do
             rm -f -- "${validation_external_marker}"
             status=0
             validation_error=''
@@ -531,7 +533,7 @@ EOF_VALIDATION_EXTERNAL
                     PATH="${validation_bin}:${MOCK_BIN}:/usr/bin:/bin" \
                     MOCK_VALIDATION_EXTERNAL_MARKER="${validation_external_marker}" \
                     "${environment_name}=${invalid_value}" \
-                    "${RUNTIME_MANAGER}" versions 2>&1
+                    "${RUNTIME_MANAGER}" versions 2>&1 >"${validation_stdout}"
             ) || status=$?
             [[ ${status} == 64 ]] \
                 || fail "${environment_name} invalid value ${invalid_value} returned ${status}, expected 64"
@@ -539,6 +541,15 @@ EOF_VALIDATION_EXTERNAL
                 "${diagnostic_name} must be an integer between" \
                 <<<"${validation_error}" \
                 || fail "${environment_name} invalid-value diagnostic is missing"
+            assert_text_contains "${validation_error}" '[RUNTIME_SETTING]' \
+                'runtime setting failure has a stable diagnostic ID'
+            assert_text_contains "${validation_error}" 'Correct or unset' \
+                'runtime setting failure explains the corrective action'
+            [[ ! -s ${validation_stdout} ]] \
+                || fail 'Runtime setting failure contaminated stdout.'
+            [[ ${validation_error} != *"${invalid_value}"* &&
+                ${validation_error} != *$'\n'* ]] \
+                || fail 'Runtime setting diagnostic exposed a rejected value or injected line.'
             [[ ! -e ${validation_external_marker} ]] \
                 || fail "${environment_name} invalid value reached an external timeout/lock command"
             if [[ ${validation_error} == *'arithmetic syntax error'* ]]; then
@@ -546,6 +557,27 @@ EOF_VALIDATION_EXTERNAL
             fi
         done
     done
+
+    rm -f -- "${validation_external_marker}"
+    status=0
+    validation_error=$(
+        "${runtime_env[@]}" \
+            PATH="${validation_bin}:${MOCK_BIN}:/usr/bin:/bin" \
+            MOCK_VALIDATION_EXTERNAL_MARKER="${validation_external_marker}" \
+            YTDLP_ARIA2_YTDLP_CHANNEL=$'https://example.invalid/PRIVATE_RUNTIME_CHANNEL\nPRIVATE_CHANNEL_LINE' \
+            "${RUNTIME_MANAGER}" versions 2>&1 >"${validation_stdout}"
+    ) || status=$?
+    assert_equals 64 "${status}" 'invalid runtime channel preserves usage failure'
+    assert_text_contains "${validation_error}" '[RUNTIME_CHANNEL]' \
+        'runtime channel failure has a stable diagnostic ID'
+    assert_text_contains "${validation_error}" 'stable or nightly' \
+        'runtime channel failure gives the accepted choices'
+    assert_text_not_contains "${validation_error}" 'PRIVATE_' \
+        'runtime channel diagnostic excludes the rejected payload'
+    [[ ${validation_error} != *$'\n'* && ! -s ${validation_stdout} ]] \
+        || fail 'Runtime channel failure injected a line or contaminated stdout.'
+    [[ ! -e ${validation_external_marker} ]] \
+        || fail 'Invalid runtime channel reached an external command.'
 }
 
 test_runtime_command_and_lock_errors() {

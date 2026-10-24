@@ -107,6 +107,8 @@ assert_diagnostic_question() {
     arguments_text=$(printf '%s\n' "${question_arguments[@]}")
     assert_text_contains "${arguments_text}" "${expected_message}" \
         "${label} user-facing message"
+    assert_text_contains "${arguments_text}" 'Select View log to inspect' \
+        "${label} identifies the available diagnostic action"
 }
 
 assert_retained_log_identity_footer() {

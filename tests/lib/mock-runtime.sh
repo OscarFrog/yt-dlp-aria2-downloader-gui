@@ -116,6 +116,13 @@ test_mock_runtime_worker_failure() {
         'forbidden external source label is absent from engine diagnostics'
     assert_text_contains "${ASSERT_OUTPUT}" '[REDACTED_SOURCE]' \
         'forbidden external source label is replaced deterministically'
+    assert_text_contains "${ASSERT_OUTPUT}" '[ENGINE_PLAN] Format planning failed.' \
+        'planning failure identifies its operation'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'does not distinguish access, network or format-selection problems' \
+        'planning status is not treated as a specific external cause'
+    assert_text_contains "${ASSERT_OUTPUT}" 'Review the diagnostic output before retrying.' \
+        'planning failure requests inspection before another attempt'
 
     prepare_argument_log 'immediate-worker-failure'
     assert_status 23 'an immediate yt-dlp failure preserves its real status' \
@@ -127,6 +134,13 @@ test_mock_runtime_worker_failure() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'Download failed with exit code 23.' \
         'immediate worker status diagnostic'
+    assert_text_contains "${ASSERT_OUTPUT}" '[ENGINE_DOWNLOAD] Media transfer failed.' \
+        'transfer failure identifies its operation'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'does not distinguish access, network or format-selection problems' \
+        'transfer status is not treated as a specific external cause'
+    assert_text_contains "${ASSERT_OUTPUT}" 'Review the diagnostic output before retrying.' \
+        'transfer failure requests inspection before another attempt'
 
     prepare_argument_log 'ffprobe-validation-failure'
     invalid_probe_result="${TEST_ROOT}/invalid-probe-result.txt"
@@ -144,6 +158,11 @@ test_mock_runtime_worker_failure() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'Media validation reason: probe-error' \
         'FFprobe failure bounded reason'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        '[MEDIA_VALIDATION] FFprobe could not validate the media contents.' \
+        'FFprobe failure advice follows the verified reason'
+    assert_text_contains "${ASSERT_OUTPUT}" 'Inspect the retained media before retrying.' \
+        'FFprobe failure preserves the need for inspection'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     prepare_argument_log 'ffprobe-validation-timeout'
@@ -159,6 +178,9 @@ test_mock_runtime_worker_failure() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'Media validation reason: probe-timeout' \
         'FFprobe timeout bounded reason'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        '[MEDIA_VALIDATION] FFprobe validation exceeded its time limit.' \
+        'FFprobe timeout advice follows the verified reason'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     prepare_argument_log 'ffprobe-validation-escalated-timeout'
@@ -174,7 +196,205 @@ test_mock_runtime_worker_failure() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'Media validation reason: probe-timeout' \
         'FFprobe escalated-timeout bounded reason'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        '[MEDIA_VALIDATION] FFprobe validation exceeded its time limit.' \
+        'escalated FFprobe timeout retains the same explanation'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
+
+    # Exercise diagnostic boundaries without launching another media engine.
+    # Existing scenarios above cover actual transport and FFprobe failures.
+    python3 -I -B - "${PROJECT_DIR}/download-video.sh" "${TEST_ROOT}" \
+        "${PROJECT_DIR}/private-aria2-plan.py" <<'PY_ENGINE_DIAGNOSTICS'
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+source = Path(sys.argv[1]).read_text().rsplit('\nmain "$@"', 1)[0]
+root = Path(sys.argv[2]) / 'engine-diagnostic-boundaries'
+root.mkdir(mode=0o700)
+
+def run(program, *arguments):
+    return subprocess.run(['bash', '-s', '--', str(root), *map(str, arguments)],
+                          input=source + program, text=True, capture_output=True, timeout=5)
+
+terminal = r'''
+fixture_status=$2
+DOWNLOAD_STATUS=$2
+SHUTDOWN_REQUESTED=$4
+MACHINE_PROGRESS=true
+URL='https://example.invalid/PRIVATE_ENGINE_DIAGNOSTIC'
+PRIVATE_ARIA2_PLAN=$1/plan.json
+YT_DLP_OPTIONS=()
+YTDLP_BIN=unused
+YTDLP_BATCH_FILE_TMP=$1/url
+run_supervised_ytdlp() { DOWNLOAD_STATUS=${fixture_status}; }
+normalize_successful_path_record() { exit 99; }
+if [[ $3 == plan ]]; then plan_selected_transport; else finalize_download; fi
+'''
+for phase, identifier, legacy in (
+    ('plan', '[ENGINE_PLAN]', 'Download failed during format planning with exit code'),
+    ('transfer', '[ENGINE_DOWNLOAD]', 'Download failed with exit code'),
+):
+    for status, requested in ((23, 'false'), (129, 'false'), (130, 'false'),
+                              (143, 'false'), (23, 'true')):
+        result = run(terminal, status, phase, requested)
+        assert result.returncode == status, 'diagnostic changed the failure status'
+        assert not result.stdout, 'human diagnostic contaminated machine stdout'
+        assert f'{legacy} {status}.' in result.stderr, 'legacy status line changed'
+        assert 'PRIVATE_ENGINE_DIAGNOSTIC' not in result.stderr, 'diagnostic leaked request data'
+        if status == 23 and requested == 'false':
+            assert identifier in result.stderr, 'missing diagnostic operation ID'
+            assert 'does not distinguish access, network or format-selection problems' in result.stderr
+            assert 'Review the diagnostic output before retrying.' in result.stderr
+        else:
+            assert identifier not in result.stderr, 'cancellation received new failure advice'
+        assert 'Download completed successfully.' not in result.stderr, 'failure claimed success'
+
+media = root / 'retained.media'
+media.write_bytes(b'unchanged retained fixture')
+(root / 'path-record').write_text(str(media) + '\n')
+validation = r'''
+fixture_reason=$2
+PATH_RECORD_FD_PATH=$1/path-record
+MODE=video
+MACHINE_PROGRESS=true
+HLS_SOURCE_TO_CLEAN=''
+validate_final_media_file() { FINAL_MEDIA_VALIDATION_REASON=${fixture_reason}; return 1; }
+validate_and_publish_result
+'''
+for reason, explanation in (
+    ('missing-or-empty-file', 'the file is missing or empty'),
+    ('missing-audio', 'no audio stream'),
+    ('missing-content-video', 'no content video stream'),
+    ('unexpected-content-video', 'audio validation found a content video stream'),
+    ('probe-timeout', 'exceeded its time limit'),
+    ('probe-error', 'could not validate the media contents'),
+    ('probe-tail-error', 'could not validate the media contents'),
+    ('tail-inconsistent', 'could not confirm the declared end'),
+    ('unknown', 'could not confirm a usable result'),
+):
+    result = run(validation, reason)
+    assert result.returncode == 65, 'validation diagnostic changed the refusal status'
+    assert result.stdout.splitlines() == ['YTDLP_POSTPROCESS|started|MediaValidation',
+                                        'YTDLP_POSTPROCESS|error|MediaValidation'], 'validation protocol changed'
+    assert f'Media validation reason: {reason}\n' in result.stderr
+    assert '[MEDIA_VALIDATION]' in result.stderr and explanation in result.stderr
+    inspection = 'Inspect the reported media location' if reason == 'missing-or-empty-file' else 'Inspect the retained media'
+    assert inspection in result.stderr, 'missing media inspection advice'
+    assert media.read_bytes() == b'unchanged retained fixture', 'diagnostic changed retained media'
+
+snapshot_code = '''
+def snapshot(directory):
+    result = {}
+    for path in sorted(directory.rglob('*')):
+        if path.name == 'mutation-snapshot.json':
+            continue
+        info = path.lstat()
+        result[str(path.relative_to(directory))] = [
+            info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns,
+            path.read_bytes().hex() if path.is_file() else None,
+        ]
+    return result
+'''
+exec(snapshot_code)
+
+# A missing path must not be described as a retained recovery copy. This case
+# invokes the real validation function, whose missing-file check precedes FFprobe.
+missing = root / 'absent.media'
+(root / 'path-record').write_text(str(missing) + '\n')
+before_missing = snapshot(root)
+missing_validation = r'''
+PATH_RECORD_FD_PATH=$1/path-record
+MODE=video
+MACHINE_PROGRESS=true
+HLS_SOURCE_TO_CLEAN=''
+validate_and_publish_result
+'''
+result = run(missing_validation)
+assert result.returncode == 65, 'missing-file diagnostic changed the refusal status'
+assert result.stdout.splitlines() == ['YTDLP_POSTPROCESS|started|MediaValidation',
+                                    'YTDLP_POSTPROCESS|error|MediaValidation'], 'missing-file protocol changed'
+assert 'Media validation reason: missing-or-empty-file\n' in result.stderr
+assert 'Inspect the reported media location' in result.stderr
+assert 'The media file was retained' not in result.stderr, 'missing file was advertised as retained'
+assert 'Inspect the media location and any remaining files' in result.stderr
+assert 'no successful result was published' in result.stderr
+assert not missing.exists(), 'validation created an absent file'
+assert media.read_bytes() == b'unchanged retained fixture', 'missing-file diagnostic changed other media'
+assert snapshot(root) == before_missing, 'missing-file diagnostic changed filesystem state'
+
+# Mutate only the fixture, after both Bash identity checks and before the real
+# helper opens the source. Snapshot actual filesystem state at that boundary.
+mutator = root / 'publication-race.py'
+mutator.write_text('import json, os, sys\nfrom pathlib import Path\n' + snapshot_code + '''
+directory = Path(sys.argv[1])
+source = directory / 'local' / 'validated.media'
+source.rename(source.with_name('previous.media'))
+if sys.argv[2] == 'replaced':
+    source.write_bytes(b'foreign replacement media')
+(directory / 'mutation-snapshot.json').write_text(json.dumps(snapshot(directory)))
+os.execvp(sys.argv[3], sys.argv[3:])
+''')
+publication = r'''
+fixture_directory=$2
+fixture_mutator=$3
+fixture_scenario=$4
+PRIVATE_ARIA2_HELPER=$5
+PATH_RECORD_FD_PATH=${fixture_directory}/path-record
+PRIVATE_ARIA2_METADATA=${fixture_directory}/metadata
+MEDIA_WORKSPACE=${fixture_directory}/local
+FINAL_OUTPUT_DIR=${fixture_directory}/output
+get_path_identity FINAL_OUTPUT_IDENTITY "${FINAL_OUTPUT_DIR}" directory
+MODE=video
+MACHINE_PROGRESS=true
+validate_final_media_file() { return 0; }
+run_supervised_command() {
+    if python3 -I -B "${fixture_mutator}" "${fixture_directory}" "${fixture_scenario}" "$@"; then
+        DOWNLOAD_STATUS=0
+    else
+        DOWNLOAD_STATUS=$?
+    fi
+}
+validate_and_publish_result
+'''
+for scenario, status, stage in (('missing', 70, 'source-open'), ('replaced', 65, 'source-validation')):
+    directory = root / ('publication-' + scenario)
+    directory.mkdir(mode=0o700)
+    for name in ('local', 'metadata', 'output'):
+        (directory / name).mkdir(mode=0o700)
+    candidate = directory / 'local' / 'validated.media'
+    candidate.write_bytes(b'previously validated fixture')
+    (directory / 'path-record').write_text(str(candidate) + '\n')
+    (directory / 'output' / 'existing.media').write_bytes(b'existing destination media')
+    result = run(publication, directory, mutator, scenario, sys.argv[3])
+    assert result.returncode == status, ('source-race diagnostic changed the helper status',
+                                        result.returncode, result.stderr)
+    assert result.stdout.splitlines() == [
+        'YTDLP_POSTPROCESS|started|MediaValidation',
+        'YTDLP_POSTPROCESS|finished|MediaValidation',
+        'YTDLP_POSTPROCESS|started|MediaPublication',
+        'YTDLP_POSTPROCESS|error|MediaPublication',
+    ], 'source-race publication protocol changed'
+    assert f'stage={stage}' in result.stderr and 'source has not been verified' in result.stderr
+    assert 'Validated local media retained at:' not in result.stderr, 'unverified source was advertised as retained'
+    assert 'Media passed validation before publication.' in result.stderr
+    assert 'Recheck the local recovery location before use: ' + str(candidate) in result.stderr
+    assert 'Download completed successfully.' not in result.stderr
+    assert snapshot(directory) == json.loads((directory / 'mutation-snapshot.json').read_text()), \
+        'failed publication changed filesystem state after the fixture mutation'
+
+dependency = r'''
+command() { [[ $1 != -v || $2 != aria2c ]] && builtin command "$@"; }
+initialize_runtime_dependencies
+'''
+result = run(dependency)
+assert result.returncode == 127 and not result.stdout, 'dependency admission contract changed'
+assert 'required command "aria2c" was not found.' in result.stderr
+assert '[DEPENDENCY_MISSING]' in result.stderr
+assert 'Install the package providing the command named above, then retry.' in result.stderr
+PY_ENGINE_DIAGNOSTICS
 }
 
 test_mock_runtime_version_overflow() {
@@ -255,6 +475,9 @@ test_mock_runtime_media_validation() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'Media validation reason: tail-inconsistent' \
         'tail-truncation bounded reason'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        '[MEDIA_VALIDATION] Final media validation could not confirm the declared end of the media.' \
+        'tail-truncation advice follows the verified reason'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 }
 
@@ -508,6 +731,12 @@ test_mock_runtime_missing_zenity() {
         "${GUI_UNDER_TEST}"
     assert_text_contains "${ASSERT_OUTPUT}" 'required command "zenity" was not found' \
         'missing Zenity diagnostic'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        '[DEPENDENCY_MISSING] Dependency check failed.' \
+        'missing Zenity identifies dependency admission'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'Install the package providing the command named above, then retry.' \
+        'missing dependency gives a bounded corrective action'
 }
 
 run_mock_runtime_compat_group() {

@@ -1623,11 +1623,11 @@ show_diagnostic_dialog() {
     local diagnostic_dir=$4
     local candidate_file=$5
     local ignored_output=''
-    local notice='More information is available in the private diagnostic.'
+    local notice='Select View log to inspect the private interface diagnostic.'
     local viewable_file=''
 
     if [[ ${diagnostic_kind} == retained ]]; then
-        notice='More information is available in the sanitized diagnostic log.'
+        notice='Select View log to inspect the sanitized diagnostic.'
     fi
     # shellcheck disable=SC2310 # Failure must never expose an unsafe file.
     if ! resolve_viewable_diagnostic \
@@ -2614,6 +2614,8 @@ initialize_gui_environment() {
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             printf 'Error: required command "%s" was not found.\n' \
                 "${command_name}" >&2
+            printf '%s\n' \
+                '[DEPENDENCY_MISSING] Dependency check failed. Install the package providing the command named above, then retry.' >&2
             exit 127
         fi
     done
