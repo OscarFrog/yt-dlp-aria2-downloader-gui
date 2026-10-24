@@ -59,7 +59,7 @@ class PlanError(Exception):
 
 
 class PublicationInterrupted(PlanError):
-    """A catchable signal requested rollback before publication committed."""
+    """A catchable signal interrupted publication."""
 
     def __init__(self, signal_number: int) -> None:
         super().__init__("component publication was interrupted")
@@ -1282,6 +1282,7 @@ def publish_media(args: argparse.Namespace) -> int:
     expected_output = parse_identity(args.output_identity)
     expected_source = parse_identity(args.source_identity)
     requested_signal = 0
+    stage = "source-directory"
 
     def remember_signal(number: int, _frame: object) -> None:
         nonlocal requested_signal
@@ -1298,21 +1299,25 @@ def publish_media(args: argparse.Namespace) -> int:
             previous_handlers[number] = signal.signal(number, remember_signal)
         with directory_descriptor(source.parent, trusted_chain=True) as source_dir_fd:
             require_local_filesystem(source_dir_fd)
+            stage = "destination-directory"
             with directory_descriptor(output) as output_fd:
                 output_stat = os.fstat(output_fd)
                 if (output_stat.st_dev, output_stat.st_ino) != expected_output:
                     raise PlanError("media destination changed before publication")
+                stage = "collision-check"
                 try:
                     os.stat(source.name, dir_fd=output_fd, follow_symlinks=False)
                 except FileNotFoundError:
                     pass
                 else:
                     raise DestinationExistsError("final media destination already exists")
+                stage = "source-open"
                 source_fd = os.open(
                     source.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
                     dir_fd=source_dir_fd,
                 )
                 try:
+                    stage = "source-validation"
                     original = os.fstat(source_fd)
                     if (
                         not stat.S_ISREG(original.st_mode) or original.st_size <= 0
@@ -1321,6 +1326,7 @@ def publish_media(args: argparse.Namespace) -> int:
                     ):
                         raise PlanError("publication source must be nonempty media owned by the current user")
                     temporary_name = f".yt-dlp-publish.{secrets.token_hex(16)}.partial"
+                    stage = "temporary-create"
                     temporary_fd = os.open(
                         temporary_name,
                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -1330,21 +1336,26 @@ def publish_media(args: argparse.Namespace) -> int:
                     publication_attempted = False
                     published = False
                     try:
+                        stage = "temporary-validation"
                         temporary_stat = os.fstat(temporary_fd)
                         temporary_identity = temporary_stat.st_dev, temporary_stat.st_ino
                         while True:
                             checkpoint()
+                            stage = "copy-read"
                             block = os.read(source_fd, 1024 * 1024)
                             if not block:
                                 break
                             remainder = memoryview(block)
                             while remainder:
                                 checkpoint()
+                                stage = "copy-write"
                                 written = os.write(temporary_fd, remainder)
                                 if written <= 0:
                                     raise OSError(errno.EIO, "media copy made no progress")
                                 remainder = remainder[written:]
+                        stage = "sync"
                         os.fsync(temporary_fd)
+                        stage = "copy-validation"
                         current = os.fstat(source_fd)
                         if (
                             (current.st_dev, current.st_ino, current.st_size,
@@ -1354,6 +1365,7 @@ def publish_media(args: argparse.Namespace) -> int:
                             or os.fstat(temporary_fd).st_size != original.st_size
                         ):
                             raise PlanError("local media changed during publication")
+                        stage = "identity-validation"
                         if (
                             directory_identity(output) != expected_output
                             or not anchored_file_matches(output_fd, temporary_name, temporary_identity)
@@ -1361,6 +1373,7 @@ def publish_media(args: argparse.Namespace) -> int:
                             raise PlanError("media publication directory or temporary file changed")
                         checkpoint()
                         publication_attempted = True
+                        stage = "rename"
                         try:
                             rename_without_overwrite(
                                 Path(temporary_name), Path(source.name),
@@ -1377,6 +1390,7 @@ def publish_media(args: argparse.Namespace) -> int:
                             # existing leaf. This fallback is never check+rename.
                             try:
                                 publication_attempted = True
+                                stage = "link"
                                 os.link(
                                     temporary_name, source.name,
                                     src_dir_fd=output_fd, dst_dir_fd=output_fd,
@@ -1389,17 +1403,27 @@ def publish_media(args: argparse.Namespace) -> int:
                                 if link_error.errno in NO_REPLACE_UNSUPPORTED | {errno.EPERM, errno.EXDEV}:
                                     publication_attempted = False
                                     raise PlanError(
-                                        "destination supports neither atomic no-replace rename nor hard links"
+                                        "destination supports neither atomic no-replace rename nor hard links "
+                                        f"(stage=link, errno={link_error.errno})"
                                     ) from link_error
                                 raise
                         published = True
+                        # A signal delivered by the atomic syscall cannot undo
+                        # its server-side effect. Preserve that name and source,
+                        # but never acknowledge the interrupted request as success.
+                        checkpoint()
+                        stage = "confirmation"
                         if (
                             not anchored_file_matches(output_fd, source.name, temporary_identity)
                             or directory_identity(output) != expected_output
                         ):
                             raise PlanError("media publication outcome is uncertain; local source was preserved")
                     finally:
-                        os.close(temporary_fd)
+                        try:
+                            os.close(temporary_fd)
+                        except OSError:
+                            stage = "close-temporary"
+                            raise
                         # An ambiguous network publication may have completed.
                         # Preserve its remaining name and always retain source.
                         if temporary_identity is None:
@@ -1411,12 +1435,24 @@ def publish_media(args: argparse.Namespace) -> int:
                             except OSError:
                                 print("Warning: preserving unconfirmed media publication temporary file", file=sys.stderr)
                 finally:
-                    os.close(source_fd)
-        print(output / source.name)
-        return 0
+                    try:
+                        os.close(source_fd)
+                    except OSError:
+                        stage = "close-source"
+                        raise
+    except OSError as exc:
+        # Exception text and filenames may contain private upstream data.
+        # Preserve the errno/status contract while emitting only our stage.
+        raise OSError(
+            exc.errno,
+            f"media publication failed (stage={stage}, errno={exc.errno}); local source was preserved",
+        ) from exc
     finally:
         for number, previous in previous_handlers.items():
             signal.signal(number, previous)
+    checkpoint()
+    print(output / source.name)
+    return 0
 
 
 def check_space(args: argparse.Namespace) -> int:

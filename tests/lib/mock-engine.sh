@@ -1763,6 +1763,69 @@ test_mock_engine_network_failures() {
     done
 }
 
+test_mock_engine_network_publication_failures() {
+    local scenario output result phases expected workspace existing_identity current_identity
+
+    for scenario in write-enospc rename-uncertain rename-term; do
+        output="${TEST_ROOT}/publication é % ${scenario}"
+        result="${TEST_ROOT}/publication-${scenario}.result"
+        phases="${TEST_ROOT}/publication-${scenario}.phases"
+        mkdir -- "${output}"
+        printf '%s\n' 'preexisting media' >"${output}/existing-media"
+        existing_identity=$(stat -c '%d:%i:%s:%y:%z' -- "${output}/existing-media")
+        expected=70
+        [[ ${scenario} != rename-term ]] || expected=143
+        prepare_argument_log "publication-${scenario}"
+        assert_status "${expected}" "publication ${scenario} cannot report success" \
+            env MOCK_NETWORK_PERMISSIONS=1 \
+            MOCK_NETWORK_CHECK="${MOCK_BIN}/network-check.py" \
+            MOCK_NETWORK_PHASE_LOG="${phases}" \
+            MOCK_NETWORK_DESTINATION="${output}" MOCK_OUTPUT_DIR="${output}" \
+            MOCK_NETWORK_PUBLICATION_FAULT="${scenario}" \
+            "${PROJECT_DIR}/download-video.sh" \
+            --output-dir "${output}" --mode video --result-file "${result}" \
+            -- 'https://example.com/watch?v=publication-fixture'
+        [[ ! -e ${result} ]] || fail 'Unconfirmed publication created a success record.'
+        assert_file_has_line "${phases}.fault" "${scenario}" \
+            'publication reached the injected syscall boundary'
+        assert_text_not_contains "${ASSERT_OUTPUT}" 'NETWORK_FIXTURE_' \
+            'publication errors never expose exception payloads'
+        current_identity=$(stat -c '%d:%i:%s:%y:%z' -- "${output}/existing-media")
+        assert_equals "${existing_identity}" "${current_identity}" \
+            'publication failure preserves preexisting inode and timestamps'
+        # This independent snapshot checks actual recovery data, not a diagnostic
+        # or the helper's identity predicate. No remote final is rolled back.
+        python3 -I -B - "${phases}.source" "${output}" "${scenario}" <<'PY_PUBLICATION_RECOVERY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+record = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+source = Path(record["path"])
+metadata = source.stat()
+assert (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns) == (
+    record["device"], record["inode"], record["size"], record["mtime"]
+), "validated local source identity changed"
+assert hashlib.sha256(source.read_bytes()).hexdigest() == record["digest"], "local source changed"
+output = Path(sys.argv[2])
+assert (output / "existing-media").read_bytes() == b"preexisting media\n", "existing media changed"
+expected = {"existing-media"}
+if sys.argv[3] != "write-enospc":
+    expected.add(source.name)
+    assert hashlib.sha256((output / source.name).read_bytes()).hexdigest() == record["digest"], "server result changed"
+assert {entry.name for entry in output.iterdir()} == expected, "unexpected remote residue"
+assert {entry.name for entry in source.parent.iterdir()} == {source.name}, "unexpected private residue"
+PY_PUBLICATION_RECOVERY
+        workspace=$(python3 -I -B -c \
+            'import json, pathlib, sys; print(pathlib.Path(json.loads(pathlib.Path(sys.argv[1]).read_text())["path"]).parent)' \
+            "${phases}.source")
+        assert_no_test_processes "publication ${scenario} left descendants"
+        # The fixture recorded this exact private workspace before publication.
+        rm -rf -- "${workspace}"
+    done
+}
+
 test_mock_engine_network_signals() {
     local scenario output result phases marker termination protocol private_path
     local state_home log_dir
@@ -2053,6 +2116,7 @@ run_mock_engine_group() {
     run_mock_engine_staging_group
     test_mock_engine_network_destination
     test_mock_engine_network_failures
+    test_mock_engine_network_publication_failures
     test_mock_engine_network_signals
     test_mock_engine_network_cleanup_boundaries
 }
@@ -2066,6 +2130,7 @@ run_selected_mock_engine_group() {
         engine-network)
             test_mock_engine_network_destination
             test_mock_engine_network_failures
+            test_mock_engine_network_publication_failures
             test_mock_engine_network_signals
             test_mock_engine_network_cleanup_boundaries
             ;;

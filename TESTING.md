@@ -2073,6 +2073,23 @@ Helper fault injection covers unsupported hard links/rename, copy/write errors,
 collisions, signals, identities and private-root selection; simulated failures
 must not be reported as actual network failures.
 
+The publication matrix injects EIO, ESTALE, ENOTCONN, EACCES, ENOSPC and
+EOPNOTSUPP at read, write, fsync, rename, hard-link and confirmation boundaries.
+It independently compares source and preexisting-file contents, inode and
+timestamps, checks failure status and empty result output, and rejects private
+exception sentinels in diagnostics. Server-applied rename/link errors preserve
+the final name and local source. HUP/INT/TERM during synchronization, atomic
+publication and confirmation cannot produce success. Directory replacement
+before or after publication cannot redirect writes to the replacement.
+The Bash network group separately checks ENOSPC, a server-applied rename with
+lost acknowledgement, and TERM after rename through the complete engine,
+including retained source, absent result record and stopped consumers.
+
+The runner suite exercises the real qualification parser against local Unicode
+paths and injected descriptor filesystem observations. Removing its CIFS check
+must fail the same no-mutation/refusal oracle. These controlled positive CIFS
+probes exercise classification only and never qualify a real mount.
+
 After focused tests, run the canonical contract:
 
 ```bash
@@ -2094,6 +2111,15 @@ required merely because the implementation is Python.
 
 Status for this change: **NOT EXECUTED on a real CIFS mount**. Use a disposable
 share explicitly authorized by its owner, never a production destination.
+`--network-destination` requires an observed CIFS (`0xff534d42`) or SMB2
+(`0xfe534d42`) filesystem. It pins the parent directory, checks the filesystem
+before creating its unique child, and rechecks parent/child identities and
+filesystem types before reporting success. Non-CIFS or unavailable observations
+return 77 with `CIFS qualification: NOT EXECUTED`; mixed
+`--simulate-network --network-destination` arguments return 64 before any share
+write. Ordinary and simulated real-tool runs explicitly report real CIFS as
+not executed. A successful real-share verdict covers only the exercised media
+flows, not server outages, quotas or mount configurations left untested below.
 An operator may prepare a Fedora 44 mount with SMB Unix extensions disabled
 and fixed `file_mode=0755,dir_mode=0755` (or an equivalent test configuration).
 A media file must be writable while `chmod 600` leaves its visible mode

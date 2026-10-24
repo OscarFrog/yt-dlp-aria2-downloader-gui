@@ -1106,7 +1106,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from contextlib import redirect_stderr
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -1501,6 +1501,204 @@ def ambiguous_rename(*positional, **keywords):
 with patch.object(module, "rename_without_overwrite", ambiguous_rename):
     failure(args, OSError)
 assert source.read_bytes() == (output / source.name).read_bytes()
+
+# Exercise the public helper boundary so failure status, empty result output
+# and sanitized diagnostics are independent of its internal exception classes.
+def publish_result(arguments):
+    stdout, stderr = io.StringIO(), io.StringIO()
+    argv = [sys.argv[1], "publish-media", "--source", arguments.source,
+            "--source-identity", arguments.source_identity,
+            "--output-dir", arguments.output_dir,
+            "--output-identity", arguments.output_identity]
+    with patch.object(sys, "argv", argv), redirect_stdout(stdout), redirect_stderr(stderr):
+        status = module.main()
+    return status, stdout.getvalue(), stderr.getvalue()
+
+
+def guarded_case(name):
+    source, output, arguments = prepare(name)
+    unrelated = output / "existing user file"
+    unrelated.write_bytes(b"never replace or remove this user file")
+    snapshots = [(path, path.read_bytes(), path.stat()) for path in (source, unrelated)]
+    return source, output, arguments, snapshots
+
+
+def unchanged(snapshots):
+    for path, contents, before in snapshots:
+        after = path.stat()
+        assert path.read_bytes() == contents
+        assert (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) == (
+            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+
+
+real_link, real_stat, real_fsync = module.os.link, module.os.stat, module.os.fsync
+for stage in ("sync", "rename", "link", "confirmation"):
+    for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        source, output, args, snapshots = guarded_case(f"late-signal-{stage}-{number}")
+        delivered = False
+
+        def interrupted_operation(*positional, **keywords):
+            global delivered
+            operation = {"sync": real_fsync, "rename": original_rename,
+                         "link": real_link, "confirmation": real_stat}[stage]
+            result = operation(*positional, **keywords)
+            if not delivered and (stage != "confirmation" or (
+                    str(positional[0]) == source.name and (output / source.name).exists())):
+                delivered = True
+                os.kill(os.getpid(), number)
+            return result
+
+        with ExitStack() as stack:
+            if stage == "link":
+                stack.enter_context(patch.object(module, "rename_without_overwrite", fail_with(errno.EOPNOTSUPP)))
+            owner, operation = ((module, "rename_without_overwrite") if stage == "rename" else
+                                (module.os, {"sync": "fsync", "link": "link", "confirmation": "stat"}[stage]))
+            stack.enter_context(patch.object(owner, operation, interrupted_operation))
+            status, stdout, stderr = publish_result(args)
+        assert delivered and status == 128 + number and stdout == "", (
+            "late publication signal was reported as success", stage, number, status, stdout, stderr)
+        unchanged(snapshots)
+        if stage == "sync":
+            assert list(output.iterdir()) == [snapshots[1][0]]
+        else:
+            assert (output / source.name).read_bytes() == snapshots[0][1]
+
+secret = "https://publication.invalid/media?token=PRIVATE_IO_TOKEN"
+for stage in ("copy-read", "copy-write", "sync", "rename", "link", "confirmation"):
+    for number in (errno.EIO, errno.ESTALE, errno.ENOTCONN, errno.EACCES, errno.ENOSPC, errno.EOPNOTSUPP):
+        source, output, args, snapshots = guarded_case(f"errno-{stage}-{number}")
+        injected = False
+
+        def io_failure(*positional, **keywords):
+            global injected
+            if stage == "confirmation":
+                result = real_stat(*positional, **keywords)
+                if str(positional[0]) != source.name or not (output / source.name).exists():
+                    return result
+            injected = True
+            raise OSError(number, secret, "PRIVATE_FILENAME_TOKEN")
+
+        with ExitStack() as stack:
+            if stage == "link":
+                stack.enter_context(patch.object(module, "rename_without_overwrite", fail_with(errno.EOPNOTSUPP)))
+            if stage == "rename" and number == errno.EOPNOTSUPP:
+                stack.enter_context(patch.object(module.os, "link", fail_with(errno.EOPNOTSUPP)))
+            owner, operation = ((module, "rename_without_overwrite") if stage == "rename" else
+                                (module.os, {"copy-read": "read", "copy-write": "write",
+                                             "sync": "fsync", "link": "link", "confirmation": "stat"}[stage]))
+            stack.enter_context(patch.object(owner, operation, io_failure))
+            status, stdout, stderr = publish_result(args)
+        expected_status = 65 if number == errno.EOPNOTSUPP and stage in {"rename", "link"} else 70
+        assert injected and status == expected_status and stdout == "", (stage, number, status, stderr)
+        assert secret not in stderr and "PRIVATE_FILENAME_TOKEN" not in stderr, (stage, stderr)
+        expected_stage = "link" if stage == "rename" and number == errno.EOPNOTSUPP else stage
+        assert f"stage={expected_stage}" in stderr and f"errno={number}" in stderr, (stage, number, stderr)
+        unchanged(snapshots)
+        if stage == "confirmation":
+            assert (output / source.name).read_bytes() == snapshots[0][1]
+        else:
+            assert not (output / source.name).exists()
+        if stage in {"copy-read", "copy-write", "sync"} or (
+                number == errno.EOPNOTSUPP and stage in {"rename", "link"}):
+            assert list(output.iterdir()) == [snapshots[1][0]]
+
+real_close = module.os.close
+for stage in ("temporary-create", "close-temporary", "close-source"):
+    for number in (errno.EIO, errno.ESTALE, errno.ENOTCONN, errno.EACCES, errno.ENOSPC, errno.EOPNOTSUPP):
+        source, output, args, snapshots = guarded_case(f"descriptor-error-{stage}-{number}")
+        selected_fd = None
+        injected = False
+
+        def select_descriptor(path, flags, *positional, **keywords):
+            global selected_fd, injected
+            temporary = str(path).startswith(".yt-dlp-publish.") and flags & os.O_EXCL
+            if stage == "temporary-create" and temporary:
+                injected = True
+                raise OSError(number, secret)
+            descriptor = real_open(path, flags, *positional, **keywords)
+            if (stage == "close-temporary" and temporary) or (
+                    stage == "close-source" and str(path) == source.name and not flags & os.O_CREAT):
+                selected_fd = descriptor
+            return descriptor
+
+        def failed_close(descriptor):
+            global injected
+            real_close(descriptor)
+            if descriptor == selected_fd and not injected:
+                injected = True
+                raise OSError(number, secret, "PRIVATE_FILENAME_TOKEN")
+
+        with patch.object(module.os, "open", select_descriptor), patch.object(module.os, "close", failed_close):
+            status, stdout, stderr = publish_result(args)
+        assert injected and status == 70 and not stdout, (stage, number, status, stderr)
+        assert f"stage={stage}" in stderr and f"errno={number}" in stderr, (stage, number, stderr)
+        assert secret not in stderr and "PRIVATE_FILENAME_TOKEN" not in stderr
+        unchanged(snapshots)
+        assert (output / source.name).exists() == (stage != "temporary-create")
+
+# The fallback still lets the kernel arbitrate a name created after preflight.
+source, output, args, snapshots = guarded_case("link-late-collision")
+
+
+def link_collision(*positional, **keywords):
+    foreign = output / source.name
+    foreign.write_bytes(b"concurrent user media")
+    snapshots.append((foreign, foreign.read_bytes(), foreign.stat()))
+    return real_link(*positional, **keywords)
+
+
+with patch.object(module, "rename_without_overwrite", fail_with(errno.EOPNOTSUPP)), \
+        patch.object(module.os, "link", link_collision):
+    status, stdout, stderr = publish_result(args)
+assert status == 1 and not stdout, (status, stderr)
+unchanged(snapshots)
+assert len(list(output.iterdir())) == 2
+
+# A lost acknowledgement can follow either atomic primitive. No retry or
+# rollback may replace the server result or remove the validated local copy.
+for stage in ("rename", "link"):
+    for number in (errno.EIO, errno.ESTALE, errno.ENOTCONN):
+        source, output, args, snapshots = guarded_case(f"server-applied-{stage}-{number}")
+
+        def server_applied(*positional, **keywords):
+            operation = original_rename if stage == "rename" else real_link
+            operation(*positional, **keywords)
+            raise OSError(number, secret)
+
+        with ExitStack() as stack:
+            if stage == "link":
+                stack.enter_context(patch.object(module, "rename_without_overwrite", fail_with(errno.EOPNOTSUPP)))
+            owner, operation = (module, "rename_without_overwrite") if stage == "rename" else (module.os, "link")
+            stack.enter_context(patch.object(owner, operation, server_applied))
+            status, stdout, stderr = publish_result(args)
+        assert status == 70 and not stdout and secret not in stderr
+        assert f"stage={stage}" in stderr and f"errno={number}" in stderr
+        unchanged(snapshots)
+        assert (output / source.name).read_bytes() == snapshots[0][1]
+        assert len(list(output.iterdir())) == (2 if stage == "rename" else 3)
+
+# A reconnect may expose a different directory at the same path. The pinned
+# original descriptor never authorizes writing into that replacement.
+for stage in ("sync", "rename"):
+    source, output, args, snapshots = guarded_case(f"directory-replaced-{stage}")
+    previous_output = output.with_name("previous directory")
+
+    def replace_directory(*positional, **keywords):
+        operation = real_fsync if stage == "sync" else original_rename
+        result = operation(*positional, **keywords)
+        output.rename(previous_output)
+        mkdir(output)
+        (output / source.name).write_bytes(b"replacement directory user media")
+        return result
+
+    owner, operation = (module.os, "fsync") if stage == "sync" else (module, "rename_without_overwrite")
+    with patch.object(owner, operation, replace_directory):
+        status, stdout, stderr = publish_result(args)
+    assert status == 65 and not stdout, (stage, status, stderr)
+    assert (output / source.name).read_bytes() == b"replacement directory user media"
+    assert list(output.iterdir()) == [output / source.name]
+    unchanged([snapshots[0], (previous_output / snapshots[1][0].name, *snapshots[1][1:])])
+    assert (previous_output / source.name).exists() == (stage == "rename")
 
 source, output, args = prepare("replaced-source")
 source.rename(source.with_name("original retained inode"))

@@ -12,16 +12,13 @@ umask 077
 PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly PROJECT_DIR
 
-for command_name in aria2c bash cp ffmpeg ffprobe grep mktemp python3 realpath sed sleep; do
+for command_name in aria2c bash cp ffmpeg ffprobe grep mktemp python3 realpath sed sleep yt-dlp; do
     command -v "${command_name}" >/dev/null 2>&1 || {
         printf 'Error: required command is absent: %s\n' "${command_name}" >&2
+        printf '%s\n' 'CIFS qualification: NOT EXECUTED (required tools unavailable).' >&2
         exit 77
     }
 done
-command -v yt-dlp >/dev/null 2>&1 || {
-    printf 'Error: required command is absent: yt-dlp\n' >&2
-    exit 77
-}
 
 TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
@@ -34,6 +31,8 @@ RUN_FINAL_FILE=''
 REAL_DIRECT_FINAL=''
 REAL_SOURCE_OPUS_CODEC=''
 NETWORK_DESTINATION=''
+NETWORK_DESTINATION_FD=''
+NETWORK_MEDIA_FD=''
 SIMULATE_NETWORK=false
 MEDIA_ROOT="${TEST_ROOT}/output"
 
@@ -1268,7 +1267,51 @@ PY_FORCE_MP3
     printf 'Expected mutation detected: forced MP3 was rejected by Opus preservation.\n'
 }
 
+verify_cifs_directory() {
+    local directory=$1
+    local descriptor=$2
+
+    # Inspect the opened inode independently of the production classifier.
+    # Holding this descriptor also prevents replacement/inode reuse from
+    # turning a changed visible destination into a successful qualification.
+    python3 -I -B - "${directory}" "${descriptor}" <<'PY_CIFS_DIRECTORY'
+import ctypes
+import os
+import stat
+import sys
+
+path, raw_descriptor = sys.argv[1:]
+try:
+    descriptor = int(raw_descriptor)
+    opened = os.fstat(descriptor)
+    visible = os.stat(path, follow_symlinks=False)
+    if (not stat.S_ISDIR(visible.st_mode)
+            or (visible.st_dev, visible.st_ino) != (opened.st_dev, opened.st_ino)):
+        raise ValueError("directory identity changed")
+    libc = ctypes.CDLL(None, use_errno=True)
+    buffer = ctypes.create_string_buffer(256)
+    libc.fstatfs.argtypes = [ctypes.c_int, ctypes.c_void_p]
+    libc.fstatfs.restype = ctypes.c_int
+    if libc.fstatfs(descriptor, ctypes.byref(buffer)) != 0:
+        raise OSError(ctypes.get_errno(), "filesystem observation failed")
+    filesystem = ctypes.c_ulong.from_buffer(buffer).value
+    if filesystem not in (0xff534d42, 0xfe534d42):
+        print(f"CIFS qualification: NOT EXECUTED (filesystem=0x{filesystem:x} is not CIFS/SMB2).",
+              file=sys.stderr)
+        raise SystemExit(77)
+except OSError as error:
+    print(f"CIFS qualification: NOT EXECUTED (filesystem observation errno={error.errno}).",
+          file=sys.stderr)
+    raise SystemExit(77)
+except ValueError:
+    print("CIFS qualification: NOT EXECUTED (directory identity changed).", file=sys.stderr)
+    raise SystemExit(77)
+PY_CIFS_DIRECTORY
+}
+
 parse_qualification_arguments() {
+    local allocated_directory=''
+
     while (($# > 0)); do
         case $1 in
             --simulate-network)
@@ -1289,19 +1332,37 @@ parse_qualification_arguments() {
         esac
         shift
     done
+    if [[ ${SIMULATE_NETWORK} == true && -n ${NETWORK_DESTINATION} ]]; then
+        printf 'Error: --simulate-network and --network-destination are mutually exclusive.\n' >&2
+        return 64
+    fi
     if [[ -n ${NETWORK_DESTINATION} ]]; then
         [[ ${NETWORK_DESTINATION} == /* && -d ${NETWORK_DESTINATION} &&
             ! -L ${NETWORK_DESTINATION} ]] || {
-            printf 'Error: the authorized network test directory must be absolute and physical.\n' >&2
+            printf 'CIFS qualification: NOT EXECUTED (test directory must be absolute and physical).\n' >&2
             return 64
         }
-        MEDIA_ROOT=$(mktemp -d --tmpdir="${NETWORK_DESTINATION}" \
+        if ! { exec {NETWORK_DESTINATION_FD}<"${NETWORK_DESTINATION}"; } 2>/dev/null; then
+            printf 'CIFS qualification: NOT EXECUTED (test directory cannot be opened).\n' >&2
+            return 77
+        fi
+        verify_cifs_directory "${NETWORK_DESTINATION}" "${NETWORK_DESTINATION_FD}"
+        # Allocate relative to the authenticated parent even if its visible
+        # path changes between the probe and creation. Never clean the share.
+        allocated_directory=$(mktemp -d --tmpdir="/proc/self/fd/${NETWORK_DESTINATION_FD}" \
             'yt-dlp-network-qualification.XXXXXXXX')
+        MEDIA_ROOT="${NETWORK_DESTINATION%/}/${allocated_directory##*/}"
+        exec {NETWORK_MEDIA_FD}<"${allocated_directory}"
+        verify_cifs_directory "${NETWORK_DESTINATION}" "${NETWORK_DESTINATION_FD}"
+        verify_cifs_directory "${MEDIA_ROOT}" "${NETWORK_MEDIA_FD}"
         printf 'Authorized network qualification media directory: %s\n' "${MEDIA_ROOT}"
         printf '%s\n' 'The generated media directory is preserved for operator inspection.'
     fi
     if [[ ${SIMULATE_NETWORK} == true ]]; then
         printf '%s\n' 'Qualification uses real tools on permissive local directories; this is not a CIFS mount test.'
+    fi
+    if [[ -z ${NETWORK_DESTINATION} ]]; then
+        printf '%s\n' 'CIFS qualification: NOT EXECUTED (no authorized CIFS test directory supplied).'
     fi
 }
 
@@ -1317,6 +1378,11 @@ main() {
     test_real_existing_assembled_output
     test_real_media_validation_mutations
     test_real_fragment_routing_and_mutations
+    if [[ -n ${NETWORK_DESTINATION} ]]; then
+        verify_cifs_directory "${NETWORK_DESTINATION}" "${NETWORK_DESTINATION_FD}"
+        verify_cifs_directory "${MEDIA_ROOT}" "${NETWORK_MEDIA_FD}"
+        printf 'Real CIFS/SMB2 filesystem qualification passed.\n'
+    fi
     printf 'Real-tool direct/audio/Opus/fallback/cover/HLS/DASH integration passed.\n'
 }
 

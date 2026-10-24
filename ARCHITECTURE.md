@@ -266,7 +266,12 @@ to the current single native-audio profile.
    source identity, size and modification timestamps, all writes and fsync,
    then use actual `renameat2(RENAME_NOREPLACE)` or atomic hard-link publication.
    Unsupported primitives and ambiguous remote results fail closed, retaining
-   the valid local source. This is one-file atomic naming, not a multi-filesystem
+   the valid local source. Catchable signals are checked after the atomic
+   operation and after confirmation/descriptor cleanup and handler restoration,
+   before emitting a success path. A server-created final name is preserved
+   when acknowledgement fails or cancellation arrives during publication.
+   I/O failures expose the publication stage and numeric errno, never raw
+   exception text or filenames. This is one-file atomic naming, not a multi-filesystem
    transaction. Then atomically publish the private result record only after the final media path
    is normalized, contained in the selected destination, and validated. Its
    canonical parent chain and inode are authenticated before use. Reads,
