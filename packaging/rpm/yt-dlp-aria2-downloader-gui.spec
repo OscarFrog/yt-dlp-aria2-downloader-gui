@@ -87,6 +87,9 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Sat Oct 24 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.4.3-1
+- Improve error diagnostics and support localized ARTE formats
+
 * Sat Oct 10 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.4.2-1
 - Harden shared destination admission and qualification.
 
