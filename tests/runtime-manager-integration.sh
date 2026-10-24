@@ -491,6 +491,7 @@ test_runtime_paths_and_locking() {
     local actual_deno actual_ytdlp expected_attestation expected_ytdlp
     local fallback_attestation lock_holder_pid lock_holder_ready
     local probe_count=0
+    local path_status=0
 
     expected_ytdlp="${ytdlp_root}/2026.07.04/${HOST_YTDLP_ASSET}"
     actual_ytdlp=$("${runtime_env[@]}" "${RUNTIME_MANAGER}" path yt-dlp)
@@ -553,7 +554,9 @@ test_runtime_paths_and_locking() {
     done
     [[ -e ${lock_holder_ready} ]] || fail 'lock holder did not start within 5 seconds'
     timeout 2s "${runtime_env[@]}" "${RUNTIME_MANAGER}" path yt-dlp >/dev/null \
-        || fail 'path lookup blocked behind the runtime update lock'
+        || path_status=$?
+    ((path_status == 0)) \
+        || fail "runtime path lookup failed under the 2s deadline (status=${path_status})"
 
     # update has a bounded lock wait. With valid active runtimes it must fall back
     # to those verified runtimes instead of failing the application launch.
