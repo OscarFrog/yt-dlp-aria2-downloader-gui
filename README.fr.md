@@ -21,6 +21,7 @@
 - [Utilisation en ligne de commande](#utilisation-en-ligne-de-commande)
 - [Fonctionnement des téléchargeurs](#fonctionnement-des-téléchargeurs)
 - [Données locales](#données-locales)
+- [Comprendre les erreurs](#comprendre-les-erreurs)
 - [Tests](#tests)
 - [Désinstallation du lanceur](#désinstallation-du-lanceur)
 - [Limites et utilisation légale](#limites-et-utilisation-légale)
@@ -988,6 +989,53 @@ Les preuves privées ne contiennent ni URL, ni cookie, ni en-tête
 d'authentification. La coordination reste locale à un hôte et un utilisateur ;
 elle ne fournit ni exclusion distribuée ni protection contre tous les écrivains
 extérieurs (la limite F1 BIS reste distincte).
+
+## Comprendre les erreurs
+
+Les erreurs importantes comportent un identifiant de diagnostic stable entre
+crochets, une explication claire et une action conseillée. Les diagnostics de
+publication précisent aussi l'opération, son étape technique `stage`, le nom et
+le numéro de l'erreur système lorsqu'ils sont disponibles, ainsi que l'état
+connu de récupération. Un identifiant comme `PUB_IO` désigne une catégorie de
+diagnostic, pas le code de sortie numérique. Les codes de sortie et les
+enregistrements de progression conservent leur sens.
+
+Dans l'interface graphique, sélectionnez **View log** lorsque la fenêtre
+d'erreur le propose. Ce bouton ouvre le diagnostic conservé et expurgé décrit
+plus haut. Un échec précoce peut ne produire aucun journal utile ; suivez alors
+le message affiché. Le journal peut présenter plusieurs niveaux : l'échec de
+l'outil externe, le statut du moteur et l'explication propre à la publication
+ou à la validation. Un statut non nul du téléchargeur ne prouve pas, à lui seul,
+une cause liée au réseau, à l'autorisation ou au format.
+
+| Information du diagnostic | Vérification conseillée |
+| --- | --- |
+| `ENOSPC` ou `EDQUOT` | Espace disponible et quota du stockage désigné par l'opération ; l'espace local de traitement et celui de destination sont distincts. |
+| `EACCES` ou `EPERM` | Droits d'accès et, pour une destination réseau, identifiants autorisés du montage ou de la session. Ne rendez pas publics les espaces de travail privés. |
+| `EROFS` | Montage en lecture seule du système de fichiers concerné et raison de cet état. |
+| `ENOTCONN`, `ESTALE` ou `EIO` | Connexion au stockage/montage et disponibilité du serveur. Une erreur d'entrées-sorties générique ne désigne pas à elle seule la cause initiale. |
+| Publication incertaine | Inspectez la destination et la source locale conservée avant une autre demande : le fichier final peut déjà exister. Ne relancez pas automatiquement et ne supprimez pas les temporaires préservés. |
+| Destination existante ou média réservé | Conservez le fichier existant ; inspectez la demande concurrente ou attendez son arrêt confirmé. Ne supprimez jamais les verrous ou checkpoints pour contourner le refus. |
+| Échec de validation du média | Lisez la raison de validation contrôlée, inspectez le média conservé et vérifiez les pistes sélectionnées ainsi que l'installation de FFmpeg/FFprobe. Un fichier analysable n'est pas nécessairement complet. |
+| `RUNTIME_SETTING` ou `RUNTIME_CHANNEL` | Corrigez ou retirez le paramètre nommé ; sa valeur rejetée est volontairement absente du message. |
+
+`ENGINE_PLAN` et `ENGINE_DOWNLOAD` désignent la phase en échec,
+`MEDIA_VALIDATION` et `DEPENDENCY_MISSING` la validation et le contrôle des
+dépendances. Leurs conseils complètent les lignes de statut techniques existantes.
+
+Le texte de récupération décrit uniquement ce que l'opération en échec a pu
+établir. Une source impossible à ouvrir ou dont l'identité a changé n'est pas
+présentée comme une copie de récupération validée et confirmée. Une interruption
+ne constitue pas une publication réussie, même si le serveur a déjà créé le nom
+final.
+
+Pour demander de l'aide, indiquez la version de l'application, l'identifiant du
+diagnostic, l'opération/étape, le numéro d'erreur système et une éventuelle
+interruption. Relisez un journal expurgé avant de le partager : les titres des
+médias et chemins locaux peuvent rester personnels. Ne joignez jamais les
+plans privés, cookies, en-têtes d'authentification ou valeurs de configuration
+du runtime. Une erreur système inconnue reste signalée comme telle, sans lui
+attribuer une cause inventée.
 
 ## Destinations réseau et stockage privé
 

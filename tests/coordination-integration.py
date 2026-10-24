@@ -57,7 +57,7 @@ def replace(path, payload):
         with (root / 'save-attempts.jsonl').open('a') as log:
             log.write(json.dumps(str(path)) + '\\n')
         if path.is_relative_to(root / os.environ['COORDINATION_SAVE_FAILURE']):
-            raise OSError(errno.EIO, 'fixture checkpoint write failed')
+            raise OSError(errno.EIO, 'fixture checkpoint write failed', str(path))
     result = real_replace(path, payload)
     if checkpoint and payload.get('active') is True:
         activated += 1
@@ -414,11 +414,25 @@ class CoordinationTests(unittest.TestCase):
         self.finish(retry, release=True)
 
     def test_failed_first_save_still_attempts_the_other_owned_registry(self):
+        def snapshot(path):
+            info = path.stat()
+            return path.read_bytes(), (info.st_dev, info.st_ino, info.st_size,
+                                       info.st_mtime_ns, info.st_ctime_ns)
+
         owner = self.admitted(self.launch(save='primary'))
+        registry_identities = {path: (path.stat().st_dev, path.stat().st_ino)
+                               for path in self.registries}
+        primary = next(path for path in self.checkpoints() if path.is_relative_to(self.registries[0]))
+        primary_before = snapshot(primary)
         failed_save = self.helper('resource-state', '--state', str(owner['state_path']), '--action', 'save',
                                   '--registry', str(self.registries[0]), '--registry', str(self.registries[1]),
                                   expected=70, save='primary')
-        self.assertIn(b'fixture checkpoint write failed', failed_save.stderr)
+        self.assertEqual(failed_save.stdout, b'')
+        self.assertIn(b'Error: [IO_ERROR]', failed_save.stderr)
+        self.assertIn(b'(errno=5, code=EIO)', failed_save.stderr)
+        self.assertNotIn(b'fixture checkpoint write failed', failed_save.stderr)
+        self.assertNotIn(os.fsencode(self.root), failed_save.stderr)
+        self.assertEqual(snapshot(primary), primary_before)
         attempts_path = self.root / 'save-attempts.jsonl'
         attempts = [Path(json.loads(line)) for line in attempts_path.read_text().splitlines()]
         self.assertEqual(len(attempts), 2)
@@ -437,6 +451,9 @@ class CoordinationTests(unittest.TestCase):
         attempts = [Path(json.loads(line)) for line in attempts_path.read_text().splitlines()]
         self.assertEqual(set(attempts), set(records))
         self.assertEqual(fallback.read_bytes(), saved_fallback)
+        self.assertEqual(snapshot(primary), primary_before)
+        self.assertEqual({path: (path.stat().st_dev, path.stat().st_ino)
+                          for path in self.registries}, registry_identities)
         self.assertIn('checkpoint failed', owner['diagnostic'].read_text())
         self.finish(self.launch(), 75)
 

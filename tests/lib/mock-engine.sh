@@ -240,6 +240,9 @@ test_mock_engine_audio_downloads() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'Media validation reason: unexpected-content-video' \
         'audio content-video bounded reason'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        '[MEDIA_VALIDATION] Final audio validation found a content video stream.' \
+        'audio validation advice follows the verified reason'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     # A distro build may omit the optional netrc feature entirely. Such a build
@@ -440,6 +443,9 @@ test_mock_engine_video_downloads() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'Media validation reason: missing-audio' \
         'missing-audio bounded reason'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        '[MEDIA_VALIDATION] Final media validation found no audio stream.' \
+        'missing-audio advice follows the verified reason'
 
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     prepare_argument_log 'video-cover-art-only-validation'
@@ -451,6 +457,9 @@ test_mock_engine_video_downloads() {
     assert_text_contains "${ASSERT_OUTPUT}" \
         'final media file failed FFprobe validation' \
         'cover-art-only validation diagnostic'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        '[MEDIA_VALIDATION] Final media validation found no content video stream.' \
+        'cover-art-only advice follows the verified reason'
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
     existing_audio_path="${OUTPUT_DIR}/Mock media [abc123].webm"
@@ -464,11 +473,13 @@ test_mock_engine_video_downloads() {
     assert_file_has_line "${existing_audio_path}" 'preserve existing audio result' \
         'existing final media is preserved'
     assert_text_contains "${ASSERT_OUTPUT}" \
-        'Destination: Mock media [abc123].webm' \
-        'existing media collision helper diagnostic'
+        '[DESTINATION_EXISTS]' \
+        'existing media collision helper diagnostic identifier'
     assert_text_contains "${ASSERT_OUTPUT}" \
-        'final media destination already exists; refusing to overwrite it.' \
-        'existing media collision engine diagnostic'
+        'final media destination already exists; refusing to overwrite it' \
+        'existing media collision controlled reason'
+    assert_text_not_contains "${ASSERT_OUTPUT}" 'Mock media [abc123].webm' \
+        'existing collision diagnostics exclude the private media basename'
     [[ ! -s ${MOCK_ARIA2_ARG_LOG} ]] \
         || fail 'Existing media collision started an unnecessary aria2 transfer.'
     rm -f -- "${existing_audio_path}"

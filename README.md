@@ -21,6 +21,7 @@
 - [Command-line usage](#command-line-usage)
 - [Downloader behavior](#downloader-behavior)
 - [Local data](#local-data)
+- [Understanding errors](#understanding-errors)
 - [Tests](#tests)
 - [Uninstalling the launcher](#uninstalling-the-launcher)
 - [Limitations and lawful use](#limitations-and-lawful-use)
@@ -928,6 +929,49 @@ Ownership records are private and contain
 no URL, cookie or authentication header. Coordination is local to one host and
 user; it provides neither distributed exclusion nor protection against arbitrary
 external writers (the separate F1 BIS limit remains).
+
+## Understanding errors
+
+Important failures include a stable diagnostic identifier in brackets, a plain
+explanation and an action to take. Publication diagnostics also identify the
+operation, its technical `stage`, the system error name/number when available,
+and what is known about recovery. An identifier such as `PUB_IO` is a diagnostic
+category, not the numeric exit status. Existing exit statuses and progress
+records keep their meaning.
+
+In the graphical interface, select **View log** when the error dialog offers
+it. That button opens the retained, sanitized diagnostic described above. An
+early failure may have no useful log; follow the displayed message instead.
+The log can contain several layers: the external tool's failure, the engine's
+status and the specific publication or validation explanation. A nonzero
+downloader status alone does not prove a network, authorization or format cause.
+
+| Diagnostic information | What to check |
+| --- | --- |
+| `ENOSPC` or `EDQUOT` | Available space and quota on the storage named by the operation; local processing space and destination space are separate. |
+| `EACCES` or `EPERM` | Access rights and, for a network destination, the authorized mount/session credentials. Do not make private workspace permissions public. |
+| `EROFS` | Whether the affected filesystem is mounted read-only and why it became read-only. |
+| `ENOTCONN`, `ESTALE` or `EIO` | The storage/mount connection and server availability. A generic I/O error does not identify the root cause by itself. |
+| Uncertain publication | Inspect the destination and retained local source before another request: the final file may already exist. Do not automatically retry or delete preserved temporary files. |
+| Existing destination or reserved media | Preserve the existing file; inspect the conflicting request or wait for its confirmed shutdown. Never remove locks/checkpoints merely to bypass the refusal. |
+| Media validation failure | Read the bounded validation reason, inspect the retained media and check the selected streams and FFmpeg/FFprobe installation. A parseable file is not necessarily complete. |
+| `RUNTIME_SETTING` or `RUNTIME_CHANNEL` | Correct or remove the named configuration override; its rejected value is deliberately omitted from the message. |
+
+`ENGINE_PLAN` and `ENGINE_DOWNLOAD` identify the failed phase, while
+`MEDIA_VALIDATION` and `DEPENDENCY_MISSING` identify validation and dependency
+admission. Their advice complements the existing technical status lines.
+
+Recovery text describes only what the failing operation could establish.
+A source that could not be opened or whose identity changed is not advertised
+as a confirmed, validated recovery copy. An interruption is not a successful
+publication even if the server has already created the final name.
+
+For a support report, include the application version, diagnostic identifier,
+operation/stage, system error number and whether the request was interrupted.
+Review a sanitized log before sharing it: media titles and local paths may
+still be personal. Never attach private plans, cookies, authentication headers
+or runtime configuration values. Unknown system errors remain explicit instead
+of being assigned an invented cause.
 
 ## Network destinations and private storage
 

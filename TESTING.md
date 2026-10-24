@@ -172,6 +172,33 @@ Python on a user's workstation. Equivalent local containers must expose Python
 3.10 through both paths and run as a non-root user, matching the ordinary CI
 user rather than UID 0 with its capabilities removed.
 
+### Human-readable diagnostic regressions
+
+Diagnostics are qualified through the existing private-plan, engine, runtime
+and GUI suites. Assert the stable identifier, operation/errno, necessary cause,
+action and recovery information without pinning every explanatory word. Keep
+numeric exit statuses, helper stdout, runtime attestation, progress records and
+GUI event lines under their existing independent assertions. Ordinary predicates
+and cancellation must not acquire misleading error diagnostics.
+
+The publication fault matrix retains its 75 cases and source/destination
+content, identity, timestamp and no-success oracles. Additional probes cover
+bounded or unknown errno values, errors before source validation, copy/sync
+failure, uncertain atomic publication/confirmation and late signals. Unicode
+format identifiers and their UTF-8 reservation boundaries stay covered in the
+same helper suite. Synthetic private exception/header/component sentinels must
+never appear in diagnostics; a plausible numeric system error does not make its
+exception text safe.
+
+Runtime configuration tests check rejected secret-like values without exposing
+them in stderr, while retaining status and absence of external work. GUI tests
+require View log guidance only for a validated diagnostic and keep the unsafe
+log fallback closed. Existing planning/download/media scenarios check advice,
+unchanged statuses and absent successful result records. Mutation probes must
+detect a missing explanation, a false success or recovery claim, and disclosure
+of private data. A mutant's failure counts only when the intended assertion
+fires; syntax failures or an unavailable fixture do not qualify the oracle.
+
 ## Workflow syntax qualification
 
 For workflow edits, run the explicit shared validator before full validation:
