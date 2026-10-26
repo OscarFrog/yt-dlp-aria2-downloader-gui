@@ -745,7 +745,7 @@ parsing classification output; internal blank or unrecognized lines are errors.
 For video accepted by the track-selection helper, the GUI starts the ordinary
 supervised engine with private `--track-catalog` and `--track-selection` paths.
 After metadata extraction the
-engine calls `private-arte-tracks.py` inside a timed supervised worker. The
+engine calls `private-art-tracks.py` inside a timed supervised worker. The
 helper reads the HLS rendition metadata, normalizes languages and roles,
 excludes hearing-impaired subtitles and explicit comfort audio, and identifies
 technical variants and exact resource aliases without acquiring subtitle payloads.
@@ -825,7 +825,7 @@ both native passes. Native preflight rechecks the reserved family against its
 admitted ownership snapshot, including late subtitle/conversion collisions;
 a refused foreign resource invalidates resume authority before cleanup.
 
-`private-arte-subtitles.py` builds cue references independently of FFmpeg.
+`private-art-subtitle.py` builds cue references independently of FFmpeg.
 Its bounded UTF-8 parser handles BOM/line endings, cue IDs, text entities,
 basic text markup, NOTE, unused STYLE/REGION and overlapping cues. Original
 settings remain in the private reference. Standard UTF-8 SRT deliberately drops
@@ -847,7 +847,7 @@ references remain in the private metadata session until the normal cleanup.
 This data policy follows the [WebVTT specification](https://www.w3.org/TR/webvtt1/)
 and the timestamp-map boundary in [HLS section 3.5](https://www.rfc-editor.org/rfc/rfc8216#section-3.5).
 
-`private-arte-media.py` probes the assembled intermediate before a local copy
+`private-art-media.py` probes the assembled intermediate before a local copy
 remux. It checks exactly one content video and the planned audio/subtitle
 counts and packet evidence; unexpected tracks cannot be hidden by mapping.
 The multitrack yt-dlp merger uses copyts with negative-timestamp adjustment
@@ -891,7 +891,9 @@ must be an actual media endpoint, not the end of a relative-duration probe
 window: seeking can land on an earlier keyframe differently in MP4/TS and MKV.
 AAC can report a shortened terminal packet duration in MP4 and the nominal
 frame duration in MKV, including a regenerated duration tag on a second remux.
-This is accepted only with matching sample rates, terminal packet bytes and
+Remuxers that preserve the partial duration satisfy the ordinary clock checks;
+neither a changed endpoint nor a regenerated duration tag is required.
+The nominal-duration representation is accepted only with matching sample rates, terminal packet bytes and
 PTS/DTS, a proven original partial frame, and endpoint metadata consistent with
 either that original endpoint or the same frame's nominal endpoint. The
 timestamp tolerance is unchanged; altered timestamps, a missing terminal

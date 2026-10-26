@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 """Test ARTE catalogue policy for yt-dlp-aria2-downloader-gui.
 
-Repository path: tests/arte-tracks-integration.py
+Repository path: tests/art-tracks-integration.py
 
 Raw synthetic manifests preserve the observed extractor ambiguities: Japanese
 audio under a French global label, mixed de-forced subtitles, and a Japanese
@@ -26,7 +26,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("arte_tracks", ROOT / "private-arte-tracks.py")
+SPEC = importlib.util.spec_from_file_location("art_tracks", ROOT / "private-art-tracks.py")
 ARTE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ARTE)
 MASTER = "https://first.example.invalid/program/master.m3u8"
@@ -436,7 +436,7 @@ class CatalogueTests(unittest.TestCase):
             previous_umask = os.umask(0o077)
             try:
                 with mock.patch.object(ARTE, "Fetcher", return_value=self.fetch), mock.patch.object(sys, "argv", [
-                        "private-arte-tracks.py", "catalogue", "--plan", str(plan_path), "--output", str(output_path)
+                        "private-art-tracks.py", "catalogue", "--plan", str(plan_path), "--output", str(output_path)
                 ]), contextlib.redirect_stderr(diagnostic):
                     self.assertEqual(ARTE.main(), 0)
             finally:
@@ -615,7 +615,7 @@ class CatalogueTests(unittest.TestCase):
             plan_path, expected_path = Path(directory) / "plan.json", Path(directory) / "expected.json"
             ARTE.write_json(plan_path, selected)
             ARTE.write_json(expected_path, expected)
-            result = subprocess.run([sys.executable, "-B", str(ROOT / "private-arte-tracks.py"), "verified-summary",
+            result = subprocess.run([sys.executable, "-B", str(ROOT / "private-art-tracks.py"), "verified-summary",
                                      "--plan", str(plan_path), "--expectation", str(expected_path)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("3 audio(s); 4 subtitle(s)", result.stdout)
@@ -820,7 +820,7 @@ class PrivateHandoffTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="arte-tracks-test.") as directory:
             path = Path(directory) / "options.json"
             ARTE.write_json(path, {"version": 1, "argv": ["--exec", "touch /tmp/forbidden", "--audio-multistreams", "--no-write-auto-subs"]})
-            result = subprocess.run([sys.executable, "-B", str(ROOT / "private-arte-tracks.py"), "options", "--options", str(path)], capture_output=True)
+            result = subprocess.run([sys.executable, "-B", str(ROOT / "private-art-tracks.py"), "options", "--options", str(path)], capture_output=True)
             self.assertEqual(result.returncode, 65)
             self.assertEqual(result.stdout, b"")
 

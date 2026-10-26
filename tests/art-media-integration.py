@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""yt-dlp-aria2-downloader-gui: tests/arte-media-integration.py.
+"""yt-dlp-aria2-downloader-gui: tests/art-media-integration.py.
 
 Exercise ARTE stream validation and opt-in real native HLS assembly through the
 production engine. All network media are synthetic and served on loopback.
@@ -30,10 +30,10 @@ from unittest import mock
 
 
 PROJECT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("arte_media", PROJECT / "private-arte-media.py")
+spec = importlib.util.spec_from_file_location("art_media", PROJECT / "private-art-media.py")
 MEDIA = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(MEDIA)
-track_spec = importlib.util.spec_from_file_location("arte_tracks_media_test", PROJECT / "private-arte-tracks.py")
+track_spec = importlib.util.spec_from_file_location("art_tracks_media_test", PROJECT / "private-art-tracks.py")
 TRACKS = importlib.util.module_from_spec(track_spec)
 track_spec.loader.exec_module(TRACKS)
 REAL_TOOLS = "--real-tools" in sys.argv
@@ -69,6 +69,19 @@ def probe_fixture() -> dict:
         },
         "subtitle_cues": {"fr": [{"start_ms": 1080, "end_ms": 2000, "text": "Complete dialogue"}]},
     }
+
+
+def aac_declared_end_matches_packets(before: dict, after: dict, packet_pts: list[MEDIA.Decimal], allowance: MEDIA.Decimal) -> bool:
+    end = MEDIA.Decimal(after["end"])
+    candidates = [MEDIA.Decimal(before["declared_end"]), end]
+    # With preserved partial frames, a muxer may describe the packet span,
+    # including negative AAC priming, instead of the final presentation time.
+    # This interpretation requires observed packets and never widens the clock
+    # allowance or the separate nominal-duration exception.
+    if packet_pts and min(packet_pts) < 0 and abs(end - MEDIA.Decimal(before["end"])) <= allowance:
+        candidates.append(end - min(packet_pts))
+    declared = MEDIA.Decimal(after["declared_end"])
+    return any(abs(declared - candidate) <= allowance for candidate in candidates)
 
 
 class MediaValidationTests(unittest.TestCase):
@@ -245,6 +258,8 @@ class MediaValidationTests(unittest.TestCase):
         after["0"]["terminal_packet"].update(pts="0.998", dts="0.998", duration="0.023")
         for declared_end in ("1", "1.021"):
             after["0"]["declared_end"] = declared_end
+            self.assertTrue(MEDIA.aac_partial_terminal_frame(original, current, before["0"], after["0"],
+                                                            MEDIA.clock_tolerance(current, original)))
             MEDIA.compare_clocks([current], after, [original], before)
         for field, value in (("pts", "1.000458"), ("dts", "1.000458"), ("dts", None), ("size", "49"),
                              ("data_hash", "SHA256:" + "b" * 64), ("duration", "1")):
@@ -258,6 +273,47 @@ class MediaValidationTests(unittest.TestCase):
             MEDIA.compare_clocks([current], candidate, [original], before)
         with self.assertRaises(MEDIA.MediaError):
             MEDIA.compare_clocks([dict(current, sample_rate="48000")], after, [original], before)
+
+    def test_aac_partial_terminal_duration_can_remain_unchanged(self) -> None:
+        original = {"index": 0, "codec_type": "audio", "codec_name": "aac", "sample_rate": "44100", "time_base": "1/44100"}
+        current = dict(original, time_base="1/1000")
+        before = {"0": {"first_pts_time": "0", "end": "1", "tail_complete": True,
+                        "declared_end": "1", "nominal_packet_duration": "0.023220", "duration_packet_count": 40,
+                        "head_timestamps": [{"pts": "0", "dts": "0"}],
+                        "terminal_packet": {"pts": "0.998458", "dts": "0.998458", "duration": "0.001542",
+                                            "size": "50", "data_hash": "SHA256:" + "a" * 64}}}
+        after = copy.deepcopy(before)
+        after["0"].update(nominal_packet_duration="0.023")
+        after["0"]["terminal_packet"].update(pts="0.998", dts="0.998", duration="0.002")
+        self.assertFalse(MEDIA.aac_partial_terminal_frame(original, current, before["0"], after["0"],
+                                                         MEDIA.clock_tolerance(current, original)))
+        # Exact preservation already satisfies the clock contract; recognizing
+        # a nominal-duration replacement must not be a prerequisite for it.
+        with mock.patch.object(MEDIA, "aac_partial_terminal_frame", side_effect=AssertionError("Unexpected AAC exception")):
+            MEDIA.compare_clocks([current], after, [original], before)
+        for field, value in (("pts", "1.000458"), ("dts", "1.000458")):
+            candidate = copy.deepcopy(after)
+            candidate["0"]["terminal_packet"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(MEDIA.MediaError, "terminal packet"):
+                MEDIA.compare_clocks([current], candidate, [original], before)
+
+    def test_aac_duration_tag_can_describe_the_preserved_packet_span(self) -> None:
+        before = {"end": "1", "declared_end": "1"}
+        after = {"end": "1", "declared_end": "1.023"}
+        timestamps = [MEDIA.Decimal("-0.023"), MEDIA.Decimal("0.998")]
+        allowance = MEDIA.Decimal("0.001")
+        for declared_end in ("1", "1.023"):
+            self.assertTrue(aac_declared_end_matches_packets(before, dict(after, declared_end=declared_end), timestamps, allowance))
+        for declared_end in ("1.010", "1.025", "2"):
+            self.assertFalse(aac_declared_end_matches_packets(before, dict(after, declared_end=declared_end), timestamps, allowance))
+        self.assertFalse(aac_declared_end_matches_packets(before, after, [], allowance))
+        self.assertFalse(aac_declared_end_matches_packets(before, after, [MEDIA.Decimal("0"), timestamps[1]], allowance))
+        # The nominal-frame exception permits only its original or new end;
+        # a changed packet end cannot borrow the preserved-frame span rule.
+        normalized = dict(after, end="1.021", declared_end="1.044")
+        self.assertFalse(aac_declared_end_matches_packets(before, normalized, timestamps, allowance))
+        for declared_end in ("1", "1.021"):
+            self.assertTrue(aac_declared_end_matches_packets(before, dict(normalized, declared_end=declared_end), timestamps, allowance))
 
     def test_private_json_refuses_symlinks_and_public_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -789,27 +845,61 @@ if REAL_TOOLS:
                 stream = probe["streams"][0]
                 return stream, MEDIA.stream_evidence(path, stream, {"duration": 1}, MEDIA.Decimal(1))
 
+            def packets(path: Path) -> list[dict]:
+                return json.loads(command(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_packets",
+                                           "-show_data_hash", "sha256", "-show_entries", "packet=pts_time,dts_time,size,data_hash",
+                                           "-of", "json", str(path)]).stdout)["packets"]
+
             original, before = observation(source)
+            source_packets = packets(source)
+            self.assertGreater(len(source_packets), 3)
             self.assertLess(MEDIA.Decimal(before["terminal_packet"]["duration"]),
                             MEDIA.Decimal(before["nominal_packet_duration"]) - MEDIA.Decimal("0.001"))
+            previous_stream, previous_evidence = original, before
             for previous, output in ((source, first), (first, second)):
                 command(["ffmpeg", "-v", "error", "-nostdin", "-copyts", "-i", str(previous), "-map", "0",
                          "-c", "copy", "-map_metadata", "-1", "-map_metadata:s", "-1", "-avoid_negative_ts", "disabled", str(output)])
                 current, after = observation(output)
+                output_packets = packets(output)
+                allowance = MEDIA.clock_tolerance(current, original)
+                self.assertEqual(len(output_packets), len(source_packets))
+                for index, (old, new) in enumerate(zip(source_packets, output_packets)):
+                    with self.subTest(copy=output.name, packet=index):
+                        self.assertRegex(old["data_hash"], r"^SHA256:[0-9a-fA-F]{64}$")
+                        self.assertGreater(int(old["size"]), 0)
+                        self.assertEqual(new["data_hash"], old["data_hash"])
+                        self.assertEqual(new["size"], old["size"])
+                        for field in ("pts_time", "dts_time"):
+                            self.assertLessEqual(abs(MEDIA.Decimal(new[field]) - MEDIA.Decimal(old[field])), allowance)
                 self.assertEqual(after["terminal_packet"]["data_hash"], before["terminal_packet"]["data_hash"])
                 self.assertEqual(after["terminal_packet"]["size"], before["terminal_packet"]["size"])
-                self.assertGreater(abs(MEDIA.Decimal(after["end"]) - MEDIA.Decimal(before["end"])), MEDIA.Decimal("0.010"))
-                self.assertTrue(MEDIA.aac_partial_terminal_frame(original, current, before, after, MEDIA.clock_tolerance(current, original)))
+                # Either retain the partial duration or prove the bounded AAC
+                # nominal-duration representation. Both preserve the packets;
+                # neither requires a remuxer to change the end or DURATION tag.
+                end_preserved = abs(MEDIA.Decimal(after["end"]) - MEDIA.Decimal(before["end"])) <= allowance
+                self.assertTrue(end_preserved or MEDIA.aac_partial_terminal_frame(original, current, before, after, allowance))
+                self.assertTrue(aac_declared_end_matches_packets(
+                    before, after, [MEDIA.Decimal(packet["pts_time"]) for packet in output_packets], allowance))
                 MEDIA.compare_clocks([current], {str(current["index"]): after}, [original], {str(original["index"]): before})
-            self.assertGreater(MEDIA.Decimal(after["declared_end"]), MEDIA.Decimal(before["declared_end"]),
-                               "The second copy must exercise regeneration of the nominal terminal duration")
-            for label, options in (("missing-terminal", ["-t", "0.98"]), ("shifted-terminal", ["-itsoffset", "0.002"])):
+                MEDIA.compare_clocks([current], {str(current["index"]): after},
+                                     [previous_stream], {str(previous_stream["index"]): previous_evidence})
+                previous_stream, previous_evidence = current, after
+            for label, options in (("missing-terminal", ["-t", "0.98"]), ("shifted-terminal", ["-itsoffset", "0.002"]),
+                                   ("truncated", ["-t", "0.5"])):
                 output = self.root / f"aac-{label}.mkv"
                 before_input = options if label == "shifted-terminal" else []
-                after_input = options if label == "missing-terminal" else []
+                after_input = options if label != "shifted-terminal" else []
                 command(["ffmpeg", "-v", "error", "-nostdin", "-copyts", *before_input, "-i", str(source), *after_input,
                          "-map", "0", "-c", "copy", "-avoid_negative_ts", "disabled", str(output)])
                 current, invalid = observation(output)
+                invalid_packets = packets(output)
+                if label == "shifted-terminal":
+                    self.assertEqual([(item["size"], item["data_hash"]) for item in invalid_packets],
+                                     [(item["size"], item["data_hash"]) for item in source_packets])
+                else:
+                    self.assertLess(len(invalid_packets), len(source_packets))
+                if label == "truncated":
+                    self.assertLess(MEDIA.Decimal(invalid["end"]), MEDIA.Decimal(before["end"]) - MEDIA.Decimal("0.25"))
                 self.assertGreater(abs(MEDIA.Decimal(invalid["terminal_packet"]["pts"])
                                        - MEDIA.Decimal(before["terminal_packet"]["pts"])), MEDIA.Decimal("0.001"))
                 with self.assertRaisesRegex(MEDIA.MediaError, "terminal packet presentation timestamps changed"):

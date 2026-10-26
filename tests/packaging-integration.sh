@@ -74,6 +74,8 @@ test_alternate_private_directory() {
         "${alternate_root}/usr/bin/yt-dlp-aria2-downloader" \
         '../libexec/yt-dlp-aria2-downloader/download-video.sh' \
         'packaged CLI libexec symlink target'
+    assert_packaged_executables \
+        "${alternate_root}/usr/libexec/yt-dlp-aria2-downloader"
     assert_package_helper_behavior \
         "${alternate_root}/usr/bin/yt-dlp-aria2-downloader"
 }
@@ -95,13 +97,19 @@ assert_packaged_executables() {
     done
 
     local private_aria2_helper="${private_dir}/private-aria2-plan.py"
-    local arte_helper
-    for arte_helper in private-arte-tracks.py private-arte-media.py private-arte-subtitles.py; do
-        [[ -f ${private_dir}/${arte_helper} && ! -L ${private_dir}/${arte_helper} ]] \
-            || fail 'Missing or unsafe packaged ARTE helper.'
-        assert_path_mode "${private_dir}/${arte_helper}" 644 "${arte_helper} permissions"
-        python3 -I -B "${private_dir}/${arte_helper}" --help >/dev/null \
-            || fail 'Installed ARTE helper cannot run independently.'
+    local track_helper
+    local -a expected_track_helpers=(private-art-tracks.py private-art-media.py private-art-subtitle.py)
+    local -a installed_track_helpers=("${private_dir}"/private-art*.py)
+    # This prefix also matches the obsolete spellings. Equal cardinality plus
+    # every exact current filename excludes old modules and compatibility aliases.
+    ((${#installed_track_helpers[@]} == ${#expected_track_helpers[@]})) \
+        || fail 'Package must contain exactly the three current track helper modules.'
+    for track_helper in "${expected_track_helpers[@]}"; do
+        [[ -f ${private_dir}/${track_helper} && ! -L ${private_dir}/${track_helper} ]] \
+            || fail 'Missing or unsafe packaged track helper.'
+        assert_path_mode "${private_dir}/${track_helper}" 644 "${track_helper} permissions"
+        python3 -I -B "${private_dir}/${track_helper}" --help >/dev/null \
+            || fail 'Installed track helper cannot run independently.'
     done
     [[ -f ${private_dir}/private-process-supervisor.py &&
         ! -L ${private_dir}/private-process-supervisor.py ]] \

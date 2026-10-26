@@ -3122,7 +3122,7 @@ update_arte_choice() {
     local selected_audio=$5 selected_subtitles=$6 id
     local default_audio=${7-} default_subtitle=${8-}
     local -a audio_ids=() subtitle_ids=()
-    local -a selection_command=(python3 -I -B "${SCRIPT_DIR}/private-arte-tracks.py" select
+    local -a selection_command=(python3 -I -B "${SCRIPT_DIR}/private-art-tracks.py" select
         --catalogue "${ARTE_CATALOG_FILE}" --audio-mode "${audio_mode}"
         --subtitle-mode "${subtitle_mode}" --output "${draft}")
 

@@ -1045,10 +1045,10 @@ The automated suite checks, among other things:
 Multitrack catalogue, selection and assembly changes additionally require:
 
 ```bash
-python3 -B tests/arte-tracks-integration.py
-python3 -B tests/arte-subtitles-integration.py
-python3 -B tests/arte-media-integration.py
-python3 -B tests/arte-media-integration.py --real-tools
+python3 -B tests/art-tracks-integration.py
+python3 -B tests/art-subtitle-integration.py
+python3 -B tests/art-media-integration.py
+python3 -B tests/art-media-integration.py --real-tools
 ./tests/mock-integration.sh --group gui-progress
 ./tests/progress-monitor-integration.sh
 ./tests/private-aria2-plan-integration.sh
@@ -1119,9 +1119,16 @@ that packet-tail probes reach EOF in both source and remuxed containers. A
 fixed-length interval after an inexact seek is not a comparable media endpoint.
 Clock tolerances remain unchanged; altered clocks and truncated media must
 still fail. AAC terminal-frame regressions cover two successive copy remuxes:
-packet identity and PTS/DTS remain authoritative when the container reports
-a nominal instead of shortened final frame duration. Missing terminal packets,
-changed clocks, packet identities or inconsistent duration metadata must fail.
+either preserving the shortened final duration or proving its bounded nominal
+representation is valid. They compare every AAC packet's count, SHA-256, size,
+PTS and DTS without requiring a remuxer to change the endpoint or regenerate
+a duration tag. Deterministic fixtures separately exercise preserved and nominal
+durations, including both permitted duration-tag representations.
+For preserved packet ends, a duration tag may also describe the full observed
+packet span, including negative AAC priming timestamps. That value is derived
+from the actual packets, never a fixed offset or a larger clock tolerance.
+Missing terminal packets, changed clocks, packet identities or inconsistent duration
+metadata must fail; real copy mutations also exercise truncation.
 Network-destination regressions preserve completed multitrack components
 and intermediates on validation refusal while cleaning private authentication
 metadata, and retain normal cleanup for incomplete transfers and successful

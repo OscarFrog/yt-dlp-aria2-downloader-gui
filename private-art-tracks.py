@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 """Discover and freeze admissible ARTE tracks for yt-dlp-aria2-downloader-gui.
 
-Repository path: private-arte-tracks.py
+Repository path: private-art-tracks.py
 
 The managed extractor remains responsible for video quality and transfer. This
 helper reads rendition metadata, applies the hearing-impaired exclusion before

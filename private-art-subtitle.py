@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 """Verify and prepare ARTE subtitles for yt-dlp-aria2-downloader-gui.
 
-Repository path: private-arte-subtitles.py
+Repository path: private-art-subtitle.py
 
 Preserved native HLS fragments are parsed independently of FFmpeg. Their
 absolute media-clock cues form the reference for conversion and final MKV
@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 
-SPEC = importlib.util.spec_from_file_location("arte_tracks", Path(__file__).with_name("private-arte-tracks.py"))
+SPEC = importlib.util.spec_from_file_location("art_tracks", Path(__file__).with_name("private-art-tracks.py"))
 TRACKS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(TRACKS)
 MAX_BYTES = 8 * 1024 * 1024

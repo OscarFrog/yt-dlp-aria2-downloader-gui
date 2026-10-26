@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""yt-dlp-aria2-downloader-gui: private-arte-media.py.
+"""yt-dlp-aria2-downloader-gui: private-art-media.py.
 
 Validate the selected ARTE streams before and after a lossless local remux.
 Probe children inherit the engine's supervised process group. Private JSON
@@ -135,8 +135,8 @@ def checked_expected(expected: dict) -> None:
 
 def validate_provenance(plan: dict, expected: dict) -> None:
     checked_expected(expected)
-    source = Path(__file__).with_name("private-arte-tracks.py")
-    spec = importlib.util.spec_from_file_location("arte_tracks_validation", source)
+    source = Path(__file__).with_name("private-art-tracks.py")
+    spec = importlib.util.spec_from_file_location("art_tracks_validation", source)
     if spec is None or spec.loader is None:
         raise MediaError("ARTE provenance validator is unavailable")
     sys.dont_write_bytecode = True
@@ -149,8 +149,8 @@ def validate_provenance(plan: dict, expected: dict) -> None:
 
 
 def subtitle_parser():
-    source = Path(__file__).with_name("private-arte-subtitles.py")
-    spec = importlib.util.spec_from_file_location("arte_subtitles_validation", source)
+    source = Path(__file__).with_name("private-art-subtitle.py")
+    spec = importlib.util.spec_from_file_location("art_subtitle_validation", source)
     if spec is None or spec.loader is None:
         raise MediaError("ARTE subtitle reference parser is unavailable")
     sys.dont_write_bytecode = True

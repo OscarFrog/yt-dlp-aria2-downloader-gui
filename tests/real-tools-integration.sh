@@ -1367,7 +1367,7 @@ parse_qualification_arguments() {
 }
 
 test_real_arte_scenarios() {
-    python3 -I -B "${PROJECT_DIR}/tests/arte-media-integration.py" --real-tools
+    python3 -I -B "${PROJECT_DIR}/tests/art-media-integration.py" --real-tools
 }
 
 main() {

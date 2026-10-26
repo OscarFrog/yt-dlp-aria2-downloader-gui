@@ -3448,7 +3448,7 @@ if actual_bash != expected_bash:
 expected_python = collections.Counter(
     ("-B", f"./tests/{name}-integration.py")
     for name in ("shfmt-version-handoff", "release-docs", "push-version",
-                 "ci-validation", "source-archive", "shfmt-bootstrap", "zenity-autonomous", "arte-tracks", "arte-subtitles", "arte-media")
+                 "ci-validation", "source-archive", "shfmt-bootstrap", "zenity-autonomous", "art-tracks", "art-subtitle", "art-media")
 )
 actual_python = collections.Counter(
     read_record(path) for path in root.glob("python.*.bin")

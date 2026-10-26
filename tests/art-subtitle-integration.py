@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 """Verify ARTE subtitle fidelity for yt-dlp-aria2-downloader-gui.
 
-Repository path: tests/arte-subtitles-integration.py
+Repository path: tests/art-subtitle-integration.py
 
 Independent cue parsing, HLS mapping, conversion refusal/fallback and actual
 local FFmpeg round trips protect the source-to-MKV text and timestamp contract.
@@ -21,7 +21,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("arte_subtitles", ROOT / "private-arte-subtitles.py")
+SPEC = importlib.util.spec_from_file_location("art_subtitle", ROOT / "private-art-subtitle.py")
 SUBS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SUBS)
 TRACKS = SUBS.TRACKS

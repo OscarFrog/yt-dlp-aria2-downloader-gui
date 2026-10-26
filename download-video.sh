@@ -3151,9 +3151,9 @@ initialize_runtime_dependencies() {
     script_dir=${script_path%/*}
     runtime_manager="${script_dir}/runtime-manager.sh"
     PRIVATE_ARIA2_HELPER="${script_dir}/private-aria2-plan.py"
-    ARTE_TRACKS_HELPER="${script_dir}/private-arte-tracks.py"
-    ARTE_MEDIA_HELPER="${script_dir}/private-arte-media.py"
-    ARTE_SUBTITLES_HELPER="${script_dir}/private-arte-subtitles.py"
+    ARTE_TRACKS_HELPER="${script_dir}/private-art-tracks.py"
+    ARTE_MEDIA_HELPER="${script_dir}/private-art-media.py"
+    ARTE_SUBTITLES_HELPER="${script_dir}/private-art-subtitle.py"
     if [[ ${ARTE_ENABLED} == true ]]; then
         for command_name in "${ARTE_TRACKS_HELPER}" "${ARTE_MEDIA_HELPER}" "${ARTE_SUBTITLES_HELPER}"; do
             if [[ ! -f ${command_name} || -L ${command_name} || ! -r ${command_name} ]]; then

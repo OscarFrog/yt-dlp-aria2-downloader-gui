@@ -1157,7 +1157,7 @@ assert_shell_policy_lists_are_canonical() {
 }
 '''
     expected = [str(root / f"tests/{name}-integration.py") for name in (
-        "arte-tracks", "arte-subtitles", "arte-media", "push-version", "release-docs", "shfmt-version-handoff",
+        "art-tracks", "art-subtitle", "art-media", "push-version", "release-docs", "shfmt-version-handoff",
         "ci-validation", "source-archive", "shfmt-bootstrap", "zenity-autonomous",
     )]
 
@@ -2853,7 +2853,7 @@ test_static_tooling_contracts() {
     assert_status 0 'run-all lists its canonical integration suites' \
         "${SCRIPT_DIR}/tests/run-all.sh" --list
     for python_suite in push-version release-docs shfmt-version-handoff \
-        ci-validation source-archive shfmt-bootstrap zenity-autonomous arte-tracks arte-subtitles arte-media; do
+        ci-validation source-archive shfmt-bootstrap zenity-autonomous art-tracks art-subtitle art-media; do
         assert_text_contains "${ASSERT_OUTPUT}" "${python_suite}" \
             "run-all suite list exposes ${python_suite} coverage"
     done
@@ -3075,11 +3075,11 @@ test_static_tooling_contracts() {
 
 test_static_python_behavioral_suites() {
     assert_status 0 'ARTE selection preserves distinct admissible tracks and rejects exclusions' \
-        python3 -B "${SCRIPT_DIR}/tests/arte-tracks-integration.py"
+        python3 -B "${SCRIPT_DIR}/tests/art-tracks-integration.py"
     assert_status 0 'ARTE subtitle references reject empty or partial conversions and timing drift' \
-        python3 -B "${SCRIPT_DIR}/tests/arte-subtitles-integration.py"
+        python3 -B "${SCRIPT_DIR}/tests/art-subtitle-integration.py"
     assert_status 0 'ARTE media validation binds tracks and clocks before publication' \
-        python3 -B "${SCRIPT_DIR}/tests/arte-media-integration.py"
+        python3 -B "${SCRIPT_DIR}/tests/art-media-integration.py"
     assert_status 0 'pre-push coherence guard accepts unchanged versions and rejects incoherent source pushes' \
         python3 -B "${SCRIPT_DIR}/tests/push-version-integration.py"
     assert_status 0 'release-docs publisher preserves bounded version and branch updates' \
@@ -4722,14 +4722,14 @@ documents = {
 inventory = re.findall(r"^\| `([^`]+)` \|", (project / "REPOSITORY_FILES.md").read_text(), re.M)
 technical_identifiers = {"ARCHITECTURE.md": ("arte_selection",)}
 
-def check_neutral_document(name, text):
+def check_neutral_document(name, text, allowed_paths=None):
     # Released history and dated qualification reports are checked separately
     # from current guidance. Technical paths/flags remain literal; useful URLs
     # are not banned solely because their domain names identify an extractor.
     if re.search(r"(?<![^\W_])Ring(?![^\W_])|133131-000-A", text, re.I):
         raise AssertionError(f"{name}: current documentation contains a programme example")
     text = re.sub(r"https?://[^\s<>\[\]()`]+", "URL", text)
-    for path in sorted(inventory, key=len, reverse=True):
+    for path in sorted(inventory if allowed_paths is None else allowed_paths, key=len, reverse=True):
         text = re.sub(r"(?<![\w.-])" + re.escape(path) + r"(?![\w./-])", "SOURCE_PATH", text)
     for identifier in technical_identifiers.get(name, ()):
         text = text.replace(f"`{identifier}`", "`TECHNICAL_IDENTIFIER`")
@@ -4769,20 +4769,25 @@ if unreleased:
 
 # Guard the scope: preserve useful links and exact identifiers, while refusing
 # narrative mentions and programme URLs even when they occur in examples.
+# A synthetic path retains the forbidden word so these boundary regressions
+# remain meaningful when actual tracked helper filenames become neutral.
+boundary_path = "fixture-ARTE-helper.py"
+boundary_inventory = (*inventory, boundary_path)
 for name in (*documents, "ARCHITECTURE.md", "maintenance"):
-    check_neutral_document(name, "Use `private-arte-tracks.py`; https://www.arte.tv/ is a useful link.")
+    check_neutral_document(name, "Use `private-art-tracks.py`; https://www.arte.tv/ is a useful link.")
+    check_neutral_document(name, f"Use `{boundary_path}`.", boundary_inventory)
     for forbidden in ("ARTE extraction", "Compatible sites, including arte.", "ArTe subtitles", "_ARTE_", "Ring", "_Ring_",
-                      "https://www.arte.tv/fr/videos/133131-000-A/ring/", "unrelated-private-arte-tracks.py",
-                      "private-arte-tracks.py.backup", "--arte-all-unrelated", "arte_unrelated"):
+                      "https://www.arte.tv/fr/videos/133131-000-A/ring/", "unrelated-" + boundary_path,
+                      boundary_path + ".backup", "--arte-all-unrelated", "arte_unrelated"):
         try:
-            check_neutral_document(name, forbidden)
+            check_neutral_document(name, forbidden, boundary_inventory)
         except AssertionError:
             pass
         else:
             raise AssertionError(f"{name}: document neutrality control accepted an out-of-scope mention")
 check_neutral_document("maintenance", "Keep the exact `--arte-all` and `--arte-*` compatibility options.")
 check_neutral_document("ARCHITECTURE.md", "The `arte_selection` field binds the selected tracks.")
-check_neutral_document("packaging", "%{_libexecdir}/yt-dlp-aria2-downloader/private-arte-tracks.py")
+check_neutral_document("packaging", "%{_libexecdir}/yt-dlp-aria2-downloader/private-art-tracks.py")
 unreleased_fixture = "## [Unreleased]\nGeneric track choices.\n## [2.4.3]\nHistorical ARTE entry.\n"
 unreleased_scope = re.search(r"^## [^\n]*unreleased[^\n]*\n(.*?)(?=^## |\Z)", unreleased_fixture, re.I | re.M | re.S)
 if not unreleased_scope or unreleased_scope[1] != "Generic track choices.\n":
