@@ -3660,6 +3660,187 @@ print('Resource families, alias exclusion, independent locks, uncertain-stop pro
 PY_RESOURCES
 }
 
+test_arte_resource_selection_and_progress() {
+    new_case 'arte-resources-and-progress'
+    python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_ARTE_RESOURCES'
+import argparse
+import contextlib
+import copy
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+helper, root = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location('arte_resource_helper', helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+output = root / 'output'
+registry = root / 'registry'
+registry.mkdir(mode=0o700)
+identity = output.stat()
+sequence = 0
+ids = ['vidéo_1080', 'VF-STF-audio_0-japonais__VO_', 'audio_français', 'audio_allemand']
+formats = [{'format_id': key, 'ext': 'mp4' if index == 0 else 'm4a',
+            'protocol': 'm3u8_native', 'url': f'https://media.invalid/component-{index}?token=PRIVATE_ARTE_TOKEN'}
+           for index, key in enumerate(ids)]
+binding = {
+    'version': 1, 'policy': 'arte-no-hearing-impaired-v1',
+    'selection': {'version': 1, 'catalogue_id': 'a' * 64,
+                  'audio': ['ja', 'fr', 'de'], 'subtitles': ['fr', 'fr-forced', 'de', 'de-forced'],
+                  'default_audio': 'ja', 'default_subtitle': 'fr'},
+    'sources': {'video': 'v-source-identity', 'audio': ['ja-source', 'fr-source', 'de-source'],
+                'subtitles': ['fr-full-source', 'fr-forced-source', 'de-full-source', 'de-forced-source']},
+    'postprocess': {'container': 'mkv', 'video': 'copy', 'audio': 'copy', 'subtitle': 'srt'},
+}
+
+def plan(name, selection=binding):
+    global sequence
+    sequence += 1
+    private = root / f'arte-{sequence}'
+    private.mkdir(mode=0o700)
+    source = private / 'plan.json'
+    payload = {'id': 'ring-fixture', 'extractor': 'ArteTV', 'extractor_key': 'ArteTV',
+               'requested_formats': formats, 'webpage_url': 'https://www.arte.tv/fr/videos/example/',
+               'requested_downloads': [{'filename': str(output / name)}]}
+    if selection is not None:
+        payload['arte_selection'] = selection
+    source.write_text(json.dumps(payload), encoding='utf-8')
+    source.chmod(0o600)
+    request = private / 'request'
+    request.write_text('https://www.arte.tv/fr/videos/example/\n')
+    request.chmod(0o600)
+    args = argparse.Namespace(output_dir=str(output), final_output_dir=str(output),
+        final_output_identity=f'{identity.st_dev}:{identity.st_ino}', plan=str(source),
+        state=str(private / 'resources.json'), url_file=str(request), mode='video', hls=False)
+    with contextlib.redirect_stdout(io.StringIO()):
+        module.resource_plan(args)
+    replay = json.loads((private / 'transfer-plan.json').read_text())
+    assert [item['format_id'] for item in replay['formats']] == ids
+    assert replay.get('arte_selection') == selection
+    state = json.loads(Path(args.state).read_text())
+    expected_name = Path(name).stem + ('.tracks.mkv' if selection is not None else '.mkv')
+    assert state['final_name'] == expected_name
+    return args
+
+def state(args, action):
+    module.resource_state(argparse.Namespace(state=args.state, registry=str(registry), action=action))
+
+def snapshot(path):
+    info = path.stat()
+    return path.read_bytes(), (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+def refused(args, path):
+    before = snapshot(path)
+    checkpoints = {item: item.read_bytes() for item in registry.rglob('*.resume.json')}
+    try:
+        state(args, 'admit')
+    except module.DestinationExistsError:
+        pass
+    else:
+        raise AssertionError('incompatible ARTE selection or foreign resource was adopted')
+    state(args, 'save')
+    assert snapshot(path) == before, 'refused ARTE resume changed the existing bytes or inode'
+    assert checkpoints == {item: item.read_bytes() for item in registry.rglob('*.resume.json')}, 'failed admission changed ownership'
+
+owner = plan('Ring 日本語.mkv')
+state(owner, 'admit')
+partial = output / 'Ring 日本語.fVF-STF-audio_0-japonais__VO_.m4a.part'
+partial.write_bytes(b'authenticated Japanese audio partial')
+state(owner, 'save')
+same = plan('Ring 日本語.mkv', copy.deepcopy(binding))
+state(same, 'admit')
+state(same, 'save')
+mutations = []
+for field, value in [('audio', ['fr']), ('subtitles', []), ('subtitles', ['fr-forced']),
+                     ('default_audio', 'de'), ('default_subtitle', None)]:
+    changed = copy.deepcopy(binding)
+    changed['selection'][field] = value
+    mutations.append(changed)
+changed = copy.deepcopy(binding)
+changed['postprocess']['subtitle'] = 'webvtt'
+mutations.append(changed)
+changed = copy.deepcopy(binding)
+changed['policy'] = 'obsolete-accessibility-policy'
+mutations.append(changed)
+changed = copy.deepcopy(binding)
+changed['sources']['subtitles'][0] = 'another-full-French-resource'
+mutations.append(changed)
+for changed in mutations:
+    refused(plan('Ring 日本語.mkv', changed), partial)
+
+# Absence of the new contract and an old SDH-bearing selection are both
+# incompatible with a freshly normalized, admissible inventory.
+for name, previous in [('legacy-arte.mkv', None), ('excluded-arte.mkv', copy.deepcopy(binding))]:
+    if previous is not None:
+        previous['selection']['subtitles'].append('de-acc')
+        previous['sources']['subtitles'].append('VA-MAL-source')
+    old = plan(name, previous)
+    state(old, 'admit')
+    retained = output / (Path(name).stem + '.de-forced.vtt.part')
+    retained.write_bytes(b'old subtitle state must not be reused')
+    state(old, 'save')
+    refused(plan(name), retained)
+
+# Family ownership covers subtitle downloads, conversions, and Unicode aliases;
+# a filename pattern alone must never authorize adopting or deleting them.
+for index, suffix in enumerate(('.fr.vtt', '.fr.srt', '.de-forced.vtt.part', '.tracks.mkv')):
+    name = f'Été 日本語 {index}.mkv'
+    candidate = plan(name)
+    foreign = output / (f'E\u0301te\u0301 日本語 {index}' + suffix)
+    foreign.write_bytes(b'pre-existing subtitle or final media')
+    refused(candidate, foreign)
+
+# A new sidecar between admission and the final native preflight is foreign.
+# Refusing it must also revoke the cleanup checkpoint's resumption authority.
+late = plan('Late été.mkv')
+state(late, 'admit')
+late_subtitle = output / 'Late été.fr.srt'
+late_subtitle.write_bytes(b'foreign translated text created after admission')
+before = snapshot(late_subtitle)
+try:
+    module.check_native_final(argparse.Namespace(
+        plan=late.plan, output_dir=str(output), final_output_dir=str(output),
+        final_output_identity=f'{identity.st_dev}:{identity.st_ino}', mode='video',
+        ownership=late.state))
+except module.DestinationExistsError:
+    pass
+else:
+    raise AssertionError('late foreign subtitle reached native yt-dlp')
+assert snapshot(late_subtitle) == before
+state(late, 'save')
+refused(plan('Late été.mkv'), late_subtitle)
+
+source = Path(owner.plan)
+result = subprocess.run([sys.executable, '-I', '-B', str(helper), 'progress-plan', '--plan', str(source)],
+                        capture_output=True, text=True, check=False)
+assert result.returncode == 0, result.stderr
+assert result.stdout == 'YTDLP_PLAN_V2|4|' + '|'.join(ids) + '\n'
+assert 'PRIVATE_ARTE_TOKEN' not in result.stdout + result.stderr
+assert 'https://' not in result.stdout + result.stderr
+valid = json.loads(source.read_text())
+for index, selected in enumerate((
+        [{'format_id': 'same'}, {'format_id': 'same'}],
+        [{'format_id': 'unsafe|delimiter'}], [{'format_id': 'unsafe\nline'}],
+        [{'format_id': 'x' * 129}], [{'format_id': 'é' * 129}],
+        [{'format_id': str(n)} for n in range(17)], [None],
+)):
+    malformed = copy.deepcopy(valid)
+    malformed['requested_formats'] = selected
+    file = root / f'malformed-progress-{index}.json'
+    file.write_text(json.dumps(malformed))
+    file.chmod(0o600)
+    failed = subprocess.run([sys.executable, '-I', '-B', str(helper), 'progress-plan', '--plan', str(file)],
+                            capture_output=True, text=True, check=False)
+    assert failed.returncode == 65 and not failed.stdout, (index, failed.returncode, failed.stdout, failed.stderr)
+    assert 'PRIVATE_ARTE_TOKEN' not in failed.stderr and 'https://' not in failed.stderr
+print('ARTE exact-selection resume, policy/default/source binding, Unicode subtitle collisions and four-component progress passed.')
+PY_ARTE_RESOURCES
+}
+
 main() {
     require_test_command python3
     require_test_command stat
@@ -3677,6 +3858,7 @@ main() {
     test_frozen_replay_contract
     test_resource_activation_signal_handoff
     test_resource_reservations_and_resume
+    test_arte_resource_selection_and_progress
     python3 -I -B "${PROJECT_DIR}/tests/coordination-integration.py"
     test_workspace_mount_oracle_ignores_optimization
     test_workspace_mount_boundaries

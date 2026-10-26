@@ -1,5 +1,48 @@
 # Changelog
 
+## 2.4.4 - 2026-10-26
+
+### Maintenance
+
+- Improve audio and subtitle selection, media validation and CI reliability
+
+### Audio and subtitle choices
+
+- Select one or more admissible audio tracks and optional subtitles on
+  compatible websites, with one video in a lossless MKV assembly.
+- Simplify the graphical selection to two checklists. Offer an explicit
+  no-subtitle choice, reject contradictory choices, and preserve cancellation
+  without starting a download.
+- Prefer identified original audio initially. Propose complete French
+  subtitles according to the selected main audio; French or unidentified
+  audio defaults to no subtitles. Explicit user choices remain authoritative.
+- Keep full and forced subtitles distinct, exclude hearing-impaired subtitles
+  and comfort audio, and resolve proven aliases while quarantining ambiguous
+  tracks. Audio description remains a separate admissible role.
+
+### Media integrity and compatibility
+
+- Preserve subtitle text, accents, line breaks and timestamps through bounded
+  independent WebVTT parsing, controlled UTF-8 SRT conversion and extraction
+  from the final MKV. Detect empty or incomplete conversions before publication.
+- Verify every selected stream, its provenance, language, role and default
+  disposition; keep per-stream packet and duration checks, no-overwrite
+  publication, supervised cancellation and selection-bound resume identity.
+- Qualify AAC copy remuxes that either preserve a partial terminal duration or
+  use its bounded nominal representation, including FFmpeg 6, 8 and 9.
+  Compare packet hashes, sizes and clocks and retain missing-frame, shift and
+  truncation negatives without widening production timestamp tolerances.
+- Rename the private track, subtitle and media helpers to the `private-art-*`
+  names, with matching installed payloads, tests and source inventories.
+
+### Qualification and maintenance
+
+- Bound dependency provisioning separately from media qualification and reserve
+  sufficient job time for the unchanged test deadlines. Keep complete pinned
+  matrices, release runtime checks and the mandatory aggregate qualification.
+- Keep English and French guidance aligned around generic language and subtitle
+  choices, including downloading without subtitles.
+
 ## 2.4.3 - 2026-10-24
 
 ### Maintenance

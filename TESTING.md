@@ -1042,6 +1042,108 @@ The automated suite checks, among other things:
 
 ### Final-validation scope
 
+Multitrack catalogue, selection and assembly changes additionally require:
+
+```bash
+python3 -B tests/art-tracks-integration.py
+python3 -B tests/art-subtitle-integration.py
+python3 -B tests/art-media-integration.py
+python3 -B tests/art-media-integration.py --real-tools
+./tests/mock-integration.sh --group gui-progress
+./tests/progress-monitor-integration.sh
+./tests/private-aria2-plan-integration.sh
+```
+
+The catalogue suite belongs to the canonical static schedule and keeps raw
+ambiguous track/manifests in its fixtures: Japanese audio under a French global
+version, full versus forced translations, German MAL mixed into `de-forced`,
+the Japanese-labelled French alias, comfort audio and Unicode format IDs.
+It tests policy before selection and again before executing a frozen plan.
+Generic `transcribes-spoken-dialog` does not exclude a full translation.
+Automatic-selection regressions cover identified French/foreign originals,
+single-language sources, unknown or ambiguous originals, deterministic fallback,
+missing complete French subtitles, and multiple audio defaults. Independent
+selection modes retain explicit choices and reject obsolete selection states.
+Discovery must fetch only master metadata. Exact resource identity can resolve
+aliases before display; unknown or contradictory subtitle languages are retained
+in private quarantine, never selected or fetched. Consistent distinct resources
+remain available, with selected alias content compared after confirmation.
+The none mode must make no subtitle resource requests. Regression coverage
+includes obsolete/forged provenance attempting to restore a quarantined track.
+The GUI mock requires exactly two checklists, Cancel/Continue only, and No
+subtitles first. It checks recalculation after audio Continue (French, foreign,
+multiple defaults and unknown or `mul` language), coherent checked/default
+labels, explicit overrides, empty choices, and conflicts redisplayed with an
+error and unchanged checks before any handoff. Both cancellation points, all
+audio by checking every row and a fresh catalogue for a new URL are covered.
+Public-document
+assertions in `test-static.sh` check the equivalent generic English/French
+guidance without restricting technical fixtures or historical release records.
+
+The subtitle-reference suite belongs to the same canonical schedule. It
+independently parses raw STYLE-before-cue fixtures, BOM/line endings, cue IDs,
+Unicode/entities/line breaks and legitimate overlaps, and tests empty/partial
+conversion despite exit zero. Fragment repetition, nonzero X-TIMESTAMP-MAP,
+single-application mapping and unsupported discontinuity refusal are explicit
+regressions. Source counts are never obtained through the demuxer under test.
+The standard-mode normalization compares display text with WebVTT entities
+decoded once, literal SRT ampersands preserved, line endings normalized to LF
+and useful markup interpreted; it preserves
+duplicate cue multiplicity and exact normalized millisecond times.
+
+The media suite's unit tests belong to the canonical static schedule. Its
+`--real-tools` qualification additionally requires actual yt-dlp, FFmpeg and
+FFprobe and loopback sockets; the real-tools repository entry point runs it
+as well. Its synthetic HLS video/audio/WebVTT sources include excluded tracks and
+distinct audio tones/subtitle text. It exercises the production engine and
+checks one video/one Japanese audio/one full French subtitle, one video/three
+audios/four admissible subtitles, and one video/one audio/no subtitles.
+The no-subtitle scenarios also exercise automatic and all-audio CLI choices:
+HTTP request records must contain no subtitle playlists or WebVTT payloads,
+no subtitle preparation/conversion progress may appear, and FFprobe must
+report zero subtitle streams. A direct engine boundary regression refuses
+any subtitle workspace creation or helper invocation for an empty selection.
+The raw synthetic alias includes conflicting own-language metadata; requests
+to its second origin must remain absent, including when every admissible track
+is selected. Decoded audio and re-extracted complete SRT cue lists verify real associations,
+exclusions and exact timestamps. Nonzero source origins and a relative audio
+delay and video B-frames qualify the common-clock merger and remux options. Negative
+controls cover per-stream truncation, missing/extra tracks, language/default/
+forced mismatches, stale provenance and retained-file collisions. These checks
+are independent of optional network observations on the live provider; they do not
+qualify a complete real programme, geographic availability, or the graphical
+appearance of native Zenity dialogs.
+
+Longer synthetic sources with widely spaced video keyframes additionally check
+that packet-tail probes reach EOF in both source and remuxed containers. A
+fixed-length interval after an inexact seek is not a comparable media endpoint.
+Clock tolerances remain unchanged; altered clocks and truncated media must
+still fail. AAC terminal-frame regressions cover two successive copy remuxes:
+either preserving the shortened final duration or proving its bounded nominal
+representation is valid. They compare every AAC packet's count, SHA-256, size,
+PTS and DTS without requiring a remuxer to change the endpoint or regenerate
+a duration tag. Deterministic fixtures separately exercise preserved and nominal
+durations, including both permitted duration-tag representations.
+For preserved packet ends, a duration tag may also describe the full observed
+packet span, including negative AAC priming timestamps. That value is derived
+from the actual packets, never a fixed offset or a larger clock tolerance.
+Missing terminal packets, changed clocks, packet identities or inconsistent duration
+metadata must fail; real copy mutations also exercise truncation.
+Network-destination regressions preserve completed multitrack components
+and intermediates on validation refusal while cleaning private authentication
+metadata, and retain normal cleanup for incomplete transfers and successful
+publication. Replaced paths and independent cleanup refusals remain protected.
+A barrier after a real successful worker reap checks the cancellation handoff;
+an old successful planning status cannot preserve an interrupted new transfer.
+
+Multitrack final validation uses each video/audio stream's own timeline and packet
+tail, plus the selected-source expectation. A long subtitle or container does
+not compensate for a truncated media stream. Every selected subtitle must
+contain packets. Plan provenance and policy are required even when the MKV
+does not carry a hearing-impaired disposition. The exact subtitle contents and
+decoded audio are checked by synthetic qualification, not by downloading the
+source media twice in production.
+
 Container duration and stream presence alone do not establish that media is
 complete: physical truncation can preserve both. The real-tool regression
 therefore checks a metadata-parseable truncated fixture at publication.
@@ -1322,7 +1424,48 @@ run records the PyPI source, observation time and selected package version in
 the selected yt-dlp version again before the shared fixture, and retains these
 records and allowlisted
 pre-rescue diagnostics under a source/run/attempt-specific artifact name.
-The existing 25-minute job budget and fixture deadlines are unchanged.
+Dependency provisioning has a separate bounded budget: APT update is limited
+to two minutes and installation to four minutes, each with TERM followed by
+KILL after ten seconds. HTTP/HTTPS inactivity timeouts are thirty seconds,
+retries remain three and the dpkg-lock wait is at most sixty seconds. Update
+uses `APT::Update::Error-Mode=any` so partial index failures also fail. An active
+but very slow transfer cannot consume the entire qualification job. Any setup
+failure stops that step; neither stale package lists nor unchecked downloads
+substitute for a successful installation. Ubuntu package authentication and
+the wheel, Deno and impersonation-dependency pins remain mandatory.
+
+Before package setup, the two real-tool jobs, the Ubuntu FFmpeg 6/9 qualification
+jobs, source-archive/DEB package jobs and release runtime/ZIP/DEB jobs select
+the official Ubuntu HTTPS archives through `scripts/ci-ubuntu-mirrors.py`.
+The helper accepts only the reviewed runner mirror list or its already selected
+form and refuses unfamiliar, unsafe or changed configuration. It removes the
+Azure mirror that can continue transferring too slowly to trigger an inactivity
+timeout. Existing Ubuntu source stanzas, suites, components, signing keyring,
+APT authentication and test deadlines remain unchanged. This preparation is
+limited to disposable CI runners; it does not modify users' package settings
+or introduce candidate execution in privileged validation/signing jobs.
+
+The existing installation step, including the venv and pip, has eight minutes.
+Checkout, version checks, Deno/prerequisite installation and evidence upload
+also have explicit bounds. PR and scheduled media jobs have sixty-five minutes:
+their longest route retains forty-one minutes of individual test deadlines,
+plus preparation, timeout cleanup and Actions overhead. The release-runtime
+job has fifty minutes for its thirty-three-minute test route and preparation.
+These are upper bounds, not target durations; no test deadline is extended.
+The stress aggregate gives `wait-required --timeout-minutes 75` an eighty-minute
+job envelope, covering the longest complementary job, identity and queue margin.
+The verifier's default remains forty-five minutes; its explicit wait bound must
+be an integer from one to ninety and is refused by non-wait commands. Timeout,
+failure or cancellation still refuses qualification, and a successful cohort
+must retain its exact latest run/attempt and source identities.
+
+`tests/ci-validation-integration.py` checks these envelopes and replays the
+actual provisioning blocks with inert package commands and compressed real
+timeouts. Negative controls cover failed and stalled update/installation,
+failure propagation and attempts to remove the bounds or authentication.
+Mirror fixtures also verify idempotence, exact source preservation, rejected
+unknown endpoints, unsafe filesystem objects and failed-preparation propagation
+before APT. Local fixtures use temporary directories and never modify `/etc/apt`.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the exact-source qualification proof and release-specific identity checks, verifies
@@ -1843,7 +1986,7 @@ the actual `PC_NAME_MAX` of the processing and final directories and exercises
 its exact reserved byte boundary. Controlled limits `(255, 254)` and `(254, 255)`
 prove that either directory can impose the smaller budget without a mount.
 
-Literal ARTE and compatibility-character IDs remain unchanged in the frozen
+Literal extractor and compatibility-character IDs remain unchanged in the frozen
 replay and direct manifest, separately from NFKC/casefold alias exclusion for
 reservation families. The helper then commits these components privately and
 publishes a synthetic assembled Unicode file to a distinct permissive directory.

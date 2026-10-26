@@ -1772,6 +1772,216 @@ test_mock_engine_network_failures() {
         assert_text_not_contains "${ASSERT_OUTPUT}" 'NETWORK_FIXTURE_' \
             "network ${scenario} diagnostics contain no secrets"
     done
+
+    # Exercise retention at the actual native-transfer, validation and cleanup
+    # boundaries. Media tools are controlled; workspace cleanup is the real
+    # inode-bound helper, so assertions observe files rather than warning text.
+    python3 -I -B - "${PROJECT_DIR}" "${TEST_ROOT}" <<'PY_ARTE_RECOVERY'
+from pathlib import Path
+import hashlib
+import os
+import subprocess
+import sys
+import time
+
+project = Path(sys.argv[1])
+source = (project / 'download-video.sh').read_text().rsplit('\nmain "$@"', 1)[0]
+source = source.replace('wait_for_download_exit() {', 'fixture_wait_for_download_exit() {', 1)
+source = source.replace('run_supervised_command() {', 'fixture_run_supervised_command() {', 1)
+root = Path(sys.argv[2]) / 'arte-completed-media-recovery'
+root.mkdir(mode=0o700)
+program = r'''
+fixture_root=$1
+fixture_case=$2
+PRIVATE_ARIA2_HELPER=$3/private-aria2-plan.py
+ARTE_TRACKS_HELPER=fixture-tracks
+ARTE_MEDIA_HELPER=fixture-media
+PROCESS_SUPERVISOR=fixture-supervisor
+ARTE_ENABLED=true
+MODE=video
+MACHINE_PROGRESS=false
+YOUTUBE_HLS_FIREFOX=false
+REUSE_CURRENT_SESSION=false
+PRIVATE_TRANSPORT=native
+YTDLP_BIN=fixture-ytdlp
+YT_DLP_OPTIONS=()
+MEDIA_WORKSPACE=${fixture_root}/media
+OUTPUT_DIR=${MEDIA_WORKSPACE}
+FINAL_OUTPUT_DIR=${fixture_root}/destination
+PRIVATE_ARIA2_METADATA=${fixture_root}/metadata
+PRIVATE_ARIA2_PLAN=${PRIVATE_ARIA2_METADATA}/plan.json
+ARTE_EXPECTATION=${PRIVATE_ARIA2_METADATA}/expected.json
+ARTE_SUBTITLE_REFERENCE=${PRIVATE_ARIA2_METADATA}/reference.json
+YTDLP_BATCH_FILE_TMP=${PRIVATE_ARIA2_METADATA}/request
+PATH_RECORD_FD_PATH=${fixture_root}/path-record
+OUTPUT_LOCK_ROOT=${PRIVATE_ARIA2_METADATA}
+get_path_identity MEDIA_WORKSPACE_IDENTITY "${MEDIA_WORKSPACE}" directory
+get_path_identity PRIVATE_ARIA2_METADATA_IDENTITY "${PRIVATE_ARIA2_METADATA}" directory
+get_path_identity PRIVATE_ARIA2_PLAN_IDENTITY "${PRIVATE_ARIA2_PLAN}" regular-file
+get_path_identity FINAL_OUTPUT_IDENTITY "${FINAL_OUTPUT_DIR}" directory
+python3() {
+    if [[ $1 == fixture-tracks ]]; then
+        return 0
+    elif [[ $1 == fixture-media ]]; then
+        if [[ $2 == cleanup-components && ${fixture_case} == cleanup-refused ]]; then
+            return 65
+        elif [[ $2 == remux-arguments ]]; then
+            printf '%s\0' -c copy
+        fi
+        return 0
+    elif [[ $1 == "${PRIVATE_ARIA2_HELPER}" && $2 == check-native-final ]]; then
+        printf '%s\n' "${MEDIA_WORKSPACE}/Ring.mkv"
+    else
+        command python3 "$@"
+    fi
+}
+run_supervised_ytdlp() {
+    if [[ ${fixture_case} == reaped-signal ]]; then
+        fixture_run_supervised_command bash -c 'exit 0'
+        return
+    elif [[ ${fixture_case} == stale-planning-status ]]; then
+        [[ -z ${DOWNLOAD_WAITED_STATUS} ]] || exit 94
+        kill -TERM "${BASHPID}"
+        exit 93
+    fi
+    DOWNLOAD_STATUS=0
+    if [[ ${fixture_case} == partial-cancel ]]; then
+        DOWNLOAD_STATUS=130
+        SHUTDOWN_REQUESTED=true
+        REQUESTED_EXIT_STATUS=130
+    fi
+}
+wait_for_download_exit() {
+    local status=0
+    fixture_wait_for_download_exit "$@" || status=$?
+    if ((status == 0)) && [[ ${fixture_case} == reaped-signal &&
+        ${DOWNLOAD_WAITED_STATUS} == 0 && -z ${DOWNLOAD_WORKER_PID} && -z ${DOWNLOAD_WORKER_PGID} ]]; then
+        # The parent delivers TERM after the real native child was reaped,
+        # while the caller still has not armed its pending-validation flag.
+        [[ ${ARTE_MEDIA_VALIDATION_PENDING} == false && ${ARTE_AV_TRANSFER_ACTIVE} == true ]] || exit 92
+        printf 'reaped\n' >"${fixture_root}/reaped"
+        while :; do sleep 0.01; done
+    fi
+    return "${status}"
+}
+run_supervised_command() {
+    DOWNLOAD_STATUS=0
+    case " $* " in
+        *' probe-components '*)
+            [[ ${ARTE_MEDIA_VALIDATION_PENDING} == true ]] || exit 98
+            if [[ ${fixture_case} == components ]]; then DOWNLOAD_STATUS=65; fi
+            if [[ ${fixture_case} == components-cancel ]]; then
+                DOWNLOAD_STATUS=130
+                SHUTDOWN_REQUESTED=true
+                REQUESTED_EXIT_STATUS=130
+            fi
+            ;;
+        *' probe '*)
+            [[ ${#MEDIA_RETAINED_PATHS[@]} == 1 ]] || exit 97
+            if [[ ${fixture_case} == source ]]; then DOWNLOAD_STATUS=65; fi
+            if [[ ${fixture_case} == source-cancel ]]; then
+                DOWNLOAD_STATUS=143
+                SHUTDOWN_REQUESTED=true
+                REQUESTED_EXIT_STATUS=143
+            fi
+            ;;
+        *) exit 96 ;;
+    esac
+}
+normalize_successful_path_record() { :; }
+if [[ ${fixture_case} == success || ${fixture_case} == cleanup-refused ]]; then
+    # Publication primitives are qualified independently; this isolates the
+    # completed-success transition which releases retained staging.
+    remux_hls_result() { :; }
+    validate_and_publish_result() {
+        [[ ${ARTE_MEDIA_VALIDATION_PENDING} == true ]] || exit 95
+        cp -- "${MEDIA_WORKSPACE}/Ring.mkv" "${FINAL_OUTPUT_DIR}/Ring.tracks.mkv"
+    }
+fi
+trap cleanup EXIT
+trap 'request_shutdown TERM 143' TERM
+trap 'request_shutdown INT 130' INT
+if [[ ${fixture_case} == stale-planning-status ]]; then
+    DOWNLOAD_WAITED_STATUS=0
+fi
+execute_selected_transport
+finalize_download
+'''
+
+def snapshot(directory):
+    result = {}
+    for path in sorted(directory.iterdir()):
+        info = path.lstat()
+        data = os.readlink(path) if path.is_symlink() else hashlib.sha256(path.read_bytes()).hexdigest()
+        result[path.name] = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, data)
+    return result
+
+cases = {'components': 65, 'source': 65, 'components-cancel': 130, 'source-cancel': 143,
+         'collision': 13, 'symlink': 13,
+         'reaped-signal': 143, 'stale-planning-status': 143,
+         'partial-cancel': 130, 'success': 0, 'cleanup-refused': 0}
+for name, status in cases.items():
+    case = root / name
+    case.mkdir(mode=0o700)
+    media, metadata, destination = (case / item for item in ('media', 'metadata', 'destination'))
+    for directory in (media, metadata, destination):
+        directory.mkdir(mode=0o700)
+    for filename in ('Ring.mkv', 'Ring.fvideo.mp4', 'Ring.fjaponais_日.m4a'):
+        (media / filename).write_bytes(('complete source ' + filename).encode())
+    for filename in ('plan.json', 'request', 'expected.json', 'reference.json'):
+        (metadata / filename).write_bytes(b'PRIVATE_RECOVERY_SENTINEL')
+    (case / 'path-record').write_text(str(media / 'Ring.mkv') + '\n')
+    external = case / 'external'
+    external.write_bytes(b'foreign target remains unchanged')
+    if name == 'collision':
+        (media / 'Ring.tracks.mkv').write_bytes(b'foreign collision remains unchanged')
+    elif name == 'symlink':
+        (media / 'Ring.mkv').unlink()
+        (media / 'Ring.mkv').symlink_to(external)
+    before = snapshot(media)
+    command = ['bash', '-s', '--', str(case), name, str(project)]
+    if name == 'reaped-signal':
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+        try:
+            process.stdin.write(source + program)
+            process.stdin.close()
+            process.stdin = None
+            deadline = time.monotonic() + 5
+            while not (case / 'reaped').exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert (case / 'reaped').read_text() == 'reaped\n', 'native child did not reach the post-reap signal barrier'
+            process.terminate()
+            stdout, stderr = process.communicate(timeout=10)
+            result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=10)
+    else:
+        result = subprocess.run(command, input=source + program, text=True, capture_output=True, timeout=10)
+    assert result.returncode == status, (name, result.returncode, result.stderr)
+    assert not metadata.exists(), (name, 'private extraction metadata survived cleanup', result.stderr)
+    assert external.read_bytes() == b'foreign target remains unchanged', name
+    assert 'PRIVATE_RECOVERY_SENTINEL' not in result.stdout + result.stderr, name
+    if name in ('partial-cancel', 'stale-planning-status', 'success'):
+        assert not media.exists(), (name, 'completed cleanup retained a disposable workspace', result.stderr)
+    else:
+        assert snapshot(media) == before, (name, 'validation cleanup changed completed or foreign media', result.stderr)
+    if name in ('success', 'cleanup-refused'):
+        assert (destination / 'Ring.tracks.mkv').read_bytes() == b'complete source Ring.mkv', name
+        assert 'Download completed successfully.' in result.stdout, name
+        assert 'not a validated final result' not in result.stderr, name
+    else:
+        assert not list(destination.iterdir()), (name, 'refused media was published')
+        assert 'Download completed successfully.' not in result.stdout + result.stderr, name
+        if name not in ('partial-cancel', 'stale-planning-status'):
+            assert 'preserving local media for inspection' in result.stderr, name
+            assert 'will not be resumed or published automatically' in result.stderr, name
+        else:
+            assert 'preserving local media for inspection' not in result.stderr, name
+print('ARTE completed-media retention, private metadata cleanup, partial cancellation, collisions and successful cleanup passed.')
+PY_ARTE_RECOVERY
 }
 
 test_mock_engine_network_publication_failures() {

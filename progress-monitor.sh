@@ -187,11 +187,50 @@ register_item() {
 
 sanitize_identifier() {
     local value=${1:-}
+    # The helper preserves Unicode format IDs. Restrict them to letters,
+    # numbers and the same punctuation without treating text as shell syntax.
+    local LC_ALL=C.UTF-8
 
     SANITIZED_IDENTIFIER=''
     if ((${#value} <= 128)) \
-        && [[ ${value} =~ ^[A-Za-z0-9_.:+-]+$ ]]; then
+        && [[ ${value} =~ ^[[:alnum:]_.:+-]+$ ]]; then
         SANITIZED_IDENTIFIER=${value}
+    fi
+}
+
+# V2 is an exact bounded list; validate the whole record before changing state.
+set_multistream_plan() {
+    local count=$1
+    shift
+    local format_id key index
+    local -a accepted_ids=()
+
+    [[ ${count} =~ ^([1-9]|1[0-6])$ ]] || return 0
+    (($# == count)) || return 0
+    for format_id in "$@"; do
+        sanitize_identifier "${format_id}"
+        [[ -n ${SANITIZED_IDENTIFIER} ]] || return 0
+        for key in "${accepted_ids[@]}"; do
+            [[ ${key} != "${SANITIZED_IDENTIFIER}" ]] || return 0
+        done
+        accepted_ids+=("${SANITIZED_IDENTIFIER}")
+    done
+    # Repeated before_dl records must not reset already observed components.
+    ((seen_items == 0)) || return 0
+    PLANNED_KEYS=()
+    PLANNED_FORMAT_IDS=("${accepted_ids[@]}")
+    explicit_multistream_plan=true
+    video_audio_fallback_plan=false
+    for index in "${!accepted_ids[@]}"; do
+        key="plan:$((index + 1))"
+        PLANNED_KEYS+=("${key}")
+        register_item "${key}" "$((index + 1))"
+    done
+    planned_items=${count}
+    phase='downloading'
+    message='Preparing the selected media streams...'
+    if ((stable_percent < DOWNLOAD_START)); then
+        stable_percent=${DOWNLOAD_START}
     fi
 }
 
@@ -202,6 +241,7 @@ set_plan() {
     local key
     local slot=0
 
+    [[ ${explicit_multistream_plan} != true ]] || return 0
     PLANNED_KEYS=()
     PLANNED_FORMAT_IDS=()
     video_audio_fallback_plan=false
@@ -280,6 +320,10 @@ resolve_native_key() {
             fi
         done
     fi
+
+    # Subtitle and combined-result hooks may precede the media transfers.
+    # With an exact V2 plan, only its literal components may advance a slot.
+    [[ ${explicit_multistream_plan} != true ]] || return 0
 
     for key in "${PLANNED_KEYS[@]}"; do
         if ((${ITEM_PERCENT[${key}]:-0} < 100)); then
@@ -503,6 +547,7 @@ handle_v2_progress() {
     phase='downloading'
     resolve_native_key "${format_id}"
     key=${RESOLVED_KEY}
+    [[ -n ${key} ]] || return 0
     register_item "${key}"
 
     sanitize_integer downloaded "${downloaded_text}"
@@ -567,6 +612,7 @@ handle_legacy_progress() {
     phase='downloading'
     resolve_native_key ''
     key=${RESOLVED_KEY}
+    [[ -n ${key} ]] || return 0
     register_item "${key}"
     if ((planned_items <= 0)); then
         planned_items=1
@@ -767,6 +813,12 @@ process_line() {
     last_line=${line}
 
     case ${line} in
+        'YTDLP_PREPARE|subtitles')
+            if [[ ${phase} == analyzing ]]; then
+                message='Preparing and verifying the selected subtitles...'
+            fi
+            return 0
+            ;;
         'YTDLP_STORAGE|local-disk')
             # Keep storage diagnostics in the log without changing the display.
             return 0
@@ -781,6 +833,11 @@ process_line() {
             ((${#fields[@]} <= 5)) || return 0
             while ((${#fields[@]} < 5)); do fields+=(''); done
             handle_plan "${fields[@]:0:5}"
+            ;;
+        YTDLP_PLAN_V2\|*)
+            IFS='|' read -r -a fields <<<"${line}"
+            ((${#fields[@]} >= 3 && ${#fields[@]} <= 18)) || return 0
+            set_multistream_plan "${fields[@]:1}"
             ;;
         YTDLP_PROGRESS_V2\|*)
             IFS='|' read -r -a fields <<<"${line}"
@@ -1007,6 +1064,7 @@ initialize_progress_state() {
     pending_data=''
     discarding_oversized_record=false
     video_audio_fallback_plan=false
+    explicit_multistream_plan=false
 }
 
 open_progress_log() {

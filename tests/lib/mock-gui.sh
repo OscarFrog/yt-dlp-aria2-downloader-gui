@@ -1557,10 +1557,344 @@ test_mock_gui_input_validation() {
         || fail 'Trivial URL validation incorrectly opened a log viewer.'
 }
 
+test_mock_gui_arte_selection() {
+    python3 -I -B - "${PROJECT_DIR}" "${TEST_ROOT}" <<'PY_ARTE_SELECTION'
+import copy
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+project = Path(sys.argv[1])
+source = (project / 'download-video-gui.sh').read_text(encoding='utf-8')
+entrypoint = 'main "$@"\n'
+if not source.endswith(entrypoint):
+    raise AssertionError('GUI entrypoint changed')
+catalogue = {
+    'version': 1, 'id': 'a' * 64, 'policy': 'arte-no-hearing-impaired-v1',
+    'audio': [
+        {'id': 'ja', 'label': 'Japanese — original', 'language': 'ja', 'role': 'main', 'original': True},
+        {'id': 'fr', 'label': 'French', 'language': 'fr', 'role': 'main', 'original': False},
+        {'id': 'de', 'label': 'German', 'language': 'de', 'role': 'main', 'original': False},
+    ],
+    'subtitles': [
+        {'id': language + suffix, 'label': language + ' — ' + role,
+         'language': language, 'role': role, 'forced': role == 'forced'}
+        for language in ('fr', 'de') for suffix, role in (('', 'full'), ('-forced', 'forced'))
+    ],
+}
+zenity_source = r'''#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+root = Path(os.environ['ARTE_GUI_CASE'])
+config = json.loads((root / 'case.json').read_text())
+args = sys.argv[1:]
+with (root / 'dialogs.jsonl').open('a') as output:
+    output.write(json.dumps(args) + '\n')
+text = next((x[7:] for x in args if x.startswith('--text=')), '')
+if '--progress' in args:
+    if config.get('cancel') == 'analysis':
+        sys.exit(1)
+    for line in sys.stdin:
+        if line.strip() == '100':
+            break
+    sys.exit(0)
+elif '--checklist' in args and text.startswith('Audio tracks:'):
+    stage = 'audio'
+elif '--checklist' in args and text.startswith('Subtitles:'):
+    stage = 'subtitles'
+else:
+    raise AssertionError('unexpected extra track dialog')
+if '--radiolist' in args or '--question' in args or any(x.startswith('--extra-button') for x in args):
+    raise AssertionError('track selection added modes, summary or extra buttons')
+if '--ok-label=Continue' not in args or '--cancel-label=Cancel' not in args:
+    raise AssertionError('track checklist controls changed')
+target = Path(os.environ.get('ARTE_GUI_ACTIVE_SELECTION', str(root / 'session' / 'selection.json')))
+if target.exists():
+    raise AssertionError('engine released before the second checklist was accepted')
+state = root / 'session' / 'arte-selection-confirmation.json'
+with (root / 'states.jsonl').open('a') as output:
+    output.write(json.dumps({'stage': stage, 'selection': json.loads(state.read_text())}) + '\n')
+counts_path = root / 'counts.json'
+counts = json.loads(counts_path.read_text()) if counts_path.exists() else {}
+occurrence = counts.get(stage, 0)
+counts[stage] = occurrence + 1
+counts_path.write_text(json.dumps(counts))
+# GTK's highlighted row does not belong to the checkbox result. Only TRUE
+# rows are checked; a highlight-only control must preserve this exact output.
+selected = [args[index + 1] for index, value in enumerate(args[:-2]) if value == 'TRUE']
+answer = config.get(stage, '|'.join(selected))
+if isinstance(answer, list):
+    answer = answer[min(occurrence, len(answer) - 1)]
+cancel = config.get('cancel')
+if cancel == stage or cancel == {'stage': stage, 'occurrence': occurrence + 1}:
+    sys.exit(1)
+print(answer)
+status = config.get('statuses', {}).get(stage, 0)
+if isinstance(status, list):
+    status = status[min(occurrence, len(status) - 1)]
+sys.exit(status)
+'''
+fixture = r'''
+source "$1"
+TEMP_DIR="$2/session"
+RUNTIME_TMPDIR="$2"
+SCRIPT_DIR="$3"
+ARTE_CATALOG_FILE="${TEMP_DIR}/catalogue.json"
+ARTE_SELECTION_FILE="${TEMP_DIR}/selection.json"
+LOG_FILE="${TEMP_DIR}/live.log"
+export ARTE_GUI_ACTIVE_SELECTION="${ARTE_SELECTION_FILE}"
+wait_for_arte_catalogue() { :; }
+show_error() { printf '%s\n' "$1" >&2; }
+show_error_with_log() { printf '%s\n' "$1" "$2" >&2; }
+select_arte_tracks
+if [[ -f "$2/second-catalogue.json" ]]; then
+    ARTE_CATALOG_FILE="$2/second-catalogue.json"
+    ARTE_SELECTION_FILE="${TEMP_DIR}/second-selection.json"
+    export ARTE_GUI_ACTIVE_SELECTION="${ARTE_SELECTION_FILE}"
+    select_arte_tracks
+fi
+'''
+with tempfile.TemporaryDirectory(prefix='arte-gui-', dir=sys.argv[2]) as temporary:
+    root = Path(temporary)
+    functions = root / 'functions.sh'
+    functions.write_text(source[:-len(entrypoint)], encoding='utf-8')
+    binary = root / 'bin'
+    binary.mkdir()
+    zenity = binary / 'zenity'
+    zenity.write_text(zenity_source, encoding='utf-8')
+    zenity.chmod(0o700)
+
+    none_id = '__no_subtitles__'
+
+    def checklist(args):
+        return {args[index + 1]: (value == 'TRUE', args[index + 2])
+                for index, value in enumerate(args[:-2]) if value in ('TRUE', 'FALSE')}
+
+    def run(name, config, expected, data=None, second_data=None, count=2):
+        case = root / name
+        case.mkdir(mode=0o700)
+        session = case / 'session'
+        session.mkdir(mode=0o700)
+        payload = session / 'catalogue.json'
+        payload.write_text(json.dumps(data if data is not None else catalogue), encoding='utf-8')
+        payload.chmod(0o600)
+        if second_data is not None:
+            second = case / 'second-catalogue.json'
+            second.write_text(json.dumps(second_data))
+            second.chmod(0o600)
+        (case / 'case.json').write_text(json.dumps(config))
+        environment = os.environ.copy()
+        environment.update(PATH=str(binary) + os.pathsep + environment['PATH'], ARTE_GUI_CASE=str(case))
+        result = subprocess.run(['bash', '-c', fixture, 'bash', str(functions), str(case), str(project)],
+                                env=environment, text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=20, check=False)
+        if result.returncode != expected:
+            detail = (session / 'live.log').read_text() if (session / 'live.log').exists() else ''
+            raise AssertionError(f'{name}: expected {expected}, got {result.returncode}: {result.stderr}; {detail}')
+        confirmed = session / ('second-selection.json' if second_data is not None else 'selection.json')
+        if expected != 0 and confirmed.exists():
+            raise AssertionError(name + ': failed/canceled dialog released the engine')
+        dialogs_path = case / 'dialogs.jsonl'
+        dialogs = [json.loads(x) for x in dialogs_path.read_text().splitlines()] if dialogs_path.exists() else []
+        states_path = case / 'states.jsonl'
+        states = [json.loads(x) for x in states_path.read_text().splitlines()] if states_path.exists() else []
+        assert len(dialogs) == count, (name, 'unexpected track dialog count', len(dialogs), count)
+        for args in dialogs:
+            assert '--checklist' in args and '--radiolist' not in args and '--question' not in args, name
+            assert not any(x.startswith('--extra-button') for x in args), name
+            if any('hearing_impaired' in x or 'de-acc' in x or 'confort' in x for x in args):
+                raise AssertionError(name + ': excluded track appeared in a dialog')
+            if any(any(token in x for token in ('ARTE', 'metadata', 'verification pending', 'possible duplicate')) for x in args):
+                raise AssertionError(name + ': track choices expose technical diagnostics')
+        subtitle_dialogs = [args for args in dialogs if '--column=Subtitles' in args]
+        for args in subtitle_dialogs:
+            keys = list(checklist(args))
+            assert keys[0] == none_id and checklist(args)[none_id][1] == 'No subtitles', name
+        selected = json.loads(confirmed.read_text()) if confirmed.exists() else None
+        if selected is not None:
+            assert none_id not in selected['subtitles'], name
+            assert selected['audio_mode'] == 'custom' and selected['subtitle_mode'] in ('none', 'custom'), name
+        return selected, dialogs, states
+
+    selected, dialogs, states = run('initial-vo-french', {}, 0)
+    assert states[0]['selection']['audio_mode'] == 'auto'
+    assert states[0]['selection']['audio'] == ['ja'] and states[0]['selection']['subtitles'] == ['fr']
+    assert selected['audio'] == ['ja'] and selected['subtitles'] == ['fr']
+    assert selected['default_audio'] == 'ja' and selected['default_subtitle'] == 'fr'
+    assert checklist(dialogs[1])['fr'] == (True, 'fr — full (default)')
+    assert checklist(dialogs[1])[none_id][0] is False
+
+    # Each transition reaches the subtitle screen with a fresh recommendation
+    # for the accepted audio, not the initial programme-wide recommendation.
+    french_original = copy.deepcopy(catalogue)
+    for track in french_original['audio']:
+        track['original'] = track['language'] == 'fr'
+    unknown = copy.deepcopy(catalogue)
+    for track in unknown['audio']:
+        track['original'] = False
+        track['label'] = track['language']
+    forced_only = copy.deepcopy(catalogue)
+    forced_only['subtitles'] = [x for x in forced_only['subtitles'] if x['role'] == 'forced']
+    language_cases = {}
+    for lang in ('und', 'mul'):
+        value = copy.deepcopy(catalogue)
+        value['audio'] = [{'id': lang, 'label': 'Unidentified audio', 'language': lang,
+                           'role': 'main', 'original': True, 'language_reliable': False}]
+        language_cases[lang] = value
+    contradictory = copy.deepcopy(catalogue)
+    contradictory['audio'][0]['language_reliable'] = False
+    transitions = [
+        ('ja-to-fr', catalogue, 'fr', 'fr', []),
+        ('ja-to-de', catalogue, 'de', 'de', ['fr']),
+        ('multi-with-vo', catalogue, 'fr|ja', 'ja', ['fr']),
+        ('multi-without-vo', catalogue, 'de|fr', 'fr', []),
+        ('french-vo-to-foreign', french_original, 'ja', 'ja', ['fr']),
+        ('french-vo-to-french', french_original, 'fr', 'fr', []),
+        ('unknown-original-french', unknown, 'fr', 'fr', []),
+        ('unknown-language', language_cases['und'], 'und', 'und', []),
+        ('multiple-languages', language_cases['mul'], 'mul', 'mul', []),
+        ('contradictory-language', contradictory, 'ja', 'ja', []),
+        ('full-translation-absent', forced_only, 'ja', 'ja', []),
+    ]
+    for name, data, audio, default, subtitles in transitions:
+        selected, dialogs, states = run(name, {'audio': audio}, 0, data)
+        seed = states[1]['selection']
+        assert seed['default_audio'] == default and seed['subtitles'] == subtitles, (name, seed)
+        assert selected['default_audio'] == default and selected['subtitles'] == subtitles, (name, selected)
+        checks = checklist(dialogs[1])
+        assert checks[none_id][0] == (not subtitles), name
+        if not subtitles:
+            assert all('(default)' not in label for checked, label in checks.values()), name
+        else:
+            assert checks['fr'][0] and '(default)' in checks['fr'][1], name
+
+    prior_default = copy.deepcopy(unknown)
+    prior_default['audio'] = [x for x in prior_default['audio'] if x['language'] != 'fr']
+    prior_default['audio'][1]['default'] = True
+    selected, _, states = run('preserve-previous-audio-default', {'audio': 'ja|de'}, 0, prior_default)
+    assert states[0]['selection']['default_audio'] == 'de' and selected['default_audio'] == 'de'
+    selected, _, _ = run('all-tracks-checkboxes', {'audio': 'ja|fr|de', 'subtitles': 'fr|fr-forced|de|de-forced'}, 0)
+    assert len(selected['audio']) == 3 and len(selected['subtitles']) == 4 and selected['default_audio'] == 'ja'
+    selected, _, _ = run('explicit-no-subtitles', {'subtitles': none_id}, 0)
+    assert selected['subtitle_mode'] == 'none' and selected['subtitles'] == [] and selected['default_subtitle'] is None
+    selected, _, _ = run('empty-subtitles', {'subtitles': ''}, 0)
+    assert selected['subtitle_mode'] == 'none' and selected['subtitles'] == []
+    selected, _, _ = run('explicit-subtitles-after-none-default', {'audio': 'fr', 'subtitles': 'de'}, 0)
+    assert selected['audio'] == ['fr'] and selected['subtitles'] == ['de'], 'explicit subtitles were replaced by automatic None'
+    no_subtitles = copy.deepcopy(catalogue)
+    no_subtitles['subtitles'] = []
+    selected, dialogs, _ = run('no-subtitles-available', {}, 0, no_subtitles)
+    assert list(checklist(dialogs[1])) == [none_id] and selected['subtitles'] == []
+    selected, dialogs, _ = run('highlight-no-subtitles-only', {'highlight': none_id}, 0)
+    assert selected['subtitles'] == ['fr'] and checklist(dialogs[1])[none_id][0] is False
+
+    for name, audio, conflicting, resolved, expected_subtitles in (
+        ('conflict-initial-full', 'ja', none_id + '|fr', none_id, []),
+        ('conflict-initial-none', 'fr', none_id + '|de', 'de', ['de']),
+        ('conflict-change-translation', 'ja', none_id + '|de', 'de', ['de']),
+    ):
+        selected, dialogs, _ = run(name, {'audio': audio, 'subtitles': [conflicting, resolved]}, 0, count=3)
+        retried = checklist(dialogs[2])
+        assert {key for key, (checked, label) in retried.items() if checked} == set(conflicting.split('|'))
+        assert all('(default)' not in label for checked, label in retried.values()), name
+        assert any('not both' in x for x in dialogs[2]), name
+        assert selected['subtitles'] == expected_subtitles, name
+    run('conflict-then-cancel', {'subtitles': none_id + '|fr',
+        'cancel': {'stage': 'subtitles', 'occurrence': 2}}, 130, count=3)
+    run('cancel-audio', {'cancel': 'audio'}, 130, count=1)
+    run('cancel-subtitles', {'cancel': 'subtitles'}, 130)
+    run('empty-audio', {'audio': ''}, 65, count=1)
+    for answer in ('ja|ja', 'ja|', 'ja||fr', 'ko', none_id, 'ja;echo bad', 'x' * 4097):
+        run('invalid-audio-' + str(len(list(root.iterdir()))), {'audio': answer}, 65, count=1)
+    for answer in ('de-acc', none_id + '|de-acc', 'fr|fr', none_id + '|' + none_id,
+                   'fr|', 'fr||' + none_id, 'fr;echo bad', 'x' * 4097):
+        run('invalid-subtitles-' + str(len(list(root.iterdir()))), {'subtitles': answer}, 65)
+    run('cancel-status-one-label', {'audio': 'Use automatic choice', 'statuses': {'audio': 1}}, 130, count=1)
+    run('audio-error-status', {'statuses': {'audio': 5}}, 1, count=1)
+    run('subtitles-error-status', {'statuses': {'subtitles': 5}}, 1)
+    second = copy.deepcopy(catalogue)
+    second['id'] = 'b' * 64
+    selected, _, states = run('new-url-reset', {'audio': ['fr', 'ja'],
+        'subtitles': [none_id, 'fr']}, 0, second_data=second, count=4)
+    restarted = [item['selection'] for item in states if item['stage'] == 'audio'][1]
+    assert restarted['audio_mode'] == 'auto' and restarted['subtitle_mode'] == 'auto'
+    assert restarted['audio'] == ['ja'] and restarted['subtitles'] == ['fr']
+    assert selected['catalogue_id'] == 'b' * 64 and selected['subtitles'] == ['fr']
+    for field, value in (('id', none_id), ('id', 42), ('role', 'hearing_impaired')):
+        injected = copy.deepcopy(catalogue)
+        injected['subtitles'][0][field] = value
+        run('invalid-public-' + field + '-' + str(value), {}, 65, injected, count=0)
+
+    hosts = r'''
+source "$1"
+url_is_arte 'https://www.arte.tv/fr/videos/example/'
+url_is_arte 'https://ARTE.TV.:443/fr/videos/example/'
+! url_is_arte 'https://arte.tv.example.org/fr/videos/example/'
+! url_is_arte 'https://notarte.tv/fr/videos/example/'
+! url_is_arte 'https://user@arte.tv/fr/videos/example/'
+'''
+    subprocess.run(['bash', '-c', hosts, 'bash', str(functions)], check=True, timeout=5)
+
+    engine = root / 'catalogue-engine.py'
+    engine.write_text('''import os, pathlib, sys, time
+time.sleep(0.3)
+if sys.argv[2] != 'missing':
+    target = pathlib.Path(sys.argv[1])
+    temporary = target.with_suffix('.tmp')
+    temporary.write_text('{}')
+    temporary.chmod(0o600)
+    os.replace(temporary, target)
+else:
+    sys.exit(65)
+while True:
+    time.sleep(0.2)
+''')
+    analysis_fixture = r'''
+source "$1"
+TEMP_DIR="$2/session"
+RUNTIME_TMPDIR="$2"
+SCRIPT_DIR="$3"
+ARTE_CATALOG_FILE="${TEMP_DIR}/catalogue.json"
+PROGRESS_PIPE="${TEMP_DIR}/progress.pipe"
+PROGRESS_DIALOG_ERROR_FILE="${TEMP_DIR}/progress.stderr"
+LOG_FILE="${TEMP_DIR}/live.log"
+PGID_FILE="${TEMP_DIR}/pgid"
+WORKER_IDENTITY_TOKEN="${TEMP_DIR}/identity"
+mkfifo -m 600 -- "${PROGRESS_PIPE}"
+show_error() { printf '%s\n' "$1" >&2; }
+show_error_with_log() { printf '%s\n' "$1" "$2" >&2; }
+trap 'stop_worker || true; stop_gui_children || true' EXIT
+COMMAND=(python3 -I -B "$4" "${ARTE_CATALOG_FILE}" "$5")
+start_download_worker
+wait_for_arte_catalogue
+'''
+    for name, config, expected in [('ready', {}, 0), ('cancel', {'cancel': 'analysis'}, 130), ('missing', {}, 1)]:
+        case = root / ('analysis-' + name)
+        case.mkdir(mode=0o700)
+        (case / 'session').mkdir(mode=0o700)
+        (case / 'case.json').write_text(json.dumps(config))
+        environment = os.environ.copy()
+        environment.update(PATH=str(binary) + os.pathsep + environment['PATH'], ARTE_GUI_CASE=str(case))
+        result = subprocess.run(['bash', '-c', analysis_fixture, 'bash', str(functions), str(case), str(project), str(engine), name],
+                                env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=15, check=False)
+        if result.returncode != expected:
+            raise AssertionError(f'analysis-{name}: expected {expected}, got {result.returncode}: {result.stderr}')
+print('GUI two-checklist track choices, audio transitions, strict None conflicts, URL reset and cancellation checks passed.')
+PY_ARTE_SELECTION
+}
+
 run_mock_gui_progress_group() {
     test_mock_gui_aria_progress
     test_mock_gui_profiles
     test_mock_gui_progress_completion
+    test_mock_gui_arte_selection
 }
 
 test_mock_gui_settings_signal_cleanup() {

@@ -2454,6 +2454,9 @@ test_real_media_validation_mutations() {
 test_real_fragment_routing_and_mutations() {
     record_phase fragments
 }
+test_real_arte_scenarios() {
+    record_phase arte
+}
 verify_cifs_directory() {
     local role=''
     case $1:$2 in
@@ -2469,7 +2472,7 @@ verify_cifs_directory() {
     return 0
 }
 '''
-    phase_prefix = ["parse", "prepare", "direct", "existing", "mutations", "fragments"]
+    phase_prefix = ["parse", "prepare", "direct", "existing", "mutations", "fragments", "arte"]
 
     def run_main(actual, label, failure):
         trace = root / f"main-{label}.trace"
@@ -2974,7 +2977,7 @@ composition = "engine_internal_record_cleanup"
 network = ["engine_network_destination", "engine_network_failures",
            "engine_network_publication_failures",
            "engine_network_signals", "engine_network_cleanup_boundaries"]
-progress = ["gui_aria_progress", "gui_profiles", "gui_progress_completion"]
+progress = ["gui_aria_progress", "gui_profiles", "gui_progress_completion", "gui_arte_selection"]
 state = ["gui_url_redaction_cases", "gui_live_log_retention_unconfirmed_shutdown",
          "gui_cleanup_unconfirmed_shutdown", "gui_config_recovery",
          "gui_settings_signal_cleanup", "gui_file_selection", "gui_prune_metadata",
@@ -3003,7 +3006,7 @@ groups = {
     "runtime-validation": [runtime[i] for i in (2, 4, 6, 7)],
 }
 expected_all = core + hls + staging + network + progress + state + signals + runtime
-assert len(expected_all) == len(set(expected_all)) == 63
+assert len(expected_all) == len(set(expected_all)) == 64
 assert source.endswith('main "$@"\n')
 # The actual entry point still parses options, bootstraps its subreaper,
 # creates fixtures and initializes/cleans their environment. Replace only
@@ -3445,7 +3448,7 @@ if actual_bash != expected_bash:
 expected_python = collections.Counter(
     ("-B", f"./tests/{name}-integration.py")
     for name in ("shfmt-version-handoff", "release-docs", "push-version",
-                 "ci-validation", "source-archive", "shfmt-bootstrap", "zenity-autonomous")
+                 "ci-validation", "source-archive", "shfmt-bootstrap", "zenity-autonomous", "art-tracks", "art-subtitle", "art-media")
 )
 actual_python = collections.Counter(
     read_record(path) for path in root.glob("python.*.bin")

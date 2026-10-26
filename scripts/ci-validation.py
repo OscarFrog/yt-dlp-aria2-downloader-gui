@@ -519,6 +519,13 @@ def event_pull():
     return result
 
 
+def wait_minutes(value):
+    """Accept only a small explicit bound for the required-cohort wait."""
+    if not re.fullmatch(r"[1-9][0-9]?", value) or int(value) > 90:
+        raise argparse.ArgumentTypeError("timeout minutes must be between 1 and 90")
+    return int(value)
+
+
 def main():
     for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, interrupt)
@@ -526,9 +533,12 @@ def main():
     parser.add_argument("command", choices=("verify", "wait-required", "verify-schedule"))
     parser.add_argument("--commit", required=True)
     parser.add_argument("--run-id", type=int)
+    parser.add_argument("--timeout-minutes", type=wait_minutes)
     args = parser.parse_args()
     try:
         oid(args.commit)
+        require(args.timeout_minutes is None or args.command == "wait-required",
+                "A timeout is only valid for required qualification waiting.")
         require(os.environ.get("GITHUB_REPOSITORY", REPOSITORY) == REPOSITORY,
                 "Qualification promotion is restricted to the canonical repository.")
         api = GitHub()
@@ -540,7 +550,7 @@ def main():
             print(json.dumps(Verifier(api).verify(args.commit), sort_keys=True, indent=2))
             return 0
         pull = event_pull()
-        minutes = 45
+        minutes = args.timeout_minutes if args.timeout_minutes is not None else 45
         deadline = time.monotonic() + minutes * 60
         verified = {}
         verifier = Verifier(api)

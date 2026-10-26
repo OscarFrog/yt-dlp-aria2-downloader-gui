@@ -6,9 +6,11 @@ Fixtures replace authenticated API reads; this suite never contacts GitHub.
 """
 
 import copy
+import contextlib
 from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -1159,6 +1161,70 @@ class WorkflowContractTests(unittest.TestCase):
         sequence = re.search(r"(?m)^    needs: \[([a-z0-9, -]+)\]$", job)
         return {part.strip() for part in sequence.group(1).split(",")} if sequence else set()
 
+    def assert_media_provisioning_budgets(self, text, job_name, expected_minutes):
+        job = self.jobs(text)[job_name]
+        minutes = int(re.search(r"(?m)^    timeout-minutes: (\d+)$", job).group(1))
+        self.assertEqual(minutes, expected_minutes)
+        steps = re.split(r"(?m)^      - ", job)[1:]
+        budget_seconds = 0
+        tests_seconds = 0
+        for step in steps:
+            explicit = re.search(r"(?m)^        timeout-minutes: (\d+)$", step)
+            if explicit:
+                budget_seconds += int(explicit.group(1)) * 60
+            else:
+                bounded = re.findall(r"timeout --signal=TERM --kill-after=10s ([0-9]+)m \\\n", step)
+                self.assertEqual(len(bounded), 1, "Every media step needs one bounded deadline: " + step)
+                duration = int(bounded[0]) * 60 + 10
+                budget_seconds += duration
+                tests_seconds += duration
+        self.assertGreaterEqual(minutes * 60, budget_seconds + 120)
+        expected_tests = 33 * 60 + 40 if job_name == "release-runtime" else 41 * 60 + 50
+        self.assertEqual(tests_seconds, expected_tests, "Test deadlines and coverage must remain unchanged")
+        install = next(step for step in steps if "apt_options=(" in step)
+        self.assertIn("timeout-minutes: 8", install)
+        for option in ("Acquire::Retries=3", "Acquire::http::Timeout=30",
+                       "Acquire::https::Timeout=30", "DPkg::Lock::Timeout=60"):
+            self.assertEqual(install.count(option), 1)
+        self.assertIn('sudo timeout --signal=TERM --kill-after=10s 2m \\\n            apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update', install)
+        self.assertIn('sudo timeout --signal=TERM --kill-after=10s 4m \\\n            env DEBIAN_FRONTEND=noninteractive \\\n            apt-get "${apt_options[@]}" install --yes --no-install-recommends', install)
+        for forbidden in ("continue-on-error", "|| true", "--allow-unauthenticated", "--fix-missing",
+                          "trusted=yes", "Acquire::AllowInsecureRepositories", "/etc/apt/sources"):
+            self.assertNotIn(forbidden, install)
+        self.assertLess(install.index('"${apt_options[@]}" -o APT::Update::Error-Mode=any update'),
+                        install.index('"${apt_options[@]}" install'))
+        self.assertLess(install.index('"${apt_options[@]}" install'), install.index("python3 -m venv"))
+
+    def test_media_provisioning_and_job_budgets_cover_all_original_tests(self):
+        for workflow, name, minutes in (("real-tools.yml", "pinned-local-media", 65),
+                                        ("real-tools.yml", "current-stable-local-media", 65),
+                                        ("release.yml", "release-runtime", 50)):
+            with self.subTest(job=name):
+                self.assert_media_provisioning_budgets(self.workflow(workflow), name, minutes)
+
+    def test_media_deadlines_cannot_be_removed_or_consume_the_test_budget(self):
+        for workflow, name, minutes in (("real-tools.yml", "pinned-local-media", 65),
+                                        ("real-tools.yml", "current-stable-local-media", 65),
+                                        ("release.yml", "release-runtime", 50)):
+            text = self.workflow(workflow)
+            job = self.jobs(text)[name]
+            for old, new in ((f"    timeout-minutes: {minutes}", "    timeout-minutes: 25"),
+                             ("        timeout-minutes: 8", "        timeout-minutes: 30"),
+                             ("sudo timeout --signal=TERM --kill-after=10s 2m", "sudo"),
+                             ("sudo timeout --signal=TERM --kill-after=10s 4m", "sudo"),
+                             ("Acquire::http::Timeout=30", "Acquire::http::Timeout=0"),
+                             ("Acquire::https::Timeout=30", "Acquire::https::Timeout=0"),
+                             ("DPkg::Lock::Timeout=60", "DPkg::Lock::Timeout=-1"),
+                             ("Acquire::Retries=3", "Acquire::Retries=0"),
+                             ("-o APT::Update::Error-Mode=any", ""),
+                             ('"${apt_options[@]}" -o APT::Update::Error-Mode=any update', '"${apt_options[@]}" -o APT::Update::Error-Mode=any update || true'),
+                             ("8m \\\n            bash ./tests/real-tools-integration.sh", "7m \\\n            bash ./tests/real-tools-integration.sh")):
+                with self.subTest(job=name, mutation=old):
+                    self.assertIn(old, job)
+                    mutated = text.replace(job, job.replace(old, new, 1), 1)
+                    with self.assertRaises(AssertionError):
+                        self.assert_media_provisioning_budgets(mutated, name, minutes)
+
     def assert_gate(self, jobs, job, gate, seen=None):
         seen = (seen or set()) | {job}
         dependencies = self.dependencies(jobs[job])
@@ -1334,7 +1400,7 @@ exit "${CHECK_VALIDATION_STATUS}"
         job = self.jobs(text)["current-stable-local-media"]
         self.assertEqual(self.dependencies(job), {"identity"})
         self.assertIn("if: github.event_name == 'schedule'", job)
-        self.assertIn("timeout-minutes: 25", job)
+        self.assertIn("timeout-minutes: 65", job)
         steps = {step.splitlines()[0][6:]: step for step in re.split(r"(?m)^      - ", job)
                  if step.startswith("name: ")}
         self.assertEqual(set(steps), SCHEDULED_STEPS)
@@ -1672,6 +1738,15 @@ exit "${CHECK_VALIDATION_STATUS}"
         self.assertIn('${MOCK_STRESS_RESULT} != success', gate)
         self.assertIn('${RUNTIME_STRESS_RESULT} != success', gate)
         self.assertNotIn("package-cleanup-stress", jobs)
+        self.assertIn('wait-required --commit "${EXPECTED_SHA}" --timeout-minutes 75', gate)
+        gate_minutes = int(re.search(r"(?m)^    timeout-minutes: (\d+)$", gate).group(1))
+        self.assertEqual(gate_minutes, 80)
+        media_jobs = self.jobs(self.workflow("real-tools.yml"))
+        maximum_job = max(int(re.search(r"(?m)^    timeout-minutes: (\d+)$", media_jobs[name]).group(1))
+                          for name in ("pinned-local-media", "current-stable-local-media"))
+        identity = int(re.search(r"(?m)^    timeout-minutes: (\d+)$", media_jobs["identity"]).group(1))
+        self.assertGreaterEqual(75, maximum_job + identity + 5, "Reserve identity and runner queue margin")
+        self.assertGreaterEqual(gate_minutes, 75 + 5, "Leave time for checkout and final API revalidation")
 
     def test_existing_required_stress_gate_waits_for_complementary_qualification(self):
         self.assert_required_stress_gate(self.workflow("stress.yml"))
@@ -1685,12 +1760,334 @@ exit "${CHECK_VALIDATION_STATUS}"
             ("scripts/ci-validation.py wait-required --commit", "true"),
             ('${MOCK_STRESS_RESULT} != success', "false"),
             ('${RUNTIME_STRESS_RESULT} != success', "false"),
+            (' --timeout-minutes 75', ''),
+            (' --timeout-minutes 75', ' --timeout-minutes 45'),
+            ('    timeout-minutes: 80', '    timeout-minutes: 50'),
         )
         for old, new in mutations:
             with self.subTest(mutation=old):
                 self.assertIn(old, text)
                 with self.assertRaises(AssertionError):
                     self.assert_required_stress_gate(text.replace(old, new, 1))
+
+
+class WaitBudgetTests(unittest.TestCase):
+    def test_wait_budget_rejects_invalid_values_before_external_reads(self):
+        for value in ("0", "91", "100", "-1", "01", "+2", "1.5", "", "9" * 1000):
+            with self.subTest(value=value), patch.object(CHECK.signal, "signal"), \
+                    patch.object(CHECK, "GitHub") as api, \
+                    patch.object(sys, "argv", ["ci-validation", "wait-required", "--commit", SOURCE,
+                                               "--timeout-minutes", value]), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    CHECK.main()
+                self.assertEqual(raised.exception.code, 2)
+                api.assert_not_called()
+        for value in ("1", "45", "75", "90"):
+            self.assertEqual(CHECK.wait_minutes(value), int(value))
+
+    def test_wait_budget_cannot_change_promotion_or_schedule_verification(self):
+        for command in ("verify", "verify-schedule"):
+            with self.subTest(command=command), patch.object(CHECK.signal, "signal"), \
+                    patch.object(CHECK, "GitHub") as api, \
+                    patch.object(sys, "argv", ["ci-validation", command, "--commit", SOURCE,
+                                               "--timeout-minutes", "75"]), \
+                    contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(CHECK.main(), 1)
+                self.assertIn("only valid for required qualification waiting", errors.getvalue())
+                api.assert_not_called()
+
+    def test_default_wait_stays_45_minutes_and_explicit_75_accepts_later_proof(self):
+        for explicit, accepted in ((False, False), (True, True)):
+            clock = [0]
+            calls = []
+
+            def required(*_args):
+                calls.append(clock[0])
+                if len(calls) == 1:
+                    clock[0] = 46 * 60
+                    raise CHECK.Pending("incomplete fixture")
+                return {"real-tools.yml": 400}
+
+            arguments = ["ci-validation", "wait-required", "--commit", SOURCE]
+            if explicit:
+                arguments += ["--timeout-minutes", "75"]
+            with self.subTest(explicit=explicit), patch.object(CHECK.signal, "signal"), \
+                    patch.object(CHECK, "GitHub"), patch.object(CHECK, "event_pull", return_value={}), \
+                    patch.object(CHECK, "Verifier") as verifier, patch.object(sys, "argv", arguments), \
+                    patch.object(CHECK.time, "monotonic", side_effect=lambda: clock[0]), \
+                    patch.object(CHECK.time, "sleep", side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)), \
+                    contextlib.redirect_stdout(io.StringIO()) as output, \
+                    contextlib.redirect_stderr(io.StringIO()) as errors:
+                verifier.return_value.required.side_effect = required
+                self.assertEqual(CHECK.main(), 0 if accepted else 1)
+                self.assertEqual(len(calls), 2 if accepted else 1)
+                self.assertEqual("qualification accepted" in output.getvalue(), accepted)
+                if not accepted:
+                    self.assertIn("within 45 minutes", errors.getvalue())
+
+    def test_explicit_wait_still_expires_and_preserves_interruption(self):
+        for interrupted in (False, True):
+            clock = [0]
+            with self.subTest(interrupted=interrupted), patch.object(CHECK.signal, "signal"), \
+                    patch.object(CHECK, "GitHub"), patch.object(CHECK, "event_pull", return_value={}), \
+                    patch.object(CHECK, "Verifier") as verifier, \
+                    patch.object(sys, "argv", ["ci-validation", "wait-required", "--commit", SOURCE,
+                                               "--timeout-minutes", "75"]), \
+                    patch.object(CHECK.time, "monotonic", side_effect=lambda: clock[0]), \
+                    patch.object(CHECK.time, "sleep", side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)), \
+                    contextlib.redirect_stdout(io.StringIO()) as output, \
+                    contextlib.redirect_stderr(io.StringIO()) as errors:
+                verifier.return_value.required.side_effect = (CHECK.Interrupted(CHECK.signal.SIGTERM)
+                                                               if interrupted else CHECK.Pending("incomplete fixture"))
+                self.assertEqual(CHECK.main(), 143 if interrupted else 1)
+                self.assertNotIn("qualification accepted", output.getvalue())
+                if interrupted:
+                    self.assertIn("interrupted; no proof was accepted", errors.getvalue())
+                else:
+                    self.assertEqual(clock[0], 75 * 60)
+                    self.assertIn("within 75 minutes", errors.getvalue())
+
+
+class UbuntuMirrorTests(unittest.TestCase):
+    """Exercise the runner-specific change on files outside the host APT tree."""
+
+    TARGETS = {
+        "real-tools.yml": {"pinned-local-media", "current-stable-local-media"},
+        "qualification.yml": {"ffmpeg-ubuntu-6", "ffmpeg-upstream-9"},
+        "packages.yml": {"source-archive", "deb"},
+        "release.yml": {"release-runtime", "zip", "deb"},
+    }
+    COMMAND = "sudo python3 -I -B scripts/ci-ubuntu-mirrors.py"
+    ORIGINAL = ("http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n"
+                "https://archive.ubuntu.com/ubuntu/\tpriority:2\n"
+                "https://security.ubuntu.com/ubuntu/\tpriority:3\n")
+    SELECTED = ("https://archive.ubuntu.com/ubuntu/\tpriority:1\n"
+                "https://security.ubuntu.com/ubuntu/\tpriority:2\n")
+    SOURCE = ("# Hosted runner Ubuntu sources\nTypes: deb\n"
+              "URIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
+              "Suites: noble noble-updates noble-backports\n"
+              "Components: main universe restricted multiverse\n"
+              "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
+              "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
+              "Suites: noble-security\nComponents: main universe restricted multiverse\n"
+              "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n")
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("ci_ubuntu_mirrors", PROJECT / "scripts/ci-ubuntu-mirrors.py")
+        cls.helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.helper)
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.apt = self.root / "apt"
+        self.apt.mkdir(mode=0o755)
+        self.sources = self.apt / "sources.list.d"
+        self.sources.mkdir(mode=0o755)
+        self.source = self.sources / "ubuntu.sources"
+        self.source.write_text(self.SOURCE)
+        self.source.chmod(0o640)
+        self.mirrors = self.apt / "apt-mirrors.txt"
+        self.mirrors.write_text(self.ORIGINAL)
+        self.mirrors.chmod(0o644)
+        self.external = self.sources / "external.list"
+        self.external.write_text("external fixture retained byte for byte\n")
+
+    def configure(self):
+        return self.helper.configure(self.apt, os.geteuid())
+
+    def assert_preserved(self):
+        self.assertEqual(self.source.read_text(), self.SOURCE)
+        self.assertEqual(self.source.stat().st_mode & 0o7777, 0o640)
+        self.assertEqual(self.external.read_text(), "external fixture retained byte for byte\n")
+        self.assertFalse(list(self.apt.glob(".apt-mirrors-*")))
+
+    def test_exact_runner_list_selected_atomically_and_repeated_without_change(self):
+        self.assertEqual(len(self.ORIGINAL.encode()), 144)
+        before = self.mirrors.stat()
+        self.assertTrue(self.configure())
+        after = self.mirrors.stat()
+        self.assertEqual(self.mirrors.read_text(), self.SELECTED)
+        self.assertNotEqual(before.st_ino, after.st_ino)
+        self.assertEqual((before.st_mode, before.st_uid, before.st_gid),
+                         (after.st_mode, after.st_uid, after.st_gid))
+        self.assertFalse(self.configure())
+        self.assertEqual(self.mirrors.stat().st_ino, after.st_ino)
+        self.assert_preserved()
+
+    def test_unknown_or_weakened_mirrors_refused_before_change(self):
+        for value in (self.ORIGINAL.replace("archive.ubuntu.com", "attacker.invalid", 1),
+                      self.ORIGINAL.replace("https://archive", "http://archive"),
+                      self.ORIGINAL.replace("priority:1", "priority:9"),
+                      self.ORIGINAL.replace("priority:3", "priority:3 trusted=yes"),
+                      self.ORIGINAL + "https://unknown.invalid/ priority:4\n",
+                      self.ORIGINAL + self.ORIGINAL, "", "x" * 16385):
+            with self.subTest(value=value[:60]):
+                self.mirrors.write_text(value)
+                with self.assertRaises(ValueError):
+                    self.configure()
+                self.assertEqual(self.mirrors.read_text(), value)
+                self.assert_preserved()
+
+    def test_unknown_sources_or_signature_configuration_refused_without_write(self):
+        for value in (self.SOURCE.replace(self.helper.MIRROR_URI, "http://azure.archive.ubuntu.com/ubuntu/", 1),
+                      self.SOURCE.replace(self.helper.KEYRING, "/tmp/untrusted.gpg", 1),
+                      self.SOURCE + "Trusted: yes\n", self.SOURCE + "Allow-Insecure: yes\n",
+                      self.SOURCE + "URIs: https://unknown.invalid/\n", "", "x" * 16385,
+                      self.SOURCE.replace("Types: deb", " Types: deb", 1)):
+            with self.subTest(value=value[:60]):
+                self.source.write_text(value)
+                with self.assertRaises(ValueError):
+                    self.configure()
+                self.assertEqual(self.source.read_text(), value)
+                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+                self.assertFalse(list(self.apt.glob(".apt-mirrors-*")))
+
+    def test_symlinks_parent_links_hardlinks_and_fifo_refused_without_following(self):
+        for path in (self.mirrors, self.source, self.sources, self.apt):
+            with self.subTest(path=path.name):
+                saved = path.with_name(path.name + ".saved")
+                path.rename(saved)
+                path.symlink_to(saved)
+                try:
+                    with self.assertRaises(OSError):
+                        self.configure()
+                finally:
+                    path.unlink()
+                    saved.rename(path)
+        hardlink = self.root / "second-link"
+        os.link(self.mirrors, hardlink)
+        with self.assertRaises(ValueError):
+            self.configure()
+        hardlink.unlink()
+        self.mirrors.unlink()
+        os.mkfifo(self.mirrors, 0o600)
+        with self.assertRaises(ValueError):
+            self.configure()
+        self.mirrors.unlink()
+        self.mirrors.write_text(self.ORIGINAL)
+        self.assert_preserved()
+
+    def test_unowned_or_writable_configuration_refused(self):
+        with self.assertRaises(ValueError):
+            self.helper.configure(self.apt, os.geteuid() + 1)
+        for path in (self.apt, self.sources, self.source, self.mirrors):
+            with self.subTest(path=path.name):
+                mode = path.stat().st_mode & 0o7777
+                path.chmod(mode | 0o020)
+                try:
+                    with self.assertRaises(ValueError):
+                        self.configure()
+                finally:
+                    path.chmod(mode)
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_preserved()
+
+    def test_changed_mirror_inode_or_source_refused_and_staging_removed(self):
+        original_read = self.helper.read_file
+        for mutation in ("mirror-inode", "source"):
+            calls = []
+
+            def read_file(*args):
+                calls.append(args[1])
+                if len(calls) == 3:
+                    if mutation == "mirror-inode":
+                        replacement = self.apt / "replacement"
+                        replacement.write_text(self.ORIGINAL)
+                        replacement.replace(self.mirrors)
+                    else:
+                        self.source.write_text(self.SOURCE + "# concurrent change\n")
+                return original_read(*args)
+
+            with self.subTest(mutation=mutation), patch.object(self.helper, "read_file", read_file):
+                with self.assertRaises(ValueError):
+                    self.configure()
+            self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+            self.source.write_text(self.SOURCE)
+            self.assert_preserved()
+
+    def test_failed_atomic_replacement_preserves_original_and_cleans_temporary(self):
+        with patch.object(self.helper.os, "replace", side_effect=OSError("fixture")):
+            with self.assertRaises(OSError):
+                self.configure()
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_preserved()
+
+    def test_cli_has_no_path_override_and_redacts_failed_configuration(self):
+        for arguments, uid in ((["helper", "/tmp/override"], 0), (["helper"], 1000)):
+            with patch.object(sys, "argv", arguments), patch.object(self.helper.os, "geteuid", return_value=uid), \
+                    patch.object(self.helper, "configure") as configure, contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(self.helper.main(), 64)
+                configure.assert_not_called()
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["helper"]), patch.object(self.helper.os, "geteuid", return_value=0), \
+                patch.object(self.helper, "configure", side_effect=ValueError("secret-source-url")) as configure, \
+                contextlib.redirect_stderr(output):
+            self.assertEqual(self.helper.main(), 65)
+            configure.assert_called_once_with("/etc/apt", 0)
+        self.assertNotIn("secret-source-url", output.getvalue())
+
+    def assert_workflow_scope(self, filename, text):
+        jobs = WorkflowContractTests.jobs(text)
+        selected = self.TARGETS.get(filename, set())
+        for name, job in jobs.items():
+            if name not in selected:
+                self.assertNotIn("ci-ubuntu-mirrors.py", job)
+                continue
+            self.assertEqual(job.count(self.COMMAND), 1)
+            self.assertIn("runs-on: ubuntu-24.04", job)
+            self.assertLess(job.index("persist-credentials: false"), job.index(self.COMMAND))
+            self.assertLess(job.index(self.COMMAND), job.index("apt-get"))
+            line = next(line.strip() for line in job.splitlines() if "ci-ubuntu-mirrors.py" in line)
+            self.assertEqual(line, self.COMMAND)
+            self.assertNotIn("/etc/apt/", job)
+
+    def test_exact_nine_jobs_prepare_mirrors_before_apt_and_exclude_privileged_jobs(self):
+        for path in (PROJECT / ".github/workflows").glob("*.yml"):
+            with self.subTest(workflow=path.name):
+                self.assert_workflow_scope(path.name, path.read_text())
+
+    def test_missing_late_or_failure_masked_preparation_is_rejected(self):
+        for filename in self.TARGETS:
+            text = WorkflowContractTests.workflow(filename)
+            for original, replacement in ((self.COMMAND, "true"),
+                                           (self.COMMAND, self.COMMAND + " || true"),
+                                           (self.COMMAND, self.COMMAND + " /tmp/config")):
+                with self.subTest(workflow=filename, mutation=replacement), self.assertRaises(AssertionError):
+                    self.assert_workflow_scope(filename, text.replace(original, replacement, 1))
+        text = WorkflowContractTests.workflow("real-tools.yml")
+        moved = text.replace("          " + self.COMMAND + "\n", "", 1)
+        moved = moved.replace('          case ${YT_DLP_VERSION}',
+                              "          " + self.COMMAND + '\n          case ${YT_DLP_VERSION}', 1)
+        with self.assertRaises(AssertionError):
+            self.assert_workflow_scope("real-tools.yml", moved)
+
+    def test_preparation_failure_preserves_status_and_prevents_every_package_setup(self):
+        binary = self.root / "bin"
+        binary.mkdir()
+        sudo = binary / "sudo"
+        sudo.write_text('#!/bin/bash\n'
+                        'if [[ $* == "python3 -I -B scripts/ci-ubuntu-mirrors.py" ]]; then exit 65; fi\n'
+                        'printf unexpected >"${CHECK_UNEXPECTED}"\nexit 99\n')
+        sudo.chmod(0o755)
+        for filename, names in self.TARGETS.items():
+            jobs = WorkflowContractTests.jobs(WorkflowContractTests.workflow(filename))
+            for name in names:
+                step = next(block for block in re.split(r"(?m)^      - ", jobs[name])
+                            if self.COMMAND in block)
+                block = step.split("run: |\n", 1)[1]
+                script = "\n".join(line[10:] for line in block.splitlines() if line.startswith("          "))
+                sentinel = self.root / "unexpected"
+                environment = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"],
+                                   CHECK_UNEXPECTED=str(sentinel))
+                with self.subTest(workflow=filename, job=name):
+                    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script],
+                                            env=environment, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+                    self.assertFalse(sentinel.exists())
 
 
 class VersionBoundaryTests(unittest.TestCase):
@@ -1703,6 +2100,128 @@ class VersionBoundaryTests(unittest.TestCase):
         block = block.split("\n      - ", 1)[0].split("        run: |\n", 1)[1]
         return "\n".join(line[10:] for line in block.splitlines()
                          if line.startswith("          ")) + "\n"
+
+    def test_media_apt_blocks_preserve_errors_signals_and_stop_stalled_provisioning(self):
+        targets = (("real-tools.yml", "Install real engines"),
+                   ("real-tools.yml", "Install real engines and current yt-dlp stable"),
+                   ("release.yml", "Install current Ubuntu engines and pinned yt-dlp"))
+        expected_options = ["-o", "Acquire::Retries=3", "-o", "Acquire::http::Timeout=30",
+                            "-o", "Acquire::https::Timeout=30", "-o", "DPkg::Lock::Timeout=60"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "bin"
+            binary.mkdir()
+            sudo = binary / "sudo"
+            sudo.write_text('#!/bin/bash\n'
+                            'if [[ $* == "python3 -I -B scripts/ci-ubuntu-mirrors.py" ]]; then exit 0; fi\n'
+                            'exec "$@"\n')
+            sudo.chmod(0o755)
+            apt = binary / "apt-get"
+            apt.write_text('''#!/usr/bin/env python3
+import json, os, signal, sys
+from pathlib import Path
+args = sys.argv[1:]
+stage = "install" if "install" in args else "update"
+with open(os.environ["CHECK_APT_LOG"], "a") as log:
+    log.write(json.dumps({"args": args, "stage": stage, "frontend": os.environ.get("DEBIAN_FRONTEND")}) + "\\n")
+if stage == os.environ["CHECK_APT_STAGE"]:
+    action = os.environ["CHECK_APT_ACTION"]
+    if action == "failure":
+        raise SystemExit(23 if stage == "update" else 27)
+    if action == "interrupt":
+        os.kill(os.getpid(), signal.SIGTERM)
+    if action in {"stall", "ignore-term"}:
+        Path(os.environ["CHECK_APT_PID"]).write_text(str(os.getpid()))
+        if action == "ignore-term":
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        while True:
+            signal.pause()
+''')
+            apt.chmod(0o755)
+            for workflow, step_name in targets:
+                script = self.step(workflow, step_name)
+                # Stop at the real APT boundary; the marker represents the
+                # subsequent venv/pip work, never a substitute package command.
+                ending = "\ncase ${YT_DLP_VERSION}" if "\ncase ${YT_DLP_VERSION}" in script else "\npython3 -m venv"
+                prefix = script.split(ending, 1)[0]
+                self.assertIn("apt-get", prefix)
+                self.assertNotIn("python3 -m venv", prefix)
+                for stage, action, expected in (("none", "success", 0), ("update", "failure", 23),
+                                                 ("install", "failure", 27), ("update", "interrupt", 143),
+                                                 ("install", "interrupt", 143), ("update", "stall", 124),
+                                                 ("install", "stall", 124), ("install", "ignore-term", 137)):
+                    with self.subTest(workflow=workflow, step=step_name, stage=stage, action=action):
+                        run = root / f"case-{len(list(root.iterdir()))}"
+                        run.mkdir()
+                        env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"],
+                                   CHECK_APT_STAGE=stage, CHECK_APT_ACTION=action,
+                                   CHECK_APT_LOG=str(run / "calls"), CHECK_APT_PID=str(run / "pid"),
+                                   CHECK_CONTINUED=str(run / "continued"))
+                        env.pop("DEBIAN_FRONTEND", None)
+                        current = prefix
+                        if action in {"stall", "ignore-term"}:
+                            current = current.replace(" 2m ", " 0.5s ").replace(" 4m ", " 0.5s ")
+                            current = current.replace("--kill-after=10s", "--kill-after=0.1s")
+                        current += '\nprintf completed >"${CHECK_CONTINUED}"\n'
+                        result = subprocess.run(["bash", "-c", current], env=env, capture_output=True,
+                                                text=True, timeout=5, check=False)
+                        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                        self.assertEqual((run / "continued").exists(), expected == 0)
+                        calls = [json.loads(line) for line in (run / "calls").read_text().splitlines()]
+                        self.assertEqual([call["stage"] for call in calls],
+                                         ["update"] if stage == "update" else ["update", "install"])
+                        for call in calls:
+                            self.assertEqual(call["args"][:8], expected_options)
+                            if call["stage"] == "update":
+                                self.assertEqual(call["args"][8:], ["-o", "APT::Update::Error-Mode=any", "update"])
+                            else:
+                                self.assertEqual(call["args"][8:11], ["install", "--yes", "--no-install-recommends"])
+                                self.assertEqual(call["frontend"], "noninteractive")
+                        if (run / "pid").exists():
+                            try:
+                                metadata = Path("/proc", (run / "pid").read_text(), "stat").read_text()
+                            except FileNotFoundError:
+                                pass
+                            else:
+                                # SIGKILL can also terminate GNU timeout. Its
+                                # dead child may await the container init's reap.
+                                state = metadata.rsplit(") ", 1)[1].split()[0]
+                                self.assertIn(state, ("Z", "X"), "Bounded APT fixture is still executing")
+
+    def test_pinned_engine_installation_preserves_hashes_and_pip_failure(self):
+        pins = {"2026.6.9": "442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4",
+                "2026.7.4": "f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266",
+                "2026.8.19": "1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf"}
+        for workflow, name, versions in (("real-tools.yml", "Install real engines", tuple(pins)),
+                                         ("release.yml", "Install current Ubuntu engines and pinned yt-dlp",
+                                          ("2026.6.9", "2026.8.19"))):
+            script = self.step(workflow, name)
+            script = "set -Eeuo pipefail\npython3() { return 0; }\n" + script[script.index("case ${YT_DLP_VERSION}"):]
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                for version in versions:
+                    for status in (0, 23):
+                        with self.subTest(workflow=workflow, version=version, status=status):
+                            run = root / f"{version}-{status}"
+                            binary = run / "yt-dlp-venv/bin"
+                            binary.mkdir(parents=True)
+                            pip = binary / "pip"
+                            pip.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >"${CHECK_ARGUMENTS}"\n'
+                                           'exit "${CHECK_PIP_STATUS}"\n')
+                            pip.chmod(0o755)
+                            env = dict(os.environ, RUNNER_TEMP=str(run), YT_DLP_VERSION=version,
+                                       GITHUB_PATH=str(run / "path"), CHECK_ARGUMENTS=str(run / "arguments"),
+                                       CHECK_PIP_STATUS=str(status))
+                            result = subprocess.run(["bash", "-c", script], env=env,
+                                                    capture_output=True, timeout=5, check=False)
+                            self.assertEqual(result.returncode, status, result.stderr)
+                            arguments = (run / "arguments").read_text().splitlines()
+                            self.assertEqual(arguments[:4], ["install", "--disable-pip-version-check",
+                                                            "--only-binary=:all:", "--require-hashes"])
+                            self.assertEqual(arguments[4], "--requirement")
+                            self.assertEqual(Path(arguments[5]).read_text(),
+                                             f"yt-dlp=={version} --hash=sha256:{pins[version]}\n")
+                            self.assertEqual((run / "path").exists(), status == 0)
 
     def test_minimum_bash_bootstrap_authenticates_before_extracting_or_building(self):
         script = self.step("shell.yml", "Build and bind verified Bash 4.4 on the disposable runner")

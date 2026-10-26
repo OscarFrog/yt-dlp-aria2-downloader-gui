@@ -175,6 +175,9 @@ readonly -a STATIC_VALIDATION_IDS=(
     source-archive
     shfmt-bootstrap
     zenity-autonomous
+    art-tracks
+    art-subtitle
+    art-media
 )
 
 declare -Ar STATIC_VALIDATION_LABELS=(
@@ -187,6 +190,9 @@ declare -Ar STATIC_VALIDATION_LABELS=(
     ['source-archive']='Source archive integration'
     ['shfmt-bootstrap']='shfmt bootstrap integration'
     ['zenity-autonomous']='Autonomous Zenity evidence integration'
+    ['art-tracks']='Track catalogue and selection integration'
+    ['art-subtitle']='Subtitle reference and conversion integration'
+    ['art-media']='Media validation integration'
     ['shellcheck-production']='Production ShellCheck'
     ['shellcheck-packaging']='Packaging ShellCheck'
     ['shellcheck-tests']='Test-suite ShellCheck'
@@ -208,6 +214,9 @@ declare -Ar STATIC_PYTHON_PATHS=(
     ['source-archive']='./tests/source-archive-integration.py'
     ['shfmt-bootstrap']='./tests/shfmt-bootstrap-integration.py'
     ['zenity-autonomous']='./tests/zenity-autonomous-integration.py'
+    ['art-tracks']='./tests/art-tracks-integration.py'
+    ['art-subtitle']='./tests/art-subtitle-integration.py'
+    ['art-media']='./tests/art-media-integration.py'
 )
 
 PROFILE='full'
@@ -1171,7 +1180,7 @@ validate_suite_manifest() {
         case ${static_validation_id} in
             shfmt | static) ;;
             shfmt-version-handoff | release-docs | push-version | \
-                ci-validation | source-archive | shfmt-bootstrap | zenity-autonomous)
+                ci-validation | source-archive | shfmt-bootstrap | zenity-autonomous | art-tracks | art-subtitle | art-media)
                 suite_path=${STATIC_PYTHON_PATHS[${static_validation_id}]:-}
                 if [[ -z ${suite_path} || ! -f ${PROJECT_DIR}/${suite_path#./} ||
                     -L ${PROJECT_DIR}/${suite_path#./} ||
@@ -1242,7 +1251,7 @@ start_static_validation() {
             validation_command=(bash -- ./test-static.sh --source-only)
             ;;
         shfmt-version-handoff | release-docs | push-version | \
-            ci-validation | source-archive | shfmt-bootstrap | zenity-autonomous)
+            ci-validation | source-archive | shfmt-bootstrap | zenity-autonomous | art-tracks | art-subtitle | art-media)
             validation_command=(python3 -B "${STATIC_PYTHON_PATHS[${validation_id}]}")
             ;;
         *)

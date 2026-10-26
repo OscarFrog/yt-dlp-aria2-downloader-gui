@@ -127,6 +127,12 @@ ALL_SHELL_FILES=(
 # shellcheck disable=SC2034 # Array is read by test-static.sh.
 PYTHON_FILES=(
     private-aria2-plan.py
+    private-art-tracks.py
+    private-art-media.py
+    private-art-subtitle.py
+    tests/art-tracks-integration.py
+    tests/art-media-integration.py
+    tests/art-subtitle-integration.py
     private-process-supervisor.py
     tests/process-observer.py
     tests/multi-instance-real.py
@@ -140,6 +146,7 @@ PYTHON_FILES=(
     scripts/check-push-version.py
     scripts/prepare-source-version.py
     scripts/ci-validation.py
+    scripts/ci-ubuntu-mirrors.py
     scripts/ci-validation-diagnostics.py
     scripts/verify-source-archive.py
     tests/ci-validation-integration.py

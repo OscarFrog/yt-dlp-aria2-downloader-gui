@@ -12,7 +12,7 @@ set -euo pipefail
 set +m
 umask 077
 
-readonly VERSION="2.4.3"
+readonly VERSION="2.4.4"
 readonly MIN_YT_DLP_VERSION="2026.06.09"
 readonly MIN_ARIA2_VERSION="1.37.0"
 readonly MIN_DENO_VERSION="2.3.0"
@@ -48,6 +48,16 @@ HLS_REMUX_FD_PATH=''
 HLS_SOURCE_TO_CLEAN=''
 HLS_SOURCE_TO_CLEAN_IDENTITY=''
 YTDLP_BATCH_FILE_TMP=''
+ARTE_ENABLED=false
+ARTE_CATALOG=''
+ARTE_SELECTION=''
+ARTE_PRESET=''
+ARTE_NO_SUBTITLES=false
+ARTE_EXPECTATION=''
+ARTE_SUBTITLE_REFERENCE=''
+ARTE_COMPONENT_RECORDS=''
+ARTE_MEDIA_VALIDATION_PENDING=false
+ARTE_AV_TRANSFER_ACTIVE=false
 PRIVATE_ARIA2_METADATA=''
 PRIVATE_ARIA2_METADATA_IDENTITY=''
 PRIVATE_ARIA2_METADATA_FD=''
@@ -142,6 +152,13 @@ cleanup() {
             exit "${status}"
         fi
     fi
+    # The native child may have been reaped just before a signal interrupted
+    # the caller's retention handoff. Its observed success belongs only to the
+    # armed AV transfer; planning/subtitle statuses cannot grant preservation.
+    if [[ -n ${MEDIA_WORKSPACE} && ${ARTE_AV_TRANSFER_ACTIVE} == true &&
+        ${DOWNLOAD_WAITED_STATUS} == 0 ]]; then
+        ARTE_MEDIA_VALIDATION_PENDING=true
+    fi
     if [[ ${RESOURCE_STATE_ACTIVE} == true ]]; then
         if ! python3 "${PRIVATE_ARIA2_HELPER}" resource-state --action save \
             --state "${RESOURCE_STATE_FILE}" --registry "${RESOURCE_LOCK_ROOT}" \
@@ -233,7 +250,11 @@ cleanup() {
                 "${PRIVATE_ARIA2_STAGING##*/}" >&2
         fi
     fi
-    if [[ -n ${MEDIA_WORKSPACE} && ${active_media_staging_safe} == true &&
+    if [[ -n ${MEDIA_WORKSPACE} && ${ARTE_MEDIA_VALIDATION_PENDING} == true ]]; then
+        printf 'Warning: ARTE media validation or publication did not finish; preserving local media for inspection: %s\n' \
+            "${MEDIA_WORKSPACE}" >&2
+        printf '%s\n' 'These files are not a validated final result and will not be resumed or published automatically.' >&2
+    elif [[ -n ${MEDIA_WORKSPACE} && ${active_media_staging_safe} == true &&
         ${MEDIA_WORKSPACE_CLEANUP_SAFE} == true ]]; then
         local -a retained_options=()
         local keep_index
@@ -353,6 +374,13 @@ Options:
                              audio: best available audio track; preserve the
                                     source codec/container whenever possible.
       --machine-progress     Emit stable YTDLP_PLAN and progress records.
+      --tracks-auto         Prefer original audio; complete French subtitles
+                             when available for foreign audio, none for French.
+      --all-tracks          Select all admissible audio and subtitle tracks.
+      --no-subtitles        Select audio automatically without subtitles;
+                             can also be combined with --all-tracks.
+      --track-catalog FILE  Publish the compatible site's private track list.
+      --track-selection FILE Read a private structured track selection.
       --youtube-hls-firefox  For YouTube video mode, use Firefox cookies and
                              web_safari HLS formats before remuxing to MKV.
       --result-file FILE     Write the final media path to FILE.
@@ -599,6 +627,19 @@ check_ytdlp_capabilities() {
             error "this yt-dlp build does not support ${required_option}."
             return 1
         fi
+    fi
+    if [[ ${ARTE_ENABLED} == true ]]; then
+        for required_option in \
+            --audio-multistreams --write-subs --no-write-subs \
+            --no-write-auto-subs --keep-fragments --abort-on-unavailable-fragments \
+            --sub-format --sub-langs --convert-subs --postprocessor-args \
+            --no-embed-metadata --no-embed-subs --keep-video; do
+            if ! grep -Eq -- \
+                "^[[:space:]]*(-[^,[:space:]]+,[[:space:]]+)?${required_option}([=[:space:]]|$)" <<<"${yt_dlp_help}"; then
+                error "this yt-dlp build does not support ${required_option}."
+                return 1
+            fi
+        done
     fi
 }
 
@@ -2664,6 +2705,40 @@ validate_media_tail_consistency() {
     esac
 }
 
+validate_arte_media_file() {
+    local media_path=$1
+    local phase=${2:-final}
+    local probe_file="${PRIVATE_ARIA2_METADATA}/arte-probe-${phase}.json"
+    local -a validation_options=(--components "${ARTE_COMPONENT_RECORDS}")
+    local -a probe_options=()
+
+    if [[ ${phase} == source ]]; then
+        validation_options+=(--source)
+        probe_options+=(--source)
+    else
+        validation_options+=(--baseline "${PRIVATE_ARIA2_METADATA}/arte-probe-source.json")
+        if [[ -n ${ARTE_SUBTITLE_REFERENCE} ]]; then
+            validation_options+=(--reference "${ARTE_SUBTITLE_REFERENCE}")
+            probe_options+=(--reference "${ARTE_SUBTITLE_REFERENCE}")
+        fi
+    fi
+    FINAL_MEDIA_VALIDATION_REASON=arte-track-validation
+    run_supervised_command python3 "${PROCESS_SUPERVISOR}" \
+        --timeout 2400 --grace 2 -- python3 "${ARTE_MEDIA_HELPER}" probe \
+        --expected "${ARTE_EXPECTATION}" --input "${media_path}" --output "${probe_file}" \
+        "${probe_options[@]}"
+    if [[ ${SHUTDOWN_REQUESTED} == true ]]; then
+        exit "${REQUESTED_EXIT_STATUS:-143}"
+    fi
+    if ((DOWNLOAD_STATUS != 0)); then
+        return 1
+    fi
+    python3 "${ARTE_MEDIA_HELPER}" validate --expected "${ARTE_EXPECTATION}" \
+        --plan "${PRIVATE_ARIA2_PLAN}" --probe "${probe_file}" \
+        "${validation_options[@]}" || return 1
+    FINAL_MEDIA_VALIDATION_REASON=ok
+}
+
 validate_final_media_file() {
     local final_path=$1
     local mode=$2
@@ -2680,6 +2755,10 @@ validate_final_media_file() {
     if [[ ! -f ${final_path} || ! -s ${final_path} ]]; then
         FINAL_MEDIA_VALIDATION_REASON='missing-or-empty-file'
         return 1
+    fi
+    if [[ ${ARTE_ENABLED} == true ]]; then
+        validate_arte_media_file "${final_path}" final
+        return $?
     fi
 
     # probe_media_summary supervises the probe before parsing; failure is
@@ -2816,6 +2895,34 @@ parse_arguments() {
                 ;;
             --machine-progress)
                 MACHINE_PROGRESS=true
+                shift
+                ;;
+            --track-catalog | --arte-catalog)
+                require_value "$1" "${2-}"
+                ARTE_CATALOG=$2
+                shift 2
+                ;;
+            --track-selection | --arte-selection)
+                require_value "$1" "${2-}"
+                ARTE_SELECTION=$2
+                shift 2
+                ;;
+            --tracks-auto | --all-tracks | --arte-all | --arte-original-fr)
+                if [[ -n ${ARTE_PRESET} ]]; then
+                    error 'choose only one track preset.'
+                    exit 64
+                fi
+                if [[ $1 == --arte-all || $1 == --all-tracks ]]; then
+                    ARTE_PRESET=all
+                elif [[ $1 == --tracks-auto ]]; then
+                    ARTE_PRESET=auto
+                else
+                    ARTE_PRESET=original-fr
+                fi
+                shift
+                ;;
+            --no-subtitles)
+                ARTE_NO_SUBTITLES=true
                 shift
                 ;;
             --youtube-hls-firefox)
@@ -2976,6 +3083,33 @@ validate_mode_selection() {
             ;;
     esac
 
+    if [[ ${ARTE_NO_SUBTITLES} == true ]]; then
+        if [[ -n ${ARTE_CATALOG}${ARTE_SELECTION} || ${ARTE_PRESET} == original-fr ]]; then
+            error '--no-subtitles cannot override a structured selection or the legacy subtitle preset.'
+            exit 64
+        fi
+        ARTE_PRESET=${ARTE_PRESET:-auto}
+    fi
+    if [[ -n ${ARTE_CATALOG}${ARTE_SELECTION}${ARTE_PRESET} ]]; then
+        if [[ ${MODE} != video || ${YOUTUBE_HLS_FIREFOX} == true ]]; then
+            error 'track selection requires the ordinary video profile.'
+            exit 64
+        fi
+        case ${URL_HOST} in
+            arte.tv | *.arte.tv) ;;
+            *)
+                error 'track selection is not supported for this site.'
+                exit 64
+                ;;
+        esac
+        if [[ -n ${ARTE_PRESET} && -n ${ARTE_SELECTION} ]] \
+            || [[ -n ${ARTE_CATALOG} && -z ${ARTE_SELECTION} ]]; then
+            error 'combine --track-catalog with --track-selection, or use one track preset.'
+            exit 64
+        fi
+        ARTE_ENABLED=true
+    fi
+
     if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
         if [[ ${MODE} != video ]]; then
             error '--youtube-hls-firefox is available only with --mode video.'
@@ -3017,6 +3151,17 @@ initialize_runtime_dependencies() {
     script_dir=${script_path%/*}
     runtime_manager="${script_dir}/runtime-manager.sh"
     PRIVATE_ARIA2_HELPER="${script_dir}/private-aria2-plan.py"
+    ARTE_TRACKS_HELPER="${script_dir}/private-art-tracks.py"
+    ARTE_MEDIA_HELPER="${script_dir}/private-art-media.py"
+    ARTE_SUBTITLES_HELPER="${script_dir}/private-art-subtitle.py"
+    if [[ ${ARTE_ENABLED} == true ]]; then
+        for command_name in "${ARTE_TRACKS_HELPER}" "${ARTE_MEDIA_HELPER}" "${ARTE_SUBTITLES_HELPER}"; do
+            if [[ ! -f ${command_name} || -L ${command_name} || ! -r ${command_name} ]]; then
+                error 'an ARTE track helper is missing or unsafe.'
+                exit 66
+            fi
+        done
+    fi
 
     if [[ -L ${PRIVATE_ARIA2_HELPER} ||
         ! -f ${PRIVATE_ARIA2_HELPER} ||
@@ -3519,6 +3664,152 @@ configure_download_options() {
     fi
 }
 
+# Catalogue, selection and execution are separate private documents. Only the
+# public catalogue crosses to the GUI; the engine enforces policy again when
+# freezing the actual transfer, including choices from an older session.
+prepare_arte_selection() {
+    local catalogue="${PRIVATE_ARIA2_METADATA}/arte-catalogue.json"
+    local selected_plan="${PRIVATE_ARIA2_METADATA}/arte-plan.json"
+    local options="${PRIVATE_ARIA2_METADATA}/arte-options.json"
+    local arguments="${PRIVATE_ARIA2_METADATA}/arte-arguments"
+    local deadline=$((SECONDS + 1800))
+    local -a arte_options=()
+    local -a selection_options=()
+
+    print_human_line 'Analysing available audio and subtitle tracks...'
+    run_supervised_command python3 "${PROCESS_SUPERVISOR}" \
+        --timeout 180 --grace 2 -- python3 "${ARTE_TRACKS_HELPER}" catalogue \
+        --plan "${PRIVATE_ARIA2_PLAN}" --output "${catalogue}"
+    if ((DOWNLOAD_STATUS != 0)); then
+        error 'track analysis failed; no media was downloaded.'
+        exit "${DOWNLOAD_STATUS}"
+    fi
+    if [[ -n ${ARTE_CATALOG} ]]; then
+        python3 "${ARTE_TRACKS_HELPER}" public \
+            --catalogue "${catalogue}" --output "${ARTE_CATALOG}"
+        print_human_line 'Waiting for audio and subtitle choices...'
+        while [[ ! -e ${ARTE_SELECTION} && ! -L ${ARTE_SELECTION} ]]; do
+            if ((SECONDS >= deadline)); then
+                error 'track selection timed out; start again and choose the tracks.'
+                exit 75
+            fi
+            sleep 0.2
+        done
+    elif [[ -n ${ARTE_PRESET} ]]; then
+        ARTE_SELECTION="${PRIVATE_ARIA2_METADATA}/arte-selection.json"
+        if [[ ${ARTE_PRESET} == original-fr ]]; then
+            selection_options=(--preset original-fr)
+        elif [[ ${ARTE_PRESET} == all ]]; then
+            selection_options=(--audio-mode all --subtitle-mode all)
+        else
+            selection_options=(--audio-mode auto --subtitle-mode auto)
+        fi
+        if [[ ${ARTE_NO_SUBTITLES} == true ]]; then
+            selection_options=(--audio-mode "${ARTE_PRESET}" --subtitle-mode none)
+        fi
+        python3 "${ARTE_TRACKS_HELPER}" select --catalogue "${catalogue}" \
+            "${selection_options[@]}" --output "${ARTE_SELECTION}"
+    fi
+    ARTE_EXPECTATION="${PRIVATE_ARIA2_METADATA}/arte-expected.json"
+    run_supervised_command python3 "${PROCESS_SUPERVISOR}" \
+        --timeout 180 --grace 2 -- python3 "${ARTE_TRACKS_HELPER}" apply --plan "${PRIVATE_ARIA2_PLAN}" \
+        --catalogue "${catalogue}" --selection "${ARTE_SELECTION}" \
+        --output "${selected_plan}" --expectation "${ARTE_EXPECTATION}" \
+        --options "${options}"
+    if ((DOWNLOAD_STATUS != 0)); then
+        error 'track selection could not be verified; no audio or video was downloaded.'
+        exit "${DOWNLOAD_STATUS}"
+    fi
+    python3 "${ARTE_TRACKS_HELPER}" verified-summary --plan "${selected_plan}" \
+        --expectation "${ARTE_EXPECTATION}" >&2
+    python3 "${ARTE_TRACKS_HELPER}" options --options "${options}" >"${arguments}"
+    mapfile -d '' -t arte_options <"${arguments}"
+    if ((${#arte_options[@]} == 0 || ${#arte_options[@]} > 32)); then
+        error 'invalid ARTE transfer options.'
+        exit 65
+    fi
+    # Preserve the shared source timeline during the native merger. Metadata
+    # and optional timestamp fixups are unnecessary here; the final validated
+    # remux writes only the selected public track labels and dispositions.
+    YT_DLP_OPTIONS+=("${arte_options[@]}" --fixup never --no-embed-metadata
+        --abort-on-unavailable-fragments
+        --postprocessor-args 'Merger+ffmpeg_i1:-copyts'
+        --postprocessor-args 'Merger+ffmpeg_o:-avoid_negative_ts disabled')
+    PRIVATE_ARIA2_PLAN=${selected_plan}
+    # shellcheck disable=SC2310 # Register the newly created selected plan for cleanup.
+    if ! get_path_identity PRIVATE_ARIA2_PLAN_IDENTITY "${PRIVATE_ARIA2_PLAN}" regular-file; then
+        error 'unable to authenticate the ARTE transfer plan.'
+        exit 65
+    fi
+}
+
+# Retain original WebVTT and native HLS fragments in the private metadata
+# workspace. The independently parsed cue reference must precede conversion
+# and media transfer; neither FFmpeg's exit status nor nonempty output proves
+# subtitle completeness.
+prepare_arte_subtitles() {
+    local subtitle_directory="${PRIVATE_ARIA2_METADATA}/arte-subtitles"
+    local subtitle_languages=''
+    local subtitle_template=''
+
+    python3 "${ARTE_TRACKS_HELPER}" check-replay --plan "${PRIVATE_ARIA2_PLAN}" \
+        --replay "${PRIVATE_ARIA2_METADATA}/transfer-plan.json" --expectation "${ARTE_EXPECTATION}"
+    python3 "${PRIVATE_ARIA2_HELPER}" check-native-final \
+        --plan "${PRIVATE_ARIA2_PLAN}" --output-dir "${OUTPUT_DIR}" \
+        --final-output-dir "${FINAL_OUTPUT_DIR}" \
+        --final-output-identity "${FINAL_OUTPUT_IDENTITY}" --mode "${MODE}" \
+        --ownership "${RESOURCE_STATE_FILE}" >/dev/null
+    subtitle_languages=$(python3 "${ARTE_TRACKS_HELPER}" subtitle-languages \
+        --expected "${ARTE_EXPECTATION}")
+    # An explicit empty selection never enters subtitle acquisition, reference
+    # construction or conversion. Media validation still requires zero tracks.
+    if [[ -z ${subtitle_languages} ]]; then
+        ARTE_SUBTITLE_REFERENCE=''
+        return 0
+    fi
+    if [[ ${MACHINE_PROGRESS} == true ]]; then
+        printf '%s\n' 'YTDLP_PREPARE|subtitles'
+    fi
+    if ! mkdir -m 700 -- "${subtitle_directory}"; then
+        error 'unable to create the private ARTE subtitle workspace.'
+        exit 73
+    fi
+    ARTE_SUBTITLE_REFERENCE="${subtitle_directory}/reference.json"
+    if [[ -n ${subtitle_languages} ]]; then
+        if [[ ${subtitle_languages} == *$'\n'* || ${#subtitle_languages} -gt 3104 ]]; then
+            error 'invalid ARTE subtitle language selection.'
+            exit 65
+        fi
+        # Metadata paths may contain literal template/environment metacharacters.
+        subtitle_template=${subtitle_directory//%/%%}
+        subtitle_template=${subtitle_template//\$/\%\(id\&\$\|\$\)s}
+        subtitle_template+='/source.%(ext)s'
+        print_human_line 'Downloading the selected subtitle sources...'
+        # This pass precedes progress/result reporting and downloads no video or
+        # audio. The same frozen, policy-checked plan and native HLS downloader
+        # supply every original subtitle; conversion/embedding are disabled.
+        run_supervised_ytdlp "${YTDLP_BIN}" "${YT_DLP_OPTIONS[@]}" \
+            --skip-download --write-subs --no-write-auto-subs --no-embed-subs \
+            --convert-subs none --no-embed-metadata --keep-fragments \
+            --abort-on-unavailable-fragments --sub-format vtt \
+            --sub-langs "${subtitle_languages}" --output "${subtitle_template}" \
+            --load-info-json "${PRIVATE_ARIA2_METADATA}/transfer-plan.json"
+        if ((DOWNLOAD_STATUS != 0)); then
+            error 'subtitle source acquisition failed; no video or audio was downloaded.'
+            exit "${DOWNLOAD_STATUS}"
+        fi
+    fi
+    print_human_line 'Checking subtitle text and timing before media download...'
+    run_supervised_command python3 "${PROCESS_SUPERVISOR}" \
+        --timeout 240 --grace 2 -- python3 "${ARTE_SUBTITLES_HELPER}" build \
+        --expected "${ARTE_EXPECTATION}" --plan "${PRIVATE_ARIA2_PLAN}" \
+        --directory "${subtitle_directory}" --output "${ARTE_SUBTITLE_REFERENCE}"
+    if ((DOWNLOAD_STATUS != 0)); then
+        error 'subtitle validation failed; no video or audio was downloaded.'
+        exit "${DOWNLOAD_STATUS}"
+    fi
+}
+
 # Run the metadata-only PLAN pass and validate the transport classifier output.
 plan_selected_transport() {
     local plan_status
@@ -3550,6 +3841,9 @@ plan_selected_transport() {
         exit "${plan_status}"
     fi
 
+    if [[ ${ARTE_ENABLED} == true ]]; then
+        prepare_arte_selection
+    fi
     if [[ ${ARIA2_HTTPS_DIRECT_SAFE} == true ]]; then
         classifier_security_options+=(--allow-https-direct)
     fi
@@ -3610,6 +3904,10 @@ plan_selected_transport() {
             exit 65
             ;;
     esac
+    if [[ ${ARTE_ENABLED} == true ]]; then
+        # HLS video, audio and WebVTT are all handled by the native downloader.
+        PRIVATE_TRANSPORT=native
+    fi
     readonly PRIVATE_TRANSPORT PRIVATE_TRANSFER_COUNT
 }
 
@@ -3622,10 +3920,16 @@ configure_download_reporting() {
             --newline
             --progress
             --color never
-            --print 'before_dl:YTDLP_PLAN|%(id|unknown)s|%(format_id|unknown)s|%(requested_formats.0.format_id|)s|%(requested_formats.1.format_id|)s'
             --progress-template 'download:YTDLP_PROGRESS_V2|%(info.id|unknown)s|%(info.format_id|unknown)s|%(progress.status|unknown)s|%(progress.downloaded_bytes|0)s|%(progress.total_bytes|0)s|%(progress.total_bytes_estimate|0)s|%(progress.fragment_index|0)s|%(progress.fragment_count|0)s|%(progress._percent_str|)s|%(progress._speed_str|)s|%(progress._eta_str|)s'
             --progress-template 'postprocess:YTDLP_POSTPROCESS|%(progress.status|unknown)s|%(progress.postprocessor|unknown)s'
         )
+        if [[ ${ARTE_ENABLED} == true ]]; then
+            python3 "${PRIVATE_ARIA2_HELPER}" progress-plan --plan "${PRIVATE_ARIA2_PLAN}"
+        else
+            YT_DLP_OPTIONS+=(
+                --print 'before_dl:YTDLP_PLAN|%(id|unknown)s|%(format_id|unknown)s|%(requested_formats.0.format_id|)s|%(requested_formats.1.format_id|)s'
+            )
+        fi
     fi
 
     if [[ -n ${PATH_RECORD_FD_PATH} ]]; then
@@ -3648,6 +3952,10 @@ execute_selected_transport() {
     local -a builder_security_options=()
     local -a native_output_options=()
 
+    if [[ ${ARTE_ENABLED} == true ]]; then
+        python3 "${ARTE_TRACKS_HELPER}" check-replay --plan "${PRIVATE_ARIA2_PLAN}" \
+            --replay "${PRIVATE_ARIA2_METADATA}/transfer-plan.json" --expectation "${ARTE_EXPECTATION}"
+    fi
     if [[ ${PRIVATE_TRANSPORT} == direct ]]; then
         if [[ ${MACHINE_PROGRESS} == true ]]; then
             printf 'ARIA2_PLAN|%s\n' "${PRIVATE_TRANSFER_COUNT}"
@@ -3824,6 +4132,17 @@ execute_selected_transport() {
                 --ownership "${RESOURCE_STATE_FILE}") || exit $?
             native_output_options=(--output "${native_output_template}")
         fi
+        if [[ ${ARTE_ENABLED} == true ]]; then
+            # Retain each selected component until per-download packet evidence
+            # proves that the merger preserved the common source clock.
+            native_output_options+=(--keep-video)
+        fi
+        if [[ ${ARTE_ENABLED} == true && -n ${MEDIA_WORKSPACE} ]]; then
+            # Clear any earlier successful metadata command before arming this
+            # transfer's completion witness, including the startup signal gap.
+            DOWNLOAD_WAITED_STATUS=''
+            ARTE_AV_TRANSFER_ACTIVE=true
+        fi
         run_supervised_ytdlp \
             "${YTDLP_BIN}" \
             "${YT_DLP_OPTIONS[@]}" \
@@ -3834,6 +4153,24 @@ execute_selected_transport() {
     if [[ -n ${DOWNLOAD_WORKER_PID} || -n ${DOWNLOAD_WORKER_PGID} ]]; then
         # Native download or direct replay may still consume this private URL.
         return 0
+    fi
+    if [[ ${ARTE_ENABLED} == true ]] && ((DOWNLOAD_STATUS == 0)); then
+        # Completed native sources are evidence for every later validation.
+        # Preserve them on a probe/remux/publication failure; an interrupted
+        # partial transfer never reaches this retention boundary.
+        if [[ -n ${MEDIA_WORKSPACE} ]]; then
+            ARTE_MEDIA_VALIDATION_PENDING=true
+        fi
+        ARTE_AV_TRANSFER_ACTIVE=false
+        ARTE_COMPONENT_RECORDS="${PRIVATE_ARIA2_METADATA}/arte-components.json"
+        run_supervised_command python3 "${PROCESS_SUPERVISOR}" \
+            --timeout 600 --grace 2 -- python3 "${ARTE_MEDIA_HELPER}" probe-components \
+            --expected "${ARTE_EXPECTATION}" --plan "${PRIVATE_ARIA2_PLAN}" \
+            --output "${ARTE_COMPONENT_RECORDS}"
+        if ((DOWNLOAD_STATUS != 0)); then
+            error 'ARTE source component timing could not be verified; refusing publication.'
+            exit "${DOWNLOAD_STATUS}"
+        fi
     fi
     if ! rm -f -- "${YTDLP_BATCH_FILE_TMP}"; then
         error 'unable to remove the private yt-dlp URL batch file.'
@@ -4123,7 +4460,8 @@ remove_repaired_hls_source() {
     HLS_SOURCE_TO_CLEAN_IDENTITY=''
 }
 
-# Remux the authenticated YouTube HLS intermediate and verify duration parity.
+# Remux an authenticated HLS intermediate. ARTE additionally validates every
+# selected track before publishing the distinct multitrack result name.
 remux_hls_result() {
     local hls_source_path
     local hls_source_dir
@@ -4134,6 +4472,9 @@ remux_hls_result() {
     local hls_source_duration_us=''
     local hls_final_duration_us=''
     local ffmpeg_status
+    local remux_arguments="${PRIVATE_ARIA2_METADATA}/arte-remux-arguments"
+    local -a remux_options=(-map 0 -dn -ignore_unknown -c copy)
+    local -a reference_options=()
 
     hls_source_path=$(<"${PATH_RECORD_FD_PATH}") || {
         error 'unable to read the repaired HLS file path.'
@@ -4153,7 +4494,8 @@ remux_hls_result() {
         # remuxed result has passed global validation.
         hls_final_path="${hls_source_dir}/${hls_source_stem}.remuxed.mkv"
     fi
-
+    # Authenticate and retain the intermediate before a track validator can
+    # refuse it. A refused result remains useful for inspection, not publication.
     # shellcheck disable=SC2310 # Failure rejects an unsafe repaired source.
     if ! get_path_identity \
         hls_source_identity "${hls_source_path}" regular-file; then
@@ -4164,6 +4506,26 @@ remux_hls_result() {
         MEDIA_RETAINED_PATHS+=("${hls_source_path}")
         MEDIA_RETAINED_IDENTITIES+=("${hls_source_identity}")
     fi
+    if [[ ${ARTE_ENABLED} == true ]]; then
+        hls_final_path="${hls_source_dir}/${hls_source_stem}.tracks.mkv"
+        # shellcheck disable=SC2310 # This validator checks each operation explicitly.
+        validate_arte_media_file "${hls_source_path}" source || {
+            error 'the assembled media does not match the selected tracks; refusing publication.'
+            exit 65
+        }
+        if [[ -n ${ARTE_SUBTITLE_REFERENCE} ]]; then
+            reference_options=(--reference "${ARTE_SUBTITLE_REFERENCE}")
+        fi
+        python3 "${ARTE_MEDIA_HELPER}" remux-arguments \
+            --expected "${ARTE_EXPECTATION}" --plan "${PRIVATE_ARIA2_PLAN}" \
+            "${reference_options[@]}" >"${remux_arguments}"
+        mapfile -d '' -t remux_options <"${remux_arguments}"
+        if ((${#remux_options[@]} == 0 || ${#remux_options[@]} > 512)); then
+            error 'invalid ARTE remux arguments.'
+            exit 65
+        fi
+    fi
+
     if [[ -e ${hls_final_path} || -L ${hls_final_path} ]]; then
         error "the final MKV already exists; refusing to overwrite it: ${hls_final_path}"
         exit 13
@@ -4228,10 +4590,7 @@ remux_hls_result() {
         -stats_period 0.5 \
         -progress pipe:1 \
         -i "${hls_source_path}" \
-        -map 0 \
-        -dn \
-        -ignore_unknown \
-        -c copy \
+        "${remux_options[@]}" \
         -y \
         "${HLS_REMUX_TMP}"
     ffmpeg_status=${DOWNLOAD_STATUS}
@@ -4263,6 +4622,14 @@ remux_hls_result() {
         "${hls_source_duration_us}" \
         "${hls_final_duration_us}" \
         "${hls_source_path}"
+    if [[ ${ARTE_ENABLED} == true ]]; then
+        # shellcheck disable=SC2310 # Failure preserves the unconfirmed source.
+        validate_arte_media_file "${HLS_REMUX_TMP}" remux || {
+            emit_machine_postprocess error FFmpegVideoRemuxer
+            error 'the ARTE MKV failed track validation; no final file was published.'
+            exit 65
+        }
+    fi
     publish_hls_remux_result \
         "${hls_source_path}" "${hls_final_path}" "${hls_source_identity}"
 }
@@ -4463,10 +4830,19 @@ finalize_download() {
     fi
 
     normalize_successful_path_record
-    if [[ ${YOUTUBE_HLS_FIREFOX} == true ]]; then
+    if [[ ${YOUTUBE_HLS_FIREFOX} == true || ${ARTE_ENABLED} == true ]]; then
         remux_hls_result
     fi
     validate_and_publish_result
+    if [[ ${ARTE_ENABLED} == true ]]; then
+        if ! python3 "${ARTE_MEDIA_HELPER}" cleanup-components \
+            --expected "${ARTE_EXPECTATION}" --plan "${PRIVATE_ARIA2_PLAN}" \
+            --records "${ARTE_COMPONENT_RECORDS}"; then
+            MEDIA_WORKSPACE_CLEANUP_SAFE=false
+            printf '%s\n' 'Warning: the validated MKV was published, but changed or ambiguous source components were preserved.' >&2
+        fi
+        ARTE_MEDIA_VALIDATION_PENDING=false
+    fi
     print_human_line ''
     print_human_line 'Download completed successfully.'
 }
@@ -4496,6 +4872,9 @@ main() {
             error 'the private local media disk cannot accommodate this download.'
             exit 73
         fi
+    fi
+    if [[ ${ARTE_ENABLED} == true ]]; then
+        prepare_arte_subtitles
     fi
     configure_download_reporting
     execute_selected_transport

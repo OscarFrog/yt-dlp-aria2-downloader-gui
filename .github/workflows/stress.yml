@@ -101,7 +101,7 @@ jobs:
       - mock-stress
       - runtime-hardening-stress
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 80
     steps:
       - name: Require all cancellation stress shards
         shell: bash
@@ -130,7 +130,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_SHA: ${{ github.sha }}
-        run: python3 -I scripts/ci-validation.py wait-required --commit "${EXPECTED_SHA}"
+        run: python3 -I scripts/ci-validation.py wait-required --commit "${EXPECTED_SHA}" --timeout-minutes 75
 
   runtime-hardening-stress:
     needs: identity

@@ -1036,6 +1036,69 @@ test_monitor_failure_and_input_hardening() {
     finish_failure
 }
 
+test_monitor_multistream_unicode_plan() {
+    local completed_video_expected maximum_percent complete_expected
+    completed_video_expected=$(map_download_to_zenity 25)
+
+    start_scenario arte-four-streams-unicode video
+    printf '%s\n' 'YTDLP_PREPARE|subtitles' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Preparing and verifying the selected subtitles...' \
+        'subtitle preparation stays before the media transfer phase'
+    maximum_percent=$(max_percentage "${CAPTURE_FILE}")
+    ((maximum_percent < DOWNLOAD_START_VALUE)) \
+        || fail 'subtitle preparation incorrectly advanced the transfer or postprocessing phase'
+    printf '%s\n' \
+        'YTDLP_PLAN_V2|4|vidéo-1080|VF-STF-audio_0-japonais__VO_|français|allemand' \
+        'YTDLP_PROGRESS_V2|ring|fr-subtitles|finished|100|100|0|0|0|100.0%||' \
+        'YTDLP_PROGRESS_V2|ring|unknown|finished|100|100|0|0|0|100.0%||' \
+        'YTDLP_PROGRESS_V2|ring|vidéo-1080+français|finished|100|100|0|0|0|100.0%||' \
+        'YTDLP_PROGRESS_V2|ring|vidéo-1080|finished|0|0|0|0|0|100.0%||' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 1/4 - 100%' \
+        'four-stream plan reserves every component before progress'
+    maximum_percent=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals "${completed_video_expected}" "${maximum_percent}" \
+        'subtitle and combined hooks do not fill slots; one completed component accounts for one quarter'
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|ring|français|finished|0|0|0|0|0|100.0%||' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 3/4 - 100%' \
+        'Unicode ID maps to its exact slot despite out-of-order progress'
+    printf '%s\n' \
+        'YTDLP_PLAN_V2|4|vidéo-1080|VF-STF-audio_0-japonais__VO_|français|allemand' \
+        'YTDLP_PROGRESS_V2|ring|VF-STF-audio_0-japonais__VO_|finished|0|0|0|0|0|100.0%||' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/4 - 100%' \
+        'repeated plan preserves completed slots and Japanese literal ID'
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|ring|allemand|finished|0|0|0|0|0|100.0%||' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 4/4 - 100%' \
+        'the fourth component is tracked'
+    complete_expected=$(map_download_to_zenity 100)
+    maximum_percent=$(max_percentage "${CAPTURE_FILE}")
+    assert_equals "${complete_expected}" "${maximum_percent}" \
+        'all components finish only the download phase'
+    assert_file_has_no_line "${CAPTURE_FILE}" '100' \
+        'a completed four-stream transfer is not publication'
+    assert_percentages_never_decrease "${CAPTURE_FILE}" 'four-stream Unicode plan'
+    finish_success '/tmp/arte-four-streams-unicode.mkv'
+
+    start_scenario arte-invalid-multistream-plan video
+    printf '%s\n' \
+        'YTDLP_PLAN_V2|4|video|audio' \
+        'YTDLP_PLAN_V2|2|same|same' \
+        'YTDLP_PLAN_V2|17|a' \
+        'YTDLP_PLAN_V2|01|a' \
+        'YTDLP_PLAN_V2|2|video|unsafe/name' \
+        'YTDLP_PLAN_V2|2|video|audio|surplus' \
+        'YTDLP_PROGRESS_V2|ring|one|downloading|10|100|0|0|0|10.0%||' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 10%' \
+        'invalid counts and identifiers leave no partial planned state'
+    finish_success '/tmp/arte-invalid-multistream-plan.mkv'
+}
+
 main() {
     trap 'stop_active_processes; rm -rf -- "${TEST_ROOT}" || true' EXIT
 
@@ -1046,6 +1109,7 @@ main() {
     test_monitor_video_audio_weighting
     test_monitor_composite_and_postprocess_progress
     test_monitor_failure_and_input_hardening
+    test_monitor_multistream_unicode_plan
     printf '%s\n' 'Progress-monitor integration tests passed.'
 }
 

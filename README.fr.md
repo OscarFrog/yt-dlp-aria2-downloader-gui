@@ -44,7 +44,7 @@ FFmpeg pour fusionner, remuxer ou extraire les flux. HTTPS repasse
 automatiquement sur le transport natif de yt-dlp lorsque le backend TLS d'aria2
 n'offre pas le durcissement requis de validation des certificats. Les flux DASH
 et HLS restent eux aussi natifs.
-La version de développement actuelle est la **2.4.3**.
+La version de développement actuelle est la **2.4.4**.
 La dernière release de paquets publiée est la **2.4.3**.
 
 ## Installation recommandée
@@ -92,6 +92,8 @@ Avec le RPM, le lanceur graphique et son icône sont installés automatiquement 
   publication locale décrite plus bas ;
 - sélection du dossier de destination et mémorisation des préférences ;
 - vidéo MKV sans réencodage lorsque les flux sont compatibles ;
+- choix indépendants des audios et sous-titres sur les sites compatibles, avec
+  sélection automatique, plusieurs pistes ou aucun sous-titre ;
 - profil vidéo YouTube HLS authentifié avec les cookies Firefox ;
 - extraction de la meilleure piste audio avec conservation du format source lorsque possible ;
 - reprise des téléchargements interrompus gérés nativement par yt-dlp lorsque le site le permet ;
@@ -273,7 +275,7 @@ version de développement ci-dessous, cette commande ne s'applique qu'après la
 création de son tag signé :
 
 ```bash
-gh workflow run release.yml   --ref v2.4.3   -f tag=v2.4.3   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh workflow run release.yml   --ref v2.4.4   -f tag=v2.4.4   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Le workflow refuse indépendamment toute exécution manuelle dont le type de ref,
@@ -635,6 +637,60 @@ dossier choisi sans remplacer un fichier existant. Consultez
 pour les besoins d'espace local et les limites des systèmes de fichiers.
 
 
+### Langues audio et sous-titres
+
+L'application permet de sélectionner les pistes audio et les sous-titres
+disponibles sur certains sites compatibles. L'utilisateur peut choisir une ou
+plusieurs langues audio et télécharger une vidéo avec ou sans sous-titres.
+
+**Complete video (MKV)** analyse les pistes disponibles avant le téléchargement.
+Deux listes à cocher suivent : choisissez une ou plusieurs **Audio tracks**
+(pistes audio), puis les **Subtitles** (sous-titres) indépendamment. La première
+ligne des sous-titres est **No subtitles** (aucun sous-titre). Chaque fenêtre
+comporte uniquement **Cancel** (annuler) et **Continue** (continuer).
+Continuer depuis la fenêtre des sous-titres lance le transfert avec ces choix.
+
+La présélection audio privilégie une version originale identifiée de
+façon fiable. Si la VO est inconnue, elle choisit le français, puis la piste par
+défaut du site ou une autre piste audio ordinaire disponible, et explique ce
+repli dans la fenêtre. L'audio par défaut fait partie des pistes sélectionnées.
+Lorsque plusieurs pistes audio sont cochées, la VO reste la piste par défaut
+si elle en fait partie. Après **Continue** dans la fenêtre audio, la présélection
+des sous-titres dépend de l'audio par défaut choisi : aucun pour
+un audio français ; des sous-titres français complets pour une autre langue
+identifiée de façon fiable, lorsqu'une telle piste est disponible sans ambiguïté.
+Sinon, **No subtitles** est sélectionné et la fenêtre explique pourquoi. Les deux
+listes restent modifiables. **No subtitles**, ou toutes les cases de sous-titres
+décochées, produit un fichier sans aucune piste de sous-titres, sans télécharger,
+convertir ni intégrer de fichiers de sous-titres.
+Choisissez **No subtitles** ou une ou plusieurs pistes de sous-titres. Cocher
+les deux crée un conflit : l'application demande de corriger la sélection avant
+de télécharger.
+
+Les sous-titres **Full** (complets) traduisent les dialogues. Les **Forced**
+(forcés) couvrent certains passages et ne remplacent jamais une traduction
+complète. Les sous-titres sélectionnés restent des pistes séparées, activables
+ou désactivables dans le lecteur. Le MKV contient une vidéo et exactement les
+audios et sous-titres choisis, sans réencodage vidéo ou audio. La politique de
+qualité vidéo existante est conservée.
+
+Les listes contiennent uniquement les pistes distinctes admissibles après
+filtrage et déduplication. Cochez chaque piste souhaitée pour inclure plusieurs
+langues ou toutes les pistes disponibles. Les sous-titres pour personnes sourdes
+ou malentendantes et les pistes explicitement identifiées comme confort audio
+sont exclus des listes et présélections. L'option CLI de toutes les pistes
+applique les mêmes exclusions. L'audiodescription reste une catégorie distincte
+disponible. La disponibilité dépend du programme, du territoire et des droits
+en cours.
+
+Les sous-titres utilisent le SRT UTF-8, qui conserve le texte, les retours à la
+ligne et les horaires. Les positions de la source ne sont pas conservées ; la
+présentation dépend des réglages du lecteur. Une mise en forme ou une horloge
+non prise en charge produit une erreur explicite. L'application vérifie le MKV
+terminé avant sa publication. Une piste choisie devenue indisponible ou une
+sélection incompatible avec une reprise impose un nouveau choix, sans
+remplacement silencieux. L'annulation reste possible pendant toute l'opération.
+
 ### 4. Suivre la progression
 
 La fenêtre de progression indique l’étape actuelle du téléchargement ou du post-traitement. Le remuxage FFmpeg géré par le moteur utilise la sortie de progression machine de FFmpeg et la durée de la source, et non un compteur artificiel. Le bouton d'annulation permet d'arrêter l'ensemble du
@@ -712,6 +768,16 @@ Meilleure piste audio native :
   --output-dir "${HOME}/Music" \
   'https://example.com/video'
 ```
+
+Pour choisir les pistes sur les sites compatibles, ajoutez `--tracks-auto` pour
+la sélection automatique des audios et sous-titres, ou `--all-tracks` pour toutes
+les pistes distinctes admissibles. Utilisez `--no-subtitles` seul pour l'audio
+automatique sans sous-titres, ou ajoutez-le à l'une de ces options pour conserver
+les audios choisis sans aucune piste de sous-titres. Ces options
+s'appliquent à `--mode video` ; les règles sont décrites dans
+[Langues audio et sous-titres](#langues-audio-et-sous-titres).
+Utilisez `--url-file FILE` à la place d'une URL positionnelle pour garder l'URL
+hors des arguments de processus ; ce fichier doit être privé et vous appartenir.
 
 Mode de repli YouTube HLS authentifié :
 

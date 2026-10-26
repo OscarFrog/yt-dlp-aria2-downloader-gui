@@ -258,7 +258,7 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 50
     # Distribution dependencies are resolved anew for publication. Source-tree
     # proof does not identify that environment, so exercise current media tools
     # alongside the independent package builds before opening the release gate.
@@ -268,18 +268,27 @@ jobs:
         yt_dlp_version: ['2026.6.9', '2026.8.19']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Install current Ubuntu engines and pinned yt-dlp
+        timeout-minutes: 8
         env:
           YT_DLP_VERSION: ${{ matrix.yt_dlp_version }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo env DEBIAN_FRONTEND=noninteractive \
-            apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
+          # Bound stalled connections and the complete package transaction;
+          # provisioning must leave the independently bounded media tests time.
+          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py
+          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
+          sudo timeout --signal=TERM --kill-after=10s 2m \
+            apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+          sudo timeout --signal=TERM --kill-after=10s 4m \
+            env DEBIAN_FRONTEND=noninteractive \
+            apt-get "${apt_options[@]}" install --yes --no-install-recommends \
             aria2 ffmpeg python3-venv
 
           case ${YT_DLP_VERSION} in
@@ -308,6 +317,7 @@ jobs:
             --requirement "${requirements}"
           echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
       - name: Record resolved release dependency versions
+        timeout-minutes: 1
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -577,6 +587,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - run: |
+          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py
           sudo apt-get update
           sudo apt-get install --yes unzip
       - name: Build and verify exact source ZIP
@@ -1117,6 +1128,7 @@ jobs:
           persist-credentials: false
       - name: Install DEB build tools
         run: |
+          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py
           sudo apt-get -o Acquire::Retries=3 update
           sudo apt-get -o Acquire::Retries=3 install --yes desktop-file-utils
       - name: Require immutable artifact identity

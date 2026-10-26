@@ -64,6 +64,10 @@ RETAINED_LOG_FILE=''
 LOG_RETAINED=false
 LOG_RETENTION_ATTEMPTED=false
 LOG_TIMESTAMP=''
+ARTE_VIDEO=false
+ARTE_CATALOG_FILE=''
+ARTE_SELECTION_FILE=''
+ARTE_PROGRESS_FD=''
 
 # Accept shared physical ancestors only when sticky-bit ownership rules keep a
 # different UID from replacing private application paths below them.
@@ -2419,6 +2423,20 @@ url_is_youtube() {
     esac
 }
 
+url_is_arte() {
+    (($# == 1)) || return 2
+    local authority=${1#*://}
+    local host=''
+    authority=${authority%%/*}
+    authority=${authority%%\?*}
+    authority=${authority%%\#*}
+    [[ ${authority} != *@* ]] || return 1
+    host=${authority%%:*}
+    host=${host,,}
+    host=${host%.}
+    [[ ${host} == arte.tv || ${host} == *.arte.tv ]]
+}
+
 select_profile() {
     local output_variable=$1
     local is_youtube=$2
@@ -2856,6 +2874,14 @@ Path: ${STATE_DIR}"
     readonly PROGRESS_MONITOR_ERROR_FILE PROGRESS_DIALOG_ERROR_FILE
 
     readonly URL_FILE="${TEMP_DIR}/url.txt"
+    # This only selects the GUI experience. The engine independently checks
+    # the host and applies the catalogue policy before accepting any selection.
+    # shellcheck disable=SC2310 # Host classification is a predicate.
+    if [[ ${PROFILE} == video ]] && url_is_arte "${URL}"; then
+        ARTE_VIDEO=true
+        ARTE_CATALOG_FILE="${TEMP_DIR}/arte-catalogue.json"
+        ARTE_SELECTION_FILE="${TEMP_DIR}/arte-selection.json"
+    fi
     if ! printf '%s\n' "${URL}" >"${URL_FILE}" \
         || ! chmod 600 -- "${URL_FILE}"; then
         show_error 'Unable to create the private URL transfer file.'
@@ -2890,6 +2916,366 @@ Path: ${STATE_DIR}"
             exit 2
             ;;
     esac
+    if [[ ${ARTE_VIDEO} == true ]]; then
+        COMMAND+=(--track-catalog "${ARTE_CATALOG_FILE}"
+            --track-selection "${ARTE_SELECTION_FILE}")
+    fi
+}
+
+# The same supervised engine pauses before reserving or downloading media.
+# Only an atomic confirmed selection releases that pause.
+wait_for_arte_catalogue() {
+    local attempt status=0
+    local catalogue_ready=false
+
+    begin_signal_registration
+    zenity --progress --pulsate --auto-close \
+        --title="${APP_DIALOG_TITLE}" \
+        --text='Analyzing the available audio and subtitle tracks...' \
+        --percentage=0 --cancel-label='Cancel' --width=700 \
+        <"${PROGRESS_PIPE}" 2>"${PROGRESS_DIALOG_ERROR_FILE}" &
+    ZENITY_PID=$!
+    # Opening both ends avoids a blocking FIFO open if Zenity fails at startup.
+    # Zenity was spawned first, so it cannot inherit this writer and prevent EOF.
+    if ! exec {ARTE_PROGRESS_FD}<>"${PROGRESS_PIPE}"; then
+        finish_signal_registration
+        show_error 'Unable to open the track analysis progress channel.'
+        exit 1
+    fi
+    finish_signal_registration
+    printf '0\n' >&"${ARTE_PROGRESS_FD}"
+    for ((attempt = 0; attempt < 9000; attempt++)); do
+        # shellcheck disable=SC2310 # Child liveness is observed, never signaling authority.
+        if ! gui_child_is_running "${ZENITY_PID}"; then
+            break
+        fi
+        if [[ -f ${ARTE_CATALOG_FILE} && ! -L ${ARTE_CATALOG_FILE} ]]; then
+            catalogue_ready=true
+            printf '100\n' >&"${ARTE_PROGRESS_FD}"
+            break
+        fi
+        # shellcheck disable=SC2310 # The normal error path handles an exited engine.
+        if ! worker_pid_is_current false; then
+            break
+        fi
+        sleep 0.2
+    done
+    exec {ARTE_PROGRESS_FD}>&-
+    ARTE_PROGRESS_FD=''
+    for ((attempt = 0; attempt < 20; attempt++)); do
+        # shellcheck disable=SC2310 # Wait only on the registered direct child.
+        gui_child_is_running "${ZENITY_PID}" || break
+        sleep 0.1
+    done
+    # shellcheck disable=SC2310 # A nonresponsive dialog is a bounded failure.
+    if gui_child_is_running "${ZENITY_PID}"; then
+        # shellcheck disable=SC2310 # Cleanup retains any unconfirmed child.
+        stop_gui_children || true
+        show_error 'The track analysis dialog did not close.'
+        exit 1
+    fi
+    wait "${ZENITY_PID}" || status=$?
+    ZENITY_PID=''
+    if ((status == 1)); then
+        exit 130
+    elif ((status != 0)); then
+        append_session_diagnostic "${PROGRESS_DIALOG_ERROR_FILE}" 'Track analysis dialog diagnostic:'
+        show_error_with_log 'Track analysis failed' 'The track analysis dialog failed.'
+        exit 1
+    elif [[ ${catalogue_ready} != true ]]; then
+        show_error_with_log 'Track analysis failed' 'No track catalogue was produced. The programme may be unavailable; inspect the diagnostic log and retry.'
+        exit 1
+    fi
+}
+
+# Export only bounded labels and verified choices, never extraction data.
+arte_gui_catalogue() {
+    python3 -I -B - "${ARTE_CATALOG_FILE}" "$@" <<'PY_ARTE_GUI'
+import json
+import os
+import re
+import stat
+import sys
+
+NONE_ID = '__no_subtitles__'
+KEY = re.compile(r'[a-z][a-z0-9-]{0,95}')
+messages = {
+    'original_audio_unknown': 'The original audio could not be identified reliably. French or the available default audio is selected.',
+    'original_audio_ambiguous': 'The original audio is uncertain. Check the selected audio before continuing.',
+    'audio_language_unknown': 'The selected audio language is unknown. No subtitles is preselected.',
+    'french_full_unavailable': 'Full French subtitles are unavailable. No subtitles is preselected; forced subtitles are not a replacement.',
+    'french_full_ambiguous': 'Several full French subtitle tracks are available. Choose the track you want, or No subtitles.',
+}
+
+def read_private(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077 or info.st_size > 65536):
+            raise ValueError('unsafe private track state')
+        payload = os.read(fd, 65537)
+        if len(payload) > 65536:
+            raise ValueError('oversized private track state')
+        return payload.decode('utf-8')
+    finally:
+        os.close(fd)
+
+try:
+    catalogue = json.loads(read_private(sys.argv[1]))
+    if (not isinstance(catalogue, dict) or catalogue.get('version') != 1
+            or catalogue.get('policy') != 'arte-no-hearing-impaired-v1'
+            or not re.fullmatch(r'[0-9a-f]{64}', catalogue.get('id', ''))):
+        raise ValueError('invalid catalogue')
+    groups = {}
+    for kind, allowed in [('audio', {'main', 'description'}), ('subtitles', {'full', 'forced'})]:
+        rows = catalogue.get(kind)
+        if not isinstance(rows, list) or len(rows) > 32 or (kind == 'audio' and not rows):
+            raise ValueError('invalid tracks')
+        seen = set()
+        for row in rows:
+            if not isinstance(row, dict) or row.get('role') not in allowed:
+                raise ValueError('excluded or invalid role')
+            for field in ('id', 'label', 'language'):
+                value = row.get(field)
+                if not isinstance(value, str) or not 1 <= len(value) <= 256 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+                    raise ValueError('invalid track text')
+            if row['id'] in seen or KEY.fullmatch(row['id']) is None:
+                raise ValueError('invalid track ID')
+            seen.add(row['id'])
+        groups[kind] = rows
+    selected = json.loads(read_private(sys.argv[3]))
+    if (not isinstance(selected, dict) or selected.get('version') != 2
+            or selected.get('catalogue_id') != catalogue['id']
+            or selected.get('audio_mode') not in ('auto', 'all', 'custom')
+            or selected.get('subtitle_mode') not in ('auto', 'none', 'all', 'custom')):
+        raise ValueError('stale selection')
+    for kind in groups:
+        wanted = selected.get(kind)
+        lookup = {x['id'] for x in groups[kind]}
+        if (not isinstance(wanted, list) or len(wanted) > 32
+                or any(not isinstance(x, str) or x not in lookup for x in wanted)
+                or len(set(wanted)) != len(wanted) or (kind == 'audio' and not wanted)):
+            raise ValueError('invalid selection')
+        default = selected.get('default_audio' if kind == 'audio' else 'default_subtitle')
+        if default not in wanted and (kind == 'audio' or default is not None):
+            raise ValueError('invalid default')
+    notices = selected.get('messages')
+    if not isinstance(notices, list) or len(notices) > 8 or any(not isinstance(x, str) for x in notices):
+        raise ValueError('invalid selection information')
+    if sys.argv[2] == 'rows':
+        result = ['|'.join(selected['audio']), '|'.join(selected['subtitles']), selected['default_audio'],
+                  selected['default_subtitle'] or '', '\n'.join(messages[item] for item in notices if item in messages)]
+        for kind, rows in groups.items():
+            for row in rows:
+                result.extend([kind, row['id'], row['label'], 'TRUE' if row['id'] in selected[kind] else 'FALSE'])
+    elif sys.argv[2] == 'choice':
+        kind = sys.argv[4]
+        if kind not in groups:
+            raise ValueError('invalid choice kind')
+        answer = read_private(sys.argv[5])
+        if len(answer) > 4096:
+            raise ValueError('oversized choice')
+        choices = answer.split('|') if answer else []
+        available = {item['id'] for item in groups[kind]}
+        if kind == 'subtitles':
+            available.add(NONE_ID)
+        if (len(choices) > (15 if kind == 'audio' else 33) or len(choices) != len(set(choices))
+                or any(item not in available for item in choices)):
+            raise ValueError('invalid or repeated choice ID')
+        if kind == 'audio':
+            if not choices:
+                raise ValueError('missing audio')
+            result = ['custom', '|'.join(choices)]
+        elif NONE_ID in choices and len(choices) > 1:
+            # A checkbox list has no live mutual exclusion. Return the complete
+            # valid conflicting state for an inline retry; never infer intent.
+            result = ['conflict', '|'.join(choices)]
+        elif not choices or choices == [NONE_ID]:
+            result = ['none', '']
+        else:
+            result = ['custom', '|'.join(choices)]
+    else:
+        raise ValueError('invalid GUI operation')
+    sys.stdout.buffer.write(('\0'.join(result) + '\0').encode('utf-8'))
+except (OSError, ValueError, TypeError, KeyError, IndexError):
+    print('Error: invalid track catalogue or selection; analyze the programme again.', file=sys.stderr)
+    sys.exit(65)
+PY_ARTE_GUI
+}
+
+require_arte_dialog_success() {
+    case ${ZENITY_STATUS} in
+        0) return 0 ;;
+        1) exit 130 ;;
+        *)
+            show_zenity_error 'The track selection dialog failed.'
+            exit 1
+            ;;
+    esac
+}
+
+# Helper-generated choices keep automatic rules and explicit intent together.
+# Only the confirmed state is moved to the engine's selection handoff path.
+update_arte_choice() {
+    local state=$1 draft=$2 audio_mode=$3 subtitle_mode=$4
+    local selected_audio=$5 selected_subtitles=$6 id
+    local default_audio=${7-} default_subtitle=${8-}
+    local -a audio_ids=() subtitle_ids=()
+    local -a selection_command=(python3 -I -B "${SCRIPT_DIR}/private-art-tracks.py" select
+        --catalogue "${ARTE_CATALOG_FILE}" --audio-mode "${audio_mode}"
+        --subtitle-mode "${subtitle_mode}" --output "${draft}")
+
+    if [[ ${audio_mode} == custom && -n ${selected_audio} ]]; then
+        IFS='|' read -r -a audio_ids <<<"${selected_audio}"
+        for id in "${audio_ids[@]}"; do selection_command+=(--audio "${id}"); done
+    fi
+    if [[ ${subtitle_mode} == custom && -n ${selected_subtitles} ]]; then
+        IFS='|' read -r -a subtitle_ids <<<"${selected_subtitles}"
+        for id in "${subtitle_ids[@]}"; do selection_command+=(--subtitle "${id}"); done
+    fi
+    if [[ -n ${default_audio} && "|${selected_audio}|" == *"|${default_audio}|"* ]]; then
+        selection_command+=(--default-audio "${default_audio}")
+    fi
+    if [[ ${subtitle_mode} == custom && -n ${default_subtitle} &&
+        "|${selected_subtitles}|" == *"|${default_subtitle}|"* ]]; then
+        selection_command+=(--default-subtitle "${default_subtitle}")
+    fi
+    if ! "${selection_command[@]}" >>"${LOG_FILE}" 2>&1 \
+        || ! mv -T -- "${draft}" "${state}"; then
+        show_error_with_log 'Track selection failed' 'A requested track is unavailable or the selection is no longer valid. Analyze the programme again and choose available tracks.'
+        exit 65
+    fi
+}
+
+select_arte_tracks() {
+    local rows_file="${TEMP_DIR}/arte-rows"
+    local state="${TEMP_DIR}/arte-selection-confirmation.json"
+    local draft="${TEMP_DIR}/arte-selection-draft.json"
+    local choice_file=''
+    local selected_audio='' selected_subtitles='' subtitle_mode=''
+    local default_audio='' default_subtitle='' information='' subtitle_notice=''
+    local id label checked index
+    local -a rows=() choice=() audio_rows=() subtitle_rows=()
+    local -r none_id=__no_subtitles__
+
+    wait_for_arte_catalogue
+    if ! choice_file=$(mktemp --tmpdir="${TEMP_DIR}" '.track-choice.XXXXXXXX'); then
+        show_error 'Unable to prepare private track selection.'
+        exit 73
+    fi
+    # Each URL begins with the helper's recommendation. Audio confirmation
+    # recalculates subtitles once, before their first display; the final choice
+    # is explicit and is never replaced by another automatic recommendation.
+    update_arte_choice "${state}" "${draft}" auto auto '' ''
+    # shellcheck disable=SC2310 # One Python command validates the private state.
+    if ! arte_gui_catalogue rows "${state}" >"${rows_file}"; then
+        show_error 'The track catalogue is invalid. Analyze the programme again.'
+        exit 65
+    fi
+    mapfile -d '' -t rows <"${rows_file}"
+    default_audio=${rows[2]}
+    information='Audio tracks: select one or more.'
+    if [[ -n ${rows[4]} ]]; then
+        information+=$'\n\n'"${rows[4]}"
+    fi
+    for ((index = 5; index + 3 < ${#rows[@]}; index += 4)); do
+        if [[ ${rows[index]} == audio ]]; then
+            label=${rows[index + 2]}
+            if [[ ${rows[index + 3]} == TRUE && ${rows[index + 1]} == "${default_audio}" ]]; then
+                label+=' (default)'
+            fi
+            audio_rows+=("${rows[index + 3]}" "${rows[index + 1]}" "${label}")
+        fi
+    done
+    run_zenity_capture selected_audio --list --checklist \
+        --title="${APP_DIALOG_TITLE}" --text="${information}" \
+        --column='Select' --column='ID' --column='Audio' --hide-column=2 --print-column=2 \
+        --separator='|' --ok-label='Continue' --cancel-label='Cancel' \
+        --width=800 --height=520 "${audio_rows[@]}"
+    require_arte_dialog_success
+    if [[ -z ${selected_audio} ]]; then
+        show_error 'Select at least one audio track.'
+        exit 65
+    fi
+    printf '%s' "${selected_audio}" >"${choice_file}"
+    # shellcheck disable=SC2310 # Reject malformed/duplicate IDs before shell splitting.
+    if ! arte_gui_catalogue choice "${state}" audio "${choice_file}" >"${rows_file}"; then
+        show_error 'Choose available audio tracks without duplicate entries.'
+        exit 65
+    fi
+    mapfile -d '' -t choice <"${rows_file}"
+    selected_audio=${choice[1]}
+    update_arte_choice "${state}" "${draft}" custom auto "${selected_audio}" '' "${default_audio}"
+    # shellcheck disable=SC2310 # The helper alone computes language/default policy.
+    if ! arte_gui_catalogue rows "${state}" >"${rows_file}"; then
+        show_error 'The track selection is invalid. Analyze the programme again.'
+        exit 65
+    fi
+    mapfile -d '' -t rows <"${rows_file}"
+    selected_audio=${rows[0]}
+    selected_subtitles=${rows[1]}
+    default_audio=${rows[2]}
+    default_subtitle=${rows[3]}
+    subtitle_notice=${rows[4]}
+    if [[ -z ${selected_subtitles} ]]; then
+        selected_subtitles=${none_id}
+    fi
+    information='Subtitles: select tracks, or No subtitles.'
+    if [[ -n ${subtitle_notice} ]]; then
+        information+=$'\n\n'"${subtitle_notice}"
+    fi
+    while :; do
+        subtitle_rows=()
+        checked=FALSE
+        if [[ "|${selected_subtitles}|" == *"|${none_id}|"* ]]; then
+            checked=TRUE
+        fi
+        subtitle_rows+=("${checked}" "${none_id}" 'No subtitles')
+        for ((index = 5; index + 3 < ${#rows[@]}; index += 4)); do
+            if [[ ${rows[index]} == subtitles ]]; then
+                id=${rows[index + 1]}
+                label=${rows[index + 2]}
+                checked=FALSE
+                if [[ "|${selected_subtitles}|" == *"|${id}|"* ]]; then
+                    checked=TRUE
+                    if [[ ${id} == "${default_subtitle}" ]]; then
+                        label+=' (default)'
+                    fi
+                fi
+                subtitle_rows+=("${checked}" "${id}" "${label}")
+            fi
+        done
+        run_zenity_capture selected_subtitles --list --checklist \
+            --title="${APP_DIALOG_TITLE}" --text="${information}" \
+            --column='Select' --column='ID' --column='Subtitles' --hide-column=2 --print-column=2 \
+            --separator='|' --ok-label='Continue' --cancel-label='Cancel' \
+            --width=820 --height=520 "${subtitle_rows[@]}"
+        require_arte_dialog_success
+        printf '%s' "${selected_subtitles}" >"${choice_file}"
+        # shellcheck disable=SC2310 # Validate every ID before interpreting No subtitles.
+        if ! arte_gui_catalogue choice "${state}" subtitles "${choice_file}" >"${rows_file}"; then
+            show_error 'Choose available subtitle tracks without duplicate entries.'
+            exit 65
+        fi
+        mapfile -d '' -t choice <"${rows_file}"
+        subtitle_mode=${choice[0]}
+        selected_subtitles=${choice[1]}
+        if [[ ${subtitle_mode} != conflict ]]; then
+            break
+        fi
+        # Preserve all checked rows on conflict, including No subtitles. A
+        # highlighted row is never a choice; only Zenity's checkbox IDs count.
+        default_subtitle=''
+        information='Subtitles: choose No subtitles OR subtitle tracks, not both. Uncheck one of these choices, then Continue.'
+    done
+    update_arte_choice "${state}" "${draft}" custom "${subtitle_mode}" \
+        "${selected_audio}" "${selected_subtitles}" "${default_audio}" "${default_subtitle}"
+    # Only the second accepted checklist releases the existing engine wait.
+    if ! mv -T -- "${state}" "${ARTE_SELECTION_FILE}"; then
+        show_error 'Unable to confirm the track selection.'
+        exit 73
+    fi
 }
 
 # Start the isolated engine session and require a controllable process group.
@@ -3260,6 +3646,9 @@ main() {
     collect_download_request
     prepare_gui_session
     start_download_worker
+    if [[ ${ARTE_VIDEO} == true ]]; then
+        select_arte_tracks
+    fi
     run_progress_dialog
     handle_worker_result
 
