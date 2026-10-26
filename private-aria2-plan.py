@@ -999,12 +999,18 @@ def resource_plan(args: argparse.Namespace) -> int:
     # a later resume even if another incomplete checkpoint has the same shape.
     binding = None
     if has_media_identity:
-        binding = hashlib.sha256(json.dumps({
+        binding_fields = {
             'request': hashlib.sha256(request.read_bytes()).hexdigest(),
             'media': media_identity,
             'identity': expected, 'family': family, 'mode': args.mode, 'hls': args.hls,
             'formats': [(item.get('format_id'), item.get('ext'), item.get('protocol')) for item in formats],
-        }, sort_keys=True).encode()).hexdigest()
+        }
+        if root.get('arte_selection') is not None:
+            # The policy and exact source identities are part of the output,
+            # including subtitle roles and default dispositions. Old records
+            # without this binding cannot admit an ARTE multitrack resume.
+            binding_fields['arte_selection'] = root['arte_selection']
+        binding = hashlib.sha256(json.dumps(binding_fields, sort_keys=True).encode()).hexdigest()
     legacy_binding = binding
     if binding is not None and incarnation is not None:
         binding = hashlib.sha256(json.dumps({'legacy_binding': binding,
@@ -1012,6 +1018,8 @@ def resource_plan(args: argparse.Namespace) -> int:
     final_name = destination.with_suffix('.mkv').name if args.mode == 'video' else destination.name
     if args.hls and destination.suffix == '.mkv':
         final_name = destination.stem + '.remuxed.mkv'
+    if root.get('arte_selection') is not None:
+        final_name = destination.stem + '.tracks.mkv'
     state = {'version': 2, 'family': family, 'binding': binding,
              'legacy_binding': legacy_binding, 'incarnation': incarnation,
              'transaction': secrets.token_hex(32),
@@ -1030,6 +1038,25 @@ def resource_plan(args: argparse.Namespace) -> int:
     write_private_new(Path(args.state).with_name('transfer-plan.json'), json.dumps(replay))
     for mode, key in sorted(keys, key=lambda item: item[1]):
         print(mode, key)
+    return 0
+
+
+def progress_plan(args: argparse.Namespace) -> int:
+    """Emit every frozen media component without leaking extraction metadata."""
+    root = selected_download(read_json(Path(args.plan), 'yt-dlp plan'))
+    formats = root.get('requested_formats') or [root]
+    if not isinstance(formats, list) or not 1 <= len(formats) <= 16:
+        raise PlanError('progress planning requires bounded formats')
+    identifiers = []
+    for item in formats:
+        identifier = item.get('format_id') if isinstance(item, dict) else None
+        if (not format_id_is_representable(identifier)
+                or len(identifier) > 128):
+            raise PlanError('progress format identifier is unsafe')
+        identifiers.append(identifier)
+    if len(set(identifiers)) != len(identifiers):
+        raise PlanError('duplicate progress format identifier')
+    print('YTDLP_PLAN_V2|' + str(len(identifiers)) + '|' + '|'.join(identifiers))
     return 0
 
 
@@ -1242,6 +1269,24 @@ def check_native_final(args: argparse.Namespace) -> int:
     output_dir = resolve_output_directory(args.output_dir)
     plan = read_json(Path(args.plan), "yt-dlp plan")
     root = selected_download(plan)
+    if root.get('arte_selection') is not None and getattr(args, 'ownership', None):
+        ownership_path = Path(args.ownership)
+        state = read_json(ownership_path, 'resource admission')
+        try:
+            if resource_snapshot(state) != state.get('owned'):
+                raise DestinationExistsError('ARTE resource family changed after admission; preserved')
+            if state['output'] != state['final']:
+                local_state = {**state, 'final': state['output'],
+                               'identity': list(directory_identity(Path(state['output'])))}
+                if resource_snapshot(local_state):
+                    raise DestinationExistsError('ARTE local workspace contains an unowned resource; preserved')
+        except DestinationExistsError:
+            # Cleanup must not turn a refused foreign subtitle/conversion file
+            # into an owned resume merely by recording the current directory.
+            state['binding'] = None
+            state['legacy_binding'] = None
+            replace_private_json(ownership_path, state)
+            raise
     destination = resolve_destination(
         root.get("filename") or root.get("_filename"),
         output_dir,
@@ -2032,6 +2077,9 @@ def create_parser() -> argparse.ArgumentParser:
     resources.add_argument('--mode', choices=('video', 'audio'), required=True)
     resources.add_argument('--hls', action='store_true')
     resources.set_defaults(handler=resource_plan)
+    progress = subparsers.add_parser('progress-plan', help='emit the bounded frozen component progress plan')
+    progress.add_argument('--plan', required=True)
+    progress.set_defaults(handler=progress_plan)
     ownership = subparsers.add_parser('resource-state', help='admit or checkpoint owned local media')
     ownership.add_argument('--action', choices=('admit', 'save'), required=True)
     ownership.add_argument('--state', required=True)

@@ -254,6 +254,39 @@ for phase, identifier, legacy in (
 media = root / 'retained.media'
 media.write_bytes(b'unchanged retained fixture')
 (root / 'path-record').write_text(str(media) + '\n')
+# The real supervisor's signal delivery/quiescence is covered separately.
+# At this boundary its completed cancellation must escape the caller's ordinary
+# validation-refusal handler, including source, remux and final validation.
+arte_cancellation = r'''
+fixture_status=$2
+PRIVATE_ARIA2_METADATA=$1
+PROCESS_SUPERVISOR=unused
+ARTE_MEDIA_HELPER=$1/must-not-run
+ARTE_COMPONENT_RECORDS=$1/components
+ARTE_SUBTITLE_REFERENCE=$1/reference
+ARTE_EXPECTATION=$1/expected
+PRIVATE_ARIA2_PLAN=$1/plan.json
+fixture_requested=$4
+run_supervised_command() {
+    DOWNLOAD_STATUS=${fixture_status}
+    SHUTDOWN_REQUESTED=${fixture_requested}
+    REQUESTED_EXIT_STATUS=${fixture_status}
+}
+validate_arte_media_file "$1/retained.media" "$3" || {
+    printf 'validation refusal\n' >&2
+    exit 65
+}
+exit 99
+'''
+for phase in ('source', 'remux', 'final'):
+    for status in (130, 143):
+        result = run(arte_cancellation, status, phase, 'true')
+        assert result.returncode == status, ('ARTE validation lost cancellation', phase, status, result.stderr)
+        assert not result.stdout and not result.stderr, 'ARTE cancellation became a media validation failure'
+        assert media.read_bytes() == b'unchanged retained fixture', 'ARTE cancellation changed retained media'
+    result = run(arte_cancellation, 23, phase, 'false')
+    assert result.returncode == 65 and result.stderr == 'validation refusal\n', 'ARTE non-signal failure no longer refuses validation'
+
 validation = r'''
 fixture_reason=$2
 PATH_RECORD_FD_PATH=$1/path-record

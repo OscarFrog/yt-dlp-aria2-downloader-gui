@@ -71,6 +71,9 @@ fi
 %{_libexecdir}/yt-dlp-aria2-downloader/download-video-gui.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/progress-monitor.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/private-aria2-plan.py
+%{_libexecdir}/yt-dlp-aria2-downloader/private-arte-tracks.py
+%{_libexecdir}/yt-dlp-aria2-downloader/private-arte-media.py
+%{_libexecdir}/yt-dlp-aria2-downloader/private-arte-subtitles.py
 %{_libexecdir}/yt-dlp-aria2-downloader/private-process-supervisor.py
 %{_libexecdir}/yt-dlp-aria2-downloader/runtime-manager.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/package-user-cleanup.sh

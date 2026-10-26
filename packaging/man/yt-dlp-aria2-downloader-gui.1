@@ -15,6 +15,40 @@ offers exactly YouTube video - Firefox cookies (HLS/MKV) and Audio track (native
 format). Every other normalized host offers exactly Complete video (MKV) and
 Audio track (native format).
 .PP
+On compatible sites, complete-video requests analyse the available tracks before
+transfer. Two checklists follow: choose one or more Audio tracks, then choose
+Subtitles independently. The first subtitle row is No subtitles. Each window
+has only Cancel and Continue. Continuing from the subtitle window starts the
+transfer. No subtitles, or leaving every subtitle row unchecked, produces a
+file with no subtitle tracks and skips subtitle downloads, conversion and
+embedding.
+Choose No subtitles or one or more subtitle tracks. Checking both is a conflict:
+the application asks you to correct the selection before downloading.
+.PP
+The initial audio selection prefers a reliably identified original version.
+If the original version is unknown, it chooses French, then the site's default
+or another ordinary audio track, and explains this fallback in the window.
+The default audio belongs to the selected tracks. When several audio tracks are
+checked, the original remains the default if included. After Continue in the
+audio window, the initial subtitle selection follows the selected default audio:
+none for French, full French subtitles for another reliably identified language
+when uniquely available, otherwise none with an explanation in the window.
+Both checklists remain editable.
+.PP
+The lists contain only distinct admissible tracks after filtering and
+deduplication. Check every desired track to include several languages or all
+available tracks. Hearing-impaired subtitles and explicitly identified comfort
+audio are excluded, including from initial selections. The CLI's all-track
+option applies the same exclusions. Audio description remains a separate
+available category. Full and forced subtitles remain distinct and
+selectable in the player; forced passages never replace a full translation.
+The validated MKV contains one video and exactly the selected audio and
+subtitles without video or audio re-encoding. UTF-8 SRT preserves text, line
+breaks and timing, but not source positioning. Unsupported formatting or timing
+causes an explicit error. Availability depends on the programme, territory and
+rights. Missing selected tracks are never silently replaced; incompatible
+selections cannot resume older partial files.
+.PP
 A remembered audio profile stays selected. All other saved values, including
 missing, invalid or incompatible preferences, select YouTube HLS video for
 YouTube and complete video for other sites. The command-line engine continues

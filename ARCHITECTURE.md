@@ -644,8 +644,7 @@ Its SPDX-plus-module-docstring header is the project-wide Python identity
 contract; `SHELL_STYLE.md`'s Bash banner does not apply.
 
 `private-root`, `media-local-safe`, `check-space`, `publish-media` and
-`cleanup-workspace` reuse the installed helper; no additional installed module
-or dependency is introduced. Disk capability uses a conservative
+`cleanup-workspace` reuse the same installed storage helper. Disk capability uses a conservative
 ext2/3/4/XFS/Btrfs/ZFS allowlist; metadata also permit tmpfs. Filesystem identity
 is checked on opened descriptors, not inferred from HOME/TMPDIR or a `cifs`
 name alone. The disk-space estimate is three times known component bytes plus
@@ -741,6 +740,167 @@ an empty transport record preceding a valid one is currently tolerated, although
 the helper never produces it. Shell capture removes trailing newlines before
 parsing classification output; internal blank or unrecognized lines are errors.
 
+### Track catalogue, selection and assembly
+
+For video accepted by the track-selection helper, the GUI starts the ordinary
+supervised engine with private `--track-catalog` and `--track-selection` paths.
+After metadata extraction the
+engine calls `private-arte-tracks.py` inside a timed supervised worker. The
+helper reads the HLS rendition metadata, normalizes languages and roles,
+excludes hearing-impaired subtitles and explicit comfort audio, and identifies
+technical variants and exact resource aliases without acquiring subtitle payloads.
+Audio description remains distinct.
+Track language takes precedence over a global version label. Complete and
+forced subtitles remain separate; `transcribes-spoken-dialog` alone is not
+an exclusion. Explicit provider-specific rendition roles take precedence over
+a narrowly scoped resource-name fallback, including `_st_VA-MAL_` in a raw
+`de-forced` key.
+Equal URLs with equal request headers can establish resource identity before
+display. Cross-host subtitle aliases require content identity, not equal paths
+alone. Entries whose language remains unknown or contradictory are retained
+in private quarantine with a bounded diagnostic, outside every selectable
+inventory. They are never automatic fallbacks or payload requests. Distinct
+resources with reliable language metadata remain selectable; any subsequent
+content comparison is deferred until a nonempty selection is confirmed.
+Excluded subtitle content is never fetched to establish alias identity.
+
+The private catalogue retains source/provenance data. A separate public-field
+catalogue contains only bounded labels, track IDs and roles, published
+atomically into the GUI's private session. The engine waits up to 30 minutes
+for confirmation, remaining cancellable through its existing supervision.
+The GUI offers exactly two checklists, each with Cancel and Continue: audio,
+then subtitles with No subtitles as the first row. There is no mode selector
+or confirmation summary between these choices and the existing transfer.
+At least one audio must be checked. After audio Continue, the helper computes
+the actual default audio and the corresponding initial subtitle checks.
+An empty subtitle checklist means none. Checking No subtitles together with
+tracks refuses confirmation and redisplays the same checklist with an inline
+error and the checked values preserved. The GUI never arbitrates that conflict.
+Only a valid second Continue publishes the selection to the waiting engine.
+The version 2 JSON selection records automatic versus explicit intent,
+catalogue identity, selected IDs and defaults; final GUI subtitle choices are
+always explicit custom or none. A new URL starts a new selection. Reliable track-local
+original-language evidence takes precedence over French dubbing. When it is
+absent or ambiguous, the fallback prefers ordinary French, an explicit source
+default, then stable catalogue order, with an explanatory message. Multiple
+audio selections prefer an included original as their default, then retain an
+explicit default when still selected, otherwise use deterministic ordering.
+Automatic subtitles follow that selected default audio: French requires none; a known foreign
+language proposes a unique complete French translation. Missing or ambiguous
+complete French subtitles leave the selection empty with an explanation;
+forced subtitles never replace them. Unknown audio language also leaves the
+automatic subtitle selection empty, including generic multilingual identifiers
+such as `mul`. The displayed default label follows the actual checked proposal;
+row highlighting is never treated as a check. Manual subtitle choices are not
+recomputed after confirmation. Unavailable/excluded/quarantined IDs, obsolete
+selections or stale catalogues fail closed. The reliable-language admission
+policy is bound to the plan so old ambiguous checkpoints cannot bypass it.
+CLI presets use the same helper
+and policy; old `--arte-*` names remain compatibility aliases.
+
+`apply` freezes a separate plan containing the video chosen by the existing
+quality policy, one representative per selected audio track, and only selected
+normalized subtitles. Selected possible aliases are compared under process
+supervision before freezing child playlists and the execution plan. Proven
+duplicates collapse; differing resources remain distinct. The verified track
+summary precedes media transfer. It preserves literal Unicode format IDs. Native yt-dlp
+replay uses that restricted format list and exact literal selectors with audio
+multistreams. An earlier subtitle-only native pass uses an explicit normalized
+subtitle list and preserves the original WebVTT and raw fragments in private
+storage. Frozen child playlists bind HLS fragment/mapping evidence; excluded
+renditions are filtered before these requests. Neither pass extracts the
+webpage again, selects all formats, or requests unfiltered subtitle languages.
+An empty subtitle selection bypasses child subtitle playlists, alias payload
+requests, the subtitle workspace, native subtitle pass, cue-reference builder
+and conversion. Media remuxing/validation requires no subtitle reference and
+rejects any subtitle stream; an old nonempty resume plan cannot be reused.
+The expected-result file
+binds the actual plan digest and source identities. `arte_selection` also
+enters the filename-family resume binding with the exclusion policy, default
+dispositions and postprocessing contract. Earlier checkpoints, different
+selections and changed sources cannot admit incompatible partial files.
+Signed URL changes may conservatively require a fresh selection/transfer.
+The actual resource-helper replay is checked against the selected plan before
+both native passes. Native preflight rechecks the reserved family against its
+admitted ownership snapshot, including late subtitle/conversion collisions;
+a refused foreign resource invalidates resume authority before cleanup.
+
+`private-arte-subtitles.py` builds cue references independently of FFmpeg.
+Its bounded UTF-8 parser handles BOM/line endings, cue IDs, text entities,
+basic text markup, NOTE, unused STYLE/REGION and overlapping cues. Original
+settings remain in the private reference. Standard UTF-8 SRT deliberately drops
+positioning; active CSS, regions, ruby/karaoke or an unsupported clock change
+cause a controlled refusal. Only proven repetitions across neighbouring raw
+HLS fragments are deduplicated. Timestamps map onto the common 90 kHz clock
+once; the native merged VTT is compared with this independent reference rather
+than trusted as a cue-count oracle. No rounded EXTINF accumulation or
+first-cue rebasing occurs. SubRip millisecond quantization rounds mapped ticks
+to the nearest millisecond. Ambiguous clock resets without a shared anchor
+are refused.
+
+A small STYLE/REGION conversion fixture probes the installed FFmpeg's actual
+output. A decoder that cannot preserve the fixture uses the bounded controlled
+SRT writer. A capable decoder's real conversion is checked against the source
+reference; successful exit alone is never sufficient. Truly empty selected
+sources have a distinct error. Original VTT, fragments, generated SRT and cue
+references remain in the private metadata session until the normal cleanup.
+This data policy follows the [WebVTT specification](https://www.w3.org/TR/webvtt1/)
+and the timestamp-map boundary in [HLS section 3.5](https://www.rfc-editor.org/rfc/rfc8216#section-3.5).
+
+`private-arte-media.py` probes the assembled intermediate before a local copy
+remux. It checks exactly one content video and the planned audio/subtitle
+counts and packet evidence; unexpected tracks cannot be hidden by mapping.
+The multitrack yt-dlp merger uses copyts with negative-timestamp adjustment
+disabled; fixups and metadata passes that could rebase streams are disabled. Retained
+native A/V components supply independent packet-clock evidence for each
+merged stream. FFmpeg copies the A/V streams and adds only the selected,
+verified SRT inputs, then explicitly sets language, title and
+default/forced/audio-description dispositions while stripping extraction
+metadata and chapters. The engine reuses its authenticated temporary inode,
+remux supervision and no-overwrite publication machinery. The distinct final
+name is `basename.tracks.mkv`; the whole `basename.*` family remains reserved,
+including subtitle downloads and conversions. A failed check retains the
+unconfirmed source under the existing ownership rules.
+After a completed multitrack A/V transfer, a pending-validation flag protects the
+local media workspace before even the component probes start. On validation
+or publication refusal/cancellation, raw components and the intermediate remain
+available for inspection without acquiring automatic resume/publication trust;
+authentication metadata still follows its separate cleanup contract. Successful
+publication clears that flag without overriding any independent cleanup refusal.
+An incomplete transfer never arms it. The intermediate's identity is recorded
+before source validation can fail.
+A separate active-transfer marker and its freshly reset worker exit status
+cover a signal after successful worker reap but before that flag is armed;
+an older planning status cannot authorize media retention.
+
+Before publication, validation checks the frozen plan's provenance and the
+remuxed file's exact tracks, metadata and dispositions. Every video/audio
+stream must have a coherent own duration and actual packets reaching its
+expected tail and agrees with its source component's clock; a long
+subtitle/container duration cannot compensate for a truncated audio or video.
+Every final subtitle is extracted as SRT and its complete normalized text,
+cue count and start/end milliseconds are compared with the independent
+reference after all postprocessing. One FFmpeg pass extracts every selected
+subtitle, with per-file and aggregate output limits and a size-dependent
+60–1800-second deadline. FFprobe output and time are bounded, with per-stream
+15-second probes under an overall supervised deadline. A/V comparisons use
+the source/output time bases (at most one millisecond) and match B-frame DTS
+by corresponding PTS; absent initial MKV DTS is not an invented clock shift.
+Tail probes read to EOF from a position near the expected end. Their endpoint
+must be an actual media endpoint, not the end of a relative-duration probe
+window: seeking can land on an earlier keyframe differently in MP4/TS and MKV.
+AAC can report a shortened terminal packet duration in MP4 and the nominal
+frame duration in MKV, including a regenerated duration tag on a second remux.
+This is accepted only with matching sample rates, terminal packet bytes and
+PTS/DTS, a proven original partial frame, and endpoint metadata consistent with
+either that original endpoint or the same frame's nominal endpoint. The
+timestamp tolerance is unchanged; altered timestamps, a missing terminal
+packet or inconsistent endpoint metadata still fail. This does not assert that
+every player trims MP4 padding identically when playing MKV.
+This is packet-tail
+qualification, not complete media decoding. No remote URL or extraction
+authentication data is placed in FFmpeg arguments or final metadata.
+
 ## Progress protocol
 
 `YTDLP_STORAGE|local-disk` is a constant, path-free diagnostic emitted when the
@@ -777,10 +937,12 @@ the compatibility contract, not an implied version negotiation.
 | Record | Fields in order after the name | Count / meaning |
 | --- | --- | --- |
 | `YTDLP_PLAN` | media ID, combined format ID, first format ID, second format ID | 5; media ID is currently ignored. The explicit two-stream video order is video then audio |
+| `YTDLP_PLAN_V2` | component count, then every literal format ID | 1–16 components, exactly count + 2 fields; emitted from the frozen multitrack plan before transfer; unknown subtitle progress IDs do not consume media slots |
 | `YTDLP_PROGRESS_V2` | media ID, format ID, status, downloaded bytes, total bytes, estimated total bytes, fragment index, fragment count, percent text, speed text, ETA text | 12; media ID ignored; `finished` completes the item. Prefer known total, then estimated total, then fragments/percent; fragment 0/N bootstrap is neutralized when N > 1 and status is not `finished` |
 | `YTDLP_PROGRESS` | status, percent text, speed text, ETA text | 5; legacy single-item model, status ignored; current engine no longer emits it |
 | `YTDLP_POSTPROCESS` | status, processor name | 3; status is diagnostic, not proof of success. `MetadataParser` is ignored because it can run before download; other processors select the postprocessing display |
 | `YTDLP_STORAGE` | `local-disk` | 2; only this exact complete record is recognized, no display transition |
+| `YTDLP_PREPARE` | `subtitles` | 2; fixed preparation text before A/V transfer, without a percentage or phase jump |
 | `FFMPEG_PROGRESS_DURATION` | expected source duration in microseconds | 2; starts remux display; invalid/zero duration leaves no quantitative denominator |
 | `ARIA2_PLAN` | transfer count, integer 1–16 without leading zero | 2; pre-registers items, ignored after items have already been observed; two video items mean video then audio |
 
@@ -790,7 +952,8 @@ become zero. Zero totals mean unknown size, not completed transfer. Percent text
 permits surrounding whitespace, a trailing `%`, one to three integer digits,
 and up to six fractional digits; the integer part is displayed, capped at 100,
 invalid input becomes unknown (`-1`). Format identifiers use at most 128
-characters from `[A-Za-z0-9_.:+-]`; invalid identifiers become empty. Native
+characters, including Unicode letters/numbers and the safe punctuation
+`_.:+-`; separators, whitespace and controls remain invalid. Native
 progress first falls back to an incomplete planned slot, then the last native
 item, then a generic item. yt-dlp defaults absent IDs/status to `unknown`,
 counters to `0`, optional plan IDs and display strings to empty. Speed and ETA

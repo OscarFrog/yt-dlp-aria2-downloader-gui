@@ -88,6 +88,8 @@ For an RPM installation, the graphical launcher and application icon are install
   limitation described below;
 - destination-folder selection and preference persistence;
 - MKV video download without re-encoding when the streams are compatible;
+- independent audio and subtitle choices on compatible sites, including
+  automatic selection, multiple tracks and no subtitles;
 - authenticated YouTube HLS video profile using Firefox cookies;
 - extraction of the best audio track while preserving its source format when possible;
 - yt-dlp-native interrupted-download resumption when supported by the website;
@@ -602,6 +604,55 @@ file. See [Network destinations and private storage](#network-destinations-and-p
 for local space requirements and filesystem limits.
 
 
+### Audio languages and subtitles
+
+The application lets you select available audio tracks and subtitles on
+compatible sites. Choose one or more audio languages and download a video
+with or without subtitles.
+
+**Complete video (MKV)** analyses the available tracks before downloading.
+Two checklists follow: select one or more **Audio tracks**, then select
+**Subtitles** independently. The first subtitle row is **No subtitles**.
+Each window has only **Cancel** and **Continue**. Continuing from the subtitle
+window starts the transfer with those choices.
+
+The initial audio selection prefers a reliably identified original version.
+If the original version is unknown, it chooses French, then the site's default
+or another available ordinary audio track, and explains this fallback in the
+window. The default audio belongs to the selected tracks. When several audio
+tracks are checked, the original remains the default if included.
+After **Continue** in the audio window, the initial subtitle selection follows
+the selected default audio: no subtitles
+for French audio, or full French subtitles for another reliably identified
+language when uniquely available. Otherwise **No subtitles** is selected and
+the window explains why.
+Both checklists remain editable. **No subtitles**, or leaving every
+subtitle row unchecked, produces a file with no subtitle tracks and skips
+subtitle downloads, conversion and embedding.
+Choose **No subtitles** or one or more subtitle tracks. Checking both is a
+conflict: the application asks you to correct the selection before downloading.
+
+**Full** subtitles translate the dialogue. **Forced** subtitles cover selected
+passages and never replace a full translation. Selected subtitles remain
+separate tracks that the player can enable or disable. The MKV contains one
+video and exactly the selected audio and subtitle tracks, without re-encoding
+video or audio. The existing video quality policy is preserved.
+
+The lists contain only distinct admissible tracks after filtering and
+deduplication. Check every desired track to include several languages or all
+available tracks. Subtitles for deaf or hard-of-hearing viewers and explicitly
+identified comfort audio are excluded from the lists and initial selections.
+The CLI's all-track option applies the same exclusions. Audio description is a
+separate category and remains available.
+Availability depends on the programme, territory and current rights.
+
+Subtitles use UTF-8 SRT, preserving text, line breaks and timing. Source
+positioning is not retained; appearance depends on the player's settings.
+Unsupported formatting or timing produces an explicit error. The application
+checks the finished MKV before publishing it. A missing selected track or an
+incompatible resumed selection requires a new choice; it is never silently
+replaced. Cancellation remains available throughout the operation.
+
 ### 4. Follow the download progress
 
 The progress dialog displays transfer progress and post-processing stages. Wrapper-managed FFmpeg remuxing uses FFmpeg machine progress and the source duration instead of an artificial timer. Use
@@ -672,6 +723,15 @@ Download the best native audio track:
   --output-dir "${HOME}/Music" \
   'https://example.com/video'
 ```
+
+For track selection on compatible sites, add `--tracks-auto` for automatic
+audio and subtitles, or `--all-tracks` for every distinct admissible track.
+Use `--no-subtitles` alone for automatic audio without subtitles, or add it to
+either option to keep the chosen audio without any subtitle tracks.
+These options apply to `--mode video`; see
+[Audio languages and subtitles](#audio-languages-and-subtitles) for the rules.
+Use `--url-file FILE` instead of a positional URL to keep the URL out of process
+arguments; the file must be private and owned by your user.
 
 Use the authenticated YouTube HLS fallback:
 

@@ -142,6 +142,9 @@ validate_packaging_inputs() {
         progress-monitor.sh \
         runtime-manager.sh \
         private-aria2-plan.py \
+        private-arte-tracks.py \
+        private-arte-media.py \
+        private-arte-subtitles.py \
         private-process-supervisor.py \
         packaging/package-user-cleanup.sh \
         README.md \
@@ -171,6 +174,9 @@ install_private_payload() {
         "${PRIVATE_TARGET}/"
     install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
         "${PRIVATE_TARGET}/private-aria2-plan.py"
+    install -m 0644 -- "${PROJECT_DIR}/private-arte-tracks.py" \
+        "${PROJECT_DIR}/private-arte-media.py" \
+        "${PROJECT_DIR}/private-arte-subtitles.py" "${PRIVATE_TARGET}/"
     install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
         "${PRIVATE_TARGET}/private-process-supervisor.py"
     install -m 0644 -- "${PROJECT_DIR}/packaging/keys/yt-dlp-public.key" \

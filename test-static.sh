@@ -1157,7 +1157,7 @@ assert_shell_policy_lists_are_canonical() {
 }
 '''
     expected = [str(root / f"tests/{name}-integration.py") for name in (
-        "push-version", "release-docs", "shfmt-version-handoff",
+        "arte-tracks", "arte-subtitles", "arte-media", "push-version", "release-docs", "shfmt-version-handoff",
         "ci-validation", "source-archive", "shfmt-bootstrap", "zenity-autonomous",
     )]
 
@@ -2853,7 +2853,7 @@ test_static_tooling_contracts() {
     assert_status 0 'run-all lists its canonical integration suites' \
         "${SCRIPT_DIR}/tests/run-all.sh" --list
     for python_suite in push-version release-docs shfmt-version-handoff \
-        ci-validation source-archive shfmt-bootstrap zenity-autonomous; do
+        ci-validation source-archive shfmt-bootstrap zenity-autonomous arte-tracks arte-subtitles arte-media; do
         assert_text_contains "${ASSERT_OUTPUT}" "${python_suite}" \
             "run-all suite list exposes ${python_suite} coverage"
     done
@@ -3074,6 +3074,12 @@ test_static_tooling_contracts() {
 }
 
 test_static_python_behavioral_suites() {
+    assert_status 0 'ARTE selection preserves distinct admissible tracks and rejects exclusions' \
+        python3 -B "${SCRIPT_DIR}/tests/arte-tracks-integration.py"
+    assert_status 0 'ARTE subtitle references reject empty or partial conversions and timing drift' \
+        python3 -B "${SCRIPT_DIR}/tests/arte-subtitles-integration.py"
+    assert_status 0 'ARTE media validation binds tracks and clocks before publication' \
+        python3 -B "${SCRIPT_DIR}/tests/arte-media-integration.py"
     assert_status 0 'pre-push coherence guard accepts unchanged versions and rejects incoherent source pushes' \
         python3 -B "${SCRIPT_DIR}/tests/push-version-integration.py"
     assert_status 0 'release-docs publisher preserves bounded version and branch updates' \
@@ -4697,6 +4703,144 @@ test_static_package_contracts() {
         'docs/images/' 'English README has no embedded screenshots'
     assert_text_not_contains "${README_FR_TEXT}" \
         'docs/images/' 'French README has no embedded screenshots'
+
+    python3 -B - "${SCRIPT_DIR}" <<'PY_PUBLIC_TRACK_DOCUMENTATION'
+from pathlib import Path
+import re
+import sys
+
+project = Path(sys.argv[1])
+readmes = ("README.md", "README.fr.md")
+manuals = (
+    "packaging/man/yt-dlp-aria2-downloader.1",
+    "packaging/man/yt-dlp-aria2-downloader-gui.1",
+)
+documents = {
+    name: (project / name).read_text(encoding="utf-8")
+    for name in (*readmes, *manuals)
+}
+inventory = re.findall(r"^\| `([^`]+)` \|", (project / "REPOSITORY_FILES.md").read_text(), re.M)
+technical_identifiers = {"ARCHITECTURE.md": ("arte_selection",)}
+
+def check_neutral_document(name, text):
+    # Released history and dated qualification reports are checked separately
+    # from current guidance. Technical paths/flags remain literal; useful URLs
+    # are not banned solely because their domain names identify an extractor.
+    if re.search(r"(?<![^\W_])Ring(?![^\W_])|133131-000-A", text, re.I):
+        raise AssertionError(f"{name}: current documentation contains a programme example")
+    text = re.sub(r"https?://[^\s<>\[\]()`]+", "URL", text)
+    for path in sorted(inventory, key=len, reverse=True):
+        text = re.sub(r"(?<![\w.-])" + re.escape(path) + r"(?![\w./-])", "SOURCE_PATH", text)
+    for identifier in technical_identifiers.get(name, ()):
+        text = text.replace(f"`{identifier}`", "`TECHNICAL_IDENTIFIER`")
+    if name not in documents:
+        text = re.sub(r"(?<![\w-])--arte-(?:catalog|selection|all|original-fr|\*)(?![\w-])",
+                      "LEGACY_OPTION", text)
+    if name in documents and re.search(r"--arte-|VF-STF|VO-STF|VA-MAL", text, re.I):
+        raise AssertionError(f"{name}: public track guidance must remain generic")
+    if re.search(r"(?<![^\W_])ARTE(?![^\W_])", text, re.I):
+        raise AssertionError(f"{name}: current explanatory text must remain platform-neutral")
+
+for name, text in documents.items():
+    check_neutral_document(name, text)
+
+historical = {"CHANGELOG.md", "CI_AUDIT.md"}
+for name in inventory:
+    if name.endswith(".md") and name not in {*documents, *historical}:
+        check_neutral_document(name, (project / name).read_text(encoding="utf-8"))
+for name in ("packaging/rpm/yt-dlp-aria2-downloader-gui.spec",
+             "packaging/yt-dlp-aria2-downloader.desktop", "packaging/deb/copyright"):
+    text = (project / name).read_text(encoding="utf-8").split("%changelog", 1)[0]
+    check_neutral_document(name, text)
+deb_builder = (project / "packaging/deb/build-deb.sh").read_text(encoding="utf-8")
+deb_control = re.search(r"<<EOF_CONTROL\n(.*?)\nEOF_CONTROL", deb_builder, re.S)
+if not deb_control:
+    raise AssertionError("DEB public metadata template is missing")
+check_neutral_document("DEB public metadata", deb_control[1])
+for name in ("download-video.sh", "download-video-gui.sh"):
+    text = (project / name).read_text(encoding="utf-8")
+    help_text = re.search(r"cat <<EOF_USAGE\n(.*?)\nEOF_USAGE", text, re.S)
+    if help_text:
+        check_neutral_document(name + " public help", help_text[1])
+changelog = (project / "CHANGELOG.md").read_text(encoding="utf-8")
+unreleased = re.search(r"^## [^\n]*unreleased[^\n]*\n(.*?)(?=^## |\Z)", changelog, re.I | re.M | re.S)
+if unreleased:
+    check_neutral_document("CHANGELOG.md unreleased", unreleased[1])
+
+# Guard the scope: preserve useful links and exact identifiers, while refusing
+# narrative mentions and programme URLs even when they occur in examples.
+for name in (*documents, "ARCHITECTURE.md", "maintenance"):
+    check_neutral_document(name, "Use `private-arte-tracks.py`; https://www.arte.tv/ is a useful link.")
+    for forbidden in ("ARTE extraction", "Compatible sites, including arte.", "ArTe subtitles", "_ARTE_", "Ring", "_Ring_",
+                      "https://www.arte.tv/fr/videos/133131-000-A/ring/", "unrelated-private-arte-tracks.py",
+                      "private-arte-tracks.py.backup", "--arte-all-unrelated", "arte_unrelated"):
+        try:
+            check_neutral_document(name, forbidden)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"{name}: document neutrality control accepted an out-of-scope mention")
+check_neutral_document("maintenance", "Keep the exact `--arte-all` and `--arte-*` compatibility options.")
+check_neutral_document("ARCHITECTURE.md", "The `arte_selection` field binds the selected tracks.")
+check_neutral_document("packaging", "%{_libexecdir}/yt-dlp-aria2-downloader/private-arte-tracks.py")
+unreleased_fixture = "## [Unreleased]\nGeneric track choices.\n## [2.4.3]\nHistorical ARTE entry.\n"
+unreleased_scope = re.search(r"^## [^\n]*unreleased[^\n]*\n(.*?)(?=^## |\Z)", unreleased_fixture, re.I | re.M | re.S)
+if not unreleased_scope or unreleased_scope[1] != "Generic track choices.\n":
+    raise AssertionError("Document neutrality control must isolate unreleased changes from published history")
+
+for name in readmes:
+    text = documents[name]
+    for label in (
+        "Audio tracks", "Subtitles", "No subtitles", "Cancel", "Continue",
+        "Full", "Forced", "--tracks-auto", "--all-tracks", "--no-subtitles",
+    ):
+        if label not in text:
+            raise AssertionError(f"{name}: missing public track choice {label}")
+    if re.search(r"--track-(?:catalog|selection)", text):
+        raise AssertionError(f"{name}: private GUI handoff does not belong in the usage guide")
+
+for name, text in documents.items():
+    for obsolete in ("Use automatic choice", "All audio tracks", "All available subtitles",
+                     "Choose tracks", "Download MKV", "Change tracks", "**Automatic**", "**None**"):
+        if obsolete in text:
+            raise AssertionError(f"{name}: obsolete track dialog control: {obsolete}")
+
+contracts = {
+    "README.md": (
+        "Two checklists follow", "Each window has only **Cancel** and **Continue**",
+        "Checking both is a conflict", "correct the selection before downloading",
+        "original version is unknown", "selected default audio",
+        "no subtitle tracks", "without re-encoding video or audio",
+        "filtering and deduplication", "deaf or hard-of-hearing",
+        "comfort audio", "Audio description", "Source positioning is not retained",
+    ),
+    "README.fr.md": (
+        "Deux listes à cocher suivent", "uniquement **Cancel** (annuler) et **Continue**",
+        "les deux crée un conflit", "corriger la sélection avant de télécharger",
+        "VO est inconnue", "l'audio par défaut choisi",
+        "sans aucune piste de sous-titres", "sans réencodage vidéo ou audio",
+        "filtrage et déduplication", "sourdes ou malentendantes",
+        "confort audio", "L'audiodescription", "positions de la source ne sont pas conservées",
+    ),
+    manuals[0]: (
+        "--tracks-auto", "--all-tracks", "--no-subtitles",
+        "--track-catalog", "--track-selection", "no subtitle tracks",
+        "original version is unknown", "selected default audio",
+    ),
+    manuals[1]: (
+        "Two checklists follow", "first subtitle row is No subtitles",
+        "has only Cancel and Continue", "Checking both is a conflict",
+        "correct the selection before downloading",
+        "original version is unknown", "selected default audio", "no subtitle tracks",
+    ),
+}
+for name, fragments in contracts.items():
+    normalized = " ".join(documents[name].split())
+    for fragment in fragments:
+        if fragment not in normalized:
+            raise AssertionError(f"{name}: missing track documentation contract: {fragment}")
+print("Public track documentation: generic choices and equivalent language contracts verified.")
+PY_PUBLIC_TRACK_DOCUMENTATION
 
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
         'name: Ubuntu 24.04 DEB' 'DEB package validation job'

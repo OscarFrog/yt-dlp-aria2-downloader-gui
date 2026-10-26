@@ -30,6 +30,33 @@ Emit stable machine-readable plan and progress records.
 For YouTube video mode, read Firefox cookies and use the authenticated HLS
 fallback before remuxing to MKV.
 .TP
+.B --tracks-auto
+For compatible video sources, prefer reliably identified original audio.
+Otherwise choose French, then the site's default or another ordinary audio
+track, and report that the original version is unknown. For the selected default
+audio, choose no subtitles when French, or full French subtitles for another
+known language when uniquely available. Otherwise select no subtitles and
+explain why. Forced subtitles never replace a full translation.
+.TP
+.B --all-tracks
+For compatible video sources, select all distinct admissible audio and subtitle
+tracks after filtering and deduplication. Hearing-impaired subtitles and
+explicitly identified comfort audio are excluded. Audio description remains a
+separate available category. Publish one validated MKV without re-encoding
+audio or video.
+.TP
+.B --no-subtitles
+Select audio automatically with no subtitle tracks. Also combine with
+--tracks-auto or --all-tracks to retain that audio choice without subtitles.
+.TP
+.B --track-catalog " " FILE
+Publish a private track catalogue and wait for --track-selection.
+This structured handoff is used by the GUI within the same engine session.
+.TP
+.B --track-selection " " FILE
+Read a private JSON selection bound to the current track catalogue. Excluded,
+missing or stale track selections fail before media transfer.
+.TP
 .B --result-file " " FILE
 Write the final media path to FILE.
 .TP
@@ -43,6 +70,15 @@ Display command help.
 .TP
 .BR -V ", " --version
 Display the program version.
+.SH TRACK SELECTION
+Audio and subtitle choices are independent. The output contains one video and
+exactly the selected tracks. Subtitles remain selectable in the player.
+Full translations and forced subtitles for selected passages are distinct.
+UTF-8 SRT preserves text, line breaks and timing; source positioning is not
+retained. Unsupported formatting or timing causes an explicit error.
+Availability depends on the programme, territory and rights. A missing selected
+track is never silently replaced, and a changed selection cannot resume
+incompatible partial files.
 .SH SHARED DESTINATIONS
 Independent GUI and CLI instances may transfer and process media concurrently
 in the same folder. Final files appear directly there. Overlapping filename

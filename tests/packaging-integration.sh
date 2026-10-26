@@ -95,6 +95,14 @@ assert_packaged_executables() {
     done
 
     local private_aria2_helper="${private_dir}/private-aria2-plan.py"
+    local arte_helper
+    for arte_helper in private-arte-tracks.py private-arte-media.py private-arte-subtitles.py; do
+        [[ -f ${private_dir}/${arte_helper} && ! -L ${private_dir}/${arte_helper} ]] \
+            || fail 'Missing or unsafe packaged ARTE helper.'
+        assert_path_mode "${private_dir}/${arte_helper}" 644 "${arte_helper} permissions"
+        python3 -I -B "${private_dir}/${arte_helper}" --help >/dev/null \
+            || fail 'Installed ARTE helper cannot run independently.'
+    done
     [[ -f ${private_dir}/private-process-supervisor.py &&
         ! -L ${private_dir}/private-process-supervisor.py ]] \
         || fail 'Missing or unsafe packaged process supervisor.'
