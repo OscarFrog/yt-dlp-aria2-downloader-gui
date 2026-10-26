@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -2090,6 +2091,88 @@ class UbuntuMirrorTests(unittest.TestCase):
                     self.assertFalse(sentinel.exists())
 
 
+def require_fixture_process_exit(pid, starttime, *, read_stat=None,
+                                 monotonic=time.monotonic, sleep=time.sleep):
+    """Observe asynchronous kernel exit without accepting a surviving fixture."""
+    if read_stat is None:
+        read_stat = Path("/proc", str(pid), "stat").read_text
+    deadline = monotonic() + 1.0
+    while True:
+        try:
+            fields = read_stat().rsplit(") ", 1)[1].split()
+        except FileNotFoundError:
+            return
+        if fields[19] != starttime:
+            raise AssertionError("APT fixture PID identity changed before terminal observation")
+        if fields[0] in ("Z", "X"):
+            return
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise AssertionError("Bounded APT fixture is still executing after 1s")
+        sleep(min(0.005, remaining))
+
+
+class ProcessExitObservationTests(unittest.TestCase):
+    """Exercise the observation deadline without signaling any real process."""
+
+    @staticmethod
+    def observation(snapshots):
+        clock = [0.0]
+        sleeps = []
+        reads = [0]
+
+        def read_stat():
+            snapshot = snapshots[min(reads[0], len(snapshots) - 1)]
+            reads[0] += 1
+            if snapshot is None:
+                raise FileNotFoundError
+            state, starttime = snapshot
+            fields = ["0"] * 20
+            fields[0], fields[6], fields[19] = state, "4", starttime
+            return "123 (apt fixture) " + " ".join(fields)
+
+        def sleep(delay):
+            sleeps.append(delay)
+            clock[0] += delay
+
+        def observe():
+            require_fixture_process_exit(123, "71", read_stat=read_stat,
+                                         monotonic=lambda: clock[0], sleep=sleep)
+
+        return observe, clock, sleeps, reads
+
+    def test_absent_or_terminal_fixture_needs_no_wait(self):
+        for snapshot in (None, ("Z", "71"), ("X", "71")):
+            with self.subTest(snapshot=snapshot):
+                observe, clock, sleeps, reads = self.observation([snapshot])
+                observe()
+                self.assertEqual((clock[0], sleeps, reads[0]), (0, [], 1))
+
+    def test_running_fixture_must_become_terminal_or_absent(self):
+        for terminal in (None, ("Z", "71"), ("X", "71")):
+            with self.subTest(terminal=terminal):
+                observe, clock, sleeps, reads = self.observation([("R", "71"), terminal])
+                observe()
+                self.assertEqual((clock[0], sleeps, reads[0]), (0.005, [0.005], 2))
+
+    def test_surviving_fixture_is_rejected_at_the_bounded_deadline(self):
+        # Even PF_EXITING in stat flags is not evidence of terminal state.
+        for state in ("R", "S", "D", "T"):
+            with self.subTest(state=state):
+                observe, clock, sleeps, reads = self.observation([(state, "71")])
+                with self.assertRaisesRegex(AssertionError, "still executing after 1s"):
+                    observe()
+                self.assertEqual(clock[0], 1.0)
+                self.assertTrue(all(0 < delay <= 0.005 for delay in sleeps))
+                self.assertLessEqual(reads[0], 202)
+
+    def test_reused_pid_cannot_supply_another_process_terminal_state(self):
+        observe, clock, sleeps, reads = self.observation([("R", "71"), ("Z", "72")])
+        with self.assertRaisesRegex(AssertionError, "PID identity changed"):
+            observe()
+        self.assertEqual((clock[0], sleeps, reads[0]), (0.005, [0.005], 2))
+
+
 class VersionBoundaryTests(unittest.TestCase):
     """Replay real workflow scripts with inert remote-read fixtures, never GitHub."""
 
@@ -2131,7 +2214,8 @@ if stage == os.environ["CHECK_APT_STAGE"]:
     if action == "interrupt":
         os.kill(os.getpid(), signal.SIGTERM)
     if action in {"stall", "ignore-term"}:
-        Path(os.environ["CHECK_APT_PID"]).write_text(str(os.getpid()))
+        starttime = Path("/proc/self/stat").read_text().rsplit(") ", 1)[1].split()[19]
+        Path(os.environ["CHECK_APT_PID"]).write_text(json.dumps({"pid": os.getpid(), "starttime": starttime}))
         if action == "ignore-term":
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
         while True:
@@ -2178,15 +2262,11 @@ if stage == os.environ["CHECK_APT_STAGE"]:
                                 self.assertEqual(call["args"][8:11], ["install", "--yes", "--no-install-recommends"])
                                 self.assertEqual(call["frontend"], "noninteractive")
                         if (run / "pid").exists():
-                            try:
-                                metadata = Path("/proc", (run / "pid").read_text(), "stat").read_text()
-                            except FileNotFoundError:
-                                pass
-                            else:
-                                # SIGKILL can also terminate GNU timeout. Its
-                                # dead child may await the container init's reap.
-                                state = metadata.rsplit(") ", 1)[1].split()[0]
-                                self.assertIn(state, ("Z", "X"), "Bounded APT fixture is still executing")
+                            identity = json.loads((run / "pid").read_text())
+                            # SIGKILL also terminates GNU timeout. Its child can
+                            # close inherited pipes before the kernel exposes a
+                            # terminal state; wait briefly for actual quiescence.
+                            require_fixture_process_exit(identity["pid"], identity["starttime"])
 
     def test_pinned_engine_installation_preserves_hashes_and_pip_failure(self):
         pins = {"2026.6.9": "442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4",
