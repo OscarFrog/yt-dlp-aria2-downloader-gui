@@ -1424,7 +1424,34 @@ run records the PyPI source, observation time and selected package version in
 the selected yt-dlp version again before the shared fixture, and retains these
 records and allowlisted
 pre-rescue diagnostics under a source/run/attempt-specific artifact name.
-The existing 25-minute job budget and fixture deadlines are unchanged.
+Dependency provisioning has a separate bounded budget: APT update is limited
+to two minutes and installation to four minutes, each with TERM followed by
+KILL after ten seconds. HTTP/HTTPS inactivity timeouts are thirty seconds,
+retries remain three and the dpkg-lock wait is at most sixty seconds. Update
+uses `APT::Update::Error-Mode=any` so partial index failures also fail. An active
+but very slow transfer cannot consume the entire qualification job. Any setup
+failure stops that step; neither stale package lists nor unchecked downloads
+substitute for a successful installation. Ubuntu package authentication and
+the wheel, Deno and impersonation-dependency pins remain mandatory.
+
+The existing installation step, including the venv and pip, has eight minutes.
+Checkout, version checks, Deno/prerequisite installation and evidence upload
+also have explicit bounds. PR and scheduled media jobs have sixty-five minutes:
+their longest route retains forty-one minutes of individual test deadlines,
+plus preparation, timeout cleanup and Actions overhead. The release-runtime
+job has fifty minutes for its thirty-three-minute test route and preparation.
+These are upper bounds, not target durations; no test deadline is extended.
+The stress aggregate gives `wait-required --timeout-minutes 75` an eighty-minute
+job envelope, covering the longest complementary job, identity and queue margin.
+The verifier's default remains forty-five minutes; its explicit wait bound must
+be an integer from one to ninety and is refused by non-wait commands. Timeout,
+failure or cancellation still refuses qualification, and a successful cohort
+must retain its exact latest run/attempt and source identities.
+
+`tests/ci-validation-integration.py` checks these envelopes and replays the
+actual provisioning blocks with inert package commands and compressed real
+timeouts. Negative controls cover failed and stalled update/installation,
+failure propagation and attempts to remove the bounds or authentication.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the exact-source qualification proof and release-specific identity checks, verifies

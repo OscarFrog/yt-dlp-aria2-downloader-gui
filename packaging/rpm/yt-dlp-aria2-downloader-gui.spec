@@ -90,6 +90,9 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Mon Oct 26 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.4.4-1
+- Improve audio and subtitle selection, media validation and CI reliability
+
 * Sat Oct 24 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.4.3-1
 - Improve error diagnostics and support localized ARTE formats
 
