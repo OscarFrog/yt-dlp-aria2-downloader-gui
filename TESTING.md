@@ -1463,6 +1463,13 @@ must retain its exact latest run/attempt and source identities.
 actual provisioning blocks with inert package commands and compressed real
 timeouts. Negative controls cover failed and stalled update/installation,
 failure propagation and attempts to remove the bounds or authentication.
+After the forced kill, the fixture's PID and start time are checked until it
+disappears or reaches a terminal state, with a one-second observation deadline
+and five-millisecond polling sleeps. Kernel exit can close inherited
+pipes before exposing the terminal process state. A surviving process or a
+changed PID identity still fails; exit flags alone never satisfy the check.
+Deterministic clock tests cover both exit transitions and a process that remains
+alive beyond that deadline. This observation does not extend the APT deadlines.
 Mirror fixtures also verify idempotence, exact source preservation, rejected
 unknown endpoints, unsafe filesystem objects and failed-preparation propagation
 before APT. Local fixtures use temporary directories and never modify `/etc/apt`.
