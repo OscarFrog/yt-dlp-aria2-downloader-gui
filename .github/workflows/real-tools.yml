@@ -59,6 +59,7 @@ jobs:
           set -Eeuo pipefail
           # Bound stalled connections and the complete package transaction;
           # provisioning must leave the independently bounded media tests time.
+          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py
           apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30
             -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
           sudo timeout --signal=TERM --kill-after=10s 2m \
@@ -236,6 +237,7 @@ jobs:
           umask 077
           # Bound stalled connections and the complete package transaction;
           # provisioning must leave the independently bounded media tests time.
+          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py
           apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30
             -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
           sudo timeout --signal=TERM --kill-after=10s 2m \

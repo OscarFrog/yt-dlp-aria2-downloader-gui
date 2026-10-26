@@ -1220,6 +1220,16 @@ the unchanged individual test deadlines. The required stress aggregate allows
 seventy-five minutes for the latest complementary cohort inside an eighty-minute
 job; longer waiting never turns missing, failed or cancelled evidence into proof.
 
+Ubuntu jobs that install media, generation-qualification or source/DEB package
+dependencies first run the source-only `scripts/ci-ubuntu-mirrors.py` helper.
+It recognizes the runner's exact Azure/Ubuntu mirror list, removes the Azure
+endpoint and retains the official archive and security endpoints over HTTPS.
+It changes only that owned regular mirror-list file, atomically; the DEB822
+source stanzas, suites, components and Ubuntu archive keyring remain unchanged.
+An unknown layout or changed source identity stops preparation. The helper is
+not installed with the application and never executes in pre-tag validation,
+signing or publication jobs.
+
 Within a release run, builds, signing, package tests, publication and public
 download verification pass immutable Actions artifact IDs through job outputs.
 Each download requests one exact ID and rejects a digest mismatch; a replacement

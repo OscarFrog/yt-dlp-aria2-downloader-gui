@@ -1849,6 +1849,247 @@ class WaitBudgetTests(unittest.TestCase):
                     self.assertIn("within 75 minutes", errors.getvalue())
 
 
+class UbuntuMirrorTests(unittest.TestCase):
+    """Exercise the runner-specific change on files outside the host APT tree."""
+
+    TARGETS = {
+        "real-tools.yml": {"pinned-local-media", "current-stable-local-media"},
+        "qualification.yml": {"ffmpeg-ubuntu-6", "ffmpeg-upstream-9"},
+        "packages.yml": {"source-archive", "deb"},
+        "release.yml": {"release-runtime", "zip", "deb"},
+    }
+    COMMAND = "sudo python3 -I -B scripts/ci-ubuntu-mirrors.py"
+    ORIGINAL = ("http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n"
+                "https://archive.ubuntu.com/ubuntu/\tpriority:2\n"
+                "https://security.ubuntu.com/ubuntu/\tpriority:3\n")
+    SELECTED = ("https://archive.ubuntu.com/ubuntu/\tpriority:1\n"
+                "https://security.ubuntu.com/ubuntu/\tpriority:2\n")
+    SOURCE = ("# Hosted runner Ubuntu sources\nTypes: deb\n"
+              "URIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
+              "Suites: noble noble-updates noble-backports\n"
+              "Components: main universe restricted multiverse\n"
+              "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
+              "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
+              "Suites: noble-security\nComponents: main universe restricted multiverse\n"
+              "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n")
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("ci_ubuntu_mirrors", PROJECT / "scripts/ci-ubuntu-mirrors.py")
+        cls.helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.helper)
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.apt = self.root / "apt"
+        self.apt.mkdir(mode=0o755)
+        self.sources = self.apt / "sources.list.d"
+        self.sources.mkdir(mode=0o755)
+        self.source = self.sources / "ubuntu.sources"
+        self.source.write_text(self.SOURCE)
+        self.source.chmod(0o640)
+        self.mirrors = self.apt / "apt-mirrors.txt"
+        self.mirrors.write_text(self.ORIGINAL)
+        self.mirrors.chmod(0o644)
+        self.external = self.sources / "external.list"
+        self.external.write_text("external fixture retained byte for byte\n")
+
+    def configure(self):
+        return self.helper.configure(self.apt, os.geteuid())
+
+    def assert_preserved(self):
+        self.assertEqual(self.source.read_text(), self.SOURCE)
+        self.assertEqual(self.source.stat().st_mode & 0o7777, 0o640)
+        self.assertEqual(self.external.read_text(), "external fixture retained byte for byte\n")
+        self.assertFalse(list(self.apt.glob(".apt-mirrors-*")))
+
+    def test_exact_runner_list_selected_atomically_and_repeated_without_change(self):
+        self.assertEqual(len(self.ORIGINAL.encode()), 144)
+        before = self.mirrors.stat()
+        self.assertTrue(self.configure())
+        after = self.mirrors.stat()
+        self.assertEqual(self.mirrors.read_text(), self.SELECTED)
+        self.assertNotEqual(before.st_ino, after.st_ino)
+        self.assertEqual((before.st_mode, before.st_uid, before.st_gid),
+                         (after.st_mode, after.st_uid, after.st_gid))
+        self.assertFalse(self.configure())
+        self.assertEqual(self.mirrors.stat().st_ino, after.st_ino)
+        self.assert_preserved()
+
+    def test_unknown_or_weakened_mirrors_refused_before_change(self):
+        for value in (self.ORIGINAL.replace("archive.ubuntu.com", "attacker.invalid", 1),
+                      self.ORIGINAL.replace("https://archive", "http://archive"),
+                      self.ORIGINAL.replace("priority:1", "priority:9"),
+                      self.ORIGINAL.replace("priority:3", "priority:3 trusted=yes"),
+                      self.ORIGINAL + "https://unknown.invalid/ priority:4\n",
+                      self.ORIGINAL + self.ORIGINAL, "", "x" * 16385):
+            with self.subTest(value=value[:60]):
+                self.mirrors.write_text(value)
+                with self.assertRaises(ValueError):
+                    self.configure()
+                self.assertEqual(self.mirrors.read_text(), value)
+                self.assert_preserved()
+
+    def test_unknown_sources_or_signature_configuration_refused_without_write(self):
+        for value in (self.SOURCE.replace(self.helper.MIRROR_URI, "http://azure.archive.ubuntu.com/ubuntu/", 1),
+                      self.SOURCE.replace(self.helper.KEYRING, "/tmp/untrusted.gpg", 1),
+                      self.SOURCE + "Trusted: yes\n", self.SOURCE + "Allow-Insecure: yes\n",
+                      self.SOURCE + "URIs: https://unknown.invalid/\n", "", "x" * 16385,
+                      self.SOURCE.replace("Types: deb", " Types: deb", 1)):
+            with self.subTest(value=value[:60]):
+                self.source.write_text(value)
+                with self.assertRaises(ValueError):
+                    self.configure()
+                self.assertEqual(self.source.read_text(), value)
+                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+                self.assertFalse(list(self.apt.glob(".apt-mirrors-*")))
+
+    def test_symlinks_parent_links_hardlinks_and_fifo_refused_without_following(self):
+        for path in (self.mirrors, self.source, self.sources, self.apt):
+            with self.subTest(path=path.name):
+                saved = path.with_name(path.name + ".saved")
+                path.rename(saved)
+                path.symlink_to(saved)
+                try:
+                    with self.assertRaises(OSError):
+                        self.configure()
+                finally:
+                    path.unlink()
+                    saved.rename(path)
+        hardlink = self.root / "second-link"
+        os.link(self.mirrors, hardlink)
+        with self.assertRaises(ValueError):
+            self.configure()
+        hardlink.unlink()
+        self.mirrors.unlink()
+        os.mkfifo(self.mirrors, 0o600)
+        with self.assertRaises(ValueError):
+            self.configure()
+        self.mirrors.unlink()
+        self.mirrors.write_text(self.ORIGINAL)
+        self.assert_preserved()
+
+    def test_unowned_or_writable_configuration_refused(self):
+        with self.assertRaises(ValueError):
+            self.helper.configure(self.apt, os.geteuid() + 1)
+        for path in (self.apt, self.sources, self.source, self.mirrors):
+            with self.subTest(path=path.name):
+                mode = path.stat().st_mode & 0o7777
+                path.chmod(mode | 0o020)
+                try:
+                    with self.assertRaises(ValueError):
+                        self.configure()
+                finally:
+                    path.chmod(mode)
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_preserved()
+
+    def test_changed_mirror_inode_or_source_refused_and_staging_removed(self):
+        original_read = self.helper.read_file
+        for mutation in ("mirror-inode", "source"):
+            calls = []
+
+            def read_file(*args):
+                calls.append(args[1])
+                if len(calls) == 3:
+                    if mutation == "mirror-inode":
+                        replacement = self.apt / "replacement"
+                        replacement.write_text(self.ORIGINAL)
+                        replacement.replace(self.mirrors)
+                    else:
+                        self.source.write_text(self.SOURCE + "# concurrent change\n")
+                return original_read(*args)
+
+            with self.subTest(mutation=mutation), patch.object(self.helper, "read_file", read_file):
+                with self.assertRaises(ValueError):
+                    self.configure()
+            self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+            self.source.write_text(self.SOURCE)
+            self.assert_preserved()
+
+    def test_failed_atomic_replacement_preserves_original_and_cleans_temporary(self):
+        with patch.object(self.helper.os, "replace", side_effect=OSError("fixture")):
+            with self.assertRaises(OSError):
+                self.configure()
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_preserved()
+
+    def test_cli_has_no_path_override_and_redacts_failed_configuration(self):
+        for arguments, uid in ((["helper", "/tmp/override"], 0), (["helper"], 1000)):
+            with patch.object(sys, "argv", arguments), patch.object(self.helper.os, "geteuid", return_value=uid), \
+                    patch.object(self.helper, "configure") as configure, contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(self.helper.main(), 64)
+                configure.assert_not_called()
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["helper"]), patch.object(self.helper.os, "geteuid", return_value=0), \
+                patch.object(self.helper, "configure", side_effect=ValueError("secret-source-url")) as configure, \
+                contextlib.redirect_stderr(output):
+            self.assertEqual(self.helper.main(), 65)
+            configure.assert_called_once_with("/etc/apt", 0)
+        self.assertNotIn("secret-source-url", output.getvalue())
+
+    def assert_workflow_scope(self, filename, text):
+        jobs = WorkflowContractTests.jobs(text)
+        selected = self.TARGETS.get(filename, set())
+        for name, job in jobs.items():
+            if name not in selected:
+                self.assertNotIn("ci-ubuntu-mirrors.py", job)
+                continue
+            self.assertEqual(job.count(self.COMMAND), 1)
+            self.assertIn("runs-on: ubuntu-24.04", job)
+            self.assertLess(job.index("persist-credentials: false"), job.index(self.COMMAND))
+            self.assertLess(job.index(self.COMMAND), job.index("apt-get"))
+            line = next(line.strip() for line in job.splitlines() if "ci-ubuntu-mirrors.py" in line)
+            self.assertEqual(line, self.COMMAND)
+            self.assertNotIn("/etc/apt/", job)
+
+    def test_exact_nine_jobs_prepare_mirrors_before_apt_and_exclude_privileged_jobs(self):
+        for path in (PROJECT / ".github/workflows").glob("*.yml"):
+            with self.subTest(workflow=path.name):
+                self.assert_workflow_scope(path.name, path.read_text())
+
+    def test_missing_late_or_failure_masked_preparation_is_rejected(self):
+        for filename in self.TARGETS:
+            text = WorkflowContractTests.workflow(filename)
+            for original, replacement in ((self.COMMAND, "true"),
+                                           (self.COMMAND, self.COMMAND + " || true"),
+                                           (self.COMMAND, self.COMMAND + " /tmp/config")):
+                with self.subTest(workflow=filename, mutation=replacement), self.assertRaises(AssertionError):
+                    self.assert_workflow_scope(filename, text.replace(original, replacement, 1))
+        text = WorkflowContractTests.workflow("real-tools.yml")
+        moved = text.replace("          " + self.COMMAND + "\n", "", 1)
+        moved = moved.replace('          case ${YT_DLP_VERSION}',
+                              "          " + self.COMMAND + '\n          case ${YT_DLP_VERSION}', 1)
+        with self.assertRaises(AssertionError):
+            self.assert_workflow_scope("real-tools.yml", moved)
+
+    def test_preparation_failure_preserves_status_and_prevents_every_package_setup(self):
+        binary = self.root / "bin"
+        binary.mkdir()
+        sudo = binary / "sudo"
+        sudo.write_text('#!/bin/bash\n'
+                        'if [[ $* == "python3 -I -B scripts/ci-ubuntu-mirrors.py" ]]; then exit 65; fi\n'
+                        'printf unexpected >"${CHECK_UNEXPECTED}"\nexit 99\n')
+        sudo.chmod(0o755)
+        for filename, names in self.TARGETS.items():
+            jobs = WorkflowContractTests.jobs(WorkflowContractTests.workflow(filename))
+            for name in names:
+                step = next(block for block in re.split(r"(?m)^      - ", jobs[name])
+                            if self.COMMAND in block)
+                block = step.split("run: |\n", 1)[1]
+                script = "\n".join(line[10:] for line in block.splitlines() if line.startswith("          "))
+                sentinel = self.root / "unexpected"
+                environment = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"],
+                                   CHECK_UNEXPECTED=str(sentinel))
+                with self.subTest(workflow=filename, job=name):
+                    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script],
+                                            env=environment, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+                    self.assertFalse(sentinel.exists())
+
+
 class VersionBoundaryTests(unittest.TestCase):
     """Replay real workflow scripts with inert remote-read fixtures, never GitHub."""
 
@@ -1871,7 +2112,9 @@ class VersionBoundaryTests(unittest.TestCase):
             binary = root / "bin"
             binary.mkdir()
             sudo = binary / "sudo"
-            sudo.write_text('#!/bin/bash\nexec "$@"\n')
+            sudo.write_text('#!/bin/bash\n'
+                            'if [[ $* == "python3 -I -B scripts/ci-ubuntu-mirrors.py" ]]; then exit 0; fi\n'
+                            'exec "$@"\n')
             sudo.chmod(0o755)
             apt = binary / "apt-get"
             apt.write_text('''#!/usr/bin/env python3

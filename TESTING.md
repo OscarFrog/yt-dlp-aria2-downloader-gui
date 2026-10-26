@@ -1434,6 +1434,17 @@ failure stops that step; neither stale package lists nor unchecked downloads
 substitute for a successful installation. Ubuntu package authentication and
 the wheel, Deno and impersonation-dependency pins remain mandatory.
 
+Before package setup, the two real-tool jobs, the Ubuntu FFmpeg 6/9 qualification
+jobs, source-archive/DEB package jobs and release runtime/ZIP/DEB jobs select
+the official Ubuntu HTTPS archives through `scripts/ci-ubuntu-mirrors.py`.
+The helper accepts only the reviewed runner mirror list or its already selected
+form and refuses unfamiliar, unsafe or changed configuration. It removes the
+Azure mirror that can continue transferring too slowly to trigger an inactivity
+timeout. Existing Ubuntu source stanzas, suites, components, signing keyring,
+APT authentication and test deadlines remain unchanged. This preparation is
+limited to disposable CI runners; it does not modify users' package settings
+or introduce candidate execution in privileged validation/signing jobs.
+
 The existing installation step, including the venv and pip, has eight minutes.
 Checkout, version checks, Deno/prerequisite installation and evidence upload
 also have explicit bounds. PR and scheduled media jobs have sixty-five minutes:
@@ -1452,6 +1463,9 @@ must retain its exact latest run/attempt and source identities.
 actual provisioning blocks with inert package commands and compressed real
 timeouts. Negative controls cover failed and stalled update/installation,
 failure propagation and attempts to remove the bounds or authentication.
+Mirror fixtures also verify idempotence, exact source preservation, rejected
+unknown endpoints, unsafe filesystem objects and failed-preparation propagation
+before APT. Local fixtures use temporary directories and never modify `/etc/apt`.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the exact-source qualification proof and release-specific identity checks, verifies
