@@ -37,6 +37,12 @@ is a demonstration, not a download benchmark.
 | --- | --- |
 | ![Audio tracks checklist with selectable languages and a Continue button](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-audio.png) | ![Subtitles checklist including No subtitles](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-subtitles.png) |
 
+| Choose a destination folder | Inspect an error log |
+| --- | --- |
+| ![Destination folder chooser showing demonstration folders](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-folder.png) | ![Log viewer opened through View log, showing a simulated disk-space error](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-error-log.png) |
+
+The error log illustrates a simulated out-of-space diagnostic.
+
 ## Recommended installation
 
 Use the [latest GitHub release](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).

@@ -4703,7 +4703,7 @@ import sys
 project = Path(sys.argv[1])
 screenshots = {
     f"docs/images/readme-{name}.png"
-    for name in ("url", "audio", "subtitles", "progress")
+    for name in ("url", "folder", "audio", "subtitles", "progress", "error-log")
 }
 for name in ("README.md", "README.fr.md"):
     text = (project / name).read_text(encoding="utf-8")
@@ -4725,7 +4725,7 @@ for name in ("README.md", "README.fr.md"):
             raise AssertionError(f"{name}: screenshot needs an absolute URL on permanent main")
         referenced.append(match[1])
     if len(referenced) != len(screenshots) or set(referenced) != screenshots:
-        raise AssertionError(f"{name}: expected the four documented application screenshots")
+        raise AssertionError(f"{name}: expected the six documented application screenshots")
 
 for name in sorted(screenshots):
     path = project / name
