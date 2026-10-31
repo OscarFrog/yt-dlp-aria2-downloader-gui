@@ -220,7 +220,7 @@ jobs:
 
   current-stable-local-media:
     needs: identity
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: Scheduled current stable yt-dlp
     runs-on: ubuntu-24.04
     # Include every test deadline, provisioning and diagnostic retention.
@@ -298,9 +298,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           umask 077
-          readonly version=2.9.4
+          readonly version=2.9.8
           # Digest from the immutable upstream release and its official checksum.
-          readonly archive_sha=c24f955d9fbfe0ea5ae2b501c8e71ae76e31e4c9782390a54a284b3364fda725
+          readonly archive_sha=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609
           tool_dir=$(mktemp -d "${RUNNER_TEMP}/deno.XXXXXXXX")
           archive=$(mktemp "${RUNNER_TEMP}/deno-archive.XXXXXXXX")
           trap 'rm -f -- "${archive}"' EXIT

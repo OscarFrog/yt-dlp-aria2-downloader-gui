@@ -1398,9 +1398,13 @@ exit "${CHECK_VALIDATION_STATUS}"
             self.assertRegex(path.strip(), r"^\$\{\{ runner.temp \}\}/shared-destination-evidence/(?:qualification\.log|shared-destination-real-\*/(?:\*\.log|events\.json|\*\.(?:final-)?before-rescue\.json))$")
 
     def assert_current_stable_shared_contract(self, text):
-        job = self.jobs(text)["current-stable-local-media"]
+        jobs = self.jobs(text)
+        job = jobs["current-stable-local-media"]
         self.assertEqual(self.dependencies(job), {"identity"})
-        self.assertIn("if: github.event_name == 'schedule'", job)
+        self.assertEqual(re.findall(r"(?m)^    if: (.+)$", job),
+                         ["github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"])
+        self.assertEqual(re.findall(r"(?m)^    if: (.+)$", jobs["pinned-local-media"]),
+                         ["github.event_name != 'schedule'"])
         self.assertIn("timeout-minutes: 65", job)
         steps = {step.splitlines()[0][6:]: step for step in re.split(r"(?m)^      - ", job)
                  if step.startswith("name: ")}
@@ -1420,6 +1424,16 @@ exit "${CHECK_VALIDATION_STATUS}"
             self.assertNotIn(forbidden, install)
         self.assertLess(install.index("package_version=$("), install.index("--isolated --no-cache-dir install"))
         self.assertIn('[[ ${installed} == "${package_version}" ]]', install)
+        deno = steps["Install verified Deno for current-stable shared qualification"]
+        for required in ("readonly version=2.9.8",
+                         "readonly archive_sha=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609",
+                         "https://github.com/denoland/deno/releases/download/v${version}/deno-x86_64-unknown-linux-gnu.zip",
+                         "--proto '=https' --proto-redir '=https'", "--tlsv1.2",
+                         "--connect-timeout 15 --max-time 120 --retry 3",
+                         '[[ ${resolved} == "${version}" ]]'):
+            self.assertIn(required, deno)
+        self.assertLess(deno.index("sha256sum --check"), deno.index("unzip -q"))
+        self.assertLess(deno.index("sha256sum --check"), deno.index('"${tool_dir}/deno" --version'))
         compatibility = steps["Validate current-stable shared prerequisites"]
         self.assertIn("requires('yt-dlp')", compatibility)
         self.assertIn("item.marker.evaluate({'extra': 'deno'})", compatibility)
@@ -1456,6 +1470,10 @@ exit "${CHECK_VALIDATION_STATUS}"
     def test_current_stable_cannot_omit_skip_or_unbind_shared_qualification(self):
         text = self.workflow("real-tools.yml")
         for old, new in (
+            ("if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'",
+             "if: github.event_name != 'schedule'"),
+            ("readonly version=2.9.8", "readonly version=2.9.4"),
+            ("e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609", "0" * 64),
             ("name: Run current-stable shared-destination GUI and CLI qualification\n",
              "name: Run current-stable shared-destination GUI and CLI qualification\n        if: false\n"),
             ('"yt-dlp[pin-curl-cffi]==${package_version}"', "--upgrade 'yt-dlp[pin-curl-cffi]'"),
@@ -2360,14 +2378,16 @@ sudo() { printf 'Unexpected host mutation\n' >&2; return 99; }
                     self.assertEqual((run / "download").exists(), condition != "self-hosted")
 
     def test_deno_bootstrap_refuses_bad_digest_before_extracting_or_executing(self):
-        for step_name in ("Install verified Deno for shared-destination qualification",
-                          "Install verified Deno for current-stable shared qualification"):
+        for step_name, expected_version in (
+                ("Install verified Deno for shared-destination qualification", "2.9.4"),
+                ("Install verified Deno for current-stable shared qualification", "2.9.8")):
             script = self.step("real-tools.yml", step_name)
             with tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 archive = root / "deno.zip"
                 with zipfile.ZipFile(archive, "w") as output:
-                    output.writestr("deno", '#!/bin/bash\nprintf executed >>"${CHECK_EXECUTE}"\nprintf "deno 2.9.4\\n"\n')
+                    output.writestr("deno", '#!/bin/bash\nprintf executed >>"${CHECK_EXECUTE}"\n'
+                                    'printf "deno %s\\n" "${CHECK_VERSION}"\n')
                 digest = hashlib.sha256(archive.read_bytes()).hexdigest()
                 fixture = r'''
     curl() {
@@ -2379,21 +2399,24 @@ sudo() { printf 'Unexpected host mutation\n' >&2; return 99; }
     }
     unzip() { printf inspect >>"${CHECK_EXTRACT}"; command unzip "$@"; }
     '''
-                for valid in (False, True):
-                    with self.subTest(valid=valid):
-                        run = root / str(valid)
+                for condition, valid_digest, installed_version, expected in (
+                        ("bad-digest", False, expected_version, 1),
+                        ("wrong-version", True, "0.0.0", 1),
+                        ("valid", True, expected_version, 0)):
+                    with self.subTest(step=step_name, condition=condition):
+                        run = root / condition
                         run.mkdir()
                         current = re.sub(r"readonly archive_sha=[0-9a-f]{64}",
-                                         "readonly archive_sha=" + (digest if valid else "0" * 64), script)
+                                         "readonly archive_sha=" + (digest if valid_digest else "0" * 64), script)
                         env = dict(os.environ, RUNNER_TEMP=str(run), GITHUB_PATH=str(run / "path"),
                                    CHECK_ARCHIVE=str(archive), CHECK_EXECUTE=str(run / "execute"),
-                                   CHECK_EXTRACT=str(run / "extract"))
+                                   CHECK_EXTRACT=str(run / "extract"), CHECK_VERSION=installed_version)
                         result = subprocess.run(["bash", "-c", fixture + current], env=env,
                                                 capture_output=True, timeout=10, check=False)
-                        self.assertEqual(result.returncode, 0 if valid else 1, result.stderr)
-                        self.assertEqual((run / "extract").exists(), valid)
-                        self.assertEqual((run / "execute").exists(), valid)
-                        self.assertEqual((run / "path").exists(), valid)
+                        self.assertEqual(result.returncode, expected, result.stderr)
+                        self.assertEqual((run / "extract").exists(), valid_digest)
+                        self.assertEqual((run / "execute").exists(), valid_digest)
+                        self.assertEqual((run / "path").exists(), expected == 0)
 
     def test_current_stable_metadata_requires_bounded_official_stable_release(self):
         import contextlib
@@ -2542,7 +2565,7 @@ timeout() { printf invoked >"${CHECK_RUN}"; }
         program = script.split("<<'PY_DENO_COMPAT'\n", 1)[1].split("\nPY_DENO_COMPAT", 1)[0]
         # pip supplies PEP 508 parsing in the workflow venv. Replace only that
         # external parser so ordinary repository validation need not install pip.
-        usable = SimpleNamespace(name="deno", marker=None, url=None, specifier={"2.9.4"})
+        usable = SimpleNamespace(name="deno", marker=None, url=None, specifier={"2.9.8"})
         too_new = copy.copy(usable)
         too_new.specifier = {"99.0.0"}
         direct = copy.copy(usable)
@@ -2555,11 +2578,14 @@ timeout() { printf invoked >"${CHECK_RUN}"; }
             "pip._vendor.packaging.requirements": SimpleNamespace(Requirement=lambda value: value),
             "pip._vendor.packaging.version": SimpleNamespace(Version=lambda value: value),
         }
-        for requirements, accepted in (([usable], True), ([usable, other_extra, unrelated], True),
-                                        ([], False), ([other_extra], False), ([too_new], False),
-                                        ([usable, too_new], False), ([direct], False)):
-            with self.subTest(requirements=requirements), patch.dict(sys.modules, modules), \
-                    patch.object(sys, "argv", ["-", "2.9.4"]), \
+        for requirements, version, accepted in (
+                ([usable], "2.9.8", True), ([usable], "2.9.4", False),
+                ([usable, other_extra, unrelated], "2.9.8", True),
+                ([], "2.9.8", False), ([other_extra], "2.9.8", False),
+                ([too_new], "2.9.8", False), ([usable, too_new], "2.9.8", False),
+                ([direct], "2.9.8", False)):
+            with self.subTest(requirements=requirements, version=version), patch.dict(sys.modules, modules), \
+                    patch.object(sys, "argv", ["-", version]), \
                     patch.object(metadata, "requires", return_value=requirements), \
                     contextlib.redirect_stdout(io.StringIO()):
                 if accepted:

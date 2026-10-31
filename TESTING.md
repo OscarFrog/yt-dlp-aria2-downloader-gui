@@ -1231,7 +1231,7 @@ virtual merge parents must be the squash parent and final PR HEAD. This supports
 the repository's enforced squash policy and deliberately refuses other merge
 shapes or a changed base. A deleted fork, missing Git object, disabled workflow,
 unknown/skipped job, pagination overflow, unavailable API or concurrent change
-of run/attempt fails closed. The scheduled-only real-tools job is the sole
+of run/attempt fails closed. The current-stable real-tools job is the sole
 expected skipped job in PR evidence. GitHub clears some run PR associations
 after merge; the verifier uses the authoritative squash-to-PR API relationship
 and exact Git parent identities instead.
@@ -1406,7 +1406,10 @@ Range/no-Range/redirect/error three times, the silent-active quiescence
 negative control ten times, and interrupted resume ten times. A separate weekly
 scheduled job resolves and logs the current stable yt-dlp
 version and runs the same qualification, including shared-destination GUI/CLI
-cycles, without changing PR pins. It first selects the published stable version
+cycles, without changing PR pins. A manual `workflow_dispatch` also runs this
+job alongside the unchanged historical matrix, allowing a candidate commit to
+be checked before merge. Such a diagnostic dispatch does not substitute for
+PR proof or scheduled-main evidence. It first selects the published stable version
 from `https://pypi.org/pypi/yt-dlp/json`, with an eight-MiB response bound and a
 30-second request timeout. Redirects, prereleases, malformed versions and
 withdrawn releases fail explicitly. Its isolated pip installation then requires
@@ -1415,8 +1418,12 @@ PyPI index instead of copying the earlier wheel's four dependency pins. Only
 wheels are accepted. Unavailable dependencies or an incompatible interpreter
 must fail; resolver backtracking cannot silently select an older yt-dlp.
 The version installed in the same venv must match the selected package version.
-The verified Deno baseline must satisfy that selected wheel's `deno`
-compatibility metadata; missing metadata or a newer minimum fails explicitly.
+The weekly/manual job pins Deno 2.9.8 and its official archive SHA-256;
+the historical matrix retains its validated Deno 2.9.4 pin. These independent
+pins require review when upstream compatibility changes; no runtime is selected
+or trusted automatically. The verified Deno baseline must satisfy that selected
+wheel's `deno` compatibility metadata; missing metadata or a newer minimum fails
+explicitly.
 Pip's bundled PEP 508 parser evaluates markers and version constraints in this
 disposable venv; it is not a new dependency of the local test suite. The weekly
 run records the PyPI source, observation time and selected package version in

@@ -1261,7 +1261,7 @@ then installs that exact version's `pin-curl-cffi` extra through isolated pip
 against HTTPS PyPI. Unavailable dependencies or an incompatible interpreter
 must fail rather than let pip backtrack to an older yt-dlp. The selected source,
 observation time and package version accompany the resolved dependency versions. It
-uses the same digest/version-verified Deno baseline, but additionally evaluates
+uses a separately pinned, digest/version-verified Deno baseline and evaluates
 that runtime against the selected wheel's `deno` compatibility requirement.
 Missing, unsupported or incompatible metadata fails qualification rather than
 reusing an older wheel's requirements. The selected executable version is bound
