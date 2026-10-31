@@ -890,6 +890,91 @@ assert_contribution_templates_are_structured() {
             "${required_fragment}" \
             "pull-request template contains ${required_fragment}"
     done
+
+    python3 -B - "${SCRIPT_DIR}" <<'PY_PUBLIC_CONTRIBUTION_DOCUMENTATION'
+from pathlib import Path
+import re
+import sys
+
+project = Path(sys.argv[1])
+repository = "https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui"
+privacy_terms = (
+    "cookies", "tokens", "credentials", "authentication headers",
+    "private media URLs", "personal data", "unredacted logs",
+)
+forms = {
+    "bug-report.yml": ("Bug report", "[Bug] ", {
+        "version": ("input", True), "installation": ("dropdown", True),
+        "environment": ("textarea", True), "steps": ("textarea", True),
+        "expected": ("textarea", True), "actual": ("textarea", True),
+        "diagnostics": ("textarea", False), "checks": ("checkboxes", False),
+    }),
+    "feature-request.yml": ("Feature request", "[Feature] ", {
+        "problem": ("textarea", True), "use_case": ("textarea", True),
+        "proposal": ("textarea", True),
+        "alternatives": ("textarea", False), "context": ("textarea", False),
+        "checks": ("checkboxes", False),
+    }),
+}
+
+for filename, (name, title, fields) in forms.items():
+    path = project / ".github/ISSUE_TEMPLATE" / filename
+    if path.is_symlink() or not path.is_file():
+        raise AssertionError(f"{filename}: missing regular public issue form")
+    text = path.read_text(encoding="utf-8")
+    # Check the canonical YAML field scopes; this is a focused source contract,
+    # not a general YAML parser or a dependency on a locally installed package.
+    header, *blocks = re.split(r"(?m)^  - type: ", text)
+    if (re.findall(r"(?m)^([a-z_]+):", header) != ["name", "description", "title", "body"]
+            or f"name: {name}\n" not in header or f'title: "{title}"\n' not in header
+            or not re.search(r"(?m)^description: \S.+$", header)
+            or not blocks or not blocks[0].startswith("markdown\n")):
+        raise AssertionError(f"{filename}: missing form identity or introductory guidance")
+    intro = " ".join(blocks[0].split())
+    if f"{repository}/blob/main/SECURITY.md" not in intro or "Do not include" not in intro:
+        raise AssertionError(f"{filename}: missing security-report route or privacy warning")
+    if any(term not in intro for term in privacy_terms):
+        raise AssertionError(f"{filename}: incomplete public-data privacy warning")
+    observed = {}
+    for block in blocks[1:]:
+        kind = block.splitlines()[0]
+        ids = re.findall(r"(?m)^    id: ([a-z][a-z0-9_-]*)$", block)
+        if len(ids) != 1 or ids[0] in observed or ids[0] not in fields:
+            raise AssertionError(f"{filename}: missing, duplicate or unexpected field id")
+        field = ids[0]
+        required = "\n    validations:\n      required: true\n" in block
+        if (kind, required) != fields[field] or not re.search(r"(?m)^      label: \S.+$", block):
+            raise AssertionError(f"{filename}: wrong type, required status or label for {field}")
+        observed[field] = block
+    if set(observed) != set(fields):
+        raise AssertionError(f"{filename}: required form fields are missing")
+    checks = observed["checks"]
+    acknowledgements = re.findall(r"(?m)^        - label: (.+)\n          required: true$", checks)
+    if (len(acknowledgements) != 2 or "searched" not in acknowledgements[0]
+            or "removed" not in acknowledgements[1]
+            or any(term not in acknowledgements[1] for term in privacy_terms)):
+        raise AssertionError(f"{filename}: search and privacy acknowledgements must be mandatory")
+    if filename == "bug-report.yml" and "\n      render: text\n" not in observed["diagnostics"]:
+        raise AssertionError("Bug diagnostics must remain an optional plain-text excerpt")
+
+for filename in ("CONTRIBUTING.md", "SECURITY.md"):
+    path = project / filename
+    if path.is_symlink() or not path.is_file():
+        raise AssertionError(f"{filename}: missing regular community document")
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("# ") or any(term not in " ".join(text.split()) for term in privacy_terms):
+        raise AssertionError(f"{filename}: missing document identity or privacy guidance")
+    for readme in ("README.md", "README.fr.md"):
+        text = (project / readme).read_text(encoding="utf-8")
+        if f"]({repository}/blob/main/{filename})" not in text:
+            raise AssertionError(f"{readme}: missing installed-safe link to {filename}")
+        if re.search(r"\]\((?:\./)?" + re.escape(filename) + r"(?:[)#])", text):
+            raise AssertionError(f"{readme}: community documents are not installed beside the README")
+security = (project / "SECURITY.md").read_text(encoding="utf-8")
+if f"]({repository}/security/advisories/new)" not in security:
+    raise AssertionError("Security reports must have an explicit private reporting route")
+print("Public contribution documentation: form contracts, privacy and installed-safe links verified.")
+PY_PUBLIC_CONTRIBUTION_DOCUMENTATION
 }
 
 cleanup_static_test() {
@@ -4739,6 +4824,29 @@ for name in sorted(screenshots):
         raise AssertionError(f"{name}: screenshot dimensions exceed the README display budget")
 print("README screenshots: equivalent accessible references and bounded PNG assets verified.")
 PY_README_SCREENSHOTS
+
+    python3 -B - "${SCRIPT_DIR}" <<'PY_SOCIAL_PREVIEW'
+from pathlib import Path
+import struct
+import sys
+
+project = Path(sys.argv[1])
+path = project / "docs/images/social-preview.png"
+if path.is_symlink() or not path.is_file() or not 45 <= path.stat().st_size < 1_000_000:
+    raise AssertionError("Social preview must be a regular PNG smaller than 1,000,000 bytes")
+data = path.read_bytes()
+if data[:16] != b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" or data[-12:] != b"\x00\x00\x00\x00IEND\xaeB`\x82":
+    raise AssertionError("Social preview has an invalid PNG signature, header or terminator")
+if struct.unpack(">II", data[16:24]) != (1280, 640):
+    raise AssertionError("Social preview must be exactly 1280 by 640 pixels")
+provenance = (project / "docs/images/README.md").read_text(encoding="utf-8")
+section = provenance.split("\n## Social preview\n", 1)
+if len(section) != 2 or any(name not in section[1].split("\n## ", 1)[0] for name in (
+    "social-preview.png", "readme-url.png", "readme-progress.png",
+)):
+    raise AssertionError("Social preview needs separate provenance identifying its native captures")
+print("Social preview: bounded 1280 by 640 PNG and separate provenance verified.")
+PY_SOCIAL_PREVIEW
 
     python3 -B - "${SCRIPT_DIR}" <<'PY_PUBLIC_TRACK_DOCUMENTATION'
 from pathlib import Path

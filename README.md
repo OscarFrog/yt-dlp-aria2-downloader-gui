@@ -404,6 +404,13 @@ A published tag and its assets must never be reused for different contents.
 
 </details>
 
+## Community
+
+- Questions and usage help: [GitHub Discussions](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/discussions).
+- Report a [bug](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/issues/new?template=bug-report.yml) or suggest a [feature](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/issues/new?template=feature-request.yml).
+- Contribute code or documentation: [contribution guide](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/CONTRIBUTING.md).
+- Suspected vulnerability: [report privately](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/security/advisories/new) using the [security policy](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/SECURITY.md).
+
 Use this software only for content you are authorized to download. Website
 restrictions and upstream availability can change. Distributed under the
 [MIT License](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/LICENSE).

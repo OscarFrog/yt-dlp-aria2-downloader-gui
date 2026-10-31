@@ -1,0 +1,58 @@
+name: Feature request
+description: Suggest an improvement and explain the user need it would address.
+title: "[Feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Suggestions in English or French are welcome. Describe the need before
+        the implementation. For suspected vulnerabilities, follow
+        [SECURITY.md](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/SECURITY.md).
+        Do not include cookies, tokens, credentials, authentication headers,
+        private media URLs, personal data or unredacted logs in text or attachments.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: User need
+      description: What are you trying to do, and what is difficult or missing today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: Give a concrete example of who would use this improvement and in which situation, with private data removed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed improvement
+      description: Describe the expected result and how a user would know it works.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered (optional)
+      description: Describe existing options or workarounds and their limitations.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context (optional)
+      description: Include relevant public references or examples with private data removed.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for a similar request.
+          required: true
+        - label: I reviewed all text and attachments and removed cookies, tokens, credentials, authentication headers, private media URLs, personal data and unredacted logs.
+          required: true

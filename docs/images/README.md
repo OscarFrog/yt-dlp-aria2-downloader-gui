@@ -73,3 +73,27 @@ the exact absolute URLs on `main`, PNG headers and dimensions. Each image must
 be at most 512 KiB and 2560 pixels on either side. This set totals about 136 KiB.
 Visual review remains necessary: these mechanical checks do not establish that
 a screenshot is faithful to the interface.
+
+## Social preview
+
+`social-preview.png` is the opaque 1280 × 640 GitHub sharing card, kept below
+1,000,000 bytes. It is a source-only asset for the repository's Social preview
+setting and is not installed in RPM/DEB packages.
+
+The decorative navy background was generated with the built-in imagegen tool.
+Exact typography and the real `readme-url.png` and `readme-progress.png`
+captures were composed deterministically with Pillow and Noto Sans. Both
+captures retain their native dimensions and pixel content; no interface was
+generated or repainted. The progress remains the demonstration described above.
+The card uses these three texts, with line wrapping where needed:
+
+- `yt-dlp aria2 downloader`
+- `Video & Audio Downloader for Linux`
+- `yt-dlp • aria2 • FFmpeg • Zenity`
+
+To refresh it, combine reviewed captures with a quiet opaque background and
+the same text. Verify the screenshot regions against their source pixels,
+export an RGB PNG at exactly 1280 × 640 below 1,000,000 bytes, and inspect both
+the full-size card and a 400-pixel-wide preview. Preserve the privacy and
+demonstration boundaries above. Uploading the card in GitHub settings is a
+separate action from updating this file.
