@@ -56,8 +56,10 @@ tests a supplied policy without executing ARGV; it does not prove automatic
 loading. Static validation parses the repository's literal `prefix_rule` subset
 without executing it, including when the Codex CLI is absent; the optional CLI
 check additionally validates actual Codex matching semantics. Include active
-global rules when auditing combined decisions. Never
-dump configuration, historical rules or session logs without redaction.
+global rules when auditing combined decisions. A `prompt` decision requests
+approval through the session's active reviewer, which may be human or automatic;
+it does not grant task authority. Never dump configuration, historical rules or
+session logs without redaction.
 
 Choose focused tests from this table; `tests/run-all.sh --list` and
 `tests/mock-integration.sh --list-groups` are the authoritative accepted names.
@@ -410,6 +412,26 @@ The `ready` field is true exactly when no required check failed. Doctor mode is
 exclusive: it cannot be combined with `--fast`, `--full`, `--jobs`, or `--list`.
 Passing `--json` without `--doctor` is rejected.
 
+Readiness covers those probes, not every qualification prerequisite. The
+private-temp probe checks creation, mode 0700 and cleanup of its temporary
+directory; it does not validate ownership of every ancestor as the private
+helpers do. The procfs probe checks readability, not every process-supervision
+operation. An ownership-remapping sandbox can therefore pass doctor and still
+be unsuitable for the full contract. Diagnose that boundary and use an
+authorized qualifying environment; do not relax helper checks or repeat the
+same failing suite. Reuse a diagnosis only while its execution environment is
+unchanged; another sandbox or agent execution context may have different access.
+
+Doctor's clean Git status also excludes ignored local evidence. Static source
+checks can inspect those files: keep new audit output outside the checkout,
+preserve existing evidence, and qualify the same candidate in a clean worktree
+when unrelated generated files interfere. Optional tool presence does not
+qualify graphical or privileged tests; follow the specific
+[Zenity](#controlled-real-zenity-qualification),
+[package](#github-actions) and
+[network](#network-destination-regression-and-opt-in-cifs-qualification)
+procedures for those environments.
+
 ## Complete local test suite
 
 Run from the repository root:
@@ -453,8 +475,9 @@ and `inventory`. `summary` reports branch/commit/tree identity; `log` reports at
 most five commit/parent identities and dates without author or message data.
 It accepts no caller-provided Git option, revision, path, helper, or output
 filename. The helper has no explicit Codex `allow` rule: it runs under the
-ordinary sandbox or baseline policy. Direct Git remains interactive under the
-repository execution policy.
+ordinary sandbox or baseline policy. Direct Git requested outside the sandbox
+remains subject to the repository execution policy and the session's configured
+approval reviewer.
 
 Every static step and integration suite reports its elapsed time. The read-only
 shfmt check, static behavioral validation, and four ShellCheck inventories
