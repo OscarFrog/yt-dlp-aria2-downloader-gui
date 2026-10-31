@@ -37,6 +37,12 @@ progression présentée est une démonstration, pas une mesure de performances.
 | --- | --- |
 | ![Liste des pistes audio avec les langues disponibles et le bouton Continue](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-audio.png) | ![Liste des sous-titres avec l'option No subtitles](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-subtitles.png) |
 
+| Choisir un dossier de destination | Consulter un journal d'erreur |
+| --- | --- |
+| ![Sélecteur du dossier de destination avec des dossiers de démonstration](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-folder.png) | ![Visionneuse ouverte via View log, affichant une erreur d'espace disque simulée](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-error-log.png) |
+
+Le journal illustre une erreur d'espace disque simulée.
+
 ## Installation recommandée
 
 Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
