@@ -31,11 +31,11 @@ is a demonstration, not a download benchmark.
 
 | Paste a URL | Follow progress |
 | --- | --- |
-| ![URL entry dialog ready for a video address](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/a7aacdbd94164aeb7da78aec82e4a9293abb3b89/docs/images/readme-url.png) | ![Download progress dialog with a Cancel button](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/a7aacdbd94164aeb7da78aec82e4a9293abb3b89/docs/images/readme-progress.png) |
+| ![URL entry dialog ready for a video address](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-url.png) | ![Download progress dialog with a Cancel button](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-progress.png) |
 
 | Select audio tracks | Select subtitles |
 | --- | --- |
-| ![Audio tracks checklist with selectable languages and a Continue button](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/a7aacdbd94164aeb7da78aec82e4a9293abb3b89/docs/images/readme-audio.png) | ![Subtitles checklist including No subtitles](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/a7aacdbd94164aeb7da78aec82e4a9293abb3b89/docs/images/readme-subtitles.png) |
+| ![Audio tracks checklist with selectable languages and a Continue button](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-audio.png) | ![Subtitles checklist including No subtitles](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-subtitles.png) |
 
 ## Recommended installation
 

@@ -31,11 +31,11 @@ progression présentée est une démonstration, pas une mesure de performances.
 
 | Coller une URL | Suivre la progression |
 | --- | --- |
-| ![Fenêtre de saisie prête à recevoir une URL vidéo](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/a7aacdbd94164aeb7da78aec82e4a9293abb3b89/docs/images/readme-url.png) | ![Fenêtre de progression du téléchargement avec le bouton Cancel](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/a7aacdbd94164aeb7da78aec82e4a9293abb3b89/docs/images/readme-progress.png) |
+| ![Fenêtre de saisie prête à recevoir une URL vidéo](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-url.png) | ![Fenêtre de progression du téléchargement avec le bouton Cancel](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-progress.png) |
 
 | Choisir les pistes audio | Choisir les sous-titres |
 | --- | --- |
-| ![Liste des pistes audio avec les langues disponibles et le bouton Continue](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/a7aacdbd94164aeb7da78aec82e4a9293abb3b89/docs/images/readme-audio.png) | ![Liste des sous-titres avec l'option No subtitles](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/a7aacdbd94164aeb7da78aec82e4a9293abb3b89/docs/images/readme-subtitles.png) |
+| ![Liste des pistes audio avec les langues disponibles et le bouton Continue](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-audio.png) | ![Liste des sous-titres avec l'option No subtitles](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/main/docs/images/readme-subtitles.png) |
 
 ## Installation recommandée
 

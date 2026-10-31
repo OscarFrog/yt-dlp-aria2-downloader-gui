@@ -4705,7 +4705,6 @@ screenshots = {
     f"docs/images/readme-{name}.png"
     for name in ("url", "audio", "subtitles", "progress")
 }
-pins = set()
 for name in ("README.md", "README.fr.md"):
     text = (project / name).read_text(encoding="utf-8")
     images = re.findall(r"!\[([^\]\n]*)\]\(([^\s)]+)\)", text)
@@ -4715,21 +4714,18 @@ for name in ("README.md", "README.fr.md"):
             raise AssertionError(f"{name}: image needs nonempty alt text")
         if url == "https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/actions/workflows/shell.yml/badge.svg":
             continue
-        # Installed READMEs do not ship source-only assets. Pin their absolute
-        # URLs so the pictures also survive maintenance-branch deletion.
+        # Installed READMEs do not ship source-only assets. Use the permanent
+        # main branch so image links survive squash and source-branch deletion.
         match = re.fullmatch(
             r"https://raw\.githubusercontent\.com/OscarFrog/"
-            r"yt-dlp-aria2-downloader-gui/([0-9a-f]{40})/(docs/images/[^/]+\.png)",
+            r"yt-dlp-aria2-downloader-gui/main/(docs/images/[^/]+\.png)",
             url,
         )
         if not match:
-            raise AssertionError(f"{name}: screenshot needs a pinned absolute URL")
-        pins.add(match[1])
-        referenced.append(match[2])
+            raise AssertionError(f"{name}: screenshot needs an absolute URL on permanent main")
+        referenced.append(match[1])
     if len(referenced) != len(screenshots) or set(referenced) != screenshots:
         raise AssertionError(f"{name}: expected the four documented application screenshots")
-if len(pins) != 1:
-    raise AssertionError("Both READMEs must reference the same screenshot commit")
 
 for name in sorted(screenshots):
     path = project / name

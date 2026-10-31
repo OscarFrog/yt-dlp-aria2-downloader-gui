@@ -45,12 +45,18 @@ The complete graphical validation procedure remains in
 ## Storage and references
 
 These are source documentation assets, not installed RPM/DEB payloads. The
-READMEs use absolute raw GitHub URLs pinned to the commit containing the images,
-so they also work from installed documentation and after branch deletion.
-When replacing images, update that commit reference in both languages.
+READMEs use absolute raw GitHub URLs on the permanent `main` branch, so they
+also work from installed documentation after squash and source-branch deletion.
+Keep these four paths stable when refreshing captures: installed README copies
+display the current images from `main`. Update capture provenance and both
+languages' descriptions when the images change.
+
+Before merge, validate the image targets in the qualified candidate tree.
+After merge and branch deletion, check their public URLs, returned bytes and
+rendering from GitHub and local README copies.
 
 `test-static.sh` checks the four expected PNG paths, nonempty alternative text,
-the shared immutable URL reference, PNG headers and dimensions. Each image must
+the exact absolute URLs on `main`, PNG headers and dimensions. Each image must
 be at most 512 KiB and 2560 pixels on either side. This set totals about 75 KiB.
 Visual review remains necessary: these mechanical checks do not establish that
 a screenshot is faithful to the interface.
