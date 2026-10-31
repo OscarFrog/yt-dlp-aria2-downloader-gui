@@ -1,0 +1,89 @@
+name: Bug report
+description: Report a reproducible problem with installation, downloads or the interface.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reports in English or French are welcome. For suspected vulnerabilities,
+        follow [SECURITY.md](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/SECURITY.md)
+        instead of opening a public issue.
+        Do not include cookies, tokens, credentials, authentication headers,
+        private media URLs, personal data or unredacted logs. Review screenshots
+        and sanitized logs too: media titles and local paths can remain personal.
+
+  - type: input
+    id: version
+    attributes:
+      label: Application version
+      description: Include the version and, for a Git checkout, the commit if known.
+      placeholder: Output of yt-dlp-aria2-downloader --version or ./download-video.sh --version
+    validations:
+      required: true
+
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation method
+      options:
+        - Fedora RPM / install-fedora.sh
+        - Debian or Ubuntu DEB
+        - Release ZIP
+        - Git checkout
+        - Other / unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: GNU/Linux distribution and version, desktop if relevant, GUI or terminal, and relevant tool versions if known. Omit usernames and hostnames.
+      placeholder: Distribution; desktop; GUI or terminal; relevant dependency versions.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use a minimal example with public or synthetic data. Do not share private media URLs or authentication data.
+      placeholder: |
+        1. Open or run ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead? Include any diagnostic identifier or exit status.
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Reviewed diagnostic excerpt (optional)
+      description: Paste only the relevant excerpt after removing secrets, private URLs, personal paths, titles and other personal data. Do not paste an unredacted log.
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues for this problem.
+          required: true
+        - label: I reviewed all text and attachments and removed cookies, tokens, credentials, authentication headers, private media URLs, personal data and unredacted logs.
+          required: true
