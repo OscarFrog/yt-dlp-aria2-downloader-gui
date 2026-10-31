@@ -4691,18 +4691,58 @@ test_static_application_contracts() {
 }
 
 test_static_package_contracts() {
-    local README_EN_TEXT README_FR_TEXT
     local deb_build_phase deb_lifecycle_phase install_tree_phase
     local lifecycle_assertion packaging_test_phase rpm_build_phase rpm_lifecycle_phase
 
-    README_EN_TEXT=$(<"${SCRIPT_DIR}/README.md")
-    README_FR_TEXT=$(<"${SCRIPT_DIR}/README.fr.md")
-    readonly README_EN_TEXT README_FR_TEXT
+    python3 -B - "${SCRIPT_DIR}" <<'PY_README_SCREENSHOTS'
+from pathlib import Path
+import re
+import struct
+import sys
 
-    assert_text_not_contains "${README_EN_TEXT}" \
-        'docs/images/' 'English README has no embedded screenshots'
-    assert_text_not_contains "${README_FR_TEXT}" \
-        'docs/images/' 'French README has no embedded screenshots'
+project = Path(sys.argv[1])
+screenshots = {
+    f"docs/images/readme-{name}.png"
+    for name in ("url", "audio", "subtitles", "progress")
+}
+pins = set()
+for name in ("README.md", "README.fr.md"):
+    text = (project / name).read_text(encoding="utf-8")
+    images = re.findall(r"!\[([^\]\n]*)\]\(([^\s)]+)\)", text)
+    referenced = []
+    for alt, url in images:
+        if not alt.strip():
+            raise AssertionError(f"{name}: image needs nonempty alt text")
+        if url == "https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/actions/workflows/shell.yml/badge.svg":
+            continue
+        # Installed READMEs do not ship source-only assets. Pin their absolute
+        # URLs so the pictures also survive maintenance-branch deletion.
+        match = re.fullmatch(
+            r"https://raw\.githubusercontent\.com/OscarFrog/"
+            r"yt-dlp-aria2-downloader-gui/([0-9a-f]{40})/(docs/images/[^/]+\.png)",
+            url,
+        )
+        if not match:
+            raise AssertionError(f"{name}: screenshot needs a pinned absolute URL")
+        pins.add(match[1])
+        referenced.append(match[2])
+    if len(referenced) != len(screenshots) or set(referenced) != screenshots:
+        raise AssertionError(f"{name}: expected the four documented application screenshots")
+if len(pins) != 1:
+    raise AssertionError("Both READMEs must reference the same screenshot commit")
+
+for name in sorted(screenshots):
+    path = project / name
+    if path.is_symlink() or not path.is_file() or not 45 <= path.stat().st_size <= 512 * 1024:
+        raise AssertionError(f"{name}: screenshot must be a regular PNG no larger than 512 KiB")
+    data = path.read_bytes()
+    if data[:16] != b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" or data[-12:] != b"\x00\x00\x00\x00IEND\xaeB`\x82":
+        raise AssertionError(f"{name}: invalid PNG signature, header or terminator")
+    width, height = struct.unpack(">II", data[16:24])
+    if not (1 <= width <= 2560 and 1 <= height <= 2560):
+        raise AssertionError(f"{name}: screenshot dimensions exceed the README display budget")
+print("README screenshots: equivalent accessible references and bounded PNG assets verified.")
+PY_README_SCREENSHOTS
 
     python3 -B - "${SCRIPT_DIR}" <<'PY_PUBLIC_TRACK_DOCUMENTATION'
 from pathlib import Path
@@ -4925,9 +4965,6 @@ PY_PUBLIC_TRACK_DOCUMENTATION
             "${rpm_build_phase}() {" \
             "RPM build phase ${rpm_build_phase}"
     done
-    [[ ! -e ${SCRIPT_DIR}/docs/images ]] \
-        || fail 'Obsolete screenshot directory remains in the project.'
-
     # shellcheck disable=SC2016 # Literal workflow-source assertions.
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
         'git config --global --add safe.directory "${GITHUB_WORKSPACE}"' \

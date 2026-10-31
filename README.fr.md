@@ -4,336 +4,54 @@
 
 [English version](README.md)
 
-## Sommaire
+Téléchargez une vidéo ou sa piste audio sous **GNU/Linux**, avec une interface
+Zenity simple ou depuis le terminal. Collez une URL, choisissez les pistes et
+le dossier de destination, puis suivez le téléchargement et le traitement.
 
-- [Installation recommandée](#installation-recommandée)
-- [Fonctionnalités principales](#fonctionnalités-principales)
-- [Prérequis](#prérequis)
-- [Provenance et immuabilité des releases](#provenance-et-immuabilité-des-releases)
-- [Installation par paquet](#installation-par-paquet)
-  - [Fedora 44](#fedora-44)
-  - [Debian et Ubuntu](#debian-et-ubuntu)
-  - [Commandes installées par les paquets](#commandes-installées-par-les-paquets)
-  - [Désinstaller une installation par paquet](#désinstaller-une-installation-par-paquet)
-- [Installation depuis une archive de release portable](#installation-depuis-une-archive-de-release-portable)
-- [Installation avec Git](#installation-avec-git)
-- [Utilisation graphique](#utilisation-graphique)
-- [Utilisation en ligne de commande](#utilisation-en-ligne-de-commande)
-- [Fonctionnement des téléchargeurs](#fonctionnement-des-téléchargeurs)
-- [Données locales](#données-locales)
-- [Comprendre les erreurs](#comprendre-les-erreurs)
-- [Tests](#tests)
-- [Désinstallation du lanceur](#désinstallation-du-lanceur)
-- [Limites et utilisation légale](#limites-et-utilisation-légale)
-- [Licence](#licence)
+- **Vidéo :** meilleures pistes vidéo et audio disponibles, réunies dans un MKV.
+- **Audio :** meilleure piste disponible, en conservant son format source lorsque possible.
+- **Langues :** choix indépendants des audios et sous-titres sur les sites compatibles.
+- **Au quotidien :** préférences mémorisées, annulation et téléchargements indépendants simultanés.
 
-Interface graphique Zenity et moteur Bash exclusivement pour GNU/Linux. Le
-programme télécharge une seule URL avec deux profils généraux et un profil
-supplémentaire réservé à YouTube :
-
-- une **vidéo MKV complète**, avec les meilleures pistes vidéo et audio
-  disponibles ;
-- une **vidéo YouTube HLS authentifiée**, qui lit les cookies Firefox et
-  remuxe le flux HLS sélectionné dans un conteneur MKV ;
-- la **meilleure piste audio disponible**, en conservant son codec et son
-  conteneur source lorsque yt-dlp peut le faire sans réencodage.
-
-Le projet utilise `yt-dlp` pour l'extraction des médias, `aria2c` pour accélérer
-les téléchargements directs éligibles via un fichier d'entrée aria2 privé et
-FFmpeg pour fusionner, remuxer ou extraire les flux. HTTPS repasse
-automatiquement sur le transport natif de yt-dlp lorsque le backend TLS d'aria2
-n'offre pas le durcissement requis de validation des certificats. Les flux DASH
-et HLS restent eux aussi natifs.
 La version de développement actuelle est la **2.4.4**.
 La dernière release de paquets publiée est la **2.4.4**.
+
+## Sommaire
+
+[Captures d'écran](#captures-décran) · [Installation](#installation-recommandée) ·
+[Premiers pas](#premiers-pas) · [Audio et sous-titres](#audio-et-sous-titres) ·
+[Terminal](#utilisation-en-ligne-de-commande) · [Dépannage](#dépannage-essentiel) ·
+[Documentation complémentaire](#documentation-complémentaire)
+
+## Captures d'écran
+
+Véritables fenêtres Zenity avec des données de démonstration. Les libellés de
+l'interface sont en anglais ; l'apparence dépend du thème du bureau. La
+progression présentée est une démonstration, pas une mesure de performances.
+
+| Coller une URL | Suivre la progression |
+| --- | --- |
+| ![Fenêtre de saisie prête à recevoir une URL vidéo](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/a7aacdbd94164aeb7da78aec82e4a9293abb3b89/docs/images/readme-url.png) | ![Fenêtre de progression du téléchargement avec le bouton Cancel](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/a7aacdbd94164aeb7da78aec82e4a9293abb3b89/docs/images/readme-progress.png) |
+
+| Choisir les pistes audio | Choisir les sous-titres |
+| --- | --- |
+| ![Liste des pistes audio avec les langues disponibles et le bouton Continue](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/a7aacdbd94164aeb7da78aec82e4a9293abb3b89/docs/images/readme-audio.png) | ![Liste des sous-titres avec l'option No subtitles](https://raw.githubusercontent.com/OscarFrog/yt-dlp-aria2-downloader-gui/a7aacdbd94164aeb7da78aec82e4a9293abb3b89/docs/images/readme-subtitles.png) |
 
 ## Installation recommandée
 
 Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
-Les noms exacts ci-dessous correspondent à la release v2.4.4 actuellement publiée.
+Les noms ci-dessous correspondent à la release v2.4.4 actuellement publiée.
+Téléchargez les fichiers adaptés à votre système dans un même dossier, puis ouvrez-y un terminal.
 
-Pour **Fedora 44**, téléchargez ces quatre fichiers :
-
-```text
-install-fedora.sh
-RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.4.4-1.fc44.noarch.rpm
-SHA256SUMS
-```
-
-Vérifiez les fichiers téléchargés puis lancez le bootstrap Fedora officiel :
-
-```bash
-sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.4.4-1.fc44.noarch.rpm
-```
-
-Le bootstrap authentifie et active RPM Fusion Free si nécessaire, remplace `ffmpeg-free` par
-le `ffmpeg` complet de RPM Fusion, installe les paquets Fedora requis, installe
-le RPM de l'application, vérifie le fournisseur de FFmpeg puis initialise les
-runtimes yt-dlp et Deno propres à l'utilisateur.
-
-Pour **Debian ou Ubuntu**, téléchargez le DEB versionné et `SHA256SUMS`,
-vérifiez-les puis installez le paquet avec `sudo apt install
-./yt-dlp-aria2-downloader-gui_2.4.4-1_all.deb`. Pour **les autres distributions
-GNU/Linux ou une utilisation portable**, utilisez le ZIP versionné ou un clone
-Git. Les runtimes yt-dlp et Deno gérés automatiquement prennent actuellement en
-charge Linux `x86_64` et `aarch64`.
-
-Avec le RPM, le lanceur graphique et son icône sont installés automatiquement dans le menu des applications. **Ne lancez pas `install-gui.sh` après l’installation d’un paquet.** Cet outil est réservé aux installations ZIP et Git.
-## Fonctionnalités principales
-
-- interface graphique Zenity simple ;
-- moteur utilisable également depuis un terminal ;
-- une URL par exécution, avec désactivation des téléchargements accidentels de
-  listes de lecture ;
-- configuration personnelle et plugins yt-dlp désactivés pour une exécution déterministe ;
-- refus des collisions connues avec les vidéos terminées, avec la limite de
-  publication locale décrite plus bas ;
-- sélection du dossier de destination et mémorisation des préférences ;
-- vidéo MKV sans réencodage lorsque les flux sont compatibles ;
-- choix indépendants des audios et sous-titres sur les sites compatibles, avec
-  sélection automatique, plusieurs pistes ou aucun sous-titre ;
-- profil vidéo YouTube HLS authentifié avec les cookies Firefox ;
-- extraction de la meilleure piste audio avec conservation du format source lorsque possible ;
-- reprise des téléchargements interrompus gérés nativement par yt-dlp lorsque le site le permet ;
-- annulation orientée confidentialité pour les transferts HTTP(S) directs gérés
-  par aria2 : l'état partiel privé est supprimé et une exécution ultérieure
-  redémarre proprement ;
-- repli HTTPS natif automatique pour les combinaisons aria2/GnuTLS concernées ;
-- progression graphique unifiée pour les fichiers directs, les fragments
-  HLS/DASH, les pistes vidéo/audio séparées et le post-traitement FFmpeg ;
-- annulation de la session de téléchargement, y compris les commandes supervisées du runtime et de FFprobe ;
-- supervision de yt-dlp et des commandes FFmpeg exécutées par le moteur, avec escalade des signaux temporisée et préservation tant que l’arrêt reste incertain ;
-- validation FFprobe des pistes vidéo et audio pour une vidéo complète, et
-  d'une piste audio sans piste vidéo de contenu pour le mode audio, avant la
-  publication du succès ;
-- téléchargements indépendants simultanés dans le même dossier, avec réservation
-  exclusive des fichiers média, partiels et de post-traitement communs ;
-- journaux privés conservés uniquement pour les exécutions problématiques, avec expurgation des URL et limite de 8 Mio ;
-- lanceur dans le menu des applications ;
-- tests statiques, mocks et intégrations hermétiques avec outils réels,
-  notamment qualification audio directe AAC/Opus/source combinée, routage
-  HLS/DASH, comportement aria2 contrôlé Range/no-Range/redirection/erreur/annulation-redémarrage-propre,
-  progression FFmpeg réelle et stress des courses de processus, avec validation
-  GitHub Actions sous Ubuntu et Fedora 44.
-
-## Prérequis
-
-Les commandes système requises par l'application sont :
-
-- Bash **4.4 ou plus récent** ;
-- `aria2c` **1.37.0 ou plus récent** ;
-- Python **3.10 ou plus récent** ;
-- pidfds Linux et WNOWAIT utilisables, inventaires procfs des processus/threads lisibles ;
-- FFmpeg et `ffprobe` ;
-- Zenity pour l'interface graphique ;
-- `ca-certificates`, `curl`, GnuPG et `unzip` pour l'initialisation et la mise
-  à jour vérifiées des runtimes ;
-- GNU coreutils, GNU grep, `find` et `setsid`/`flock`, normalement fournis par
-  les paquets système de base et `util-linux` ;
-- Firefox avec une session YouTube authentifiée uniquement pour le profil
-  YouTube HLS authentifié facultatif.
-
-`yt-dlp` et Deno **n'ont plus besoin d'être installés comme paquets système**.
-L'application maintient des runtimes vérifiés propres à l'utilisateur dans :
-
-```text
-~/.local/share/yt-dlp-aria2-downloader/runtime/
-```
-
-Par défaut, chaque lancement du moteur contrôle le canal **stable** signé de
-yt-dlp et le canal stable de Deno. Toute nouvelle version est préparée
-séparément, validée puis activée atomiquement. Les attentes de verrou et les
-opérations réseau sont bornées ; si le contrôle de mise à jour échoue, le
-dernier runtime vérifié reste actif. L'exécutable Linux officiel de yt-dlp
-embarque ses dépendances Python compatibles, notamment `curl_cffi`, ainsi que
-le support EJS embarqué utilisé par l'extraction YouTube actuelle.
-Le gestionnaire renvoie une attestation versionnée unique avec les chemins et
-versions validés ; le moteur ne répète donc pas la découverte des exécutables
-et de leurs capacités pendant le même lancement.
-
-Définissez `YTDLP_ARIA2_YTDLP_CHANNEL=nightly` pour utiliser volontairement les
-nightly yt-dlp. Définissez `YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE=0` pour un **mode
-strictement sans réseau** : seuls les runtimes déjà installés sont validés ; un
-runtime absent ou invalide provoque un échec clair sans appel à `curl`. Utilisez
-`runtime-manager.sh ensure` lorsqu'un bootstrap sans contrôle de mise à jour est
-explicitement souhaité. `runtime-manager.sh rollback yt-dlp` et
-`runtime-manager.sh rollback deno` réactivent un runtime précédent après
-validation lorsqu'il existe.
-Le rollback applique les mêmes contrôles de répertoire réel, d'exécutable régulier
-et de version exacte que l'activation normale. `ensure` essaie un runtime précédent
-installé et valide avant le bootstrap, même si le lien actif, son répertoire ou
-son exécutable a disparu.
-
-Les versions installées sont conservées, car un téléchargement en cours peut
-encore utiliser une ancienne version après plusieurs mises à jour. Télécharger
-à nouveau un binaire vérifié identique préserve le fichier installé ; une copie
-endommagée peut être réparée depuis la release vérifiée.
-
-Lors d'une interruption gérable, le gestionnaire de runtime conserve les fichiers
-temporaires du bootstrap et le verrou de mise à jour jusqu'à l'arrêt de la
-commande en cours et de ses consommateurs supervisés. Le retour anticipé d'une
-sonde temporisée n'autorise pas le nettoyage si un enfant reste actif. Le
-gestionnaire supprime ensuite ses temporaires authentifiés avant de libérer le
-verrou. Un arrêt forcé par `SIGKILL` peut laisser des temporaires et des
-consommateurs actifs.
-
-Le gestionnaire résout d'abord le tag exact de la release, puis télécharge tous
-les fichiers depuis cette coordonnée immuable, ce qui élimine la course où
-`latest` changerait entre deux téléchargements. yt-dlp est authentifié avec le
-manifeste SHA-256 signé par upstream. Les archives Deno sont vérifiées avec le
-checksum SHA-256 publié à côté de la même release exacte avant extraction et
-validation. Pour Deno, la confiance repose donc sur la source HTTPS officielle
-de la release ; son checksum n'apporte pas de signature distincte comme le
-manifeste signé de yt-dlp. L'exécution des runtimes candidats est elle aussi
-bornée dans le temps. Les appels réseau individuels sont bornés ; un bootstrap complet en
-chaîne plusieurs, il ne faut donc pas interpréter ces limites comme un délai
-global unique.
-
-Les paquets système comme Python, FFmpeg, aria2 et Zenity restent gérés par le
-gestionnaire de paquets de la distribution. Sous Fedora, le bootstrap officiel
-installe les versions les plus récentes disponibles dans les dépôts
-Fedora/RPM Fusion activés au moment de l'installation.
-
-## Provenance et immuabilité des releases
-
-La qualification des sources porte sur la fusion virtuelle de la pull request.
-Après le squash, la CI vérifie que le tree Git complet correspond aux
-qualifications réussies, workflows et paramètres de test compris. La release
-exige à nouveau cette preuve et conserve les contrôles du tag, des signatures,
-de l'installation et de la mise à niveau des paquets définitifs, du fonctionnement
-avec les dépendances actuelles de la distribution et des assets publics.
-Une preuve absente, différente ou invalide bloque la publication ; la
-procédure de reprise mainteneur est décrite dans `TESTING.md`.
-
-Les **Immutable Releases** GitHub doivent être activées dans les paramètres du
-dépôt avant de pousser le tag de release. Le workflow contrôle l'inventaire
-exact des noms d'assets, compare octet par octet une release déjà existante lors
-d'un rerun, confirme que la release obtenue est immuable, puis vérifie
-l'attestation GitHub et chaque asset local. Si une nouvelle release reste anormalement mutable, le workflow tente
-de la supprimer, vérifie ensuite sa disparition et échoue explicitement si le
-nettoyage ne peut pas être confirmé.
-
-Avec GitHub CLI, il est possible de vérifier en plus la provenance du build et
-l'identité de la release :
-
-```bash
-gh attestation verify ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.4.4 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.4.4 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-```
-
-`SHA256SUMS` reste utile pour un contrôle local ou hors ligne ; les attestations
-et l'immuabilité ajoutent la preuve de provenance et d'identité de release.
-
-Après publication, un job séparé en lecture seule retélécharge la release
-publique, reconstruit la charge utile attendue à partir des artefacts Actions
-exacts ayant passé la qualification des paquets, compare chaque asset octet par
-octet, revérifie `SHA256SUMS` et valide les attestations de release/assets
-contre ce dépôt, `release.yml` et le commit exact du tag de release.
-
-### Identité de signature RPM, environnement et rotation des clés
-
-L'autorisation d'un RPM Fedora est volontairement plus stricte que le trousseau
-RPM global de la machine. Le bootstrap valide l'empreinte exacte du certificat
-primaire `7B54065FE061E78ED2C96252E3BE996196ABEA7F`, exige exactement une sous-clé
-de signature utilisable et épingle celle-ci sur
-`1F5B769CE48A08AAC0A7D9DDECC9894B41830245`. Il importe ensuite uniquement ce
-certificat dans un trousseau RPM 6 privé de type `fs` et y vérifie le RPM, en
-redirigeant également le verrou de transaction RPM dans la même racine
-temporaire privée. Une clé déjà approuvée par la base RPM globale de la machine
-ne peut donc pas autoriser le RPM du projet. Le job de signature contrôle
-indépendamment les mêmes empreintes complètes, demande explicitement la
-sous-clé exacte avec `rpmsign --key-id`, puis vérifie cryptographiquement le RPM
-signé avant publication. La sortie RPM `OPENPGP:pgpsig` reste uniquement
-diagnostique : sous Fedora 44 avec RPM 6.0.2, elle affiche un Key ID long et non
-l'empreinte OpenPGP complète ; elle n'est donc pas utilisée pour prendre la
-décision d'autorisation.
-
-Le format du paquet RPM de production est explicitement figé en **RPM v4** et
-vérifié avant et après la signature de release. La CI construit séparément un
-fixture RPM v6 dédié afin de qualifier la sémantique multi-signature de RPM 6 ;
-cela ne migre pas silencieusement le format du paquet de production vers v6.
-
-L'environnement GitHub `rpm-signing` constitue une frontière de sécurité
-opérationnelle et pas seulement un nom dans le workflow. Conservez
-`RPM_SIGNING_PRIVATE_KEY_B64` et `RPM_SIGNING_PASSPHRASE` comme **secrets
-d'environnement**. Le bundle privé doit être produit avec
-`--export-secret-subkeys` de GnuPG : la clé privée primaire reste hors ligne et
-n'est importée que comme stub `sec#`, tandis que la sous-clé de signature dédiée
-reste utilisable. Configurez un réviseur obligatoire et désactivez le
-contournement administrateur. Pour un dépôt volontairement exploité par un
-**mainteneur unique**, le seul réviseur peut également être l'auteur du
-déclenchement : `prevent_self_review` reste donc désactivé par conception. Le
-preflight mainteneur exige alors la confirmation explicite
-`--confirm-single-maintainer-self-review` et vérifie que l'unique réviseur
-correspond au compte GitHub authentifié. Limitez l'environnement à une politique
-de déploiement **tag** sélectionnée `v*`. La reprise manuelle reste disponible,
-mais elle doit exécuter le workflow depuis le tag exact de la release. Pour la
-version de développement ci-dessous, cette commande ne s'applique qu'après la
-création de son tag signé :
-
-```bash
-gh workflow run release.yml   --ref v2.4.4   -f tag=v2.4.4   -R OscarFrog/yt-dlp-aria2-downloader-gui
-```
-
-Le workflow refuse indépendamment toute exécution manuelle dont le type de ref,
-le nom de ref ou le commit source ne correspond pas au tag de release demandé.
-
-La sous-clé de signature actuelle expire le **21 août 2027**. Sa rotation doit
-être préparée avant cette date. Pour une rotation normale sous le même
-certificat primaire, publiez le certificat public actualisé, remplacez
-l'empreinte de sous-clé épinglée dans le code, le workflow et les tests,
-actualisez le secret de signature de l'environnement, puis imposez toute la
-qualification Fedora positive et négative avant le tag suivant. En cas de
-compromission de la sous-clé, arrêtez les releases, révoquez-la, remplacez le
-secret d'environnement, publiez le certificat actualisé et ne reprenez les
-releases qu'après épinglage de la nouvelle empreinte. Si le certificat primaire
-est compromis, une nouvelle empreinte primaire est obligatoire : aucun
-remplacement silencieux du certificat primaire n'est accepté.
-
-## Installation par paquet
-
-Les releases GitHub publient un RPM Fedora, un DEB Debian/Ubuntu, l'archive
-ZIP portable, le bootstrap Fedora, la clé publique OpenPGP de signature RPM
-et un fichier `SHA256SUMS` commun. Les paquets
-RPM et DEB installent les commandes, l’icône dédiée et le lanceur graphique au
-niveau du système. Aucune exécution séparée de `install-gui.sh` n’est nécessaire
-avec une installation par paquet.
-
-Avant de migrer depuis une installation ZIP ou Git, supprimez l'ancien lanceur
-utilisateur afin qu'il ne masque pas l'entrée installée par le paquet :
-
-```bash
-./install-gui.sh uninstall
-```
-
-Le RPM Fedora corrige aussi automatiquement d'anciens cas de migration : lors
-de l'installation ou d'une mise à niveau, il retire uniquement les fichiers
-desktop utilisateur correspondant exactement aux schémas historiques du projet
-qui employaient l'icône générique `video-x-generic` et masquaient l'entrée du
-paquet. Les premiers lanceurs directs ne sont reconnus que si leur cible
-absolue entre guillemets se trouve sous le dossier personnel de l'utilisateur
-et se termine par `download-video-gui.sh` ; le schéma ultérieur à lien stable
-est également reconnu. Le lien portable `launch` et ses données restent
-intacts. Les entrées actuelles, modifiées, symboliques, non régulières, hors du
-dossier personnel ou placées dans un XDG personnalisé qui sont observées
-pendant la migration sont préservées ; utilisez la commande ci-dessus pour
-remplacer volontairement l'un de ces lanceurs.
-
-La migration automatique du lanceur ignore les comptes de service et de
-maintenance dont le shell de connexion est `nologin`, `false`, `sync`,
-`shutdown` ou `halt`. Les autres comptes restent pris en compte, quels que
-soient leur UID et l'emplacement de leur dossier personnel.
+| Système | Application à télécharger |
+| --- | --- |
+| Fedora 44 | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.4-1.fc44.noarch.rpm) |
+| Debian / Ubuntu | [DEB](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui_2.4.4-1_all.deb) |
+| Autres GNU/Linux / utilisation portable | [ZIP](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.4.zip) |
 
 ### Fedora 44
 
-Utilisez `install-fedora.sh` provenant de la même release GitHub que le RPM.
-N'installez pas directement le RPM sur une Fedora fraîche : RPM Fusion doit
-être activé avant que DNF ne résolve la dépendance `ffmpeg`.
-
-Téléchargez :
+Téléchargez ces quatre fichiers depuis cette release :
 
 ```text
 install-fedora.sh
@@ -342,189 +60,50 @@ yt-dlp-aria2-downloader-gui-2.4.4-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
-Vérifiez tous les fichiers téléchargés :
-
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-```
-
-Puis lancez :
-
-```bash
 bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.4.4-1.fc44.noarch.rpm
 ```
 
-Le bootstrap refuse par défaut un RPM de release non signé. Il vérifie que
-`RPM-GPG-KEY-OscarFrog` contient exactement un certificat primaire d'empreinte
-`7B54065FE061E78ED2C96252E3BE996196ABEA7F` ainsi que la sous-clé de signature dédiée
-`1F5B769CE48A08AAC0A7D9DDECC9894B41830245`. Il importe ensuite uniquement ce
-certificat dans un trousseau RPM 6 temporaire privé de type `fs` et exige que
-`rpmkeys --checksig` valide le paquet dans ce domaine de confiance isolé. Les
-chaînes d'affichage RPM comme `OPENPGP:pgpsig` restent uniquement diagnostiques
-et ne servent pas de primitive d'autorisation. Avant tout import système ou
-toute transaction de paquet, le bootstrap copie le certificat et le RPM via
-`sudo` dans une zone privée appartenant à root. Il répète sur ces copies
-l'identité exacte du paquet, les empreintes du certificat et la vérification de
-signature isolée ; l'import système et DNF utilisent ensuite uniquement ces
-mêmes chemins privés appartenant à root. Le remplacement des fichiers
-utilisateur d'origine après leur copie ne peut donc plus modifier la transaction
-autorisée.
-DNF répète indépendamment la vérification avec
-`localpkg_gpgcheck=True`. Une autre clé déjà approuvée dans la base RPM de la
-machine ne peut donc pas autoriser le RPM du projet. L'option
-`--allow-unsigned-dev` reste réservée explicitement aux builds locaux/CI de
-développement et n'est jamais utilisée pour une release.
-
-Sur une Fedora 44 fraîche, le bootstrap RPM Fusion suit le même modèle fermé
-avant toute exécution par DNF sous root. L'installateur télécharge la clé et le
-RPM de release via TLS contraint, exige l'empreinte RPM Fusion exacte
-`E9A491A3DE247814E7E067EAE06F8ECDD651FF2E`, vérifie la signature dans un
-trousseau isolé et exige le NEVRA audité
-`rpmfusion-free-release-44-3.noarch`. Toute version Fedora sans pin explicite
-est refusée jusqu'à sa qualification. Le certificat et le RPM de bootstrap RPM
-Fusion franchissent la même frontière de staging appartenant à root et y sont
-revérifiés avant tout import ou installation privilégiés.
-Les signaux HUP/INT/TERM gérables sont différés jusqu'à l'authentification du
-staging temporaire et son enregistrement pour le nettoyage ; un second signal
-n'interrompt pas ce nettoyage. SIGKILL ne permet pas cette garantie.
-
-Le bootstrap :
-
-- authentifie et active RPM Fusion Free s'il est absent ;
-- remplace `ffmpeg-free` par le `ffmpeg` RPM Fusion lorsque nécessaire ;
-- installe les dépendances système requises ;
-- vérifie la clé OpenPGP de signature RPM OscarFrog épinglée et la signature du RPM ;
-- active le contrôle OpenPGP DNF du RPM local de release ;
-- installe le RPM de l'application ;
-- vérifie que `ffmpeg` provient de RPM Fusion et que `ffmpeg-free` est absent ;
-- initialise et valide les runtimes yt-dlp stable et Deno stable pour
-  l'utilisateur courant.
-
-Le RPM lui-même ne télécharge aucun runtime tiers depuis un scriptlet RPM.
-Les téléchargements de runtimes sont effectués dans le contexte non privilégié
-de l'utilisateur et vérifiés avant activation.
+Utilisez le bootstrap plutôt qu'une installation directe du RPM sur une Fedora
+fraîche. Il vérifie les signatures, active RPM Fusion Free si nécessaire,
+remplace `ffmpeg-free` par le `ffmpeg` complet, installe les dépendances et
+prépare les runtimes yt-dlp et Deno vérifiés propres à l'utilisateur.
 
 ### Debian et Ubuntu
 
-La dernière release publiée, la 2.4.4, fournit un DEB indépendant de
-l'architecture, aligné sur le même modèle de runtimes gérés que Fedora.
-Téléchargez :
+La dernière release publiée, la 2.4.4, fournit le DEB. Téléchargez :
 
 ```text
 yt-dlp-aria2-downloader-gui_2.4.4-1_all.deb
 SHA256SUMS
 ```
 
-Vérifiez puis installez :
-
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
 sudo apt install ./yt-dlp-aria2-downloader-gui_2.4.4-1_all.deb
 ```
 
-Le DEB dépend explicitement d'`aria2`, de Python 3.10+, de FFmpeg/FFprobe,
-de Zenity, des certificats CA, de curl, GnuPG, unzip et du thème d'icônes
-hicolor. GNU coreutils, grep, findutils, sed et util-linux sont fournis par la
-base Essential de Debian/Ubuntu et ne sont pas redéclarés inutilement comme
-dépendances non versionnées. Le DEB
-**ne dépend pas de paquets yt-dlp ou Deno fournis par la distribution**. yt-dlp
-et Deno sont installés et vérifiés dans le runtime de l'utilisateur au premier
-lancement.
+Le paquet installe les dépendances système. Les runtimes yt-dlp et Deno vérifiés
+sont préparés pour votre utilisateur au premier lancement ; les paquets de la
+distribution pour ces deux outils ne sont pas nécessaires.
 
-### Commandes installées par les paquets
+Avec le RPM et le DEB, le lanceur et son icône sont installés automatiquement dans le menu des applications.
+**Ne lancez pas `install-gui.sh` après l’installation d’un paquet.**
+Pour remplacer une installation ZIP/Git, retirez d'abord son ancien lanceur
+depuis le dossier source avec `./install-gui.sh uninstall`.
 
-Après l'installation du RPM ou du DEB, démarrez l'interface depuis le menu
-des applications ou avec :
+### Archive ZIP portable ou clone Git
 
-```bash
-yt-dlp-aria2-downloader-gui
-```
+<details>
+<summary>Installer depuis le ZIP de release</summary>
 
-Le moteur en ligne de commande est installé sous le nom :
-
-```bash
-yt-dlp-aria2-downloader --help
-```
-
-### Désinstaller une installation par paquet
-
-Fedora :
-
-```bash
-sudo dnf remove yt-dlp-aria2-downloader-gui
-```
-
-Debian/Ubuntu :
-
-```bash
-sudo apt remove yt-dlp-aria2-downloader-gui
-```
-
-Sous Fedora, une **désinstallation finale du RPM** continue d'effectuer un
-nettoyage best-effort du runtime géré propre à chaque utilisateur ainsi que des
-artefacts XDG historiques portant exactement le nom
-`yt-dlp-aria2-downloader-gui`, pour les utilisateurs dont le dossier personnel
-est disponible. Une mise à niveau du RPM ne déclenche pas ce nettoyage.
-
-La migration ciblée des desktops à icône générique décrite ci-dessus est une
-action distincte exécutée à l'installation ou à la mise à niveau, et non ce
-nettoyage final. Elle retire seulement les entrées obsolètes reconnues et
-conserve les liens des lanceurs portables ainsi que leurs données.
-
-Sous Debian/Ubuntu, `apt remove` et `apt purge` suppriment le payload système du
-paquet mais préservent volontairement les runtimes, la configuration, l'état et
-le cache propres à chaque utilisateur. Une réinstallation reste ainsi non
-destructive et aucun script du gestionnaire de paquets ne parcourt les dossiers
-personnels.
-
-Le nettoyage Fedora repose volontairement sur une liste blanche de chemins. Il
-supprime le runtime géré sous
-`${XDG_DATA_HOME:-$HOME/.local/share}/yt-dlp-aria2-downloader/runtime/` et les
-anciens chemins `yt-dlp-aria2-downloader-gui` connus dans les emplacements XDG
-de données, configuration, état et cache. Il ne recherche pas récursivement
-dans le dossier personnel tous les fichiers dont le nom ressemble à celui du
-paquet.
-
-Pour le nettoyage RPM, à partir de la 2.1.27, le gestionnaire de runtime
-enregistre le `XDG_DATA_HOME` réellement utilisé afin qu'une désinstallation ultérieure
-puisse aussi retrouver un emplacement de données personnalisé. Un emplacement
-XDG personnalisé utilisé uniquement par une ancienne version et jamais observé
-par la 2.1.27 ne peut pas être reconstitué automatiquement de manière sûre.
-
-À partir de la 2.1.29, la racine de données personnalisée reçoit également une
-preuve de propriété privée qui lie l'identifiant de l'application, l'UID, HOME
-et la racine de données réellement utilisée. La désinstallation finale ne suit
-un marker personnalisé que s'il contient exactement une seule ligne avec un
-chemin absolu et si la preuve régulière `0600` correspondante existe et
-appartient à l'utilisateur cible. La seule modification du marker ne peut donc
-plus autoriser une suppression dans une autre racine XDG.
- Le nettoyage refuse également les composants parents
-symboliques sous la racine XDG autorisée : un chemin ambigu est préservé au
-lieu d'être traversé par une suppression récursive. Après une mise à
-niveau depuis la 2.1.27/2.1.28, une exécution du gestionnaire de runtime 2.1.29
-crée automatiquement cette preuve. Si la 2.1.29 est supprimée avant cette
-migration, l'ancienne racine personnalisée est conservée par prudence au lieu
-d'être supprimée.
-
-Le lanceur portable ZIP/Git
-`~/.local/share/yt-dlp-aria2-downloader/launch` est volontairement conservé
-lorsqu'il existe, car il peut appartenir à une installation portable
-indépendante.
-
-`install-gui.sh uninstall` reste la commande destinée à supprimer une ancienne
-installation de bureau ZIP ou Git dans le dossier personnel de l'utilisateur
-courant.
-
-## Installation depuis une archive de release portable
-
-Téléchargez les fichiers suivants :
+Installez d'abord les [prérequis système](#prérequis). Téléchargez :
 
 ```text
 yt-dlp-aria2-downloader-gui-2.4.4.zip
 SHA256SUMS
 ```
-
-Vérifiez puis extrayez l'archive :
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
@@ -535,7 +114,12 @@ chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
 ```
 
-## Installation avec Git
+</details>
+
+<details>
+<summary>Installer avec Git</summary>
+
+Installez d'abord les [prérequis système](#prérequis), puis exécutez :
 
 ```bash
 git clone https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui.git
@@ -545,213 +129,112 @@ chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
 ```
 
-Le lanceur est créé dans :
+</details>
 
-```text
-~/.local/share/applications/
+Pour ZIP/Git, conservez le dossier source : le lanceur pointe vers celui-ci.
+Après un déplacement, relancez `./install-gui.sh install`.
+
+### Prérequis
+
+GNU/Linux sur `x86_64` ou `aarch64` pour les runtimes gérés, avec :
+
+- Bash **4.4 ou plus récent**, Python **3.10 ou plus récent**, aria2 **1.37.0 ou plus récent** ;
+- FFmpeg et `ffprobe`, Zenity, certificats CA, curl, GnuPG et unzip ;
+- GNU coreutils/grep, findutils et util-linux (`setsid`, `flock`) ;
+- pidfds Linux et WNOWAIT utilisables, informations procfs des processus/threads lisibles.
+
+Firefox avec une session YouTube authentifiée n'est nécessaire que pour le
+profil YouTube HLS/Firefox explicitement sélectionné. Les installateurs de
+paquets gèrent les dépendances système ; pour ZIP/Git, installez-les avec
+les outils de votre distribution.
+
+<details>
+<summary>Vérification complémentaire de la release avec GitHub CLI</summary>
+
+Remplacez `ARTEFACT` par le nom du fichier téléchargé :
+
+```bash
+gh attestation verify ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.4.4 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.4.4 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
-L'entrée du menu appelle un lien de lancement stable stocké dans :
+Les empreintes contrôlent l'intégrité des fichiers ; ces commandes vérifient
+aussi leur provenance et l'identité de la release immuable. Consultez la
+[sécurité des releases](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/ARCHITECTURE.md#ci-and-release-trust-zones).
 
-```text
-~/.local/share/yt-dlp-aria2-downloader/launch
+</details>
+
+## Premiers pas
+
+Ouvrez **yt-dlp aria2 downloader** depuis le menu des applications, ou lancez
+la commande installée par le paquet :
+
+```bash
+yt-dlp-aria2-downloader-gui
 ```
 
-Ce lien privé cible le chemin absolu du script graphique dans le dépôt. Après
-avoir déplacé le dossier du projet, relancez `./install-gui.sh install`.
-Pour garantir le confinement, l'installateur portable exige un
-`XDG_DATA_HOME` appartenant à l'utilisateur courant et non inscriptible par le
-groupe ou les autres utilisateurs ; il refuse aussi tout lien symbolique à la
-racine ou dans un composant parent. Le chemin de données doit aussi être en
-UTF-8 valide et pouvoir être représenté sans ambiguïté dans une clé `Exec` de
-fichier desktop. Tous les ancêtres, y compris les répertoires intermédiaires des
-icônes, doivent appartenir à root ou à l'utilisateur courant. Les ancêtres
-inscriptibles par le groupe ou les autres utilisateurs exigent le bit sticky ;
-la racine de données et les répertoires gérés eux-mêmes restent soumis à la
-propriété de l'utilisateur courant et à l'absence d'écriture partagée. Les
-chaînes non sûres sont refusées sans modifier leurs permissions.
-Il conserve des descripteurs sans suivi de liens pendant toute
-la transaction : un remplacement concurrent du chemin ne peut donc pas
-rediriger l'installation, le retrait ou le nettoyage.
-Les demandes concurrentes d'installation et de retrait portables sont
-sérialisées. Après l'échec d'une mise à jour multifichier, le helper tente de
-restaurer l'état précédent du lanceur avant de signaler l'erreur principale et
-tout échec de rollback. La cible graphique exécutable est revalidée avant tout
-succès. HUP, INT et TERM déclenchent également ce nettoyage transactionnel avant
-que la commande retourne respectivement le statut 129, 130 ou 143.
-
-## Utilisation graphique
-
-Le parcours graphique utilise une succession de fenêtres Zenity natives. Les étapes ci-dessous décrivent entièrement l’interface sans dépendre de captures d’écran, afin que la documentation reste exacte lorsque les dimensions des fenêtres ou le thème du bureau évoluent.
-
-Démarrez **yt-dlp aria2 downloader** depuis le menu des applications. Une
-installation par paquet fournit également la commande
-`yt-dlp-aria2-downloader-gui` ; depuis une archive ZIP ou un clone Git,
-utilisez :
+Depuis un dossier ZIP ou Git, utilisez plutôt :
 
 ```bash
 ./download-video-gui.sh
 ```
 
-### 1. Saisir l'URL de la vidéo
+1. Collez une URL vidéo. Les listes de lecture sont désactivées.
+2. Choisissez **Complete video (MKV)** ou **Audio track (native format)**.
+   Pour YouTube, le choix vidéo est **YouTube video - Firefox cookies (HLS/MKV)**.
+3. Choisissez un dossier de destination, puis les pistes audio/sous-titres lorsqu'elles sont proposées.
+4. Suivez la progression ; **Cancel** arrête la session. Après un succès, utilisez
+   **Open folder** (ouvrir le dossier), **New download** (nouveau téléchargement) ou **Close** (fermer).
 
-Collez l'URL de la vidéo à télécharger, puis validez la fenêtre.
+### Vidéo YouTube HLS authentifiée
 
+Ce profil réservé à la vidéo lit votre session Firefox locale et utilise
+`youtube:player_client=web_safari` pour demander du HLS, puis remuxe en MKV sans
+réencodage. Il ne stocke pas les cookies dans `gui.conf`. La disponibilité
+dépend de votre session et de YouTube ; ce repli ne garantit pas l'accès et ne
+remplace pas les plugins fournisseurs de PO Token. Le moteur CLI accepte
+toujours le mode ordinaire `--mode video` pour YouTube.
 
-Les espaces copiés accidentellement avant ou après l'URL sont supprimés par
-l'interface graphique.
+## Audio et sous-titres
 
-### 2. Choisir le mode de téléchargement
+Sur les sites compatibles, **Complete video (MKV)** analyse les pistes disponibles.
+Deux listes à cocher suivent : **Audio tracks**, puis **Subtitles**.
+Chaque fenêtre comporte uniquement **Cancel** (annuler) et **Continue** (continuer) ;
+continuer depuis les sous-titres lance le téléchargement.
 
-L'interface classe l'hôte normalisé de l'URL avant d'afficher ce menu.
-Pour `youtube.com`, `youtu.be`, `youtube-nocookie.com` et leurs sous-domaines,
-elle propose exactement :
+- L'audio présélectionné privilégie une version originale identifiée de façon
+  fiable. Si la VO est inconnue, il choisit le français, puis la piste par
+  défaut du site ou une autre piste ordinaire, avec une explication. Vous pouvez
+  sélectionner plusieurs pistes.
+- Les sous-titres dépendent de l'audio par défaut choisi : aucun pour le
+  français ; sinon, des sous-titres français complets lorsqu'ils sont disponibles
+  sans ambiguïté pour une langue identifiée de façon fiable. Ce choix reste modifiable.
+- **No subtitles**, ou toutes les lignes de sous-titres décochées, produit un
+  fichier sans aucune piste de sous-titres. Choisissez cette option ou des pistes
+  précises. Cocher les deux crée un conflit : il faut corriger la sélection avant de télécharger.
+- **Full** (complets) traduit les dialogues ; **Forced** (forcés) couvre certains
+  passages et ne remplace pas une traduction complète. Les pistes restent
+  activables ou désactivables dans votre lecteur.
 
-- **YouTube video - Firefox cookies (HLS/MKV)**, qui lit la session Firefox
-  locale, télécharge un flux HLS puis le remuxe en MKV ;
-- **Audio track (native format)**, qui télécharge la meilleure piste audio
-  disponible en conservant son format natif chaque fois que cela est possible.
+Les listes contiennent les pistes distinctes admissibles après filtrage et déduplication.
+Les sous-titres pour personnes sourdes ou malentendantes et les pistes explicitement
+identifiées comme confort audio sont exclus. L'audiodescription reste disponible.
+La disponibilité dépend du programme, du territoire et des droits.
 
-Pour tous les autres hôtes, elle propose exactement :
-
-- **Complete video (MKV)**, qui télécharge les meilleures pistes vidéo et audio
-  disponibles, puis les rassemble dans un conteneur MKV ;
-- **Audio track (native format)**.
-
-Une sélection audio mémorisée reste sélectionnée. Sinon, le profil vidéo
-correspondant est sélectionné : YouTube HLS pour YouTube, vidéo complète pour
-les autres sites. Cette règle vaut aussi pour une préférence absente, invalide
-ou incompatible. Le moteur CLI conserve le mode vidéo ordinaire `--mode video`
-pour les URL YouTube.
-
-
-### 3. Choisir le dossier de destination
-
-Sélectionnez le dossier dans lequel le média terminé sera enregistré, y compris
-un partage réseau monté. Les cookies et plans de transfert restent dans un
-espace local privé validé. Si la destination ne permet pas d'héberger les
-fichiers temporaires du téléchargeur en sécurité, l'application télécharge et
-traite le média sur un disque local, puis copie le résultat validé dans le
-dossier choisi sans remplacer un fichier existant. Consultez
-[Destinations réseau et stockage privé](#destinations-réseau-et-stockage-privé)
-pour les besoins d'espace local et les limites des systèmes de fichiers.
-
-
-### Langues audio et sous-titres
-
-L'application permet de sélectionner les pistes audio et les sous-titres
-disponibles sur certains sites compatibles. L'utilisateur peut choisir une ou
-plusieurs langues audio et télécharger une vidéo avec ou sans sous-titres.
-
-**Complete video (MKV)** analyse les pistes disponibles avant le téléchargement.
-Deux listes à cocher suivent : choisissez une ou plusieurs **Audio tracks**
-(pistes audio), puis les **Subtitles** (sous-titres) indépendamment. La première
-ligne des sous-titres est **No subtitles** (aucun sous-titre). Chaque fenêtre
-comporte uniquement **Cancel** (annuler) et **Continue** (continuer).
-Continuer depuis la fenêtre des sous-titres lance le transfert avec ces choix.
-
-La présélection audio privilégie une version originale identifiée de
-façon fiable. Si la VO est inconnue, elle choisit le français, puis la piste par
-défaut du site ou une autre piste audio ordinaire disponible, et explique ce
-repli dans la fenêtre. L'audio par défaut fait partie des pistes sélectionnées.
-Lorsque plusieurs pistes audio sont cochées, la VO reste la piste par défaut
-si elle en fait partie. Après **Continue** dans la fenêtre audio, la présélection
-des sous-titres dépend de l'audio par défaut choisi : aucun pour
-un audio français ; des sous-titres français complets pour une autre langue
-identifiée de façon fiable, lorsqu'une telle piste est disponible sans ambiguïté.
-Sinon, **No subtitles** est sélectionné et la fenêtre explique pourquoi. Les deux
-listes restent modifiables. **No subtitles**, ou toutes les cases de sous-titres
-décochées, produit un fichier sans aucune piste de sous-titres, sans télécharger,
-convertir ni intégrer de fichiers de sous-titres.
-Choisissez **No subtitles** ou une ou plusieurs pistes de sous-titres. Cocher
-les deux crée un conflit : l'application demande de corriger la sélection avant
-de télécharger.
-
-Les sous-titres **Full** (complets) traduisent les dialogues. Les **Forced**
-(forcés) couvrent certains passages et ne remplacent jamais une traduction
-complète. Les sous-titres sélectionnés restent des pistes séparées, activables
-ou désactivables dans le lecteur. Le MKV contient une vidéo et exactement les
-audios et sous-titres choisis, sans réencodage vidéo ou audio. La politique de
-qualité vidéo existante est conservée.
-
-Les listes contiennent uniquement les pistes distinctes admissibles après
-filtrage et déduplication. Cochez chaque piste souhaitée pour inclure plusieurs
-langues ou toutes les pistes disponibles. Les sous-titres pour personnes sourdes
-ou malentendantes et les pistes explicitement identifiées comme confort audio
-sont exclus des listes et présélections. L'option CLI de toutes les pistes
-applique les mêmes exclusions. L'audiodescription reste une catégorie distincte
-disponible. La disponibilité dépend du programme, du territoire et des droits
-en cours.
-
-Les sous-titres utilisent le SRT UTF-8, qui conserve le texte, les retours à la
-ligne et les horaires. Les positions de la source ne sont pas conservées ; la
-présentation dépend des réglages du lecteur. Une mise en forme ou une horloge
-non prise en charge produit une erreur explicite. L'application vérifie le MKV
-terminé avant sa publication. Une piste choisie devenue indisponible ou une
-sélection incompatible avec une reprise impose un nouveau choix, sans
-remplacement silencieux. L'annulation reste possible pendant toute l'opération.
-
-### 4. Suivre la progression
-
-La fenêtre de progression indique l’étape actuelle du téléchargement ou du post-traitement. Le remuxage FFmpeg géré par le moteur utilise la sortie de progression machine de FFmpeg et la durée de la source, et non un compteur artificiel. Le bouton d'annulation permet d'arrêter l'ensemble du
-processus.
-
-
-### 5. Résultat du téléchargement
-
-Après un téléchargement réussi, l'interface affiche le chemin du fichier
-multimédia terminé. **Open folder** ouvre son dossier de destination, **New
-download** lance une nouvelle demande et **Close** termine la session. Dans le
-cas exceptionnel où un journal de réussite n'a pas pu être supprimé mais où une
-copie expurgée sûre existe, **View log** l'ouvre puis rend de nouveau accessibles
-ces actions de fin.
-
-
-Lorsqu'une erreur survient après la création d'un diagnostic utile du worker ou
-de la progression, l'interface conserve un journal expurgé et propose **View
-log** et **Close**. Cela couvre notamment le démarrage du worker, le runtime, le
-téléchargeur, le moniteur de progression, le post-traitement et la validation
-du résultat final.
-
-Lorsque Zenity lui-même renvoie des détails techniques utiles avant qu'une
-session de téléchargement existe, les mêmes actions **View log** et **Close**
-ouvrent un diagnostic temporaire privé et borné. Ce diagnostic est supprimé
-immédiatement après la boîte de dialogue ; il n'est pas présenté comme un
-journal conservé persistant.
-
-
-Le journal conservé peut être ouvert directement depuis la fenêtre d’erreur.
-Avant sa conservation, les valeurs ressemblant à des URL sont remplacées par
-`[REDACTED_URL]` et seule la portion tenant dans la limite finale de 8 Mio est
-gardée. Une section clairement identifiée à la fin indique le nom exact du
-fichier conservé et son chemin absolu canonique ; elle survit donc à la
-troncature du journal source et désigne toujours le fichier ouvert par **View
-log**. Le journal actif reste privé (`0600`) pendant l’exécution et n'est jamais
-proposé comme solution de repli si la sanitisation sûre échoue. Les erreurs de
-saisie et les autres échecs précoces sans diagnostic utile restent de simples
-messages d'erreur.
-Le fichier conservé est un instantané. Si l'arrêt des processus ne peut pas être
-confirmé, le journal actif privé et la session restent en place, y compris les
-écritures effectuées après cet instantané. Le nettoyage normal de la session
-n'est autorisé qu'après confirmation de l'arrêt ; l'instantané n'est pas
-automatiquement actualisé.
-
-
-
-### Confidentialité des URL dans l’interface graphique
-
-La GUI écrit l’URL demandée dans un fichier temporaire privé et ne transmet au
-moteur que le chemin de ce fichier. Le moteur fournit ensuite l’URL à yt-dlp via
-son fichier batch privé. Pour un média HTTP(S) direct, les URL et en-têtes
-validés sont écrits dans un fichier d'entrée aria2 privé `0600` : l'URL média
-n'apparaît donc pas dans les arguments d'`aria2c`. Les URL contenant
-`utilisateur:motdepasse@hôte` sont refusées. L’utilisation CLI directe avec une
-URL positionnelle reste possible ; comme pour toute commande, cette URL peut
-alors être visible dans les arguments du processus appelant.
+Le MKV contient exactement les pistes choisies, sans réencodage vidéo ou audio.
+Les sous-titres utilisent le SRT UTF-8 en conservant le texte, les retours à la ligne
+et les horaires. Les positions de la source ne sont pas conservées ; la présentation
+dépend du lecteur. Une mise en forme/horloge non prise en charge ou une piste
+manquante produit une erreur explicite.
 
 ## Utilisation en ligne de commande
 
-Vidéo MKV complète :
+Les exemples suivants s'exécutent depuis un dossier ZIP/Git. Pour un RPM/DEB,
+remplacez `./download-video.sh` par `yt-dlp-aria2-downloader`.
+Remplacez l'adresse d'exemple par votre URL et conservez les guillemets.
+
+Vidéo complète :
 
 ```bash
 ./download-video.sh \
@@ -760,7 +243,7 @@ Vidéo MKV complète :
   'https://example.com/video'
 ```
 
-Meilleure piste audio native :
+Audio natif :
 
 ```bash
 ./download-video.sh \
@@ -769,17 +252,12 @@ Meilleure piste audio native :
   'https://example.com/video'
 ```
 
-Pour choisir les pistes sur les sites compatibles, ajoutez `--tracks-auto` pour
-la sélection automatique des audios et sous-titres, ou `--all-tracks` pour toutes
-les pistes distinctes admissibles. Utilisez `--no-subtitles` seul pour l'audio
-automatique sans sous-titres, ou ajoutez-le à l'une de ces options pour conserver
-les audios choisis sans aucune piste de sous-titres. Ces options
-s'appliquent à `--mode video` ; les règles sont décrites dans
-[Langues audio et sous-titres](#langues-audio-et-sous-titres).
-Utilisez `--url-file FILE` à la place d'une URL positionnelle pour garder l'URL
-hors des arguments de processus ; ce fichier doit être privé et vous appartenir.
+Pour les sources vidéo compatibles, ajoutez `--tracks-auto` pour les choix
+automatiques, `--all-tracks` pour toutes les pistes admissibles ou `--no-subtitles`
+pour omettre les sous-titres. Cette dernière option fonctionne aussi avec l'une
+des deux premières. Les exclusions décrites plus haut s'appliquent.
 
-Mode de repli YouTube HLS authentifié :
+YouTube HLS avec les cookies Firefox :
 
 ```bash
 ./download-video.sh \
@@ -796,448 +274,151 @@ Aide et version :
 ./download-video.sh --version
 ```
 
-Placez toujours les URL entre apostrophes ou guillemets, car elles peuvent
-contenir des métacaractères du shell comme `&`.
+Aide de la commande installée par paquet :
 
-Le moteur utilise volontairement `--ignore-config`, désactive les plugins yt-dlp
-avec `YTDLP_NO_PLUGINS=1` et applique une politique explicite de
-non-écrasement. Lorsque le build aria2c installé annonce `--no-netrc`, le
-moteur active cette option afin d’éviter la lecture des identifiants d’un
-fichier `.netrc` personnel. Les builds qui n’exposent pas cette capacité
-facultative restent acceptés et ne reçoivent pas une option non prise en charge.
-Une reprise native exige une preuve enregistrée après un arrêt confirmé : même
-demande, même profil, mêmes formats, identifiant complet du média extrait et
-identité disponible de l'extracteur, ainsi que des identités, tailles et dates de
-fichiers inchangées. Un nom tronqué ou `.part` ne suffit pas. Les URL signées de
-téléchargement peuvent être renouvelées sans changer l'identité du média. Une
-identité de média ou d'extracteur absente ou mal formée permet un nouveau
-transfert, mais aucune reprise ultérieure. Les anciennes preuves dépourvues de
-cette liaison, les partiels ambigus et les entrées MP4/WebM étrangères sont
-conservés avec un refus explicite. Le staging aria2 des transferts HTTP(S) directs gérés
-par le moteur est volontairement éphémère : une fois les processus de
-téléchargement arrêtés, une annulation utilisateur supprime son état
-partiel/contrôle privé et une exécution ultérieure redémarre le transfert direct
-proprement. Si l'arrêt des processus ne peut pas être confirmé après admission,
-le moteur émet un avertissement et conserve ses fichiers temporaires et ses
-réservations en attendant l'arrêt des consommateurs. Les
-collisions connues avec une vidéo finale sont refusées ; les contrôles propres
-aux transports et la limite de collision locale tardive sont décrits plus bas.
-
-Le modèle de sortie limite le titre et l'identifiant du média selon leur taille
-encodée en octets, ce qui réduit les échecs avec de longs titres Unicode sur les
-systèmes de fichiers limitant un composant de chemin à 255 octets.
-
-Les URL peuvent contenir de l'Unicode ou des données encodées avec `%`, mais les
-caractères de contrôle bruts sont refusés avant le téléchargement.
-
-## Fonctionnement des téléchargeurs
-
-Le moteur demande d'abord à yt-dlp de planifier les formats sélectionnés sans
-télécharger le média. Les plans HTTP(S) directs représentables et sûrs à rejouer
-sont transférés par aria2c via des fichiers privés d'entrée, manifeste, cookies
-et staging. Les plans dont l'URL média contient une composante URI userinfo, ou dont les
-en-têtes exigent un contexte non rejouable de façon sûre comme Referer, Cookie,
-Authorization, une autorisation proxy ou un autre en-tête hors liste sûre,
-restent sur le transport natif de yt-dlp. FTP et les autres protocoles non HTTP(S)
-restent
-également natifs. DASH et HLS sont explicitement conservés sur le téléchargeur
-natif :
-
-```text
---downloader dash,m3u8:native
-aria2c --input-file=/privé/aria2.input --dir=/privé/staging ...
+```bash
+yt-dlp-aria2-downloader --help
 ```
 
-Cette architecture conserve l'accélération multi-connexion d'aria2c pour les
-médias HTTP(S) directs validés sans placer l'URL média dans les arguments du
-processus aria2c.
+Une URL positionnelle peut apparaître dans les arguments des processus. Utilisez
+la GUI ou `--url-file FILE` avec un fichier privé vous appartenant si nécessaire.
+Les URL contenant `utilisateur:motdepasse@hôte` sont refusées. La configuration
+personnelle et les plugins yt-dlp sont désactivés.
 
-Une destination de transfert direct déjà présente est refusée avant le
-téléchargement ; la publication vérifie à nouveau l'absence de collision.
-Des en-têtes répétés avec des casses différentes maintiennent le transfert sur
-yt-dlp natif.
+## Fichiers, annulation et confidentialité
 
-Les identifiants de formats peuvent contenir des lettres Unicode, des chiffres
-et des deux-points, notamment pour les libellés audio localisés. Les séparateurs
-de chemins et les caractères de contrôle restent refusés lors de la construction
-des noms de fichiers des composants.
-Ces identifiants restent inchangés dans le plan de transfert figé et les noms
-des composants. Les destinations réseau traitent les composants dans un espace
-local privé ; cela ne certifie pas les noms contenant des deux-points sur tous
-les serveurs SMB/Windows.
+- Des téléchargements indépendants peuvent partager une destination. Les demandes
+  qui se recouvrent sont refusées tant que les fichiers sont réservés ; les résultats
+  existants ne sont ni renommés ni adoptés silencieusement. Le traitement local
+  présente une fenêtre de collision tardive avec d'autres programmes : il n'offre
+  pas une garantie atomique de non-écrasement. La publication réseau/depuis un
+  espace privé refuse les collisions tardives. [Détails](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/ARCHITECTURE.md#shared-destination-reservations).
+- Les téléchargements natifs interrompus ne reprennent que si le site et les
+  preuves d'appartenance enregistrées le permettent. Après confirmation de l'arrêt,
+  l'annulation des transferts aria2 gérés par le moteur et des sessions réseau
+  isolées supprime les partiels ; la demande suivante recommence à zéro.
+- Une destination réseau peut nécessiter un **espace disque local privé**, capable
+  de contenir les pistes et les médias assemblés/remuxés, en plus de l'espace de
+  destination. Un stockage non pris en charge est refusé. Si la copie échoue ou
+  reste incertaine, inspectez la source conservée signalée et la destination avant
+  de réessayer. Ne supprimez pas les temporaires ou verrous incertains.
+- Les runtimes vérifiés propres à l'utilisateur sont mis à jour par défaut. Un
+  échec du contrôle de mise à jour conserve le dernier runtime vérifié.
+  [Réglages et récupération des runtimes](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/ARCHITECTURE.md#managed-runtimes-and-persistent-state).
 
-Pour la vidéo ordinaire, les transports direct et natif vérifient le MKV
-assemblé/remuxé dans la véritable destination finale, même si le traitement
-utilise un espace de travail local distinct. Une collision connue provoque un
-échec avant le transfert média, sans post-traiter un ancien fichier ;
-elle n'est pas annoncée comme un nouveau succès validé.
-L'extraction native et ses nouvelles tentatives conservent le nom de base choisi
-pendant la planification, même si les métadonnées actualisées le modifieraient.
-Le profil YouTube HLS/Firefox conserve son chemin distinct de publication du
-remux contrôlé.
+Emplacements par défaut (les personnalisations XDG sont prises en charge) :
 
-L'audio natif refuse aussi un nom d'entrée planifié déjà présent avant le transfert
-ou le traitement des métadonnées, sans annoncer l'ancien audio comme un nouveau
-téléchargement. La sélection actualisée doit garder l'extension d'entrée planifiée ;
-si ce format n'est plus disponible, la tentative échoue avant le transfert et peut
-être relancée. Les noms de répertoires de destination contenant littéralement
-`$`, `${VAR}` ou `%` restent littéraux ; ils ne sont pas développés comme des
-variables d'environnement ou des templates de métadonnées yt-dlp.
-
-Sur une destination locale utilisée directement pour le traitement, un autre
-programme peut encore créer le même nom final entre ce contrôle et le
-post-traitement yt-dlp ; cette fenêtre de collision tardive ne constitue pas une
-garantie atomique de non-écrasement. Le verrou de destination par utilisateur
-exclut les autres instances coopérantes du moteur, pas les écrivains arbitraires.
-La publication depuis un espace de travail privé (notamment vers le réseau) et
-la publication distincte du remux HLS/Firefox refusent les collisions tardives
-sur le nom final.
-
-Pour l'extraction YouTube actuelle, le moteur utilise le runtime Deno géré
-automatiquement via un chemin explicite :
-
-```text
---js-runtimes deno:/chemin/absolu/vers/deno
-```
-
-L'exécutable Linux officiel yt-dlp géré par l'application contient les scripts
-`yt-dlp-ejs` compatibles. Le wrapper ne demande donc **pas**
-`--remote-components ejs:npm` pendant un téléchargement. yt-dlp et ses
-dépendances embarquées sont mis à jour ensemble comme un seul runtime vérifié.
-
-### Vidéo complète
-
-Le moteur sélectionne les meilleures pistes vidéo et audio, puis les fusionne ou
-les remuxe dans un conteneur MKV sans réencodage lorsque les flux sont
-compatibles.
-
-### Vidéo YouTube HLS authentifiée
-
-Le profil graphique `YouTube video - Firefox cookies (HLS/MKV)` est l'option
-vidéo proposée pour les URL YouTube reconnues. Il utilise HLS authentifié et
-ajoute les options suivantes :
-
-    --cookies-from-browser firefox
-    --extractor-args youtube:player_client=web_safari
-    --format (bv*+ba/b)[protocol^=m3u8]
-
-Ce profil est limité au mode vidéo et aux URL YouTube. yt-dlp lit directement
-la base locale de cookies Firefox ; l'application ne copie, n'exporte et ne
-stocke aucune valeur de cookie dans `gui.conf`.
-
-Les téléchargements HLS réussis restent traités par le téléchargeur natif de
-médias fragmentés de yt-dlp. yt-dlp applique d'abord son correctif
-MPEG-TS-dans-MP4, puis le moteur effectue un second remux en copie de flux du
-MP4 réparé vers MKV. Aucune de ces deux étapes ne réencode la vidéo ou l'audio.
-
-Dans l'état actuel d'upstream yt-dlp, les formats HLS de `web_safari` n'exigent
-pas de GVS PO Token, mais depuis 2026.07 YouTube ne renvoie ces formats HLS que
-pour certaines sessions connectées ou « trusted ». Ce comportement upstream
-peut évoluer indépendamment du projet.
-
-Ce profil constitue une solution de compatibilité et ne remplace pas les
-plugins fournisseurs de PO Token. Les mécanismes de contrôle de YouTube peuvent
-évoluer indépendamment de ce projet.
-
-### Piste audio native
-
-Le mode audio utilise :
-
-```text
---format ba/b
---extract-audio
---audio-format best
---audio-quality 0
-```
-
-Il privilégie la meilleure piste audio seule. Si le site n'en fournit pas, il
-utilise le meilleur fichier combiné et en extrait l'audio. yt-dlp conserve le
-codec et le conteneur source lorsque cela est possible, mais peut utiliser
-FFmpeg pour remuxer ou convertir un média qui ne peut pas être extrait directement.
-
-## Données locales
-
-Configuration de l'interface :
-
-```text
-~/.config/yt-dlp-aria2-downloader/gui.conf
-```
-
-Runtimes yt-dlp et Deno gérés :
-
-```text
-~/.local/share/yt-dlp-aria2-downloader/runtime/
-```
-
-Journaux de diagnostic de la GUI :
-
-```text
-~/.local/state/yt-dlp-aria2-downloader/download-*.log
-```
-
-Le journal actif du processus est créé en mode `0600` dans le dossier
-temporaire d’exécution privé, puis supprimé après un succès. Lorsqu’une
-exécution échouée, annulée, interrompue ou incohérente a produit un journal
-actif non vide et utile, seule une copie de diagnostic expurgée est publiée
-dans le dossier d’état. Les valeurs ressemblant à des URL sont remplacées, le
-contenu et les métadonnées d’identité finales restent ensemble dans la limite de
-8 Mio, et le fichier obtenu conserve le mode `0600`. Sa section finale donne le
-basename `download-*.log` exact et son chemin absolu canonique. Les journaux de
-diagnostic conservés depuis plus de 15 jours sont supprimés automatiquement
-lors de la prochaine préparation d’une session de téléchargement graphique.
-
-Les instances GUI et CLI peuvent transférer et traiter des médias indépendants
-simultanément dans le même dossier. Les fichiers terminés y apparaissent
-directement. Si leurs familles de noms se recouvrent, la seconde demande est
-refusée avec le statut **75** dès que son plan est connu ; une autre URL ou un
-autre profil ne contourne pas cette réservation. Un fichier final existant ou
-une entrée native sans preuve d’appartenance est une collision distincte
-(statut **1**), conservée sans écrasement, adoption ni suffixe automatique « (1) ».
-
-La coordination couvre le même hôte et le même utilisateur, y compris les
-alias de chemins canoniques et les racines XDG différentes. Les inodes des
-verrous sont détenus dans les deux racines privées revalidées
-`/tmp/yt-dlp-aria2-downloader-UID` et `/var/tmp/yt-dlp-aria2-downloader-UID`, et ne
-sont jamais supprimés pour leur âge. Si une racine de coordination est indisponible
-ou non sûre, l'admission échoue avec **73**, sans basculer vers un registre
-indépendant. Les sessions privées conservent leur repli et privilégient la racine validée
-`$XDG_RUNTIME_DIR/yt-dlp-aria2-downloader-UID`. Le verrou historique de destination
-est conservé en mode partagé dans chaque racine : il exclut une ancienne instance 2.3.29 utilisant
-son protocole exclusif, dans les deux ordres de lancement. Les nouvelles
-instances emploient en parallèle des réservations plus fines. Les checkpoints
-des deux racines sont examinés et activés avant transfert. Les enregistrements
-historiques actifs ou ambigus sont conservés. Cela ne corrige ni deux anciens
-exécutables choisissant des racines différentes, ni les défauts d’arrêt de l’ancien exécutable.
-
-Les réservations durent jusqu’à l’arrêt des consommateurs et la fin du
-nettoyage. Fermer une instance ne signale pas les autres. Si l'arrêt reste
-incertain après admission, le moteur reste actif et conserve ses réservations,
-y compris le verrou historique, même si les consommateurs ont fermé leurs
-descripteurs de verrou hérités. La GUI délègue l'annulation forcée au moteur
-authentifié afin qu'un seul superviseur suspende et inspecte les consommateurs
-avant de les arrêter. L'arrêt forcé exige des inventaires stables de tous les
-threads suspendus et l'arrêt confirmé de leurs enfants authentifiés dans la même
-session, pendant que le parent reste suspendu. Un auxiliaire temporisé conserve
-son enfant d'une session privée, même après sa mort, jusqu'à ce que sa propre
-attente confirme l'arrêt complet. Avant toute activité média, la GUI, le moteur
-et le gestionnaire de runtime vérifient les API Python, les opérations Linux
-pidfd/WAIT avec un enfant privé jetable, ainsi que la lisibilité et les champs
-d'identité de chaque processus visible dans procfs. Une capacité absente
-entraîne un refus anticipé de statut **69**. Un refus de permission ou une
-observation impossible après admission laisse l'arrêt non confirmé et préserve
-les ressources. Un leader de threads zombie dont d'autres threads vivent reste actif. Les auxiliaires temporisés
-supervisent leurs propres sessions de commande jusqu'à l'arrêt des consommateurs
-et à la collecte de leur enfant dont
-l'identité reste retenue ; des signaux gracieux répétés ne raccourcissent pas leur
-délai de grâce. Ils répètent les signaux forcés après escalade et exigent deux
-inventaires complets inchangés, sans membre actif, avant de rendre la main.
-La GUI, le moteur et la sentinelle CLI exigent aussi deux inventaires complets
-des processus avec les mêmes identités de zombies (PID/instant de démarrage) ;
-tout consommateur vivant, changement d'inventaire ou incertitude interdit le
-nettoyage.
-L'escalade des signaux a des échéances, mais un consommateur
-bloqué dans le noyau peut retarder la fermeture au-delà de celles-ci. Un arrêt
-GUI non confirmé préserve sa session privée et signale l'incertitude. L'arrêt
-confirmé permet le nettoyage et la fermeture des descripteurs sans
-déverrouillage explicite.
-
-Un `SIGKILL` externe ou un crash peut supprimer ces détenteurs de verrou sans
-nettoyage. Une preuve d'activité conservée bloque encore les demandes qui se
-recouvrent pour les nouveaux moteurs. La version 2.3.29 ne peut pas lire cette
-preuve : une fois tous les détenteurs du verrou historique disparus, l'exclusion
-de cette ancienne version n'est plus garantie. Ne supprimez pas les verrous ou
-preuves préservés pour leur seul âge ; un état incertain exige une inspection.
-Lorsque le système de fichiers fournit une identité de dossier vérifiée,
-recréer un dossier supprimé ne lui attribue pas la preuve d'activité de l'ancien
-pour la seule réutilisation de son numéro d'inode. Sans cette preuve, un ancien
-état actif reste protégé en attendant son inspection.
-Les preuves privées ne contiennent ni URL, ni cookie, ni en-tête
-d'authentification. La coordination reste locale à un hôte et un utilisateur ;
-elle ne fournit ni exclusion distribuée ni protection contre tous les écrivains
-extérieurs (la limite F1 BIS reste distincte).
-
-## Comprendre les erreurs
-
-Les erreurs importantes comportent un identifiant de diagnostic stable entre
-crochets, une explication claire et une action conseillée. Les diagnostics de
-publication précisent aussi l'opération, son étape technique `stage`, le nom et
-le numéro de l'erreur système lorsqu'ils sont disponibles, ainsi que l'état
-connu de récupération. Un identifiant comme `PUB_IO` désigne une catégorie de
-diagnostic, pas le code de sortie numérique. Les codes de sortie et les
-enregistrements de progression conservent leur sens.
-
-Dans l'interface graphique, sélectionnez **View log** lorsque la fenêtre
-d'erreur le propose. Ce bouton ouvre le diagnostic conservé et expurgé décrit
-plus haut. Un échec précoce peut ne produire aucun journal utile ; suivez alors
-le message affiché. Le journal peut présenter plusieurs niveaux : l'échec de
-l'outil externe, le statut du moteur et l'explication propre à la publication
-ou à la validation. Un statut non nul du téléchargeur ne prouve pas, à lui seul,
-une cause liée au réseau, à l'autorisation ou au format.
-
-| Information du diagnostic | Vérification conseillée |
+| Données | Emplacement |
 | --- | --- |
-| `ENOSPC` ou `EDQUOT` | Espace disponible et quota du stockage désigné par l'opération ; l'espace local de traitement et celui de destination sont distincts. |
-| `EACCES` ou `EPERM` | Droits d'accès et, pour une destination réseau, identifiants autorisés du montage ou de la session. Ne rendez pas publics les espaces de travail privés. |
-| `EROFS` | Montage en lecture seule du système de fichiers concerné et raison de cet état. |
-| `ENOTCONN`, `ESTALE` ou `EIO` | Connexion au stockage/montage et disponibilité du serveur. Une erreur d'entrées-sorties générique ne désigne pas à elle seule la cause initiale. |
-| Publication incertaine | Inspectez la destination et la source locale conservée avant une autre demande : le fichier final peut déjà exister. Ne relancez pas automatiquement et ne supprimez pas les temporaires préservés. |
-| Destination existante ou média réservé | Conservez le fichier existant ; inspectez la demande concurrente ou attendez son arrêt confirmé. Ne supprimez jamais les verrous ou checkpoints pour contourner le refus. |
-| Échec de validation du média | Lisez la raison de validation contrôlée, inspectez le média conservé et vérifiez les pistes sélectionnées ainsi que l'installation de FFmpeg/FFprobe. Un fichier analysable n'est pas nécessairement complet. |
-| `RUNTIME_SETTING` ou `RUNTIME_CHANNEL` | Corrigez ou retirez le paramètre nommé ; sa valeur rejetée est volontairement absente du message. |
+| Préférences | `~/.config/yt-dlp-aria2-downloader/gui.conf` |
+| yt-dlp / Deno | `~/.local/share/yt-dlp-aria2-downloader/runtime/` |
+| Journaux des exécutions problématiques | `~/.local/state/yt-dlp-aria2-downloader/download-*.log` |
 
-`ENGINE_PLAN` et `ENGINE_DOWNLOAD` désignent la phase en échec,
-`MEDIA_VALIDATION` et `DEPENDENCY_MISSING` la validation et le contrôle des
-dépendances. Leurs conseils complètent les lignes de statut techniques existantes.
+Les journaux des exécutions réussies sont normalement supprimés. Les journaux
+conservés sont privés, expurgés des URL, limités à 8 Mio et supprimés après
+15 jours lors de la préparation d'une nouvelle session GUI. Les titres et
+chemins locaux peuvent rester personnels : relisez les journaux avant de les
+partager. Ne partagez jamais de cookies, d'en-têtes ou de plans de transfert
+privés. Ne supprimez pas récursivement d'anciens dossiers temporaires sur la
+seule ressemblance de leurs noms.
 
-Le texte de récupération décrit uniquement ce que l'opération en échec a pu
-établir. Une source impossible à ouvrir ou dont l'identité a changé n'est pas
-présentée comme une copie de récupération validée et confirmée. Une interruption
-ne constitue pas une publication réussie, même si le serveur a déjà créé le nom
-final.
+## Dépannage essentiel
 
-Pour demander de l'aide, indiquez la version de l'application, l'identifiant du
-diagnostic, l'opération/étape, le numéro d'erreur système et une éventuelle
-interruption. Relisez un journal expurgé avant de le partager : les titres des
-médias et chemins locaux peuvent rester personnels. Ne joignez jamais les
-plans privés, cookies, en-têtes d'authentification ou valeurs de configuration
-du runtime. Une erreur système inconnue reste signalée comme telle, sans lui
-attribuer une cause inventée.
+Utilisez **View log** lorsqu'une fenêtre d'erreur le propose ; sinon, suivez son
+message. Indiquez la version de l'application et l'identifiant du diagnostic
+lorsque vous signalez un problème.
 
-## Destinations réseau et stockage privé
+| Problème | Première vérification |
+| --- | --- |
+| Dépendance manquante | Prérequis système et version de l'outil signalé ; sous Fedora, utilisez le bootstrap avec le FFmpeg complet de RPM Fusion. |
+| YouTube HLS indisponible | Connexion Firefox, profil sélectionné et disponibilité actuelle pour cette session. |
+| `ENOSPC` / `EDQUOT` | Espace libre et quota sur l'espace local de travail et la destination. |
+| Erreur d'accès ou de montage | Permissions, disponibilité du montage et identifiants ; préservez les permissions privées de l'espace de travail. |
+| Fichier existant ou média réservé | Conservez le fichier ; attendez l'arrêt de l'autre téléchargement. Ne supprimez jamais les verrous pour contourner un refus. |
+| Validation ou copie incertaine | Lisez le diagnostic précis et inspectez les médias conservés avant de recommencer. |
 
-Cette section décrit l'implémentation actuelle des sources. Les versions de
-développement et publiée indiquées plus haut permettent d'identifier le code testé.
+Pour la récupération du stockage, les limites d'annulation et l'interprétation
+des diagnostics, consultez les
+[détails du moteur](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/ARCHITECTURE.md#engine-pipeline)
+et les [limites de qualification réseau](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#network-destination-regression-and-opt-in-cifs-qualification).
 
-L'allocateur privé commun valide les composants physiques des chemins, le
-propriétaire, les permissions réellement observées, la création exclusive et
-le système de fichiers des descripteurs ouverts avant d'écrire des secrets.
-Les métadonnées utilisent un `XDG_RUNTIME_DIR` local validé, puis `/tmp`, puis
-`/var/tmp`. Aucun répertoire utilisateur préexistant n'est modifié par chmod.
-Les candidats inutilisables sont refusés. `TMPDIR`, `TMP` et `TEMP` transmis à
-yt-dlp désignent la session privée, y compris pour ses copies temporaires de
-la base Firefox. Plans, cookies, entrées aria2, manifestes, fichiers internes de
-chemins, URL et journaux actifs de la GUI restent locaux et privés.
+<details>
+<summary>Récupération et contrôle des mises à jour des runtimes</summary>
 
-Sur un système local avec une chaîne de répertoires protégée, les médias
-conservent le téléchargement dans la destination et la reprise native
-existants. Les autres destinations, dont CIFS/SMB et les répertoires partagés
-inscriptibles, utilisent un espace disque local privé choisi parmi les
-répertoires existants `XDG_CACHE_HOME`, `$HOME/.cache`, puis `/var/tmp`. Chaque
-candidat subit les contrôles de propriétaire et de système de fichiers ; un
-nom de variable ne prouve pas qu'un emplacement est local. Les espaces disque
-acceptent actuellement ext2/3/4, XFS, Btrfs et ZFS ; les métadonnées acceptent
-aussi tmpfs. Les systèmes inconnus, FUSE et overlay ne sont pas présumés offrir
-ces garanties locales. Ils peuvent néanmoins recevoir le média final si un
-espace local adéquat et une primitive de publication sûre sont disponibles.
-Les médias complets ne sont jamais placés par défaut dans `XDG_RUNTIME_DIR`
-ou tmpfs.
+Définissez `YTDLP_ARIA2_MANAGED_RUNTIME_UPDATE=0` pour exiger des runtimes déjà
+vérifiés pendant les téléchargements, sans accès réseau pour leur installation
+ou leur mise à jour. Les téléchargements de médias restent disponibles. Le canal yt-dlp
+par défaut est stable ; `YTDLP_ARIA2_YTDLP_CHANNEL=nightly` active volontairement
+les versions nightly.
 
-Le stockage local doit pouvoir contenir les pistes sélectionnées, le média
-assemblé et le remux HLS éventuel. Avant le transfert, les tailles connues, y
-compris celles héritées des métadonnées sélectionnées, sont comparées à l'espace
-disponible avec une estimation triple et une marge de 64 Mio. Ce contrôle ne
-réserve pas l'espace disque. Les tailles inconnues, quotas, écritures concurrentes et saturations
-ultérieures ne sont pas prévisibles ; les erreurs d'écriture restent des
-échecs. Le journal indique l'espace local. La fenêtre de progression affiche
-l'étape actuelle, le pourcentage, la vitesse et le temps restant estimé lorsque
-disponibles, y compris l'étape de copie finale vers la destination. Les détails
-du stockage local restent dans le journal de diagnostic.
-La qualité, les formats et les règles audio restent inchangés. Pour ces sessions
-réseau isolées, l'annulation supprime les fichiers partiels après confirmation
-de l'arrêt ; une nouvelle demande recommence sans reprendre les fichiers
-natifs d'une ancienne session locale.
+Depuis un dossier ZIP/Git, téléchargez et préparez explicitement les runtimes manquants avec :
 
-La publication copie via des descripteurs ouverts vers un fichier de destination
-`.yt-dlp-publish.*.partial` créé exclusivement, vérifie les écritures et leur
-synchronisation, puis essaie `renameat2(RENAME_NOREPLACE)` sous Linux. Un lien
-physique atomique sert de repli si ce renommage n'est pas pris en charge. Si
-aucune primitive ne fonctionne, la publication échoue explicitement, sans
-renommage écrasant précédé d'un simple test d'existence. Le nom final complet
-n'apparaît qu'après la copie. Aucun fichier existant, même créé concurremment,
-n'est remplacé. Cette garantie porte sur un fichier, pas sur une transaction
-entre disque local et serveur. Les permissions du média volontairement partagé
-restent soumises au serveur et au montage.
+```bash
+./runtime-manager.sh ensure
+```
 
-Si la publication échoue ou reste incertaine, la source locale validée est
-conservée et son chemin signalé. Les temporaires distants ambigus sont
-préservés. HUP, INT ou TERM reçu pendant la publication empêche un résultat
-annonçant une réussite, même si le serveur a déjà créé le nom final ; ce fichier
-est également préservé. Les diagnostics d'entrées-sorties indiquent l'opération
-et l'errno numérique, sans texte brut d'exception ni données amont.
-HUP, INT, TERM et l'annulation GUI supervisent les groupes de
-processus ; le nettoyage attend un arrêt confirmé. SIGKILL ne permet pas ce
-nettoyage, et une opération réseau bloquée dans le noyau peut dépasser les
-délais d'annulation. Les instances d'une même machine utilisent le verrou de
-destination commun ; entre machines, la protection repose sur la publication
-atomique sans écrasement, et non sur ce verrou local.
+Si une version précédente vérifiée est disponible, réactivez celle du composant concerné :
 
-Les anciens résidus `.yt-dlp-aria2.*`, `.yt-dlp-path.*` et de remux ne sont pas
-supprimés automatiquement selon leur nom, marqueur ou âge. Les anciens plans
-et cookies sur la destination peuvent contenir des secrets : ne pas afficher,
-transmettre ni joindre leur contenu. Arrêter les téléchargements concernés,
-inspecter le type, le propriétaire et les noms d'un seul chemin exact sans
-suivre les liens, puis établir la session d'origine. Supprimer uniquement les
-fichiers individuellement identifiés et utiliser `rmdir` sur le répertoire
-exact devenu vide ; préserver toute entrée inconnue. Ne pas utiliser de
-nettoyage récursif par motif.
+```bash
+./runtime-manager.sh rollback yt-dlp
+./runtime-manager.sh rollback deno
+```
 
-Les simulations de permissions et tests locaux avec vrais outils ne prouvent
-pas le fonctionnement sur CIFS réel. La procédure SMB/CIFS opt-in de
-`TESTING.md` exige un partage jetable explicitement autorisé. Les transports
-qualifiés sont HLS/DASH natifs ordinaires ; les variantes HLS live ou non prises
-en charge que yt-dlp délègue à un outil externe nécessitent une qualification
-supplémentaire de confidentialité.
-La qualification contrôle le système de fichiers des descripteurs de répertoires
-ouverts avant toute écriture sur le partage et avant son verdict final. Un
-répertoire local ou une observation impossible produit
-`CIFS qualification: NOT EXECUTED` (« NON EXÉCUTÉ ») ; la simulation ne peut pas
-être combinée avec l'option de partage réel.
+</details>
 
-## Tests
+## Désinstallation
 
-Consultez le
-[guide de test](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md)
-du dépôt pour les validations locales, les contrôles spécifiques à Fedora et
-les tâches GitHub Actions.
+Fedora :
 
-Les commits, pushs et fusions de PR ordinaires peuvent conserver la même
-version source cohérente, y compris le dernier numéro publié. La préparation
-d'une release choisit la prochaine version d'après les changements regroupés ;
-les corrections d'un candidat non publié n'imposent pas un nouvel incrément.
-Exécutez le contrôle de cohérence et activez le hook pre-push selon
-[la procédure de versionnement](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#version-coherence-and-release-preparation).
-Les artefacts CI de développement sont identifiés par leur SHA source et leur
-run/tentative, pas uniquement par leur version de paquet. Un tag publié et ses
-assets ne peuvent pas servir à distribuer un contenu différent. Préparer les
-métadonnées source d'un candidat ne publie pas de paquets ; tag et publication restent
-des opérations autorisées séparément.
+```bash
+sudo dnf remove yt-dlp-aria2-downloader-gui
+```
 
-Pour travailler avec Codex, ouvrez le dépôt lui-même comme projet. La
-[procédure de démarrage et de routage](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#codex-session-setup-and-task-routing)
-explique le chargement des instructions et fournit un modèle de demande minimal.
+Debian/Ubuntu :
 
-## Désinstallation d'un lanceur portable
+```bash
+sudo apt remove yt-dlp-aria2-downloader-gui
+```
 
-Pour un lanceur installé depuis une archive ZIP portable ou un checkout Git,
-exécutez cette commande depuis le dossier source correspondant :
+La désinstallation finale du RPM tente de nettoyer les runtimes gérés vérifiés
+et les anciens artefacts utilisateur reconnus ; les mises à niveau les préservent.
+Le retrait/purge du DEB conserve les données propres aux utilisateurs.
+Le nettoyage des paquets conserve les liens des lanceurs portables.
+
+Pour un lanceur installé depuis une archive ZIP portable ou un checkout Git, exécutez depuis son dossier source :
 
 ```bash
 ./install-gui.sh uninstall
 ```
 
-## Limites et utilisation légale
+## Documentation complémentaire
 
-- les listes de lecture sont désactivées ;
-- les cookies Firefox ne sont lus que lorsque le profil YouTube HLS
-  authentifié est explicitement sélectionné ;
-- ce mode HLS est réservé à la vidéo et ne préserve pas une piste audio
-  YouTube native séparée ;
-- le format audio final dépend du meilleur flux fourni par le site ;
-- certains sites limitent ou interdisent les téléchargements ;
-- utilisez ce programme uniquement pour les contenus que vous êtes autorisé à
-  télécharger.
+- [Architecture et frontières de sécurité](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/ARCHITECTURE.md)
+- [Tests et qualification](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md)
+- [Cohérence des versions et préparation des releases](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#version-coherence-and-release-preparation)
+- [Démarrage de Codex et routage des tâches](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#codex-session-setup-and-task-routing)
+- [Historique des changements](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/CHANGELOG.md)
 
-## Licence
+<details>
+<summary>Mainteneurs : reprise manuelle d'une release</summary>
 
-Ce projet est distribué sous licence MIT. Consultez la
-[licence du dépôt](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/LICENSE).
+Les commits et fusions de PR ordinaires n'exigent pas de changement de version.
+La préparation et la publication d'une release sont des opérations distinctes,
+explicitement autorisées. Uniquement après la création du tag signé et la réussite
+du [preflight de release](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/TESTING.md#release-maintainer-preflight),
+la reprise manuelle utilise le tag exact :
+
+```bash
+gh workflow run release.yml \
+  --ref v2.4.4 \
+  -f tag=v2.4.4 \
+  -R OscarFrog/yt-dlp-aria2-downloader-gui
+```
+
+Un tag publié et ses assets ne doivent jamais servir à distribuer un contenu différent.
+
+</details>
+
+Utilisez ce logiciel uniquement pour les contenus que vous êtes autorisé à
+télécharger. Les restrictions des sites et leur disponibilité upstream peuvent
+évoluer. Distribué sous [licence MIT](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/blob/main/LICENSE).
