@@ -3503,6 +3503,102 @@ PY_MANIFEST
         'failed Python validation prevents the integration phase'
 }
 
+test_doctor_private_path_contract() {
+    python3 -I -B - "${SCRIPT_DIR}/run-all.sh" <<'PY_DOCTOR_PRIVATE_PATH_TEST'
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+runner = Path(sys.argv[1])
+source = runner.read_text()
+match = re.search(r"<<'PY_DOCTOR_PRIVATE_TEMP'\n(.*?)\nPY_DOCTOR_PRIVATE_TEMP\n", source, re.S)
+assert match is not None, 'missing actual private-path doctor probe'
+probe = match[1]
+helper = runner.parent.parent / 'private-aria2-plan.py'
+# Only ownership observations are modeled; real descriptor traversal, modes,
+# symlink refusal and the production helper predicates remain under test.
+# A fixed effective UID keeps these oracles independent of the runner's UID.
+driver = r"""
+import json
+import os
+from pathlib import Path
+import sys
+from unittest.mock import patch
+
+probe, helper, raw_path, fixture, scenario = json.loads(sys.argv[1])
+real_fstat = os.fstat
+fixture = Path(fixture)
+private = fixture / 'parent' / 'private'
+
+def observed_fstat(descriptor):
+    metadata = list(real_fstat(descriptor))
+    path = Path(os.readlink(f'/proc/self/fd/{descriptor}'))
+    metadata[4] = 41001 if path.is_relative_to(fixture) else 0
+    metadata[5] = 51002
+    if path == fixture / 'parent':
+        if scenario == 'root-parent':
+            metadata[4] = 0
+        elif scenario == 'foreign-parent':
+            metadata[4] = 41002
+        elif scenario == 'remapped-parent':
+            metadata[4] = 65534
+        elif scenario == 'unreadable':
+            raise PermissionError('private-exception-sentinel')
+    if path == private:
+        if scenario == 'foreign-leaf':
+            metadata[4] = 41002
+        elif scenario == 'root-leaf':
+            metadata[4] = 0
+    return os.stat_result(metadata)
+
+sys.argv = ['-', helper, raw_path]
+with patch.object(os, 'geteuid', return_value=41001), patch.object(os, 'fstat', observed_fstat):
+    exec(compile(probe, '<actual doctor private-path probe>', 'exec'))
+"""
+with tempfile.TemporaryDirectory(prefix='doctor-private-contract-') as temporary:
+    fixture = Path(temporary)
+    parent = fixture / 'parent'
+    parent.mkdir(mode=0o700)
+    private = parent / 'private'
+    private.mkdir(mode=0o700)
+    link = fixture / 'link'
+    link.symlink_to(parent, target_is_directory=True)
+    cases = (
+        ('compatible', private, 0o700, 0o700, ''),
+        ('root-parent', private, 0o755, 0o700, ''),
+        ('sticky-parent', private, 0o1777, 0o700, ''),
+        ('foreign-parent', private, 0o700, 0o700, 'untrusted-owner'),
+        ('remapped-parent', private, 0o1777, 0o700, 'untrusted-owner'),
+        ('unsafe-parent', private, 0o777, 0o700, 'unsafe-parent-mode'),
+        ('group-writable-parent', private, 0o770, 0o700, 'unsafe-parent-mode'),
+        ('unsafe-leaf', private, 0o700, 0o755, 'unsafe-private-directory'),
+        ('foreign-leaf', private, 0o700, 0o700, 'untrusted-owner'),
+        ('root-leaf', private, 0o700, 0o700, 'unsafe-private-directory'),
+        ('symlink', link / 'private', 0o700, 0o700, 'unreadable-or-symlink-path'),
+        ('unreadable', private, 0o700, 0o700, 'unreadable-or-symlink-path'),
+    )
+    for scenario, path, parent_mode, leaf_mode, reason in cases:
+        parent.chmod(parent_mode)
+        private.chmod(leaf_mode)
+        payload = json.dumps([probe, str(helper), str(path), str(fixture), scenario])
+        result = subprocess.run([sys.executable, '-I', '-B', '-c', driver, payload],
+                                capture_output=True, text=True, timeout=5)
+        assert result.returncode == (1 if reason else 0), (scenario, result.returncode, result.stderr)
+        assert result.stdout.strip() == reason, (scenario, result.stdout)
+        assert not result.stderr, (scenario, result.stderr)
+        assert 'private-exception-sentinel' not in result.stdout
+        assert parent.stat().st_mode & 0o7777 == parent_mode
+        assert private.stat().st_mode & 0o7777 == leaf_mode
+    assert sorted(item.name for item in fixture.iterdir()) == ['link', 'parent']
+    assert list(private.iterdir()) == [], 'read-only path probe created state'
+print('Doctor private-path ownership, modes, symlinks and refusal diagnostics passed.')
+PY_DOCTOR_PRIVATE_PATH_TEST
+}
+
 test_doctor_optimization_isolation() {
     python3 -I -B - "${SCRIPT_DIR}/test-runner-integration.sh" <<'PY_DOCTOR_OPTIMIZATION'
 import json
@@ -3521,7 +3617,7 @@ if match is None:
 flags = shlex.split(match[1].split('"${doctor_output}"', 1)[0])[1:]
 report = {"schema_version": 1, "ready": True, "required": {"failed": 0},
           "checks": [{"id": name, "status": "pass"} for name in
-                     ("python-version", "loopback-bind", "external-https", "shfmt-cache",
+                     ("python-version", "private-temp", "loopback-bind", "external-https", "shfmt-cache",
                       "shfmt-ready", "repository-state")]}
 for optimize in ("1", "2"):
     for ready in (True, False):
@@ -3541,6 +3637,9 @@ test_run_all_doctor_contract() {
     local offline_shfmt_root="${TEST_RUNNER_LOG_DIR}/offline-shfmt-cache"
     local project_dir=${SCRIPT_DIR%/*}
     local doctor_output=''
+    local doctor_format=''
+    local private_probe_result=''
+    local -a doctor_format_arguments=()
     local project_has_git_metadata=false
     local aria2_probe_mode=''
     local command_name=''
@@ -3667,6 +3766,10 @@ fi
 if [[ $* == *'import socket;'* ]]; then
     exit "${DOCTOR_MOCK_LOOPBACK_STATUS:-0}"
 fi
+if [[ ${4:-} == */private-aria2-plan.py && -n ${DOCTOR_MOCK_PRIVATE_STATUS:-} ]]; then
+    printf '%s\n' "${DOCTOR_MOCK_PRIVATE_RESULT:-untrusted-owner}"
+    exit "${DOCTOR_MOCK_PRIVATE_STATUS}"
+fi
 exec "${DOCTOR_REAL_PYTHON:?}" "$@"
 EOF_MOCK_PYTHON
     chmod 0755 -- \
@@ -3701,6 +3804,7 @@ assert report["schema_version"] == 1
 assert report["ready"] is True
 assert report["required"]["failed"] == 0
 assert checks["python-version"]["status"] == "pass"
+assert checks["private-temp"]["status"] == "pass"
 assert checks["loopback-bind"]["status"] == "pass"
 assert checks["external-https"]["status"] == "pass"
 assert checks["shfmt-cache"]["status"] == "pass"
@@ -3710,6 +3814,54 @@ PY_READY_DOCTOR
     then
         fail 'doctor ready report is invalid or incomplete'
     fi
+
+    for doctor_format in text json; do
+        doctor_format_arguments=()
+        [[ ${doctor_format} != json ]] || doctor_format_arguments=(--json)
+        for private_probe_result in untrusted-owner private-exception-sentinel; do
+            assert_status 69 "doctor reports private-path failure in ${doctor_format}" \
+                env \
+                DOCTOR_MOCK_PRIVATE_STATUS=1 \
+                DOCTOR_MOCK_PRIVATE_RESULT="${private_probe_result}" \
+                DOCTOR_REAL_ARIA2="${real_aria2}" \
+                DOCTOR_REAL_GIT="${real_git}" \
+                DOCTOR_REAL_PYTHON="${real_python}" \
+                PATH="${doctor_mock_bin}:${PATH}" \
+                SHFMT_TOOL_ROOT="${managed_shfmt_root}" \
+                "${run_all}" --doctor "${doctor_format_arguments[@]}"
+            doctor_output=${ASSERT_OUTPUT}
+            if ! python3 -I -B - "${doctor_output}" "${doctor_format}" \
+                "${private_probe_result}" <<'PY_PRIVATE_FAILURE_DOCTOR'
+import json
+import sys
+
+output, format_name, reason = sys.argv[1:]
+if format_name == 'json':
+    report = json.loads(output)
+    checks = {item['id']: item for item in report['checks']}
+    assert report['schema_version'] == 1 and report['ready'] is False
+    assert report['required']['failed'] == 1
+    assert checks['private-temp']['level'] == 'required'
+    assert checks['private-temp']['status'] == 'fail'
+    detail = checks['private-temp']['detail']
+else:
+    assert 'Result: NOT READY' in output
+    detail = next(line for line in output.splitlines() if 'private-temp' in line)
+    assert '[FAIL]' in detail
+assert 'private-aria2-plan.py' in detail
+assert 'compatible TMPDIR' in detail and 'authorized qualifying environment' in detail
+assert 'do not weaken private-path validation' in detail
+if reason == 'untrusted-owner':
+    assert 'owner is neither root nor the effective user' in detail
+else:
+    assert 'probe failed or exceeded' in detail
+assert 'private-exception-sentinel' not in output
+PY_PRIVATE_FAILURE_DOCTOR
+            then
+                fail "doctor private-path ${doctor_format} failure report is invalid"
+            fi
+        done
+    done
 
     assert_status 0 'doctor keeps external HTTPS optional' \
         env \
@@ -3944,6 +4096,7 @@ main() {
 
     test_ordinary_exit_descendant_cleanup
     test_doctor_optimization_isolation
+    test_doctor_private_path_contract
 
     test_runner_format_duration 1234 duration
     assert_equals '1.234s' "${duration}" 'millisecond duration formatting'

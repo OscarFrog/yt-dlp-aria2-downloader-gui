@@ -413,13 +413,25 @@ exclusive: it cannot be combined with `--fast`, `--full`, `--jobs`, or `--list`.
 Passing `--json` without `--doctor` is rejected.
 
 Readiness covers those probes, not every qualification prerequisite. The
-private-temp probe checks creation, mode 0700 and cleanup of its temporary
-directory; it does not validate ownership of every ancestor as the private
-helpers do. The procfs probe checks readability, not every process-supervision
-operation. An ownership-remapping sandbox can therefore pass doctor and still
-be unsuitable for the full contract. Diagnose that boundary and use an
-authorized qualifying environment; do not relax helper checks or repeat the
-same failing suite. Reuse a diagnosis only while its execution environment is
+`private-temp` probe checks creation and cleanup below `${TMPDIR:-/tmp}` and
+uses the actual `private-aria2-plan.py` descriptor validators in a bounded,
+isolated Python process: the leaf must belong to the effective user with mode
+0700, and each traversed ancestor must belong to root or the effective user.
+Group/world-writable ancestors require sticky protection; symbolic links are
+not followed, and the filesystem root has the helper's existing exemption.
+The additional checks only read metadata and do not create production roots.
+An ownership-remapping sandbox that can create a 0700 directory but fails this
+trusted-chain contract now fails the existing required `private-temp` check.
+Use a compatible temporary root or an authorized qualifying environment; never
+change system permissions or weaken private-path validation to pass diagnosis.
+The existing JSON schema, check IDs and readiness/exit-status rules are unchanged.
+
+The procfs probe checks only `/proc/self/cmdline` readability; its message
+explicitly leaves pidfd, subreaper, signaling and descendant visibility
+unverified until the specialized process-supervision tests run. Other storage
+roots, filesystem capabilities, races and later sandbox restrictions may still
+prevent qualification. Do not repeat a suite with an unchanged diagnosed
+environment failure. Reuse a diagnosis only while its execution environment is
 unchanged; another sandbox or agent execution context may have different access.
 
 Doctor's clean Git status also excludes ignored local evidence. Static source
