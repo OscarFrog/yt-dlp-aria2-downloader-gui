@@ -695,8 +695,10 @@ doctor_probe_private_temp() {
     local probe_dir=''
     local probe_mode=''
     local probe_failed=false
+    local path_result=''
+    local path_failure=''
 
-    for command_name in chmod mktemp rm stat; do
+    for command_name in chmod mktemp rm stat python3 timeout head; do
         if ! command -v -- "${command_name}" >/dev/null 2>&1; then
             record_doctor_check required private-temp fail \
                 "probe skipped because ${command_name} is unavailable"
@@ -720,16 +722,57 @@ doctor_probe_private_temp() {
         || [[ ${probe_mode} != 700 ]]; then
         probe_failed=true
     fi
+    # Use the same descriptor checks as private-plan fixtures, without resolving
+    # symlinks or creating production roots. A writable 0700 leaf alone does not
+    # establish a trusted chain in ownership-remapping sandboxes.
+    # The bounded capture handles command/pipeline failures explicitly.
+    # shellcheck disable=SC2310
+    if ! doctor_capture_bounded_output path_result python3 -I -B - \
+        "${PROJECT_DIR}/private-aria2-plan.py" "${probe_dir}" <<'PY_DOCTOR_PRIVATE_TEMP'
+import importlib.util
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("doctor_private_plan", sys.argv[1])
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+try:
+    with helper.directory_descriptor(Path(sys.argv[2]), trusted_chain=True) as descriptor:
+        helper.require_private_directory_descriptor(descriptor)
+except helper.PlanError as error:
+    reasons = {
+        "directory chain has an untrusted owner": "untrusted-owner",
+        "directory chain is writable without sticky protection": "unsafe-parent-mode",
+        "private directory must belong to the current user with mode 0700": "unsafe-private-directory",
+    }
+    print(reasons.get(str(error), "private-path-rejected"))
+    sys.exit(1)
+except OSError:
+    print("unreadable-or-symlink-path")
+    sys.exit(1)
+PY_DOCTOR_PRIVATE_TEMP
+    then
+        case ${path_result} in
+            untrusted-owner) path_failure='private-path component owner is neither root nor the effective user' ;;
+            unsafe-parent-mode) path_failure='private-path ancestor is group/world writable without sticky protection' ;;
+            unsafe-private-directory) path_failure='private directory lacks effective-user ownership or mode 0700' ;;
+            unreadable-or-symlink-path) path_failure='private-path component is unreadable, unavailable, or a symlink' ;;
+            *) path_failure='private-path probe failed or exceeded its time/output bound' ;;
+        esac
+    fi
     if ! rm -rf -- "${probe_dir}"; then
         probe_failed=true
     fi
 
-    if [[ ${probe_failed} == true ]]; then
+    if [[ -n ${path_failure} ]]; then
+        record_doctor_check required private-temp fail \
+            "${path_failure}; private-aria2-plan.py requires this for test fixtures. Use a compatible TMPDIR or an authorized qualifying environment; do not weaken private-path validation."
+    elif [[ ${probe_failed} == true ]]; then
         record_doctor_check required private-temp fail \
             'private temporary directory creation, mode, or cleanup failed'
     else
         record_doctor_check required private-temp pass \
-            "private temporary creation and cleanup succeeded below ${temporary_root}"
+            "private temporary creation, trusted ownership/permissions chain, mode 0700 and cleanup succeeded below ${temporary_root}"
     fi
 }
 
@@ -754,7 +797,7 @@ doctor_probe_loopback() {
 doctor_probe_procfs() {
     if [[ -r /proc/self/cmdline ]]; then
         record_doctor_check required procfs pass \
-            'Linux /proc process metadata is readable'
+            'Linux /proc/self/cmdline is readable; pidfd, subreaper, signals and descendant visibility remain unverified until process-supervision tests run'
     else
         record_doctor_check required procfs fail \
             'mock process-supervision tests require readable /proc/self/cmdline'
