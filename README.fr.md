@@ -202,10 +202,10 @@ dépend de votre session et de YouTube ; ce repli ne garantit pas l'accès et ne
 remplace pas les plugins fournisseurs de PO Token. Le moteur CLI accepte
 toujours le mode ordinaire `--mode video` pour YouTube.
 
-Le HLS identifié comme direct dans ses métadonnées est refusé dans tous les
-profils, y compris YouTube HLS/Firefox, car yt-dlp pourrait transmettre des URL
-et en-têtes privés dans les arguments
-d'un téléchargeur FFmpeg. Des métadonnées HLS insuffisantes ou contradictoires
+Le flux HLS identifié comme étant en direct dans ses métadonnées est refusé dans
+tous les profils, y compris YouTube HLS/Firefox, car yt-dlp pourrait transmettre
+des URL et des en-têtes privés dans les arguments d'un processus FFmpeg.
+Des métadonnées HLS insuffisantes ou contradictoires
 sur le caractère en direct du flux sont également refusées. La découverte des métadonnées peut
 avoir déjà contacté le site ; le refus intervient avant le
 transfert du média et ne publie aucun résultat réussi. Utilisez un enregistrement
