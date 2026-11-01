@@ -552,6 +552,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -901,6 +902,133 @@ for extension, codecs in (("mp4", ["-c:v", "libx264", "-c:a", "aac"]),
     assert not result.exists() and not foreign.with_suffix(".mkv").exists(), "foreign media became a false success"
     assert len(media_requests()) == before, "native input collision caused a transfer"
     print(f"Native {extension} foreign-media witness preserved before transfer/postprocessing.")
+
+
+# A native preference is not an argv confidentiality boundary: yt-dlp can
+# select FFmpeg for live HLS before applying that preference. Observe the real
+# child with synthetic values; the witness refuses network inputs before I/O
+# and delegates only local postprocessing/version probes to the real FFmpeg.
+privacy_root = root / "hls-argv"
+privacy_root.mkdir(mode=0o700)
+spy_dir = privacy_root / "bin"
+spy_dir.mkdir(mode=0o700)
+spy_log = privacy_root / "ffmpeg-argv.jsonl"
+spy = spy_dir / "ffmpeg"
+spy.write_text(
+    "#!/usr/bin/python3\n"
+    "import json, os, sys\n"
+    "with open(os.environ['HLS_FFMPEG_LOG'], 'a', encoding='utf-8') as log:\n"
+    "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+    "if any(arg.startswith(('http://', 'https://')) for arg in sys.argv[1:]):\n"
+    "    raise SystemExit(93)\n"
+    "os.execv(os.environ['HLS_REAL_FFMPEG'], [os.environ['HLS_REAL_FFMPEG'], *sys.argv[1:]])\n",
+    encoding="utf-8",
+)
+spy.chmod(0o700)
+privacy_environment = dict(environment, HLS_FFMPEG_LOG=str(spy_log),
+                           HLS_REAL_FFMPEG=shutil.which("ffmpeg"),
+                           PATH=str(spy_dir) + os.pathsep + environment["PATH"])
+url_token = "SYNTHETIC_HLS_URL_7ca1"
+auth_token = "SYNTHETIC_HLS_AUTH_9d03"
+cookie_token = "SYNTHETIC_HLS_COOKIE_4a52"
+private_url = base + "/hls/stream.m3u8?sentinel=" + url_token
+private_headers = {"Authorization": "Bearer " + auth_token,
+                   "Cookie": "qualification=" + cookie_token}
+
+
+def ffmpeg_arguments():
+    return [json.loads(line) for line in spy_log.read_text().splitlines()] if spy_log.exists() else []
+
+
+def hls_metadata(label, url, headers, *, live):
+    result = {"id": label, "title": "Confidential HLS", "extractor": "generic",
+              "extractor_key": "Generic", "is_live": live,
+              "live_status": "is_live" if live else "not_live",
+              "formats": [{"format_id": "hls", "url": url, "ext": "mp4",
+                           "protocol": "m3u8_native", "vcodec": "h264", "acodec": "aac",
+                           "http_headers": headers}]}
+    if not live:
+        result["duration"] = 3.0
+    return result
+
+
+# Negative control: the real yt-dlp CLI must actually reach the refusing
+# FFmpeg witness with the private arguments. No application guard is involved
+# in this control; it qualifies the dependency behavior being defended against.
+seed.write_text(json.dumps(hls_metadata("selection-control", private_url,
+                                        private_headers, live=True)), encoding="utf-8")
+spy_log.write_text("")
+oracle = capture_engine(
+    [environment["ASSEMBLED_REAL_YTDLP"], "--ignore-config", "--no-plugin-dirs",
+     "--no-update", "--no-playlist", "--downloader", "dash,m3u8:native",
+     "--ffmpeg-location", str(spy_dir), "--load-info-json", str(seed),
+     "--output", str(privacy_root / "selection-control.%(ext)s")],
+    privacy_environment,
+)
+remote_invocations = [args for args in ffmpeg_arguments() if private_url in args]
+assert oracle.returncode != 0 and remote_invocations, "real live HLS selection did not reach the FFmpeg witness"
+assert any(auth_token in arg for args in remote_invocations for arg in args), "live selection control lost its authorization witness"
+assert any(cookie_token in arg for args in remote_invocations for arg in args), "live selection control lost its cookie witness"
+assert not list(privacy_root.glob("selection-control.*")), "refusing FFmpeg witness created media"
+
+# Positive control: the same private values on VOD remain entirely within the
+# native transfer. FFmpeg may postprocess local files but receives no secret.
+output = media_root / "hls-private-vod"
+output.mkdir(mode=0o700)
+if sys.argv[5] == "true":
+    output.chmod(0o777)
+seed.write_text(json.dumps(hls_metadata("private-vod", private_url,
+                                        private_headers, live=False)), encoding="utf-8")
+spy_log.write_text("")
+result = privacy_root / "vod.result"
+before = len(media_requests())
+completed = capture_engine(
+    ["bash", str(project / "download-video.sh"), "--mode", "video",
+     "--output-dir", str(output), "--result-file", str(result), base + "/controlled-page"],
+    privacy_environment,
+)
+assert completed.returncode == 0 and result.exists(), "private VOD HLS no longer succeeds"
+assert any(path.startswith("/hls/segment-") for path in media_requests()[before:]), "VOD HLS did not use its real native fragment transfer"
+assert any("-i" in args for args in ffmpeg_arguments()), "VOD control did not exercise FFmpeg postprocessing"
+assert not any(secret in arg for args in ffmpeg_arguments() for arg in args
+               for secret in (url_token, auth_token, cookie_token)), "private VOD data reached FFmpeg argv"
+assert not any(arg.startswith(("http://", "https://")) for args in ffmpeg_arguments()
+               for arg in args), "VOD HLS used FFmpeg as a network downloader"
+
+for label, url, headers, status_only in (
+        ("url", private_url, {}, False),
+        ("authorization", base + "/hls/stream.m3u8", {"Authorization": "Bearer " + auth_token}, False),
+        ("both", private_url, private_headers, False),
+        ("public", base + "/hls/stream.m3u8", {}, False),
+        ("status-only", private_url, private_headers, True)):
+    output = media_root / ("hls-live-refused-" + label)
+    output.mkdir(mode=0o700)
+    if sys.argv[5] == "true":
+        output.chmod(0o777)
+    witness = output / "unrelated-user-file.txt"
+    witness.write_bytes(b"Pre-existing user bytes must remain unchanged.\n")
+    initial = final_snapshot(witness)
+    metadata = hls_metadata("live-" + label, url, headers, live=True)
+    if status_only:
+        metadata.pop("is_live")
+    seed.write_text(json.dumps(metadata), encoding="utf-8")
+    spy_log.write_text("")
+    result = privacy_root / (label + ".result")
+    before = len(media_requests())
+    completed = capture_engine(
+        ["bash", str(project / "download-video.sh"), "--mode", "video",
+         "--output-dir", str(output), "--result-file", str(result), base + "/controlled-page"],
+        privacy_environment,
+    )
+    assert not any("-i" in args for args in ffmpeg_arguments()), "unsafe live HLS reached an FFmpeg media invocation"
+    assert completed.returncode == 65 and b"HLS_LIVE_UNSAFE" in completed.stderr, "live HLS was not explicitly refused before media"
+    assert len(media_requests()) == before, "refused live HLS requested media"
+    assert not result.exists(), "refused live HLS published a success record"
+    assert sorted(output.iterdir()) == [witness], "refused live HLS left or removed destination files"
+    assert final_snapshot(witness) == initial, "refused live HLS changed a pre-existing user file"
+    assert not any(secret.encode() in completed.stdout + completed.stderr
+                   for secret in (url_token, auth_token, cookie_token)), "live refusal disclosed a private diagnostic value"
+print("Real HLS selection exposes the controlled baseline; live refusal precedes FFmpeg, while private VOD stays native.")
 
 
 PY_EXISTING_ASSEMBLED

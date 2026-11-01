@@ -974,6 +974,14 @@ The automated suite checks, among other things:
   and changed metadata preserve bytes, inode and modification/change timestamps,
   produce no result record and issue no additional media requests. Native final
   preflight also rejects symlinks, directories and replaced destination identity;
+- private-plan HLS live/uncertainty refusals cover inherited root metadata,
+  selected-download overrides and selected components, with non-live HLS,
+  direct HTTP(S) and DASH controls. The real-tools suite uses the actual yt-dlp
+  downloader selection and a controlled FFmpeg child to demonstrate synthetic
+  URL/header exposure in the upstream live path, then requires the engine to
+  refuse with status 65 and `HLS_LIVE_UNSAFE` before that child, media requests
+  or a successful result. Public live
+  URLs receive the same refusal; no secret-detection heuristic grants admission;
 - malformed or secret-bearing protocol metadata produces no traceback or raw
   protocol diagnostic, and case-insensitive duplicate header names select
   native transport without rewriting the header values;
@@ -1419,6 +1427,12 @@ locally, serves them over loopback, proves the aria2c/native downloader boundary
 exercises real
 FFmpeg progress, and checks HLS post-remux duration consistency without
 contacting a public media service. Routing runs once per pinned yt-dlp version.
+The HLS live argv-privacy regression also runs for each of these three pins:
+it observes the real child arguments with synthetic sentinels, checks engine
+refusal and preserves an actual non-live HLS control. A pass on one version
+does not stand in for the other matrix entries. These cases extend the existing
+real-tools and private-plan suites without adding canonical tasks or changing
+concurrency, stress repetitions or process-supervision requirements.
 HLS duration mocks yt-dlp and FFmpeg progress does not use it; those fixtures
 run once on the latest Ubuntu matrix entry with FFmpeg/FFprobe 6.1.1 verified.
 Before shared-destination qualification, that latest entry has a dedicated

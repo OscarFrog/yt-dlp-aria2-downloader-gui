@@ -20,6 +20,7 @@ import ctypes
 import errno
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -94,6 +95,7 @@ class ResourceBusyError(PlanError):
 
 DIAGNOSTIC_ACTIONS = {
     "PLAN_INVALID": "Check the reported validation reason and the selected download settings.",
+    "HLS_LIVE_UNSAFE": "Use a non-live HLS recording with unambiguous metadata; do not bypass the private transport check.",
     "IO_ERROR": "Check the affected storage and its permissions before starting another download.",
     "PRIVATE_STORAGE": "Check that a writable private local storage location is available.",
     "SPACE": "Check free space and quotas on the private local media disk.",
@@ -933,6 +935,59 @@ def resource_record_name(state: dict) -> str:
     return key + '.resume.json'
 
 
+def require_private_hls_transport(plan: dict, selected: dict) -> None:
+    """Refuse live HLS before yt-dlp can delegate its private URLs to FFmpeg."""
+    formats = selected.get('requested_formats') or [selected]
+    if not isinstance(formats, list) or not 1 <= len(formats) <= 16:
+        raise PlanError('resource planning requires bounded formats')
+    if any(not isinstance(item, dict) for item in formats):
+        raise PlanError('invalid planned component')
+    if any(item.get('_type', 'video') != 'video' for item in (plan, selected, *formats)):
+        raise PlanError('selected replay must contain video metadata, not extraction indirection')
+    if selected.get('requested_downloads') is not None or any(
+            item is not selected and (item.get('requested_formats') is not None or
+                                     item.get('requested_downloads') is not None)
+            for item in formats):
+        raise PlanError('selected components must not contain nested downloads or formats')
+    # The replay keeps the original root and copies selected format fields.
+    # Inspect both representations: an override in requested_downloads must not
+    # hide live state that yt-dlp restores from the root or a selected component.
+    for item in formats:
+        unsafe_live = False
+        non_live = False
+        for metadata in (plan, selected, item):
+            live = metadata.get('is_live')
+            status = metadata.get('live_status')
+            if live is not None and type(live) is not bool:
+                unsafe_live = True
+            if live is True or (status is not None and status not in
+                                ('not_live', 'was_live', 'post_live')):
+                unsafe_live = True
+            if live is False or status in ('not_live', 'was_live', 'post_live'):
+                non_live = True
+        protocol = item.get('protocol')
+        unknown_protocol = not isinstance(protocol, str) or not protocol
+        hls = (not unknown_protocol and
+               bool({'m3u8', 'm3u8_native'} & set(protocol.split('+'))))
+        if unknown_protocol:
+            url = item.get('url')
+            if isinstance(url, str):
+                try:
+                    hls = urlsplit(url).path.lower().endswith('.m3u8')
+                except ValueError:
+                    pass
+        # Generic VOD extraction can omit both live flags but supply its finite
+        # duration. This compatibility case never overrides a live/invalid flag,
+        # and a sibling format's non-live flag cannot authorize this component.
+        duration = item.get('duration', selected.get('duration', plan.get('duration')))
+        finite_vod = (type(duration) in (int, float) and 0 < duration < math.inf)
+        if (unsafe_live and (hls or unknown_protocol)) or (hls and not (non_live or finite_vod)):
+            raise PlanError(
+                'Live or uncertain HLS cannot be transferred privately; '
+                'FFmpeg may expose URLs or authentication in process arguments. '
+                'No media transfer was started.', diagnostic_id='HLS_LIVE_UNSAFE')
+
+
 def selected_download(plan: object) -> dict:
     """Restore inherited fields omitted from yt-dlp's selected download delta."""
     downloads = plan.get('requested_downloads') if isinstance(plan, dict) else None
@@ -944,6 +999,7 @@ def selected_download(plan: object) -> dict:
     result = {key: value for key, value in plan.items()
               if key not in ('formats', 'requested_downloads')}
     result.update(downloads[0])
+    require_private_hls_transport(plan, result)
     return result
 
 

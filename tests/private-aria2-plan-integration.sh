@@ -156,6 +156,7 @@ payload = {
             "filename": str(output_dir / "native.ts"),
             "url": "https://example.invalid/manifest.m3u8",
             "protocol": "m3u8_native",
+            "is_live": False,
             "http_headers": {
                 "User-Agent": "qualification-native",
             },
@@ -215,6 +216,183 @@ assert_private_file() {
         || fail "${label} is not a regular non-symlink file."
 
     assert_path_mode "${path}" 600 "${label} permissions"
+}
+
+test_private_hls_live_admission() {
+    new_case 'private-hls-admission'
+    python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_HLS_ADMISSION'
+import copy
+import json
+from pathlib import Path
+import stat
+import subprocess
+import sys
+
+helper, root = map(Path, sys.argv[1:])
+url_marker = 'SYNTHETIC_HLS_URL_TOKEN'
+header_marker = 'SYNTHETIC_HLS_AUTHORIZATION'
+secret_url = 'https://example.invalid/live.m3u8?private=' + url_marker
+
+def base():
+    return {'id': 'fixture-hls', 'extractor': 'generic', 'extractor_key': 'Generic',
+            'requested_downloads': [{'format_id': 'av', 'ext': 'mp4',
+                'protocol': 'm3u8_native', 'url': secret_url,
+                'http_headers': {'Authorization': 'Bearer ' + header_marker}}]}
+
+def delta(plan):
+    return plan['requested_downloads'][0]
+
+def components(plan, live_first=False):
+    hls = {'format_id': 'v', 'ext': 'mp4', 'protocol': 'm3u8_native',
+           'url': secret_url, 'vcodec': 'h264', 'acodec': 'none'}
+    direct = {'format_id': 'a', 'ext': 'm4a', 'protocol': 'https',
+              'url': 'https://example.invalid/audio.m4a', 'vcodec': 'none', 'acodec': 'aac'}
+    delta(plan)['requested_formats'] = [hls, direct] if live_first else [direct, hls]
+    return hls
+
+refused = []
+def reject(label, update, diagnostic_id='HLS_LIVE_UNSAFE'):
+    plan = base()
+    update(plan)
+    refused.append((label, plan, False, None, diagnostic_id))
+
+reject('root-live', lambda p: p.update(is_live=True))
+reject('selected-live', lambda p: delta(p).update(is_live=True))
+reject('url-only-live', lambda p: delta(p).update(is_live=True, http_headers={}))
+reject('header-only-live', lambda p: delta(p).update(is_live=True, url='https://example.invalid/public.m3u8'))
+reject('public-live', lambda p: delta(p).update(is_live=True, url='https://example.invalid/public.m3u8', http_headers={}))
+reject('component-live-last', lambda p: components(p).update(is_live=True))
+reject('component-live-first', lambda p: components(p, True).update(is_live=True))
+reject('root-live-status', lambda p: p.update(live_status='is_live'))
+reject('selected-upcoming-status', lambda p: delta(p).update(live_status='is_upcoming'))
+reject('component-live-status', lambda p: components(p).update(live_status='is_live'))
+reject('root-live-selected-false', lambda p: (p.update(is_live=True), delta(p).update(is_live=False)))
+reject('root-live-selected-null', lambda p: (p.update(is_live=True), delta(p).update(is_live=None)))
+reject('root-live-selected-vod', lambda p: (p.update(is_live=True), delta(p).update(live_status='not_live', duration=60)))
+reject('root-vod-component-live', lambda p: (p.update(is_live=False), components(p).update(is_live=True)))
+reject('selected-vod-component-live', lambda p: (delta(p).update(is_live=False), components(p).update(is_live=True)))
+reject('root-status-selected-false', lambda p: (p.update(live_status='is_live'), delta(p).update(is_live=False)))
+reject('live-with-duration', lambda p: delta(p).update(is_live=True, duration=60))
+reject('null-live-status', lambda p: delta(p).update(is_live=None, live_status='is_live'))
+reject('missing-live-state', lambda p: None)
+reject('null-live-state', lambda p: delta(p).update(is_live=None, live_status=None))
+reject('unknown-live-status', lambda p: delta(p).update(is_live=False, live_status='unknown-state'))
+for index, value in enumerate(('false', '', 0, 1, [], {})):
+    reject(f'malformed-is-live-{index}', lambda p, value=value: delta(p).update(is_live=value, duration=60))
+for index, value in enumerate((True, 12, [], {})):
+    reject(f'malformed-live-status-{index}', lambda p, value=value: delta(p).update(is_live=False, live_status=value))
+for index, value in enumerate((0, -1, True, '60', float('inf'), float('nan'))):
+    reject(f'uncertain-duration-{index}', lambda p, value=value: delta(p).update(duration=value))
+reject('m3u8-live-alias', lambda p: delta(p).update(protocol='m3u8', is_live=True))
+reject('combined-hls-live', lambda p: delta(p).update(protocol='m3u8_native+https', is_live=True))
+reject('live-missing-protocol', lambda p: (delta(p).pop('protocol'), delta(p).update(is_live=True)))
+reject('live-null-protocol', lambda p: delta(p).update(protocol=None, is_live=True))
+reject('live-empty-protocol', lambda p: delta(p).update(protocol='', is_live=True))
+reject('live-malformed-protocol', lambda p: delta(p).update(protocol=12, is_live=True))
+reject('direct-vod-must-not-authorize-unknown-hls', lambda p: (
+    components(p), delta(p)['requested_formats'][0].update(is_live=False)))
+reject('native-early-return-must-not-hide-live', lambda p: (
+    components(p).update(is_live=True), delta(p)['requested_formats'][0].update(format_id='invalid/id')))
+
+reject('nested-selected-formats', lambda p: (
+    components(p).update(is_live=False, requested_formats=[
+        {'protocol': 'm3u8_native', 'is_live': True, 'url': secret_url}])), 'PLAN_INVALID')
+reject('nested-component-downloads', lambda p: (
+    components(p).update(is_live=False, requested_downloads=[
+        {'protocol': 'm3u8_native', 'is_live': True, 'url': secret_url}])), 'PLAN_INVALID')
+reject('nested-selected-downloads', lambda p: delta(p).update(
+    is_live=False, requested_downloads=[{'protocol': 'm3u8_native', 'is_live': True,
+                                       'url': secret_url}]), 'PLAN_INVALID')
+
+reject('playlist-root-masked-by-video-selection', lambda p: (
+    p.update(_type='playlist', entries=[{'_type': 'video', 'protocol': 'm3u8_native',
+                                       'is_live': True, 'url': secret_url}]),
+    delta(p).update(_type='video', is_live=False)), 'PLAN_INVALID')
+reject('multi-video-selected-download', lambda p: delta(p).update(
+    _type='multi_video', is_live=False, entries=[{'protocol': 'm3u8_native',
+                                              'is_live': True, 'url': secret_url}]), 'PLAN_INVALID')
+reject('url-selected-component', lambda p: components(p).update(
+    _type='url', is_live=False, url=secret_url), 'PLAN_INVALID')
+
+accepted = []
+def accept(label, update, transport='native'):
+    plan = base()
+    update(plan)
+    accepted.append((label, plan, True, transport, None))
+
+accept('selected-vod', lambda p: delta(p).update(is_live=False))
+accept('inherited-vod', lambda p: p.update(is_live=False))
+accept('vod-status', lambda p: p.update(live_status='not_live'))
+accept('was-live-recording', lambda p: delta(p).update(live_status='was_live'))
+accept('post-live-recording', lambda p: delta(p).update(live_status='post_live'))
+accept('generic-vod-duration', lambda p: delta(p).update(duration=12.5))
+accept('m3u8-vod-alias', lambda p: delta(p).update(protocol='m3u8', is_live=False))
+accept('public-vod', lambda p: delta(p).update(is_live=False,
+    url='https://example.invalid/public.m3u8', http_headers={}))
+accept('inherited-vod-components', lambda p: (p.update(is_live=False), components(p)))
+accept('component-vod', lambda p: components(p).update(is_live=False))
+accept('direct-live-with-vod-hls', lambda p: (components(p).update(is_live=False),
+    delta(p)['requested_formats'][0].update(is_live=True)))
+accept('overridden-unselected-components', lambda p: (
+    p.update(requested_formats=[{'protocol': 'm3u8_native', 'is_live': True, 'url': secret_url}]),
+    delta(p).update(requested_formats=None, is_live=False)))
+accept('unselected-live-format', lambda p: (delta(p).update(is_live=False),
+    p.update(formats=[{'protocol': 'm3u8_native', 'is_live': True, 'url': secret_url}])))
+accept('direct-https-live', lambda p: delta(p).update(protocol='https', is_live=True,
+    url='https://example.invalid/media.mp4', http_headers={}), 'direct')
+accept('dash-live-native', lambda p: delta(p).update(protocol='http_dash_segments', is_live=True))
+
+for label, template, safe, transport, diagnostic_id in refused + accepted:
+    case = root / label
+    case.mkdir(mode=0o700)
+    output, private = case / 'output', case / 'private'
+    output.mkdir(mode=0o700)
+    private.mkdir(mode=0o700)
+    plan = copy.deepcopy(template)
+    delta(plan)['filename'] = str(output / 'chosen.mp4')
+    source = private / 'plan.json'
+    source.write_text(json.dumps(plan))
+    source.chmod(0o600)
+    request = private / 'request'
+    request.write_text('https://example.invalid/watch\n')
+    request.chmod(0o600)
+    # Even a colliding user file must be preserved, and a rejected plan must
+    # fail for its transport before publication or ownership state is created.
+    witness = output / ('unrelated-user.data' if safe else 'chosen.mp4')
+    witness.write_bytes(b'pre-existing user bytes')
+    witness.chmod(0o640)
+    before = witness.stat()
+    before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, stat.S_IMODE(before.st_mode))
+    state = private / 'resources.json'
+    identity = output.stat()
+    common = ['--plan', str(source), '--output-dir', str(output),
+              '--final-output-dir', str(output),
+              '--final-output-identity', f'{identity.st_dev}:{identity.st_ino}', '--mode', 'video']
+    commands = [
+        ['classify', '--allow-https-direct', '--plan', str(source)],
+        ['resource-plan', *common, '--state', str(state), '--url-file', str(request)],
+        ['check-native-final', *common],
+    ]
+    for command in commands:
+        result = subprocess.run([sys.executable, '-I', '-B', str(helper), *command],
+                                text=True, capture_output=True, timeout=10, check=False)
+        context = (label, command[0], result.returncode, result.stdout, result.stderr)
+        assert url_marker not in result.stdout + result.stderr and header_marker not in result.stdout + result.stderr, context
+        assert secret_url not in result.stdout + result.stderr, context
+        if safe:
+            assert result.returncode == 0, context
+            if command[0] == 'classify':
+                assert f'transport={transport}\n' in result.stdout, context
+        else:
+            assert result.returncode == 65 and not result.stdout, context
+            assert f'[{diagnostic_id}]' in result.stderr, context
+            assert not state.exists() and not (private / 'transfer-plan.json').exists(), context
+        after = witness.stat()
+        assert (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, stat.S_IMODE(after.st_mode)) == before_identity, context
+        assert witness.read_bytes() == b'pre-existing user bytes', context
+        assert list(output.iterdir()) == [witness], context
+print(f'Private HLS admission passed: {len(refused)} refused and {len(accepted)} accepted plans at three boundaries.')
+PY_HLS_ADMISSION
 }
 
 test_private_plan_classification() {
@@ -3703,7 +3881,7 @@ def plan(name, selection=binding):
     private = root / f'arte-{sequence}'
     private.mkdir(mode=0o700)
     source = private / 'plan.json'
-    payload = {'id': 'ring-fixture', 'extractor': 'ArteTV', 'extractor_key': 'ArteTV',
+    payload = {'id': 'ring-fixture', 'extractor': 'ArteTV', 'extractor_key': 'ArteTV', 'is_live': False,
                'requested_formats': formats, 'webpage_url': 'https://www.arte.tv/fr/videos/example/',
                'requested_downloads': [{'filename': str(output / name)}]}
     if selection is not None:
@@ -3865,6 +4043,7 @@ main() {
     test_network_media_permissions
     test_space_admission_before_transfer
     test_private_roots_and_media_faults
+    test_private_hls_live_admission
     test_private_plan_classification
     test_private_plan_protocol_metadata
     test_private_plan_duplicate_headers

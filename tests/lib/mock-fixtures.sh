@@ -573,7 +573,8 @@ if [[ ${dump_single_json} == true ]]; then
     fi
 
     printf \
-        '{"requested_downloads":[{"filename":"%s","format_id":"mock","ext":"%s","protocol":"%s","url":"%s","http_headers":{"User-Agent":"mock-agent"}}]}\n' \
+        '{"is_live":%s,"requested_downloads":[{"filename":"%s","format_id":"mock","ext":"%s","protocol":"%s","url":"%s","http_headers":{"User-Agent":"mock-agent"}}]}\n' \
+        "${MOCK_PLAN_IS_LIVE:-false}" \
         "${plan_filename}" \
         "${plan_ext}" \
         "${plan_protocol}" \
@@ -1870,7 +1871,7 @@ if phase == "plan":
     for path in private_paths:
         if path.is_relative_to(output):
             os.chmod(path, 0o666)
-    json.dump({"requested_downloads": [{"filename": filename,
+    json.dump({"is_live": False, "requested_downloads": [{"filename": filename,
         "format_id": "mock", "ext": extension, "protocol": protocol,
         "url": "http://example.invalid/mock?token=" + tokens[2].decode(),
         "http_headers": {"User-Agent": "mock-agent " + tokens[1].decode()}}]},
