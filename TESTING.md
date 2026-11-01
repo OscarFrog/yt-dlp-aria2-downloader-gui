@@ -605,7 +605,7 @@ functions without changing shell state:
 | `mock-signals.sh` | Process-supervision suite, CLI/GUI registration, cancellation, descendant and pre-env observer controls |
 | `mock-runtime.sh` | `runtime-compat`, `runtime-validation` and the historical interleaved `runtime` aggregate |
 
-The 61 `test_mock_*` functions retain their assertions and parameterized cases.
+The `test_mock_*` functions retain their assertions and parameterized cases.
 The crash/residue scenario shares one dedicated destination for its crash,
 conflicting retry and independent-media control; its active checkpoint cannot
 contaminate unrelated scenarios. The isolated `engine-staging` group additionally
