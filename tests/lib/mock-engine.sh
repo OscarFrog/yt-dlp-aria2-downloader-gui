@@ -498,6 +498,22 @@ test_mock_engine_youtube_hls() {
     local -a hls_temp_replacement_temps
     local -a youtube_hls_path_files
 
+    # Live refusal applies before the Firefox profile can start a media child.
+    prepare_argument_log 'youtube-hls-live-refusal'
+    youtube_hls_result="${TEST_ROOT}/youtube-hls-live-result.txt"
+    youtube_hls_ffmpeg_args="${TEST_ROOT}/youtube-hls-live-ffmpeg.bin"
+    assert_status 65 'YouTube HLS live refuses private external downloading' \
+        env MOCK_PLAN_IS_LIVE=true MOCK_FFMPEG_ARG_LOG="${youtube_hls_ffmpeg_args}" \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode video \
+        --youtube-hls-firefox --machine-progress \
+        --result-file "${youtube_hls_result}" \
+        -- 'https://www.youtube.com/watch?v=synthetic-live'
+    assert_text_contains "${ASSERT_OUTPUT}" '[HLS_LIVE_UNSAFE]' \
+        'YouTube HLS live refusal diagnostic'
+    [[ ! -e ${youtube_hls_result} && ! -e ${youtube_hls_ffmpeg_args} ]] \
+        || fail 'Refused live HLS launched FFmpeg or published a result.'
+
     # Scenario: authenticated YouTube HLS profile.
     prepare_argument_log 'youtube-hls-engine'
     youtube_hls_result="${TEST_ROOT}/youtube-hls-result.txt"

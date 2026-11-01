@@ -202,6 +202,15 @@ dépend de votre session et de YouTube ; ce repli ne garantit pas l'accès et ne
 remplace pas les plugins fournisseurs de PO Token. Le moteur CLI accepte
 toujours le mode ordinaire `--mode video` pour YouTube.
 
+Le flux HLS identifié comme étant en direct dans ses métadonnées est refusé dans
+tous les profils, y compris YouTube HLS/Firefox, car yt-dlp pourrait transmettre
+des URL et des en-têtes privés dans les arguments d'un processus FFmpeg.
+Des métadonnées HLS insuffisantes ou contradictoires
+sur le caractère en direct du flux sont également refusées. La découverte des métadonnées peut
+avoir déjà contacté le site ; le refus intervient avant le
+transfert du média et ne publie aucun résultat réussi. Utilisez un enregistrement
+à la demande dont les métadonnées peuvent être validées.
+
 ## Audio et sous-titres
 
 Sur les sites compatibles, **Complete video (MKV)** analyse les pistes disponibles.
@@ -338,6 +347,7 @@ lorsque vous signalez un problème.
 | --- | --- |
 | Dépendance manquante | Prérequis système et version de l'outil signalé ; sous Fedora, utilisez le bootstrap avec le FFmpeg complet de RPM Fusion. |
 | YouTube HLS indisponible | Connexion Firefox, profil sélectionné et disponibilité actuelle pour cette session. |
+| `HLS_LIVE_UNSAFE` | Le HLS en direct ou incertain est refusé avant le transfert du média. Utilisez un enregistrement à la demande validé ; changer les cookies ne contourne pas cette protection. |
 | `ENOSPC` / `EDQUOT` | Espace libre et quota sur l'espace local de travail et la destination. |
 | Erreur d'accès ou de montage | Permissions, disponibilité du montage et identifiants ; préservez les permissions privées de l'espace de travail. |
 | Fichier existant ou média réservé | Conservez le fichier ; attendez l'arrêt de l'autre téléchargement. Ne supprimez jamais les verrous pour contourner un refus. |

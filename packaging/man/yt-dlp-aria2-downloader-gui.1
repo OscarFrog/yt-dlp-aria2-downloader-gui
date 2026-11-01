@@ -54,6 +54,14 @@ missing, invalid or incompatible preferences, select YouTube HLS video for
 YouTube and complete video for other sites. The command-line engine continues
 to support ordinary video mode for YouTube.
 .PP
+HLS identified as live in its metadata, or with insufficient or contradictory
+live-state metadata, is refused before media transfer, including in the
+YouTube HLS/Firefox profile.
+The HLS_LIVE_UNSAFE refusal prevents yt-dlp from selecting a live FFmpeg
+downloader that exposes private URLs or headers in process arguments.
+Metadata discovery may already have contacted the site. No successful result
+is published; use an on-demand recording whose metadata can be validated.
+.PP
 Progress includes percentage, speed, estimated time remaining and processing
 phases, including the final destination copy. Local workspace details remain
 in the diagnostic log. Errors with a safely retained diagnostic offer direct

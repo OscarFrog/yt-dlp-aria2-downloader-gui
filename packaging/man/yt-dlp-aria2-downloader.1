@@ -8,7 +8,8 @@ yt-dlp-aria2-downloader \- download one video or audio track with managed yt-dlp
 .B yt-dlp-aria2-downloader
 is the command-line engine for yt-dlp aria2 downloader. It downloads one URL
 as a complete MKV video or as the best available native audio track. Direct
-HTTP(S) media may use aria2; DASH and HLS remain on yt-dlp's native downloader.
+HTTP(S) media may use aria2; admitted DASH and non-live HLS use yt-dlp's native
+downloader.
 yt-dlp and Deno are managed in per-user runtime storage and verified before use.
 .SH OPTIONS
 .TP
@@ -70,6 +71,15 @@ Display command help.
 .TP
 .BR -V ", " --version
 Display the program version.
+.SH HLS TRANSFERS
+HLS identified as live in its metadata is refused in every profile, including
+--youtube-hls-firefox, before media transfer. yt-dlp can select an FFmpeg
+downloader for live HLS despite the native option, exposing private URLs or
+headers in process arguments.
+Insufficient or contradictory HLS live-state metadata are also refused with
+status 65 and diagnostic HLS_LIVE_UNSAFE. Metadata discovery may already have
+contacted the site. No successful result is published; use an on-demand
+recording whose metadata can be validated.
 .SH TRACK SELECTION
 Audio and subtitle choices are independent. The output contains one video and
 exactly the selected tracks. Subtitles remain selectable in the player.

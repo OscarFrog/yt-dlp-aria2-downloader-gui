@@ -281,7 +281,7 @@ done
 
 if [[ ${dump_single_json} == true ]]; then
     printf \
-        '{"requested_downloads":[{"filename":"%s","format_id":"mock-hls","ext":"mp4","protocol":"m3u8_native","url":"https://example.invalid/mock-manifest.m3u8","http_headers":{"User-Agent":"mock-agent"}}]}\n' \
+        '{"is_live":false,"requested_downloads":[{"filename":"%s","format_id":"mock-hls","ext":"mp4","protocol":"m3u8_native","url":"https://example.invalid/mock-manifest.m3u8","http_headers":{"User-Agent":"mock-agent"}}]}\n' \
         "${MOCK_OUTPUT_DIR:?}/Mock HLS [abc123].mp4"
     exit 0
 fi

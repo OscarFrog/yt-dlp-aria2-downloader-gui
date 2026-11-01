@@ -591,7 +591,30 @@ after that preflight. A separate private POST/rebased-plan transaction would be 
 close it while preserving interrupted-download resume. The same-user advisory
 lock does not exclude unrelated writers; descriptor-bound workspace publication
 and the separate HLS/Firefox remux publication already refuse late collisions.
-The classifier sends unsupported transport features to native yt-dlp. Malformed
+Before transport classification, replay planning and native preflight, selected
+HLS must satisfy the shared metadata admission policy. The plan validation
+checks inherited/root metadata and the selected components, including live
+signals that survive the frozen replay; unselected formats do not authorize or
+veto the selected transfer. Each selected component needs an explicit false
+live flag or recognized non-live status, with a finite positive duration accepted
+as a compatibility hint when Generic VOD metadata omit both flags. This duration
+is not proof that every referenced manifest is non-live, and it never overrides
+a live or malformed flag. A sibling component's non-live flag does not grant
+admission. The common replay shape check also rejects a present `_type` other
+than `video` and nested download/format lists in selected components, so replay
+cannot reach an unexamined extraction or selection level.
+Live, conflicting or uncertain HLS is refused with
+status 65 and the controlled `HLS_LIVE_UNSAFE` diagnostic, without copying URLs
+or headers into the diagnostic. This includes public live URLs and the
+YouTube HLS/Firefox profile: a missing token-like query is not evidence that a
+URL is public. Discovery may already have used the network, but the rejection
+precedes media transfer, the FFmpeg downloader and successful-result publication.
+yt-dlp can select `FFmpegFD` for live HLS before honoring the configured
+`--downloader 'dash,m3u8:native'`; the native option alone is not an argv privacy
+boundary. Direct HTTP(S), DASH and admitted non-live HLS retain their existing
+transport, supervision and publication contracts.
+
+The classifier sends other unsupported transport features to native yt-dlp. Malformed
 URL/header fields encountered during direct classification remain validation
 errors; an earlier native fallback does not inspect every remaining field and
 leaves unsupported transport handling to yt-dlp. Subsequent build/publication
@@ -613,7 +636,7 @@ URL redaction, including malformed UTF-8 input. GUI snapshots and Zenity
 diagnostics apply the same case-insensitive masking without changing URL data.
 Diagnostic filters ignore cooperative termination signals
 until the producer closes its pipe, preserving its final cancellation messages;
-unexpected filter failures remain fatal. Fragmented DASH/HLS,
+unexpected filter failures remain fatal. Fragmented DASH and admitted non-live HLS,
 unsafe headers, URL user information, unrepresentable formats, and HTTPS on an
 aria2 build that lacks the required safety capability stay on yt-dlp's native
 transport. Cleanup revalidates the recorded filesystem identities of the
@@ -681,9 +704,12 @@ checks the temporary before and final inode after the atomic operation. A
 concurrent replacement is an error with the local source retained; no claim
 is made against a malicious server or writers modifying deliberately shared
 media after publication. Advisory locks coordinate this user's local launches,
-not separate hosts. Normal HLS/DASH fixtures are qualified; upstream unsupported
-or live HLS delegation to an external downloader requires separate argv-privacy
-qualification.
+not separate hosts. Normal HLS/DASH fixtures are qualified, and HLS with live
+or inadmissible live-state metadata is refused before downloading. This guard
+does not establish argv privacy for every upstream fallback after a non-live manifest is read;
+unsupported-manifest delegation to an external downloader still requires
+separate qualification. It is not a general confidentiality certification of
+yt-dlp or FFmpeg.
 
 ### Private helper exchange formats
 

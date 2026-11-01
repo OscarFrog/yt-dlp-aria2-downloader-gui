@@ -199,6 +199,14 @@ your session and YouTube; this fallback is not a guarantee of access or a
 replacement for PO Token provider plugins. The CLI still accepts ordinary
 `--mode video` for YouTube.
 
+HLS identified as live in its metadata is refused in every profile, including
+YouTube HLS/Firefox, because yt-dlp can otherwise pass private URLs and headers
+to an FFmpeg downloader's
+process arguments. Insufficient or contradictory HLS live-state metadata are
+also refused. Metadata discovery may already have contacted the site; the
+refusal occurs before media transfer and does not publish a successful result.
+Use an on-demand recording whose metadata can be validated.
+
 ## Audio and subtitles
 
 On compatible sites, **Complete video (MKV)** analyses available tracks.
@@ -321,6 +329,7 @@ Include the application version and diagnostic identifier when reporting a probl
 | --- | --- |
 | Missing dependency | System requirements and the reported tool version; on Fedora use the bootstrap with full RPM Fusion FFmpeg. |
 | YouTube HLS unavailable | Firefox login, the selected profile and current availability for that session. |
+| `HLS_LIVE_UNSAFE` | Live or uncertain HLS is refused before media transfer. Use a validated on-demand recording; changing cookies does not bypass this protection. |
 | `ENOSPC` / `EDQUOT` | Free space and quota on both the local workspace and destination. |
 | Access or mount error | Permissions, mount availability and credentials; keep private workspace permissions private. |
 | Existing file or reserved media | Preserve the file; wait for the other download to stop. Never delete locks to bypass a refusal. |
