@@ -1322,6 +1322,24 @@ def owned_native_input(path: Path, ownership: str | None) -> bool:
 
 def check_native_final(args: argparse.Namespace) -> int:
     """Refuse a known existing native media path and bind retries to its basename."""
+    ownership = getattr(args, 'ownership', None)
+    if not ownership:
+        print(native_final_template(args))
+        return 0
+    ownership_path = Path(ownership)
+    original = read_json(ownership_path, 'resource admission')
+    # A signal can interrupt preflight before it reports a foreign collision.
+    # Invalidate first so cleanup cannot checkpoint an unexamined resource; only
+    # a fully successful preflight restores this transaction's resume binding.
+    invalidated = {**original, 'binding': None, 'legacy_binding': None}
+    replace_private_json(ownership_path, invalidated)
+    template = native_final_template(args)
+    replace_private_json(ownership_path, original)
+    print(template)
+    return 0
+
+
+def native_final_template(args: argparse.Namespace) -> str:
     output_dir = resolve_output_directory(args.output_dir)
     plan = read_json(Path(args.plan), "yt-dlp plan")
     root = selected_download(plan)
@@ -1384,8 +1402,7 @@ def check_native_final(args: argparse.Namespace) -> int:
     # emit literal dollars through a constant replacement/default, not $NAME.
     stem = str(destination.with_suffix(""))
     template = stem.replace("%", "%%").replace("$", "%(id&$|$)s")
-    print(template + ("." + extension if args.mode == "audio" else ".%(ext)s"))
-    return 0
+    return template + ("." + extension if args.mode == "audio" else ".%(ext)s")
 
 
 def classify_plan(args: argparse.Namespace) -> int:

@@ -3690,6 +3690,68 @@ with part.open('r+b') as handle:
 changed, _ = plan('resume.mp4')
 rejected(module.DestinationExistsError, state, changed, 'admit')
 
+# A late native collision must never become resume authority during cleanup.
+# Both historical registries receive the same transaction and must remain safe.
+second_registry = root / 'registry-second'
+second_registry.mkdir(mode=0o700)
+for name, foreign_name in (('late-native.mp4', 'late-native.mp4'),
+                           ('late-final.mp4', 'late-final.mkv')):
+    owner, _ = plan(name)
+    def both(action):
+        return module.resource_state(argparse.Namespace(
+            state=owner.state, registry=[str(registry), str(second_registry)], action=action))
+    both('admit')
+    foreign = output / foreign_name
+    foreign.write_bytes(b'foreign media must survive')
+    before = file_snapshot(foreign)
+    preflight = argparse.Namespace(plan=owner.plan, output_dir=str(output),
+        final_output_dir=str(output), final_output_identity=owner.final_output_identity,
+        mode='video', ownership=owner.state)
+    rejected(module.DestinationExistsError, module.check_native_final, preflight)
+    assert file_snapshot(foreign) == before
+    both('save')
+    for request in ('one', 'different-request'):
+        for retry_registry in (registry, second_registry):
+            retry, _ = plan(name, request)
+            retry_args = argparse.Namespace(state=retry.state, registry=str(retry_registry), action='admit')
+            rejected(module.DestinationExistsError, module.resource_state, retry_args)
+            assert file_snapshot(foreign) == before
+    foreign.unlink()
+
+# Revocation precedes collision inspection, including an interrupted helper.
+interrupted, _ = plan('interrupted-native.mp4')
+state(interrupted, 'admit')
+foreign = output / 'interrupted-native.mp4'
+foreign.write_bytes(b'preserve on interruption')
+preflight = argparse.Namespace(plan=interrupted.plan, output_dir=str(output),
+    final_output_dir=str(output), final_output_identity=interrupted.final_output_identity,
+    mode='video', ownership=interrupted.state)
+with patch.object(module, 'native_final_template', side_effect=KeyboardInterrupt):
+    rejected(KeyboardInterrupt, module.check_native_final, preflight)
+assert json.loads(Path(interrupted.state).read_text())['binding'] is None
+state(interrupted, 'save')
+retry, _ = plan('interrupted-native.mp4')
+rejected(module.DestinationExistsError, state, retry, 'admit')
+assert foreign.read_bytes() == b'preserve on interruption'
+foreign.unlink()
+
+# Successful preflight restores authority for a legitimate interrupted transfer.
+legitimate, _ = plan('legitimate-native.mp4')
+state(legitimate, 'admit')
+preflight = argparse.Namespace(plan=legitimate.plan, output_dir=str(output),
+    final_output_dir=str(output), final_output_identity=legitimate.final_output_identity,
+    mode='video', ownership=legitimate.state)
+with contextlib.redirect_stdout(io.StringIO()):
+    assert module.check_native_final(preflight) == 0
+assert json.loads(Path(legitimate.state).read_text())['binding'] is not None
+partial = output / 'legitimate-native.mp4.part'
+partial.write_bytes(b'legitimate partial')
+state(legitimate, 'save')
+retry, _ = plan('legitimate-native.mp4')
+state(retry, 'admit')
+state(retry, 'save')
+assert partial.read_bytes() == b'legitimate partial'
+
 # Full media IDs can differ beyond the output template's 64-byte truncation.
 # The same request, filename and formats must not adopt another media's bytes.
 prefix = 'i' * 64
