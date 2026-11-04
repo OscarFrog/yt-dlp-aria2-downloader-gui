@@ -2578,13 +2578,17 @@ with tempfile.TemporaryDirectory(prefix="real-tool-optimization-") as directory:
         project.mkdir()
         media = case / "media"
         media.mkdir()
-        # The extracted qualification constructs its complete scenario matrix
-        # before running the first case; only file existence is needed here.
+        # The extracted qualification needs only inert DASH and HLS paths
+        # for this deliberately invalid engine.
         dash = case / "web" / "dash"
         dash.mkdir(parents=True)
         for index in (0, 1):
             (dash / f"init-stream{index}.m4s").touch()
             (dash / f"chunk-stream{index}-00001.m4s").touch()
+        hls = case / "web" / "hls"
+        hls.mkdir(parents=True)
+        for index in range(3):
+            (hls / f"segment-{index:03d}.ts").touch()
         (project / "download-video.sh").write_text(engine_source, encoding="ascii")
         # This oracle deliberately uses an invalid engine and inert media. The
         # unisolated mutant reaches later native-witness construction after its

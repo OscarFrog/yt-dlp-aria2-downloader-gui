@@ -206,6 +206,8 @@ process arguments. Insufficient or contradictory HLS live-state metadata are
 also refused. Metadata discovery may already have contacted the site; the
 refusal occurs before media transfer and does not publish a successful result.
 Use an on-demand recording whose metadata can be validated.
+If a required HLS or DASH fragment remains unavailable after retries, the
+download fails instead of publishing an incomplete result.
 
 ## Audio and subtitles
 
