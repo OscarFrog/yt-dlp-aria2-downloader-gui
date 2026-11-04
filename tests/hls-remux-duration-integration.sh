@@ -226,6 +226,7 @@ if (($# == 4)) \
             '--socket-timeout SECONDS' \
             '--retries RETRIES' \
             '--fragment-retries RETRIES' \
+            '--abort-on-unavailable-fragments' \
             '--extractor-retries RETRIES' \
             '--retry-sleep EXPR' \
             '--no-playlist' \
