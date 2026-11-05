@@ -3146,7 +3146,7 @@ initial = [
     "test_no_network_require",
 ]
 admission = ["test_exact_active_runtime_admission", "test_deno_checksum_before_extraction"]
-rollback = ["test_rollback_candidate_admission"]
+rollback = ["test_runtime_link_exact_targets", "test_rollback_candidate_admission"]
 recovery = ["test_structurally_missing_active_recovery", "test_missing_old_activation_journal"]
 invalid_active = ["test_invalid_active_runtime_recovery"]
 identity = ["test_cached_runtime_file_identity"]
@@ -3158,7 +3158,7 @@ expected_all = (initial + admission + rollback + recovery + invalid_active
 groups = {"validation": initial + admission + invalid_active,
           "rollback-admission": rollback, "recovery": recovery,
           "cache-identity": identity, "transactions": transactions}
-assert len(expected_all) == len(set(expected_all)) == 25
+assert len(expected_all) == len(set(expected_all)) == 26
 assert source.endswith('main "$@"\n')
 # Replace only test bodies at the final call site. Execute the real argument
 # parser, private initialization, dispatch and cleanup, with inert phases.
@@ -3174,7 +3174,8 @@ hardening_dispatch_record() {
         printf '%s\n' '--update' >"${HOME_DIR}/.config/yt-dlp/config"
     fi
     case $1 in
-        test_exact_active_runtime_admission | test_rollback_candidate_admission | \
+        test_exact_active_runtime_admission | test_runtime_link_exact_targets | \
+        test_rollback_candidate_admission | \
         test_structurally_missing_active_recovery | test_cached_runtime_file_identity | \
         test_runtime_updates)
             [[ $(<"${HOME_DIR}/.config/yt-dlp/config") == --update ]] || return 91

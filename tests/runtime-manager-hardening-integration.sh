@@ -1239,6 +1239,40 @@ PY_VALID_ZIP
     assert_link_target "${root}/deno/current" 2.9.5 'valid checksum activates valid archive'
 }
 
+test_runtime_link_exact_targets() {
+    local name scenario data_home root target status
+    for name in current previous; do
+        for scenario in terminal-lf multiple-lf internal-lf cr slash dot dangling; do
+            data_home="${TEST_ROOT}/link-target-${name}-${scenario}"
+            make_recovery_fixture "${data_home}"
+            root="${data_home}/yt-dlp-aria2-downloader/runtime/yt-dlp"
+            case ${scenario} in
+                terminal-lf) target=$'2026.03.17\n' ;;
+                multiple-lf) target=$'2026.03.17\n\n' ;;
+                internal-lf) target=$'2026.03\n.17' ;;
+                cr) target=$'2026.03.17\r' ;;
+                slash) target='other/2026.03.17' ;;
+                dot) target='.2026.03.17' ;;
+                dangling) target='2026.01.01' ;;
+                *) fail "unknown runtime link scenario: ${scenario}" ;;
+            esac
+            rm -- "${root}/${name}"
+            ln -s -- "${target}" "${root}/${name}"
+            status=0
+            if [[ ${name} == current ]]; then
+                MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" XDG_DATA_HOME="${data_home}" \
+                    "${RUNTIME_MANAGER}" require >/dev/null 2>&1 || status=$?
+                assert_equals 69 "${status}" "${name} ${scenario} admission"
+            else
+                MOCK_NETWORK_FORBIDDEN=1 "${runtime_env[@]}" XDG_DATA_HOME="${data_home}" \
+                    "${RUNTIME_MANAGER}" rollback yt-dlp >/dev/null 2>&1 || status=$?
+                assert_equals 1 "${status}" "${name} ${scenario} admission"
+                assert_link_target "${root}/current" 2026.06.09 'rejected rollback changed current'
+            fi
+        done
+    done
+}
+
 test_rollback_candidate_admission() {
     local component scenario data_home root asset current previous candidate
     local status marker before after attestation
@@ -1816,6 +1850,7 @@ main() {
         test_deno_checksum_before_extraction
     fi
     if [[ ${group} == all || ${group} == rollback-admission ]]; then
+        test_runtime_link_exact_targets
         test_rollback_candidate_admission
     fi
     if [[ ${group} == all || ${group} == recovery ]]; then
