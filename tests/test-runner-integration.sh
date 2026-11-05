@@ -2566,6 +2566,8 @@ TEST_ROOT=$2
 MEDIA_ROOT=$3
 PORT=12345
 SIMULATE_NETWORK=false
+# This early-phase oracle starts no HTTP server and never uses its identity.
+SERVER_PID=0
 '''
 
 with tempfile.TemporaryDirectory(prefix="real-tool-optimization-") as directory:
@@ -2590,9 +2592,10 @@ with tempfile.TemporaryDirectory(prefix="real-tool-optimization-") as directory:
         for index in range(3):
             (hls / f"segment-{index:03d}.ts").touch()
         (project / "download-video.sh").write_text(engine_source, encoding="ascii")
-        # This oracle deliberately uses an invalid engine and inert media. The
-        # unisolated mutant reaches later native-witness construction after its
-        # assertions disappear; that must not acquire a real FFmpeg dependency.
+        # The unisolated mutant must cross the repeated-output assertions and
+        # reach this first encoder. Its fixed failure bounds that proof before
+        # later HLS witnesses, whose live-process contract this inert engine
+        # cannot satisfy. No real FFmpeg dependency is needed by this oracle.
         binaries = case / "bin"
         binaries.mkdir()
         encoder = binaries / "ffmpeg"
@@ -2601,6 +2604,8 @@ set -euo pipefail
 [[ ${!#} == "${OPTIMIZATION_TEST_ROOT}/media/"* ]] || exit 99
 printf 'inert optimization witness\\n' >"${!#}"
 printf 'generated\\n' >>"${OPTIMIZATION_TEST_ROOT}/encoder-calls"
+printf '%s\\n' 'OPTIMIZATION_ENCODER_REACHED' >&2
+exit 86
 ''', encoding="ascii")
         encoder.chmod(0o700)
         environment = dict(os.environ, PYTHONOPTIMIZE="1",
@@ -2628,7 +2633,12 @@ printf 'generated\\n' >>"${OPTIMIZATION_TEST_ROOT}/encoder-calls"
     try:
         check(mutant, "without-isolation")
     except AssertionError as error:
-        if "status=0\nReal direct-two-streams repetition and metadata change preserve" not in str(error):
+        diagnostic = str(error)
+        if ("status=1\nReal direct-two-streams repetition and metadata change preserve" not in diagnostic
+                or "OPTIMIZATION_ENCODER_REACHED" not in diagnostic
+                or "subprocess.CalledProcessError:" not in diagnostic
+                or "returned non-zero exit status 86" not in diagnostic
+                or (root / "without-isolation" / "encoder-calls").read_text() != "generated\n"):
             raise AssertionError("isolation negative control failed for an unrelated reason") from error
     else:
         raise AssertionError("optimization regression accepted removal of interpreter isolation")

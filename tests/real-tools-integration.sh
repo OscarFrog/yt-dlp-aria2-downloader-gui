@@ -363,16 +363,21 @@ prepare_real_tool_fixtures() {
 
     cat >"${TEST_ROOT}/server.py" <<'PY_SERVER'
 import http.server
+import json
 import pathlib
+import socket
 import socketserver
 import sys
+import time
 
 root = pathlib.Path(sys.argv[1])
 port_file = pathlib.Path(sys.argv[2])
 request_log = pathlib.Path(sys.argv[3])
+cancel_attempts = 0
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
+        global cancel_attempts
         with request_log.open("a", encoding="utf-8") as log:
             log.write(self.path + "\n")
         fail_once = root.parent / "hls-fail-once"
@@ -380,7 +385,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             fail_once.unlink()
             self.send_error(503)
             return
-        super().do_GET()
+        cancellation = root.parent / "hls-cancel.json"
+        if cancellation.exists():
+            settings = json.loads(cancellation.read_text(encoding="ascii"))
+            if self.path == settings["fragment"]:
+                cancel_attempts += 1
+                if cancel_attempts == 2:
+                    # The first missing fragment received its ordinary 404.
+                    # Hold its retry until the controller has observed and
+                    # cancelled the real consumer; no timing sleep is involved.
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as barrier:
+                        barrier.connect(settings["socket"])
+                        barrier.sendall(f"RETRY {time.monotonic_ns()}\n".encode("ascii"))
+                        barrier.recv(1)
+        try:
+            super().do_GET()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def log_message(self, _format, *args):
         return
@@ -552,7 +573,7 @@ test_real_existing_assembled_output() {
     # Only extraction is seeded: real yt-dlp selects formats and the real
     # direct/native downloaders and FFmpeg produce the first completed media.
     python3 -I -B - "${PROJECT_DIR}" "${TEST_ROOT}" "${MEDIA_ROOT}" "${PORT}" \
-        "${SIMULATE_NETWORK}" <<'PY_EXISTING_ASSEMBLED'
+        "${SIMULATE_NETWORK}" "${SERVER_PID}" <<'PY_EXISTING_ASSEMBLED'
 import hashlib
 import json
 import os
@@ -593,7 +614,7 @@ def process_identity(pid):
         return None
 
 
-def capture_engine(arguments, environment, *, timeout=60, grace=20, cancel_after=None,
+def capture_engine(arguments, environment, *, timeout=60, grace=20, cancellation=None,
                    cancel_observed=None):
     # The standalone engine owns separate worker sessions. Killing only its
     # wrapper would bypass their authenticated shutdown and strand downloads.
@@ -613,30 +634,23 @@ def capture_engine(arguments, environment, *, timeout=60, grace=20, cancel_after
         # Establish preservation before launching anything: a full or unwritable
         # filesystem must fail before there is a worker session to shut down.
         preservation.touch()
+        if cancellation is not None:
+            environment = cancellation.environment(environment)
         process = subprocess.Popen(arguments, env=environment,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if cancellation is not None:
+            cancellation.register(process)
         deadline = time.monotonic() + timeout
         cancellation_sent = False
         while True:
-            if cancel_after is not None and not cancellation_sent and cancel_after():
-                if cancel_observed is not None:
-                    identities = {}
-                    for entry in Path("/proc").iterdir():
-                        if entry.name.isdecimal():
-                            identity = process_identity(int(entry.name))
-                            if identity:
-                                identities[int(entry.name)] = identity
-                    parents = {process.pid}
-                    while True:
-                        children = {pid for pid, (_, ppid, _) in identities.items()
-                                    if ppid in parents and pid not in parents}
-                        if not children:
-                            break
-                        parents.update(children)
-                    cancel_observed.extend((pid, identities[pid][2]) for pid in parents
-                                           if pid != process.pid and pid in identities)
-                process.send_signal(signal.SIGTERM)
-                cancellation_sent = True
+            if cancellation is not None:
+                cancellation.sample()
+                if not cancellation_sent and cancellation.ready():
+                    identities = cancellation.before_signal(process)
+                    if cancel_observed is not None:
+                        cancel_observed.extend(identities)
+                    process.send_signal(signal.SIGTERM)
+                    cancellation_sent = True
             if requested_signal:
                 raise SystemExit(128 + requested_signal)
             # Handlers only record intent, including during Popen and exception
@@ -656,6 +670,8 @@ def capture_engine(arguments, environment, *, timeout=60, grace=20, cancel_after
                 continue
             if requested_signal:
                 raise SystemExit(128 + requested_signal)
+            if cancellation is not None:
+                cancellation.verify_completed(process, stdout, stderr)
             preservation.unlink()
             return subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
     except BaseException:
@@ -670,12 +686,13 @@ def capture_engine(arguments, environment, *, timeout=60, grace=20, cancel_after
                         process.send_signal(requested_signal or signal.SIGTERM)
                     try:
                         process.communicate(timeout=grace)
-                        preservation.unlink()
+                        if cancellation is None or cancellation.quiescent():
+                            preservation.unlink()
                         break
                     except subprocess.TimeoutExpired:
                         pass
-            except Exception as error:
-                print(f"Error during engine shutdown: {error}", file=sys.stderr)
+            except Exception:
+                print("Error: engine shutdown observation failed.", file=sys.stderr)
             if preservation.exists():
                 print("Error: engine shutdown remains unconfirmed; retaining its fixtures.",
                       file=sys.stderr)
@@ -1156,7 +1173,13 @@ for label, fragment, mode, transient in (
         assert not list(output.glob("*.m4a")), "missing audio fragment published final media"
 print("Missing terminal video and audio HLS fail; temporary audio loss succeeds after retry.")
 
-# Cancel while a required fragment is unavailable, after the first request.
+# Keep a real retry outstanding while observing its owned native consumer.
+# Subreaping belongs only to this sequential test controller, not the engine.
+import importlib.util
+witness_spec = importlib.util.spec_from_file_location(
+    "hls_cancellation_witness", project / "tests/hls-cancellation-witness.py")
+witness_module = importlib.util.module_from_spec(witness_spec)
+witness_spec.loader.exec_module(witness_module)
 output = media_root / "hls-cancel-retry"
 output.mkdir(mode=0o700)
 if sys.argv[5] == "true":
@@ -1164,17 +1187,22 @@ if sys.argv[5] == "true":
 result = root / "hls-cancel-retry.result"
 saved = root / "hls-cancel-retry.ts"
 missing.rename(saved)
-before = len(media_requests())
 observed = []
+witness = witness_module.CancellationWitness(
+    root, "/hls/" + missing.name, hls_environment["YTDLP_ARIA2_YTDLP_BIN"], int(sys.argv[6]),
+    result=result, output=output)
 try:
     completed = capture_engine(
         ["bash", str(project / "download-video.sh"), "--mode", "video",
          "--machine-progress", "--output-dir", str(output), "--result-file", str(result),
          hls_url], hls_environment, timeout=100, cancel_observed=observed,
-        cancel_after=lambda: ("/hls/" + missing.name) in media_requests()[before:],
+        cancellation=witness,
     )
 finally:
-    saved.rename(missing)
+    try:
+        witness.restore_fragment(saved, missing)
+    finally:
+        witness.close()
 assert completed.returncode == 143, ("cancellation status", completed.returncode)
 assert observed, "no descendant observed during fragment transfer"
 for pid, start in observed:
