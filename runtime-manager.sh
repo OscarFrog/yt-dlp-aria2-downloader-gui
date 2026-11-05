@@ -662,10 +662,12 @@ read_runtime_link() {
     local path="${root}/${name}"
 
     if [[ -L ${path} ]]; then
-        target=$(readlink -- "${path}") || {
+        # The sentinel preserves trailing newlines through command substitution.
+        target=$(readlink -n -- "${path}" && printf '.') || {
             error "unable to read runtime link: ${path}"
             return 1
         }
+        target=${target%.}
         runtime_target_is_safe "${target}" || {
             error "runtime link has an unsafe target: ${path} -> ${target}"
             return 1
@@ -1581,8 +1583,7 @@ rollback_component() {
         error "no previous ${component} runtime is available."
         return 1
     }
-    previous_target=$(readlink -- "${root}/previous") || return 1
-    runtime_target_is_safe "${previous_target}" || {
+    read_runtime_link "${root}" previous previous_target || {
         error "invalid previous ${component} runtime target."
         return 1
     }
