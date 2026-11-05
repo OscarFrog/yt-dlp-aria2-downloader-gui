@@ -354,7 +354,10 @@ Names or `.part` files alone confer no ownership. Records contain digests, never
 a URL or credential. Admission invalidates the prior checkpoint before launching
 tools and binds it to a private transaction nonce. The shell registers possible
 activation before starting the helper, so cancellation between atomic publication
-and its acknowledgement can safely checkpoint only its own transaction.
+and its acknowledgement can safely checkpoint only its own transaction. Native
+preflight temporarily revokes the binding before inspecting its paths and restores
+it only after success. A collision, interrupted inspection or failed restoration
+cannot turn an unexamined file into resume authority during cleanup.
 Selected-download fields inherit the root metadata when omitted; the same merged
 view supplies planning, classification, disk-space estimation and the resume
 binding. Replay uses selected formats in a private frozen plan without yt-dlp's webpage re-extraction fallback;
