@@ -634,8 +634,26 @@ URLs and replayed HTTP headers are written to private files rather than command
 arguments. aria2 diagnostics pass through byte-oriented, scheme-case-insensitive
 URL redaction, including malformed UTF-8 input. GUI snapshots and Zenity
 diagnostics apply the same case-insensitive masking without changing URL data.
+The stderr boundary of `run_supervised_ytdlp` instead emits only closed,
+constant diagnostics. Neither an apparently safe prefix nor removal of known
+secrets permits external text to pass through. Unsupported URLs, selected HTTP
+errors and unavailable formats receive useful categories; other messages receive
+a generic privacy notice. Categories describe a yt-dlp report, not an
+authenticated fact about the remote server. HTTP reasons, Generic identifiers,
+URLs and arbitrary suffixes never enter the emitted messages.
+The filter is embedded Python in the engine, using the existing Python runtime;
+there is no new installed helper or raw diagnostic log. Lines are limited to
+4096 bytes; output is limited to 64 messages (including a limit notice) and
+16384 bytes per invocation. Parsing retains at most one bounded line; overlong
+lines are discarded through their newline. The filter continues consuming through EOF
+after its emission limit. Producer stdout bypasses the filter byte-for-byte,
+preserving JSON, results and progress. The pipeline captures `PIPESTATUS`
+immediately, prioritizes filter failure and otherwise preserves the producer's
+status. Local phase/status diagnostics and GUI log viewing remain available.
+This boundary covers stderr from supervised yt-dlp calls; it does not sanitize
+structured stdout, personal titles or local paths elsewhere in the application.
 Diagnostic filters ignore cooperative termination signals
-until the producer closes its pipe, preserving its final cancellation messages;
+until the producer closes its pipe, draining its final cancellation output;
 unexpected filter failures remain fatal. Fragmented DASH and admitted non-live HLS,
 unsafe headers, URL user information, unrepresentable formats, and HTTPS on an
 aria2 build that lacks the required safety capability stay on yt-dlp's native

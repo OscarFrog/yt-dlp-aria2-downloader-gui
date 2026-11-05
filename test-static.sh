@@ -4069,7 +4069,8 @@ test_static_cleanup_and_qualification_contracts() {
         prepare_real_tool_fixtures \
         test_real_direct_audio_scenarios \
         test_real_media_validation_mutations \
-        test_real_fragment_routing_and_mutations; do
+        test_real_fragment_routing_and_mutations \
+        test_real_ytdlp_diagnostic_scenarios; do
         assert_file_contains "${SCRIPT_DIR}/tests/real-tools-integration.sh" \
             "${real_tools_phase}() {" \
             "real-tool integration phase ${real_tools_phase}"
@@ -4465,7 +4466,7 @@ test_static_application_contracts() {
         'final media failure exposes a bounded diagnostic reason'
     assert_file_contains "${SCRIPT_DIR}/download-video.sh" \
         'run_supervised_ytdlp() {' \
-        'yt-dlp diagnostics pass through the source-label redactor'
+        'yt-dlp diagnostics pass through the closed privacy boundary'
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         '[REDACTED_SOURCE]' \
         'retained GUI logs apply defense-in-depth source-label redaction'

@@ -331,7 +331,14 @@ Emplacements par défaut (les personnalisations XDG sont prises en charge) :
 
 Les journaux des exécutions réussies sont normalement supprimés. Les journaux
 conservés sont privés, expurgés des URL, limités à 8 Mio et supprimés après
-15 jours lors de la préparation d'une nouvelle session GUI. Les titres et
+15 jours lors de la préparation d'une nouvelle session GUI.
+Pendant la découverte des métadonnées et les téléchargements, stderr de yt-dlp
+est remplacé par des diagnostics contrôlés : URL non prise en charge, certaines
+erreurs HTTP, format indisponible ou avis générique de confidentialité. Ces
+catégories rapportent ce que yt-dlp signale ; elles n'authentifient pas une réponse
+du serveur. Le texte externe libre n'est pas retransmis et les diagnostics excessifs sont
+limités. La phase d'échec, le statut de sortie et **View log** restent disponibles ;
+les résultats structurés et la progression sont inchangés. Les titres et
 chemins locaux peuvent rester personnels : relisez les journaux avant de les
 partager. Ne partagez jamais de cookies, d'en-têtes ou de plans de transfert
 privés. Ne supprimez pas récursivement d'anciens dossiers temporaires sur la

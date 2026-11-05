@@ -2457,6 +2457,9 @@ test_real_fragment_routing_and_mutations() {
 test_real_arte_scenarios() {
     record_phase arte
 }
+test_real_ytdlp_diagnostic_scenarios() {
+    record_phase privacy
+}
 verify_cifs_directory() {
     local role=''
     case $1:$2 in
@@ -2472,7 +2475,7 @@ verify_cifs_directory() {
     return 0
 }
 '''
-    phase_prefix = ["parse", "prepare", "direct", "existing", "mutations", "fragments", "arte"]
+    phase_prefix = ["parse", "prepare", "direct", "existing", "mutations", "fragments", "arte", "privacy"]
 
     def run_main(actual, label, failure):
         trace = root / f"main-{label}.trace"

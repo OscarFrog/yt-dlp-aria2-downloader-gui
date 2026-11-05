@@ -2753,5 +2753,285 @@ printf stopped >"$2/stopped"
         self.assertTrue((self.root / 'term').exists())
 
 
+class YtdlpDiagnosticFixture(unittest.TestCase):
+    """Exercise the actual Bash pipeline; external bytes never enter argv."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='ytdlp-diagnostics-')
+        self.root = Path(self.temp.name)
+        source = Path(os.environ.get('YTDLP_PRIVACY_TEST_SOURCE', PROJECT / 'download-video.sh')).read_text()
+        self.source = source[source.index('run_supervised_ytdlp() {'):source.index('\nremove_recorded_private_aria2_sensitive_file()')]
+        self.wrapper = self.root / 'pipeline.sh'
+        self.wrapper.write_text('''set -uo pipefail
+run_supervised_command() { "$@"; DOWNLOAD_STATUS=$?; }
+''' + self.source + '''
+run_supervised_ytdlp "$@"
+exit "$DOWNLOAD_STATUS"
+''')
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def run_pipeline(self, payload, status=23, wrapper=None, memory_limit=False):
+        import resource
+        private_input = self.root / 'external.bin'
+        private_input.write_bytes(payload)
+        producer = self.root / 'producer.py'
+        producer.write_text('''import os, sys
+from pathlib import Path
+payload = Path(__file__).with_name("external.bin").read_bytes()
+os.write(1, bytes(range(256)) + b"\\nYTDLP_PROGRESS|1|2|3\\n")
+os.write(2, payload)
+sys.exit(int(sys.argv[1]))
+''')
+        def constrain_memory():
+            resource.setrlimit(resource.RLIMIT_AS, (64 * 1024 * 1024,) * 2)
+        return subprocess.run(['bash', str(wrapper or self.wrapper), sys.executable,
+                               str(producer), str(status)], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=15,
+                              preexec_fn=constrain_memory if memory_limit else None)
+
+    def assert_private_result(self, result, status=23):
+        self.assertEqual(result.returncode, status, 'producer status changed')
+        self.assertEqual(result.stdout, bytes(range(256)) + b'\nYTDLP_PROGRESS|1|2|3\n')
+        self.assertNotIn(b'PRIVATE_', result.stderr, 'external diagnostic disclosed a private sentinel')
+        self.assertTrue(result.stderr.startswith(b'[YTDLP_'), 'controlled diagnostic missing')
+        self.assertLessEqual(len(result.stderr), 16384)
+
+class YtdlpDiagnosticTests(YtdlpDiagnosticFixture):
+    def test_closed_categories_unicode_controls_and_unknown_messages(self):
+        cases = [
+            (b'ERROR: Unsupported URL: https://localhost/a?key=PRIVATE_ONE&auth=PRIVATE_TWO', b'[YTDLP_UNSUPPORTED_URL]'),
+            (b'ERROR: [generic] PRIVATE_GENERIC: extraction failed', b'[YTDLP_DIAGNOSTIC]'),
+            (b'ERROR: HTTP Error 403: PRIVATE_REASON', b'(code 403)'),
+            (b'HTTP Error 499: PRIVATE_REASON', b'reported an HTTP error.\n'),
+            (b'Requested format is not available PRIVATE_FORMAT', b'[YTDLP_FORMAT_UNAVAILABLE]'),
+            ('inconnu \u00e9\u6f22\u202e PRIVATE_UNICODE'.encode(), b'[YTDLP_DIAGNOSTIC]'),
+            (b'\xff\xfe PRIVATE_INVALID\x00\r\x1b[31mPRIVATE_ANSI\nPRIVATE_LF', b'[YTDLP_DIAGNOSTIC]'),
+            (b'ordinary seemingly harmless text PRIVATE_UNKNOWN', b'[YTDLP_DIAGNOSTIC]'),
+        ]
+        for payload, category in cases:
+            with self.subTest(category=category):
+                result = self.run_pipeline(payload)
+                self.assert_private_result(result)
+                self.assertIn(category, result.stderr)
+        self.assert_private_result(self.run_pipeline(b'PRIVATE_SUCCESS', status=0), 0)
+
+    def test_line_and_emission_limits_continue_to_eof(self):
+        import resource
+        producer = self.root / 'stream.py'
+        producer.write_text('''import os
+from pathlib import Path
+for _ in range(32768):
+    os.write(2, b"PRIVATE_LONG" + b"x" * 4084)
+os.write(2, b"\\n")
+for _ in range(20000):
+    os.write(2, b"PRIVATE_MANY\\n")
+Path(__file__).with_name("drained").write_text("complete")
+os.write(1, b"complete")
+''')
+        def constrain_memory():
+            resource.setrlimit(resource.RLIMIT_AS, (64 * 1024 * 1024,) * 2)
+        result = subprocess.run(['bash', str(self.wrapper), sys.executable, str(producer)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20,
+                                preexec_fn=constrain_memory)
+        self.assertEqual(result.returncode, 0, 'bounded filter broke the producer pipe')
+        self.assertEqual(result.stdout, b'complete')
+        self.assertTrue((self.root / 'drained').exists())
+        self.assertLessEqual(len(result.stderr), 16384)
+        self.assertLessEqual(len(result.stderr.splitlines()), 64)
+        self.assertIn(b'[YTDLP_DIAGNOSTIC_TRUNCATED]', result.stderr)
+        self.assertIn(b'[YTDLP_DIAGNOSTIC_LIMIT]', result.stderr)
+        self.assertNotIn(b'PRIVATE_', result.stderr, 'long diagnostic disclosed a private sentinel')
+
+    def test_filter_failure_is_fatal_and_never_prints_exception(self):
+        mutant = self.root / 'fault.sh'
+        original = self.wrapper.read_text()
+        needle = 'line = sys.stdin.buffer.readline(line_limit + 1)'
+        self.assertIn(needle, original)
+        mutant.write_text(original.replace(needle, 'raise RuntimeError("PRIVATE_EXCEPTION")'))
+        for producer_status in (0, 23):
+            result = self.run_pipeline(b'PRIVATE_INPUT\n', producer_status, mutant)
+            self.assertEqual(result.returncode, 70, 'filter failure lost priority')
+            self.assertIn(b'[YTDLP_DIAGNOSTIC_FILTER_FAILED]', result.stderr)
+            self.assertNotIn(b'PRIVATE_', result.stderr, 'filter traceback disclosed private data')
+            self.assertNotIn(b'Traceback', result.stderr)
+
+    def test_descendant_holding_stderr_delays_completion_until_eof(self):
+        child = self.root / 'descendant.py'
+        child.write_text('''import os, time
+from pathlib import Path
+root = Path(__file__).parent
+if os.fork():
+    os.write(2, b"PRIVATE_PARENT\\n")
+    (root / "producer-exited").write_text("yes")
+    os._exit(23)
+os.close(1)
+(root / "child-ready").write_text("yes")
+while not (root / "release").exists():
+    time.sleep(.01)
+os.write(2, b"PRIVATE_DESCENDANT\\n")
+os._exit(0)
+''')
+        # The independent parent marker proves early producer exit; the child
+        # retains only stderr, so stdout capture cannot create a false wait.
+        p = subprocess.Popen(['bash', str(self.wrapper), sys.executable, str(child)],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while (not all((self.root / name).exists() for name in ('child-ready', 'producer-exited'))
+                   and time.monotonic() < deadline):
+                time.sleep(.01)
+            self.assertTrue((self.root / 'child-ready').exists(), 'descendant did not start')
+            self.assertTrue((self.root / 'producer-exited').exists())
+            # Observe after both sides of the fork are ready; a process that has
+            # merely not been scheduled yet is not evidence of waiting for EOF.
+            observation_end = time.monotonic() + .2
+            while time.monotonic() < observation_end:
+                self.assertIsNone(p.poll(), 'pipeline returned before descendant EOF')
+                time.sleep(.01)
+            (self.root / 'release').touch()
+            out, err = p.communicate(timeout=5)
+            self.assertEqual(p.returncode, 23)
+            self.assertEqual(out, b'')
+            self.assertIn(b'[YTDLP_DIAGNOSTIC]', err)
+            self.assertNotIn(b'PRIVATE_', err)
+        finally:
+            (self.root / 'release').touch()
+            if p.poll() is None:
+                os.killpg(p.pid, signal.SIGKILL)
+            p.communicate(timeout=5)
+
+    def test_group_signals_preserve_final_drain_and_producer_status(self):
+        producer = self.root / 'signal-producer.py'
+        producer.write_text('''import os, signal, sys, time
+from pathlib import Path
+root = Path(__file__).parent
+def stop(number, frame):
+    for _ in range(10000):
+        os.write(2, b"PRIVATE_SIGNAL\\n")
+    (root / "handled").write_text(str(number))
+    sys.exit(128 + number)
+for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(number, stop)
+(root / "ready").write_text("yes")
+while True:
+    time.sleep(.01)
+''')
+        engine_source = self.root / 'engine-functions.sh'
+        engine_source.write_text((PROJECT / 'download-video.sh').read_text().rsplit('\nmain "$@"', 1)[0])
+        supervised = self.root / 'supervised.sh'
+        supervised.write_text('''source "$1"
+TEMP_DIR=$2
+OUTPUT_LOCK_ROOT=$2
+REUSE_CURRENT_SESSION=false
+shift 2
+trap cleanup EXIT
+trap 'request_shutdown HUP 129' HUP
+trap 'request_shutdown INT 130' INT
+trap 'request_shutdown TERM 143' TERM
+run_supervised_ytdlp "$@"
+exit "$DOWNLOAD_STATUS"
+''')
+        for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=number):
+                for name in ('ready', 'handled'):
+                    (self.root / name).unlink(missing_ok=True)
+                p = subprocess.Popen(['bash', str(supervised), str(engine_source), str(self.root),
+                                      sys.executable, str(producer)], stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, start_new_session=True)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not (self.root / 'ready').exists() and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue((self.root / 'ready').exists())
+                    p.send_signal(number)
+                    out, err = p.communicate(timeout=8)
+                    self.assertEqual(p.returncode, 128 + number, 'signal status changed')
+                    self.assertEqual((self.root / 'handled').read_text(), str(number))
+                    self.assertEqual(out, b'')
+                    self.assertIn(b'[YTDLP_DIAGNOSTIC_LIMIT]', err)
+                    self.assertNotIn(b'PRIVATE_', err)
+                finally:
+                    if p.poll() is None:
+                        os.killpg(p.pid, signal.SIGKILL)
+                    p.communicate(timeout=5)
+
+
+class YtdlpRealDiagnosticTests(YtdlpDiagnosticFixture):
+    """Real loopback witnesses, explicitly required by the real-tool suite."""
+
+    def test_real_unsupported_generic_and_http_reason_witnesses(self):
+        import http.server
+        import shutil
+        import threading
+        # The default suite also runs under the mock-signals PATH. Only the
+        # real-tool entrypoint (or explicit focused invocation) admits engines.
+        if not any(argument == 'YtdlpRealDiagnosticTests'
+                   or argument.startswith('YtdlpRealDiagnosticTests.')
+                   for argument in sys.argv[1:]):
+            self.skipTest('real witnesses require explicit YtdlpRealDiagnosticTests selection')
+        executable = shutil.which('yt-dlp')
+        self.assertIsNotNone(executable, 'real qualification requires yt-dlp')
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith('/http-reason'):
+                    self.send_response(403, 'PRIVATE_HTTP_REASON')
+                    self.end_headers()
+                elif self.path == '/PRIVATE_GENERIC_ID':
+                    self.send_response(404, 'Not Found')
+                    self.end_headers()
+                else:
+                    data = b'<html><title>synthetic fixture</title><body>No media</body></html>'
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/html')
+                    self.send_header('Content-Length', str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = 'http://127.0.0.1:' + str(server.server_port)
+            cases = [
+                (base + '/unsupported?key=PRIVATE_QUERY_ONE&auth=PRIVATE_QUERY_TWO',
+                 (b'PRIVATE_QUERY_ONE', b'PRIVATE_QUERY_TWO'), b'[YTDLP_UNSUPPORTED_URL]'),
+                (base + '/PRIVATE_GENERIC_ID', (b'PRIVATE_GENERIC_ID',), b'[YTDLP_HTTP_ERROR]'),
+                (base + '/http-reason', (b'PRIVATE_HTTP_REASON',), b'[YTDLP_HTTP_ERROR]'),
+            ]
+            for url, sentinels, category in cases:
+                with self.subTest(category=category):
+                    batch = self.root / 'urls'
+                    batch.write_text(url + '\n')
+                    command = [executable, '--ignore-config', '--no-plugin-dirs', '--no-cache-dir', '--proxy', '',
+                               '--no-progress', '--skip-download', '--socket-timeout', '3',
+                               '--retries', '0', '--extractor-retries', '0', '--batch-file', str(batch)]
+                    raw = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+                    self.assertNotEqual(raw.returncode, 0, 'real witness unexpectedly succeeded')
+                    for sentinel in sentinels:
+                        self.assertTrue(sentinel in raw.stderr, 'real witness did not reproduce the leak')
+                    if sentinels == (b'PRIVATE_GENERIC_ID',):
+                        self.assertTrue(any(b'PRIVATE_GENERIC_ID' in line and b'[generic]' in line
+                                            and b'http://' not in line and b'https://' not in line
+                                            for line in raw.stderr.splitlines()),
+                                        'Generic witness lacks a schemeless private ID')
+                    result = subprocess.run(['bash', str(self.wrapper), *command], stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, timeout=15)
+                    self.assertEqual(result.returncode, raw.returncode)
+                    self.assertEqual(result.stdout, raw.stdout)
+                    self.assertTrue(all(value not in result.stderr for value in sentinels),
+                                    'real yt-dlp stderr disclosed private sentinel')
+                    self.assertIn(category, result.stderr)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(5)
+
+
 if __name__ == '__main__':
     unittest.main()

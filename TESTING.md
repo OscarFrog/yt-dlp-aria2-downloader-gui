@@ -201,6 +201,35 @@ detect a missing explanation, a false success or recovery claim, and disclosure
 of private data. A mutant's failure counts only when the intended assertion
 fires; syntax failures or an unavailable fixture do not qualify the oracle.
 
+The supervised yt-dlp stderr contract intentionally withholds free-form external
+text. Recognized errors yield constant categories attributed to yt-dlp; unknown
+text yields a controlled privacy diagnostic. GUI failure tests must therefore
+assert a useful controlled diagnostic rather than a verbatim mock sentence.
+They retain the exact failure status and phase, private retained-log identity,
+retention/footer checks, Close and View log behavior, correct viewer target,
+absence of private sentinels and absence of success. A mutation that removes the
+useful diagnostic must fail the corresponding assertion. Do not add production
+exceptions for fixture text. Structured stdout and progress retain their separate
+byte/protocol contracts.
+
+Focused boundary checks run through the existing process-supervision suite:
+
+```bash
+python3 -B tests/process-supervision-integration.py YtdlpDiagnosticTests YtdlpRealDiagnosticTests
+./tests/mock-integration.sh --group gui-state
+./tests/mock-integration.sh --group runtime
+./tests/real-tools-integration.sh
+```
+
+The synthetic checks cover bounded lines/output under a memory ceiling, continued
+drainage, descendant-held stderr, filter failure, exact producer status/stdout,
+Unicode and control bytes, and HUP/INT/TERM through the engine supervisor.
+The real-tool suite requires the loopback Unsupported URL, Generic identifier
+and HTTP reason witnesses for its selected yt-dlp binary, including each pinned
+CI matrix version. Raw witness output is inspected in memory only; regression
+reports must not copy it. These checks qualify supervised stderr, not every
+application output channel or arbitrary third-party executable behavior.
+
 ## Workflow syntax qualification
 
 For workflow edits, run the explicit shared validator before full validation:
