@@ -2948,7 +2948,7 @@ exit "$DOWNLOAD_STATUS"
                     p.send_signal(number)
                     out, err = p.communicate(timeout=8)
                     self.assertEqual(p.returncode, 128 + number, 'signal status changed')
-                    self.assertEqual((self.root / 'handled').read_text(), str(number))
+                    self.assertEqual((self.root / 'handled').read_text(), str(int(number)))
                     self.assertEqual(out, b'')
                     self.assertIn(b'[YTDLP_DIAGNOSTIC_LIMIT]', err)
                     self.assertNotIn(b'PRIVATE_', err)
@@ -2980,8 +2980,17 @@ class YtdlpRealDiagnosticTests(YtdlpDiagnosticFixture):
                     self.send_response(403, 'PRIVATE_HTTP_REASON')
                     self.end_headers()
                 elif self.path == '/PRIVATE_GENERIC_ID':
-                    self.send_response(404, 'Not Found')
+                    # A valid empty manifest reaches Generic's no-format error
+                    # with its explicit ID on every supported yt-dlp version.
+                    # HTTP errors do not consistently include that ID.
+                    data = (b'<?xml version="1.0"?>'
+                            b'<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static">'
+                            b'<Period/></MPD>')
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/dash+xml')
+                    self.send_header('Content-Length', str(len(data)))
                     self.end_headers()
+                    self.wfile.write(data)
                 else:
                     data = b'<html><title>synthetic fixture</title><body>No media</body></html>'
                     self.send_response(200)
@@ -2999,13 +3008,13 @@ class YtdlpRealDiagnosticTests(YtdlpDiagnosticFixture):
         try:
             base = 'http://127.0.0.1:' + str(server.server_port)
             cases = [
-                (base + '/unsupported?key=PRIVATE_QUERY_ONE&auth=PRIVATE_QUERY_TWO',
+                ('unsupported-url', base + '/unsupported?key=PRIVATE_QUERY_ONE&auth=PRIVATE_QUERY_TWO',
                  (b'PRIVATE_QUERY_ONE', b'PRIVATE_QUERY_TWO'), b'[YTDLP_UNSUPPORTED_URL]'),
-                (base + '/PRIVATE_GENERIC_ID', (b'PRIVATE_GENERIC_ID',), b'[YTDLP_HTTP_ERROR]'),
-                (base + '/http-reason', (b'PRIVATE_HTTP_REASON',), b'[YTDLP_HTTP_ERROR]'),
+                ('generic-id', base + '/PRIVATE_GENERIC_ID', (b'PRIVATE_GENERIC_ID',), b'[YTDLP_DIAGNOSTIC]'),
+                ('http-reason', base + '/http-reason', (b'PRIVATE_HTTP_REASON',), b'[YTDLP_HTTP_ERROR]'),
             ]
-            for url, sentinels, category in cases:
-                with self.subTest(category=category):
+            for witness, url, sentinels, category in cases:
+                with self.subTest(witness=witness):
                     batch = self.root / 'urls'
                     batch.write_text(url + '\n')
                     command = [executable, '--ignore-config', '--no-plugin-dirs', '--no-cache-dir', '--proxy', '',
@@ -3016,9 +3025,9 @@ class YtdlpRealDiagnosticTests(YtdlpDiagnosticFixture):
                     for sentinel in sentinels:
                         self.assertTrue(sentinel in raw.stderr, 'real witness did not reproduce the leak')
                     if sentinels == (b'PRIVATE_GENERIC_ID',):
-                        self.assertTrue(any(b'PRIVATE_GENERIC_ID' in line and b'[generic]' in line
-                                            and b'http://' not in line and b'https://' not in line
-                                            for line in raw.stderr.splitlines()),
+                        # This exact prefix proves the ID is outside any URL;
+                        # a separate bug-report/help URL may follow the message.
+                        self.assertTrue(b'[generic] PRIVATE_GENERIC_ID: No video formats found!' in raw.stderr,
                                         'Generic witness lacks a schemeless private ID')
                     result = subprocess.run(['bash', str(self.wrapper), *command], stdout=subprocess.PIPE,
                                             stderr=subprocess.PIPE, timeout=15)
