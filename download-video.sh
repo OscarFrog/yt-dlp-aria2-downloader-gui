@@ -2135,40 +2135,110 @@ run_supervised_command() {
     return 0
 }
 
-# Preserve yt-dlp stdout byte-for-byte for JSON/progress consumers while
-# filtering a forbidden external source label from stderr before it can reach
-# a terminal or GUI diagnostic log.
+# Preserve stdout byte-for-byte; only constant categories may cross the external
+# stderr boundary. Categories describe yt-dlp reports, not authenticated causes.
 run_supervised_ytdlp() {
     (($# > 0)) || return 2
+    local diagnostic_filter=''
+
+    # Code, never external text or secret values, is passed to the interpreter.
+    # Keep this stdlib-only filter in the installed engine so every installation
+    # uses the same boundary without another helper/path admission contract.
+    diagnostic_filter=$(
+        cat <<'PY_YTDLP_DIAGNOSTICS'
+import os
+import re
+import sys
+
+try:
+    line_limit = 4096
+    output_limit = 16384
+    message_limit = 64
+    emitted = 0
+    output_size = 0
+    limited = False
+    discarding = False
+    limit_message = b"[YTDLP_DIAGNOSTIC_LIMIT] yt-dlp diagnostic output limited for privacy.\n"
+
+    def emit(message):
+        global emitted, output_size, limited
+        if limited:
+            return
+        if emitted >= message_limit - 1 or output_size + len(message) + len(limit_message) > output_limit:
+            message = limit_message
+            limited = True
+        sys.stdout.buffer.write(message)
+        sys.stdout.buffer.flush()
+        emitted += 1
+        output_size += len(message)
+
+    def classify(line):
+        folded = line.lower()
+        if b"unsupported url" in folded:
+            return b"[YTDLP_UNSUPPORTED_URL] yt-dlp reported an unsupported URL.\n"
+        if b"requested format is not available" in folded:
+            return b"[YTDLP_FORMAT_UNAVAILABLE] yt-dlp reported that the requested format is unavailable.\n"
+        if b"http error" in folded:
+            match = re.search(rb"http error (400|401|403|404|408|410|429|500|502|503|504)(?![0-9])", folded)
+            # This finite lookup emits constants, never a matched text slice.
+            for code in (b"400", b"401", b"403", b"404", b"408", b"410", b"429", b"500", b"502", b"503", b"504"):
+                if match is not None and match[1] == code:
+                    return b"[YTDLP_HTTP_ERROR] yt-dlp reported an HTTP error (code " + code + b").\n"
+            return b"[YTDLP_HTTP_ERROR] yt-dlp reported an HTTP error.\n"
+        return b"[YTDLP_DIAGNOSTIC] yt-dlp reported an external diagnostic; details withheld for privacy.\n"
+
+    while True:
+        # Bounded reads also drain an unterminated line or unlimited chatter.
+        # After the emission ceiling there is no parsing, timeout or early EOF.
+        if limited:
+            if not sys.stdin.buffer.read(4096):
+                break
+            continue
+        line = sys.stdin.buffer.readline(line_limit + 1)
+        if not line:
+            break
+        terminated = line.endswith(b"\n")
+        if discarding:
+            discarding = not terminated
+            continue
+        if len(line) > line_limit:
+            emit(b"[YTDLP_DIAGNOSTIC_TRUNCATED] yt-dlp diagnostic line exceeded the size limit; details withheld for privacy.\n")
+            discarding = not terminated
+        else:
+            emit(classify(line))
+except BaseException:
+    # Exceptions may contain external bytes. The supervising shell reports a
+    # constant failure after collecting both statuses; no traceback is safe.
+    os._exit(70)
+PY_YTDLP_DIAGNOSTICS
+    )
 
     # The quoted program is intentionally evaluated by the supervised shell.
     # shellcheck disable=SC2016
     run_supervised_command bash -c '
         set -o pipefail
         trap ":" HUP INT TERM
-        forbidden_source_name=$(printf "\170\150\141\155\163\164\145\162")
+        diagnostic_filter=$1
+        shift
         exec 3>&1
         {
             "$@" 2>&1 1>&3 3>&-
         } | (
-            # The complete process group receives cancellation. Keep the
-            # redactor alive until the producer closes its pipe so the producer
-            # cannot lose its TERM handler to a concurrent SIGPIPE.
+            # Ignore group cancellation until producer and descendants close
+            # stderr, avoiding SIGPIPE in the producer cancellation handler.
             trap "" HUP INT TERM
-            LC_ALL=C exec sed -u -E \
-                "s/${forbidden_source_name}/[REDACTED_SOURCE]/gI"
+            exec python3 -I -S -u -c "$diagnostic_filter" 2>/dev/null
         ) >&2
         pipeline_statuses=("${PIPESTATUS[@]}")
         producer_status=${pipeline_statuses[0]:-125}
         redactor_status=${pipeline_statuses[1]:-125}
         exec 3>&-
-        # Never turn a broken diagnostic redaction boundary into the
-        # producer status. Otherwise preserve the exact yt-dlp result.
         if ((redactor_status != 0)); then
+            printf "%s\n" "[YTDLP_DIAGNOSTIC_FILTER_FAILED] Cannot safely process yt-dlp diagnostics." >&2
             exit "${redactor_status}"
         fi
         exit "${producer_status}"
-    ' bash "$@"
+    ' bash "${diagnostic_filter}" "$@"
 }
 
 remove_recorded_private_aria2_sensitive_file() {

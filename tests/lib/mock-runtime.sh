@@ -114,8 +114,8 @@ test_mock_runtime_worker_failure() {
         -- 'https://example.com/watch?v=redacted-external-diagnostic'
     assert_text_not_contains "${ASSERT_OUTPUT}" "${forbidden_source_name}" \
         'forbidden external source label is absent from engine diagnostics'
-    assert_text_contains "${ASSERT_OUTPUT}" '[REDACTED_SOURCE]' \
-        'forbidden external source label is replaced deterministically'
+    assert_text_contains "${ASSERT_OUTPUT}" '[YTDLP_DIAGNOSTIC]' \
+        'external diagnostic is replaced by a controlled privacy category'
     assert_text_contains "${ASSERT_OUTPUT}" '[ENGINE_PLAN] Format planning failed.' \
         'planning failure identifies its operation'
     assert_text_contains "${ASSERT_OUTPUT}" \

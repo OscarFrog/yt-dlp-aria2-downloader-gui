@@ -786,9 +786,114 @@ EOF_PRUNE_METADATA
     done
 }
 
+# The engine may summarize external stderr, but a failed GUI run must retain
+# both that controlled diagnostic and its local phase/status context.
+assert_gui_ytdlp_failure_log() {
+    local retained_log=$1
+    assert_file_contains "${retained_log}" \
+        '[YTDLP_DIAGNOSTIC] yt-dlp reported an external diagnostic; details withheld for privacy.' \
+        'retained failure log keeps a useful controlled yt-dlp diagnostic'
+    assert_file_contains "${retained_log}" '[ENGINE_DOWNLOAD]' \
+        'retained failure log keeps the local failure phase'
+    assert_file_contains "${retained_log}" 'Download failed with exit code 7.' \
+        'retained failure log keeps the exact producer status'
+}
+
+# Exercise both error-dialog choices and a filter mutation which drains its
+# input without emitting diagnostics. The mutation must fail the same useful
+# diagnostic oracle while the real GUI still returns the producer status.
+qualify_gui_ytdlp_failure_diagnostics() {
+    local action question_status drop_diagnostic state_dir log_dir retained_log
+    local question_log viewer_log viewer_capture info_log progress_capture
+    local secret log_owner
+    local -a retained_logs viewer_arguments
+    for action in close view silent-filter; do
+        question_status=1
+        drop_diagnostic=0
+        [[ ${action} != view ]] || question_status=0
+        [[ ${action} != silent-filter ]] || drop_diagnostic=1
+        state_dir="${TEST_ROOT}/ytdlp-diagnostic-${action}"
+        log_dir="${state_dir}/yt-dlp-aria2-downloader"
+        question_log="${TEST_ROOT}/ytdlp-${action}-question.bin"
+        viewer_log="${TEST_ROOT}/ytdlp-${action}-viewer.bin"
+        viewer_capture="${TEST_ROOT}/ytdlp-${action}-viewed.txt"
+        info_log="${TEST_ROOT}/ytdlp-${action}-info.bin"
+        progress_capture="${TEST_ROOT}/ytdlp-${action}-progress.txt"
+        prepare_argument_log "failed-download-${action}"
+        assert_status 7 "failed GUI download status survives ${action}" \
+            env XDG_STATE_HOME="${state_dir}" \
+            MOCK_PLAN_PROTOCOL='m3u8_native' MOCK_YTDLP_EXIT_STATUS=7 \
+            MOCK_PRIVATE_YTDLP_DIAGNOSTIC=1 \
+            MOCK_YTDLP_DIAGNOSTIC_DROP="${drop_diagnostic}" \
+            MOCK_QUESTION_ARGS_LOG="${question_log}" \
+            MOCK_QUESTION_STATUS="${question_status}" \
+            MOCK_TEXT_INFO_ARGS_LOG="${viewer_log}" \
+            MOCK_TEXT_INFO_CONTENT_CAPTURE="${viewer_capture}" \
+            MOCK_INFO_ARGS_LOG="${info_log}" \
+            MOCK_PROGRESS_CAPTURE="${progress_capture}" \
+            "${GUI_UNDER_TEST}"
+        assert_diagnostic_question "${question_log}" \
+            'The download failed with status 7.' "downloader-failure ${action}"
+        assert_file_not_contains "${question_log}" 'The download is complete.' \
+            'failed GUI download never offers successful completion'
+        [[ ! -s ${info_log} ]] || fail 'Failed download displayed a success info dialog.'
+        assert_file_not_contains "${progress_capture}" '# Completed' \
+            'failed GUI download never reports completed progress'
+        shopt -s nullglob
+        retained_logs=("${log_dir}"/download-*.log)
+        shopt -u nullglob
+        assert_equals 1 "${#retained_logs[@]}" \
+            "failed GUI download retains exactly its own ${action} log"
+        retained_log=${retained_logs[0]}
+        [[ -f ${retained_log} && ! -L ${retained_log} ]] \
+            || fail 'Failed GUI download retained an unsafe log type.'
+        assert_path_mode "${log_dir}" 700 'private retained-log directory'
+        assert_path_mode "${retained_log}" 600 'private retained failure log'
+        log_owner=$(stat -c '%u' -- "${retained_log}")
+        assert_equals "${EUID}" "${log_owner}" \
+            'retained failure log belongs to the current user'
+        assert_retained_log_identity_footer "${retained_log}" \
+            "retained downloader-failure ${action}"
+        assert_file_not_contains "${retained_log}" 'Download completed successfully.' \
+            'retained failure log never claims successful completion'
+        assert_no_retained_log_staging "${log_dir}" "downloader-failure ${action}"
+        for secret in GUI_PRIVATE_GENERIC GUI_PRIVATE_URL GUI_PRIVATE_KEY GUI_PRIVATE_REASON; do
+            assert_file_not_contains "${retained_log}" "${secret}" \
+                'retained failure log excludes private external diagnostics'
+            assert_file_not_contains "${question_log}" "${secret}" \
+                'failure dialog excludes private external diagnostics'
+            assert_file_not_contains "${progress_capture}" "${secret}" \
+                'progress excludes private external diagnostics'
+        done
+        if [[ ${action} == silent-filter ]]; then
+            assert_status 1 'silent filter mutation fails the useful diagnostic oracle' \
+                assert_gui_ytdlp_failure_log "${retained_log}"
+            assert_text_contains "${ASSERT_OUTPUT}" \
+                'retained failure log keeps a useful controlled yt-dlp diagnostic' \
+                'silent filter is rejected for the intended missing diagnostic'
+        else
+            assert_gui_ytdlp_failure_log "${retained_log}"
+        fi
+        if [[ ${action} == view ]]; then
+            # shellcheck disable=SC2034 # Read through nameref assertion helpers.
+            viewer_arguments=()
+            read_arguments "${viewer_log}" viewer_arguments
+            assert_array_contains viewer_arguments '--text-info' 'View log opens the viewer'
+            assert_array_contains viewer_arguments "--filename=${retained_log}" \
+                'View log opens exactly the current retained failure log'
+            assert_array_contains viewer_arguments '--ok-label=Close' 'viewer Close action'
+            cmp -s -- "${retained_log}" "${viewer_capture}" \
+                || fail 'The viewer did not read the retained failure-log inode contents.'
+        else
+            [[ ! -s ${viewer_log} && ! -e ${viewer_capture} ]] \
+                || fail 'Close unexpectedly opened the failure log.'
+        fi
+    done
+}
+
 test_mock_gui_diagnostic_logs() {
     local boundary_log_found boundary_question_log boundary_text_info_log
-    local failure_question_log failure_record_found final_probe_question_log
+    local final_probe_question_log
     local final_result_bundle final_result_question_log final_result_text_info_log
     local inconsistent_question_log inconsistent_text_info_log log_dir log_mode
     local log_record_found log_size logs_after logs_before outside_question_log
@@ -858,40 +963,7 @@ test_mock_gui_diagnostic_logs() {
     rm -f -- "${outside_result_path}"
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
 
-    logs_before=$(count_logs)
-    prepare_argument_log 'failed-download'
-    failure_question_log="${TEST_ROOT}/failed-download-question.bin"
-    rm -f -- "${failure_question_log}"
-    assert_status 7 'failed GUI download status is propagated' \
-        env MOCK_PLAN_PROTOCOL='m3u8_native' \
-        MOCK_YTDLP_EXIT_STATUS=7 \
-        MOCK_QUESTION_ARGS_LOG="${failure_question_log}" \
-        "${GUI_UNDER_TEST}"
-    assert_diagnostic_question "${failure_question_log}" \
-        'The download failed with status 7.' \
-        'downloader-failure diagnostic'
-    assert_file_contains "${failure_question_log}" \
-        'Select View log to inspect the sanitized diagnostic.' \
-        'download failure identifies its sanitized diagnostic action'
-    logs_after=$(count_logs)
-    assert_equals "$((logs_before + 1))" "${logs_after}" \
-        'a failed download retains one new log'
-    shopt -s nullglob
-    failed_logs=("${log_dir}"/download-*.log)
-    shopt -u nullglob
-    failure_record_found=false
-    for retained_log in "${failed_logs[@]}"; do
-        if grep -Fq -- 'Simulated yt-dlp failure.' "${retained_log}"; then
-            failure_record_found=true
-            break
-        fi
-    done
-    [[ ${failure_record_found} == true ]] \
-        || fail 'No retained log contains the simulated failure.'
-    assert_retained_log_identity_footer "${retained_log}" \
-        'ordinary retained diagnostic'
-    assert_no_retained_log_staging "${log_dir}" \
-        'ordinary failed GUI download'
+    qualify_gui_ytdlp_failure_diagnostics
 
     logs_before=$(count_logs)
     prepare_argument_log 'retained-log-boundary-redaction'

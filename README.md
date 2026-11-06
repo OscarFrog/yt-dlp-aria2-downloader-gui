@@ -318,6 +318,12 @@ Default locations (XDG overrides are supported):
 
 Successful-run logs are normally removed. Retained logs are private, URL-redacted,
 limited to 8 MiB and removed after 15 days when a new GUI session is prepared.
+During metadata discovery and downloads, yt-dlp stderr is replaced by controlled
+diagnostics: unsupported URL, selected HTTP errors, unavailable format, or a
+generic privacy notice. These categories report what yt-dlp says; they do not
+authenticate a server response. Free-form external text is withheld, and excessive
+diagnostics are limited. The failure phase, exit status and **View log** remain
+available; structured results and progress are unchanged.
 Titles and local paths can still be personal: review logs before sharing them.
 Never share cookies, headers or private transfer plans. Do not recursively delete
 old temporary directories just because their names look familiar.

@@ -1680,6 +1680,10 @@ test_real_arte_scenarios() {
     python3 -I -B "${PROJECT_DIR}/tests/art-media-integration.py" --real-tools
 }
 
+test_real_ytdlp_diagnostic_scenarios() {
+    python3 -I -B "${PROJECT_DIR}/tests/process-supervision-integration.py" YtdlpRealDiagnosticTests
+}
+
 main() {
     trap cleanup EXIT
     trap 'exit 129' HUP
@@ -1693,6 +1697,7 @@ main() {
     test_real_media_validation_mutations
     test_real_fragment_routing_and_mutations
     test_real_arte_scenarios
+    test_real_ytdlp_diagnostic_scenarios
     if [[ -n ${NETWORK_DESTINATION} ]]; then
         verify_cifs_directory "${NETWORK_DESTINATION}" "${NETWORK_DESTINATION_FD}"
         verify_cifs_directory "${MEDIA_ROOT}" "${NETWORK_MEDIA_FD}"

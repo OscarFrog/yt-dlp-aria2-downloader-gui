@@ -800,6 +800,12 @@ if [[ ${MOCK_YTDLP_EXIT_STATUS:-0} != 0 ]]; then
         printf '%s\n' \
             'https://example.invalid/private?token=UNSANITIZED_DIAGNOSTIC_SECRET'
     fi
+    if [[ ${MOCK_PRIVATE_YTDLP_DIAGNOSTIC:-0} == 1 ]]; then
+        printf '%s\n' \
+            'ERROR: [generic] GUI_PRIVATE_GENERIC: unexpected diagnostic' \
+            'ERROR: Unsupported URL: https://example.invalid/?token=GUI_PRIVATE_URL&key=GUI_PRIVATE_KEY' \
+            'ERROR: HTTP Error 403: GUI_PRIVATE_REASON' >&2
+    fi
     printf 'Simulated yt-dlp failure.\n' >&2
     exit "${MOCK_YTDLP_EXIT_STATUS}"
 fi
@@ -1742,6 +1748,21 @@ EOF_ZENITY
     cat >"${MOCK_BIN}/python3" <<'EOF_NETWORK_PYTHON'
 #!/usr/bin/env bash
 set -euo pipefail
+
+# The injected failure/drop targets only the closed yt-dlp diagnostic filter.
+# Other Python helpers and their failure contracts remain intact.
+if [[ ${1:-} == -I && ${2:-} == -S && ${3:-} == -u && ${4:-} == -c &&
+    ${5:-} == *'[YTDLP_DIAGNOSTIC]'* ]]; then
+    if [[ ${MOCK_PIPELINE_REDACTOR_FAILURE:-0} == 1 ]]; then
+        exit 75
+    fi
+    if [[ ${MOCK_YTDLP_DIAGNOSTIC_DROP:-0} == 1 ]]; then
+        program=$5
+        [[ ${program} == *'sys.stdout.buffer.write(message)'* ]] || exit 98
+        program=${program//sys.stdout.buffer.write(message)/pass}
+        exec /usr/bin/python3 -I -S -u -c "${program}"
+    fi
+fi
 
 if [[ ${MOCK_NETWORK_PERMISSIONS:-0} == 1 &&
     ${1##*/} == private-aria2-plan.py && ${2:-} == media-local-safe ]]; then
