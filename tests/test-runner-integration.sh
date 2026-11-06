@@ -2569,6 +2569,8 @@ TEST_ROOT=$2
 MEDIA_ROOT=$3
 PORT=12345
 SIMULATE_NETWORK=false
+# This early-phase oracle starts no HTTP server and never uses its identity.
+SERVER_PID=0
 '''
 
 with tempfile.TemporaryDirectory(prefix="real-tool-optimization-") as directory:
@@ -2581,17 +2583,22 @@ with tempfile.TemporaryDirectory(prefix="real-tool-optimization-") as directory:
         project.mkdir()
         media = case / "media"
         media.mkdir()
-        # The extracted qualification constructs its complete scenario matrix
-        # before running the first case; only file existence is needed here.
+        # The extracted qualification needs only inert DASH and HLS paths
+        # for this deliberately invalid engine.
         dash = case / "web" / "dash"
         dash.mkdir(parents=True)
         for index in (0, 1):
             (dash / f"init-stream{index}.m4s").touch()
             (dash / f"chunk-stream{index}-00001.m4s").touch()
+        hls = case / "web" / "hls"
+        hls.mkdir(parents=True)
+        for index in range(3):
+            (hls / f"segment-{index:03d}.ts").touch()
         (project / "download-video.sh").write_text(engine_source, encoding="ascii")
-        # This oracle deliberately uses an invalid engine and inert media. The
-        # unisolated mutant reaches later native-witness construction after its
-        # assertions disappear; that must not acquire a real FFmpeg dependency.
+        # The unisolated mutant must cross the repeated-output assertions and
+        # reach this first encoder. Its fixed failure bounds that proof before
+        # later HLS witnesses, whose live-process contract this inert engine
+        # cannot satisfy. No real FFmpeg dependency is needed by this oracle.
         binaries = case / "bin"
         binaries.mkdir()
         encoder = binaries / "ffmpeg"
@@ -2600,6 +2607,8 @@ set -euo pipefail
 [[ ${!#} == "${OPTIMIZATION_TEST_ROOT}/media/"* ]] || exit 99
 printf 'inert optimization witness\\n' >"${!#}"
 printf 'generated\\n' >>"${OPTIMIZATION_TEST_ROOT}/encoder-calls"
+printf '%s\\n' 'OPTIMIZATION_ENCODER_REACHED' >&2
+exit 86
 ''', encoding="ascii")
         encoder.chmod(0o700)
         environment = dict(os.environ, PYTHONOPTIMIZE="1",
@@ -2627,7 +2636,12 @@ printf 'generated\\n' >>"${OPTIMIZATION_TEST_ROOT}/encoder-calls"
     try:
         check(mutant, "without-isolation")
     except AssertionError as error:
-        if "status=0\nReal direct-two-streams repetition and metadata change preserve" not in str(error):
+        diagnostic = str(error)
+        if ("status=1\nReal direct-two-streams repetition and metadata change preserve" not in diagnostic
+                or "OPTIMIZATION_ENCODER_REACHED" not in diagnostic
+                or "subprocess.CalledProcessError:" not in diagnostic
+                or "returned non-zero exit status 86" not in diagnostic
+                or (root / "without-isolation" / "encoder-calls").read_text() != "generated\n"):
             raise AssertionError("isolation negative control failed for an unrelated reason") from error
     else:
         raise AssertionError("optimization regression accepted removal of interpreter isolation")
@@ -3149,7 +3163,7 @@ initial = [
     "test_no_network_require",
 ]
 admission = ["test_exact_active_runtime_admission", "test_deno_checksum_before_extraction"]
-rollback = ["test_rollback_candidate_admission"]
+rollback = ["test_runtime_link_exact_targets", "test_rollback_candidate_admission"]
 recovery = ["test_structurally_missing_active_recovery", "test_missing_old_activation_journal"]
 invalid_active = ["test_invalid_active_runtime_recovery"]
 identity = ["test_cached_runtime_file_identity"]
@@ -3161,7 +3175,7 @@ expected_all = (initial + admission + rollback + recovery + invalid_active
 groups = {"validation": initial + admission + invalid_active,
           "rollback-admission": rollback, "recovery": recovery,
           "cache-identity": identity, "transactions": transactions}
-assert len(expected_all) == len(set(expected_all)) == 25
+assert len(expected_all) == len(set(expected_all)) == 26
 assert source.endswith('main "$@"\n')
 # Replace only test bodies at the final call site. Execute the real argument
 # parser, private initialization, dispatch and cleanup, with inert phases.
@@ -3177,7 +3191,8 @@ hardening_dispatch_record() {
         printf '%s\n' '--update' >"${HOME_DIR}/.config/yt-dlp/config"
     fi
     case $1 in
-        test_exact_active_runtime_admission | test_rollback_candidate_admission | \
+        test_exact_active_runtime_admission | test_runtime_link_exact_targets | \
+        test_rollback_candidate_admission | \
         test_structurally_missing_active_recovery | test_cached_runtime_file_identity | \
         test_runtime_updates)
             [[ $(<"${HOME_DIR}/.config/yt-dlp/config") == --update ]] || return 91

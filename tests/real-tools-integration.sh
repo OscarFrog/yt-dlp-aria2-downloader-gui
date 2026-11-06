@@ -363,19 +363,45 @@ prepare_real_tool_fixtures() {
 
     cat >"${TEST_ROOT}/server.py" <<'PY_SERVER'
 import http.server
+import json
 import pathlib
+import socket
 import socketserver
 import sys
+import time
 
 root = pathlib.Path(sys.argv[1])
 port_file = pathlib.Path(sys.argv[2])
 request_log = pathlib.Path(sys.argv[3])
+cancel_attempts = 0
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
+        global cancel_attempts
         with request_log.open("a", encoding="utf-8") as log:
             log.write(self.path + "\n")
-        super().do_GET()
+        fail_once = root.parent / "hls-fail-once"
+        if fail_once.exists() and self.path == fail_once.read_text(encoding="ascii"):
+            fail_once.unlink()
+            self.send_error(503)
+            return
+        cancellation = root.parent / "hls-cancel.json"
+        if cancellation.exists():
+            settings = json.loads(cancellation.read_text(encoding="ascii"))
+            if self.path == settings["fragment"]:
+                cancel_attempts += 1
+                if cancel_attempts == 2:
+                    # The first missing fragment received its ordinary 404.
+                    # Hold its retry until the controller has observed and
+                    # cancelled the real consumer; no timing sleep is involved.
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as barrier:
+                        barrier.connect(settings["socket"])
+                        barrier.sendall(f"RETRY {time.monotonic_ns()}\n".encode("ascii"))
+                        barrier.recv(1)
+        try:
+            super().do_GET()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def log_message(self, _format, *args):
         return
@@ -547,7 +573,7 @@ test_real_existing_assembled_output() {
     # Only extraction is seeded: real yt-dlp selects formats and the real
     # direct/native downloaders and FFmpeg produce the first completed media.
     python3 -I -B - "${PROJECT_DIR}" "${TEST_ROOT}" "${MEDIA_ROOT}" "${PORT}" \
-        "${SIMULATE_NETWORK}" <<'PY_EXISTING_ASSEMBLED'
+        "${SIMULATE_NETWORK}" "${SERVER_PID}" <<'PY_EXISTING_ASSEMBLED'
 import hashlib
 import json
 import os
@@ -580,7 +606,16 @@ environment = dict(os.environ, ASSEMBLED_SEED=str(seed),
 requests = root / "http-requests.log"
 aria2_invocations = Path(os.environ["ARIA2_INVOCATION_LOG"])
 
-def capture_engine(arguments, environment, *, timeout=60, grace=20):
+def process_identity(pid):
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+        return fields[0], int(fields[1]), fields[19]
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def capture_engine(arguments, environment, *, timeout=60, grace=20, cancellation=None,
+                   cancel_observed=None):
     # The standalone engine owns separate worker sessions. Killing only its
     # wrapper would bypass their authenticated shutdown and strand downloads.
     process = None
@@ -599,10 +634,23 @@ def capture_engine(arguments, environment, *, timeout=60, grace=20):
         # Establish preservation before launching anything: a full or unwritable
         # filesystem must fail before there is a worker session to shut down.
         preservation.touch()
+        if cancellation is not None:
+            environment = cancellation.environment(environment)
         process = subprocess.Popen(arguments, env=environment,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if cancellation is not None:
+            cancellation.register(process)
         deadline = time.monotonic() + timeout
+        cancellation_sent = False
         while True:
+            if cancellation is not None:
+                cancellation.sample()
+                if not cancellation_sent and cancellation.ready():
+                    identities = cancellation.before_signal(process)
+                    if cancel_observed is not None:
+                        cancel_observed.extend(identities)
+                    process.send_signal(signal.SIGTERM)
+                    cancellation_sent = True
             if requested_signal:
                 raise SystemExit(128 + requested_signal)
             # Handlers only record intent, including during Popen and exception
@@ -622,6 +670,8 @@ def capture_engine(arguments, environment, *, timeout=60, grace=20):
                 continue
             if requested_signal:
                 raise SystemExit(128 + requested_signal)
+            if cancellation is not None:
+                cancellation.verify_completed(process, stdout, stderr)
             preservation.unlink()
             return subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
     except BaseException:
@@ -636,12 +686,13 @@ def capture_engine(arguments, environment, *, timeout=60, grace=20):
                         process.send_signal(requested_signal or signal.SIGTERM)
                     try:
                         process.communicate(timeout=grace)
-                        preservation.unlink()
+                        if cancellation is None or cancellation.quiescent():
+                            preservation.unlink()
                         break
                     except subprocess.TimeoutExpired:
                         pass
-            except Exception as error:
-                print(f"Error during engine shutdown: {error}", file=sys.stderr)
+            except Exception:
+                print("Error: engine shutdown observation failed.", file=sys.stderr)
             if preservation.exists():
                 print("Error: engine shutdown remains unconfirmed; retaining its fixtures.",
                       file=sys.stderr)
@@ -1029,6 +1080,137 @@ for label, url, headers, status_only in (
     assert not any(secret.encode() in completed.stdout + completed.stderr
                    for secret in (url_token, auth_token, cookie_token)), "live refusal disclosed a private diagnostic value"
 print("Real HLS selection exposes the controlled baseline; live refusal precedes FFmpeg, while private VOD stays native.")
+
+# A missing middle fragment must fail even when later media and both streams
+# remain decodable. The source is restored to prove that a retry can complete.
+hls_environment = dict(environment, YTDLP_ARIA2_YTDLP_BIN=environment["ASSEMBLED_REAL_YTDLP"])
+hls_url = base + "/hls/stream.m3u8"
+local_hls_output = sys.argv[5] != "true" and media_root.resolve() == (root / "output").resolve()
+segments = sorted((root / "web" / "hls").glob("segment-*.ts"))
+assert len(segments) >= 3
+missing = segments[1]
+saved = root / "missing-hls-fragment.ts"
+output = media_root / "hls-missing-fragment"
+output.mkdir(mode=0o700)
+if sys.argv[5] == "true":
+    output.chmod(0o777)
+witness = output / "unrelated-user-file.txt"
+witness.write_bytes(b"unchanged user file\n")
+original_witness = final_snapshot(witness)
+result = root / "missing-fragment.result"
+missing.rename(saved)
+try:
+    before = len(media_requests())
+    completed = capture_engine(
+        ["bash", str(project / "download-video.sh"), "--mode", "video",
+         "--machine-progress", "--output-dir", str(output), "--result-file", str(result),
+         hls_url], hls_environment, timeout=100,
+    )
+    attempts = media_requests()[before:].count("/hls/" + missing.name)
+    assert attempts > 1, ("fragment was not retried", attempts)
+    assert completed.returncode != 0, "missing middle HLS fragment was reported successful"
+    assert not result.exists(), "missing HLS fragment published a success record"
+    assert b"Download completed successfully." not in completed.stdout + completed.stderr
+    assert not list(output.glob("*.mkv")), "missing HLS fragment published final media"
+    if local_hls_output:
+        assert list(output.glob("*.part")) and list(output.glob("*.ytdl")), "resumable HLS state was not retained"
+    assert final_snapshot(witness) == original_witness
+finally:
+    saved.rename(missing)
+restart_before = len(media_requests())
+completed = capture_engine(
+    ["bash", str(project / "download-video.sh"), "--mode", "video",
+     "--machine-progress", "--output-dir", str(output), "--result-file", str(result),
+     hls_url], hls_environment, timeout=100,
+)
+assert completed.returncode == 0 and result.exists(), (completed.returncode, completed.stderr)
+restart_requests = media_requests()[restart_before:]
+assert "/hls/" + missing.name in restart_requests
+if local_hls_output:
+    assert "/hls/" + segments[0].name not in restart_requests, "completed fragment was fetched again"
+assert Path(result.read_text().strip()).is_file()
+assert final_snapshot(witness) == original_witness
+print("Missing middle HLS fragment fails after retries; repaired source succeeds and preserves user data.")
+if local_hls_output:
+    print("Local HLS retry resumes its previously acquired fragment.")
+
+# Terminal loss is equally fatal; a temporary loss must retain normal retries.
+for label, fragment, mode, transient in (
+        ("terminal", segments[-1], "video", False),
+        ("missing-audio", segments[1], "audio", False),
+        ("temporary-audio", segments[1], "audio", True)):
+    output = media_root / ("hls-" + label)
+    output.mkdir(mode=0o700)
+    if sys.argv[5] == "true":
+        output.chmod(0o777)
+    result = root / ("hls-" + label + ".result")
+    saved = root / ("hls-" + label + ".ts")
+    marker = root / "hls-fail-once"
+    before = len(media_requests())
+    if transient:
+        marker.write_text("/hls/" + fragment.name, encoding="ascii")
+    else:
+        fragment.rename(saved)
+    try:
+        completed = capture_engine(
+            ["bash", str(project / "download-video.sh"), "--mode", mode,
+             "--machine-progress", "--output-dir", str(output), "--result-file", str(result),
+             hls_url], hls_environment, timeout=100,
+        )
+    finally:
+        if saved.exists():
+            saved.rename(fragment)
+        marker.unlink(missing_ok=True)
+    attempts = media_requests()[before:].count("/hls/" + fragment.name)
+    assert attempts > 1, (label, "fragment was not retried", attempts)
+    if transient:
+        assert completed.returncode == 0 and result.exists(), (label, completed.returncode)
+        assert Path(result.read_text().strip()).is_file()
+    else:
+        assert completed.returncode != 0 and not result.exists(), label
+        assert b"Download completed successfully." not in completed.stdout + completed.stderr
+        assert not list(output.glob("*.mkv")), "missing fragment published final media"
+        assert not list(output.glob("*.m4a")), "missing audio fragment published final media"
+print("Missing terminal video and audio HLS fail; temporary audio loss succeeds after retry.")
+
+# Keep a real retry outstanding while observing its owned native consumer.
+# Subreaping belongs only to this sequential test controller, not the engine.
+import importlib.util
+witness_spec = importlib.util.spec_from_file_location(
+    "hls_cancellation_witness", project / "tests/hls-cancellation-witness.py")
+witness_module = importlib.util.module_from_spec(witness_spec)
+witness_spec.loader.exec_module(witness_module)
+output = media_root / "hls-cancel-retry"
+output.mkdir(mode=0o700)
+if sys.argv[5] == "true":
+    output.chmod(0o777)
+result = root / "hls-cancel-retry.result"
+saved = root / "hls-cancel-retry.ts"
+missing.rename(saved)
+observed = []
+witness = witness_module.CancellationWitness(
+    root, "/hls/" + missing.name, hls_environment["YTDLP_ARIA2_YTDLP_BIN"], int(sys.argv[6]),
+    result=result, output=output)
+try:
+    completed = capture_engine(
+        ["bash", str(project / "download-video.sh"), "--mode", "video",
+         "--machine-progress", "--output-dir", str(output), "--result-file", str(result),
+         hls_url], hls_environment, timeout=100, cancel_observed=observed,
+        cancellation=witness,
+    )
+finally:
+    try:
+        witness.restore_fragment(saved, missing)
+    finally:
+        witness.close()
+assert completed.returncode == 143, ("cancellation status", completed.returncode)
+assert observed, "no descendant observed during fragment transfer"
+for pid, start in observed:
+    identity = process_identity(pid)
+    assert identity is None or identity[2] != start or identity[0] == "Z", ("descendant survived cancellation", pid)
+assert not result.exists() and not list(output.glob("*.mkv"))
+assert b"Download completed successfully." not in completed.stdout + completed.stderr
+print("Cancellation during HLS fragment retry stops without publishing a successful result.")
 
 
 PY_EXISTING_ASSEMBLED

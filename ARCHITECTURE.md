@@ -354,7 +354,10 @@ Names or `.part` files alone confer no ownership. Records contain digests, never
 a URL or credential. Admission invalidates the prior checkpoint before launching
 tools and binds it to a private transaction nonce. The shell registers possible
 activation before starting the helper, so cancellation between atomic publication
-and its acknowledgement can safely checkpoint only its own transaction.
+and its acknowledgement can safely checkpoint only its own transaction. Native
+preflight temporarily revokes the binding before inspecting its paths and restores
+it only after success. A collision, interrupted inspection or failed restoration
+cannot turn an unexamined file into resume authority during cleanup.
 Selected-download fields inherit the root metadata when omitted; the same merged
 view supplies planning, classification, disk-space estimation and the resume
 binding. Replay uses selected formats in a private frozen plan without yt-dlp's webpage re-extraction fallback;
@@ -1509,6 +1512,14 @@ The real-tool assembled-output fixture similarly lets the standalone engine
 stop its own worker sessions on timeout or interruption; it preserves fixture
 state when bounded cooperative shutdown remains unconfirmed. Its isolated
 Python driver keeps qualification assertions active despite PYTHONOPTIMIZE.
+The HLS cancellation oracle synchronizes with a pending retry response rather
+than an HTTP request history. Its test-only subreaper retains attributed
+PID/start identities and pidfds, including adopted detached children, until
+post-cancellation quiescence is established. Fixture recovery remains distinct
+from the verdict and from application wait-status collection. A separate
+Python-HUP diagnostic helper instruments only private copies of the test
+runner, with bounded constant events and relative monotonic process snapshots;
+it changes neither the runner's deadlines nor its supervision decisions.
 Tests are part of the architecture: changing a trust, cleanup, progress,
 process, packaging, or compatibility boundary requires updating or adding the
 matching regression proof.

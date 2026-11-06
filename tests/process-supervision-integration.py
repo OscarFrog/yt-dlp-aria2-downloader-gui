@@ -2380,6 +2380,285 @@ wait "$WORKER_PID"
         self.assertEqual(process.returncode, 0)
         self.assertFalse(self.observer.sample()['live'])
 
+    @staticmethod
+    def hls_witness_module():
+        module_spec = importlib.util.spec_from_file_location(
+            'hls_witness', PROJECT / 'tests/hls-cancellation-witness.py')
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+        return module
+
+    def exercise_hls_witness(self, mode, *, late_inventory=False, corruption=None,
+                             restore_mutation=False):
+        import socket
+        import threading
+        import types
+
+        module = self.hls_witness_module()
+        native = self.root / 'native.py'
+        native.write_text('''import os, signal, subprocess, sys
+from pathlib import Path
+root = Path(os.environ['HLS_FIXTURE_ROOT'])
+mode = os.environ['HLS_FIXTURE_MODE']
+if '--orphan' in sys.argv:
+    (root / 'orphan').write_text(str(os.getpid()))
+    while True: signal.pause()
+if mode == 'detached':
+    subprocess.run([sys.executable, '-c',
+        'import subprocess,sys; subprocess.Popen(sys.argv[1:], start_new_session=True, '
+        'stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)',
+        sys.executable, __file__, '--orphan'], check=True)
+def stopped(_number, _frame):
+    (root / 'consumer-term').touch()
+    if mode != 'survivor': raise SystemExit(143)
+signal.signal(signal.SIGTERM, stopped)
+(root / 'ready').write_text(str(os.getpid()))
+while True: signal.pause()
+''')
+        engine = self.root / 'engine.py'
+        engine.write_text('''import os, signal, subprocess, sys
+from pathlib import Path
+root = Path(os.environ['HLS_FIXTURE_ROOT'])
+mode = os.environ['HLS_FIXTURE_MODE']
+if mode == 'premature':
+    (root / 'ready').write_text(str(os.getpid()))
+    raise SystemExit(143)
+args = [sys.executable, str(root / 'native.py'), '--load-info-json', 'synthetic-plan']
+if mode == 'absent': args = [sys.executable, '-c', 'import signal; signal.pause()']
+child = subprocess.Popen(args, start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=None if mode == 'pipe' else subprocess.DEVNULL,
+                         stderr=None if mode == 'pipe' else subprocess.DEVNULL)
+def stopped(_number, _frame):
+    if mode not in ('unforwarded', 'pipe'): child.terminate()
+    if mode not in ('unforwarded', 'survivor', 'pipe'): child.wait(timeout=3)
+    if mode == 'published': (root / 'result').write_text('unexpected successful publication')
+    if mode == 'success-message': print('Download completed successfully.')
+    raise SystemExit(143)
+signal.signal(signal.SIGTERM, stopped)
+if mode == 'absent': (root / 'ready').write_text(str(child.pid))
+while True: signal.pause()
+''')
+        (self.root / 'saved-fragment').write_bytes(b'fixture media must remain retained')
+        witness = module.CancellationWitness(
+            self.root, '/hls/missing.ts', str(native), os.getpid(), token=self.token)
+        stopping = threading.Event()
+        server_errors = []
+
+        def barrier():
+            try:
+                deadline = time.monotonic() + 3
+                while not (self.root / 'ready').exists():
+                    if stopping.wait(.005):
+                        return
+                    if time.monotonic() >= deadline:
+                        raise AssertionError('synthetic consumer readiness missing')
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                    connection.connect(str(witness.address))
+                    connection.sendall(f'RETRY {time.monotonic_ns()}\n'.encode('ascii'))
+                    connection.recv(1)
+            except (ConnectionResetError, BrokenPipeError):
+                pass
+            except BaseException as error:
+                server_errors.append(type(error).__name__)
+
+        server = threading.Thread(target=barrier)
+        server.start()
+        source = (PROJECT / 'tests/real-tools-integration.sh').read_text()
+        body = source.split("<<'PY_EXISTING_ASSEMBLED'\n", 1)[1].split('\nPY_EXISTING_ASSEMBLED', 1)[0]
+        function = next(node for node in ast.parse(body).body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'capture_engine')
+        process_holder = []
+
+        def launch(*arguments, **keywords):
+            process = subprocess.Popen(*arguments, **keywords)
+            process_holder.append(process)
+            self.processes.append(process)
+            # A deterministic late-inventory challenge: the real detached child
+            # is already adopted before the HLS observer first sees the engine.
+            self.wait_file('ready', process)
+            if mode == 'detached':
+                self.wait_file('orphan', process)
+            return process
+
+        controlled = types.SimpleNamespace(Popen=launch, PIPE=subprocess.PIPE,
+                                           TimeoutExpired=subprocess.TimeoutExpired,
+                                           CompletedProcess=subprocess.CompletedProcess)
+        namespace = dict(signal=signal, subprocess=controlled, root=self.root, sys=sys, time=time)
+        exec(compile(ast.Module(body=[function], type_ignores=[]), 'real-hls-capture', 'exec'), namespace)
+        observed, failure, result = [], None, None
+        original_children = module.direct_children
+        original_signal = witness.before_signal
+        persistent_patches = []
+        if corruption == 'peer':
+            witness.server_pid += 1
+
+        def corrupt_signal(process):
+            if corruption == 'identity':
+                original_identity = module.identity
+
+                def changed(pid):
+                    row = original_identity(pid)
+                    if row is not None and pid == process.pid:
+                        row = dict(row, start=row['start'] + 1)
+                    return row
+
+                with mock.patch.object(module, 'identity', side_effect=changed):
+                    return original_signal(process)
+            if corruption == 'persistent-unreadable':
+                patcher = mock.patch.object(module.observer, 'snapshot',
+                                            side_effect=PermissionError('controlled'))
+                patcher.start()
+                persistent_patches.append(patcher)
+                return original_signal(process)
+            if corruption == 'unreadable':
+                with mock.patch.object(module.observer, 'snapshot', side_effect=PermissionError('controlled')):
+                    return original_signal(process)
+            return original_signal(process)
+
+        witness.before_signal = corrupt_signal
+        try:
+            with ExitStack() as patches:
+                if late_inventory:
+                    patches.enter_context(mock.patch.object(
+                        module, 'direct_children', side_effect=lambda: original_children() & {
+                            witness.engine[0] if witness.engine else -1}))
+                try:
+                    result = namespace['capture_engine'](
+                        [sys.executable, str(engine)],
+                        dict(os.environ, HLS_FIXTURE_ROOT=str(self.root), HLS_FIXTURE_MODE=mode),
+                        timeout=.5 if mode == 'pipe' else 3, grace=.1,
+                        cancellation=witness, cancel_observed=observed)
+                except (AssertionError, PermissionError, subprocess.TimeoutExpired) as error:
+                    failure = error
+            for patcher in persistent_patches:
+                patcher.stop()
+            persistent_patches.clear()
+            if restore_mutation:
+                witness.restore_fragment = lambda saved, missing: Path(saved).rename(missing)
+            witness.restore_fragment(self.root / 'saved-fragment', self.root / 'restored-fragment')
+            alive = self.observer.sample()['live']
+            preservation = (self.root / 'preserve-active-engine').exists()
+            # Verdicts precede witness close, rescue, harvesting or fixture removal.
+            if mode == 'normal' and corruption is None:
+                self.assertIsNone(failure)
+                self.assertEqual(result.returncode, 143)
+                self.assertTrue(observed)
+                self.assertTrue(witness.completed)
+                self.assertFalse(alive)
+                self.assertFalse(preservation)
+            elif mode == 'detached' and late_inventory:
+                # Removing adopted-child discovery makes the actual oracle
+                # accept a persistent new-session consumer. This counterexample
+                # must be rejected by the independent assertion below.
+                self.assertIsNone(failure)
+                self.assertTrue(alive)
+                with self.assertRaisesRegex(self.failureException, 'orphan escaped'):
+                    self.assertFalse(alive, 'orphan escaped the late-inventory mutant')
+            else:
+                self.assertIsNotNone(failure, 'HLS witness accepted an invalid cancellation')
+                self.assertFalse(witness.completed)
+                if mode in ('detached', 'survivor', 'unforwarded', 'pipe'):
+                    self.assertTrue(alive, 'negative control was rescued before its verdict')
+                    self.assertTrue(preservation, 'live consumer lost fixture preservation')
+            if corruption == 'persistent-unreadable':
+                self.assertTrue(preservation, 'uncertain identity lost fixture preservation')
+            if mode == 'unforwarded':
+                self.assertFalse((self.root / 'consumer-term').exists())
+            if mode == 'survivor':
+                self.assertTrue((self.root / 'consumer-term').exists())
+            def assert_preserved():
+                self.assertTrue((self.root / 'saved-fragment').exists(),
+                                'premature fixture restoration')
+                self.assertFalse((self.root / 'restored-fragment').exists())
+
+            if restore_mutation:
+                with self.assertRaisesRegex(self.failureException, 'premature fixture restoration'):
+                    assert_preserved()
+            elif witness.completed:
+                self.assertFalse((self.root / 'saved-fragment').exists())
+                self.assertTrue((self.root / 'restored-fragment').exists())
+            else:
+                assert_preserved()
+        finally:
+            for patcher in persistent_patches:
+                patcher.stop()
+            stopping.set()
+            witness.close()
+            server.join(3)
+            self.assertFalse(server.is_alive(), 'retry barrier did not close')
+            self.assertEqual(server_errors, [])
+
+    def test_hls_cancellation_active_native_consumer(self):
+        self.exercise_hls_witness('normal')
+
+    def test_hls_cancellation_rejects_surviving_consumer(self):
+        self.exercise_hls_witness('survivor')
+
+    def test_hls_cancellation_rejects_unforwarded_signal(self):
+        self.exercise_hls_witness('unforwarded')
+
+    def test_hls_cancellation_rejects_detached_consumer(self):
+        self.exercise_hls_witness('detached')
+
+    def test_hls_cancellation_late_inventory_mutation_is_detected(self):
+        self.exercise_hls_witness('detached', late_inventory=True)
+
+    def test_hls_cancellation_rejects_missing_native_consumer(self):
+        self.exercise_hls_witness('absent')
+
+    def test_hls_cancellation_rejects_premature_return(self):
+        self.exercise_hls_witness('premature')
+
+    def test_hls_cancellation_rejects_replaced_identity(self):
+        self.exercise_hls_witness('normal', corruption='identity')
+
+    def test_hls_cancellation_rejects_unreadable_identity(self):
+        self.exercise_hls_witness('normal', corruption='unreadable')
+
+    def test_hls_cancellation_rejects_held_pipe_after_leader_exit(self):
+        self.exercise_hls_witness('pipe')
+
+    def test_hls_cancellation_rejects_wrong_barrier_peer(self):
+        self.exercise_hls_witness('normal', corruption='peer')
+
+    def test_hls_cancellation_premature_restoration_mutation_is_detected(self):
+        self.exercise_hls_witness('unforwarded', restore_mutation=True)
+
+    def test_hls_cancellation_does_not_signal_foreign_process(self):
+        guardian = self.root / 'foreign.py'
+        guardian.write_text('''import signal, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+def stopped(_number, _frame):
+    (root / 'foreign-signalled').touch()
+    raise SystemExit(91)
+for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(number, stopped)
+(root / 'foreign-ready').write_text('ready')
+while True: signal.pause()
+''')
+        foreign = self.launch([sys.executable, str(guardian), str(self.root)])
+        self.wait_file('foreign-ready', foreign)
+        # The HLS controller is a sibling of this separately marked process,
+        # so neither ancestry nor subreaping can grant authority over it.
+        result = subprocess.run(
+            [sys.executable, '-I', '-B', str(PROJECT / 'tests/process-supervision-integration.py'),
+             'ProcessTests.test_hls_cancellation_active_native_consumer'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
+        self.assertEqual(result.returncode, 0, 'isolated HLS positive control failed')
+        self.assertIsNone(foreign.poll(), 'HLS witness terminated an unrelated process')
+        self.assertFalse((self.root / 'foreign-signalled').exists(),
+                         'HLS witness signalled an unrelated process')
+
+    def test_hls_cancellation_preserves_uncertain_cleanup(self):
+        self.exercise_hls_witness('normal', corruption='persistent-unreadable')
+
+    def test_hls_cancellation_rejects_successful_publication(self):
+        self.exercise_hls_witness('published')
+
+    def test_hls_cancellation_rejects_success_message(self):
+        self.exercise_hls_witness('success-message')
+
     def test_observer_orphan_session_and_url(self):
         child = self.child()
         launcher = self.root / 'launcher.py'

@@ -210,6 +210,8 @@ sur le caractère en direct du flux sont également refusées. La découverte de
 avoir déjà contacté le site ; le refus intervient avant le
 transfert du média et ne publie aucun résultat réussi. Utilisez un enregistrement
 à la demande dont les métadonnées peuvent être validées.
+Si un fragment HLS ou DASH nécessaire reste indisponible après les tentatives,
+le téléchargement échoue au lieu de publier un résultat incomplet.
 
 ## Audio et sous-titres
 

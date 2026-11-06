@@ -117,6 +117,7 @@ EOF_BASH_MOCK
         MOCK_BIN="${mock_bin}" \
         python3 -I -B - <<'PY_CONTROLLER'
 import fcntl
+import importlib.util
 import os
 import pathlib
 import re
@@ -133,6 +134,18 @@ test_root = pathlib.Path(os.environ["TEST_ROOT"])
 mock_bin = pathlib.Path(os.environ["MOCK_BIN"])
 real_bash = os.environ["REAL_BASH"]
 real_sleep = os.environ["REAL_SLEEP"]
+
+# Only the Python-HUP scenario needs an observation of the runner's internal
+# transition. Private copies keep diagnostic hooks out of the shared library.
+observer_spec = importlib.util.spec_from_file_location(
+    "run_all_hup_observer", project_dir / "tests/lib/run-all-hup-observer.py"
+)
+if observer_spec is None or observer_spec.loader is None:
+    raise AssertionError("Python-HUP diagnostic helper is unavailable")
+observer_module = importlib.util.module_from_spec(observer_spec)
+sys.modules[observer_spec.name] = observer_module
+observer_spec.loader.exec_module(observer_module)
+observer_module.check_contract(project_dir, test_root)
 
 
 def wait_runner(runner: subprocess.Popen[bytes]) -> str:
@@ -401,8 +414,18 @@ for name, sig, expected, python_suite in (
         }
     )
 
+    observer = None
+    runner_path = project_dir / "tests/run-all.sh"
+    if name == "python-hup":
+        try:
+            observer = observer_module.HupObserver(project_dir, test_root)
+        except (OSError, ValueError, UnicodeError):
+            raise AssertionError("Python-HUP diagnostic setup failed") from None
+        runner_path = observer.runner_path
+        env.update(observer.environment)
+
     runner = subprocess.Popen(
-        [real_bash, str(project_dir / "tests/run-all.sh"), "--jobs", "4"],
+        [real_bash, str(runner_path), "--jobs", "4"],
         cwd=project_dir,
         env=env,
         stdout=subprocess.DEVNULL,
@@ -410,15 +433,25 @@ for name, sig, expected, python_suite in (
     )
     immediate_pid = 0
     descendant_pid = 0
+    if observer is not None:
+        observer.mark("created", runner)
     try:
         immediate_pid = wait_marker(immediate_marker, runner)
         descendant_pid = wait_marker(descendant_marker, runner)
+        if observer is not None:
+            observer.mark("ready", runner, immediate_pid, descendant_pid)
         os.kill(runner.pid, sig)
+        if observer is not None:
+            observer.mark("hup_sent", runner)
         try:
             stderr = wait_runner(runner)
         except subprocess.TimeoutExpired:
+            if observer is not None:
+                observer.mark("timeout", runner)
             report_timeout(runner, immediate_pid, descendant_pid)
             raise AssertionError(f"run-all did not terminate for {name}") from None
+        if observer is not None:
+            observer.mark("wait_finished", runner)
 
         return_code = runner.returncode
         if return_code != expected:
@@ -433,7 +466,20 @@ for name, sig, expected, python_suite in (
             raise AssertionError(
                 f"run-all {name} left descendant process {descendant_pid}"
             )
+        if observer is not None and not observer.complete():
+            raise AssertionError("Python-HUP diagnostic is incomplete")
     finally:
+        if observer is not None and sys.exc_info()[0] is not None:
+            # Diagnostic I/O must not prevent the original authenticated rescue
+            # or replace the failure that selected this path.
+            try:
+                observer.mark("failed", runner)
+                observer.report()
+            except (OSError, ValueError):
+                try:
+                    print("Python-HUP diagnostic: unavailable", file=sys.stderr, flush=True)
+                except OSError:
+                    pass
         if runner.poll() is None:
             runner.kill()
             runner.wait(timeout=5)

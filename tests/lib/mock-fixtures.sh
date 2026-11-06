@@ -458,6 +458,9 @@ if [[ ${probe_operation} == '--help' ]]; then
         '--newline' \
         '--progress' \
         '--color STREAM:POLICY'
+    if [[ ${MOCK_YTDLP_MISSING_FRAGMENT_ABORT:-0} != 1 ]]; then
+        printf '%s\n' '--abort-on-unavailable-fragments'
+    fi
     if [[ ${MOCK_YTDLP_MISSING_AUDIO_QUALITY:-0} != 1 ]]; then
         printf '%s\n' '--audio-quality QUALITY'
     fi

@@ -556,6 +556,18 @@ test_mock_runtime_dependencies() {
         'this yt-dlp build does not support --audio-quality.' \
         'missing consumed yt-dlp capability diagnostic'
 
+    prepare_argument_log 'missing-fragment-abort-capability'
+    assert_status 1 'yt-dlp without fragment abort fails before transfer' \
+        env MOCK_YTDLP_MISSING_FRAGMENT_ABORT=1 \
+        "${PROJECT_DIR}/download-video.sh" \
+        --output-dir "${OUTPUT_DIR}" --mode audio \
+        -- 'https://example.com/watch?v=missing-fragment-abort'
+    assert_text_contains "${ASSERT_OUTPUT}" \
+        'this yt-dlp build does not support --abort-on-unavailable-fragments.' \
+        'missing fragment abort capability diagnostic'
+    [[ ! -s ${MOCK_ARG_LOG} && ! -s ${MOCK_ARIA2_ARG_LOG} ]] \
+        || fail 'Missing fragment abort capability reached the transfer.'
+
     assert_status 1 'old yt-dlp version is rejected' \
         env MOCK_YTDLP_VERSION=2026.06.08 \
         "${PROJECT_DIR}/download-video.sh" \

@@ -591,6 +591,7 @@ check_ytdlp_capabilities() {
         --socket-timeout \
         --retries \
         --fragment-retries \
+        --abort-on-unavailable-fragments \
         --ignore-config \
         --no-plugin-dirs \
         --extractor-retries \
@@ -631,7 +632,7 @@ check_ytdlp_capabilities() {
     if [[ ${ARTE_ENABLED} == true ]]; then
         for required_option in \
             --audio-multistreams --write-subs --no-write-subs \
-            --no-write-auto-subs --keep-fragments --abort-on-unavailable-fragments \
+            --no-write-auto-subs --keep-fragments \
             --sub-format --sub-langs --convert-subs --postprocessor-args \
             --no-embed-metadata --no-embed-subs --keep-video; do
             if ! grep -Eq -- \
@@ -3689,6 +3690,7 @@ configure_download_options() {
         --socket-timeout 30
         --retries 10
         --fragment-retries 10
+        --abort-on-unavailable-fragments
         --extractor-retries 3
         --retry-sleep 2
         --output "${OUTPUT_DIR_TEMPLATE}/%(title).160B [%(id).64B].%(ext)s"
