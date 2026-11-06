@@ -127,6 +127,8 @@ test_mock_engine_audio_downloads() {
     assert_array_contains arguments '--no-playlist' 'yt-dlp disables playlists'
     assert_array_contains arguments '--no-overwrites' 'yt-dlp final-file overwrite protection'
     assert_array_contains arguments '--no-post-overwrites' 'yt-dlp post-processing overwrite protection'
+    assert_option_value arguments '--print' 'post_process:YTDLP_POSTPROCESS|started|MediaPostprocessing' \
+        'real post-processing phase uses constant stdout reporting' 2
     assert_option_value arguments '--parse-metadata' ':(?P<meta_purl>)' \
         'embedded purl URL metadata is cleared' 1
     assert_option_value arguments '--parse-metadata' ':(?P<meta_comment>)' \
