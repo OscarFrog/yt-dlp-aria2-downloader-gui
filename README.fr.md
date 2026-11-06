@@ -13,7 +13,7 @@ le dossier de destination, puis suivez le téléchargement et le traitement.
 - **Langues :** choix indépendants des audios et sous-titres sur les sites compatibles.
 - **Au quotidien :** préférences mémorisées, annulation et téléchargements indépendants simultanés.
 
-La version de développement actuelle est la **2.4.4**.
+La version de développement actuelle est la **2.4.5**.
 La dernière release de paquets publiée est la **2.4.4**.
 
 ## Sommaire
@@ -435,8 +435,8 @@ la reprise manuelle utilise le tag exact :
 
 ```bash
 gh workflow run release.yml \
-  --ref v2.4.4 \
-  -f tag=v2.4.4 \
+  --ref v2.4.5 \
+  -f tag=v2.4.5 \
   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
