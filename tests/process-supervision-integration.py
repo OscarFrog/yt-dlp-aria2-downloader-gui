@@ -3240,6 +3240,92 @@ exit "$DOWNLOAD_STATUS"
 class YtdlpRealDiagnosticTests(YtdlpDiagnosticFixture):
     """Real loopback witnesses, explicitly required by the real-tool suite."""
 
+    def test_real_postprocess_phase_precedes_remux_through_closed_stderr(self):
+        import shutil
+        if not any(argument == 'YtdlpRealDiagnosticTests'
+                   or argument.startswith('YtdlpRealDiagnosticTests.')
+                   for argument in sys.argv[1:]):
+            self.skipTest('real witnesses require explicit YtdlpRealDiagnosticTests selection')
+        executable, ffmpeg = shutil.which('yt-dlp'), shutil.which('ffmpeg')
+        self.assertIsNotNone(executable, 'real qualification requires yt-dlp')
+        self.assertIsNotNone(ffmpeg, 'real qualification requires FFmpeg')
+        source = Path(os.environ.get('YTDLP_PRIVACY_TEST_SOURCE', PROJECT / 'download-video.sh')).read_text()
+        reporting = source[source.index('configure_download_reporting() {'):
+                           source.index('\n# Execute either the private aria2 direct path')]
+        options = subprocess.check_output(['bash', '-c', '''set -euo pipefail
+MACHINE_PROGRESS=true
+ARTE_ENABLED=false
+PATH_RECORD_FD_PATH=''
+YT_DLP_OPTIONS=()
+''' + reporting + '\nconfigure_download_reporting\nprintf "%s\\0" "${YT_DLP_OPTIONS[@]}"\n'])
+        component = self.root / 'fixture [probe].mp4'
+        subprocess.run([ffmpeg, '-v', 'error', '-nostdin', '-f', 'lavfi', '-i',
+                        'color=c=blue:s=32x32:r=5', '-t', '1', '-c:v', 'mpeg4', str(component)],
+                       check=True, capture_output=True, timeout=10)
+        seed = self.root / 'seed.json'
+        seed.write_text(json.dumps(dict(id='probe', title='fixture', extractor='generic',
+                                       extractor_key='Generic', duration=1,
+                                       formats=[dict(format_id='av', ext='mp4', protocol='http',
+                                                     url='http://127.0.0.1:9/unused-owned-component',
+                                                     vcodec='mpeg4', acodec='none')])) + '\n')
+        binaries = self.root / 'bin'
+        binaries.mkdir()
+        ready, release = self.root / 'remux-ready', self.root / 'remux-release'
+        wrapper = binaries / 'ffmpeg'
+        wrapper.write_text('''#!/usr/bin/env python3
+import os, sys, time
+from pathlib import Path
+args = sys.argv[1:]
+if '-i' in args and any(arg.endswith('.mkv') for arg in args):
+    Path(os.environ['PHASE_TEST_READY']).touch()
+    deadline = time.monotonic() + 10
+    while not Path(os.environ['PHASE_TEST_RELEASE']).exists():
+        if time.monotonic() >= deadline:
+            sys.exit(75)
+        time.sleep(.01)
+os.execv(os.environ['PHASE_TEST_FFMPEG'], [os.environ['PHASE_TEST_FFMPEG'], *args])
+''')
+        wrapper.chmod(0o700)
+        home = self.root / 'home'
+        home.mkdir()
+        environment = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(home),
+                           XDG_CACHE_HOME=str(home), XDG_DATA_HOME=str(home),
+                           PHASE_TEST_READY=str(ready), PHASE_TEST_RELEASE=str(release),
+                           PHASE_TEST_FFMPEG=ffmpeg, PATH=str(binaries) + os.pathsep + os.environ['PATH'])
+        command = ['bash', str(self.wrapper), executable, '--ignore-config', '--no-plugin-dirs',
+                   '--no-cache-dir', '--no-update', '--no-overwrites', '--no-simulate',
+                   '--load-info-json', str(seed), '--format', 'av', '--remux-video', 'mkv',
+                   '--output', str(self.root / '%(title)s [%(id)s].%(ext)s'),
+                   *[os.fsdecode(option) for option in options.split(b'\0') if option]]
+        process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        prefix = bytearray()
+        expected = b'YTDLP_POSTPROCESS|started|MediaPostprocessing\n'
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and process.poll() is None:
+                if select.select([process.stdout], [], [], .02)[0]:
+                    prefix.extend(os.read(process.stdout.fileno(), 65536))
+                if ready.exists() and expected in prefix:
+                    break
+            reached, observed = ready.exists(), expected in prefix
+        finally:
+            # Release only the owned fixture barrier, including on a failing
+            # assertion. The actual remux then runs and its status is collected.
+            release.touch()
+            try:
+                tail, diagnostic = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=5)
+                raise
+        self.assertTrue(reached, 'real yt-dlp never requested its FFmpeg remux')
+        self.assertTrue(observed, 'postprocess phase absent from stdout before real remux')
+        self.assertEqual(process.returncode, 0, diagnostic)
+        self.assertEqual((prefix + tail).count(expected), 1, 'phase is not emitted once at its real boundary')
+        self.assertNotIn(b'YTDLP_POSTPROCESS|', diagnostic, 'raw stderr progress bypassed the closed filter')
+        self.assertIn(b'[YTDLP_DIAGNOSTIC]', diagnostic, 'real postprocessor stderr was not exercised')
+        self.assertTrue((self.root / 'fixture [probe].mkv').is_file())
+
     def test_real_unsupported_generic_and_http_reason_witnesses(self):
         import http.server
         import shutil

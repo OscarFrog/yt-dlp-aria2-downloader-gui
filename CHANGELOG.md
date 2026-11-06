@@ -32,6 +32,10 @@
 
 ### Reliability and qualification
 
+- Restore native postprocessing phase reporting on stdout when supervised
+  yt-dlp stderr is privacy-filtered. The graphical monitor retains its phase
+  estimates, real cancellation races and confirmed-publication semantics;
+  these estimates do not measure FFmpeg remux completion.
 - Strengthen HLS cancellation witnesses with authenticated process identities,
   descendant observations and nonempty cancellation records. Preserve descendant
   supervision, signal statuses and pipe-drain assertions.

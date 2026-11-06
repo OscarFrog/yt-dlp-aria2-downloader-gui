@@ -963,6 +963,17 @@ private live log. `progress-monitor.sh` tails that log and maintains a monotonic
 display model for yt-dlp native downloads, aria2 direct transfers, yt-dlp
 post-processing, and FFmpeg remux progress.
 
+In quiet mode, yt-dlp's postprocessor progress templates use stderr and are
+intentionally replaced by the closed diagnostic filter. Machine-progress
+invocations that already use `before_dl` printing also use yt-dlp's actual
+`post_process` print boundary to emit the
+constant `YTDLP_POSTPROCESS|started|MediaPostprocessing` on stdout before its
+postprocessors run. This contains no media-derived fields, does not reopen
+stderr, and lets the monitor enter its existing bounded postprocessing phase
+while a real native remux is active. Without FFmpeg duration records, those
+percentages are phase estimates, not measurements of encoded media duration;
+only the authenticated result record can confirm completion.
+
 Machine records include plan membership, stable format identifiers, byte or
 fragment counters, post-processing state, FFmpeg duration/progress, and the
 final result record. The monitor sanitizes untrusted fields, bounds arithmetic,
