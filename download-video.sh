@@ -3998,8 +3998,13 @@ configure_download_reporting() {
         if [[ ${ARTE_ENABLED} == true ]]; then
             python3 "${PRIVATE_ARIA2_HELPER}" progress-plan --plan "${PRIVATE_ARIA2_PLAN}"
         else
+            # The before_dl print makes yt-dlp quiet, routing postprocessor
+            # templates to closed-filtered stderr. Report the real phase on
+            # stdout with a constant, without changing the multitrack route's
+            # quiet mode or injecting a media field or synthetic percentage.
             YT_DLP_OPTIONS+=(
                 --print 'before_dl:YTDLP_PLAN|%(id|unknown)s|%(format_id|unknown)s|%(requested_formats.0.format_id|)s|%(requested_formats.1.format_id|)s'
+                --print 'post_process:YTDLP_POSTPROCESS|started|MediaPostprocessing'
             )
         fi
     fi

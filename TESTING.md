@@ -1807,6 +1807,16 @@ of the completion boundary observable without changing an application timeout
 or substituting a synthetic result. Expiry fails; an already closed window
 does not count as an actual Cancel action.
 
+The native-remux fixture uses the application's normal postprocessing phase
+estimate, not an injected FFmpeg percentage. Its real yt-dlp `post_process`
+boundary must reach the monitor on stdout even when quiet-mode postprocessor
+templates are withheld by the stderr privacy filter. The real-tool regression
+`YtdlpRealDiagnosticTests.test_real_postprocess_phase_precedes_remux_through_closed_stderr`
+checks this boundary against an owned remux-start barrier and then executes
+real FFmpeg. That focused regression is not graphical qualification; the
+eighteen real trials still require the original 97% threshold, live remux,
+unconfirmed result and actual Cancel interaction.
+
 Publication evidence follows the actual private `--result-file` record passed
 by the GUI to its attributed engine. The presence of a media-shaped filename
 alone is insufficient: a canceled native transfer or remux may legitimately
