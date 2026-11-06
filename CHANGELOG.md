@@ -1,5 +1,64 @@
 # Changelog
 
+## 2.4.5 - Unreleased
+
+### Maintenance
+
+- Harden HLS privacy, media integrity, runtime links and qualification.
+- Prepare an unpublished corrective candidate; the latest official package
+  release remains v2.4.4 until immutable publication is independently verified.
+
+### Security
+
+- Refuse live or uncertain HLS before media transfer when yt-dlp could delegate
+  private URLs or authentication to FFmpeg process arguments. Preserve validated
+  on-demand HLS, direct HTTP and other permitted transports.
+- Replace supervised yt-dlp stderr with bounded constant diagnostic categories,
+  withholding free-form external text while preserving producer status,
+  structured stdout, progress and GUI View log behavior. This guarantee covers
+  supervised yt-dlp stderr, not every output channel or all personal data.
+- Validate runtime symlink targets byte-for-byte, including trailing newlines,
+  and apply the same validation when selecting a previous runtime for rollback.
+
+### File integrity
+
+- Require yt-dlp's abort-on-unavailable-fragments capability for all download
+  profiles and refuse successful completion when indispensable HLS fragments
+  remain unavailable after retries.
+- Invalidate native resume ownership before collision preflight and restore it
+  only after successful validation, preventing interrupted cleanup from adopting
+  an unrelated existing media file. Preserve legitimate retries/resume and the
+  existing collision and no-overwrite contracts.
+
+### Reliability and qualification
+
+- Strengthen HLS cancellation witnesses with authenticated process identities,
+  descendant observations and nonempty cancellation records. Preserve descendant
+  supervision, signal statuses and pipe-drain assertions.
+- Add bounded, allowlisted Python HUP diagnostics and deterministic readiness
+  witnesses to test-runner qualification. The historical Python HUP timeout's
+  cause remains unknown; improved observations do not prove it was eliminated.
+- Diagnose unsafe private temporary-path ownership before qualification and
+  cover incompatible environments without weakening production path validation.
+- Observe forced CI fixture exits by PID and start time until actual terminal
+  state or disappearance, rejecting surviving or reused processes.
+- Extend synthetic and real-tool regressions for HLS live privacy, missing
+  fragments, foreign-file resume, exact runtime links and supervised stderr,
+  including GUI failure diagnostics and the pinned yt-dlp matrix.
+
+### Documentation and tooling
+
+- Simplify and align the English/French installation and usage guides, add
+  demonstration screenshots, and document HLS refusal and stderr privacy limits
+  in both guides and installed manuals.
+- Align published download references with the verified v2.4.4 release; add
+  contribution/security guidance, issue templates and project preview assets.
+- Clarify agent preflight/approval boundaries and remove a stale mock-test count.
+- Restore current-stable qualification compatibility with verified Deno 2.9.8
+  and permit that diagnostic job on manual real-tools dispatch. Historical PR
+  tool pins remain unchanged; this is qualification tooling, not a new runtime
+  dependency or a change to package installation/removal policy.
+
 ## 2.4.4 - 2026-10-26
 
 ### Maintenance
