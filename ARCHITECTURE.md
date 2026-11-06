@@ -1494,6 +1494,14 @@ The real-tool assembled-output fixture similarly lets the standalone engine
 stop its own worker sessions on timeout or interruption; it preserves fixture
 state when bounded cooperative shutdown remains unconfirmed. Its isolated
 Python driver keeps qualification assertions active despite PYTHONOPTIMIZE.
+The HLS cancellation oracle synchronizes with a pending retry response rather
+than an HTTP request history. Its test-only subreaper retains attributed
+PID/start identities and pidfds, including adopted detached children, until
+post-cancellation quiescence is established. Fixture recovery remains distinct
+from the verdict and from application wait-status collection. A separate
+Python-HUP diagnostic helper instruments only private copies of the test
+runner, with bounded constant events and relative monotonic process snapshots;
+it changes neither the runner's deadlines nor its supervision decisions.
 Tests are part of the architecture: changing a trust, cleanup, progress,
 process, packaging, or compatibility boundary requires updating or adding the
 matching regression proof.

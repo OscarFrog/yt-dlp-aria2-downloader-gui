@@ -560,6 +560,22 @@ an output larger than the capture pipe. Partial padding writes can exhaust pipe
 slots below nominal byte capacity. The identity-checked observation descriptor
 is closed before communicate, which must drain every byte and retain status 130;
 waiting before draining is rejected. No debugger is required by either profile.
+The Python-HUP scenario also builds private diagnostic copies of the runner and
+its supervision library. Only those copies receive bounded, constant transition
+events; the tracked runner/library and the other signal scenarios retain their
+ordinary execution. Relative monotonic observations distinguish startup,
+deferred-signal replay, signal-guard entry, authenticated transmission and wait
+completion without exporting arguments or environment values. Missing or
+inaccessible observations remain explicit. These diagnostics do not replace
+the ten-second wait, expected status 129, descendant checks or failure verdict;
+an instrumented success does not explain a historical timeout.
+An unavailable or incomplete trace fails the fixture even when the runner
+returns 129. The same canonical suite checks closed parsing, private-sentinel
+exclusion, byte/event bounds, source-insertion identity and PID revalidation;
+it adds no scheduler task. Bash emits at most 64 ordinary and 16 critical
+events, plus one limit marker per class. Trace input is capped at 16 KiB and
+the failure report at 32 KiB. Observation errors cannot skip the existing
+fixture rescue or replace its initial failure.
 After escalation, the monitor test permits at most one second for an original
 descendant with an already pending SIGKILL to become a zombie or disappear.
 It authenticates PID/start-time around the signal snapshot and sends no extra
@@ -575,6 +591,30 @@ actual engine supervision functions. Preservation is established before launch;
 a capture error during cleanup keeps both that state and the original failure.
 The fixture driver uses isolated Python
 so PYTHONOPTIMIZE cannot silently remove its no-overwrite assertions.
+Its isolation mutation must reach a unique, deliberately failing encoder
+checkpoint after bypassing the first repeated-output assertion. The positive
+control must fail at that exact assertion before any encoder call. An unrelated
+setup error or a different checkpoint status cannot qualify the mutation;
+later HLS supervision checks remain independently mandatory.
+
+The HLS retry-cancellation case uses a private rendezvous with the fixture HTTP
+server: the first unavailable-fragment request receives 404 and the next retry
+response remains pending until the test closes the rendezvous. Before TERM,
+the oracle requires the actual native-transfer producer and its live,
+authenticated session. A request recorded in the HTTP history is insufficient.
+The isolated controller acts as a test-only child subreaper and retains
+PID/start-time identities and pidfds from launch, including adopted detached
+children. It never treats a changed PID identity or unreadable owned process as
+proof of termination. Two final observations and stopped identities are
+required before releasing the fixture-preservation guard. The engine's Popen
+status stays with its owner; orphan collection occurs only after the verdict
+and is not evidence of application reaping. The helper is source-only and does
+not change the engine, retries, FFmpeg generation or production supervision.
+Adversarial controls in the existing process-supervision suite cover survivors,
+detached orphans, missing or prematurely stopped producers, omitted signals,
+late inventories and uncertain or replaced identities, alongside valid
+cancellation and foreign-process preservation. These tests retain status 143,
+EOF, no-publication and no-survivor requirements.
 
 Before allocating fixtures, the mock entry point registers its own Bash
 process as a Linux child subreaper through an isolated Python `prctl`/`exec`
