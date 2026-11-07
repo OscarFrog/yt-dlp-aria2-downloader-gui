@@ -52,7 +52,11 @@ git diff --check
 Use the [task-to-test table](TESTING.md#codex-session-setup-and-task-routing)
 for focused tests during development and additional qualifications. Shell
 changes also require `./scripts/check-shell-format.sh`; workflow changes
-require `./scripts/check-workflows.sh`. Before a source push, run
+require `./scripts/check-workflows.sh`. Python changes also require the
+[hash-pinned Ruff check](TESTING.md#reproducible-python-static-analysis);
+its disposable environment adds no application dependency. Report that result
+separately from the offline full suite, and do not run automatic fixes or a
+formatting sweep. Before a source push, run
 `python3 -B scripts/check-push-version.py check` and follow the documented
 [pre-push hook setup](TESTING.md#version-coherence-and-release-preparation).
 
