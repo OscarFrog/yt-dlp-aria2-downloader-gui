@@ -145,6 +145,83 @@ class ObservationFailureTests(unittest.TestCase):
         self.token = 'synthetic-observation-test'
         self.marker = b'YTDLP_QUALIFICATION_TOKEN=' + self.token.encode()
 
+    @contextmanager
+    def attribute_failure_transition(self, name, number, transition):
+        state = {'row': dict(self.row), 'fail': False, 'failed_reads': 0}
+
+        def snapshot():
+            return {} if state['row'] is None else {self.pid: dict(state['row'])}
+
+        def identity(_path):
+            if state['row'] is None:
+                raise FileNotFoundError(errno.ENOENT, 'synthetic disappeared identity')
+            return dict(state['row'])
+
+        def read(path):
+            if state['fail'] and path.name == name:
+                state['failed_reads'] += 1
+                if transition == 'disappeared':
+                    state['row'] = None
+                elif transition == 'replaced':
+                    state['row'] = dict(self.row, start=self.row['start'] + 1)
+                elif transition == 'quiescent':
+                    state['row'] = dict(self.row, state='Z')
+                raise OSError(number, 'synthetic private failure text', '/synthetic/private/path')
+            return self.marker + b'\0' if path.name == 'environ' else b'fixture\0'
+
+        with mock.patch.object(observer, 'snapshot', side_effect=snapshot), \
+                mock.patch.object(observer, 'process_row', side_effect=identity), \
+                mock.patch.object(Path, 'iterdir', autospec=True, side_effect=lambda _path: iter([
+                    Path(f'/proc/{self.pid}/task/{self.pid}')])), \
+                mock.patch.object(Path, 'read_bytes', new=read):
+            yield state
+
+    def test_attribute_error_before_terminal_transition_remains_latched(self):
+        for name in ('environ', 'cmdline'):
+            for number in (errno.EACCES, errno.EIO, errno.EINTR):
+                for transition in ('disappeared', 'replaced', 'quiescent', 'live'):
+                    with self.subTest(attribute=name, errno=number, transition=transition):
+                        observed = observer.Observer(self.token)
+                        with self.attribute_failure_transition(name, number, transition) as state:
+                            self.assertIn(str(self.pid), observed.sample()['live'])
+                            self.assertIn((self.pid, self.row['start']), observed.known)
+                            state['fail'] = True
+                            with self.assertRaises(observer.ObservationError) as raised:
+                                observed.sample()
+                            self.assertEqual(state['failed_reads'], 2 if number == errno.EINTR else 1)
+                            self.assertEqual(raised.exception.args, (
+                                number, 'attributed process observation is incomplete'))
+                            self.assertIsNone(raised.exception.filename)
+                            self.assertIs(observed.error, raised.exception)
+                            state['row'] = None
+                            with self.assertRaises(observer.ObservationError) as repeated:
+                                observed.sample()
+                            self.assertIs(repeated.exception, raised.exception)
+
+    def test_disappearance_errors_accept_confirmed_terminal_transition(self):
+        for name in ('environ', 'cmdline'):
+            for number in (errno.ENOENT, errno.ESRCH):
+                for transition in ('disappeared', 'replaced', 'quiescent'):
+                    with self.subTest(attribute=name, errno=number, transition=transition):
+                        observed = observer.Observer(self.token)
+                        with self.attribute_failure_transition(name, number, transition) as state:
+                            self.assertIn(str(self.pid), observed.sample()['live'])
+                            state['fail'] = True
+                            observed.sample()
+                            self.assertEqual(state['failed_reads'], 1)
+                            self.assertIsNone(observed.error)
+                            state['row'] = None
+                            self.assertFalse(observed.sample()['live'])
+
+    def test_presence_oracle_accepts_terminal_transition_after_read_error(self):
+        for number in (errno.EACCES, errno.EIO, errno.EINTR):
+            for transition in ('disappeared', 'replaced', 'quiescent'):
+                with self.subTest(errno=number, transition=transition), \
+                        self.attribute_failure_transition('environ', number, transition) as state:
+                    self.assertTrue(observer.token_process_is_live(self.pid, self.marker))
+                    state['fail'] = True
+                    self.assertFalse(observer.token_process_is_live(self.pid, self.marker))
+
     def test_attributed_attribute_failure_stays_inconclusive(self):
         for name in ('environ', 'cmdline'):
             for number in (errno.EACCES, errno.EIO):
@@ -339,6 +416,56 @@ class ObservationFailureTests(unittest.TestCase):
                 evidence['observer_error'] = watch.error is not None
                 with self.assertRaisesRegex(ValueError, 'Process observation failed'):
                     driver.validate_scenario(evidence)
+
+    def test_terminal_transition_failure_reaches_watch_finish_and_validator(self):
+        def load(name, relative):
+            module_spec = importlib.util.spec_from_file_location(name, PROJECT / relative)
+            module = importlib.util.module_from_spec(module_spec)
+            module_spec.loader.exec_module(module)
+            return module
+
+        driver = load('transition_driver', 'tests/zenity-autonomous-qualification.py')
+        fixtures = load('transition_fixtures', 'tests/zenity-autonomous-integration.py')
+        for name in ('environ', 'cmdline'):
+            for number in (errno.EACCES, errno.EIO):
+                for transition in ('disappeared', 'replaced', 'quiescent'):
+                    with self.subTest(attribute=name, errno=number, transition=transition), \
+                            tempfile.TemporaryDirectory() as temporary, \
+                            self.attribute_failure_transition(name, number, transition) as state:
+                        watch = driver.Watch.__new__(driver.Watch)
+                        watch.observer = observer.Observer(self.token)
+                        watch.path = Path(temporary) / 'topology.jsonl'
+                        watch.lock = threading.Lock()
+                        watch.stop = threading.Event()
+                        watch.error = None
+                        watch.last = None
+
+                        class Result:
+                            def observe(self, _state):
+                                if state['fail']:
+                                    watch.stop.set()
+                                else:
+                                    state['fail'] = True
+                                return {}
+
+                        watch.result = Result()
+                        watch.thread = threading.Thread(target=watch.run)
+                        watch.thread.start()
+                        watch.thread.join(timeout=3)
+                        self.assertFalse(watch.thread.is_alive())
+                        self.assertIn((self.pid, self.row['start']), watch.observer.known)
+                        self.assertEqual(watch.error, 'ObservationError')
+                        with self.assertRaisesRegex(ValueError, 'Continuous process observation failed'):
+                            watch.check()
+                        with self.assertRaisesRegex(ValueError, 'Continuous process observation failed'):
+                            watch.finish()
+                        state['row'] = None
+                        with self.assertRaises(observer.ObservationError):
+                            watch.observer.sample()
+                        evidence = fixtures.evidence()
+                        evidence['observer_error'] = watch.error is not None
+                        with self.assertRaisesRegex(ValueError, 'Process observation failed'):
+                            driver.validate_scenario(evidence)
 
     def test_each_runner_oracle_propagates_unreadable_environment(self):
         examined = 0

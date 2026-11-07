@@ -60,15 +60,17 @@ def read_process_observation(pid, row, path):
     return data
 
 
-def observation_failure(pid, row, error):
-    # The identity can disappear between enumeration and an attribute read.
-    # Persistent permission/I/O failures never establish that transition.
-    try:
-        current = current_process(pid)
-        if current is None or current['start'] != row['start'] or threads_are_quiescent(pid, current):
-            return
-    except (OSError, ValueError, IndexError) as identity_error:
-        error = identity_error
+def observation_failure(pid, row, error, *, current_presence_only=False):
+    # Fresh exit evidence can explain a missing attribute, but cannot restore a
+    # lost privacy interval after another read failure. Only the token predicate
+    # asks solely about current presence rather than continuous observation.
+    if current_presence_only or isinstance(error, (FileNotFoundError, ProcessLookupError)):
+        try:
+            current = current_process(pid)
+            if current is None or current['start'] != row['start'] or threads_are_quiescent(pid, current):
+                return
+        except (OSError, ValueError, IndexError) as identity_error:
+            error = identity_error
     number = getattr(error, 'errno', None)
     if not isinstance(number, int) or not 0 < number < 4096:
         number = errno.EIO
@@ -100,7 +102,7 @@ def token_process_is_live(pid, marker):
                 pending = error
                 continue
             except OSError as error:
-                observation_failure(pid, row, error)
+                observation_failure(pid, row, error, current_presence_only=True)
                 continue
             if not same_process(pid, row):
                 return False
@@ -108,11 +110,11 @@ def token_process_is_live(pid, marker):
             if marker in environment:
                 return True
         if pending is not None and not inspected:
-            observation_failure(pid, row, pending)
+            observation_failure(pid, row, pending, current_presence_only=True)
     except ObservationError:
         raise
     except (OSError, ValueError, IndexError) as error:
-        observation_failure(pid, row, error)
+        observation_failure(pid, row, error, current_presence_only=True)
     return False
 
 

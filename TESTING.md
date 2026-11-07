@@ -2010,8 +2010,11 @@ The independent test observer rejects unreadable command/environment data for
 an attributed live identity. ENOENT/ESRCH require fresh identity evidence;
 permission/I/O errors, persistent interruptions and partial identity records
 cannot produce a successful empty observation. Bounded retries do not erase
-failure evidence. Dedicated cases cover identity recycling, known zombie
-threads and all five runner-oracle call sites.
+failure evidence: a later disappearance, identity replacement or quiescence,
+even within the same sample, cannot restore a lost privacy interval. The token
+predicate checks only current presence and may accept those freshly confirmed
+terminal transitions after a read error. Dedicated cases cover identity recycling,
+known zombie threads and all five runner-oracle call sites.
 The independent test observer reads that same real task, including its root
 procfs alias in a controlled inventory with an unrelated marker. Synthetic
 stat fixtures additionally cover arbitrary name bytes and invalid identity
