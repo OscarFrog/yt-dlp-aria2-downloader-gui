@@ -543,6 +543,19 @@ profiles execute each family exactly once. Standalone `./test-static.sh` keeps
 the complete contract; `./test-static.sh --source-only` intentionally omits
 these separately scheduled behavioral suites and is not a qualification profile.
 
+The public static entrypoint keeps the family order, options and version
+constants. Its fixed `tests/static/application-contracts.sh` library owns the
+engine, GUI and progress source assertions, and is called once in either mode.
+The library only defines that family; it receives `SCRIPT_DIR` and the existing
+assertion helpers from its caller. It is included in the canonical test and
+sourced-shell inventories, so syntax, headers, formatting, ShellCheck and
+unchanged caller-state checks apply in Git checkouts and Git-free archives.
+The static harness runs the actual entrypoint with unrelated families inert
+to reject a missing module, definition, load or call, and a duplicated call.
+Existing standalone/source-only replay and security negative controls remain
+separate. This organization adds no task, process supervisor or runtime package
+dependency.
+
 Interruption still terminates every supervised validation process group. A
 descendant that deliberately creates a new session is outside that
 process-group contract. Before signaling, the runner reaps slots whose original
