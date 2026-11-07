@@ -112,9 +112,10 @@ tests from the route table, including the Bash side when applicable.
 `test-static.sh` validates every `PYTHON_FILES` module's SPDX/docstring identity
 and parses it with Python 3.10's grammar. This detects newer syntax but does not
 prove runtime/API compatibility with Python 3.10. The existing Bash integration
-suites and stdlib `unittest` tests are the test entry points; no pytest, Ruff or
-type-checker configuration is currently a project requirement. Compilation or
-typing alone cannot establish exception, subprocess or cancellation behavior.
+suites and stdlib `unittest` tests are the behavioral test entry points; pytest
+and type checkers are not project requirements. Ruff provides the separate
+static check described below. Static analysis, compilation or typing alone
+cannot establish exception, subprocess or cancellation behavior.
 The `shell.yml` job **Python 3.10 / Ubuntu** selects the real minimum interpreter,
 asserts its minor version, and runs doctor plus the full contract together with
 GNU Bash 4.4.0. The Bash source archive is verified by fixed SHA-256 and the
@@ -173,6 +174,67 @@ only to the disposable qualification environment; do not replace the system
 Python on a user's workstation. Equivalent local containers must expose Python
 3.10 through both paths and run as a non-root user, matching the ordinary CI
 user rather than UID 0 with its capabilities removed.
+
+### Reproducible Python static analysis
+
+`ruff.toml` requires Ruff **0.14.4**, targets Python 3.10 and enables only
+`E4`, `E7`, `E9` and `F`: import/statement errors and Pyflakes diagnostics.
+This is a contributor/CI dependency, never an application or RPM/DEB runtime
+dependency. No automatic fixes or formatting are part of the check.
+
+Run this from the repository root in Bash. Python's `venv` module and pip are
+needed for provisioning (`python3-venv` on Ubuntu); no system Python installation
+is changed. The reviewed requirement covers GNU/Linux glibc 2.17 or newer on
+x86_64/aarch64. Other platforms fail rather than fall back to an unpinned wheel
+or source build.
+
+```bash
+(
+    set -Eeuo pipefail
+    umask 077
+    ruff_env=$(mktemp -d "${TMPDIR:-/tmp}/project-ruff.XXXXXXXX")
+    trap 'rm -rf -- "${ruff_env}"' EXIT
+    python3 -m venv "${ruff_env}"
+    PIP_CONFIG_FILE=/dev/null timeout --signal=TERM --kill-after=10s 90s \
+        "${ruff_env}/bin/python" -m pip --isolated --disable-pip-version-check \
+        install --index-url https://pypi.org/simple --no-cache-dir \
+        --timeout 15 --retries 2 --only-binary=:all: --no-deps --require-hashes \
+        --requirement scripts/dev-tools/ruff-requirements.txt
+    source tests/lib/project-files.sh
+    "${ruff_env}/bin/ruff" check --no-cache --config ruff.toml "${PYTHON_FILES[@]}"
+)
+```
+
+The two wheel SHA-256 values are pinned in
+`scripts/dev-tools/ruff-requirements.txt`, obtained from the official PyPI
+release metadata over HTTPS and reviewed with the version/configuration.
+They bind installation to those approved bytes; a newly discovered checksum
+alone is not an independent publisher-authentication proof. Provisioning uses
+an isolated pip configuration with configuration files disabled, the explicit
+public PyPI index and no package cache. Download, hash, installation, version or analysis failures remain
+failures. Updating the pin requires reviewing both platform hashes and the
+corresponding `required-version` before qualifying the changed tree.
+
+The check passes the canonical `PYTHON_FILES` array explicitly, so it covers
+application helpers, development tools and tests even in a Git-free source
+archive. Source inventory tests detect unlisted Python files. The existing
+**Ubuntu** job in `shell.yml` runs this additional step and the source-proof
+verifier requires its success; no required-check name, permission or CodeQL
+analysis is changed. The Ubuntu job retains its ten-minute envelope and the
+suite's seven-minute deadline. Ruff provisioning/analysis has a separate
+two-minute step limit; a slow installation can fail rather than consume an
+unbounded wait.
+
+This obligation applies to qualifications under this source contract. To audit
+a historical release, use its immutable tag checkout and that version's
+verifier: older successful runs did not execute Ruff and cannot satisfy the
+new requirement. Do not add a missing-step exception for those runs.
+
+`tests/run-all.sh`, `test-static.sh`, package builds and source-archive replays
+retain their existing offline contract and do not download Ruff. A successful
+full suite therefore does not imply a Ruff pass: record both checks separately
+for Python changes. The real Python 3.10/Bash 4.4 qualification remains necessary
+because Ruff's target setting does not verify runtime/API compatibility.
 
 ### Human-readable diagnostic regressions
 

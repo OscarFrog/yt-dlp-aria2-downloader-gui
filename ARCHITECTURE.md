@@ -1192,7 +1192,7 @@ architecture document. The source ZIP contains the tracked source tree.
 
 | Workflow | Responsibility |
 | --- | --- |
-| `shell.yml` | PR source identity/coherence/syntax gate, pinned workflow checks, full local suite on Ubuntu/Fedora and paired Python 3.10/Bash 4.4.0 |
+| `shell.yml` | PR source identity/coherence/syntax gate, pinned workflow checks and complementary Python analysis, full local suite on Ubuntu/Fedora and paired Python 3.10/Bash 4.4.0 |
 | `packages.yml` | Git-free source archive, RPM/DEB construction, lifecycle, authentication, and previous-release upgrade |
 | `real-tools.yml` | Pinned real-tool behavior and shared-destination qualification on both the latest pin and scheduled current-stable yt-dlp |
 | `qualification.yml` | Supported FFmpeg/FFprobe generation matrix |
@@ -1213,6 +1213,12 @@ reuse an old success. No candidate artifact or dependency cache establishes
 qualification. Historical content proof has no arbitrary calendar expiry; changed identity,
 new failure or missing evidence invalidates reuse. Current external inputs and
 explicit requalification/recovery are described in `TESTING.md`.
+
+The Ubuntu shell job also checks every canonical Python source with hash-pinned
+Ruff in a disposable environment. The source-proof verifier requires that
+step explicitly; local/package archive suites remain offline, and Ruff is not
+installed with the application. Python 3.10 syntax and runtime qualification
+and CodeQL retain their separate roles.
 
 The Ubuntu shell job can collect passive validation diagnostics through
 `scripts/ci-validation-diagnostics.py`. Its optional private rendezvous identifies

@@ -61,7 +61,7 @@ REQUIRED_STEPS = {
         "Run current-stable shared-destination GUI and CLI qualification",
         "Retain current-stable shared-destination verdicts and monotonic events",
     },
-    "Ubuntu": {"Check workflow syntax and embedded shell", "Run validation"},
+    "Ubuntu": {"Check workflow syntax and embedded shell", "Check Python with reviewed Ruff", "Run validation"},
     "Fedora 44": {"Run validation"},
     "Python 3.10 / Ubuntu": {
         "Build and bind verified Bash 4.4 on the disposable runner",
