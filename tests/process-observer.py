@@ -45,6 +45,21 @@ def read_observation(path):
         return path.read_bytes()
 
 
+def read_process_observation(pid, row, path):
+    """Accept memory only from the same live task within the same thread group."""
+    if not same_process(pid, row):
+        raise ProcessLookupError(errno.ESRCH, 'observation group identity changed')
+    before = process_row(path.with_name('stat'))
+    if before['state'] in ('Z', 'X'):
+        raise ProcessLookupError(errno.ESRCH, 'observation task has terminated')
+    data = read_observation(path)
+    after = process_row(path.with_name('stat'))
+    if (after['start'] != before['start'] or after['state'] in ('Z', 'X')
+            or not same_process(pid, row)):
+        raise ProcessLookupError(errno.ESRCH, 'observation task identity changed')
+    return data
+
+
 def observation_failure(pid, row, error):
     # The identity can disappear between enumeration and an attribute read.
     # Persistent permission/I/O failures never establish that transition.
@@ -78,7 +93,7 @@ def token_process_is_live(pid, marker):
     try:
         for path in observation_paths(pid, row, 'environ'):
             try:
-                environment = read_observation(path).split(b'\0')
+                environment = read_process_observation(pid, row, path).split(b'\0')
             except (FileNotFoundError, ProcessLookupError) as error:
                 # A dead group leader may have a live sibling with readable
                 # memory. Visit that sibling before deciding observability.
@@ -139,17 +154,31 @@ def snapshot():
 
 
 def observation_paths(pid, row, name):
-    """The main thread's proc entries can be empty while siblings still run."""
-    yield Path(f'/proc/{pid}/{name}')
-    # The leader can exit after the snapshot but before reading its memory.
-    # Revalidate once before considering a sibling; never follow a reused PID.
+    """Choose live tasks; an exited leader need not retain accessible memory."""
     current = current_process(pid)
     if current is None or current['start'] != row['start']:
         return
+    if current['state'] not in ('Z', 'X'):
+        yield Path(f'/proc/{pid}/{name}')
+        # The leader can exit after selection. Revalidate before considering
+        # siblings; memory readers also revalidate both identities themselves.
+        current = current_process(pid)
+        if current is None or current['start'] != row['start']:
+            return
     if current['state'] in ('Z', 'X'):
+        live = False
         for task in Path(f'/proc/{pid}/task').iterdir():
             if task.name.isdecimal() and task.name != str(pid):
+                try:
+                    identity = process_row(task / 'stat')
+                except FileNotFoundError:
+                    continue
+                if identity['state'] in ('Z', 'X'):
+                    continue
+                live = True
                 yield task / name
+        if not live and not threads_are_quiescent(pid, current):
+            raise OSError(errno.EIO, 'observation task inventory is incomplete')
 
 
 def threads_are_quiescent(pid, row):
@@ -209,7 +238,7 @@ class Observer:
             try:
                 for path in observation_paths(pid, row, 'environ'):
                     try:
-                        environment = read_observation(path).split(b'\0')
+                        environment = read_process_observation(pid, row, path).split(b'\0')
                     except OSError as error:
                         if pid not in environment_errors or isinstance(environment_errors[pid],
                                                                        (FileNotFoundError, ProcessLookupError)):
@@ -262,7 +291,7 @@ class Observer:
             try:
                 for path in observation_paths(pid, row, 'cmdline'):
                     try:
-                        argv = read_observation(path).lower()
+                        argv = read_process_observation(pid, row, path).lower()
                     except (FileNotFoundError, ProcessLookupError) as error:
                         pending = error
                         continue

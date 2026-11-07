@@ -371,6 +371,150 @@ class ObservationFailureTests(unittest.TestCase):
         self.assertEqual(examined, 5, 'a runner oracle escaped the failure matrix')
 
 
+class ObservationMemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.pid = 44444
+        self.tid = 44445
+        self.row = dict(start=12345, state='Z', parent=1, group=self.pid, session=self.pid)
+        self.task = dict(self.row, start=12346, state='S')
+        self.token = 'synthetic-thread-memory-test'
+        self.marker = b'YTDLP_QUALIFICATION_TOKEN=' + self.token.encode()
+        self.root = Path(f'/proc/{self.pid}')
+        self.sibling = self.root / 'task' / str(self.tid)
+
+    def row_for(self, path):
+        return dict(self.task if path.parent == self.sibling else self.row)
+
+    def test_zombie_leader_memory_is_not_required_for_live_sibling(self):
+        for number in (errno.EACCES, errno.EIO):
+            with self.subTest(dead_leader_errno=number):
+                reads = []
+
+                def read(path):
+                    reads.append(path)
+                    if path.parent != self.sibling:
+                        raise OSError(number, 'synthetic terminated-task memory')
+                    return self.marker + b'\0' if path.name == 'environ' else b'https://example.invalid/synthetic\0'
+
+                with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                        mock.patch.object(observer, 'process_row', side_effect=self.row_for), \
+                        mock.patch.object(Path, 'iterdir', side_effect=lambda _path: iter([
+                            self.root / 'task' / str(self.pid), self.sibling]), autospec=True), \
+                        mock.patch.object(observer, 'read_observation', side_effect=read):
+                    sample = observer.Observer(self.token).sample()
+                    self.assertIn(str(self.pid), sample['live'])
+                    self.assertIn((self.pid, self.row['start']), sample['url_in_argv'])
+                    self.assertTrue(observer.token_process_is_live(self.pid, self.marker))
+                self.assertTrue(reads)
+                self.assertTrue(all(path.parent == self.sibling for path in reads),
+                                'terminated task memory was read instead of the live sibling')
+
+    def test_live_sibling_permission_and_io_errors_remain_blocking(self):
+        for name in ('environ', 'cmdline'):
+            for number in (errno.EACCES, errno.EIO):
+                with self.subTest(attribute=name, errno=number):
+                    observed = observer.Observer(self.token)
+                    observed.known.add((self.pid, self.row['start']))
+
+                    def read(path):
+                        if path.name == name:
+                            raise OSError(number, 'synthetic active-task memory refusal')
+                        return self.marker + b'\0'
+
+                    with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                            mock.patch.object(observer, 'process_row', side_effect=self.row_for), \
+                            mock.patch.object(Path, 'iterdir', side_effect=lambda _path: iter([self.sibling]),
+                                              autospec=True), \
+                            mock.patch.object(observer, 'read_observation', side_effect=read):
+                        with self.assertRaises(observer.ObservationError) as raised:
+                            observed.sample()
+                        self.assertEqual(raised.exception.errno, number)
+                        self.assertIs(observed.error, raised.exception)
+                        if name == 'environ':
+                            with self.assertRaises(observer.ObservationError) as token_error:
+                                observer.token_process_is_live(self.pid, self.marker)
+                            self.assertEqual(token_error.exception.errno, number)
+
+    def test_memory_read_revalidates_group_and_task_identity(self):
+        for change in ('group-start', 'task-start', 'task-exit', 'task-disappears'):
+            with self.subTest(change=change):
+                rows = {'group': dict(self.row), 'task': dict(self.task)}
+
+                def identity(path):
+                    if path.parent == self.sibling:
+                        if rows['task'] is None:
+                            raise FileNotFoundError(errno.ENOENT, 'synthetic retired task')
+                        return dict(rows['task'])
+                    return dict(rows['group'])
+
+                def read(_path):
+                    if change == 'group-start':
+                        rows['group']['start'] += 1
+                    elif change == 'task-start':
+                        rows['task']['start'] += 1
+                    elif change == 'task-exit':
+                        rows['task']['state'] = 'Z'
+                    else:
+                        rows['task'] = None
+                    return self.marker + b'\0'
+
+                with mock.patch.object(observer, 'process_row', side_effect=identity), \
+                        mock.patch.object(observer, 'read_observation', side_effect=read) as memory:
+                    with self.assertRaises((FileNotFoundError, ProcessLookupError)):
+                        observer.read_process_observation(self.pid, self.row, self.sibling / 'environ')
+                    memory.assert_called_once()
+
+    def test_leader_exit_between_selection_and_read_uses_live_sibling(self):
+        self.row['state'] = 'S'
+        with mock.patch.object(observer, 'process_row', side_effect=self.row_for), \
+                mock.patch.object(Path, 'iterdir', side_effect=lambda _path: iter([self.sibling]), autospec=True), \
+                mock.patch.object(observer, 'read_observation', return_value=self.marker + b'\0') as memory:
+            paths = observer.observation_paths(self.pid, self.row, 'environ')
+            leader_path = next(paths)
+            self.assertEqual(leader_path, self.root / 'environ')
+            self.row['state'] = 'Z'
+            with self.assertRaises(ProcessLookupError):
+                observer.read_process_observation(self.pid, self.row, leader_path)
+            memory.assert_not_called()
+            sibling_path = next(paths)
+            self.assertEqual(sibling_path, self.sibling / 'environ')
+            self.assertEqual(observer.read_process_observation(self.pid, self.row, sibling_path),
+                             self.marker + b'\0')
+
+    def test_unknown_task_inventory_and_identity_cannot_prove_absence(self):
+        for boundary in ('inventory', 'task-stat'):
+            for number in (errno.EACCES, errno.EIO):
+                with self.subTest(boundary=boundary, errno=number):
+                    observed = observer.Observer(self.token)
+                    observed.known.add((self.pid, self.row['start']))
+
+                    def identity(path):
+                        if boundary == 'task-stat' and path.parent == self.sibling:
+                            raise OSError(number, 'synthetic task identity refusal')
+                        return self.row_for(path)
+
+                    def tasks(_path):
+                        if boundary == 'inventory':
+                            raise OSError(number, 'synthetic task inventory refusal')
+                        return iter([self.sibling])
+
+                    with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                            mock.patch.object(observer, 'process_row', side_effect=identity), \
+                            mock.patch.object(Path, 'iterdir', side_effect=tasks, autospec=True), \
+                            mock.patch.object(observer, 'read_observation') as memory:
+                        with self.assertRaises(observer.ObservationError) as raised:
+                            observed.sample()
+                        self.assertEqual(raised.exception.errno, number)
+                        memory.assert_not_called()
+        observed = observer.Observer(self.token)
+        observed.known.add((self.pid, self.row['start']))
+        with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                mock.patch.object(observer, 'process_row', side_effect=self.row_for), \
+                mock.patch.object(Path, 'iterdir', side_effect=lambda _path: iter([]), autospec=True):
+            with self.assertRaises(observer.ObservationError):
+                observed.sample()
+
+
 class ProcessTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='process-contract-')
@@ -1032,6 +1176,28 @@ while Path('/proc/' + sys.argv[1]).exists():
         finally:
             if write_end is not None:
                 os.close(write_end)
+
+    def test_observer_uses_live_memory_when_zombie_leader_access_is_denied(self):
+        real_read = observer.read_observation
+        live_reads = []
+
+        def denied_leader(path):
+            ready = self.root / 'thread-ready'
+            if ready.exists():
+                pid = int(ready.read_text())
+                root = Path(f'/proc/{pid}')
+                if path.parent == root:
+                    row = observer.current_process(pid)
+                    if row is not None and row['state'] == 'Z':
+                        raise PermissionError(errno.EACCES, 'synthetic exited-leader memory ownership')
+                elif path.parent.parent == root / 'task':
+                    live_reads.append(path.name)
+            return real_read(path)
+
+        with mock.patch.object(observer, 'read_observation', side_effect=denied_leader):
+            self.test_observer_detects_orphan_zombie_leader_live_thread()
+        self.assertIn('environ', live_reads)
+        self.assertIn('cmdline', live_reads)
 
     def test_observer_process_row_ignores_name_encoding(self):
         raw = Path('/proc/self/stat').read_bytes()
