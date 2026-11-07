@@ -14,7 +14,7 @@ le dossier de destination, puis suivez le téléchargement et le traitement.
 - **Au quotidien :** préférences mémorisées, annulation et téléchargements indépendants simultanés.
 
 La version de développement actuelle est la **2.4.5**.
-La dernière release de paquets publiée est la **2.4.4**.
+La dernière release de paquets publiée est la **2.4.5**.
 
 ## Sommaire
 
@@ -46,14 +46,14 @@ Le journal illustre une erreur d'espace disque simulée.
 ## Installation recommandée
 
 Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
-Les noms ci-dessous correspondent à la release v2.4.4 actuellement publiée.
+Les noms ci-dessous correspondent à la release v2.4.5 actuellement publiée.
 Téléchargez les fichiers adaptés à votre système dans un même dossier, puis ouvrez-y un terminal.
 
 | Système | Application à télécharger |
 | --- | --- |
-| Fedora 44 | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.4-1.fc44.noarch.rpm) |
-| Debian / Ubuntu | [DEB](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui_2.4.4-1_all.deb) |
-| Autres GNU/Linux / utilisation portable | [ZIP](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.4.zip) |
+| Fedora 44 | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.5-1.fc44.noarch.rpm) |
+| Debian / Ubuntu | [DEB](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui_2.4.5-1_all.deb) |
+| Autres GNU/Linux / utilisation portable | [ZIP](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.5.zip) |
 
 ### Fedora 44
 
@@ -62,13 +62,13 @@ Téléchargez ces quatre fichiers depuis cette release :
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.4.4-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.4.5-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.4.4-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.4.5-1.fc44.noarch.rpm
 ```
 
 Utilisez le bootstrap plutôt qu'une installation directe du RPM sur une Fedora
@@ -78,16 +78,16 @@ prépare les runtimes yt-dlp et Deno vérifiés propres à l'utilisateur.
 
 ### Debian et Ubuntu
 
-La dernière release publiée, la 2.4.4, fournit le DEB. Téléchargez :
+La dernière release publiée, la 2.4.5, fournit le DEB. Téléchargez :
 
 ```text
-yt-dlp-aria2-downloader-gui_2.4.4-1_all.deb
+yt-dlp-aria2-downloader-gui_2.4.5-1_all.deb
 SHA256SUMS
 ```
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.4.4-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.4.5-1_all.deb
 ```
 
 Le paquet installe les dépendances système. Les runtimes yt-dlp et Deno vérifiés
@@ -107,14 +107,14 @@ depuis le dossier source avec `./install-gui.sh uninstall`.
 Installez d'abord les [prérequis système](#prérequis). Téléchargez :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.4.4.zip
+yt-dlp-aria2-downloader-gui-2.4.5.zip
 SHA256SUMS
 ```
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.4.4.zip
-cd yt-dlp-aria2-downloader-gui-2.4.4
+unzip yt-dlp-aria2-downloader-gui-2.4.5.zip
+cd yt-dlp-aria2-downloader-gui-2.4.5
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -161,8 +161,8 @@ Remplacez `ARTEFACT` par le nom du fichier téléchargé :
 
 ```bash
 gh attestation verify ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.4.4 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.4.4 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.4.5 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.4.5 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Les empreintes contrôlent l'intégrité des fichiers ; ces commandes vérifient
