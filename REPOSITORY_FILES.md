@@ -170,8 +170,8 @@ The first column contains every source path included in this inventory, includin
 
 ## Inventory status
 
-- Tracked and new source files included: **116**.
-- Inventory entries: **116**.
-- Files retained: **116**.
+- Tracked and new source files included: **138**.
+- Inventory entries: **138**.
+- Files retained: **138**.
 - Historical files: **1** (`CHANGELOG.md`).
 These counts describe inventory coverage, not a defect-free audit verdict. All descriptions are in English; machine-readable filenames, command names, SPDX identifiers, package metadata and protocol tokens retain their required spelling.
