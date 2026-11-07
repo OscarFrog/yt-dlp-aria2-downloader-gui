@@ -116,24 +116,20 @@ exit 99
 '''
 
 
-def running(pid: int, token: pathlib.Path) -> bool:
-    stat_path = pathlib.Path(f"/proc/{pid}/stat")
-    try:
-        fields = stat_path.read_text(encoding="ascii").split()
-    except OSError:
-        return False
-    if len(fields) >= 3 and fields[2] == "Z":
-        return False
+import importlib.util
 
-    # A busy parallel suite can recycle a released PID before this controller
-    # observes it. Match an inherited identity token so cleanup never mistakes
-    # an unrelated replacement process for the supervised fixture.
+identity_spec = importlib.util.spec_from_file_location(
+    "fixture_process_identity", pathlib.Path(library).parent.parent / "process-observer.py"
+)
+if identity_spec is None or identity_spec.loader is None:
+    raise AssertionError("Independent process observer is unavailable")
+identity_observer = importlib.util.module_from_spec(identity_spec)
+identity_spec.loader.exec_module(identity_observer)
+
+
+def running(pid: int, token) -> bool:
     expected = f"YTDLP_ARIA2_TEST_CHILD_TOKEN={token}".encode()
-    try:
-        environment = pathlib.Path(f"/proc/{pid}/environ").read_bytes()
-    except OSError:
-        return False
-    return expected in environment.split(b"\0")
+    return identity_observer.token_process_is_live(pid, expected)
 
 
 with tempfile.TemporaryDirectory(prefix="runner-startup-stress-") as temp_dir:
@@ -306,21 +302,20 @@ exit 99
 '''
 
 
-def running(pid: int, token: pathlib.Path) -> bool:
-    stat_path = pathlib.Path(f"/proc/{pid}/stat")
-    try:
-        fields = stat_path.read_text(encoding="ascii").split()
-    except OSError:
-        return False
-    if len(fields) >= 3 and fields[2] == "Z":
-        return False
+import importlib.util
 
+identity_spec = importlib.util.spec_from_file_location(
+    "fixture_process_identity", pathlib.Path(library).parent.parent / "process-observer.py"
+)
+if identity_spec is None or identity_spec.loader is None:
+    raise AssertionError("Independent process observer is unavailable")
+identity_observer = importlib.util.module_from_spec(identity_spec)
+identity_spec.loader.exec_module(identity_observer)
+
+
+def running(pid: int, token) -> bool:
     expected = f"YTDLP_ARIA2_TEST_CHILD_TOKEN={token}".encode()
-    try:
-        environment = pathlib.Path(f"/proc/{pid}/environ").read_bytes()
-    except OSError:
-        return False
-    return expected in environment.split(b"\0")
+    return identity_observer.token_process_is_live(pid, expected)
 
 
 with tempfile.TemporaryDirectory(prefix="runner-final-transition-") as temp_dir:
@@ -803,21 +798,20 @@ exit 99
 '''
 
 
-def running(pid: int, identity_token: str) -> bool:
-    try:
-        stat_fields = pathlib.Path(f"/proc/{pid}/stat").read_text(
-            encoding="ascii"
-        ).split()
-    except OSError:
-        return False
-    if len(stat_fields) >= 3 and stat_fields[2] == "Z":
-        return False
+import importlib.util
+
+identity_spec = importlib.util.spec_from_file_location(
+    "fixture_process_identity", pathlib.Path(library).parent.parent / "process-observer.py"
+)
+if identity_spec is None or identity_spec.loader is None:
+    raise AssertionError("Independent process observer is unavailable")
+identity_observer = importlib.util.module_from_spec(identity_spec)
+identity_spec.loader.exec_module(identity_observer)
+
+
+def running(pid: int, identity_token) -> bool:
     expected = f"YTDLP_ARIA2_STOPPED_IDENTITY_TOKEN={identity_token}".encode()
-    try:
-        environment = pathlib.Path(f"/proc/{pid}/environ").read_bytes()
-    except OSError:
-        return False
-    return expected in environment.split(b"\0")
+    return identity_observer.token_process_is_live(pid, expected)
 
 
 with tempfile.TemporaryDirectory(prefix="runner-stopped-identity-") as temp_dir:
@@ -919,20 +913,20 @@ trap - EXIT
 '''
 
 
-def running(pid: int, identity_token: str) -> bool:
-    stat_path = pathlib.Path(f"/proc/{pid}/stat")
-    try:
-        stat_fields = stat_path.read_text(encoding="ascii").split()
-    except OSError:
-        return False
-    if len(stat_fields) >= 3 and stat_fields[2] == "Z":
-        return False
+import importlib.util
+
+identity_spec = importlib.util.spec_from_file_location(
+    "fixture_process_identity", pathlib.Path(library).parent.parent / "process-observer.py"
+)
+if identity_spec is None or identity_spec.loader is None:
+    raise AssertionError("Independent process observer is unavailable")
+identity_observer = importlib.util.module_from_spec(identity_spec)
+identity_spec.loader.exec_module(identity_observer)
+
+
+def running(pid: int, identity_token) -> bool:
     expected = f"YTDLP_ARIA2_STUBBORN_FIXTURE_TOKEN={identity_token}".encode()
-    try:
-        environment = pathlib.Path(f"/proc/{pid}/environ").read_bytes()
-    except OSError:
-        return False
-    return expected in environment.split(b"\0")
+    return identity_observer.token_process_is_live(pid, expected)
 
 
 with tempfile.TemporaryDirectory(prefix="runner-signal-resistant-") as temp_dir:
@@ -2864,6 +2858,7 @@ PY_MOCK_SUBREAPING
 test_mock_process_scan_contract() {
     python3 -I -B - "${SCRIPT_DIR}/lib/mock-common.sh" <<'PY_PROCESS_SCAN'
 import ctypes
+import errno
 import os
 from pathlib import Path
 import re
@@ -2872,6 +2867,7 @@ import subprocess
 import sys
 import tempfile
 
+project = Path(sys.argv[1]).resolve().parents[2]
 source = Path(sys.argv[1]).read_text()
 match = re.search(r"^find_test_processes\(\) \{\n.*?^\}\n", source, re.M | re.S)
 if match is None:
@@ -2879,62 +2875,92 @@ if match is None:
 function = match.group()
 
 
-def scan(token, implementation=function, prefix=""):
-    command = "set -euo pipefail\n" + implementation + prefix + '''
+def scan(token, fixture_project=project, prefix="", *, check=True, fault=""):
+    command = "set -euo pipefail\n" + function + prefix + '''
 TEST_ROOT=$1
+PROJECT_DIR=$2
+export YTDLP_ARIA2_MOCK_PROCESS_TOKEN=$1
 find_test_processes
 if ((${#TEST_PROCESS_PIDS[@]})); then
     printf '%s\\n' "${TEST_PROCESS_PIDS[@]}"
 fi
 '''
-    result = subprocess.run(["bash", "-c", command, "scan-fixture", token],
-                            capture_output=True, text=True, timeout=10, check=True)
-    return set(result.stdout.splitlines())
+    result = subprocess.run(["bash", "-c", command, "scan-fixture", token, str(fixture_project)],
+                            env=dict(os.environ, MOCK_OBSERVATION_FAULT=fault),
+                            capture_output=True, text=True, timeout=10, check=check)
+    return set(result.stdout.splitlines()) if check else result
 
 
 with tempfile.TemporaryDirectory(prefix="mock-process-scan-") as directory:
     root = Path(directory)
     token = str(root / "needle space é\nend")
+    marker = b"YTDLP_ARIA2_MOCK_PROCESS_TOKEN=" + os.fsencode(token)
     proc = root / "proc"
     proc.mkdir()
+    fake_project = root / "project"
+    (fake_project / "tests").mkdir(parents=True)
+    # Redirect only the observer's filesystem reads; parsing, token matching,
+    # identity checks and the actual Bash scanner remain the implementations.
+    (fake_project / "tests/process-observer.py").write_text('''import importlib.util
+import os
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('actual_observer', REAL_HELPER)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = Path(PROC_ROOT)
+
+def mapped(path):
+    value = str(path)
+    return root / value[6:] if value.startswith('/proc/') else Path(value)
+
+module.Path = mapped
+module.snapshot = lambda: {int(path.name): module.process_row(path / 'stat') for path in root.iterdir()}
+read = module.read_observation
+
+def injected(path):
+    fault = os.environ.get('MOCK_OBSERVATION_FAULT', '')
+    if fault and path.parent.name == '9900000101' and path.name == 'cmdline':
+        raise OSError(int(fault), 'synthetic observation failure')
+    return read(path)
+
+module.read_observation = injected
+Observer = module.Observer
+snapshot = module.snapshot
+'''.replace('REAL_HELPER', repr(str(project / 'tests/process-observer.py')))
+       .replace('PROC_ROOT', repr(str(proc))))
     payloads = {
-        "9900000101": b"python\0" + os.fsencode(token) + b"\0",
-        "9900000102": b"python\0prefix" + os.fsencode(token) + b"suffix\0",
-        "9900000103": b"python\0" + os.fsencode(token).replace(b" ", b"\0", 1) + b"\0",
-        "9900000104": b"python\0foreign\0",
+        "9900000101": marker + b"\0YTDLP_QUALIFICATION_EXTERNAL=1\0",
+        "9900000102": marker + b"suffix\0",
+        "9900000103": b"YTDLP_ARIA2_MOCK_PROCESS_TOKEN=prefix" + os.fsencode(token) + b"\0",
+        "9900000104": b"FOREIGN=1\0",
         "9900000105": b"",
-        "9900000106": b"python\0" + os.fsencode(token) + b"\0",
     }
     for pid, payload in payloads.items():
         (proc / pid).mkdir()
-        (proc / pid / "cmdline").write_bytes(payload)
-    (proc / "9900000107").mkdir()  # A process whose cmdline disappeared.
-    (proc / "9900000106/cmdline").chmod(0)
-    expected = {"9900000101", "9900000102", "9900000103"}
-    if os.access(proc / "9900000106/cmdline", os.R_OK):
-        expected.add("9900000106")  # A root qualification may still read mode 000.
-    fake_scan = function.replace("/proc/", str(proc) + "/")
-    if scan(token, fake_scan) != expected:
-        raise AssertionError("mock scanner changed NUL/space/newline or global-token semantics")
-    if scan(token + "foreign", fake_scan):
+        (proc / pid / "stat").write_text(pid + " (name ) with spaces) S 1 1 1 " + " ".join(["123"] * 20))
+        (proc / pid / "environ").write_bytes(payload)
+        (proc / pid / "cmdline").write_bytes(b"sleep\00030\0")
+    if scan(token, fake_project) != {"9900000101"}:
+        raise AssertionError("mock scanner lost exact NUL/space/newline token matching")
+    if scan(token + "foreign", fake_project):
         raise AssertionError("foreign process was selected")
+    for number in (errno.EACCES, errno.EIO):
+        refused = scan(token, fake_project, check=False, fault=str(number))
+        if refused.returncode != 70 or refused.stdout or 'observation is incomplete' not in refused.stderr:
+            raise AssertionError("attributed unreadable process was classified as absent")
 
-    # Remove cmdline between the readable probe and the builtin read.
-    disappearing = '''
-set -T
-trap 'if [[ ${BASH_COMMAND} == mapfile* ]]; then command rm -f -- "${cmdline_file}"; fi' DEBUG
-'''
-    if scan(token, fake_scan, disappearing):
-        raise AssertionError("disappeared process remained in the scan")
-
+    environment = dict(os.environ, YTDLP_ARIA2_MOCK_PROCESS_TOKEN=token)
     children = []
     try:
-        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", token])
+        # The token is deliberately absent from argv, including after exec.
+        child = subprocess.Popen(["sleep", "60"], env=environment)
         children.append(child)
-        foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "foreign"])
+        foreign = subprocess.Popen(["sleep", "60"])
         children.append(foreign)
         if scan(token) != {str(child.pid)}:
-            raise AssertionError("live witness missing or unrelated process selected")
+            raise AssertionError("argv-free live witness missing or unrelated process selected")
+        if child.poll() is not None or foreign.poll() is not None:
+            raise AssertionError("the observation-only scanner signaled a witness")
     finally:
         for process in children:
             process.terminate()
@@ -2943,8 +2969,6 @@ trap 'if [[ ${BASH_COMMAND} == mapfile* ]]; then command rm -f -- "${cmdline_fil
     if scan(token):
         raise AssertionError("reaped witness remained in the scan")
 
-    # Adopt the witness after its launcher exits so this regression can reap
-    # its own orphan without relying on the host's PID 1.
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(36, 1, 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), "unable to enable fixture subreaping")
@@ -2957,19 +2981,20 @@ if child:
 else:
     os.close(1)
     os.close(2)
-    time.sleep(60)
+    os.setsid()
+    os.execlp('sleep', 'sleep', '60')
 '''
-        result = subprocess.run([sys.executable, "-c", launcher, token],
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", launcher], env=environment,
                                 capture_output=True, text=True, timeout=5, check=True)
         orphan = int(result.stdout)
         if scan(token) != {str(orphan)}:
-            raise AssertionError("global scanner lost the witness after its leader exited")
+            raise AssertionError("token scanner lost an exec/new-session orphan")
     finally:
         if orphan:
             os.kill(orphan, signal.SIGTERM)
             os.waitpid(orphan, 0)
         libc.prctl(36, 0, 0, 0, 0)
-print("Mock process scan: argv boundaries, disappearance, foreign processes and orphan witness passed.")
+print("Mock process scan: exact inherited token, unknown observations, disappearance, foreign processes and exec/session orphan passed.")
 PY_PROCESS_SCAN
 }
 
@@ -2995,7 +3020,7 @@ network = ["engine_network_destination", "engine_network_failures",
            "engine_network_publication_failures",
            "engine_network_signals", "engine_network_cleanup_boundaries"]
 progress = ["gui_aria_progress", "gui_profiles", "gui_progress_completion", "gui_arte_selection"]
-state = ["gui_url_redaction_cases", "gui_live_log_retention_unconfirmed_shutdown",
+state = ["fixture-safety", "gui_url_redaction_cases", "gui_live_log_retention_unconfirmed_shutdown",
          "gui_cleanup_unconfirmed_shutdown", "gui_config_recovery",
          "gui_settings_signal_cleanup", "gui_file_selection", "gui_prune_metadata",
          "gui_diagnostic_logs", "gui_state_initialization", "gui_input_validation"]
@@ -3023,7 +3048,7 @@ groups = {
     "runtime-validation": [runtime[i] for i in (2, 4, 6, 7)],
 }
 expected_all = core + hls + staging + network + progress + state + signals + runtime
-assert len(expected_all) == len(set(expected_all)) == 64
+assert len(expected_all) == len(set(expected_all)) == 65
 assert source.endswith('main "$@"\n')
 # The actual entry point still parses options, bootstraps its subreaper,
 # creates fixtures and initializes/cleans their environment. Replace only
@@ -3046,7 +3071,7 @@ mock_dispatch_record() {
 }
 '''
 stubs = ''.join(f'test_mock_{name}() {{ mock_dispatch_record {name}; }}\n'
-                for name in expected_all if name != "process-supervision")
+                for name in expected_all if name not in ("process-supervision", "fixture-safety"))
 stubs += f'mock_engine_internal_record_cleanup() {{ mock_dispatch_record {composition}; }}\n'
 with tempfile.TemporaryDirectory(prefix="mock-dispatch-") as directory:
     root = Path(directory)
@@ -3056,6 +3081,7 @@ with tempfile.TemporaryDirectory(prefix="mock-dispatch-") as directory:
     for name in ("download-video.sh", "private-aria2-plan.py", "private-process-supervisor.py"):
         shutil.copy2(tests.parent / name, project / name)
     shutil.copy2(tests / "lib/assert.sh", library_root / "assert.sh")
+    shutil.copy2(tests / "process-observer.py", project / "tests/process-observer.py")
     for name in libraries:
         shutil.copy2(tests / f"lib/mock-{name}.sh", library_root / f"mock-{name}.sh")
     specimen = project / "tests/mock-integration.sh"
@@ -3063,6 +3089,9 @@ with tempfile.TemporaryDirectory(prefix="mock-dispatch-") as directory:
     (project / "tests/process-supervision-integration.py").write_text(
         'import os\nwith open(os.environ["MOCK_DISPATCH_LOG"], "a") as log:\n'
         '    log.write("process-supervision\\n")\n')
+    (project / "tests/fixture-safety-integration.py").write_text(
+        'import os\nwith open(os.environ["MOCK_DISPATCH_LOG"], "a") as log:\n'
+        '    log.write("fixture-safety\\n")\n')
     assert not (project / ".git").exists()
     bash = shutil.which("bash")
     # Library loading itself must leave the caller's process-wide state alone.
@@ -3121,7 +3150,7 @@ load_mock_libraries "$@"
     union = []
     for group, phases in groups.items():
         union.extend(run(["--group", group], phases))
-        failing = next(name for name in phases if name != "process-supervision")
+        failing = next(name for name in phases if name not in ("process-supervision", "fixture-safety"))
         run(["--group", group], phases[:phases.index(failing) + 1], 23,
             MOCK_DISPATCH_FAIL_PHASE=failing)
     assert Counter(union) == Counter(expected_all + [composition])
@@ -3137,7 +3166,7 @@ load_mock_libraries "$@"
         run(["--group", "engine-core"], core[:1], status,
             MOCK_DISPATCH_FAIL_PHASE=core[0], MOCK_DISPATCH_FAIL_SIGNAL=signal_name)
 
-print(f"Mock dispatch: all {len(expected_all) - 1} test functions plus process supervision, isolated crash/cleanup composition, group/aggregate order, failures, signals, library state and Git-free entry point passed.")
+print(f"Mock dispatch: all {len(expected_all) - 2} test functions plus process supervision and fixture safety, isolated crash/cleanup composition, group/aggregate order, failures, signals, library state and Git-free entry point passed.")
 PY_MOCK_DISPATCH
 }
 

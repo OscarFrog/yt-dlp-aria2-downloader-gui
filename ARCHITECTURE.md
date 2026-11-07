@@ -1482,6 +1482,17 @@ The original entry point retains its subreaper bootstrap, private root ownership
 and ordered group dispatch. Independent runner controls preserve each scenario
 boundary, aggregate ordering and failure propagation, including Git-free use.
 
+The mock root retains a directory descriptor and device/inode until cleanup.
+Recursive removal stays anchored to that descriptor, after owner/mode and
+visible-root revalidation and a successful process-quiescence observation.
+Failure preserves remaining data. Relative-XDG probes live inside this private
+root, never at fixed names in the checkout. Final removal of an empty root is
+not an atomic defense against a hostile same-UID replacement.
+Mock leak checks combine an exact inherited token with observed ancestry and
+retained PID/start identities. Unreadable attributed processes veto a clean
+verdict; rescue uses revalidated pidfds and does not change that verdict. The
+shared observer is a test-only component, independent of production supervision.
+
 Tests use private temporary homes, mock binaries, fixtures, and bounded process
 supervision. The parallel runner binds cancellation to a child-published Linux
 process start time and a private inherited token. If a fatal signal arrives

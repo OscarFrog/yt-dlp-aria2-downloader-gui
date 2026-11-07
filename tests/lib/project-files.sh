@@ -142,6 +142,7 @@ PYTHON_FILES=(
     tests/zenity-autonomous-qualification.py
     tests/zenity-autonomous-integration.py
     tests/process-supervision-integration.py
+    tests/fixture-safety-integration.py
     tests/coordination-integration.py
     private-launcher-manager.py
     scripts/update-published-version.py

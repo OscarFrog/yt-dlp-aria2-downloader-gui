@@ -7,6 +7,8 @@ Rescue happens only after assertions; test subreaping is not application reaping
 
 import ast
 import ctypes
+import errno
+import gc
 from contextlib import ExitStack, contextmanager, redirect_stderr
 import importlib.util
 import inspect
@@ -14,13 +16,17 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import select
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import weakref
 from unittest import mock
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -132,9 +138,245 @@ class DisplayReadinessTests(unittest.TestCase):
                         os.close(writer)
 
 
+class ObservationFailureTests(unittest.TestCase):
+    def setUp(self):
+        self.pid = 44444
+        self.row = dict(start=12345, state='S', parent=1, group=44444, session=44444)
+        self.token = 'synthetic-observation-test'
+        self.marker = b'YTDLP_QUALIFICATION_TOKEN=' + self.token.encode()
+
+    def test_attributed_attribute_failure_stays_inconclusive(self):
+        for name in ('environ', 'cmdline'):
+            for number in (errno.EACCES, errno.EIO):
+                with self.subTest(attribute=name, errno=number):
+                    observed = observer.Observer(self.token)
+
+                    def readable(path):
+                        return self.marker + b'\0' if path.name == 'environ' else b'fixture\0'
+
+                    def denied(path):
+                        if path.name == name:
+                            raise OSError(number, 'synthetic attribute failure')
+                        return readable(path)
+
+                    with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                            mock.patch.object(observer, 'process_row', return_value=self.row), \
+                            mock.patch.object(Path, 'read_bytes', new=readable):
+                        self.assertIn(str(self.pid), observed.sample()['live'])
+                        with mock.patch.object(Path, 'read_bytes', new=denied):
+                            with self.assertRaises(observer.ObservationError):
+                                observed.sample()
+                    # A lost interval must not disappear from the verdict when
+                    # the fixture exits, even if the caller resumes sampling.
+                    with mock.patch.object(observer, 'snapshot', return_value={}):
+                        with self.assertRaises(observer.ObservationError):
+                            observed.sample()
+
+    def test_unattributed_foreign_environment_does_not_join_fixture(self):
+        with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                mock.patch.object(Path, 'read_bytes', side_effect=PermissionError(errno.EACCES, 'foreign')):
+            self.assertFalse(observer.Observer(self.token).sample()['live'])
+
+    def test_sibling_disappearance_cannot_erase_an_earlier_permission_failure(self):
+        paths = [Path(f'/proc/{self.pid}/task/{index}/environ') for index in (1, 2, 3)]
+        for strong in (errno.EACCES, errno.EIO):
+            for sequence in ((strong, errno.ESRCH), (errno.ESRCH, strong),
+                             (strong, errno.ENOENT), (errno.ENOENT, strong)):
+                with self.subTest(sequence=sequence):
+                    observed = observer.Observer(self.token)
+                    observed.known.add((self.pid, self.row['start']))
+
+                    def read(path):
+                        index = paths.index(path)
+                        if index < 2:
+                            raise OSError(sequence[index], 'synthetic sibling observation failure')
+                        return self.marker + b'\0'
+
+                    with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                            mock.patch.object(observer, 'process_row', return_value=self.row), \
+                            mock.patch.object(observer, 'observation_paths', return_value=iter(paths)), \
+                            mock.patch.object(Path, 'read_bytes', new=read):
+                        with self.assertRaises(observer.ObservationError) as raised:
+                            observed.sample()
+                    self.assertEqual(raised.exception.errno, strong)
+                    self.assertIs(observed.error, raised.exception)
+        for strong in (errno.EACCES, errno.EIO):
+            observed = observer.Observer(self.token)
+            observed.known.add((self.pid, self.row['start']))
+
+            def failed_enumeration(*_args):
+                yield paths[0]
+                raise ProcessLookupError(errno.ESRCH, 'synthetic task enumeration disappearance')
+
+            with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                    mock.patch.object(observer, 'process_row', return_value=self.row), \
+                    mock.patch.object(observer, 'observation_paths', new=failed_enumeration), \
+                    mock.patch.object(Path, 'read_bytes', side_effect=OSError(strong, 'synthetic')):
+                with self.assertRaises(observer.ObservationError) as raised:
+                    observed.sample()
+            self.assertEqual(raised.exception.errno, strong)
+
+    def test_error_rechecks_quiescence_with_fresh_leader_state(self):
+        current = dict(self.row, state='Z')
+        with mock.patch.object(observer, 'process_row', return_value=current), \
+                mock.patch.object(observer, 'threads_are_quiescent', return_value=True) as quiescent:
+            observer.observation_failure(self.pid, self.row, ProcessLookupError(errno.ESRCH, 'stale'))
+        quiescent.assert_called_once_with(self.pid, current)
+
+    def test_failed_oracle_still_rescues_owned_child_and_preserves_unknown_root(self):
+        for denied in (False, True):
+            with self.subTest(terminal_observation_denied=denied):
+                case = ProcessTests(methodName='test_mock_rescue_requires_token_and_current_start_identity')
+                case.setUp()
+                process = subprocess.Popen(['sleep', '30'],
+                                           env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=case.token))
+                case.processes.append(process)
+                failure = observer.ObservationError(errno.EIO, 'synthetic latched failure')
+                case.observer.error = failure
+                try:
+                    with ExitStack() as stack:
+                        if denied:
+                            stack.enter_context(mock.patch.object(
+                                observer, 'snapshot', side_effect=PermissionError(errno.EACCES, 'injected')))
+                        with self.assertRaises(observer.ObservationError) as raised:
+                            case.tearDown()
+                    self.assertIs(raised.exception, failure, 'cleanup erased the initial observation failure')
+                    self.assertIsNotNone(process.poll(), 'failed observation prevented owned-child rescue')
+                    self.assertTrue(case.root.exists(),
+                                    'a later quiet sample must not erase an earlier observation gap')
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=3)
+                    case.temp.cleanup()
+
+    def test_unconfirmed_owned_process_survives_automatic_fixture_cleanup(self):
+        def exercise():
+            case = ProcessTests(methodName='test_mock_rescue_requires_token_and_current_start_identity')
+            case.setUp()
+            process = mock.Mock(spec=subprocess.Popen)
+            process.poll.return_value = 0
+            process.communicate.side_effect = subprocess.TimeoutExpired('synthetic owned pipe', 5)
+            case.processes.append(process)
+            with mock.patch.object(observer, 'snapshot', return_value={}):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    case.tearDown()
+            self.assertFalse(case.temp._finalizer.alive, 'automatic cleanup still owns an uncertain fixture')
+            return case.root, weakref.ref(case)
+
+        root, reference = exercise()
+        try:
+            gc.collect()
+            self.assertIsNone(reference(), 'the fixture lifetime probe did not collect its TestCase')
+            self.assertTrue(root.is_dir(), 'automatic cleanup removed an unconfirmed fixture')
+        finally:
+            # The synthetic Popen never created a process or inherited an FD.
+            shutil.rmtree(root)
+
+    def test_token_oracle_rejects_unknown_and_confirms_disappearance(self):
+        for number in (errno.EACCES, errno.EIO, errno.ESRCH):
+            with self.subTest(errno=number), \
+                    mock.patch.object(observer, 'process_row', return_value=self.row), \
+                    mock.patch.object(Path, 'read_bytes', side_effect=OSError(number, 'injected')):
+                with self.assertRaises(observer.ObservationError):
+                    observer.token_process_is_live(self.pid, self.marker)
+        for missing in (FileNotFoundError(errno.ENOENT, 'gone'),
+                        ProcessLookupError(errno.ESRCH, 'stale')):
+            with self.subTest(initial=type(missing).__name__), \
+                    mock.patch.object(observer, 'process_row', side_effect=[missing, FileNotFoundError()]):
+                self.assertFalse(observer.token_process_is_live(self.pid, self.marker))
+        with mock.patch.object(observer, 'process_row', side_effect=[self.row, dict(self.row, start=54321)]), \
+                mock.patch.object(Path, 'read_bytes', return_value=self.marker + b'\0'):
+            self.assertFalse(observer.token_process_is_live(self.pid, self.marker))
+        with mock.patch.object(observer, 'process_row', return_value=self.row), \
+                mock.patch.object(Path, 'read_bytes', side_effect=[InterruptedError(errno.EINTR, 'interrupted'),
+                                                                 self.marker + b'\0']):
+            self.assertTrue(observer.token_process_is_live(self.pid, self.marker))
+        with mock.patch.object(observer, 'process_row', return_value=self.row), \
+                mock.patch.object(Path, 'read_bytes', side_effect=InterruptedError(errno.EINTR, 'persistent')):
+            with self.assertRaises(observer.ObservationError):
+                observer.token_process_is_live(self.pid, self.marker)
+
+    def test_argv_failure_reaches_real_watch_and_scenario_validator(self):
+        def load(name, relative):
+            module_spec = importlib.util.spec_from_file_location(name, PROJECT / relative)
+            module = importlib.util.module_from_spec(module_spec)
+            module_spec.loader.exec_module(module)
+            return module
+
+        driver = load('observation_driver', 'tests/zenity-autonomous-qualification.py')
+        fixtures = load('observation_fixtures', 'tests/zenity-autonomous-integration.py')
+        for number in (errno.EACCES, errno.EIO):
+            with self.subTest(errno=number), tempfile.TemporaryDirectory() as temporary:
+                watch = driver.Watch.__new__(driver.Watch)
+                watch.observer = observer.Observer(self.token)
+                watch.path = Path(temporary) / 'topology.jsonl'
+                watch.lock = threading.Lock()
+                watch.stop = threading.Event()
+                watch.error = None
+                watch.last = None
+
+                class Result:
+                    def observe(self, _state):
+                        watch.stop.set()
+                        return {}
+
+                watch.result = Result()
+
+                def read(path):
+                    if path.name == 'environ':
+                        return self.marker + b'\0'
+                    raise OSError(number, 'synthetic private observation failure')
+
+                with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                        mock.patch.object(observer, 'process_row', return_value=self.row), \
+                        mock.patch.object(Path, 'read_bytes', side_effect=read, autospec=True):
+                    watch.run()
+                self.assertEqual(watch.error, 'ObservationError')
+                with self.assertRaisesRegex(ValueError, 'Continuous process observation failed'):
+                    watch.check()
+                evidence = fixtures.evidence()
+                evidence['observer_error'] = watch.error is not None
+                with self.assertRaisesRegex(ValueError, 'Process observation failed'):
+                    driver.validate_scenario(evidence)
+
+    def test_each_runner_oracle_propagates_unreadable_environment(self):
+        examined = 0
+        for relative in ('tests/run-all-signal-integration.sh', 'tests/test-runner-integration.sh'):
+            source = (PROJECT / relative).read_text()
+            for match in re.finditer(r"<<'(?P<tag>PY_[A-Z_]+)'\n(?P<body>.*?)\n(?P=tag)(?:\n|$)",
+                                     source, re.S):
+                body = match['body']
+                tree = ast.parse(body)
+                function = next((node for node in tree.body
+                                 if isinstance(node, ast.FunctionDef) and node.name == 'running'), None)
+                if function is None:
+                    continue
+                examined += 1
+                namespace = {'identity_observer': observer}
+                exec(compile(ast.Module(body=[function], type_ignores=[]),
+                             relative + ':' + match['tag'], 'exec'), namespace)
+                token_name = re.search(r'YTDLP_ARIA2_[A-Z_]+TOKEN',
+                                       ast.get_source_segment(body, function)).group()
+                marker = (token_name + '=' + self.token).encode()
+                with mock.patch.object(observer, 'process_row', return_value=self.row), \
+                        mock.patch.object(Path, 'read_bytes', return_value=marker + b'\0'):
+                    self.assertTrue(namespace['running'](self.pid, self.token))
+                for number in (errno.EACCES, errno.EIO):
+                    with self.subTest(file=relative, heredoc=match['tag'], errno=number), \
+                            mock.patch.object(observer, 'process_row', return_value=self.row), \
+                            mock.patch.object(Path, 'read_bytes', side_effect=OSError(number, 'injected')):
+                        with self.assertRaises(observer.ObservationError):
+                            namespace['running'](self.pid, self.token)
+        self.assertEqual(examined, 5, 'a runner oracle escaped the failure matrix')
+
+
 class ProcessTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='process-contract-')
+        # Python 3.10 has no delete=False. Failed observation must not let the
+        # automatic finalizer delete files still held by an uncertain consumer.
+        self.temp._finalizer.detach()
         self.root = Path(self.temp.name)
         self.token = os.urandom(24).hex()
         self.observer = observer.Observer(self.token)
@@ -143,11 +385,21 @@ class ProcessTests(unittest.TestCase):
 
     def tearDown(self):
         # Capture the production verdict before test-only intervention.
-        state = self.observer.sample()
+        failures = []
+        try:
+            state = self.observer.sample()
+        except (OSError, ValueError, IndexError) as error:
+            failures.append(error)
+            state = {'live': {}}
         # Rescue is independent of the oracle being mutation-tested. Select
         # only this fixture's exact inherited marker, then revalidate identity.
         rescue = dict(state['live'])
-        for pid, row in observer.snapshot().items():
+        try:
+            rows = observer.snapshot()
+        except (OSError, ValueError, IndexError) as error:
+            failures.append(error)
+            rows = {}
+        for pid, row in rows.items():
             try:
                 marked = self.observer.marker in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0')
             except OSError:
@@ -155,16 +407,26 @@ class ProcessTests(unittest.TestCase):
             if marked:
                 rescue[str(pid)] = row
         for pid, row in rescue.items():
-            current = observer.snapshot().get(int(pid))
-            if current and current['start'] == row['start']:
-                try:
-                    os.kill(int(pid), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            descriptor = None
+            try:
+                descriptor = os.pidfd_open(int(pid))
+                current = observer.current_process(int(pid))
+                if current and current['start'] == row['start']:
+                    signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+            except (OSError, ValueError, IndexError) as error:
+                failures.append(error)
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
         for process in self.processes:
-            if process.poll() is None:
-                process.kill()
-            process.communicate(timeout=5)
+            try:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=5)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                failures.append(error)
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             try:
@@ -172,13 +434,68 @@ class ProcessTests(unittest.TestCase):
                     time.sleep(.02)
             except ChildProcessError:
                 break
-        self.temp.cleanup()
+        try:
+            terminal = observer.Observer(self.token)
+            terminal.known.update(self.observer.known)
+            terminal.known.update((int(pid), row['start']) for pid, row in rescue.items())
+            if terminal.sample()['live']:
+                raise observer.ObservationError('fixture shutdown remains unconfirmed')
+        except (OSError, ValueError, IndexError) as error:
+            failures.append(error)
+        else:
+            if not failures:
+                self.temp.cleanup()
+        if failures:
+            raise failures[0]
 
     def launch(self, argv):
         p = subprocess.Popen(argv, env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token),
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         self.processes.append(p)
         return p
+
+    def test_mock_rescue_requires_token_and_current_start_identity(self):
+        source = (PROJECT / 'tests/lib/mock-common.sh').read_text()
+        function = re.search(r'^signal_test_processes\(\) \{\n.*?^\}\n', source, re.M | re.S).group()
+        marker = self.token + '-mock'
+        process = subprocess.Popen(['sleep', '30'],
+                                   env=dict(os.environ, YTDLP_ARIA2_MOCK_PROCESS_TOKEN=marker))
+        self.processes.append(process)
+        start = observer.process_row(Path(f'/proc/{process.pid}/stat'))['start']
+        script = function + '''
+PROJECT_DIR=$1
+YTDLP_ARIA2_MOCK_PROCESS_TOKEN=$2
+TEST_PROCESS_IDENTITIES=("$3:$4")
+signal_test_processes TERM
+'''
+
+        def attempt(project, token, identity):
+            return subprocess.run(['bash', '-c', script, 'mock-rescue', str(project), token,
+                                   str(process.pid), str(identity)], capture_output=True, timeout=5)
+
+        self.assertEqual(attempt(PROJECT, marker, start + 1).returncode, 0)
+        self.assertIsNone(process.poll(), 'rescue signaled a replaced start identity')
+        self.assertEqual(attempt(PROJECT, marker + '-foreign', start).returncode, 70)
+        self.assertIsNone(process.poll(), 'rescue signaled a foreign token')
+        fake_project = self.root / 'unreadable-rescue'
+        (fake_project / 'tests').mkdir(parents=True)
+        (fake_project / 'tests/process-observer.py').write_text('''import importlib.util
+import errno
+spec = importlib.util.spec_from_file_location('real_mock_observer', REAL_HELPER)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+process_row = module.process_row
+threads_are_quiescent = module.threads_are_quiescent
+same_process = module.same_process
+def token_process_is_live(pid, marker):
+    raise PermissionError(errno.EACCES, 'synthetic private error')
+'''.replace('REAL_HELPER', repr(str(PROJECT / 'tests/process-observer.py'))))
+        refused = attempt(fake_project, marker, start)
+        self.assertEqual(refused.returncode, 70)
+        self.assertNotIn(b'synthetic private error', refused.stderr)
+        self.assertIsNone(process.poll(), 'rescue converted unknown ownership into signal authority')
+        self.assertEqual(attempt(PROJECT, marker, start).returncode, 0)
+        self.assertEqual(process.wait(timeout=3), -signal.SIGTERM)
 
     def wait_file(self, name, process):
         path = self.root / name
@@ -686,6 +1003,8 @@ while Path('/proc/' + sys.argv[1]).exists():
             # discovery must still come from the exact inherited launch token.
             fresh = observer.Observer(self.token)
             verdict(fresh.sample())
+            self.assertTrue(observer.token_process_is_live(consumer, fresh.marker),
+                            'runner oracle lost a live thread behind a zombie leader')
             with mock.patch.object(observer, 'threads_are_quiescent',
                                    side_effect=lambda _pid, observed: observed['state'] in ('Z', 'X')):
                 # Restore precisely the former classification, keeping token
@@ -704,6 +1023,7 @@ while Path('/proc/' + sys.argv[1]).exists():
             stopped = fresh.sample()
             self.assertNotIn(str(consumer), stopped['live'])
             self.assertIn(consumer, stopped['zombies'])
+            self.assertFalse(observer.token_process_is_live(consumer, fresh.marker))
             self.assertTrue((self.root / 'thread-last-access').exists())
             self.assertEqual(os.waitpid(consumer, 0)[1], 0)
             unrelated.communicate(timeout=3)

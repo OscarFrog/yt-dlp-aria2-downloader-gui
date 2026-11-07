@@ -656,6 +656,26 @@ resources. Runner integration includes a
 non-reaping outer parent, a no-bootstrap negative control, and live-child,
 identity and exit-status checks for this fixture lifecycle.
 
+The mock root is an owned mode-0700 directory held open from allocation to
+cleanup. Cleanup requires matching device/inode, owner and mode, traverses from
+the retained descriptor, and refuses replaced or unreadable roots. It first
+requires process quiescence; a refusal preserves remaining fixtures and turns
+nominal success into status 70. The `gui-state` group runs
+`tests/fixture-safety-integration.py`, including pre-existing checkout sentinels,
+symlink/replacement cases, injected I/O errors and owner signal handling. The
+relative-XDG probe creates no directories in the source checkout. This does not
+claim an atomic delete against arbitrary hostile writers sharing the same UID;
+the final empty-root removal retains a documented name check/use window.
+
+Mock process observation uses an exact inherited fixture token plus observed
+ancestry, including exec/new-session orphans without path arguments. Known
+identities with unreadable procfs attributes remain indeterminate and fail the
+verdict; marker misses cannot erase a retained identity. Rescue is separate
+from the verdict and uses revalidated pidfds. The independent observer also
+supplies test-only token predicates to runner cancellation fixtures; production
+supervision does not import this test module. A never-observed orphan that has
+removed its token remains outside this attribution guarantee.
+
 The complete mock contract is divided into nine isolated scheduler suites
 (`engine-core`, `engine-hls`, `engine-staging`, `engine-network`, `gui-progress`, `gui-state`,
 `signals`, `runtime-compat`, and `runtime-validation`) so `run-all.sh --jobs N`
@@ -1471,7 +1491,15 @@ those final objects.
 
 Pull-request CI builds one unsigned noarch RPM and proves that the production
 bootstrap rejects it unless `--allow-unsigned-dev` is explicitly selected.
-PR CI qualifies RPM-v4/v6 signature semantics once; the fixture already covers
+The separate Fedora RPM Fusion dependency bootstrap never admits an unsigned
+package: its signature must verify against the exact pinned public certificate
+in an isolated keyring, with the expected NEVRA. The authenticated certificate
+is then imported into the transaction keyring and DNF must enforce
+`localpkg_gpgcheck=True`. The RPM6 suite executes this workflow block with
+synthetic authorized, unsigned, foreign-signed, corrupt and wrong-identity
+packages, including mutations of each guard. Its DNF stand-in checks the
+transaction arguments without installing anything on the host.
+PR CI qualifies RPM-v4/v6 signature semantics once; the fixture also covers
 multiple signers, signature ordering and corruption. Release CI reuses that
 source qualification, builds the RPM once, explicitly requires RPM package
 format v4, then signs those exact bytes once in the
@@ -1978,6 +2006,12 @@ A named-thread witness covers ASCII, valid UTF-8 and kernel truncation inside a
 multibyte name. Readiness precedes the real stat read; an independent byte oracle
 checks SID/start while admission, presence and quiescence ignore name encoding,
 including the actual Python predicates extracted from the GUI and engine.
+The independent test observer rejects unreadable command/environment data for
+an attributed live identity. ENOENT/ESRCH require fresh identity evidence;
+permission/I/O errors, persistent interruptions and partial identity records
+cannot produce a successful empty observation. Bounded retries do not erase
+failure evidence. Dedicated cases cover identity recycling, known zombie
+threads and all five runner-oracle call sites.
 The independent test observer reads that same real task, including its root
 procfs alias in a controlled inventory with an unrelated marker. Synthetic
 stat fixtures additionally cover arbitrary name bytes and invalid identity

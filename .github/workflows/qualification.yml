@@ -134,6 +134,15 @@ jobs:
             exit 65
           fi
 
+          signature_state=$(
+            LC_ALL=C rpm -qp --qf '%|OPENPGP?{signed}:{unsigned}|\n' \
+              -- "${bootstrap_dir}/rpmfusion-free-release-44.noarch.rpm"
+          )
+          if [[ ${signature_state} != signed ]]; then
+            printf 'Error: RPM Fusion bootstrap package has no OpenPGP signature.\n' >&2
+            exit 65
+          fi
+
           rpmkeys \
             --define "_keyring fs" \
             --define "_keyringpath ${rpm_keyring}" \
@@ -157,7 +166,8 @@ jobs:
             exit 65
           fi
 
-          dnf install --assumeyes \
+          rpmkeys --import "${bootstrap_dir}/RPM-GPG-KEY-rpmfusion-free-fedora-2020"
+          dnf install --assumeyes --setopt=localpkg_gpgcheck=True \
             "${bootstrap_dir}/rpmfusion-free-release-44.noarch.rpm"
           dnf install --assumeyes aria2 ffmpeg
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

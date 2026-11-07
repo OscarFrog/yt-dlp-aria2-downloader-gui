@@ -317,6 +317,7 @@ run_zenity_capture() {
     shift
     local capture_size=''
     local error_file=''
+    local error_snapshot=''
     local output_file=''
     local output=''
     local restore_errexit=false
@@ -333,6 +334,7 @@ run_zenity_capture() {
     }
     output_file="${ZENITY_CAPTURE_DIR}/stdout"
     error_file="${ZENITY_CAPTURE_DIR}/stderr"
+    error_snapshot="${ZENITY_CAPTURE_DIR}/stderr-snapshot"
     if ! : >"${output_file}" || ! : >"${error_file}"; then
         rm -rf -- "${ZENITY_CAPTURE_DIR}" || true
         ZENITY_CAPTURE_DIR=''
@@ -359,8 +361,22 @@ run_zenity_capture() {
     ZENITY_PID=''
 
     if [[ -s ${error_file} ]]; then
-        ZENITY_ERROR=$(tail -c "${ZENITY_CAPTURE_MAX_BYTES}" \
-            -- "${error_file}" 2>/dev/null || true)
+        # Inspect the bounded snapshot, not a size read before a producer may
+        # append more bytes. No partial first line reaches the URL redactor.
+        if ! tail -c "$((ZENITY_CAPTURE_MAX_BYTES + 1))" \
+            -- "${error_file}" >"${error_snapshot}" 2>/dev/null \
+            || ! capture_size=$(stat -c '%s' -- "${error_snapshot}" 2>/dev/null) \
+            || [[ ! ${capture_size} =~ ^[0-9]{1,16}$ ]]; then
+            ZENITY_ERROR='Unable to capture Zenity diagnostics safely.'
+        elif ((10#${capture_size} > ZENITY_CAPTURE_MAX_BYTES)); then
+            # Keep complete tail lines only: cutting a URL before its scheme
+            # would prevent the later diagnostic redactor from recognizing it.
+            if ! ZENITY_ERROR=$(sed '1d' -- "${error_snapshot}"); then
+                ZENITY_ERROR='Unable to read Zenity diagnostics safely.'
+            fi
+        elif ! ZENITY_ERROR=$(<"${error_snapshot}"); then
+            ZENITY_ERROR='Unable to read Zenity diagnostics safely.'
+        fi
     fi
     if ! capture_size=$(stat -c '%s' -- "${output_file}" 2>/dev/null) \
         || [[ ! ${capture_size} =~ ^[0-9]+$ ]]; then

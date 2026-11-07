@@ -3802,6 +3802,18 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
         'rpmfusion-free-release-44-3.noarch' \
         'Fedora qualification pins the reviewed RPM Fusion bootstrap NEVRA'
+    # shellcheck disable=SC2016 # Literal workflow authentication contract.
+    assert_file_fragments_ordered "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
+        'RPM Fusion bootstrap requires its authorized signature before installation' \
+        'if [[ ${primary_count} != 1 ||' \
+        "'%|OPENPGP?{signed}:{unsigned}|\\n'" \
+        'if [[ ${signature_state} != signed ]]; then' \
+        'exit 65' \
+        '--define "_keyring fs"' \
+        '--checksig "${bootstrap_dir}/rpmfusion-free-release-44.noarch.rpm"' \
+        'if [[ ${resolved_nevra} != "${rpmfusion_nevra}" ]]; then' \
+        'rpmkeys --import "${bootstrap_dir}/RPM-GPG-KEY-rpmfusion-free-fedora-2020"' \
+        'dnf install --assumeyes --setopt=localpkg_gpgcheck=True'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/shfmt-update.yml" \
         'verify-shfmt-update:' \
         'shfmt updater uses a separate fresh read-only verifier job'

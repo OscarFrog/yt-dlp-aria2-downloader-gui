@@ -962,6 +962,84 @@ sys.exit(1)
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
 
+class ManualEvidencePrivacyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        source = (PROJECT / 'tests/zenity-real-session-qualification.sh').read_text()
+        start = source.index('    if [[ -d ${SESSION_ROOT}/state ]]; then',
+                             source.index('    assert_no_residual_processes "${evidence_dir}"'))
+        end = source.index("    printf '\\nGUI process exited", start)
+        cls.gate = source[start:end]
+
+    def exercise_gate(self, payload, location='stderr', scanner_failure=False):
+        with tempfile.TemporaryDirectory(prefix='manual-privacy-gate-') as temporary:
+            root = Path(temporary)
+            state, evidence_dir = root / 'state', root / 'evidence'
+            state.mkdir(mode=0o700)
+            evidence_dir.mkdir(mode=0o700)
+            paths = {'stdout': root / 'gui.stdout', 'stderr': root / 'gui.stderr',
+                     'state': state / 'download.log'}
+            for path in paths.values():
+                path.write_bytes(b'Synthetic clean diagnostic\n')
+            paths[location].write_bytes(payload)
+            program = r'''
+set -euo pipefail
+SESSION_ROOT=$1
+evidence_dir=$SESSION_ROOT/evidence
+raw_gui_stdout=$SESSION_ROOT/gui.stdout
+raw_gui_stderr=$SESSION_ROOT/gui.stderr
+leak_file=$evidence_dir/privacy-findings.txt
+state_url_hits=0
+: >"${leak_file}"
+fail_test() { printf '%s\n' "$1" >&2; exit 65; }
+'''
+            if scanner_failure:
+                program += r'''
+scan_failure_path=$2
+grep() {
+    if [[ ${*: -1} == "${scan_failure_path}" ]]; then
+        [[ ${SCAN_FAILURE_OUTPUT} != partial ]] || printf 'partial scanner output\n'
+        return 2
+    fi
+    command grep "$@"
+}
+'''
+                program = 'SCAN_FAILURE_OUTPUT=' + scanner_failure + '\n' + program
+            failure_path = state if location == 'state' else paths[location]
+            result = subprocess.run(['bash', '-s', '--', str(root), str(failure_path)],
+                                    input=program + self.gate, text=True,
+                                    capture_output=True, timeout=10)
+            exported = [evidence_dir / 'gui.stdout', evidence_dir / 'gui.stderr']
+            if scanner_failure or b'SYNTHETIC_PRIVATE_URL' in payload:
+                self.assertEqual(result.returncode, 65, result.stderr)
+                self.assertTrue(all(not path.exists() for path in exported))
+                self.assertNotIn('SYNTHETIC_PRIVATE_URL', result.stdout + result.stderr)
+                if scanner_failure:
+                    self.assertIn('privacy scan', result.stderr)
+            else:
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(all(path.is_file() for path in exported))
+                for name in ('stdout', 'stderr'):
+                    self.assertEqual((evidence_dir / ('gui.' + name)).read_bytes(),
+                                     paths[name].read_bytes())
+
+    def test_clean_diagnostics_are_preserved(self):
+        self.exercise_gate(b'Useful diagnostic, without a URL\n')
+
+    def test_url_case_and_binary_boundaries_are_refused(self):
+        for location in ('stdout', 'stderr', 'state'):
+            for scheme in (b'https', b'HTTPS', b'hTtPs', b'HTTP'):
+                with self.subTest(location=location, scheme=scheme):
+                    self.exercise_gate(b'\0\xff' + scheme +
+                                       b'://example.invalid/SYNTHETIC_PRIVATE_URL\n', location)
+
+    def test_scanner_error_cannot_authorize_archiving(self):
+        for location in ('stdout', 'stderr', 'state'):
+            for failure in ('silent', 'partial'):
+                with self.subTest(location=location, failure=failure):
+                    self.exercise_gate(b'Clean diagnostic\n', location, scanner_failure=failure)
+
+
 class PrivacyAndCleanupTests(unittest.TestCase):
     def test_private_gui_diagnostics_and_state_gate_artifact_publication(self):
         for location in ('clean', 'diagnostics', 'state'):

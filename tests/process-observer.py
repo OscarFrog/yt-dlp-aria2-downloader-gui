@@ -6,10 +6,99 @@ signaling or reaping the application. No arguments or environment are retained.
 """
 
 import argparse
+import errno
 import json
 import os
 from pathlib import Path
 import time
+
+
+class ObservationError(OSError):
+    """An attributed process could not be observed; no private data is kept."""
+
+
+def current_process(pid):
+    """Read one fresh identity, with a bounded retry for a stale proc handle."""
+    path = Path(f'/proc/{pid}/stat')
+    for attempt in range(2):
+        try:
+            return process_row(path)
+        except FileNotFoundError:
+            return None
+        except (ProcessLookupError, InterruptedError):
+            if attempt:
+                raise
+    raise AssertionError('unreachable identity retry')
+
+
+def same_process(pid, row):
+    """Confirm disappearance or replacement only through a fresh stat read."""
+    current = current_process(pid)
+    return current is not None and current['start'] == row['start']
+
+
+def read_observation(path):
+    """Retry an interrupted read once, without treating it as an empty file."""
+    try:
+        return path.read_bytes()
+    except InterruptedError:
+        return path.read_bytes()
+
+
+def observation_failure(pid, row, error):
+    # The identity can disappear between enumeration and an attribute read.
+    # Persistent permission/I/O failures never establish that transition.
+    try:
+        current = current_process(pid)
+        if current is None or current['start'] != row['start'] or threads_are_quiescent(pid, current):
+            return
+    except (OSError, ValueError, IndexError) as identity_error:
+        error = identity_error
+    number = getattr(error, 'errno', None)
+    if not isinstance(number, int) or not 0 < number < 4096:
+        number = errno.EIO
+    raise ObservationError(number, 'attributed process observation is incomplete') from None
+
+
+def token_process_is_live(pid, marker):
+    """Observe a fixture token without granting authority after a read failure."""
+    for attempt in range(2):
+        try:
+            row = process_row(Path(f'/proc/{pid}/stat'))
+            break
+        except FileNotFoundError:
+            return False
+        except (ProcessLookupError, InterruptedError):
+            if attempt:
+                raise
+    if threads_are_quiescent(pid, row):
+        return False
+    pending = None
+    inspected = False
+    try:
+        for path in observation_paths(pid, row, 'environ'):
+            try:
+                environment = read_observation(path).split(b'\0')
+            except (FileNotFoundError, ProcessLookupError) as error:
+                # A dead group leader may have a live sibling with readable
+                # memory. Visit that sibling before deciding observability.
+                pending = error
+                continue
+            except OSError as error:
+                observation_failure(pid, row, error)
+                continue
+            if not same_process(pid, row):
+                return False
+            inspected = inspected or any(environment)
+            if marker in environment:
+                return True
+        if pending is not None and not inspected:
+            observation_failure(pid, row, pending)
+    except ObservationError:
+        raise
+    except (OSError, ValueError, IndexError) as error:
+        observation_failure(pid, row, error)
+    return False
 
 
 def process_row(path):
@@ -52,7 +141,12 @@ def snapshot():
 def observation_paths(pid, row, name):
     """The main thread's proc entries can be empty while siblings still run."""
     yield Path(f'/proc/{pid}/{name}')
-    if row['state'] in ('Z', 'X'):
+    # The leader can exit after the snapshot but before reading its memory.
+    # Revalidate once before considering a sibling; never follow a reused PID.
+    current = current_process(pid)
+    if current is None or current['start'] != row['start']:
+        return
+    if current['state'] in ('Z', 'X'):
         for task in Path(f'/proc/{pid}/task').iterdir():
             if task.name.isdecimal() and task.name != str(pid):
                 yield task / name
@@ -84,15 +178,28 @@ def threads_are_quiescent(pid, row):
 
 
 class Observer:
-    def __init__(self, token):
-        self.marker = b'YTDLP_QUALIFICATION_TOKEN=' + token.encode()
+    def __init__(self, token, *, marker_name='YTDLP_QUALIFICATION_TOKEN', allow_external=True):
+        self.marker = marker_name.encode() + b'=' + token.encode()
         self.known = set()
         self.leaks = set()
         self.external = set()
+        self.allow_external = allow_external
+        self.error = None
 
     def sample(self):
+        if self.error is not None:
+            raise self.error
+        try:
+            return self._sample()
+        except ObservationError as error:
+            # A later disappearance cannot erase a gap in privacy observation.
+            self.error = error
+            raise
+
+    def _sample(self):
         rows = snapshot()
         selected = {}
+        environment_errors = {}
         # The independent launch marker finds a worker even if its immediate
         # parent disappeared between samples. Recorded PID/start identities
         # continue to work after exec clears the environment.
@@ -102,20 +209,28 @@ class Observer:
             try:
                 for path in observation_paths(pid, row, 'environ'):
                     try:
-                        environment = path.read_bytes().split(b'\0')
-                    except OSError:
+                        environment = read_observation(path).split(b'\0')
+                    except OSError as error:
+                        if pid not in environment_errors or isinstance(environment_errors[pid],
+                                                                       (FileNotFoundError, ProcessLookupError)):
+                            environment_errors[pid] = error
                         continue
+                    if any(environment) and isinstance(environment_errors.get(pid),
+                                                       (FileNotFoundError, ProcessLookupError)):
+                        environment_errors.pop(pid, None)
                     if self.marker not in environment:
                         continue
                     current = process_row(Path(f'/proc/{pid}/stat'))
                     if current['start'] != row['start']:
                         break
                     marked = True
-                    if b'YTDLP_QUALIFICATION_EXTERNAL=1' in environment:
+                    if self.allow_external and b'YTDLP_QUALIFICATION_EXTERNAL=1' in environment:
                         self.external.add(key)
                     break
-            except (OSError, ValueError, IndexError):
-                pass
+            except (OSError, ValueError, IndexError) as error:
+                if pid not in environment_errors or isinstance(environment_errors[pid],
+                                                               (FileNotFoundError, ProcessLookupError)):
+                    environment_errors[pid] = error
             if marked or key in self.known:
                 selected[pid] = row
         changed = True
@@ -140,21 +255,34 @@ class Observer:
         for pid, row in selected.items():
             key = pid, row['start']
             self.known.add(key)
+            if pid in environment_errors:
+                observation_failure(pid, row, environment_errors[pid])
+            pending = None
+            inspected = False
             try:
                 for path in observation_paths(pid, row, 'cmdline'):
                     try:
-                        argv = path.read_bytes().lower()
-                    except OSError:
+                        argv = read_observation(path).lower()
+                    except (FileNotFoundError, ProcessLookupError) as error:
+                        pending = error
+                        continue
+                    except OSError as error:
+                        observation_failure(pid, row, error)
                         continue
                     # Revalidate after reading argv; a reused PID is not evidence.
                     current = process_row(Path(f'/proc/{pid}/stat'))
                     if current['start'] != row['start']:
                         break
+                    inspected = inspected or bool(argv)
                     if b'http://' in argv or b'https://' in argv:
                         self.leaks.add(key)
                         break
-            except (OSError, ValueError, IndexError):
-                pass
+                if pending is not None and not inspected:
+                    observation_failure(pid, row, pending)
+            except ObservationError:
+                raise
+            except (OSError, ValueError, IndexError) as error:
+                observation_failure(pid, row, error)
         quiescent = {pid for pid, row in selected.items() if threads_are_quiescent(pid, row)}
         return {
             'monotonic_ns': time.monotonic_ns(),
