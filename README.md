@@ -14,7 +14,7 @@ then follow the download and processing progress.
 - **Everyday use:** remembered preferences, cancellation and concurrent independent downloads.
 
 The current development version is **2.4.5**.
-The latest published package release is **2.4.4**.
+The latest published package release is **2.4.5**.
 
 ## Contents
 
@@ -46,14 +46,14 @@ The error log illustrates a simulated out-of-space diagnostic.
 ## Recommended installation
 
 Use the [latest GitHub release](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
-The filenames below match the currently published v2.4.4 release.
+The filenames below match the currently published v2.4.5 release.
 Download the files for your platform into the same folder, then open a terminal there.
 
 | Platform | Application download |
 | --- | --- |
-| Fedora 44 | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.4-1.fc44.noarch.rpm) |
-| Debian / Ubuntu | [DEB](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui_2.4.4-1_all.deb) |
-| Other GNU/Linux / portable use | [ZIP](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.4.zip) |
+| Fedora 44 | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.5-1.fc44.noarch.rpm) |
+| Debian / Ubuntu | [DEB](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui_2.4.5-1_all.deb) |
+| Other GNU/Linux / portable use | [ZIP](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.5.zip) |
 
 ### Fedora 44
 
@@ -62,13 +62,13 @@ Download these four assets from that release:
 ```text
 install-fedora.sh
 RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.4.4-1.fc44.noarch.rpm
+yt-dlp-aria2-downloader-gui-2.4.5-1.fc44.noarch.rpm
 SHA256SUMS
 ```
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.4.4-1.fc44.noarch.rpm
+bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.4.5-1.fc44.noarch.rpm
 ```
 
 Use the bootstrap rather than installing the RPM directly on a fresh Fedora
@@ -78,16 +78,16 @@ the verified per-user yt-dlp and Deno runtimes.
 
 ### Debian and Ubuntu
 
-The latest published release, 2.4.4, provides the DEB. Download:
+The latest published release, 2.4.5, provides the DEB. Download:
 
 ```text
-yt-dlp-aria2-downloader-gui_2.4.4-1_all.deb
+yt-dlp-aria2-downloader-gui_2.4.5-1_all.deb
 SHA256SUMS
 ```
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.4.4-1_all.deb
+sudo apt install ./yt-dlp-aria2-downloader-gui_2.4.5-1_all.deb
 ```
 
 The package installs system dependencies. Verified yt-dlp and Deno runtimes are
@@ -107,14 +107,14 @@ source directory with `./install-gui.sh uninstall`.
 Install the [system requirements](#requirements) first. Download:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.4.4.zip
+yt-dlp-aria2-downloader-gui-2.4.5.zip
 SHA256SUMS
 ```
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.4.4.zip
-cd yt-dlp-aria2-downloader-gui-2.4.4
+unzip yt-dlp-aria2-downloader-gui-2.4.5.zip
+cd yt-dlp-aria2-downloader-gui-2.4.5
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -160,8 +160,8 @@ Replace `ARTIFACT` with the downloaded file's name:
 
 ```bash
 gh attestation verify ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.4.4 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.4.4 ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.4.5 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.4.5 ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Checksums check file integrity; these commands also check provenance and the
