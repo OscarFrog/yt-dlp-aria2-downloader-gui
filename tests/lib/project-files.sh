@@ -35,6 +35,7 @@ PACKAGING_SHELL_FILES=(
 # shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
 TEST_SHELL_FILES=(
     test-static.sh
+    tests/static/application-contracts.sh
     tests/run-all.sh
     tests/run-all-signal-integration.sh
     tests/repeat-qualification.sh
@@ -87,6 +88,7 @@ DEVELOPMENT_SHELL_FILES=(
 # caller's shell-option state and are exempt from the executable main() rule.
 # shellcheck disable=SC2034 # Array is read by test-static.sh.
 SOURCED_SHELL_FILES=(
+    tests/static/application-contracts.sh
     tests/lib/assert.sh
     tests/lib/mock-fixtures.sh
     tests/lib/mock-common.sh

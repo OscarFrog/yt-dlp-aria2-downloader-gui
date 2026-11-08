@@ -1404,6 +1404,14 @@ they are not nested serial work inside one long static task. Standalone
 `--source-only` mode is a partial building block used by the scheduler. Every
 Python family runs exactly once in either canonical profile before integration
 starts; no persistent success cache substitutes for a test result.
+The static entrypoint owns options, versions, traps and family order. A single
+fixed sourced library, `tests/static/application-contracts.sh`, holds its
+engine/GUI/progress source assertions and consumes the existing caller-provided
+root and assertion helpers. Loading the library has no test or shell-state
+side effects; only the entrypoint invokes it. Both canonical shell inventories
+and the Git-free source archive include it, while native application payloads
+exclude it. Other families and the harness's independent introspection remain
+in the entrypoint; there is no module discovery or second test framework.
 The `fast` profile is a development loop; the default `full` profile is the
 complete hermetic local contract. Its separate `doctor` mode diagnoses command,
 filesystem, loopback, formatter-bootstrap, network, and repository capabilities
