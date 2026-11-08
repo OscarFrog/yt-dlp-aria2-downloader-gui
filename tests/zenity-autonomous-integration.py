@@ -1132,6 +1132,35 @@ class PrivacyAndCleanupTests(unittest.TestCase):
             for directory in (root, exported):
                 self.assertIs(json.loads((directory / 'summary.json').read_text())['passed'], False)
 
+    def test_export_rollback_interruption_preserves_initial_error_and_invalidates_summaries(self):
+        with tempfile.TemporaryDirectory(prefix='zenity-export-') as temporary:
+            base = Path(temporary)
+            root, exported = base / 'private', base / 'exported'
+            root.mkdir(mode=0o700)
+            exported.mkdir(mode=0o700)
+            (root / 'trial.log').write_bytes(b'qualified diagnostic\n')
+            original_write = CHECK.write_json
+            primary = OSError(5, 'synthetic original export failure')
+            rollback = False
+
+            def failing_write(path, value):
+                nonlocal rollback
+                if path.name == 'summary.json' and rollback:
+                    raise SystemExit(0)
+                original_write(path, value)
+                if path.name == 'summary.json' and value['passed'] is True:
+                    rollback = True
+                    raise primary
+
+            summary = {'schema': 1, 'passed': True, 'failure': None, 'scenarios': []}
+            with mock.patch.object(CHECK, 'write_json', side_effect=failing_write):
+                with self.assertRaises(OSError) as failure:
+                    CHECK.export_evidence(root, exported, summary)
+            self.assertIs(failure.exception, primary)
+            for directory in (root, exported):
+                target = directory / 'summary.json'
+                self.assertTrue(not target.exists() or json.loads(target.read_text())['passed'] is False)
+
     def test_export_passing_verdict_follows_complete_artifact_copy(self):
         with tempfile.TemporaryDirectory(prefix='zenity-export-') as temporary:
             base = Path(temporary)
@@ -1205,5 +1234,250 @@ class PrivacyAndCleanupTests(unittest.TestCase):
             session.close.assert_called_once_with()
 
 
+class TerminalVerdictTests(unittest.TestCase):
+    """Exercise both real CLI entry points with inert, explicit observations."""
+
+    def run_terminal(self, program, case, candidate=None):
+        filename = ('multi-instance-real.py' if program == 'multi' else
+                    'zenity-autonomous-qualification.py')
+        target = Path(candidate) if candidate else PROJECT / 'tests' / filename
+        with tempfile.TemporaryDirectory(prefix='terminal-verdict-') as temporary:
+            base = Path(temporary)
+            retained = base / 'pre-existing.txt'
+            retained.write_text('preserve this independent witness')
+            fixture = base / 'fixture'
+            if program == 'zenity':
+                fixture.mkdir(mode=0o700)
+            command = [sys.executable, '-I', '-B', str(Path(__file__).resolve()),
+                       '--terminal-proof-worker', program, str(target), case, str(fixture)]
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, timeout=20,
+                                    env={'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'LC_ALL': 'C.UTF-8'})
+            self.assertEqual(retained.read_text(), 'preserve this independent witness')
+            root = fixture / 'private' if program == 'zenity' else fixture
+            artifacts = {}
+            for path in fixture.rglob('*.json'):
+                if '.seed.' in path.name or path.name.endswith('.seed.json'):
+                    continue
+                # Preserve only the records needed by the independent assertions.
+                if (path.name in ('summary.json', 'qualification-errors.json', 'main-return.json') or
+                        path.name.endswith(('.before-rescue.json', '.final-before-rescue.json',
+                                            '.observer-error.json'))):
+                    artifacts[path.relative_to(fixture).as_posix()] = json.loads(path.read_text())
+            notices = fixture / 'harness-events.json'
+            events = json.loads(notices.read_text()) if notices.is_file() else []
+            outcome = dict(returncode=result.returncode, stdout=result.stdout, stderr=result.stderr,
+                           artifacts=artifacts, events=events, retained=root.is_dir())
+            self.assertNotIn('Traceback', result.stderr, result.stderr)
+            return outcome
+
+    def assert_terminal_verdict(self, result, passed):
+        self.assertEqual(result['returncode'], 0 if passed else 1,
+                         result['stdout'] + result['stderr'])
+        lines = result['stdout'].splitlines()
+        pass_lines = [line for line in lines if line.startswith('PASS:')]
+        if passed:
+            self.assertTrue(pass_lines, result['stdout'])
+            self.assertNotIn('FAIL', result['stdout'] + result['stderr'])
+        else:
+            self.assertFalse(pass_lines, 'A provisional PASS escaped a failing qualification')
+            self.assertIn('FAIL', result['stdout'] + result['stderr'])
+        self.assertTrue(result['retained'], 'Uncertain fixture was removed')
+        self.assertTrue(any(name.endswith('main-return.json') for name in result['artifacts']),
+                        'The real main return was not observed')
+        for name, record in result['artifacts'].items():
+            if name.endswith('summary.json'):
+                self.assertIs(record['passed'], passed, name)
+            if name.endswith('main-return.json'):
+                self.assertEqual(record['returned'], 0 if passed else 1)
+
+    def test_zenity_complete_program_terminal_matrix(self):
+        for case in ('clean', 'final-live', 'final-url', 'earlier-url', 'eacces', 'eio',
+                     'missing', 'empty', 'null-fields', 'invalid-identity', 'identity-error',
+                     'export-error', 'export-final-write', 'cleanup-error', 'url-and-cleanup',
+                     'earlier-and-cleanup', 'final-url-write', 'final-live-write',
+                     'systemexit-observation', 'url-and-systemexit-cleanup'):
+            with self.subTest(case=case):
+                result = self.run_terminal('zenity', case)
+                self.assert_terminal_verdict(result, case == 'clean')
+                if case == 'clean':
+                    self.assertIn('private/summary.json', result['artifacts'])
+                    self.assertIn('exported/summary.json', result['artifacts'])
+                if case not in ('earlier-url', 'earlier-and-cleanup'):
+                    # All 18 scenarios completed the real validator before the
+                    # final observation/cleanup injection; none is skipped.
+                    summary = result['artifacts']['private/summary.json']
+                    self.assertEqual(len(summary['scenarios']), 18)
+                    self.assertEqual(sum(event['kind'] == 'result-closed'
+                                         for event in result['events']), 18)
+                if case == 'final-url':
+                    final = result['artifacts']['private/success.final-before-rescue.json']
+                    self.assertEqual(final['url_in_argv'], [[70000, 41]])
+                    self.assertEqual(final['live'], {})
+                if case in ('missing', 'empty', 'null-fields', 'invalid-identity'):
+                    final = result['artifacts']['private/success.final-before-rescue.json']
+                    self.assertIs(final.get('observation_complete'), False)
+                if case == 'url-and-systemexit-cleanup':
+                    summary = result['artifacts']['private/summary.json']
+                    self.assertEqual(summary['failure'], 'Terminal URL argument exposure.')
+                    self.assertEqual(summary['errors'][0]['phase'], summary['failure'])
+                    self.assertGreaterEqual(len(summary['errors']), 2)
+                if case in ('final-url-write', 'final-live-write'):
+                    summary = result['artifacts']['private/summary.json']
+                    expected = ('Terminal URL argument exposure.' if case == 'final-url-write' else
+                                'Live process residue before rescue.')
+                    self.assertEqual(summary['failure'], expected)
+                    self.assertEqual(summary['errors'][0]['phase'], summary['failure'])
+                if case == 'earlier-and-cleanup':
+                    summary = result['artifacts']['private/summary.json']
+                    self.assertEqual(summary['failure'], summary['errors'][0]['phase'])
+                    self.assertGreaterEqual(len(summary['errors']), 2)
+
+    def test_multi_complete_program_terminal_matrix(self):
+        for case in ('clean', 'final-live', 'final-url', 'previous-url', 'eacces', 'eio',
+                     'missing', 'empty', 'identity-mismatch', 'initial-error',
+                     'export-error', 'cleanup-error', 'previous-incomplete',
+                     'initial-and-cleanup', 'final-live-write', 'systemexit-observation',
+                     'url-and-systemexit-cleanup'):
+            with self.subTest(case=case):
+                result = self.run_terminal('multi', case)
+                self.assert_terminal_verdict(result, case == 'clean')
+                failures = result['artifacts']['qualification-errors.json']
+                if case == 'clean':
+                    self.assertEqual(failures, [])
+                else:
+                    expected = {
+                        'final-live': 'terminal-live', 'final-url': 'terminal-url',
+                        'previous-url': 'scenario', 'previous-incomplete': 'scenario',
+                        'eacces': 'terminal-observation', 'eio': 'terminal-observation',
+                        'missing': 'terminal-observation', 'empty': 'terminal-observation',
+                        'identity-mismatch': 'terminal-live', 'initial-error': 'scenario',
+                        'export-error': 'evidence-export', 'cleanup-error': 'server-shutdown',
+                        'initial-and-cleanup': 'scenario', 'final-live-write': 'terminal-live',
+                        'systemexit-observation': 'terminal-observation',
+                        'url-and-systemexit-cleanup': 'terminal-url',
+                    }[case]
+                    self.assertTrue(failures, case)
+                    self.assertEqual(failures[0]['phase'], expected)
+                if case == 'initial-and-cleanup':
+                    self.assertEqual([row['phase'] for row in failures], ['scenario', 'server-shutdown'])
+                if case == 'final-live-write':
+                    self.assertEqual([row['phase'] for row in failures][:2],
+                                     ['terminal-live', 'terminal-evidence'])
+                if case == 'url-and-systemexit-cleanup':
+                    self.assertEqual([row['phase'] for row in failures][:2],
+                                     ['terminal-url', 'server-shutdown'])
+                if case == 'identity-mismatch':
+                    self.assertIn('rescue-identity-changed', [row['phase'] for row in failures])
+                if case == 'final-url':
+                    final = result['artifacts']['cycle0-A.final-before-rescue.json']
+                    self.assertEqual(final['url_in_argv'], [[810000, 111]])
+                if case == 'clean':
+                    finals = [name for name in result['artifacts']
+                              if name.endswith('.final-before-rescue.json') and not name.startswith('evidence/')]
+                    self.assertGreaterEqual(len(finals), 20)
+
+    def test_terminal_verdict_mutations_are_detected_by_the_relevant_oracle(self):
+        original = DRIVER.read_text()
+        changes = (
+            ('omit-live', "live_residue = (rescue is not None and bool(rescue['live'])) or process.poll() is None",
+             'live_residue = process.poll() is None', 'final-live', 'returncode'),
+            ('omit-url', "if state is not None and state['url_in_argv']:",
+             'if False:', 'final-url', 'returncode'),
+            ('error-as-success', "record_failure('Terminal process observation failed.', error)",
+             'pass', 'eacces', 'returncode'),
+            ('omit-observation', 'observed = watch.finish()',
+             'observed = watch.last', 'final-url', 'returncode'),
+            ('miss-system-exit', "except BaseException as error:\n            record_failure('Fixture server cleanup failed.', error)",
+             "except Exception as error:\n            record_failure('Fixture server cleanup failed.', error)",
+             'url-and-systemexit-cleanup', 'returncode'),
+            ('force-zero', 'return 0 if passed else 1', 'return 0', 'final-url', 'returncode'),
+            ('missing-as-empty', 'observed = watch.finish()',
+             "observed = watch.finish() or dict(monotonic_ns=1, live={}, zombies=[], url_in_argv=[])",
+             'missing', 'returncode'),
+            ('cleanup-rehabilitates', '    if passed:\n        for row in rows:',
+             '    passed = True\n    if passed:\n        for row in rows:', 'earlier-url', 'returncode'),
+            ('early-pass', '        passed = True\n    except BaseException as error:',
+             "        passed = True\n        print('PASS: premature fixture verdict', flush=True)\n"
+             '    except BaseException as error:', 'final-url', 'message'),
+        )
+        for name, before, after, case, oracle in changes:
+            with self.subTest(mutation=name), tempfile.TemporaryDirectory(prefix='terminal-mutant-') as temporary:
+                self.assertEqual(original.count(before), 1, name)
+                mutant = original.replace(before, after)
+                compile(mutant, '<terminal-mutant>', 'exec')
+                target = Path(temporary) / DRIVER.name
+                target.write_text(mutant)
+                result = self.run_terminal('zenity', case, target)
+                if oracle == 'returncode':
+                    self.assertEqual(result['returncode'], 0,
+                                     'Mutation did not reach its intended false-success path: ' +
+                                     result['stdout'] + result['stderr'])
+                else:
+                    self.assertEqual(result['returncode'], 1)
+                    self.assertIn('PASS: premature fixture verdict', result['stdout'])
+                with self.assertRaises(AssertionError):
+                    self.assert_terminal_verdict(result, False)
+
+
+    def test_multi_mutations_preserve_the_real_exit_status_oracle(self):
+        driver = PROJECT / 'tests/multi-instance-real.py'
+        original = driver.read_text()
+        observed = "            state = terminal_observation(obs.sample())\n        except BaseException as error:"
+        changes = (
+            ('omit-live', "            if state['live']:\n                qualification_failure(failures, 'terminal-live', label)",
+             '            if False:\n                pass', 'final-live', 'returncode'),
+            ('omit-url', "            if state['url_in_argv']:\n                qualification_failure(failures, 'terminal-url', label)",
+             '            if False:\n                pass', 'final-url', 'returncode'),
+            ('error-as-success', "            qualification_failure(failures, 'terminal-observation', label, error)",
+             '            pass', 'eacces', 'returncode'),
+            ('omit-observation', observed,
+             "            state = dict(monotonic_ns=1, live={}, zombies=[], url_in_argv=[])\n"
+             '        except BaseException as error:', 'final-url', 'returncode'),
+            ('miss-system-exit', "except BaseException as error:\n            qualification_failure(failures, 'terminal-observation', label, error)",
+             "except Exception as error:\n            qualification_failure(failures, 'terminal-observation', label, error)",
+             'systemexit-observation', 'returncode'),
+            ('force-zero', '    sys.exit(main())', '    main()', 'final-url', 'returncode'),
+            ('missing-as-empty', observed,
+             "            state = terminal_observation(obs.sample() or dict(monotonic_ns=1, live={}, zombies=[], url_in_argv=[]))\n"
+             '        except BaseException as error:', 'missing', 'returncode'),
+            ('cleanup-rehabilitates', '    if succeeded and not failures:',
+             '    failures.clear()\n    if succeeded and not failures:', 'eacces', 'returncode'),
+            ('early-pass', '        succeeded = True\n    except BaseException as error:',
+             "        succeeded = True\n        print('PASS: premature fixture verdict', flush=True)\n"
+             '    except BaseException as error:', 'final-url', 'message'),
+        )
+        for name, before, after, case, oracle in changes:
+            with self.subTest(mutation=name), tempfile.TemporaryDirectory(prefix='terminal-mutant-') as temporary:
+                self.assertEqual(original.count(before), 1, name)
+                mutant = original.replace(before, after)
+                compile(mutant, '<terminal-mutant>', 'exec')
+                directory = Path(temporary) / 'tests'
+                directory.mkdir()
+                target = directory / driver.name
+                target.write_text(mutant)
+                (directory / 'process-observer.py').write_bytes((PROJECT / 'tests/process-observer.py').read_bytes())
+                result = self.run_terminal('multi', case, target)
+                if oracle == 'returncode':
+                    self.assertEqual(result['returncode'], 0,
+                                     'Mutation did not reach its intended false-success path: ' +
+                                     result['stdout'] + result['stderr'])
+                else:
+                    self.assertEqual(result['returncode'], 1)
+                    self.assertIn('PASS: premature fixture verdict', result['stdout'])
+                with self.assertRaises(AssertionError):
+                    self.assert_terminal_verdict(result, False)
+
+
 if __name__ == '__main__':
-    unittest.main()
+    if len(sys.argv) == 6 and sys.argv[1] == '--terminal-proof-worker':
+        fixtures = load_module('terminal_proof_fixtures', PROJECT / 'tests/terminal-proof-fixtures.py')
+        program, target, case, workspace = sys.argv[2:]
+        if program == 'multi':
+            fixtures.run_multi(Path(target), case, Path(workspace))
+        elif program == 'zenity':
+            fixtures.run_zenity(Path(target), case, Path(workspace), evidence, event)
+        else:
+            raise ValueError('Unknown synthetic terminal witness')
+    else:
+        unittest.main()
