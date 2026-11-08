@@ -23,10 +23,19 @@ spec.loader.exec_module(observer)
 
 
 def identity(pid):
+    path = Path(f'/proc/{pid}/stat')
     try:
-        return observer.process_row(Path(f'/proc/{pid}/stat'))
+        return observer.process_row(path)
     except FileNotFoundError:
         return None
+    except ProcessLookupError:
+        # procfs can report ESRCH while a stat file opened for reading races
+        # with task exit. Reopen once: only a now-missing path confirms
+        # disappearance; a repeated or different read error remains unknown.
+        try:
+            return observer.process_row(path)
+        except FileNotFoundError:
+            return None
 
 
 def direct_children():

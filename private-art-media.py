@@ -83,7 +83,7 @@ def decimal_value(value: object, *, positive: bool = False) -> Decimal | None:
         parsed = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
-    if not parsed.is_finite() or abs(parsed) > Decimal("9000000000"):
+    if not parsed.is_finite() or parsed.copy_abs() > Decimal("9000000000"):
         return None
     if positive and parsed <= 0:
         return None
@@ -175,7 +175,9 @@ def read_subtitle_reference(path: Path | None, expected: dict) -> dict:
     tracks = reference.get("tracks")
     if (reference.get("version") != 1 or reference.get("selection_digest") != expected.get("selection_digest")
             or reference.get("plan_digest") != expected.get("plan_digest") or not isinstance(tracks, list)
-            or [entry.get("id") for entry in tracks if isinstance(entry, dict)]
+            or len(tracks) != len(expected["subtitles"])
+            or any(not isinstance(entry, dict) for entry in tracks)
+            or [entry.get("id") for entry in tracks]
             != [entry["id"] for entry in expected["subtitles"]]):
         raise MediaError("ARTE subtitle reference does not match the executed selection")
     parser = subtitle_parser()

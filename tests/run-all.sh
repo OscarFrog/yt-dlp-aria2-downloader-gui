@@ -42,9 +42,10 @@ source "${PROJECT_FILES}"
 # shellcheck source=lib/test-runner.sh
 source "${TEST_RUNNER_LIBRARY}"
 
-# Start the latency-dominant signal and runner suites first, then retain the
-# deliberate CPU-heavy/wait-heavy stagger. This reduces the four-worker tail
-# without increasing concurrency or weakening any validation.
+# Start the latency-dominant signal and runner suites first. The private-plan
+# suite has a separate launch priority so report and failure order stay stable.
+# Retain the deliberate CPU-heavy/wait-heavy stagger without increasing
+# concurrency or weakening any validation.
 readonly -a FULL_SUITE_IDS=(
     mock-signals
     test-runner
@@ -72,6 +73,9 @@ readonly -a FULL_SUITE_IDS=(
     package-user-cleanup
     packaging
 )
+
+readonly -a FULL_SUITE_LAUNCH_PRIORITY_IDS=(private-aria2-plan)
+readonly FULL_SUITE_LAUNCH_PRIORITY_AFTER=runtime-manager-hardening
 
 # The fast profile is an explicit developer feedback loop. The default full
 # profile remains the release-equivalent local contract.
@@ -240,6 +244,7 @@ DOCTOR_SHFMT_BOOTSTRAP_READY=false
 DOCTOR_EXTERNAL_HTTPS_AVAILABLE=false
 
 INTEGRATION_SUITE_IDS=()
+INTEGRATION_SUITE_LAUNCH_INDICES=()
 INTEGRATION_SUITE_LOGS=()
 INTEGRATION_SUITE_COMPLETIONS=()
 INTEGRATION_SUITE_STARTS=()
@@ -1415,10 +1420,46 @@ run_static_validation() {
 }
 
 initialize_integration_schedule() {
+    local suite_index=''
+    local priority_id=''
+    local priority_index=''
+    local is_priority=false
+
+    INTEGRATION_SUITE_LAUNCH_INDICES=()
+
     if [[ ${PROFILE} == fast ]]; then
         INTEGRATION_SUITE_IDS=("${FAST_SUITE_IDS[@]}")
+        for suite_index in "${!INTEGRATION_SUITE_IDS[@]}"; do
+            INTEGRATION_SUITE_LAUNCH_INDICES+=("${suite_index}")
+        done
     else
         INTEGRATION_SUITE_IDS=("${FULL_SUITE_IDS[@]}")
+        INTEGRATION_SUITE_LAUNCH_INDICES=()
+    fi
+
+    if [[ ${PROFILE} == full ]]; then
+        for suite_index in "${!INTEGRATION_SUITE_IDS[@]}"; do
+            is_priority=false
+            for priority_id in "${FULL_SUITE_LAUNCH_PRIORITY_IDS[@]}"; do
+                if [[ ${INTEGRATION_SUITE_IDS[suite_index]} == "${priority_id}" ]]; then
+                    is_priority=true
+                    break
+                fi
+            done
+            if [[ ${is_priority} == false ]]; then
+                INTEGRATION_SUITE_LAUNCH_INDICES+=("${suite_index}")
+            fi
+            if [[ ${INTEGRATION_SUITE_IDS[suite_index]} == "${FULL_SUITE_LAUNCH_PRIORITY_AFTER}" ]]; then
+                for priority_id in "${FULL_SUITE_LAUNCH_PRIORITY_IDS[@]}"; do
+                    for priority_index in "${!INTEGRATION_SUITE_IDS[@]}"; do
+                        if [[ ${INTEGRATION_SUITE_IDS[priority_index]} == "${priority_id}" ]]; then
+                            INTEGRATION_SUITE_LAUNCH_INDICES+=("${priority_index}")
+                            break
+                        fi
+                    done
+                done
+            fi
+        done
     fi
 
     INTEGRATION_SUITE_LOGS=()
@@ -1520,6 +1561,7 @@ run_integration_suites() {
     local next_index=0
     local active_count=0
     local slot=0
+    local suite_index=''
 
     initialize_integration_schedule
     while ((next_index < ${#INTEGRATION_SUITE_IDS[@]} || active_count > 0)); do
@@ -1527,7 +1569,8 @@ run_integration_suites() {
             ((next_index < ${#INTEGRATION_SUITE_IDS[@]})) || break
             [[ -z ${INTEGRATION_SLOT_SUITE_INDEX[${slot}]+x} ]] || continue
 
-            start_integration_suite "${next_index}" "${slot}"
+            suite_index=${INTEGRATION_SUITE_LAUNCH_INDICES[next_index]}
+            start_integration_suite "${suite_index}" "${slot}"
             next_index=$((next_index + 1))
             active_count=$((active_count + 1))
         done

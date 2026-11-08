@@ -8,6 +8,7 @@ production engine. All network media are synthetic and served on loopback.
 from __future__ import annotations
 
 import copy
+from decimal import Decimal, localcontext
 import functools
 import hashlib
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -82,6 +83,95 @@ def aac_declared_end_matches_packets(before: dict, after: dict, packet_pts: list
         candidates.append(end - min(packet_pts))
     declared = MEDIA.Decimal(after["declared_end"])
     return any(abs(declared - candidate) <= allowance for candidate in candidates)
+
+
+class DecimalValueTests(unittest.TestCase):
+    def test_extreme_exponents_are_controlled_refusals(self) -> None:
+        for value in ("1e999999999", "-1e999999999", "NaN", "sNaN", "Infinity", "-Infinity"):
+            with self.subTest(value=value):
+                self.assertIsNone(MEDIA.decimal_value(value))
+                self.assertIsNone(MEDIA.decimal_value(value, positive=True))
+
+    def test_bound_is_exact_without_context_rounding(self) -> None:
+        for value in ("9000000000.00000000000000000001", "-9000000000.00000000000000000001"):
+            with self.subTest(value=value):
+                self.assertIsNone(MEDIA.decimal_value(value))
+        for value in ("9000000000", "-9000000000", "0", "1e-999999999", "-1e-999999999"):
+            with self.subTest(value=value):
+                self.assertEqual(MEDIA.decimal_value(value), Decimal(value))
+                expected = Decimal(value) if Decimal(value) > 0 else None
+                self.assertEqual(MEDIA.decimal_value(value, positive=True), expected)
+        for value in (None, True, False, "", "not-a-number"):
+            with self.subTest(value=value):
+                self.assertIsNone(MEDIA.decimal_value(value))
+
+    def test_bound_check_does_not_round_or_change_decimal_flags(self) -> None:
+        with localcontext() as context:
+            context.prec = 6
+            context.clear_flags()
+            value = "1.234567890123456789"
+            self.assertEqual(MEDIA.decimal_value(value), Decimal(value))
+            self.assertFalse(any(context.flags.values()))
+
+    def test_long_numeric_inputs_remain_bounded_or_refused(self) -> None:
+        for value in ("9" * 10000, "-" + "9" * 10000, "1e" + "9" * 10000,
+                      "1." + "0" * 10000 + "invalid"):
+            with self.subTest(length=len(value)):
+                self.assertIsNone(MEDIA.decimal_value(value))
+        self.assertEqual(MEDIA.decimal_value("0" * 10000), Decimal(0))
+
+
+class SubtitleReferenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="art-reference-contract-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.path = self.root / "reference.json"
+        self.expected = expected_fixture()
+        self.expected.update(selection_digest="selection", plan_digest="plan")
+        self.expected["subtitles"][0]["source_identity"] = "source"
+        payload = b"1\n00:00:01,000 --> 00:00:02,000\nSynthetic dialogue\n\n"
+        subtitle = self.root / "prepared.fr.srt"
+        subtitle.write_bytes(payload)
+        subtitle.chmod(0o600)
+        self.entry = {"id": "fr", "source_identity": "source", "path": str(subtitle),
+                      "sha256": hashlib.sha256(payload).hexdigest(),
+                      "cues": MEDIA.subtitle_parser().parse_srt(payload)}
+
+    def write_reference(self, tracks: list) -> None:
+        self.path.write_text(json.dumps({"version": 1, "selection_digest": "selection",
+                                         "plan_digest": "plan", "tracks": tracks}))
+        self.path.chmod(0o600)
+
+    def test_valid_reference_and_absent_unselected_reference(self) -> None:
+        self.write_reference([self.entry])
+        self.assertEqual(MEDIA.read_subtitle_reference(self.path, self.expected)["tracks"],
+                         [self.entry])
+        self.expected["subtitles"] = []
+        self.assertEqual(MEDIA.read_subtitle_reference(None, self.expected), {"tracks": []})
+        self.write_reference([])
+        self.assertEqual(MEDIA.read_subtitle_reference(self.path, self.expected)["tracks"], [])
+
+    def test_non_object_tracks_are_refused_before_reading_subtitles(self) -> None:
+        for invalid in (None, 7, "track", [], True):
+            for position in (0, 1):
+                with self.subTest(invalid=invalid, position=position):
+                    tracks = [self.entry]
+                    tracks.insert(position, invalid)
+                    self.write_reference(tracks)
+                    with self.assertRaisesRegex(MEDIA.MediaError, "does not match"):
+                        MEDIA.read_subtitle_reference(self.path, self.expected)
+        self.expected["subtitles"] = []
+        self.write_reference([7])
+        with self.assertRaisesRegex(MEDIA.MediaError, "does not match"):
+            MEDIA.read_subtitle_reference(self.path, self.expected)
+
+    def test_missing_and_surplus_tracks_are_refused(self) -> None:
+        for tracks in ([], [self.entry, self.entry], [{"id": "other"}]):
+            with self.subTest(count=len(tracks)):
+                self.write_reference(tracks)
+                with self.assertRaisesRegex(MEDIA.MediaError, "does not match"):
+                    MEDIA.read_subtitle_reference(self.path, self.expected)
 
 
 class MediaValidationTests(unittest.TestCase):

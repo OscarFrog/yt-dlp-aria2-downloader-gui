@@ -7,6 +7,8 @@ Rescue happens only after assertions; test subreaping is not application reaping
 
 import ast
 import ctypes
+import errno
+import gc
 from contextlib import ExitStack, contextmanager, redirect_stderr
 import importlib.util
 import inspect
@@ -14,13 +16,18 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import select
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from types import SimpleNamespace
 import unittest
+import weakref
 from unittest import mock
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -45,6 +52,22 @@ def denied_procfs_enumeration(error):
                     return original(path)
 
                 stack.enter_context(mock.patch.object(owner, name, side_effect=denied))
+        yield
+
+
+@contextmanager
+def unavailable_synthetic_pidfds():
+    """Keep simulated procfs identities outside every real pidfd boundary."""
+    synthetic_os = SimpleNamespace(
+        getpid=os.getpid,
+        pidfd_open=mock.Mock(side_effect=OSError(errno.ENOSYS, 'synthetic pidfd unavailable')),
+        close=mock.Mock(side_effect=AssertionError('synthetic fixture has no owned pidfd')))
+    synthetic_select = SimpleNamespace(
+        POLLIN=select.POLLIN, POLLHUP=select.POLLHUP, POLLERR=select.POLLERR,
+        POLLNVAL=select.POLLNVAL,
+        poll=mock.Mock(side_effect=AssertionError('synthetic fixture has no pollable pidfd')))
+    with mock.patch.object(observer, 'os', synthetic_os), \
+            mock.patch.object(observer, 'select', synthetic_select, create=True):
         yield
 
 
@@ -132,9 +155,1192 @@ class DisplayReadinessTests(unittest.TestCase):
                         os.close(writer)
 
 
+class ObservationFailureTests(unittest.TestCase):
+    def setUp(self):
+        self.pid = 44444
+        self.row = dict(start=12345, state='S', parent=1, group=44444, session=44444)
+        self.token = 'synthetic-observation-test'
+        self.marker = b'YTDLP_QUALIFICATION_TOKEN=' + self.token.encode()
+        self.pidfd_boundary = ExitStack()
+        self.pidfd_boundary.enter_context(unavailable_synthetic_pidfds())
+        self.addCleanup(self.pidfd_boundary.close)
+
+    @contextmanager
+    def attribute_failure_transition(self, name, number, transition):
+        state = {'row': dict(self.row), 'fail': False, 'failed_reads': 0}
+
+        def snapshot():
+            return {} if state['row'] is None else {self.pid: dict(state['row'])}
+
+        def identity(_path):
+            if state['row'] is None:
+                raise FileNotFoundError(errno.ENOENT, 'synthetic disappeared identity')
+            return dict(state['row'])
+
+        def read(path):
+            if state['fail'] and path.name == name:
+                state['failed_reads'] += 1
+                if transition == 'disappeared':
+                    state['row'] = None
+                elif transition == 'replaced':
+                    state['row'] = dict(self.row, start=self.row['start'] + 1)
+                elif transition == 'quiescent':
+                    state['row'] = dict(self.row, state='Z')
+                raise OSError(number, 'synthetic private failure text', '/synthetic/private/path')
+            return self.marker + b'\0' if path.name == 'environ' else b'fixture\0'
+
+        with mock.patch.object(observer, 'snapshot', side_effect=snapshot), \
+                mock.patch.object(observer, 'process_row', side_effect=identity), \
+                mock.patch.object(Path, 'iterdir', autospec=True, side_effect=lambda _path: iter([
+                    Path(f'/proc/{self.pid}/task/{self.pid}')])), \
+                mock.patch.object(Path, 'read_bytes', new=read):
+            yield state
+
+    def test_attribute_error_before_terminal_transition_remains_latched(self):
+        for name in ('environ', 'cmdline'):
+            for number in (errno.EACCES, errno.EIO, errno.EINTR):
+                for transition in ('disappeared', 'replaced', 'quiescent', 'live'):
+                    with self.subTest(attribute=name, errno=number, transition=transition):
+                        observed = observer.Observer(self.token)
+                        with self.attribute_failure_transition(name, number, transition) as state:
+                            self.assertIn(str(self.pid), observed.sample()['live'])
+                            self.assertIn((self.pid, self.row['start']), observed.known)
+                            state['fail'] = True
+                            with self.assertRaises(observer.ObservationError) as raised:
+                                observed.sample()
+                            self.assertEqual(state['failed_reads'], 2 if number == errno.EINTR else 1)
+                            self.assertEqual(raised.exception.args, (
+                                number, 'attributed process observation is incomplete'))
+                            self.assertIsNone(raised.exception.filename)
+                            self.assertIs(observed.error, raised.exception)
+                            state['row'] = None
+                            with self.assertRaises(observer.ObservationError) as repeated:
+                                observed.sample()
+                            self.assertIs(repeated.exception, raised.exception)
+
+    def test_disappearance_errors_accept_confirmed_terminal_transition(self):
+        for name in ('environ', 'cmdline'):
+            for number in (errno.ENOENT, errno.ESRCH):
+                for transition in ('disappeared', 'replaced', 'quiescent'):
+                    with self.subTest(attribute=name, errno=number, transition=transition):
+                        observed = observer.Observer(self.token)
+                        with self.attribute_failure_transition(name, number, transition) as state:
+                            self.assertIn(str(self.pid), observed.sample()['live'])
+                            state['fail'] = True
+                            observed.sample()
+                            self.assertEqual(state['failed_reads'], 1)
+                            self.assertIsNone(observed.error)
+                            state['row'] = None
+                            self.assertFalse(observed.sample()['live'])
+
+    def test_presence_oracle_accepts_terminal_transition_after_read_error(self):
+        for number in (errno.EACCES, errno.EIO, errno.EINTR):
+            for transition in ('disappeared', 'replaced', 'quiescent'):
+                with self.subTest(errno=number, transition=transition), \
+                        self.attribute_failure_transition('environ', number, transition) as state:
+                    self.assertTrue(observer.token_process_is_live(self.pid, self.marker))
+                    state['fail'] = True
+                    self.assertFalse(observer.token_process_is_live(self.pid, self.marker))
+
+    def test_attributed_attribute_failure_stays_inconclusive(self):
+        for name in ('environ', 'cmdline'):
+            for number in (errno.EACCES, errno.EIO):
+                with self.subTest(attribute=name, errno=number):
+                    observed = observer.Observer(self.token)
+
+                    def readable(path):
+                        return self.marker + b'\0' if path.name == 'environ' else b'fixture\0'
+
+                    def denied(path):
+                        if path.name == name:
+                            raise OSError(number, 'synthetic attribute failure')
+                        return readable(path)
+
+                    with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                            mock.patch.object(observer, 'process_row', return_value=self.row), \
+                            mock.patch.object(Path, 'read_bytes', new=readable):
+                        self.assertIn(str(self.pid), observed.sample()['live'])
+                        with mock.patch.object(Path, 'read_bytes', new=denied):
+                            with self.assertRaises(observer.ObservationError):
+                                observed.sample()
+                    # A lost interval must not disappear from the verdict when
+                    # the fixture exits, even if the caller resumes sampling.
+                    with mock.patch.object(observer, 'snapshot', return_value={}):
+                        with self.assertRaises(observer.ObservationError):
+                            observed.sample()
+
+    def test_unattributed_foreign_environment_does_not_join_fixture(self):
+        with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                mock.patch.object(observer, 'process_row', return_value=self.row), \
+                mock.patch.object(Path, 'read_bytes', side_effect=PermissionError(errno.EACCES, 'foreign')):
+            self.assertFalse(observer.Observer(self.token).sample()['live'])
+
+    def test_sibling_disappearance_cannot_erase_an_earlier_permission_failure(self):
+        paths = [Path(f'/proc/{self.pid}/task/{index}/environ') for index in (1, 2, 3)]
+        for strong in (errno.EACCES, errno.EIO):
+            for sequence in ((strong, errno.ESRCH), (errno.ESRCH, strong),
+                             (strong, errno.ENOENT), (errno.ENOENT, strong)):
+                with self.subTest(sequence=sequence):
+                    observed = observer.Observer(self.token)
+                    observed.known.add((self.pid, self.row['start']))
+
+                    def read(path):
+                        index = paths.index(path)
+                        if index < 2:
+                            raise OSError(sequence[index], 'synthetic sibling observation failure')
+                        return self.marker + b'\0'
+
+                    with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                            mock.patch.object(observer, 'process_row', return_value=self.row), \
+                            mock.patch.object(observer, 'observation_paths', return_value=iter(paths)), \
+                            mock.patch.object(Path, 'read_bytes', new=read):
+                        with self.assertRaises(observer.ObservationError) as raised:
+                            observed.sample()
+                    self.assertEqual(raised.exception.errno, strong)
+                    self.assertIs(observed.error, raised.exception)
+        for strong in (errno.EACCES, errno.EIO):
+            observed = observer.Observer(self.token)
+            observed.known.add((self.pid, self.row['start']))
+
+            def failed_enumeration(*_args):
+                yield paths[0]
+                raise ProcessLookupError(errno.ESRCH, 'synthetic task enumeration disappearance')
+
+            with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                    mock.patch.object(observer, 'process_row', return_value=self.row), \
+                    mock.patch.object(observer, 'observation_paths', new=failed_enumeration), \
+                    mock.patch.object(Path, 'read_bytes', side_effect=OSError(strong, 'synthetic')):
+                with self.assertRaises(observer.ObservationError) as raised:
+                    observed.sample()
+            self.assertEqual(raised.exception.errno, strong)
+
+    def test_error_rechecks_quiescence_with_fresh_leader_state(self):
+        current = dict(self.row, state='Z')
+        with mock.patch.object(observer, 'process_row', return_value=current), \
+                mock.patch.object(observer, 'threads_are_quiescent', return_value=True) as quiescent:
+            observer.observation_failure(self.pid, self.row, ProcessLookupError(errno.ESRCH, 'stale'))
+        quiescent.assert_called_once_with(self.pid, current)
+
+    def test_failed_oracle_still_rescues_owned_child_and_preserves_unknown_root(self):
+        # This existing witness creates its own child and verifies real rescue;
+        # the other methods in this class use entirely simulated procfs PIDs.
+        self.pidfd_boundary.close()
+        for denied in (False, True):
+            with self.subTest(terminal_observation_denied=denied):
+                case = ProcessTests(methodName='test_mock_rescue_requires_token_and_current_start_identity')
+                case.setUp()
+                process = subprocess.Popen(['sleep', '30'],
+                                           env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=case.token))
+                case.processes.append(process)
+                failure = observer.ObservationError(errno.EIO, 'synthetic latched failure')
+                case.observer.error = failure
+                try:
+                    with ExitStack() as stack:
+                        if denied:
+                            stack.enter_context(mock.patch.object(
+                                observer, 'snapshot', side_effect=PermissionError(errno.EACCES, 'injected')))
+                        with self.assertRaises(observer.ObservationError) as raised:
+                            case.tearDown()
+                    self.assertIs(raised.exception, failure, 'cleanup erased the initial observation failure')
+                    self.assertIsNotNone(process.poll(), 'failed observation prevented owned-child rescue')
+                    self.assertTrue(case.root.exists(),
+                                    'a later quiet sample must not erase an earlier observation gap')
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=3)
+                    case.temp.cleanup()
+
+    def test_unconfirmed_owned_process_survives_automatic_fixture_cleanup(self):
+        def exercise():
+            case = ProcessTests(methodName='test_mock_rescue_requires_token_and_current_start_identity')
+            case.setUp()
+            process = mock.Mock(spec=subprocess.Popen)
+            process.poll.return_value = 0
+            process.communicate.side_effect = subprocess.TimeoutExpired('synthetic owned pipe', 5)
+            case.processes.append(process)
+            with mock.patch.object(observer, 'snapshot', return_value={}):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    case.tearDown()
+            self.assertFalse(case.temp._finalizer.alive, 'automatic cleanup still owns an uncertain fixture')
+            return case.root, weakref.ref(case)
+
+        root, reference = exercise()
+        try:
+            gc.collect()
+            self.assertIsNone(reference(), 'the fixture lifetime probe did not collect its TestCase')
+            self.assertTrue(root.is_dir(), 'automatic cleanup removed an unconfirmed fixture')
+        finally:
+            # The synthetic Popen never created a process or inherited an FD.
+            shutil.rmtree(root)
+
+    def test_token_oracle_rejects_unknown_and_confirms_disappearance(self):
+        for number in (errno.EACCES, errno.EIO, errno.ESRCH):
+            with self.subTest(errno=number), \
+                    mock.patch.object(observer, 'process_row', return_value=self.row), \
+                    mock.patch.object(Path, 'read_bytes', side_effect=OSError(number, 'injected')):
+                with self.assertRaises(observer.ObservationError):
+                    observer.token_process_is_live(self.pid, self.marker)
+        for missing in (FileNotFoundError(errno.ENOENT, 'gone'),
+                        ProcessLookupError(errno.ESRCH, 'stale')):
+            with self.subTest(initial=type(missing).__name__), \
+                    mock.patch.object(observer, 'process_row', side_effect=[missing, FileNotFoundError()]):
+                self.assertFalse(observer.token_process_is_live(self.pid, self.marker))
+        with mock.patch.object(observer, 'process_row', side_effect=[self.row, dict(self.row, start=54321)]), \
+                mock.patch.object(Path, 'read_bytes', return_value=self.marker + b'\0'):
+            self.assertFalse(observer.token_process_is_live(self.pid, self.marker))
+        with mock.patch.object(observer, 'process_row', return_value=self.row), \
+                mock.patch.object(Path, 'read_bytes', side_effect=[InterruptedError(errno.EINTR, 'interrupted'),
+                                                                 self.marker + b'\0']):
+            self.assertTrue(observer.token_process_is_live(self.pid, self.marker))
+        with mock.patch.object(observer, 'process_row', return_value=self.row), \
+                mock.patch.object(Path, 'read_bytes', side_effect=InterruptedError(errno.EINTR, 'persistent')):
+            with self.assertRaises(observer.ObservationError):
+                observer.token_process_is_live(self.pid, self.marker)
+
+    def test_argv_failure_reaches_real_watch_and_scenario_validator(self):
+        def load(name, relative):
+            module_spec = importlib.util.spec_from_file_location(name, PROJECT / relative)
+            module = importlib.util.module_from_spec(module_spec)
+            module_spec.loader.exec_module(module)
+            return module
+
+        driver = load('observation_driver', 'tests/zenity-autonomous-qualification.py')
+        fixtures = load('observation_fixtures', 'tests/zenity-autonomous-integration.py')
+        for number in (errno.EACCES, errno.EIO):
+            with self.subTest(errno=number), tempfile.TemporaryDirectory() as temporary:
+                watch = driver.Watch.__new__(driver.Watch)
+                watch.observer = observer.Observer(self.token)
+                watch.path = Path(temporary) / 'topology.jsonl'
+                watch.lock = threading.Lock()
+                watch.stop = threading.Event()
+                watch.error = None
+                watch.last = None
+                watch.diagnostics = None
+                watch.label = watch.path.name.removesuffix('.topology.jsonl')
+                watch.context = threading.local()
+
+                class Result:
+                    def observe(self, _state):
+                        watch.stop.set()
+                        return {}
+
+                watch.result = Result()
+
+                def read(path):
+                    if path.name == 'environ':
+                        return self.marker + b'\0'
+                    raise OSError(number, 'synthetic private observation failure')
+
+                with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                        mock.patch.object(observer, 'process_row', return_value=self.row), \
+                        mock.patch.object(Path, 'read_bytes', side_effect=read, autospec=True):
+                    watch.run()
+                self.assertEqual(watch.error, 'ObservationError')
+                with self.assertRaisesRegex(ValueError, 'Continuous process observation failed'):
+                    watch.check()
+                evidence = fixtures.evidence()
+                evidence['observer_error'] = watch.error is not None
+                with self.assertRaisesRegex(ValueError, 'Process observation failed'):
+                    driver.validate_scenario(evidence)
+
+    def test_terminal_transition_failure_reaches_watch_finish_and_validator(self):
+        def load(name, relative):
+            module_spec = importlib.util.spec_from_file_location(name, PROJECT / relative)
+            module = importlib.util.module_from_spec(module_spec)
+            module_spec.loader.exec_module(module)
+            return module
+
+        driver = load('transition_driver', 'tests/zenity-autonomous-qualification.py')
+        fixtures = load('transition_fixtures', 'tests/zenity-autonomous-integration.py')
+        for name in ('environ', 'cmdline'):
+            for number in (errno.EACCES, errno.EIO):
+                for transition in ('disappeared', 'replaced', 'quiescent'):
+                    with self.subTest(attribute=name, errno=number, transition=transition), \
+                            tempfile.TemporaryDirectory() as temporary, \
+                            self.attribute_failure_transition(name, number, transition) as state:
+                        watch = driver.Watch.__new__(driver.Watch)
+                        watch.observer = observer.Observer(self.token)
+                        watch.path = Path(temporary) / 'topology.jsonl'
+                        watch.lock = threading.Lock()
+                        watch.stop = threading.Event()
+                        watch.error = None
+                        watch.last = None
+                        watch.diagnostics = None
+                        watch.label = watch.path.name.removesuffix('.topology.jsonl')
+                        watch.context = threading.local()
+
+                        class Result:
+                            def observe(self, _state):
+                                if state['fail']:
+                                    watch.stop.set()
+                                else:
+                                    state['fail'] = True
+                                return {}
+
+                        watch.result = Result()
+                        watch.thread = threading.Thread(target=watch.run)
+                        watch.thread.start()
+                        watch.thread.join(timeout=3)
+                        self.assertFalse(watch.thread.is_alive())
+                        self.assertIn((self.pid, self.row['start']), watch.observer.known)
+                        self.assertEqual(watch.error, 'ObservationError')
+                        with self.assertRaisesRegex(ValueError, 'Continuous process observation failed'):
+                            watch.check()
+                        with self.assertRaisesRegex(ValueError, 'Continuous process observation failed'):
+                            watch.finish()
+                        state['row'] = None
+                        with self.assertRaises(observer.ObservationError):
+                            watch.observer.sample()
+                        evidence = fixtures.evidence()
+                        evidence['observer_error'] = watch.error is not None
+                        with self.assertRaisesRegex(ValueError, 'Process observation failed'):
+                            driver.validate_scenario(evidence)
+
+    def test_each_runner_oracle_propagates_unreadable_environment(self):
+        examined = 0
+        for relative in ('tests/run-all-signal-integration.sh', 'tests/test-runner-integration.sh'):
+            source = (PROJECT / relative).read_text()
+            for match in re.finditer(r"<<'(?P<tag>PY_[A-Z_]+)'\n(?P<body>.*?)\n(?P=tag)(?:\n|$)",
+                                     source, re.S):
+                body = match['body']
+                tree = ast.parse(body)
+                function = next((node for node in tree.body
+                                 if isinstance(node, ast.FunctionDef) and node.name == 'running'), None)
+                if function is None:
+                    continue
+                examined += 1
+                namespace = {'identity_observer': observer}
+                exec(compile(ast.Module(body=[function], type_ignores=[]),
+                             relative + ':' + match['tag'], 'exec'), namespace)
+                token_name = re.search(r'YTDLP_ARIA2_[A-Z_]+TOKEN',
+                                       ast.get_source_segment(body, function)).group()
+                marker = (token_name + '=' + self.token).encode()
+                with mock.patch.object(observer, 'process_row', return_value=self.row), \
+                        mock.patch.object(Path, 'read_bytes', return_value=marker + b'\0'):
+                    self.assertTrue(namespace['running'](self.pid, self.token))
+                for number in (errno.EACCES, errno.EIO):
+                    with self.subTest(file=relative, heredoc=match['tag'], errno=number), \
+                            mock.patch.object(observer, 'process_row', return_value=self.row), \
+                            mock.patch.object(Path, 'read_bytes', side_effect=OSError(number, 'injected')):
+                        with self.assertRaises(observer.ObservationError):
+                            namespace['running'](self.pid, self.token)
+        self.assertEqual(examined, 5, 'a runner oracle escaped the failure matrix')
+
+
+class ObservationMemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.pid = 44444
+        self.tid = 44445
+        self.row = dict(start=12345, state='Z', parent=1, group=self.pid, session=self.pid)
+        self.task = dict(self.row, start=12346, state='S')
+        self.token = 'synthetic-thread-memory-test'
+        self.marker = b'YTDLP_QUALIFICATION_TOKEN=' + self.token.encode()
+        self.root = Path(f'/proc/{self.pid}')
+        self.sibling = self.root / 'task' / str(self.tid)
+        self.pidfd_boundary = ExitStack()
+        self.pidfd_boundary.enter_context(unavailable_synthetic_pidfds())
+        self.addCleanup(self.pidfd_boundary.close)
+
+    def row_for(self, path):
+        return dict(self.task if path.parent == self.sibling else self.row)
+
+    def test_zombie_leader_memory_is_not_required_for_live_sibling(self):
+        for number in (errno.EACCES, errno.EIO):
+            with self.subTest(dead_leader_errno=number):
+                reads = []
+
+                def read(path):
+                    reads.append(path)
+                    if path.parent != self.sibling:
+                        raise OSError(number, 'synthetic terminated-task memory')
+                    return self.marker + b'\0' if path.name == 'environ' else b'https://example.invalid/synthetic\0'
+
+                with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                        mock.patch.object(observer, 'process_row', side_effect=self.row_for), \
+                        mock.patch.object(Path, 'iterdir', side_effect=lambda _path: iter([
+                            self.root / 'task' / str(self.pid), self.sibling]), autospec=True), \
+                        mock.patch.object(observer, 'read_observation', side_effect=read):
+                    sample = observer.Observer(self.token).sample()
+                    self.assertIn(str(self.pid), sample['live'])
+                    self.assertIn((self.pid, self.row['start']), sample['url_in_argv'])
+                    self.assertTrue(observer.token_process_is_live(self.pid, self.marker))
+                self.assertTrue(reads)
+                self.assertTrue(all(path.parent == self.sibling for path in reads),
+                                'terminated task memory was read instead of the live sibling')
+
+    def test_live_sibling_permission_and_io_errors_remain_blocking(self):
+        for name in ('environ', 'cmdline'):
+            for number in (errno.EACCES, errno.EIO):
+                with self.subTest(attribute=name, errno=number):
+                    observed = observer.Observer(self.token)
+                    observed.known.add((self.pid, self.row['start']))
+
+                    def read(path):
+                        if path.name == name:
+                            raise OSError(number, 'synthetic active-task memory refusal')
+                        return self.marker + b'\0'
+
+                    with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                            mock.patch.object(observer, 'process_row', side_effect=self.row_for), \
+                            mock.patch.object(Path, 'iterdir', side_effect=lambda _path: iter([self.sibling]),
+                                              autospec=True), \
+                            mock.patch.object(observer, 'read_observation', side_effect=read):
+                        with self.assertRaises(observer.ObservationError) as raised:
+                            observed.sample()
+                        self.assertEqual(raised.exception.errno, number)
+                        self.assertIs(observed.error, raised.exception)
+                        if name == 'environ':
+                            with self.assertRaises(observer.ObservationError) as token_error:
+                                observer.token_process_is_live(self.pid, self.marker)
+                            self.assertEqual(token_error.exception.errno, number)
+
+    def test_memory_read_revalidates_group_and_task_identity(self):
+        for change in ('group-start', 'task-start', 'task-exit', 'task-disappears'):
+            with self.subTest(change=change):
+                rows = {'group': dict(self.row), 'task': dict(self.task)}
+
+                def identity(path):
+                    if path.parent == self.sibling:
+                        if rows['task'] is None:
+                            raise FileNotFoundError(errno.ENOENT, 'synthetic retired task')
+                        return dict(rows['task'])
+                    return dict(rows['group'])
+
+                def read(_path):
+                    if change == 'group-start':
+                        rows['group']['start'] += 1
+                    elif change == 'task-start':
+                        rows['task']['start'] += 1
+                    elif change == 'task-exit':
+                        rows['task']['state'] = 'Z'
+                    else:
+                        rows['task'] = None
+                    return self.marker + b'\0'
+
+                with mock.patch.object(observer, 'process_row', side_effect=identity), \
+                        mock.patch.object(observer, 'read_observation', side_effect=read) as memory:
+                    with self.assertRaises((FileNotFoundError, ProcessLookupError)):
+                        observer.read_process_observation(self.pid, self.row, self.sibling / 'environ')
+                    memory.assert_called_once()
+
+    def test_leader_exit_between_selection_and_read_uses_live_sibling(self):
+        self.row['state'] = 'S'
+        with mock.patch.object(observer, 'process_row', side_effect=self.row_for), \
+                mock.patch.object(Path, 'iterdir', side_effect=lambda _path: iter([self.sibling]), autospec=True), \
+                mock.patch.object(observer, 'read_observation', return_value=self.marker + b'\0') as memory:
+            paths = observer.observation_paths(self.pid, self.row, 'environ')
+            leader_path = next(paths)
+            self.assertEqual(leader_path, self.root / 'environ')
+            self.row['state'] = 'Z'
+            with self.assertRaises(ProcessLookupError):
+                observer.read_process_observation(self.pid, self.row, leader_path)
+            memory.assert_not_called()
+            sibling_path = next(paths)
+            self.assertEqual(sibling_path, self.sibling / 'environ')
+            self.assertEqual(observer.read_process_observation(self.pid, self.row, sibling_path),
+                             self.marker + b'\0')
+
+    def test_unknown_task_inventory_and_identity_cannot_prove_absence(self):
+        for boundary in ('inventory', 'task-stat'):
+            for number in (errno.EACCES, errno.EIO):
+                with self.subTest(boundary=boundary, errno=number):
+                    observed = observer.Observer(self.token)
+                    observed.known.add((self.pid, self.row['start']))
+
+                    def identity(path):
+                        if boundary == 'task-stat' and path.parent == self.sibling:
+                            raise OSError(number, 'synthetic task identity refusal')
+                        return self.row_for(path)
+
+                    def tasks(_path):
+                        if boundary == 'inventory':
+                            raise OSError(number, 'synthetic task inventory refusal')
+                        return iter([self.sibling])
+
+                    with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                            mock.patch.object(observer, 'process_row', side_effect=identity), \
+                            mock.patch.object(Path, 'iterdir', side_effect=tasks, autospec=True), \
+                            mock.patch.object(observer, 'read_observation') as memory:
+                        with self.assertRaises(observer.ObservationError) as raised:
+                            observed.sample()
+                        self.assertEqual(raised.exception.errno, number)
+                        memory.assert_not_called()
+        observed = observer.Observer(self.token)
+        observed.known.add((self.pid, self.row['start']))
+        with mock.patch.object(observer, 'snapshot', return_value={self.pid: self.row}), \
+                mock.patch.object(observer, 'process_row', side_effect=self.row_for), \
+                mock.patch.object(Path, 'iterdir', side_effect=lambda _path: iter([]), autospec=True):
+            with self.assertRaises(observer.ObservationError):
+                observed.sample()
+
+
+class ObservationRetirementTests(unittest.TestCase):
+    """Model group retirement without reading procfs or opening a real pidfd."""
+
+    def setUp(self):
+        self.pid = 44444
+        self.tid = 44445
+        self.row = dict(start=12345, state='S', parent=1, group=55555, session=55555)
+        self.token = 'synthetic-retired-group-test'
+        self.marker = b'YTDLP_QUALIFICATION_TOKEN=' + self.token.encode()
+        self.root = Path(f'/proc/{self.pid}')
+
+    @contextmanager
+    def retired_group(self, *, ready=True, inventory_errno=errno.ENOENT,
+                      read_errno=None, replace_on_open=False, pidfd_errno=None,
+                      poll_mask=None, poll_errno=None, wrong_descriptor=False,
+                      close_errno=None, already_exited=False, leader_inventory=False,
+                      duplicate_events=False, gone_on_open=False, sibling_live=False,
+                      reuse_task=False, complete_inventory=False, fdinfo_payload=None,
+                      fdinfo_errno=None, fdinfo_close_errno=None, earlier_memory_error=None):
+        state = dict(row=dict(self.row, state='Z' if already_exited else 'S'),
+                     task=dict(self.row, start=12399, state='S'),
+                     opened=[], closed=[], polls=[], reads=[], read_tids=[], inventories=[],
+                     fdinfo_opened=[], fdinfo_reads=[], fdinfo_closed=[])
+        handles = set()
+        test = self
+        sibling = self.root / 'task' / str(self.tid)
+        earlier_pid = self.pid - 1
+        earlier_root = Path(f'/proc/{earlier_pid}')
+        earlier_row = dict(self.row, start=self.row['start'] - 1, state='S')
+        rows = {self.pid: dict(self.row)}
+        if earlier_memory_error is not None:
+            rows = {earlier_pid: earlier_row, **rows}
+
+        def identity(path):
+            test.assertIn(path, (self.root / 'stat', self.root / 'task' / str(self.pid) / 'stat',
+                                sibling / 'stat', earlier_root / 'stat'),
+                          'fixture escaped the owned group identity')
+            if path.parent == earlier_root:
+                return dict(earlier_row)
+            if state['row'] is None:
+                raise FileNotFoundError(errno.ENOENT, 'synthetic retired group identity')
+            if path.parent == sibling:
+                return dict(state['task'])
+            return dict(state['row'])
+
+        def inventory(path):
+            test.assertEqual(path, self.root / 'task', 'fixture escaped the owned task inventory')
+            state['inventories'].append(path)
+            if sibling_live:
+                return iter((self.root / 'task' / str(self.pid), sibling))
+            if complete_inventory:
+                return iter((self.root / 'task' / str(self.pid),))
+            if leader_inventory and len(state['inventories']) == 1:
+                return iter((self.root / 'task' / str(self.pid),))
+            if inventory_errno is not None:
+                raise OSError(inventory_errno, 'synthetic retired task inventory')
+            return iter(())
+
+        class Memory:
+            def __init__(self, path):
+                self.path = path
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exception):
+                return False
+
+            def read(self):
+                state['reads'].append(self.path.name)
+                if self.path.parent == earlier_root:
+                    state['read_tids'].append(earlier_pid)
+                    raise OSError(earlier_memory_error, 'synthetic preceding group memory refusal')
+                state['read_tids'].append(self.tid if self.path.parent == sibling else self.pid)
+                state['row']['state'] = 'Z'
+                if reuse_task and self.path.parent == sibling:
+                    state['task']['start'] += 1
+                if read_errno is not None:
+                    raise OSError(read_errno, 'synthetic attributed memory failure')
+                return self.marker + b'\0' if self.path.name == 'environ' else b'fixture\0'
+
+            marker = self.marker
+            tid = self.tid
+            pid = self.pid
+
+        class DescriptorInfo:
+            def __init__(self, descriptor):
+                self.descriptor = descriptor
+                state['fdinfo_opened'].append(descriptor)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exception):
+                self.close()
+                return False
+
+            def close(self):
+                state['fdinfo_closed'].append(self.descriptor)
+                if fdinfo_close_errno is not None:
+                    raise OSError(fdinfo_close_errno, 'synthetic descriptor identity close refusal')
+
+            def read(self, size=-1):
+                test.assertEqual(size, 4097, 'fdinfo identity read is not bounded')
+                state['fdinfo_reads'].append(size)
+                if fdinfo_errno is not None:
+                    raise OSError(fdinfo_errno, 'synthetic descriptor identity refusal')
+                data = fdinfo_payload if fdinfo_payload is not None else f'Pid:\t{test.pid}\n'.encode()
+                return data[:size]
+
+        def opened(path, *args, **kwargs):
+            if path.parent == Path('/proc/self/fdinfo'):
+                test.assertTrue(path.name.isdecimal())
+                descriptor = int(path.name)
+                test.assertIn(descriptor, handles, 'descriptor identity is not owned by this sample')
+                return DescriptorInfo(descriptor)
+            test.assertIn(path, (self.root / 'environ', self.root / 'cmdline',
+                                sibling / 'environ', sibling / 'cmdline',
+                                earlier_root / 'environ', earlier_root / 'cmdline'),
+                          'fixture escaped the owned memory attributes')
+            return Memory(path)
+
+        def pidfd_open(pid, flags=0):
+            test.assertEqual((pid, flags), (self.pid, 0), 'pidfd must bind the complete expected group')
+            if pidfd_errno is not None:
+                raise OSError(pidfd_errno, 'synthetic pidfd refusal')
+            descriptor = 900000 + len(state['opened'])
+            state['opened'].append(descriptor)
+            handles.add(descriptor)
+            if replace_on_open:
+                state['row']['start'] += 1
+            if gone_on_open:
+                state['row'] = None
+            return descriptor
+
+        class Poll:
+            def __init__(self):
+                self.descriptor = None
+
+            def register(self, descriptor, mask=select.POLLIN):
+                test.assertIn(descriptor, handles)
+                test.assertIsNone(self.descriptor, 'a poller must not admit another group')
+                test.assertTrue(mask & select.POLLIN)
+                self.descriptor = descriptor
+
+            def poll(self, timeout=None):
+                test.assertEqual(timeout, 0, 'termination evidence must not wait for the process')
+                state['polls'].append(self.descriptor)
+                if poll_errno is not None:
+                    raise OSError(poll_errno, 'synthetic poll refusal')
+                if not ready:
+                    return []
+                descriptor = self.descriptor + 1 if wrong_descriptor else self.descriptor
+                events = [(descriptor, select.POLLIN if poll_mask is None else poll_mask)]
+                return events * 2 if duplicate_events else events
+
+        def close(descriptor):
+            test.assertIn(descriptor, handles, 'only this fixture owns the descriptor')
+            test.assertNotIn(descriptor, state['closed'], 'descriptor closed more than once')
+            state['closed'].append(descriptor)
+            if close_errno is not None:
+                raise OSError(close_errno, 'synthetic close refusal')
+
+        with mock.patch.object(observer, 'snapshot', return_value=rows), \
+                mock.patch.object(observer, 'process_row', side_effect=identity), \
+                mock.patch.object(Path, 'iterdir', new=inventory), \
+                mock.patch.object(Path, 'open', new=opened), \
+                mock.patch.object(os, 'pidfd_open', side_effect=pidfd_open, create=True), \
+                mock.patch.object(select, 'poll', new=Poll), \
+                mock.patch.object(os, 'close', side_effect=close):
+            yield state
+        self.assertCountEqual(state['opened'], state['closed'], 'pidfd ownership leaked')
+        self.assertCountEqual(state['fdinfo_opened'], state['fdinfo_closed'], 'fdinfo stream leaked')
+
+    def observed(self, diagnostics=False, identity_diagnostics=False):
+        result = observer.Observer(self.token, diagnostics=diagnostics,
+                                   identity_diagnostics=identity_diagnostics)
+        result.known.add((self.pid, self.row['start']))
+        return result
+
+    def test_enoent_after_leader_exit_requires_independent_group_termination(self):
+        for diagnostics, identity in ((False, False), (True, False), (True, True)):
+            with self.subTest(diagnostics=diagnostics, identity=identity), self.retired_group() as state:
+                observed = self.observed(diagnostics, identity)
+                result = observed.sample()
+                self.assertFalse(result['live'], 'independently terminated group remained live')
+                self.assertFalse(result['url_in_argv'])
+                self.assertIsNone(observed.error)
+                self.assertTrue(state['inventories'], 'missing task inventory was not exercised')
+                self.assertTrue(state['polls'], 'a missing inventory alone was accepted as termination')
+                self.assertEqual(state['reads'], ['environ'])
+
+    def test_missing_task_inventory_without_termination_evidence_remains_blocking(self):
+        for diagnostics, identity in ((False, False), (True, False), (True, True)):
+            with self.subTest(diagnostics=diagnostics, identity=identity), \
+                    self.retired_group(ready=False) as state:
+                observed = self.observed(diagnostics, identity)
+                with self.assertRaises(observer.ObservationError) as failure:
+                    observed.sample()
+                self.assertIs(observed.error, failure.exception)
+                self.assertTrue(state['inventories'])
+                with mock.patch.object(observer, 'snapshot', return_value={}):
+                    with self.assertRaises(observer.ObservationError) as repeated:
+                        observed.sample()
+                self.assertIs(repeated.exception, failure.exception)
+
+    def test_inventory_guard_accepts_only_independently_terminated_group(self):
+        for diagnostics, identity in ((False, False), (True, False), (True, True)):
+            with self.subTest(diagnostics=diagnostics, identity=identity), \
+                    self.retired_group(already_exited=True, leader_inventory=True) as state:
+                observed = self.observed(diagnostics, identity)
+                result = observed.sample()
+                self.assertFalse(result['live'], 'terminal pidfd evidence did not resolve the inventory race')
+                self.assertIsNone(observed.error)
+                self.assertGreaterEqual(len(state['inventories']), 2)
+                self.assertTrue(state['polls'], 'the inventory guard was bypassed without independent evidence')
+                self.assertEqual(state['reads'], [], 'memory of the retired leader was requested')
+
+    def test_inventory_guard_retains_enoent_origin_without_terminal_evidence(self):
+        with self.retired_group(ready=False, already_exited=True, leader_inventory=True):
+            observed = self.observed(True, True)
+            with self.assertRaises(observer.ObservationError) as failure:
+                observed.sample()
+            self.assertEqual(failure.exception.errno, errno.EIO)
+            private = observed.identity_failure(failure.exception)
+            self.assertTrue(private['complete'])
+            events = private['events']
+            first = [event for event in events if event['first_failure']]
+            self.assertEqual(len(first), 1)
+            self.assertEqual((first[0]['operation'], first[0]['phase'], first[0]['primitive_errno']),
+                             ('task_inventory', 'quiescence_check', errno.ENOENT))
+            guards = [event for event in events if event['operation'] == 'inventory_guard']
+            self.assertTrue(guards)
+            self.assertEqual((guards[0]['primitive_errno'], guards[0]['primitive_origin']),
+                             (errno.EIO, 'application_state_check'))
+            self.assertIs(observed.error, failure.exception)
+
+    def test_unproven_pidfd_states_cannot_accept_a_missing_inventory(self):
+        cases = (
+            dict(ready=False),
+            dict(pidfd_errno=errno.ESRCH),
+            dict(pidfd_errno=errno.ENOSYS),
+            dict(pidfd_errno=errno.EACCES),
+            dict(pidfd_errno=errno.EIO),
+            dict(poll_errno=errno.EINTR),
+            dict(poll_errno=errno.EIO),
+            dict(poll_mask=select.POLLERR),
+            dict(poll_mask=select.POLLNVAL),
+            dict(poll_mask=select.POLLIN | select.POLLERR),
+            dict(poll_mask=select.POLLIN | select.POLLNVAL),
+            dict(poll_mask=select.POLLOUT),
+            dict(poll_mask=select.POLLIN | 0x40000000),
+            dict(wrong_descriptor=True),
+            dict(duplicate_events=True),
+        )
+        for options in cases:
+            with self.subTest(options=options), \
+                    self.retired_group(already_exited=True, leader_inventory=True, **options):
+                observed = self.observed(True, True)
+                with self.assertRaises(observer.ObservationError) as failure:
+                    observed.sample()
+                expected_final = errno.ENOENT if 'poll_errno' in options else errno.EIO
+                self.assertEqual(failure.exception.errno, expected_final)
+                self.assertIs(observed.error, failure.exception)
+                private = observed.identity_failure(failure.exception)
+                first = [event for event in private['events'] if event['first_failure']]
+                self.assertEqual(len(first), 1)
+                expected_first = options.get('pidfd_errno', errno.ENOENT)
+                self.assertEqual(first[0]['primitive_errno'], expected_first,
+                                 'the diagnostic changed the primitive chronological order')
+                expected_operation = 'pidfd_open' if 'pidfd_errno' in options else 'task_inventory'
+                self.assertEqual(first[0]['operation'], expected_operation)
+                self.assertTrue(any(event['operation'] == 'task_inventory'
+                                    and event['primitive_errno'] == errno.ENOENT
+                                    for event in private['events']),
+                                'failed auxiliary evidence erased the missing inventory')
+
+    def test_permission_and_io_failure_remain_latched_after_group_termination(self):
+        for number in (errno.EACCES, errno.EIO):
+            for diagnostics, identity in ((False, False), (True, False), (True, True)):
+                with self.subTest(errno=number, diagnostics=diagnostics, identity=identity), \
+                        self.retired_group(read_errno=number) as state:
+                    observed = self.observed(diagnostics, identity)
+                    with self.assertRaises(observer.ObservationError) as failure:
+                        observed.sample()
+                    self.assertEqual(failure.exception.errno, number)
+                    self.assertIs(observed.error, failure.exception)
+                    poll_count = len(state['polls'])
+                    with mock.patch.object(observer, 'snapshot', return_value={}):
+                        with self.assertRaises(observer.ObservationError) as repeated:
+                            observed.sample()
+                    self.assertIs(repeated.exception, failure.exception)
+                    self.assertEqual(len(state['polls']), poll_count,
+                                     'a latched privacy gap consulted a new termination witness')
+
+    def test_terminal_evidence_never_erases_a_previous_argument_leak(self):
+        with self.retired_group(already_exited=True, leader_inventory=True):
+            observed = self.observed()
+            identity = self.pid, self.row['start']
+            observed.leaks.add(identity)
+            result = observed.sample()
+            self.assertFalse(result['live'])
+            self.assertEqual(result['url_in_argv'], [identity],
+                             'termination evidence erased the prior privacy verdict')
+
+    def test_pidfd_replacement_or_disappearance_cannot_certify_the_old_group(self):
+        for options in (dict(replace_on_open=True), dict(gone_on_open=True)):
+            with self.subTest(options=options), \
+                    self.retired_group(already_exited=True, leader_inventory=True, **options) as state:
+                observed = self.observed(True, True)
+                try:
+                    result = observed.sample()
+                except observer.ObservationError as error:
+                    self.assertIs(observed.error, error)
+                else:
+                    self.assertTrue(result['live'], 'unbound pidfd was accepted as terminal evidence')
+                self.assertEqual(state['polls'], [], 'an unbound pidfd was polled as the old identity')
+                self.assertEqual(observed.known, {(self.pid, self.row['start'])})
+
+    def test_zombie_leader_with_a_live_sibling_remains_live(self):
+        for ready in (False, True):
+            with self.subTest(pidfd_ready=ready), \
+                    self.retired_group(ready=ready, already_exited=True, sibling_live=True) as state:
+                observed = self.observed(True, True)
+                result = observed.sample()
+                self.assertIn(str(self.pid), result['live'])
+                self.assertIsNone(observed.error)
+                self.assertEqual(state['reads'], ['environ', 'cmdline'])
+                self.assertEqual(state['read_tids'], [self.tid, self.tid])
+                self.assertEqual(state['polls'], [], 'readable live sibling was replaced by a stop inference')
+
+    def test_reused_task_cannot_be_accepted_through_a_group_pidfd(self):
+        with self.retired_group(already_exited=True, sibling_live=True, reuse_task=True) as state:
+            observed = self.observed(True, True)
+            with self.assertRaises(observer.ObservationError) as failure:
+                observed.sample()
+            self.assertEqual(failure.exception.errno, errno.ESRCH)
+            self.assertIs(observed.error, failure.exception)
+            self.assertEqual(state['polls'], [])
+            private = observed.identity_failure(failure.exception)
+            first = [event for event in private['events'] if event['first_failure']]
+            self.assertEqual(len(first), 1)
+            self.assertEqual((first[0]['operation'], first[0]['phase'], first[0]['primitive_origin']),
+                             ('identity_guard', 'task_stat_after', 'application_identity_check'))
+
+    def test_strong_inventory_errors_and_unexplained_empty_inventory_stay_blocking(self):
+        for number in (errno.EACCES, errno.EIO, None):
+            with self.subTest(inventory_errno=number), \
+                    self.retired_group(already_exited=True, inventory_errno=number) as state:
+                observed = self.observed(True, True)
+                with self.assertRaises(observer.ObservationError) as failure:
+                    observed.sample()
+                self.assertEqual(failure.exception.errno, errno.EIO if number is None else number)
+                self.assertIs(observed.error, failure.exception)
+                self.assertEqual(state['polls'], [], 'a strong or unexplained inventory gap was ignored')
+
+    def test_bound_group_readiness_accepts_documented_exit_masks(self):
+        for mask in (select.POLLIN, select.POLLHUP, select.POLLIN | select.POLLHUP):
+            with self.subTest(mask=mask), \
+                    self.retired_group(already_exited=True, leader_inventory=True, poll_mask=mask) as state:
+                observed = self.observed()
+                result = observed.sample()
+                self.assertFalse(result['live'])
+                self.assertIsNone(observed.error)
+                self.assertEqual(state['polls'], state['opened'])
+
+    def test_complete_historical_inventory_does_not_require_auxiliary_pidfd(self):
+        self.row['state'] = 'Z'
+        for number in (errno.ENOSYS, errno.ESRCH, errno.EACCES, errno.EIO):
+            with self.subTest(pidfd_errno=number), \
+                    self.retired_group(already_exited=True, complete_inventory=True,
+                                       pidfd_errno=number) as state:
+                observed = self.observed(True, True)
+                result = observed.sample()
+                self.assertFalse(result['live'])
+                self.assertIn(self.pid, result['zombies'])
+                self.assertIsNone(observed.error)
+                self.assertEqual(state['polls'], [])
+                self.assertGreaterEqual(len(state['inventories']), 2)
+
+    def test_close_failure_preserves_an_initial_gap_and_never_returns_success(self):
+        for ready in (False, True):
+            with self.subTest(terminal_evidence=ready), \
+                    self.retired_group(ready=ready, already_exited=True, leader_inventory=True,
+                                       close_errno=errno.EIO) as state:
+                observed = self.observed(True, True)
+                with self.assertRaises(observer.ObservationError) as failure:
+                    observed.sample()
+                self.assertEqual(failure.exception.errno, errno.EIO)
+                self.assertIs(observed.error, failure.exception)
+                private = observed.identity_failure(failure.exception)
+                first = [event for event in private['events'] if event['first_failure']]
+                self.assertEqual(len(first), 1)
+                self.assertEqual((first[0]['operation'], first[0]['primitive_errno']),
+                                 ('task_inventory', errno.ENOENT),
+                                 'resolved inventory evidence vanished from the close failure chain')
+                close_events = [event for event in private['events'] if event['operation'] == 'pidfd_close']
+                self.assertTrue(close_events)
+                self.assertEqual(close_events[-1]['primitive_errno'], errno.EIO)
+                self.assertCountEqual(state['opened'], state['closed'])
+
+    def test_unattributed_group_never_acquires_a_pidfd(self):
+        with self.retired_group(already_exited=True, leader_inventory=True) as state:
+            result = observer.Observer(self.token).sample()
+            self.assertFalse(result['live'])
+            self.assertEqual(state['opened'], [])
+            self.assertEqual(state['polls'], [])
+            self.assertEqual(state['closed'], [])
+
+    def test_normalization_keeps_the_first_failing_close_group_identity(self):
+        closed = []
+        private = 'synthetic-private-close-detail'
+        observed = self.observed(True, True)
+        groups = ((44444, 12345, 900001), (44446, 12400, 900002))
+        observed.known.update((pid, start) for pid, start, _descriptor in groups)
+
+        def body():
+            proofs = observer._GROUP_EXIT_PROOFS.get()
+            for pid, start, descriptor in groups:
+                row = dict(self.row, start=start, state='Z')
+                proofs.handles[pid, start] = pid, row, descriptor
+                proofs.attributions[pid, start] = 'known_identity'
+            return dict(live={}, zombies=[], url_in_argv=[])
+
+        def close(descriptor):
+            closed.append(descriptor)
+            raise OSError(errno.EIO if descriptor == groups[0][2] else errno.EACCES, private)
+
+        observed._sample = body
+        with unavailable_synthetic_pidfds(), \
+                mock.patch.object(observer.os, 'close', side_effect=close):
+            with self.assertRaises(observer.ObservationError) as failure:
+                observed.sample()
+        self.assertEqual(closed, [row[2] for row in groups])
+        self.assertEqual(failure.exception.errno, errno.EIO)
+        self.assertIs(observed.error, failure.exception)
+        packet = observed.identity_failure(failure.exception)
+        self.assertTrue(packet['complete'])
+        events = packet['events']
+        self.assertEqual([event['operation'] for event in events],
+                         ['pidfd_close', 'pidfd_close', 'error_normalization'])
+        normalized = events[-1]
+        cause = events[normalized['cause_sequence'] - 1]
+        self.assertEqual((cause['primitive_errno'], normalized['normalized_errno']),
+                         (errno.EIO, errno.EIO))
+        self.assertEqual(cause['context']['group_expected']['pid'], groups[0][0])
+        self.assertEqual(events[1]['context']['group_expected']['pid'], groups[1][0])
+        self.assertEqual(normalized['context']['group_expected'], cause['context']['group_expected'],
+                         'normalization was attributed to another failing descriptor')
+        self.assertNotIn(private, json.dumps(packet))
+
+    def test_pidfd_namespace_identity_must_match_the_observed_procfs_group(self):
+        payloads = (
+            f'Pid:\t{self.pid + 1}\n'.encode(), b'Pid:\t0\n', b'Pid:\t-1\n', b'',
+            f'Pid:\t{self.pid}\nPid:\t{self.pid}\n'.encode(), b'Pid:\tnot-a-pid\n',
+            f'Pid:\t{self.pid}\n'.encode() + b'x' * 4097,
+            b'Pid:\t0\nNote:\tsynthetic-private-fdinfo-detail\n',
+        )
+        for payload in payloads:
+            with self.subTest(fdinfo_case=payloads.index(payload)), \
+                    self.retired_group(already_exited=True, leader_inventory=True,
+                                       fdinfo_payload=payload) as state:
+                observed = self.observed(True, True)
+                with self.assertRaises(observer.ObservationError) as failure:
+                    observed.sample()
+                self.assertIs(observed.error, failure.exception)
+                self.assertEqual(state['polls'], [], 'an identity from another procfs PID view was trusted')
+                packet = observed.identity_failure(failure.exception)
+                self.assertTrue(packet['complete'])
+                self.assertNotIn('synthetic-private-fdinfo-detail', json.dumps(packet))
+        for number in (errno.ENOENT, errno.EACCES, errno.EIO):
+            with self.subTest(fdinfo_errno=number), \
+                    self.retired_group(already_exited=True, leader_inventory=True,
+                                       fdinfo_errno=number) as state:
+                observed = self.observed(True, True)
+                with self.assertRaises(observer.ObservationError) as failure:
+                    observed.sample()
+                self.assertIs(observed.error, failure.exception)
+                self.assertEqual(state['polls'], [], 'unreadable pidfd identity became exit authority')
+
+    def test_bad_pidfd_namespace_evidence_does_not_replace_a_complete_inventory(self):
+        self.row['state'] = 'Z'
+        with self.retired_group(already_exited=True, complete_inventory=True,
+                               fdinfo_payload=f'Pid:\t{self.pid + 1}\n'.encode()) as state:
+            observed = self.observed(True, True)
+            result = observed.sample()
+            self.assertFalse(result['live'])
+            self.assertIn(self.pid, result['zombies'])
+            self.assertIsNone(observed.error)
+            self.assertEqual(state['polls'], [])
+
+    def test_fdinfo_close_failure_remains_blocking_after_complete_inventory(self):
+        self.row['state'] = 'Z'
+        for read_errno in (None, errno.EACCES):
+            with self.subTest(read_errno=read_errno), \
+                    self.retired_group(already_exited=True, complete_inventory=True,
+                                       fdinfo_errno=read_errno, fdinfo_close_errno=errno.EIO) as state:
+                observed = self.observed(True, True)
+                with self.assertRaises(observer.ObservationError) as failure:
+                    observed.sample()
+                self.assertEqual(failure.exception.errno, errno.EIO)
+                self.assertIs(observed.error, failure.exception)
+                packet = observed.identity_failure(failure.exception)
+                self.assertTrue(packet['complete'])
+                first = [event for event in packet['events'] if event['first_failure']]
+                self.assertEqual(len(first), 1)
+                operation = 'pidfd_fdinfo_close' if read_errno is None else 'pidfd_fdinfo_read'
+                self.assertEqual((first[0]['operation'], first[0]['primitive_errno']),
+                                 (operation, errno.EIO if read_errno is None else read_errno))
+                normalized = packet['events'][-1]
+                self.assertEqual(normalized['normalized_errno'], errno.EIO)
+                cause = packet['events'][normalized['cause_sequence'] - 1]
+                self.assertEqual(cause['operation'], 'pidfd_fdinfo_close')
+                self.assertEqual(state['polls'], [])
+                self.assertEqual(state['fdinfo_reads'], [4097])
+
+    def test_fdinfo_close_failure_precedes_a_later_inventory_refusal(self):
+        for read_errno in (None, errno.EACCES):
+            with self.subTest(fdinfo_read_errno=read_errno), \
+                    self.retired_group(already_exited=True, inventory_errno=errno.EEXIST,
+                                       fdinfo_errno=read_errno, fdinfo_close_errno=errno.EIO) as state:
+                observed = self.observed(True, True)
+                with self.assertRaises(observer.ObservationError) as failure:
+                    observed.sample()
+                self.assertEqual(failure.exception.errno, errno.EIO,
+                                 'a later inventory refusal replaced the earlier close failure')
+                self.assertIs(observed.error, failure.exception)
+                packet = observed.identity_failure(failure.exception)
+                self.assertTrue(packet['complete'])
+                first = [event for event in packet['events'] if event['first_failure']]
+                self.assertEqual(len(first), 1)
+                operation = 'pidfd_fdinfo_close' if read_errno is None else 'pidfd_fdinfo_read'
+                self.assertEqual((first[0]['operation'], first[0]['primitive_errno']),
+                                 (operation, errno.EIO if read_errno is None else read_errno))
+                self.assertTrue(any(event['operation'] == 'pidfd_fdinfo_close'
+                                    and event['primitive_errno'] == errno.EIO
+                                    for event in packet['events']))
+                self.assertEqual(state['polls'], [])
+
+    def test_memory_refusal_precedes_a_later_fdinfo_close_failure(self):
+        for number in (errno.EACCES, errno.EIO):
+            with self.subTest(memory_errno=number), \
+                    self.retired_group(read_errno=number, fdinfo_close_errno=errno.EIO) as state:
+                observed = self.observed(True, True)
+                with self.assertRaises(observer.ObservationError) as failure:
+                    observed.sample()
+                self.assertEqual(failure.exception.errno, number)
+                self.assertIs(observed.error, failure.exception)
+                packet = observed.identity_failure(failure.exception)
+                self.assertTrue(packet['complete'])
+                first = [event for event in packet['events'] if event['first_failure']]
+                self.assertEqual(len(first), 1)
+                self.assertEqual((first[0]['operation'], first[0]['primitive_errno']),
+                                 ('attribute_read', number))
+                self.assertTrue(any(event['operation'] == 'pidfd_fdinfo_close'
+                                    and event['primitive_errno'] == errno.EIO
+                                    for event in packet['events']),
+                                'the later descriptor cleanup error was lost')
+                self.assertEqual(state['polls'], [])
+
+    def test_earlier_owned_group_error_precedes_another_groups_fdinfo_close(self):
+        for attribution in ('known', 'foreign', 'external'):
+            with self.subTest(earlier_group=attribution), \
+                    self.retired_group(already_exited=True, fdinfo_close_errno=errno.EIO,
+                                       earlier_memory_error=errno.EACCES) as state:
+                observed = self.observed(True, True)
+                earlier_identity = self.pid - 1, self.row['start'] - 1
+                if attribution != 'foreign':
+                    observed.known.add(earlier_identity)
+                if attribution == 'external':
+                    observed.external.add(earlier_identity)
+                with self.assertRaises(observer.ObservationError) as failure:
+                    observed.sample()
+                expected = errno.EACCES if attribution == 'known' else errno.EIO
+                self.assertEqual(failure.exception.errno, expected)
+                self.assertIs(observed.error, failure.exception)
+                packet = observed.identity_failure(failure.exception)
+                self.assertTrue(packet['complete'])
+                first = [event for event in packet['events'] if event['first_failure']]
+                self.assertEqual(len(first), 1)
+                operation = 'attribute_read' if attribution == 'known' else 'pidfd_fdinfo_close'
+                expected_pid = earlier_identity[0] if attribution == 'known' else self.pid
+                self.assertEqual((first[0]['operation'], first[0]['primitive_errno']),
+                                 (operation, expected))
+                self.assertEqual(first[0]['context']['group_expected']['pid'], expected_pid)
+                self.assertEqual(packet['events'][-1]['normalized_errno'], expected)
+                if attribution != 'known':
+                    self.assertFalse(any(event['primitive_errno'] == errno.EACCES
+                                         for event in packet['events']),
+                                     'an excluded or unattributed group entered the failure chain')
+                self.assertEqual(state['polls'], [])
+
+    def test_retirement_mutations_fail_their_behavioral_oracles(self):
+        original = (PROJECT / 'tests/process-observer.py').read_text()
+        readiness = (
+            "            if (len(events) != 1 or events[0][0] != descriptor\n"
+            "                    or not events[0][1] & allowed or events[0][1] & ~allowed):")
+        binding = ("            if (not matches or after is None or after['start'] != row['start']\n"
+                   "                    or after['state'] not in ('Z', 'X')):")
+        inventory = (
+            "    except FileNotFoundError as error:\n"
+            "        proofs = _GROUP_EXIT_PROOFS.get()\n"
+            "        if error.errno == errno.ENOENT and proofs is not None "
+            "and proofs.resolve_inventory(pid, row, error):")
+        changes = (
+            ('missing-readiness', readiness, '            if False:',
+             'test_unproven_pidfd_states_cannot_accept_a_missing_inventory'),
+            ('non-group-flags', "opener, pid, 0)", "opener, pid, 1)",
+             'test_enoent_after_leader_exit_requires_independent_group_termination'),
+            ('missing-identity-revalidation', binding, '            if not matches:',
+             'test_pidfd_replacement_or_disappearance_cannot_certify_the_old_group'),
+            ('unbound-descriptor', 'if handle is None or key not in self.bound:',
+             'if handle is None:',
+             'test_pidfd_replacement_or_disappearance_cannot_certify_the_old_group'),
+            ('strong-inventory-as-disappearance', inventory,
+             "    except OSError as error:\n"
+             "        proofs = _GROUP_EXIT_PROOFS.get()\n"
+             "        if proofs is not None and proofs.resolve_inventory(pid, row, error):",
+             'test_strong_inventory_errors_and_unexplained_empty_inventory_stay_blocking'),
+            ('lost-environment-failure',
+             "            if pid in environment_errors:\n"
+             "                observation_failure(pid, row, environment_errors[pid])",
+             "            if False:\n"
+             "                observation_failure(pid, row, environment_errors[pid])",
+             'test_permission_and_io_failure_remain_latched_after_group_termination'),
+            ('unclosed-descriptor', '                    os.close(descriptor)',
+             '                    pass',
+             'test_enoent_after_leader_exit_requires_independent_group_termination'),
+            ('lost-argument-leak', "'url_in_argv': sorted(self.leaks)", "'url_in_argv': []",
+             'test_terminal_evidence_never_erases_a_previous_argument_leak'),
+            ('lost-latched-failure',
+             '            if self.error is not None:\n                raise self.error',
+             '            if False:\n                raise self.error',
+             'test_permission_and_io_failure_remain_latched_after_group_termination'),
+            ('wrong-pid-namespace', 'and int(values[0]) == pid and pid > 0)',
+             'and int(values[0]) > 0 and pid > 0)',
+             'test_pidfd_namespace_identity_must_match_the_observed_procfs_group'),
+            ('unbounded-fdinfo', 'len(data) > 4096:', 'len(data) > 8192:',
+             'test_pidfd_namespace_identity_must_match_the_observed_procfs_group'),
+            ('ignored-fdinfo-close', '                    self.cleanup_error = error',
+             '                    pass',
+             'test_fdinfo_close_failure_remains_blocking_after_complete_inventory'),
+        )
+        detected = 0
+        for name, before, after, method in changes:
+            with self.subTest(mutation=name):
+                self.assertEqual(original.count(before), 1, 'mutation target is not unique')
+                code = compile(original.replace(before, after), '<retirement-mutant>', 'exec')
+                spec = importlib.util.spec_from_loader('retirement_mutant', loader=None)
+                candidate = importlib.util.module_from_spec(spec)
+                exec(code, candidate.__dict__)
+                result = unittest.TestResult()
+                with mock.patch.dict(globals(), observer=candidate):
+                    type(self)(methodName=method).run(result)
+                self.assertEqual(result.errors, [], 'mutation crashed outside its behavioral assertion')
+                self.assertTrue(result.failures, 'mutation escaped its specific behavioral oracle')
+                detected += 1
+        self.assertEqual(detected, 12)
+
+
 class ProcessTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='process-contract-')
+        # Python 3.10 has no delete=False. Failed observation must not let the
+        # automatic finalizer delete files still held by an uncertain consumer.
+        self.temp._finalizer.detach()
         self.root = Path(self.temp.name)
         self.token = os.urandom(24).hex()
         self.observer = observer.Observer(self.token)
@@ -143,11 +1349,21 @@ class ProcessTests(unittest.TestCase):
 
     def tearDown(self):
         # Capture the production verdict before test-only intervention.
-        state = self.observer.sample()
+        failures = []
+        try:
+            state = self.observer.sample()
+        except (OSError, ValueError, IndexError) as error:
+            failures.append(error)
+            state = {'live': {}}
         # Rescue is independent of the oracle being mutation-tested. Select
         # only this fixture's exact inherited marker, then revalidate identity.
         rescue = dict(state['live'])
-        for pid, row in observer.snapshot().items():
+        try:
+            rows = observer.snapshot()
+        except (OSError, ValueError, IndexError) as error:
+            failures.append(error)
+            rows = {}
+        for pid, row in rows.items():
             try:
                 marked = self.observer.marker in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0')
             except OSError:
@@ -155,16 +1371,26 @@ class ProcessTests(unittest.TestCase):
             if marked:
                 rescue[str(pid)] = row
         for pid, row in rescue.items():
-            current = observer.snapshot().get(int(pid))
-            if current and current['start'] == row['start']:
-                try:
-                    os.kill(int(pid), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            descriptor = None
+            try:
+                descriptor = os.pidfd_open(int(pid))
+                current = observer.current_process(int(pid))
+                if current and current['start'] == row['start']:
+                    signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+            except (OSError, ValueError, IndexError) as error:
+                failures.append(error)
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
         for process in self.processes:
-            if process.poll() is None:
-                process.kill()
-            process.communicate(timeout=5)
+            try:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=5)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                failures.append(error)
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             try:
@@ -172,13 +1398,68 @@ class ProcessTests(unittest.TestCase):
                     time.sleep(.02)
             except ChildProcessError:
                 break
-        self.temp.cleanup()
+        try:
+            terminal = observer.Observer(self.token)
+            terminal.known.update(self.observer.known)
+            terminal.known.update((int(pid), row['start']) for pid, row in rescue.items())
+            if terminal.sample()['live']:
+                raise observer.ObservationError('fixture shutdown remains unconfirmed')
+        except (OSError, ValueError, IndexError) as error:
+            failures.append(error)
+        else:
+            if not failures:
+                self.temp.cleanup()
+        if failures:
+            raise failures[0]
 
     def launch(self, argv):
         p = subprocess.Popen(argv, env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token),
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         self.processes.append(p)
         return p
+
+    def test_mock_rescue_requires_token_and_current_start_identity(self):
+        source = (PROJECT / 'tests/lib/mock-common.sh').read_text()
+        function = re.search(r'^signal_test_processes\(\) \{\n.*?^\}\n', source, re.M | re.S).group()
+        marker = self.token + '-mock'
+        process = subprocess.Popen(['sleep', '30'],
+                                   env=dict(os.environ, YTDLP_ARIA2_MOCK_PROCESS_TOKEN=marker))
+        self.processes.append(process)
+        start = observer.process_row(Path(f'/proc/{process.pid}/stat'))['start']
+        script = function + '''
+PROJECT_DIR=$1
+YTDLP_ARIA2_MOCK_PROCESS_TOKEN=$2
+TEST_PROCESS_IDENTITIES=("$3:$4")
+signal_test_processes TERM
+'''
+
+        def attempt(project, token, identity):
+            return subprocess.run(['bash', '-c', script, 'mock-rescue', str(project), token,
+                                   str(process.pid), str(identity)], capture_output=True, timeout=5)
+
+        self.assertEqual(attempt(PROJECT, marker, start + 1).returncode, 0)
+        self.assertIsNone(process.poll(), 'rescue signaled a replaced start identity')
+        self.assertEqual(attempt(PROJECT, marker + '-foreign', start).returncode, 70)
+        self.assertIsNone(process.poll(), 'rescue signaled a foreign token')
+        fake_project = self.root / 'unreadable-rescue'
+        (fake_project / 'tests').mkdir(parents=True)
+        (fake_project / 'tests/process-observer.py').write_text('''import importlib.util
+import errno
+spec = importlib.util.spec_from_file_location('real_mock_observer', REAL_HELPER)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+process_row = module.process_row
+threads_are_quiescent = module.threads_are_quiescent
+same_process = module.same_process
+def token_process_is_live(pid, marker):
+    raise PermissionError(errno.EACCES, 'synthetic private error')
+'''.replace('REAL_HELPER', repr(str(PROJECT / 'tests/process-observer.py'))))
+        refused = attempt(fake_project, marker, start)
+        self.assertEqual(refused.returncode, 70)
+        self.assertNotIn(b'synthetic private error', refused.stderr)
+        self.assertIsNone(process.poll(), 'rescue converted unknown ownership into signal authority')
+        self.assertEqual(attempt(PROJECT, marker, start).returncode, 0)
+        self.assertEqual(process.wait(timeout=3), -signal.SIGTERM)
 
     def wait_file(self, name, process):
         path = self.root / name
@@ -686,6 +1967,8 @@ while Path('/proc/' + sys.argv[1]).exists():
             # discovery must still come from the exact inherited launch token.
             fresh = observer.Observer(self.token)
             verdict(fresh.sample())
+            self.assertTrue(observer.token_process_is_live(consumer, fresh.marker),
+                            'runner oracle lost a live thread behind a zombie leader')
             with mock.patch.object(observer, 'threads_are_quiescent',
                                    side_effect=lambda _pid, observed: observed['state'] in ('Z', 'X')):
                 # Restore precisely the former classification, keeping token
@@ -704,6 +1987,7 @@ while Path('/proc/' + sys.argv[1]).exists():
             stopped = fresh.sample()
             self.assertNotIn(str(consumer), stopped['live'])
             self.assertIn(consumer, stopped['zombies'])
+            self.assertFalse(observer.token_process_is_live(consumer, fresh.marker))
             self.assertTrue((self.root / 'thread-last-access').exists())
             self.assertEqual(os.waitpid(consumer, 0)[1], 0)
             unrelated.communicate(timeout=3)
@@ -712,6 +1996,28 @@ while Path('/proc/' + sys.argv[1]).exists():
         finally:
             if write_end is not None:
                 os.close(write_end)
+
+    def test_observer_uses_live_memory_when_zombie_leader_access_is_denied(self):
+        real_read = observer.read_observation
+        live_reads = []
+
+        def denied_leader(path):
+            ready = self.root / 'thread-ready'
+            if ready.exists():
+                pid = int(ready.read_text())
+                root = Path(f'/proc/{pid}')
+                if path.parent == root:
+                    row = observer.current_process(pid)
+                    if row is not None and row['state'] == 'Z':
+                        raise PermissionError(errno.EACCES, 'synthetic exited-leader memory ownership')
+                elif path.parent.parent == root / 'task':
+                    live_reads.append(path.name)
+            return real_read(path)
+
+        with mock.patch.object(observer, 'read_observation', side_effect=denied_leader):
+            self.test_observer_detects_orphan_zombie_leader_live_thread()
+        self.assertIn('environ', live_reads)
+        self.assertIn('cmdline', live_reads)
 
     def test_observer_process_row_ignores_name_encoding(self):
         raw = Path('/proc/self/stat').read_bytes()
@@ -2615,6 +3921,36 @@ while True: signal.pause()
     def test_hls_cancellation_rejects_unreadable_identity(self):
         self.exercise_hls_witness('normal', corruption='unreadable')
 
+    def test_hls_witness_identity_revalidates_procfs_stat_esrch(self):
+        module = self.hls_witness_module()
+        row = dict(start=123, state='S', parent=1, group=123, session=123)
+        path = Path('/proc/123/stat')
+        with mock.patch.object(module.observer, 'process_row',
+                               side_effect=[ProcessLookupError(errno.ESRCH, 'read race'), row]) as read:
+            self.assertEqual(module.identity(123), row)
+        self.assertEqual([call.args[0] for call in read.call_args_list], [path, path])
+        with mock.patch.object(module.observer, 'process_row',
+                               side_effect=[ProcessLookupError(errno.ESRCH, 'read race'),
+                                            FileNotFoundError(errno.ENOENT, 'gone')]):
+            self.assertIsNone(module.identity(123))
+        replacement = dict(row, start=row['start'] + 1)
+        with mock.patch.object(module.observer, 'process_row',
+                               side_effect=[ProcessLookupError(errno.ESRCH, 'read race'), replacement]):
+            self.assertEqual(module.identity(123), replacement)
+        with mock.patch.object(module.observer, 'process_row',
+                               side_effect=[ProcessLookupError(errno.ESRCH, 'read race'),
+                                            ProcessLookupError(errno.ESRCH, 'still racing')]):
+            with self.assertRaises(ProcessLookupError):
+                module.identity(123)
+        for number in (errno.EACCES, errno.EIO):
+            with self.subTest(errno=number), \
+                    mock.patch.object(module.observer, 'process_row',
+                                      side_effect=[ProcessLookupError(errno.ESRCH, 'read race'),
+                                                   OSError(number, 'retry failed')]):
+                with self.assertRaises(OSError) as failure:
+                    module.identity(123)
+                self.assertEqual(failure.exception.errno, number)
+
     def test_hls_cancellation_rejects_held_pipe_after_leader_exit(self):
         self.exercise_hls_witness('pipe')
 
@@ -2755,7 +4091,7 @@ exit "$?"
         self.assertFalse(self.observer.sample()['live'])
 
     def engine_case(self, reuse):
-        child = self.child(slow=True)
+        self.child(slow=True)
         source = self.root / 'engine-functions.sh'
         source.write_text((PROJECT / 'download-video.sh').read_text().rsplit('\nmain "$@"', 1)[0])
         wrapper = self.root / 'engine.sh'
@@ -2795,7 +4131,7 @@ exit "$status"
         self.assertFalse(self.observer.sample()['live'])
 
     def probe_case(self, gui):
-        child = self.child(resistant=True, new_group=True)
+        self.child(resistant=True, new_group=True)
         binary = self.root / 'ffprobe'
         binary.write_text('''#!/bin/bash
 python3 "${0%/*}/consumer.py" &
@@ -3002,7 +4338,7 @@ exit "$DOWNLOAD_STATUS"
         self.assertFalse(self.observer.sample()['live'], 'CLI lost subgroup authority before escalation')
 
     def test_gui_stops_timeout_subgroup_after_leader_exit(self):
-        child = self.child(resistant=True)
+        self.child(resistant=True)
         source = self.root / 'gui-functions.sh'
         source.write_text((PROJECT / 'download-video-gui.sh').read_text().rsplit('\nmain "$@"', 1)[0])
         wrapper = self.root / 'gui.sh'

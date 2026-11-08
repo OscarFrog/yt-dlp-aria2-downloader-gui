@@ -1,0 +1,5 @@
+# Reviewed Ruff wheels from https://pypi.org/pypi/ruff/0.14.4/json.
+# GNU/Linux glibc >= 2.17, x86_64 and aarch64; no source builds or dependencies.
+ruff==0.14.4 \
+    --hash=sha256:456daa2fa1021bc86ca857f43fe29d5d8b3f0e55e9f90c58c317c1dcc2afc7b5 \
+    --hash=sha256:81b40d27924f1f02dfa827b9c0712a13c0e4b108421665322218fc38caf615c2

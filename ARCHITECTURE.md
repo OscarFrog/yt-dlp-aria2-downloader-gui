@@ -1192,7 +1192,7 @@ architecture document. The source ZIP contains the tracked source tree.
 
 | Workflow | Responsibility |
 | --- | --- |
-| `shell.yml` | PR source identity/coherence/syntax gate, pinned workflow checks, full local suite on Ubuntu/Fedora and paired Python 3.10/Bash 4.4.0 |
+| `shell.yml` | PR source identity/coherence/syntax gate, pinned workflow checks and complementary Python analysis, full local suite on Ubuntu/Fedora and paired Python 3.10/Bash 4.4.0 |
 | `packages.yml` | Git-free source archive, RPM/DEB construction, lifecycle, authentication, and previous-release upgrade |
 | `real-tools.yml` | Pinned real-tool behavior and shared-destination qualification on both the latest pin and scheduled current-stable yt-dlp |
 | `qualification.yml` | Supported FFmpeg/FFprobe generation matrix |
@@ -1213,6 +1213,12 @@ reuse an old success. No candidate artifact or dependency cache establishes
 qualification. Historical content proof has no arbitrary calendar expiry; changed identity,
 new failure or missing evidence invalidates reuse. Current external inputs and
 explicit requalification/recovery are described in `TESTING.md`.
+
+The Ubuntu shell job also checks every canonical Python source with hash-pinned
+Ruff in a disposable environment. The source-proof verifier requires that
+step explicitly; local/package archive suites remain offline, and Ruff is not
+installed with the application. Python 3.10 syntax and runtime qualification
+and CodeQL retain their separate roles.
 
 The Ubuntu shell job can collect passive validation diagnostics through
 `scripts/ci-validation-diagnostics.py`. Its optional private rendezvous identifies
@@ -1441,6 +1447,56 @@ subset cannot replace this complete proof. The headless validator regressions
 in `tests/zenity-autonomous-integration.py` run in the ordinary local contract
 without launching graphical qualification or changing publication authority.
 
+The real-tool and autonomous qualification consumers retain failures through
+their final observations, rescue and evidence export. A later clean sample or
+successful fixture rescue cannot repair a prior failure. Their final PASS and
+process status depend on complete terminal records, including live identities
+and argument-privacy findings. Autonomous summaries remain provisional and
+non-passing until export succeeds. Headless terminal regressions run the actual
+Python entry points with inert dependency models; they qualify this verdict
+composition, not real media, desktop behavior or continuous procfs coverage.
+
+The independent test observer can resolve a disappearing task inventory only
+with separate evidence that the attributed thread group has exited. A
+whole-group pidfd is acquired before enumeration for a Z/X leader, with the
+same PID/start-time revalidated around acquisition. Nonblocking readiness may
+resolve that inventory's ENOENT, including a stale live row from the sample's
+initial snapshot. The proof and descriptor ownership end with that sample.
+The descriptor's bounded `fdinfo/Pid` observation must agree in the procfs
+namespace; matching numeric PID arguments across namespaces alone is insufficient.
+When the inventory is incomplete, a zombie leader with surviving tasks or an
+uncertain pidfd result cannot prove termination. A complete procfs inventory
+remains usable when auxiliary pidfd acquisition is unavailable. This proof
+neither signals nor reaps processes and cannot erase earlier privacy failures
+or extend fixture cleanup authority. Errors in this additional proof use the same bounded diagnostic and
+latched-refusal contracts.
+
+The observer's optional primitive diagnostic is metadata only. Exception-local
+capsules preserve the operation and safe original errno before normalization,
+including a distinct secondary revalidation error. Only a propagated failure
+is attached to the existing Watch refusal; a recovered read or an unselected
+process does not acquire a new veto. The diagnostic adds no procfs reads,
+threads, signals, retry attempts or admission criteria. Its bounded closed
+schema contains no process contents or exception text. An absent primitive
+errno remains distinct from the final normalized EIO, and incomplete diagnostic
+collection never rehabilitates an incomplete observation.
+
+A separately enabled identity diagnostic correlates existing group and task
+observations without using those records as a new attribution or cleanup input.
+Leader and task start times remain distinct. Snapshot parentage is not a fresh,
+atomic parent-child proof, and procfs namespace identity remains unknown when it
+has not been observed. This mode separates attribute open/read/close boundaries
+while retaining the supported interpreter's buffering, retry and exception
+selection semantics; it does not claim unchanged real-world timing. Numerical
+records remain in a private, bounded sink outside the public export inventory.
+Only qualification-local pseudonyms enter the existing first-failure registry,
+after their private correspondence has been stored. The original primitive
+diagnostic and the disabled path retain their independent contracts.
+Unsupported reader or context protocols retain their original execution with
+an explicitly incomplete diagnostic. Task-to-group bindings describe the
+expected group rather than an atomic membership proof; a replacement group
+does not acquire an attributed public identity merely through revalidation.
+
 Contributor control is layered around that runner. Repository skills route a
 task to the relevant policy; issue and pull-request templates make scope,
 invariants, validation evidence, and external authority explicit; conservative
@@ -1489,6 +1545,17 @@ loading a library does not change caller options, traps or process topology.
 The original entry point retains its subreaper bootstrap, private root ownership
 and ordered group dispatch. Independent runner controls preserve each scenario
 boundary, aggregate ordering and failure propagation, including Git-free use.
+
+The mock root retains a directory descriptor and device/inode until cleanup.
+Recursive removal stays anchored to that descriptor, after owner/mode and
+visible-root revalidation and a successful process-quiescence observation.
+Failure preserves remaining data. Relative-XDG probes live inside this private
+root, never at fixed names in the checkout. Final removal of an empty root is
+not an atomic defense against a hostile same-UID replacement.
+Mock leak checks combine an exact inherited token with observed ancestry and
+retained PID/start identities. Unreadable attributed processes veto a clean
+verdict; rescue uses revalidated pidfds and does not change that verdict. The
+shared observer is a test-only component, independent of production supervision.
 
 Tests use private temporary homes, mock binaries, fixtures, and bounded process
 supervision. The parallel runner binds cancellation to a child-published Linux

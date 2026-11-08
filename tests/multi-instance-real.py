@@ -80,7 +80,7 @@ def record_fixture_environment(root, evidence):
 def preserve_fixture_evidence(root, evidence, labels):
     if root == evidence:
         return
-    names = {'fixture-environment.log', 'fixture-tools.log', 'events.json',
+    names = {'fixture-environment.log', 'fixture-tools.log', 'events.json', 'qualification-errors.json',
              'events-xwayland.log', 'events-bus.log', 'dialog-events.jsonl', 'fixture-cleanup.jsonl'}
     names.update(label + suffix for label in labels for suffix in
                  ('.log', '.dialogs.log', '.status.log', '.before-rescue.json', '.final-before-rescue.json'))
@@ -98,6 +98,111 @@ def preserve_fixture_evidence(root, evidence, labels):
             with os.fdopen(os.open(evidence / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                                    os.O_NOFOLLOW, 0o600), 'wb') as target:
                 shutil.copyfileobj(source, target)
+
+
+def terminal_observation(state):
+    """Require the complete observer record before using it as evidence or rescue input."""
+    require(isinstance(state, dict) and
+            set(state) == {'monotonic_ns', 'live', 'zombies', 'url_in_argv'} and
+            type(state.get('monotonic_ns')) is int and
+            state['monotonic_ns'] >= 0 and isinstance(state.get('live'), dict) and
+            isinstance(state.get('zombies'), list) and isinstance(state.get('url_in_argv'), list),
+            'Incomplete terminal process observation')
+    for pid, row in state['live'].items():
+        require(isinstance(pid, str) and pid.isascii() and pid.isdecimal() and int(pid) > 0 and
+                str(int(pid)) == pid and isinstance(row, dict) and
+                set(row) == {'start', 'parent', 'group', 'session', 'state'} and
+                all(type(row.get(key)) is int and row[key] >= 0
+                    for key in ('start', 'parent', 'group', 'session')) and
+                row.get('state') in ('R', 'S', 'D', 'Z', 'T', 't', 'X', 'x', 'K', 'W', 'P', 'I'),
+                'Invalid terminal process identity')
+    require(all(type(pid) is int and pid > 0 for pid in state['zombies']) and
+            all(isinstance(identity, (list, tuple)) and len(identity) == 2 and
+                type(identity[0]) is int and identity[0] > 0 and
+                type(identity[1]) is int and identity[1] >= 0
+                for identity in state['url_in_argv']), 'Invalid terminal observation identities')
+    return state
+
+
+def qualification_failure(failures, phase, label=None, error=None):
+    """Keep failure order without exporting exception text or process contents."""
+    record = dict(phase=phase, label=label)
+    if error is not None:
+        record['category'] = ('operating-system-error' if isinstance(error, OSError) else
+                              'assertion' if isinstance(error, AssertionError) else
+                              'interrupt' if isinstance(error, KeyboardInterrupt) else
+                              'system-exit' if isinstance(error, SystemExit) else 'exception')
+    number = getattr(error, 'errno', None)
+    if type(number) is int and 0 < number < 4096:
+        record['errno'] = number
+    failures.append(record)
+
+
+def finalize_fixture(root, evidence, processes, gates, server, dialogs, events, failures):
+    """Collect terminal verdicts before rescue, without abandoning other owned resources."""
+    def attempt(phase, operation, label=None):
+        try:
+            operation()
+        except BaseException as error:
+            qualification_failure(failures, phase, label, error)
+
+    attempt('events-write', lambda: (root / 'events.json').write_text(json.dumps(events, indent=2)))
+    for label, process, obs, _ in processes:
+        state = None
+        try:
+            state = terminal_observation(obs.sample())
+        except BaseException as error:
+            qualification_failure(failures, 'terminal-observation', label, error)
+        if state is not None:
+            if state['live']:
+                qualification_failure(failures, 'terminal-live', label)
+            if state['url_in_argv']:
+                qualification_failure(failures, 'terminal-url', label)
+            attempt('terminal-evidence', lambda: (root / f'{label}.final-before-rescue.json').write_text(
+                json.dumps(state)), label)
+        attempt('parent-evidence', lambda: (root / f'{label}.status.log').write_text(json.dumps(dict(
+            monotonic_ns=time.monotonic_ns(), label=label, parent_status=process.poll(),
+            event='parent-status-before-rescue')) + '\n'), label)
+        attempt('parent-evidence-mode', lambda: (root / f'{label}.status.log').chmod(0o600), label)
+        try:
+            if process.poll() is None:
+                qualification_failure(failures, 'terminal-parent', label)
+                process.send_signal(signal.SIGTERM)
+        except BaseException as error:
+            qualification_failure(failures, 'parent-rescue', label, error)
+        # A failed observation supplies no invented empty state or new rescue authority.
+        if state is not None:
+            for pid, row in state['live'].items():
+                try:
+                    current = observer_module.snapshot().get(int(pid))
+                    if current and current['start'] == row['start']:
+                        try:
+                            os.kill(int(pid), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    elif current:
+                        qualification_failure(failures, 'rescue-identity-changed', label)
+                except BaseException as error:
+                    qualification_failure(failures, 'descendant-rescue', label, error)
+        try:
+            if process.poll() is None:
+                process.wait(timeout=10)
+        except BaseException as error:
+            qualification_failure(failures, 'parent-wait', label, error)
+    for gate in gates.values():
+        attempt('gate-release', gate.set)
+    attempt('server-shutdown', server.shutdown)
+    attempt('server-close', server.server_close)
+    if dialogs is not None:
+        attempt('dialogs-close', dialogs.close)
+    attempt('failure-evidence', lambda: (root / 'qualification-errors.json').write_text(
+        json.dumps(failures, indent=2) + '\n'))
+    attempt('evidence-export', lambda: preserve_fixture_evidence(
+        root, evidence, [entry[0] for entry in processes]))
+    # An export failure must remain recorded locally even when the destination failed.
+    if failures:
+        attempt('failure-evidence', lambda: (root / 'qualification-errors.json').write_text(
+            json.dumps(failures, indent=2) + '\n'))
 
 
 def write_scripted_zenity(path):
@@ -185,6 +290,7 @@ def main():
     media = {}
     expected_final = {}
     succeeded = False
+    failures = []
     dialogs = None
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -364,7 +470,8 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
             args = ['bash', str(engine or PROJECT / ('download-video-gui.sh' if gui else 'download-video.sh'))]
             if not gui:
                 url_file = root / f'{label}.url'
-                url_file.write_text(env['FIXTURE_URL'] + '\n'); url_file.chmod(0o600)
+                url_file.write_text(env['FIXTURE_URL'] + '\n')
+                url_file.chmod(0o600)
                 args += ['--url-file', str(url_file), '--output-dir', str(destination or output),
                          '--result-file', str(result), '--mode', mode]
             log = (root / f'{label}.log').open('wb')
@@ -381,7 +488,7 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
             label, process, obs, index = entry
             wait_until(lambda: process.poll() is not None, f'{label} did not terminate', 30)
             events.append((time.monotonic_ns(), label, 'parent-exited'))
-            state = obs.sample()
+            state = terminal_observation(obs.sample())
             (root / f'{label}.before-rescue.json').write_text(json.dumps(state))
             require(process.returncode == expected_status,
                     f'{label} status {process.returncode}, expected {expected_status}; see {root / (label + ".log")}')
@@ -399,7 +506,7 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
             require(p.poll() is None,
                     f'{label} exited before transfer (status {p.returncode}); '
                     f'see {evidence / (label + ".log")} and {evidence / (label + ".dialogs.log")}')
-            obs.sample()
+            terminal_observation(obs.sample())
 
         if dialogs is not None:
             for label in ('entry-window-close', 'entry-cancel'):
@@ -467,7 +574,8 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         # a path alias and a different XDG_RUNTIME_DIR still use the same inode.
         first = launch('conflict-owner', title='same target', ident='same')
         wait_active(first)
-        alias = root / 'destination-alias'; alias.symlink_to(output, target_is_directory=True)
+        alias = root / 'destination-alias'
+        alias.symlink_to(output, target_is_directory=True)
         contender = launch('conflict-other-url', title='same target', ident='same', destination=alias, alternate_runtime=True)
         finish(contender, 75)
         # Video plans MKV and audio plans the native input name, but both would
@@ -480,18 +588,21 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         gates[first[0]].set()
         # A later independent CLI is admitted after completed cleanup.
         again = launch('after-conflict', 2)
-        wait_active(again); gates[again[0]].set(); finish(again)
+        wait_active(again)
+        gates[again[0]].set()
+        finish(again)
 
         # Keep a real aria2 consumer stopped with an open staging FD while the
         # GUI starts closing. The competitor is planned before the signal so
         # its reservation probe runs inside the ordinary escalation deadline.
         owner = launch('stopping-owner', gui=True, title='stop owner', ident='stop')
         independent = launch('stopping-independent', 1)
-        wait_active(owner); wait_active(independent)
+        wait_active(owner)
+        wait_active(independent)
         contender = launch('stopping-contender', title='stop owner', ident='stop', plan_gate=True)
         gate = root / 'stopping-contender.plan-gate'
         wait_until(lambda: gate.with_suffix('.plan-gate.ready').exists(), 'conflict plan did not reach barrier')
-        live = owner[2].sample()['live']
+        live = terminal_observation(owner[2].sample())['live']
         consumers = []
         for candidate, row in live.items():
             try:
@@ -538,8 +649,10 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         gates[owner[0]].set()
         fresh = launch('stopping-relaunch', title='stop owner', ident='stop')
         wait_active(fresh)
-        gates[fresh[0]].set(); gates[independent[0]].set()
-        finish(fresh); finish(independent)
+        gates[fresh[0]].set()
+        gates[independent[0]].set()
+        finish(fresh)
+        finish(independent)
 
         # Exact historical inode, both launch orders. No old executable is
         # patched or credited with the new supervisor's guarantees.
@@ -559,25 +672,29 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
                     pass
                 else:
                     raise AssertionError('old exclusive protocol bypassed a new active writer')
-        gates[new[0]].set(); finish(new)
+        gates[new[0]].set()
+        finish(new)
         if os.environ.get('YTDLP_LEGACY_ENGINE'):
             legacy_engine = Path(os.environ['YTDLP_LEGACY_ENGINE']).resolve(strict=True)
             old = launch('legacy-real-first', 0, engine=legacy_engine)
             wait_active(old)
             blocked = launch('new-behind-legacy-real', 1)
             finish(blocked, 75)
-            gates[old[0]].set(); finish(old)
+            gates[old[0]].set()
+            finish(old)
             current = launch('current-before-legacy-real', 2)
             wait_active(current)
             blocked = launch('legacy-real-behind-current', 3, engine=legacy_engine)
             finish(blocked, 75)
-            gates[current[0]].set(); finish(current)
+            gates[current[0]].set()
+            finish(current)
         truncated = launch('truncated-owner', title='é' * 90 + 'one', ident='long')
         wait_active(truncated)
         equivalent = launch('truncated-other', title='é' * 90 + 'two', ident='long')
         finish(equivalent, 75)
         truncated[1].send_signal(signal.SIGTERM)
-        finish(truncated, 143); gates[truncated[0]].set()
+        finish(truncated, 143)
+        gates[truncated[0]].set()
         changed_records = []
         final_digests = {}
         for bucket in buckets:
@@ -610,40 +727,19 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
                     require(not any(row['dialog_error'] or row['event'] == 'fixture-adapter-failed'
                                     for row in outcomes), f'{label} displayed an unexpected fixture error')
         succeeded = True
-        print('PASS: real shared-destination GUI/GUI, GUI/CLI, CLI conflicts, transfer/remux cancellation, D relaunch and decoded contents.', flush=True)
+    except BaseException as error:
+        qualification_failure(failures, 'scenario', error=error)
     finally:
-        # The verdict/evidence is written before any rescue. Never turn rescue
-        # into a passing application result or delete uncertain application state.
-        try:
-            (root / 'events.json').write_text(json.dumps(events, indent=2))
-            for entry in processes:
-                label, process, obs, _ = entry
-                state = obs.sample()
-                (root / f'{label}.final-before-rescue.json').write_text(json.dumps(state))
-                (root / f'{label}.status.log').write_text(json.dumps(dict(
-                    monotonic_ns=time.monotonic_ns(), label=label, parent_status=process.poll(),
-                    event='parent-status-before-rescue')) + '\n')
-                (root / f'{label}.status.log').chmod(0o600)
-                if process.poll() is None:
-                    process.send_signal(signal.SIGTERM)
-                for pid, row in state['live'].items():
-                    current = observer_module.snapshot().get(int(pid))
-                    if current and current['start'] == row['start']:
-                        try:
-                            os.kill(int(pid), signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                if process.poll() is None:
-                    process.wait(timeout=10)
-            for gate in gates.values():
-                gate.set()
-            server.shutdown(); server.server_close()
-            if dialogs is not None:
-                dialogs.close()
-        finally:
-            preserve_fixture_evidence(root, evidence, [entry[0] for entry in processes])
-        print('Qualification passed.' if succeeded else 'Qualification FAILED; evidence preserved.', flush=True)
+        # An earlier error and every adverse terminal result survive successful rescue.
+        # Fixtures are always retained; uncertain consumers never authorize deletion.
+        finalize_fixture(root, evidence, processes, gates, server, dialogs, events, failures)
+    if succeeded and not failures:
+        print('PASS: real shared-destination GUI/GUI, GUI/CLI, CLI conflicts, transfer/remux cancellation, D relaunch and decoded contents.', flush=True)
+        print('Qualification passed.', flush=True)
+        return 0
+    print('Qualification FAILED; evidence preserved.', flush=True)
+    return 1
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

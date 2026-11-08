@@ -205,20 +205,20 @@ def report_timeout(runner: subprocess.Popen[bytes], *pids: int) -> None:
             print("Timeout stderr pipe: unavailable", file=sys.stderr, flush=True)
 
 
-def running(pid: int, identity_token: str) -> bool:
-    stat_path = pathlib.Path(f"/proc/{pid}/stat")
-    try:
-        fields = stat_path.read_text(encoding="ascii").split()
-    except FileNotFoundError:
-        return False
-    if len(fields) >= 3 and fields[2] == "Z":
-        return False
+import importlib.util
+
+identity_spec = importlib.util.spec_from_file_location(
+    "fixture_process_identity", project_dir / "tests/process-observer.py"
+)
+if identity_spec is None or identity_spec.loader is None:
+    raise AssertionError("Independent process observer is unavailable")
+identity_observer = importlib.util.module_from_spec(identity_spec)
+identity_spec.loader.exec_module(identity_observer)
+
+
+def running(pid: int, identity_token) -> bool:
     expected = f"YTDLP_ARIA2_RUN_ALL_SIGNAL_TOKEN={identity_token}".encode()
-    try:
-        environment = pathlib.Path(f"/proc/{pid}/environ").read_bytes()
-    except OSError:
-        return False
-    return expected in environment.split(b"\0")
+    return identity_observer.token_process_is_live(pid, expected)
 
 
 def wait_marker(path: pathlib.Path, runner: subprocess.Popen[bytes]) -> int:

@@ -2103,6 +2103,9 @@ def commit_plan(args: argparse.Namespace) -> int:
         for signal_number, previous_handler in previous_handlers.items():
             signal.signal(signal_number, previous_handler)
 
+    # A request recorded while handlers were restored must not report success.
+    # The transaction is already committed here; preserve its published files.
+    check_interruption()
     print(f"published_count={len(moved)}")
     return 0
 
