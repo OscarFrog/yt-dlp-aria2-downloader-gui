@@ -3921,6 +3921,36 @@ while True: signal.pause()
     def test_hls_cancellation_rejects_unreadable_identity(self):
         self.exercise_hls_witness('normal', corruption='unreadable')
 
+    def test_hls_witness_identity_revalidates_procfs_stat_esrch(self):
+        module = self.hls_witness_module()
+        row = dict(start=123, state='S', parent=1, group=123, session=123)
+        path = Path('/proc/123/stat')
+        with mock.patch.object(module.observer, 'process_row',
+                               side_effect=[ProcessLookupError(errno.ESRCH, 'read race'), row]) as read:
+            self.assertEqual(module.identity(123), row)
+        self.assertEqual([call.args[0] for call in read.call_args_list], [path, path])
+        with mock.patch.object(module.observer, 'process_row',
+                               side_effect=[ProcessLookupError(errno.ESRCH, 'read race'),
+                                            FileNotFoundError(errno.ENOENT, 'gone')]):
+            self.assertIsNone(module.identity(123))
+        replacement = dict(row, start=row['start'] + 1)
+        with mock.patch.object(module.observer, 'process_row',
+                               side_effect=[ProcessLookupError(errno.ESRCH, 'read race'), replacement]):
+            self.assertEqual(module.identity(123), replacement)
+        with mock.patch.object(module.observer, 'process_row',
+                               side_effect=[ProcessLookupError(errno.ESRCH, 'read race'),
+                                            ProcessLookupError(errno.ESRCH, 'still racing')]):
+            with self.assertRaises(ProcessLookupError):
+                module.identity(123)
+        for number in (errno.EACCES, errno.EIO):
+            with self.subTest(errno=number), \
+                    mock.patch.object(module.observer, 'process_row',
+                                      side_effect=[ProcessLookupError(errno.ESRCH, 'read race'),
+                                                   OSError(number, 'retry failed')]):
+                with self.assertRaises(OSError) as failure:
+                    module.identity(123)
+                self.assertEqual(failure.exception.errno, number)
+
     def test_hls_cancellation_rejects_held_pipe_after_leader_exit(self):
         self.exercise_hls_witness('pipe')
 
