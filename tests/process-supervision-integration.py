@@ -4091,7 +4091,7 @@ exit "$?"
         self.assertFalse(self.observer.sample()['live'])
 
     def engine_case(self, reuse):
-        child = self.child(slow=True)
+        self.child(slow=True)
         source = self.root / 'engine-functions.sh'
         source.write_text((PROJECT / 'download-video.sh').read_text().rsplit('\nmain "$@"', 1)[0])
         wrapper = self.root / 'engine.sh'
@@ -4131,7 +4131,7 @@ exit "$status"
         self.assertFalse(self.observer.sample()['live'])
 
     def probe_case(self, gui):
-        child = self.child(resistant=True, new_group=True)
+        self.child(resistant=True, new_group=True)
         binary = self.root / 'ffprobe'
         binary.write_text('''#!/bin/bash
 python3 "${0%/*}/consumer.py" &
@@ -4338,7 +4338,7 @@ exit "$DOWNLOAD_STATUS"
         self.assertFalse(self.observer.sample()['live'], 'CLI lost subgroup authority before escalation')
 
     def test_gui_stops_timeout_subgroup_after_leader_exit(self):
-        child = self.child(resistant=True)
+        self.child(resistant=True)
         source = self.root / 'gui-functions.sh'
         source.write_text((PROJECT / 'download-video-gui.sh').read_text().rsplit('\nmain "$@"', 1)[0])
         wrapper = self.root / 'gui.sh'

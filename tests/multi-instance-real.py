@@ -470,7 +470,8 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
             args = ['bash', str(engine or PROJECT / ('download-video-gui.sh' if gui else 'download-video.sh'))]
             if not gui:
                 url_file = root / f'{label}.url'
-                url_file.write_text(env['FIXTURE_URL'] + '\n'); url_file.chmod(0o600)
+                url_file.write_text(env['FIXTURE_URL'] + '\n')
+                url_file.chmod(0o600)
                 args += ['--url-file', str(url_file), '--output-dir', str(destination or output),
                          '--result-file', str(result), '--mode', mode]
             log = (root / f'{label}.log').open('wb')
@@ -573,7 +574,8 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         # a path alias and a different XDG_RUNTIME_DIR still use the same inode.
         first = launch('conflict-owner', title='same target', ident='same')
         wait_active(first)
-        alias = root / 'destination-alias'; alias.symlink_to(output, target_is_directory=True)
+        alias = root / 'destination-alias'
+        alias.symlink_to(output, target_is_directory=True)
         contender = launch('conflict-other-url', title='same target', ident='same', destination=alias, alternate_runtime=True)
         finish(contender, 75)
         # Video plans MKV and audio plans the native input name, but both would
@@ -586,14 +588,17 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         gates[first[0]].set()
         # A later independent CLI is admitted after completed cleanup.
         again = launch('after-conflict', 2)
-        wait_active(again); gates[again[0]].set(); finish(again)
+        wait_active(again)
+        gates[again[0]].set()
+        finish(again)
 
         # Keep a real aria2 consumer stopped with an open staging FD while the
         # GUI starts closing. The competitor is planned before the signal so
         # its reservation probe runs inside the ordinary escalation deadline.
         owner = launch('stopping-owner', gui=True, title='stop owner', ident='stop')
         independent = launch('stopping-independent', 1)
-        wait_active(owner); wait_active(independent)
+        wait_active(owner)
+        wait_active(independent)
         contender = launch('stopping-contender', title='stop owner', ident='stop', plan_gate=True)
         gate = root / 'stopping-contender.plan-gate'
         wait_until(lambda: gate.with_suffix('.plan-gate.ready').exists(), 'conflict plan did not reach barrier')
@@ -644,8 +649,10 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         gates[owner[0]].set()
         fresh = launch('stopping-relaunch', title='stop owner', ident='stop')
         wait_active(fresh)
-        gates[fresh[0]].set(); gates[independent[0]].set()
-        finish(fresh); finish(independent)
+        gates[fresh[0]].set()
+        gates[independent[0]].set()
+        finish(fresh)
+        finish(independent)
 
         # Exact historical inode, both launch orders. No old executable is
         # patched or credited with the new supervisor's guarantees.
@@ -665,25 +672,29 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
                     pass
                 else:
                     raise AssertionError('old exclusive protocol bypassed a new active writer')
-        gates[new[0]].set(); finish(new)
+        gates[new[0]].set()
+        finish(new)
         if os.environ.get('YTDLP_LEGACY_ENGINE'):
             legacy_engine = Path(os.environ['YTDLP_LEGACY_ENGINE']).resolve(strict=True)
             old = launch('legacy-real-first', 0, engine=legacy_engine)
             wait_active(old)
             blocked = launch('new-behind-legacy-real', 1)
             finish(blocked, 75)
-            gates[old[0]].set(); finish(old)
+            gates[old[0]].set()
+            finish(old)
             current = launch('current-before-legacy-real', 2)
             wait_active(current)
             blocked = launch('legacy-real-behind-current', 3, engine=legacy_engine)
             finish(blocked, 75)
-            gates[current[0]].set(); finish(current)
+            gates[current[0]].set()
+            finish(current)
         truncated = launch('truncated-owner', title='é' * 90 + 'one', ident='long')
         wait_active(truncated)
         equivalent = launch('truncated-other', title='é' * 90 + 'two', ident='long')
         finish(equivalent, 75)
         truncated[1].send_signal(signal.SIGTERM)
-        finish(truncated, 143); gates[truncated[0]].set()
+        finish(truncated, 143)
+        gates[truncated[0]].set()
         changed_records = []
         final_digests = {}
         for bucket in buckets:

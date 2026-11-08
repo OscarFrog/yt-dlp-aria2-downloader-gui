@@ -79,7 +79,7 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
         self.bin.mkdir()
         self.home = self.base_dir / "home"
         self.home.mkdir()
-        self.env = dict(os.environ, HOME=str(self.home), GIT_CONFIG_GLOBAL=os.devnull,
+        self.env = dict(os.environ, LC_ALL="C", HOME=str(self.home), GIT_CONFIG_GLOBAL=os.devnull,
                         GIT_CONFIG_NOSYSTEM="1", GIT_NO_REPLACE_OBJECTS="1",
                         GIT_TERMINAL_PROMPT="0", GIT_AUTHOR_DATE="2026-09-12T00:00:00Z",
                         GIT_COMMITTER_DATE="2026-09-12T00:00:00Z", GH_TOKEN="fictitious-test-token",

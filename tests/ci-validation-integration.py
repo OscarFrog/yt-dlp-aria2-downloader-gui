@@ -8,6 +8,7 @@ Fixtures replace authenticated API reads; this suite never contacts GitHub.
 import copy
 import contextlib
 from datetime import datetime, timedelta, timezone
+import errno
 import hashlib
 import importlib.util
 import io
@@ -179,6 +180,7 @@ class ProofTests(unittest.TestCase):
 
     def test_minimum_shell_and_shared_destination_steps_cannot_be_missing_or_skipped(self):
         checks = (
+            (1, "Ubuntu", "Check Python with reviewed Ruff"),
             (1, "Python 3.10 / Ubuntu", "Build and bind verified Bash 4.4 on the disposable runner"),
             (1, "Python 3.10 / Ubuntu", "Bind every test interpreter to the minimum Python"),
             (4, "Local media, pinned yt-dlp 2026.8.19", "Install verified Deno for shared-destination qualification"),
@@ -386,6 +388,7 @@ class ProofTests(unittest.TestCase):
         # These obligations are business contracts, not values derived from
         # REQUIRED_STEPS: removing a production requirement must fail this test.
         for index, name, obligation in (
+            (1, "Ubuntu", "Check Python with reviewed Ruff"),
             (2, "Fedora 44 RPM build-once", "Qualify RPM v4/v6 signature semantics"),
             (2, "Previous immutable release", "Verify exact published previous packages"),
             (2, "Fedora 44 RPM (fresh)", "Reject a different globally trusted RPM signer in PR CI"),
@@ -2126,7 +2129,14 @@ def require_fixture_process_exit(pid, starttime, *, read_stat=None,
     deadline = monotonic() + 1.0
     while True:
         try:
-            fields = read_stat().rsplit(") ", 1)[1].split()
+            try:
+                snapshot = read_stat()
+            except ProcessLookupError:
+                # A procfs descriptor opened before reap can return ESRCH.
+                # Reopen once: only absence or the same terminal identity is
+                # evidence of exit; repeated unreadability remains a failure.
+                snapshot = read_stat()
+            fields = snapshot.rsplit(") ", 1)[1].split()
         except FileNotFoundError:
             return
         if fields[19] != starttime:
@@ -2140,7 +2150,7 @@ def require_fixture_process_exit(pid, starttime, *, read_stat=None,
 
 
 class ProcessExitObservationTests(unittest.TestCase):
-    """Exercise the observation deadline without signaling any real process."""
+    """Exercise bounded fixture exit and conservative procfs observations."""
 
     @staticmethod
     def observation(snapshots):
@@ -2151,6 +2161,8 @@ class ProcessExitObservationTests(unittest.TestCase):
         def read_stat():
             snapshot = snapshots[min(reads[0], len(snapshots) - 1)]
             reads[0] += 1
+            if isinstance(snapshot, BaseException):
+                raise snapshot
             if snapshot is None:
                 raise FileNotFoundError
             state, starttime = snapshot
@@ -2198,6 +2210,69 @@ class ProcessExitObservationTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "PID identity changed"):
             observe()
         self.assertEqual((clock[0], sleeps, reads[0]), (0.005, [0.005], 2))
+
+    def test_reaped_proc_stat_descriptor_requires_a_fresh_absence_observation(self):
+        with subprocess.Popen([sys.executable, "-I", "-B", "-c",
+                               "import signal; signal.pause()"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as process:
+            path = Path("/proc", str(process.pid), "stat")
+            try:
+                starttime = path.read_text().rsplit(") ", 1)[1].split()[19]
+                with path.open() as held:
+                    process.terminate()
+                    process.wait(timeout=3)
+                    with self.assertRaises(ProcessLookupError) as reaped:
+                        held.read()
+                    self.assertEqual(reaped.exception.errno, errno.ESRCH)
+                    reads = []
+
+                    def stale_once():
+                        reads.append(path)
+                        return held.read() if len(reads) == 1 else path.read_text()
+
+                    require_fixture_process_exit(process.pid, starttime, read_stat=stale_once)
+                    self.assertEqual(len(reads), 2)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=3)
+
+    def test_esrch_recheck_keeps_terminal_identity_and_survival_guards(self):
+        for terminal in (None, ("Z", "71"), ("X", "71")):
+            with self.subTest(terminal=terminal):
+                observe, clock, sleeps, reads = self.observation([
+                    ProcessLookupError(errno.ESRCH, "stale fixture stat"), terminal])
+                observe()
+                self.assertEqual((clock[0], sleeps, reads[0]), (0, [], 2))
+        observe, clock, sleeps, reads = self.observation([
+            ProcessLookupError(errno.ESRCH, "stale fixture stat"), ("R", "71")])
+        with self.assertRaisesRegex(AssertionError, "still executing after 1s"):
+            observe()
+        self.assertEqual(clock[0], 1.0)
+        self.assertLessEqual(reads[0], 203)
+        observe, clock, sleeps, reads = self.observation([
+            ProcessLookupError(errno.ESRCH, "stale fixture stat"), ("Z", "72")])
+        with self.assertRaisesRegex(AssertionError, "PID identity changed"):
+            observe()
+        self.assertEqual((clock[0], sleeps, reads[0]), (0, [], 2))
+
+    def test_unreadable_proc_stat_never_authorizes_fixture_exit(self):
+        for error in (ProcessLookupError(errno.ESRCH, "still unreadable"),
+                      PermissionError(errno.EACCES, "denied"), OSError(errno.EIO, "read failed")):
+            with self.subTest(error=type(error).__name__):
+                observe, clock, sleeps, reads = self.observation([
+                    ProcessLookupError(errno.ESRCH, "stale fixture stat"), error])
+                with self.assertRaises(type(error)) as refused:
+                    observe()
+                self.assertIs(refused.exception, error)
+                self.assertEqual((clock[0], sleeps, reads[0]), (0, [], 2))
+        for error in (PermissionError(errno.EACCES, "denied"), OSError(errno.EIO, "read failed")):
+            with self.subTest(first_error=type(error).__name__):
+                observe, clock, sleeps, reads = self.observation([error])
+                with self.assertRaises(type(error)) as refused:
+                    observe()
+                self.assertIs(refused.exception, error)
+                self.assertEqual((clock[0], sleeps, reads[0]), (0, [], 1))
 
 
 class VersionBoundaryTests(unittest.TestCase):
