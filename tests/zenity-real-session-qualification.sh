@@ -221,7 +221,7 @@ main() {
     local raw_gui_stderr
     local gui_status=0
     local answer=''
-    local state_url_hits=0
+    local state_url_hits=0 privacy_scan_status
     local state_file_count=0
     local state_dir_count=0
     local state_log_count=0
@@ -409,19 +409,26 @@ EOF_EXTERNAL_VIEWER
     assert_no_residual_processes "${evidence_dir}" "${observer_stop}"
 
     if [[ -d ${SESSION_ROOT}/state ]]; then
-        state_url_hits=$(
-            { grep -RIlE -- 'https?://' "${SESSION_ROOT}/state" 2>/dev/null || true; } \
-                | wc -l
-        )
+        if LC_ALL=C grep -RqaEi -- 'https?://' "${SESSION_ROOT}/state" >/dev/null 2>&1; then
+            state_url_hits=1
+        else
+            privacy_scan_status=$?
+            ((privacy_scan_status == 1)) \
+                || fail_test 'state privacy scan failed; raw diagnostics were not retained.'
+        fi
     fi
     for diagnostic_file in "${raw_gui_stdout}" "${raw_gui_stderr}"; do
-        if grep -qE -- 'https?://' "${diagnostic_file}" 2>/dev/null; then
+        if LC_ALL=C grep -qaEi -- 'https?://' "${diagnostic_file}" >/dev/null 2>&1; then
             printf 'potential-url-in-gui-diagnostic file=%s\n' \
                 "${diagnostic_file##*/}" >>"${leak_file}"
+        else
+            privacy_scan_status=$?
+            ((privacy_scan_status == 1)) \
+                || fail_test 'GUI diagnostic privacy scan failed; raw diagnostics were not retained.'
         fi
     done
     if ((state_url_hits > 0)); then
-        printf 'potential-url-in-retained-state files=%d\n' "${state_url_hits}" >>"${leak_file}"
+        printf 'potential-url-in-retained-state\n' >>"${leak_file}"
     fi
     if [[ -s ${leak_file} ]]; then
         fail_test 'a potential sensitive URL exposure was detected; raw diagnostics were not retained.'

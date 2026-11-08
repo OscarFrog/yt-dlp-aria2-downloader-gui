@@ -141,7 +141,9 @@ PYTHON_FILES=(
     tests/zenity-x11-events.py
     tests/zenity-autonomous-qualification.py
     tests/zenity-autonomous-integration.py
+    tests/terminal-proof-fixtures.py
     tests/process-supervision-integration.py
+    tests/fixture-safety-integration.py
     tests/coordination-integration.py
     private-launcher-manager.py
     scripts/update-published-version.py

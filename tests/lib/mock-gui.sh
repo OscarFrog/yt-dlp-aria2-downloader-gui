@@ -459,7 +459,7 @@ test_mock_gui_progress_completion() {
 test_mock_gui_config_recovery() {
     local config_file config_line_count config_padding_bytes config_prefix_bytes
     local config_profile_suffix=$'\nprofile=audio\n'
-    local config_size line_number relative_config_dir relative_state_dir
+    local config_size line_number
     local special_file_timeout_seconds=10
 
     # Scenario group: legacy and malformed configuration recovery.
@@ -590,17 +590,28 @@ EOF_BAD_CONFIG
     assert_file_has_line "${config_file}" 'profile=video' \
         'overlong configuration falls back atomically'
 
+    test_mock_gui_relative_xdg_fallback
+}
+
+test_mock_gui_relative_xdg_fallback() {
+    local relative_xdg_root relative_config_dir relative_state_dir
+
     # Relative XDG configuration/state paths are invalid and must fall back to HOME.
-    relative_config_dir="${PROJECT_DIR}/relative-config-home"
-    relative_state_dir="${PROJECT_DIR}/relative-state-home"
-    rm -rf -- "${relative_config_dir}" "${relative_state_dir}"
+    # Keep the probe's working directory and relative paths inside owned fixtures.
+    relative_xdg_root=$(mktemp -d "${TEST_ROOT}/relative-xdg.XXXXXXXX")
+    relative_config_dir="${relative_xdg_root}/relative-config-home"
+    relative_state_dir="${relative_xdg_root}/relative-state-home"
     rm -f -- "${OUTPUT_DIR}/Mock media [abc123].webm"
     prepare_argument_log 'relative-xdg-home-fallback'
-    env XDG_CONFIG_HOME='relative-config-home' \
-        XDG_STATE_HOME='relative-state-home' \
-        MOCK_USE_DEFAULT_PROFILE=1 \
-        "${GUI_UNDER_TEST}"
-    [[ ! -e ${relative_config_dir} && ! -e ${relative_state_dir} ]] \
+    (
+        cd -- "${relative_xdg_root}" || exit 1
+        env XDG_CONFIG_HOME='relative-config-home' \
+            XDG_STATE_HOME='relative-state-home' \
+            MOCK_USE_DEFAULT_PROFILE=1 \
+            "${GUI_UNDER_TEST}"
+    )
+    [[ ! -e ${relative_config_dir} && ! -L ${relative_config_dir} &&
+        ! -e ${relative_state_dir} && ! -L ${relative_state_dir} ]] \
         || fail 'The GUI used a relative XDG configuration or state path.'
     assert_file_has_line \
         "${HOME}/.config/yt-dlp-aria2-downloader/gui.conf" \
@@ -1356,6 +1367,46 @@ for path in [retained[0], diagnostic]:
         raise AssertionError("GUI diagnostic did not mask every URL in the casing corpus")
     if path.stat().st_mode & 0o077:
         raise AssertionError("GUI diagnostic is accessible to other users")
+
+# Exercise the capture boundary before the existing diagnostic redactor. A
+# truncated first line must not turn a private URL into an unrecognized suffix.
+token = b"PRIVATE_CAPTURE_BOUNDARY_TOKEN"
+short_url = b"https://example.invalid/" + token + b"\n"
+exact_url = b"https://example.invalid/" + b"A" * (65536 - len(short_url)) + token + b"\n"
+cases = {
+    "short": (short_url, True),
+    "exact-limit": (exact_url, True),
+    "one-byte-over": (exact_url[:-1] + b"A\n", False),
+    "long-single-line": (b"https://example.invalid/" + b"A" * 70000 + token + b"\n", False),
+    "long-with-footer": (b"https://example.invalid/" + b"A" * 70000 + token + b"\nUseful complete diagnostic\n", False),
+}
+for name, (payload, expect_redaction) in cases.items():
+    case = root / name
+    case.mkdir(mode=0o700)
+    raw = case / "input.txt"
+    raw.write_bytes(payload)
+    captured_diagnostic = case / "diagnostic.txt"
+    capture_program = source + r'''
+RUNTIME_TMPDIR=$1
+raw_diagnostic=$2
+diagnostic_copy=$3
+zenity() { cat -- "${raw_diagnostic}" >&2; return 42; }
+show_diagnostic_dialog() { cp -- "$5" "${diagnostic_copy}"; }
+run_zenity_capture captured --entry
+[[ ${ZENITY_STATUS} == 70 && -z ${captured} ]] || exit 72
+show_zenity_error 'Expected capture failure'
+'''
+    outcome = subprocess.run(["bash", "-s", "--", str(case), str(raw), str(captured_diagnostic)],
+                             input=capture_program, text=True, capture_output=True, timeout=15)
+    if outcome.returncode or not captured_diagnostic.is_file():
+        raise AssertionError(f"Zenity capture boundary fixture failed: {name}")
+    captured = captured_diagnostic.read_bytes()
+    if token in captured or len(captured) > 65536 or captured_diagnostic.stat().st_mode & 0o077:
+        raise AssertionError(f"Zenity capture exposed a URL suffix or unsafe diagnostic: {name}")
+    if expect_redaction and b"[REDACTED_URL]" not in captured:
+        raise AssertionError(f"Zenity capture lost a bounded diagnostic: {name}")
+    if name == "long-with-footer" and b"Useful complete diagnostic" not in captured:
+        raise AssertionError("Zenity capture discarded the complete diagnostic after a partial line")
 PY_GUI_URL_CASES
 }
 
@@ -2228,6 +2279,7 @@ EOF_GUI_CLEANUP_QUIESCENCE
 }
 
 run_mock_gui_state_group() {
+    python3 -I -B "${PROJECT_DIR}/tests/fixture-safety-integration.py"
     test_mock_gui_url_redaction_cases
     test_mock_gui_live_log_retention_unconfirmed_shutdown
     test_mock_gui_cleanup_unconfirmed_shutdown

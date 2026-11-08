@@ -629,13 +629,13 @@ class ScheduledProofTests(unittest.TestCase):
         self.api.responses["actions/workflows/real-tools.yml"] = {
             "id": 4, "path": ".github/workflows/real-tools.yml", "state": "active",
         }
-        self.run = {
+        self.run_record = {
             "id": 600, "run_attempt": 2, "workflow_id": 4, "path": ".github/workflows/real-tools.yml",
             "repository": {"full_name": CHECK.REPOSITORY}, "head_repository": {"full_name": CHECK.REPOSITORY},
             "head_sha": SOURCE, "head_branch": "main", "event": "schedule",
             "status": "completed", "conclusion": "success", "created_at": RECENT, "updated_at": RECENT,
         }
-        self.api.responses["actions/runs/600"] = self.run
+        self.api.responses["actions/runs/600"] = self.run_record
         self.jobs = [{"run_id": 600, "name": name, "status": "completed", "completed_at": RECENT,
                       "conclusion": "skipped" if skipped else "success",
                       "steps": [{"name": step, "status": "completed", "conclusion": "success"}
@@ -658,6 +658,15 @@ class ScheduledProofTests(unittest.TestCase):
         self.assertEqual(self.api.calls.count("actions/runs/600"), 2)
         self.assertIn("actions/runs/600/attempts/2/jobs?per_page=100&page=1", self.api.calls)
         self.assertEqual(CHECK.required_steps("Scheduled current stable yt-dlp"), SCHEDULED_STEPS)
+
+    def test_case_can_run_again_with_a_fresh_result(self):
+        case = ScheduledProofTests("test_complete_attempt_binds_source_and_rechecks_run")
+        for attempt in range(2):
+            with self.subTest(attempt=attempt):
+                result = unittest.TestResult()
+                case.run(result)
+                self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+                self.assertEqual(result.testsRun, 1)
 
     def test_required_weekly_steps_must_each_succeed_exactly_once(self):
         original = copy.deepcopy(self.jobs[1]["steps"])
@@ -715,11 +724,11 @@ class ScheduledProofTests(unittest.TestCase):
                              ("created_at", "2026-09-12T11:30:00Z"),
                              ("updated_at", "2026-09-13T11:00:00Z")):
             with self.subTest(field=field):
-                original = self.run[field]
-                self.run[field] = value
+                original = self.run_record[field]
+                self.run_record[field] = value
                 with self.assertRaises(CHECK.Refusal):
                     self.verifier.scheduled(600, SOURCE)
-                self.run[field] = original
+                self.run_record[field] = original
 
     def test_incomplete_pagination_and_changed_latest_attempt_are_refused(self):
         original = self.api.responses["actions/runs/600/attempts/2/jobs?per_page=100&page=1"]

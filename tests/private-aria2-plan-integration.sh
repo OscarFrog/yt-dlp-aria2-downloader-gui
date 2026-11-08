@@ -4081,6 +4081,72 @@ print('ARTE exact-selection resume, policy/default/source binding, Unicode subti
 PY_ARTE_RESOURCES
 }
 
+test_private_plan_late_commit_signal() {
+    new_case 'late-commit-signal'
+    python3 -I -B - "${HELPER}" "${CASE_ROOT}" <<'PY_LATE_COMMIT_SIGNAL'
+import contextlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+from unittest.mock import patch
+
+helper, root = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location('late_commit_signal', helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+for number in (0, signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    output = root / str(number)
+    output.mkdir(mode=0o700)
+    staging = output / 'staging'
+    staging.mkdir(mode=0o700)
+    source = staging / 'item-000.download'
+    source.write_bytes(b'synthetic committed component\n')
+    identity = source.stat().st_dev, source.stat().st_ino
+    destination = output / 'result.bin'
+    manifest = output / 'manifest.json'
+    manifest.write_text(json.dumps({
+        'version': 2, 'output_dir': str(output), 'staging_dir': str(staging),
+        'output_identity': list(module.directory_identity(output)),
+        'staging_identity': list(module.directory_identity(staging)),
+        'items': [{'staging_name': source.name, 'destination': str(destination)}],
+    }))
+    manifest.chmod(0o600)
+    original = signal.signal
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)}
+    delivered = []
+
+    def restore(sig, handler):
+        if sig == number and handler is handlers[sig] and not delivered:
+            delivered.append(sig)
+            os.kill(os.getpid(), number)
+        return original(sig, handler)
+
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with patch.object(module.signal, 'signal', side_effect=restore), \
+            patch.object(sys, 'argv', [str(helper), 'commit', '--manifest', str(manifest)]), \
+            contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        status = module.main()
+    expected = 128 + number if number else 0
+    if status != expected:
+        raise AssertionError(f'late signal {number} returned {status}, expected {expected}: {stderr.getvalue()}')
+    if stdout.getvalue() != ('' if number else 'published_count=1\n'):
+        raise AssertionError('late interrupted commit emitted a success record')
+    if destination.read_bytes() != b'synthetic committed component\n' or source.exists():
+        raise AssertionError('late cancellation rolled back committed content')
+    if (destination.stat().st_dev, destination.stat().st_ino) != identity:
+        raise AssertionError('late cancellation replaced the committed inode')
+    if any(signal.getsignal(sig) != handler for sig, handler in handlers.items()):
+        raise AssertionError('publication handler was not restored')
+    if number and delivered != [number]:
+        raise AssertionError('late-signal boundary was not exercised')
+print('Late commit signals preserve publication and return interrupted status.')
+PY_LATE_COMMIT_SIGNAL
+}
+
 main() {
     require_test_command python3
     require_test_command stat
@@ -4118,6 +4184,7 @@ main() {
     test_private_plan_publication_safety
     test_private_plan_rollback_safety
     test_private_plan_signal_rollback
+    test_private_plan_late_commit_signal
     test_private_plan_ownership
     test_https_direct_requires_explicit_opt_in
     printf '%s\n' 'Private aria2 plan integration tests passed.'
