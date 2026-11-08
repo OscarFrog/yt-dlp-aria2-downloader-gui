@@ -3337,6 +3337,16 @@ test_run_all_manifest_execution() {
     local profile=''
     local jobs=''
     local real_bash=''
+    local output_line=''
+    local -a launch_ids=()
+    local output_line_number=0
+    local private_report_order=0
+    local previous_report_order=0
+    local completion_sequence=0
+    local private_complete_order=0
+    local runner_complete_order=0
+    local private_complete_time=0
+    local runner_complete_time=0
 
     real_bash=$(command -v -- bash) \
         || fail 'run-all manifest test could not resolve Bash'
@@ -3352,11 +3362,34 @@ record=$(mktemp \
 printf '%s\0' "$@" >"${record}"
 if [[ ${RUN_ALL_MANIFEST_FAILURE_MODE:-} == ordered ]]; then
     case " $* " in
-        *' ./tests/test-runner-integration.sh '*)
+        *test-runner-integration.sh*)
             sleep 0.2
             exit 17
             ;;
         *' ./tests/runtime-manager-integration.sh '*)
+            exit 23
+            ;;
+    esac
+fi
+if [[ ${RUN_ALL_MANIFEST_FAILURE_MODE:-} == full-priority ]]; then
+    case " $* " in
+        *test-runner-integration.sh*)
+            : >"${RUN_ALL_MANIFEST_LOG_DIR}/runner-ready"
+            for attempt in {1..500}; do
+                [[ -e ${RUN_ALL_MANIFEST_LOG_DIR}/private-ready ]] && break
+                sleep 0.01
+            done
+            [[ -e ${RUN_ALL_MANIFEST_LOG_DIR}/private-ready ]] || exit 70
+            sleep 0.2
+            exit 17
+            ;;
+        *private-aria2-plan-integration.sh*)
+            for attempt in {1..500}; do
+                [[ -e ${RUN_ALL_MANIFEST_LOG_DIR}/runner-ready ]] && break
+                sleep 0.01
+            done
+            [[ -e ${RUN_ALL_MANIFEST_LOG_DIR}/runner-ready ]] || exit 71
+            : >"${RUN_ALL_MANIFEST_LOG_DIR}/private-ready"
             exit 23
             ;;
     esac
@@ -3411,6 +3444,31 @@ EOF_MANIFEST_PYTHON
                 RUN_ALL_MANIFEST_LOG_DIR="${invocation_root}" \
                 "${real_bash}" "${SCRIPT_DIR}/run-all.sh" \
                 "--${profile}" --jobs "${jobs}"
+
+            if [[ ${profile} == full && ${jobs} == 4 ]]; then
+                launch_ids=()
+                output_line_number=0
+                private_report_order=0
+                previous_report_order=0
+                while IFS= read -r output_line; do
+                    output_line_number=$((output_line_number + 1))
+                    if [[ ${output_line} =~ ^Runner\ event:\ phase=integration\ task=([^[:space:]]+)\ event=start\  ]]; then
+                        launch_ids+=("${BASH_REMATCH[1]}")
+                    fi
+                    if [[ ${output_line} == '=== Private aria2 plan integration ===' ]]; then
+                        private_report_order=${output_line_number}
+                    elif [[ ${output_line} == '=== Mock runtime/media validation integration ===' ]]; then
+                        previous_report_order=${output_line_number}
+                    fi
+                done <<<"${ASSERT_OUTPUT}"
+                [[ ${launch_ids[0]:-} == mock-signals &&
+                    ${launch_ids[1]:-} == test-runner &&
+                    ${launch_ids[2]:-} == runtime-manager-hardening &&
+                    ${launch_ids[3]:-} == private-aria2-plan ]] \
+                    || fail 'full four-worker launch priority did not start private aria2 plan in the first wave'
+                ((previous_report_order > 0 && private_report_order > previous_report_order)) \
+                    || fail 'full suite report order no longer follows the canonical manifest'
+            fi
 
             python3 -I -B - \
                 "${profile}" "${invocation_root}" -- \
@@ -3548,6 +3606,43 @@ PY_MANIFEST
         --fast --jobs 4
     assert_text_not_contains "${ASSERT_OUTPUT}" 'Starting: Runtime-manager integration' \
         'failed Python validation prevents the integration phase'
+
+    assert_status 17 \
+        'run-all preserves canonical full-manifest failure order after priority completion' \
+        env \
+        PATH="${mock_bin}:/usr/bin:/bin" \
+        RUN_ALL_MANIFEST_LOG_DIR="${failure_root}" \
+        RUN_ALL_MANIFEST_FAILURE_MODE=full-priority \
+        "${real_bash}" "${SCRIPT_DIR}/run-all.sh" \
+        --full --jobs 4
+    completion_sequence=0
+    private_complete_order=0
+    runner_complete_order=0
+    private_complete_time=0
+    runner_complete_time=0
+    while IFS= read -r output_line; do
+        if [[ ${output_line} =~ ^Runner\ event:\ phase=integration\ task=([^[:space:]]+)\ event=complete\ monotonic_ms=([0-9]+)\ status=([0-9]+)$ ]]; then
+            completion_sequence=$((completion_sequence + 1))
+            case ${BASH_REMATCH[1]} in
+                private-aria2-plan)
+                    private_complete_order=${completion_sequence}
+                    private_complete_time=${BASH_REMATCH[2]}
+                    [[ ${BASH_REMATCH[3]} == 23 ]] \
+                        || fail 'priority private-plan fixture did not preserve its distinct failure status'
+                    ;;
+                test-runner)
+                    runner_complete_order=${completion_sequence}
+                    runner_complete_time=${BASH_REMATCH[2]}
+                    [[ ${BASH_REMATCH[3]} == 17 ]] \
+                        || fail 'canonical test-runner fixture did not preserve its distinct failure status'
+                    ;;
+                *) ;;
+            esac
+        fi
+    done <<<"${ASSERT_OUTPUT}"
+    ((private_complete_order > 0 && runner_complete_order > 0 && \
+    private_complete_time < runner_complete_time)) \
+        || fail 'priority private-plan failure did not finish before test-runner by monotonic time'
 }
 
 test_doctor_private_path_contract() {
