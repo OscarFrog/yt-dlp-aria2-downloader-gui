@@ -718,6 +718,48 @@ resources. Runner integration includes a
 non-reaping outer parent, a no-bootstrap negative control, and live-child,
 identity and exit-status checks for this fixture lifecycle.
 
+The mock root is an owned mode-0700 directory held open from allocation to
+cleanup. Cleanup requires matching device/inode, owner and mode, traverses from
+the retained descriptor, and refuses replaced or unreadable roots. It first
+requires process quiescence; a refusal preserves remaining fixtures and turns
+nominal success into status 70. The `gui-state` group runs
+`tests/fixture-safety-integration.py`, including pre-existing checkout sentinels,
+symlink/replacement cases, injected I/O errors and owner signal handling. The
+relative-XDG probe creates no directories in the source checkout. This does not
+claim an atomic delete against arbitrary hostile writers sharing the same UID;
+the final empty-root removal retains a documented name check/use window.
+
+Mock process observation uses an exact inherited fixture token plus observed
+ancestry, including exec/new-session orphans without path arguments. Known
+identities with unreadable procfs attributes remain indeterminate and fail the
+verdict; marker misses cannot erase a retained identity. Rescue is separate
+from the verdict and uses revalidated pidfds. The independent observer also
+supplies test-only token predicates to runner cancellation fixtures; production
+supervision does not import this test module. A never-observed orphan that has
+removed its token remains outside this attribution guarantee.
+
+An unavailable `/proc/PID/task` inventory is not evidence that every thread has
+exited. During one `Observer.sample()`, an already attributed Z/X identity can
+be bound to a whole-group pidfd before task enumeration, with the same
+PID/start-time checked before and after opening it. Only an ENOENT from that
+enumeration may use immediate readiness of the authenticated pidfd as
+independent group-exit evidence. A live sibling, an unbound or unreadable
+descriptor, an ambiguous poll result, or a failed close cannot establish this
+proof. The descriptor is closed within the sample and grants no signal, wait,
+reaping or fixture-cleanup authority. Earlier privacy failures, EACCES/EIO and
+recorded argument leaks retain their refusal. Deterministic observer retirement
+regressions model these boundaries in all diagnostic modes, including a stale
+live snapshot followed by a zombie leader and a missing task inventory.
+An unavailable auxiliary pidfd does not replace a complete procfs inventory;
+the existing two-inventory proof remains usable. The group-exit guarantee uses
+`pidfd_open(..., 0)`, without `PIDFD_THREAD`, as documented in
+[pidfd_open(2)](https://man7.org/linux/man-pages/man2/pidfd_open.2.html).
+Binding also requires the descriptor's unique positive `fdinfo/Pid` to match
+the PID in this procfs instance. This prevents a numerically identical PID in
+another namespace from supplying an unrelated exit proof. The metadata read is
+bounded and never exported. Failure to close its stream remains a refusal;
+an auxiliary open/read failure cannot provide evidence of group exit.
+
 The complete mock contract is divided into nine isolated scheduler suites
 (`engine-core`, `engine-hls`, `engine-staging`, `engine-network`, `gui-progress`, `gui-state`,
 `signals`, `runtime-compat`, and `runtime-validation`) so `run-all.sh --jobs N`
@@ -1533,7 +1575,15 @@ those final objects.
 
 Pull-request CI builds one unsigned noarch RPM and proves that the production
 bootstrap rejects it unless `--allow-unsigned-dev` is explicitly selected.
-PR CI qualifies RPM-v4/v6 signature semantics once; the fixture already covers
+The separate Fedora RPM Fusion dependency bootstrap never admits an unsigned
+package: its signature must verify against the exact pinned public certificate
+in an isolated keyring, with the expected NEVRA. The authenticated certificate
+is then imported into the transaction keyring and DNF must enforce
+`localpkg_gpgcheck=True`. The RPM6 suite executes this workflow block with
+synthetic authorized, unsigned, foreign-signed, corrupt and wrong-identity
+packages, including mutations of each guard. Its DNF stand-in checks the
+transaction arguments without installing anything on the host.
+PR CI qualifies RPM-v4/v6 signature semantics once; the fixture also covers
 multiple signers, signature ordering and corruption. Release CI reuses that
 source qualification, builds the RPM once, explicitly requires RPM package
 format v4, then signs those exact bytes once in the
@@ -1924,6 +1974,78 @@ validator with valid controls and rejected incomplete or contradictory
 records. This headless proof protects the oracle; only the complete real run
 above can satisfy the autonomous graphical requirement.
 
+The same suite exercises both qualification programs' complete `main` functions
+and actual Python entry points with inert dependency models from
+`tests/terminal-proof-fixtures.py`. These controls retain the scenario assertions
+and finalization code while replacing external media, graphical, process and
+procfs operations with deterministic data. They check interpreter exit status,
+absence of premature PASS, terminal evidence and failed exports; they do not
+qualify real process transitions, media tools or desktop interactions.
+
+Every required observation, including the last one before rescue, must be
+complete and explicitly validated. A late live process, URL finding or read
+error vetoes success. An earlier failure survives a later clean observation and
+successful rescue. Final PASS messages follow successful finalization and
+evidence export. Autonomous summaries remain non-passing until export commits
+the final verdict; failed exports attempt to retain a non-passing summary or
+remove a summary that cannot be rewritten. If storage refuses both operations,
+the nonzero program status remains authoritative: a retained summary alone
+cannot qualify an unsuccessful export. Multi-instance records ordered, controlled
+failure categories in `qualification-errors.json` and preserves its private
+fixture when observation or cleanup is uncertain.
+
+The optional `--watch-diagnostics` switch records closed first-failure metadata.
+The separate `--observer-diagnostics` switch requires it and adds the primitive
+exception chain only to a failed observer sample. Both are disabled by default.
+Primitive operation identifiers, exception categories and safe errno values are
+separate from the final `ObservationError` errno. An EIO selected by application
+normalization or an explicit inventory guard is not evidence of a Linux EIO.
+Recovered retries and unselected process errors do not create Watch failures.
+No process arguments, environment contents, exception text, raw traceback or
+frame locals enter this diagnostic. Its memory records are bounded; export uses
+the existing private Watch journal. Missing or failed diagnostic collection is
+explicitly incomplete and cannot replace the application exception or authorize
+PASS. Enabling a diagnostic grants no authority to run graphical qualification.
+Synthetic tests of the actual observer and Watch, including their Python entry
+point with inert dependencies, remain distinct from a real graphical attempt.
+
+The separate `--observer-identity-diagnostics` option requires both diagnostic
+options above. Its additional identity record distinguishes the selected group
+and task, their separate start times, and identity information before and after
+an access. It consumes existing observations only; an unavailable identity or
+namespace remains unknown. The `group` field of the observer's stat rows is a
+process-group ID (PGID), not a thread-group ID (TGID). Descendant attribution is
+a correlation through the sampled PPID and does not establish an atomic parent
+relationship or grant signaling authority.
+
+Only this additional mode separates the attribute open, read and close stages.
+It must preserve the buffering policy of the supported Python implementation,
+the existing retry policy and the final exception selected when both a read and
+its close fail. Recording the first error does not change which exception the
+application propagates. A system-operation category names the instrumented I/O
+boundary; an exception injected into a deterministic fixture is synthetic, not
+evidence of a kernel response. Diagnostic work has a timing cost and is not an
+identical scheduling replay.
+
+The detailed I/O path is limited to the inspected CPython 3.10–3.14
+`Path.read_bytes` implementations. A customized reader or unsupported context
+protocol keeps its original execution and marks the diagnostic incomplete;
+an already opened stream is never reopened to obtain more detail. A task's
+group binding denotes the expected group, not a new atomic membership proof.
+Replaced, unattributed group identities stay out of the public correlation
+graph; the observed comparison remains available without assigning them an
+attributed-process alias.
+
+Numerical identity evidence is confined to the private fixture's mode-0600
+`observer-identities.private` file. This suffix is outside the ordinary evidence
+export. Public Watch records contain only validated, qualification-scoped
+pseudonyms and closed identity metadata; the private mapping must be written
+before these references are published. Missing or failed diagnostic storage
+cannot authorize PASS. Never include the private identity file in a shared
+archive. Normal successful observations do not create error events in Watch.
+Neither identity correlation nor any diagnostic option authorizes another real
+Zenity run, a process signal, an additional procfs read or a functional change.
+
 ## Shared-destination and process qualification
 
 Run the deterministic process/observer controls through the `signals` group
@@ -2040,6 +2162,15 @@ A named-thread witness covers ASCII, valid UTF-8 and kernel truncation inside a
 multibyte name. Readiness precedes the real stat read; an independent byte oracle
 checks SID/start while admission, presence and quiescence ignore name encoding,
 including the actual Python predicates extracted from the GUI and engine.
+The independent test observer rejects unreadable command/environment data for
+an attributed live identity. ENOENT/ESRCH require fresh identity evidence;
+permission/I/O errors, persistent interruptions and partial identity records
+cannot produce a successful empty observation. Bounded retries do not erase
+failure evidence: a later disappearance, identity replacement or quiescence,
+even within the same sample, cannot restore a lost privacy interval. The token
+predicate checks only current presence and may accept those freshly confirmed
+terminal transitions after a read error. Dedicated cases cover identity recycling,
+known zombie threads and all five runner-oracle call sites.
 The independent test observer reads that same real task, including its root
 procfs alias in a controlled inventory with an unrelated marker. Synthetic
 stat fixtures additionally cover arbitrary name bytes and invalid identity

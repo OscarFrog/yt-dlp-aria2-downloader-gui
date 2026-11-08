@@ -26,6 +26,7 @@ PROJECT = Path(__file__).resolve().parent.parent
 ORDINARY = ('success', 'error', 'cancel-transfer', 'cancel-ffmpeg',
             'signal-entry', 'signal-progress', 'new-download', 'open-folder')
 SCENARIOS = ORDINARY + ('cancel-success-race',)
+DIAGNOSTICS = None
 
 
 def require(condition, message):
@@ -219,6 +220,27 @@ def write_json(path, value):
     path.chmod(0o600)
 
 
+def validate_process_observation(state):
+    """Require explicit process evidence before judging or rescuing identities."""
+    require(isinstance(state, dict) and type(state.get('monotonic_ns')) is int and
+            state['monotonic_ns'] >= 0 and isinstance(state.get('live'), dict) and
+            isinstance(state.get('zombies'), list) and isinstance(state.get('url_in_argv'), list),
+            'Incomplete terminal process observation')
+    for pid, identity in state['live'].items():
+        require(isinstance(pid, str) and re.fullmatch(r'[1-9][0-9]*', pid) and
+                isinstance(identity, dict) and type(identity.get('start')) is int and
+                identity['start'] >= 0 and isinstance(identity.get('state'), str) and
+                identity['state'] in ('R', 'S', 'D', 'Z', 'T', 't', 'X', 'x', 'K', 'W', 'P', 'I') and
+                all(type(identity.get(key)) is int and identity[key] >= 0
+                    for key in ('parent', 'group', 'session')), 'Invalid observed process identity')
+    require(all(type(pid) is int and pid > 0 and str(pid) not in state['live']
+                for pid in state['zombies']), 'Invalid observed quiescent identity')
+    require(all(isinstance(identity, (list, tuple)) and len(identity) == 2 and
+                type(identity[0]) is int and identity[0] > 0 and
+                type(identity[1]) is int and identity[1] >= 0
+                for identity in state['url_in_argv']), 'Invalid observed privacy identity')
+
+
 def source_identity():
     inventory = subprocess.check_output([str(PROJECT / 'scripts/git-inspect.sh'), 'inventory'],
                                         cwd=PROJECT, env={'PATH': '/usr/bin:/bin'}, text=True, timeout=10)
@@ -324,17 +346,20 @@ def export_evidence(root, evidence, summary):
                     target.chmod(0o600)
         for directory in locations:
             write_json(directory / 'summary.json', summary)
-    except BaseException:
-        failed = dict(provisional, failure=summary.get('failure') or 'Qualification evidence export failed.')
+    except BaseException as error:
+        failed = dict(provisional, failure=summary.get('failure') or 'Qualification evidence export failed.',
+                      errors=[*summary.get('errors', []),
+                              {'phase': 'Qualification evidence export failed.',
+                               'category': type(error).__name__}])
         for directory in locations:
             try:
                 write_json(directory / 'summary.json', failed)
-            except Exception:
+            except BaseException:
                 # A truncated/absent report is preferable to a stale PASS if
                 # storage cannot record the failure. The caller still fails.
                 try:
                     (directory / 'summary.json').unlink(missing_ok=True)
-                except OSError:
+                except BaseException:
                     pass
         raise
 
@@ -445,6 +470,257 @@ class ResultWitness:
             self.parent_fd = None
 
 
+class FailureDiagnostics:
+    """Opt-in bounded metadata; never retain exception text or frame locals."""
+    LABELS = frozenset(ORDINARY + tuple(f'cancel-success-race-{i:02}' for i in range(10)))
+    PHASES = frozenset(('sampling', 'finalization', 'validation', 'cleanup', 'scenario'))
+    OPERATIONS = frozenset((
+        'lock-acquire', 'lock-release', 'observer-sample', 'result-observe', 'state-update',
+        'observation-open', 'observation-serialize', 'observation-write', 'observation-close',
+        'result-refresh', 'thread-start', 'thread-stop', 'thread-join', 'thread-alive',
+        'watch-check', 'final-sample', 'scenario-failure', 'cleanup-failure',
+        'diagnostic-write', 'diagnostic-metadata', 'diagnostic-overflow', 'evidence-export'))
+    CATEGORIES = (PermissionError, FileNotFoundError, ProcessLookupError, InterruptedError,
+                  OSError, ValueError, TypeError, KeyError, IndexError, RuntimeError,
+                  AssertionError, KeyboardInterrupt, SystemExit)
+
+    def __init__(self, root):
+        self.lock = threading.Lock()
+        self.io_lock = threading.Lock()
+        self.events = []
+        self.incomplete = False
+        self.omitted = 0
+        self.sites = {}
+        self.observer_copy = None
+        self.identity_copy = None
+        self.identity_export_copy = None
+        self.identity_projection = None
+        self.identity_path = None
+        self.identity_bytes = 0
+        self.identity_pending = 0
+        self.identity_sink_failed = False
+        self.path = root / 'watch-first-failure.jsonl'
+        info = root.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and
+                stat.S_IMODE(info.st_mode) == 0o700, 'Diagnostic root is not private')
+        handle = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            info = os.fstat(handle)
+            self.identity = (info.st_dev, info.st_ino)
+        finally:
+            os.close(handle)
+        for name in ('observe', 'refresh', 'close'):
+            self.sites[getattr(ResultWitness, name).__code__] = 'result.' + name
+        for function in (main, wait_until, require, validate_scenario, validate_evidence,
+                         validate_process_observation, write_json, export_evidence):
+            self.sites[function.__code__] = 'qualification.' + function.__name__
+
+    def register_observer(self, module):
+        # Only reviewed code objects are named. No frame values are inspected.
+        self.observer_copy = getattr(module, 'copy_diagnostic', None)
+        for name in ('current_process', 'read_observation', 'read_process_observation',
+                     'observation_failure', 'process_row', 'snapshot', 'observation_paths',
+                     'threads_are_quiescent'):
+            self.sites[getattr(module, name).__code__] = 'observer.' + name
+        for name in ('sample', '_sample'):
+            self.sites[getattr(module.Observer, name).__code__] = 'observer.' + name
+
+    def register_identity_observer(self, module):
+        """Keep numerical identity evidence private before publishing its aliases."""
+        self.identity_copy = module.copy_identity_diagnostic
+        self.identity_export_copy = module.copy_identity_export
+        self.identity_projection = module.IdentityProjection()
+        self.identity_path = self.path.with_name('observer-identities.private')
+        handle = os.open(self.identity_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            info = os.fstat(handle)
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and
+                    stat.S_IMODE(info.st_mode) == 0o600, 'Identity diagnostic is not private')
+            self.identity_file = (info.st_dev, info.st_ino)
+        finally:
+            os.close(handle)
+
+    def _append_identity(self, record):
+        # The .private suffix is deliberately outside export_evidence's inventory.
+        # Aligned private/public views preserve the alias mapping only in this sink.
+        try:
+            require(not self.identity_sink_failed, 'Identity diagnostic storage previously failed')
+            payload = (json.dumps(record, sort_keys=True) + '\n').encode('ascii')
+            require(self.identity_bytes + len(payload) <= 4 * 1024 * 1024,
+                    'Identity diagnostic storage bound exceeded')
+            handle = os.open(self.identity_path,
+                             os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                info = os.fstat(handle)
+                require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and
+                        stat.S_IMODE(info.st_mode) == 0o600 and
+                        (info.st_dev, info.st_ino) == self.identity_file and
+                        info.st_size == self.identity_bytes, 'Identity diagnostic file changed')
+                while payload:
+                    count = os.write(handle, payload)
+                    require(count > 0, 'Identity diagnostic write made no progress')
+                    self.identity_bytes += count
+                    payload = payload[count:]
+            finally:
+                os.close(handle)
+        except BaseException:
+            # A partial record cannot safely be followed by another JSON line.
+            self.identity_sink_failed = True
+            raise
+
+    def _metadata(self, error):
+        sites = []
+        frame = BaseException.__traceback__.__get__(error)
+        for _ in range(32):
+            if frame is None:
+                break
+            name = self.sites.get(frame.tb_frame.f_code)
+            if name is not None:
+                sites.append({'site': name, 'line': frame.tb_lineno})
+            frame = frame.tb_next
+        return sites
+
+    def _record(self, label, phase, operation, error, propagation):
+        category = next((kind.__name__ for kind in self.CATEGORIES if type(error) is kind),
+                        'OSError' if isinstance(error, OSError) else 'OtherException')
+        number = OSError.errno.__get__(error) if isinstance(error, OSError) else None
+        if type(number) is not int or not 0 < number < 4096:
+            number = None
+        return dict(sequence=len(self.events) + 1, monotonic_ns=time.monotonic_ns(),
+                    scenario=label if type(label) is str and label in self.LABELS else 'unknown',
+                    phase=phase if phase in self.PHASES else 'unknown',
+                    operation=operation if operation in self.OPERATIONS else 'unknown',
+                    origin=('observer' if operation == 'observer-sample' else
+                            'result' if operation in ('result-observe', 'result-refresh') else
+                            'evidence' if operation.startswith('observation-') else
+                            'diagnostic' if operation.startswith('diagnostic-') else
+                            'thread' if operation.startswith(('thread-', 'lock-')) else
+                            'cleanup' if phase == 'cleanup' else 'validation'),
+                    thread='main' if threading.current_thread() is threading.main_thread() else 'watch',
+                    category=category, errno=number, sites=[],
+                    kind='initial' if not self.events else ('propagation' if propagation else 'secondary'),
+                    first_sequence=1)
+
+    def _append(self, record):
+        payload = (json.dumps(record, sort_keys=True) + '\n').encode('ascii')
+        handle = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(handle)
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and
+                    stat.S_IMODE(info.st_mode) == 0o600 and
+                    (info.st_dev, info.st_ino) == self.identity, 'Diagnostic identity changed')
+            while payload:
+                count = os.write(handle, payload)
+                require(count > 0, 'Diagnostic write made no progress')
+                payload = payload[count:]
+        finally:
+            os.close(handle)
+
+    def capture(self, label, phase, operation, error, propagation=False, *, observer_source=None):
+        # Record before I/O. Failure of this auxiliary sink must not replace
+        # the exception already being propagated by the qualification.
+        with self.lock:
+            if len(self.events) >= 128:
+                self.omitted += 1
+                self.incomplete = True
+                return
+            record = self._record(label, phase, operation, error, propagation)
+            self.events.append(record)
+            records = [record]
+            identity_record = None
+            try:
+                record['sites'] = self._metadata(error)
+                if (observer_source is not None
+                        and getattr(observer_source, 'diagnostics_enabled', False) is True):
+                    require(operation == 'observer-sample' and self.observer_copy is not None,
+                            'Primitive diagnostic projector is unavailable')
+                    record['observer_detail'] = self.observer_copy(observer_source.diagnostic_failure(error))
+                    if not record['observer_detail']['complete']:
+                        self.incomplete = True
+                if (observer_source is not None
+                        and getattr(observer_source, 'identity_diagnostics_enabled', False) is True):
+                    require(operation == 'observer-sample' and self.identity_projection is not None,
+                            'Identity diagnostic projector is unavailable')
+                    private = self.identity_copy(observer_source.identity_failure(error))
+                    public = self.identity_export_copy(self.identity_projection.project(private))
+                    identity_record = dict(schema=2, scenario=record['scenario'],
+                                           watch_sequence=record['sequence'],
+                                           private_packet=private, public_packet=public)
+                    self.identity_pending += 1
+                    if not private['complete'] or not public['complete']:
+                        self.incomplete = True
+            except BaseException as metadata_error:
+                self.incomplete = True
+                if len(self.events) < 128:
+                    secondary = self._record(label, phase, 'diagnostic-metadata', metadata_error, False)
+                    self.events.append(secondary)
+                    records.append(secondary)
+                else:
+                    self.omitted += 1
+        # Never hold the registry lock across filesystem I/O. In particular,
+        # join timeout reporting must not wait on a stuck observer's writer.
+        if not self.io_lock.acquire(blocking=False):
+            self.incomplete = True
+            if identity_record is not None:
+                with self.lock:
+                    self.identity_pending -= 1
+            return
+        try:
+            if identity_record is not None:
+                try:
+                    self._append_identity(identity_record)
+                except BaseException as identity_error:
+                    self.incomplete = True
+                    self.identity_sink_failed = True
+                    with self.lock:
+                        if len(self.events) < 128:
+                            secondary = self._record(label, phase, 'diagnostic-write', identity_error, False)
+                            self.events.append(secondary)
+                            records.append(secondary)
+                        else:
+                            self.omitted += 1
+                else:
+                    # No numerical packet enters the registry or its public snapshot.
+                    with self.lock:
+                        record['observer_identity_detail'] = identity_record['public_packet']
+            for record in records:
+                try:
+                    self._append(record)
+                except BaseException as sink_error:
+                    self.incomplete = True
+                    with self.lock:
+                        if len(self.events) < 128:
+                            self.events.append(self._record(label, phase, 'diagnostic-write', sink_error, False))
+                        else:
+                            self.omitted += 1
+                    break
+        finally:
+            if identity_record is not None:
+                with self.lock:
+                    self.identity_pending -= 1
+            self.io_lock.release()
+
+    def snapshot(self):
+        # A final copy must not wait on a failed observation thread or writer.
+        if not self.lock.acquire(blocking=False):
+            raise RuntimeError('Diagnostic registry is unavailable')
+        try:
+            events = []
+            for row in self.events:
+                copied = dict(row, sites=[dict(site) for site in row['sites']])
+                if 'observer_detail' in row:
+                    require(self.observer_copy is not None, 'Primitive diagnostic projector is unavailable')
+                    copied['observer_detail'] = self.observer_copy(row['observer_detail'])
+                if 'observer_identity_detail' in row:
+                    require(self.identity_export_copy is not None, 'Identity diagnostic projector is unavailable')
+                    copied['observer_identity_detail'] = self.identity_export_copy(row['observer_identity_detail'])
+                events.append(copied)
+            return dict(schema=1, complete=not (self.incomplete or self.identity_pending),
+                        omitted=self.omitted, events=events)
+        finally:
+            self.lock.release()
+
+
 class Watch:
     """Keep observing the inherited marker, including between driver waits."""
     def __init__(self, observer, path, result):
@@ -455,17 +731,76 @@ class Watch:
         self.stop = threading.Event()
         self.error = None
         self.last = None
+        self.diagnostics = DIAGNOSTICS
+        self.label = path.name.removesuffix('.topology.jsonl')
+        self.context = threading.local()
         self.thread = threading.Thread(target=self.run, daemon=True)
-        self.thread.start()
+        try:
+            self.thread.start()
+        except BaseException as error:
+            self.diagnose('thread-start', error)
+            raise
+
+    def diagnose(self, operation, error, propagation=False):
+        if self.diagnostics is not None:
+            try:
+                if operation == 'observer-sample':
+                    self.diagnostics.capture(self.label, getattr(self.context, 'phase', 'sampling'),
+                                             operation, error, propagation,
+                                             observer_source=self.observer)
+                else:
+                    self.diagnostics.capture(self.label, getattr(self.context, 'phase', 'sampling'),
+                                             operation, error, propagation)
+            except BaseException:
+                # An unavailable diagnostic cannot replace the real exception
+                # or establish successful qualification.
+                self.diagnostics.incomplete = True
 
     def sample(self):
-        with self.lock:
-            state = self.observer.sample()
-            state.update(self.result.observe(state))
-            self.last = state
-            with self.path.open('a') as stream:
-                stream.write(json.dumps(state) + '\n')
+        operation, captured = 'lock-acquire', None
+        try:
+            with self.lock:
+                try:
+                    operation = 'observer-sample'
+                    state = self.observer.sample()
+                    if self.diagnostics is not None:
+                        try:
+                            if (getattr(self.observer, 'diagnostics_enabled', False) is True
+                                    and self.observer.diagnostics_incomplete):
+                                self.diagnostics.incomplete = True
+                        except BaseException:
+                            self.diagnostics.incomplete = True
+                    operation = 'result-observe'
+                    result = self.result.observe(state)
+                    operation = 'state-update'
+                    state.update(result)
+                    self.last = state
+                    operation = 'observation-open'
+                    with self.path.open('a') as stream:
+                        try:
+                            operation = 'observation-serialize'
+                            payload = json.dumps(state) + '\n'
+                            operation = 'observation-write'
+                            stream.write(payload)
+                        except BaseException as error:
+                            self.diagnose(operation, error)
+                            captured = error
+                            raise
+                        finally:
+                            operation = 'observation-close'
+                    operation = 'lock-release'
+                except BaseException as error:
+                    if error is not captured:
+                        self.diagnose(operation, error)
+                        captured = error
+                    raise
+                finally:
+                    operation = 'lock-release'
             return state
+        except BaseException as error:
+            if error is not captured:
+                self.diagnose(operation, error)
+            raise
 
     def run(self):
         while not self.stop.is_set():
@@ -477,19 +812,51 @@ class Watch:
             self.stop.wait(.05)
 
     def check(self):
-        require(self.error is None, 'Continuous process observation failed')
+        try:
+            require(self.error is None, 'Continuous process observation failed')
+        except BaseException as error:
+            self.diagnose('watch-check', error, propagation=True)
+            raise
 
     def result_state(self):
-        with self.lock:
-            return self.result.refresh()
+        operation, captured = 'lock-acquire', None
+        try:
+            with self.lock:
+                try:
+                    operation = 'result-refresh'
+                    state = self.result.refresh()
+                except BaseException as error:
+                    self.diagnose(operation, error)
+                    captured = error
+                    raise
+                finally:
+                    operation = 'lock-release'
+            return state
+        except BaseException as error:
+            if error is not captured:
+                self.diagnose(operation, error)
+            raise
 
     def finish(self):
-        self.stop.set()
-        self.thread.join(timeout=10)
-        require(not self.thread.is_alive(), 'Observer thread did not stop')
-        self.check()
-        # This read begins after the caller collected the GUI exit status.
-        return self.sample()
+        previous = getattr(self.context, 'phase', 'sampling')
+        self.context.phase = 'finalization'
+        operation = 'thread-stop'
+        try:
+            self.stop.set()
+            operation = 'thread-join'
+            self.thread.join(timeout=10)
+            operation = 'thread-alive'
+            require(not self.thread.is_alive(), 'Observer thread did not stop')
+            operation = 'watch-check'
+            self.check()
+            # This read begins after the caller collected the GUI exit status.
+            operation = 'final-sample'
+            return self.sample()
+        except BaseException as error:
+            self.diagnose(operation, error, propagation=operation in ('watch-check', 'final-sample'))
+            raise
+        finally:
+            self.context.phase = previous
 
 
 def wait_until(predicate, message, watch=None, timeout=20):
@@ -601,9 +968,21 @@ def make_media_handler(routes, active, event_log):
 
 
 def main():
+    global DIAGNOSTICS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--evidence-dir', type=Path)
+    parser.add_argument('--watch-diagnostics', action='store_true',
+                        help='retain bounded first-failure metadata in the private fixture')
+    parser.add_argument('--observer-diagnostics', action='store_true',
+                        help='include closed primitive exception metadata in Watch diagnostics')
+    parser.add_argument('--observer-identity-diagnostics', action='store_true',
+                        help='correlate private task identities and export only qualification-local aliases')
     args = parser.parse_args()
+    if args.observer_diagnostics and not args.watch_diagnostics:
+        parser.error('--observer-diagnostics requires --watch-diagnostics')
+    if args.observer_identity_diagnostics and not (args.observer_diagnostics and args.watch_diagnostics):
+        parser.error('--observer-identity-diagnostics requires --observer-diagnostics and --watch-diagnostics')
+    DIAGNOSTICS = None
     os.umask(0o077)
     root = Path(tempfile.mkdtemp(prefix='zenity-autonomous-', dir='/tmp'))
     evidence = args.evidence_dir.resolve() if args.evidence_dir else root
@@ -617,6 +996,31 @@ def main():
     server = None
     passed = False
     failure = None
+    errors = []
+    diagnostic_label = 'unknown'
+
+    def record_failure(phase, error=None):
+        nonlocal passed, failure
+        passed = False
+        if DIAGNOSTICS is not None:
+            cleanup = phase != 'Scenario qualification failed.'
+            try:
+                DIAGNOSTICS.capture(diagnostic_label, 'cleanup' if cleanup else 'scenario',
+                                    'evidence-export' if phase == 'Qualification evidence export failed.' else
+                                    'cleanup-failure' if cleanup else 'scenario-failure',
+                                    error if error is not None else ValueError())
+            except BaseException:
+                DIAGNOSTICS.incomplete = True
+        entry = {'phase': phase}
+        if error is not None:
+            entry['category'] = type(error).__name__
+            number = getattr(error, 'errno', None)
+            if type(number) is int and 0 < number < 4096:
+                entry['errno'] = number
+        errors.append(entry)
+        if failure is None:
+            failure = phase
+        print('FAIL: ' + phase, file=sys.stderr, flush=True)
 
     def interrupted(number, _frame):
         raise InterruptedError(f'Qualification interrupted by signal {number}')
@@ -625,6 +1029,11 @@ def main():
                     for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
 
     try:
+        if args.watch_diagnostics:
+            DIAGNOSTICS = FailureDiagnostics(root)
+            DIAGNOSTICS.register_observer(observer_module)
+            if args.observer_identity_diagnostics:
+                DIAGNOSTICS.register_identity_observer(observer_module)
         os_release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
                           if '=' in line)
         distro = tuple(os_release.get(key, '').strip('"') for key in ('ID', 'VERSION_ID'))
@@ -700,6 +1109,7 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         matrix = [(name, name) for name in ORDINARY]
         matrix += [('cancel-success-race', f'cancel-success-race-{index:02}') for index in range(10)]
         for scenario, label in matrix:
+            diagnostic_label = label
             print(f'Running {label}', flush=True)
             gates[label] = threading.Event()
             routes['/' + label + '.mp4'] = (label, source, gates[label],
@@ -724,7 +1134,11 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
             with raw.open('wb') as log:
                 process = subprocess.Popen(['bash', str(PROJECT / 'download-video-gui.sh')],
                                            env=env, stdout=log, stderr=subprocess.STDOUT)
-            watch = Watch(observer_module.Observer(token), root / (label + '.topology.jsonl'),
+            observer = (observer_module.Observer(token, diagnostics=True, identity_diagnostics=True)
+                        if args.observer_identity_diagnostics else
+                        observer_module.Observer(token, diagnostics=True) if args.observer_diagnostics else
+                        observer_module.Observer(token))
+            watch = Watch(observer, root / (label + '.topology.jsonl'),
                           ResultWitness(final, observer_module))
             children.append((label, process, watch))
             stage = dict(transfer_active=False, ffmpeg_active=False)
@@ -833,6 +1247,7 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
                 wait_until(lambda: not watch.sample()['live'], 'Selected folder descendants did not stop',
                            watch, timeout=10)
             state = watch.finish()
+            validate_process_observation(state)
             diagnostics_clean, state_clean = privacy_evidence(root, raw)
             row = dict(scenario=scenario, label=label, status=process.returncode, events=observed(complete=True),
                        output_present=present, output_verified=verified, observer_error=watch.error is not None,
@@ -852,13 +1267,11 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
                             'Captured pixel evidence changed or is absent')
             require(not (root / (label + '.barrier-failed.json')).exists(), 'Transfer barrier expired')
             gates[label].set()
-            print(f'PASS: {label}', flush=True)
         validate_evidence(dict(schema=1, scenarios=rows))
         require(source_identity() == identity, 'Candidate source changed during qualification')
         passed = True
     except BaseException as error:
-        failure = type(error).__name__ + ': ' + str(error)
-        print('FAIL: ' + failure, file=sys.stderr, flush=True)
+        record_failure('Scenario qualification failed.', error)
     finally:
         # Preserve the application verdict before rescue. Cleanup may turn PASS
         # into FAIL, but can never erase an earlier observation failure.
@@ -866,33 +1279,50 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
             nonlocal passed
             try:
                 write_json(path, value)
-            except Exception as error:
-                passed = False
-                print('FAIL: cleanup evidence write failed (' + type(error).__name__ + ')',
-                      file=sys.stderr, flush=True)
+            except BaseException as error:
+                record_failure('Cleanup evidence write failed.', error)
 
         for number in old_handlers:
-            signal.signal(number, signal.SIG_IGN)
-        record_cleanup(root / 'summary.json', dict(schema=1, passed=passed, failure=failure, scenarios=rows))
-        for label, process, watch in children:
             try:
+                signal.signal(number, signal.SIG_IGN)
+            except BaseException as error:
+                record_failure('Cleanup signal handler setup failed.', error)
+        record_cleanup(root / 'summary.json', dict(schema=1, passed=False, failure=failure,
+                                                  errors=errors, scenarios=rows))
+        for label, process, watch in children:
+            diagnostic_label = label
+            try:
+                state = None
                 try:
-                    state = watch.finish()
-                except Exception as error:
-                    passed = False
+                    observed = watch.finish()
+                    validate_process_observation(observed)
+                    state = observed
+                except BaseException as error:
+                    record_failure('Terminal process observation failed.', error)
                     record_cleanup(root / (label + '.observer-error.json'), {'category': type(error).__name__})
-                    # Last observations grant no passing verdict. They may
-                    # identify fixture processes for individually revalidated
-                    # rescue when a later ambient procfs inventory has failed.
-                    state = watch.last or {'live': {}}
-                record_cleanup(root / (label + '.final-before-rescue.json'), state)
-                if state['live'] or process.poll() is None:
-                    passed = False
+                if state is not None and state['url_in_argv']:
+                    record_failure('Terminal URL argument exposure.')
+                # An older sample is only a rescue hint, never a replacement
+                # for missing terminal evidence. Identity checks still precede
+                # each signal below, and the private fixture is retained.
+                rescue = state
+                if rescue is None and watch.last is not None:
+                    try:
+                        validate_process_observation(watch.last)
+                        rescue = watch.last
+                    except BaseException as error:
+                        record_failure('Rescue observation is incomplete.', error)
+                live_residue = (rescue is not None and bool(rescue['live'])) or process.poll() is None
+                if live_residue:
+                    record_failure('Live process residue before rescue.')
+                record_cleanup(root / (label + '.final-before-rescue.json'),
+                               state if state is not None else {'observation_complete': False})
+                if live_residue:
                     record_cleanup(root / (label + '.rescue.json'), dict(label=label,
                                    monotonic_ns=time.monotonic_ns(), event='failure-before-rescue'))
                     if process.poll() is None:
                         process.terminate()
-                    for pid, identity in state['live'].items():
+                    for pid, identity in (rescue['live'].items() if rescue is not None else ()):
                         handle = None
                         try:
                             handle = os.pidfd_open(int(pid))
@@ -901,8 +1331,8 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
                                 signal.pidfd_send_signal(handle, signal.SIGKILL)
                         except (ProcessLookupError, FileNotFoundError):
                             pass
-                        except Exception as error:
-                            passed = False
+                        except BaseException as error:
+                            record_failure('Process identity cleanup failed.', error)
                             record_cleanup(root / (label + '.identity-cleanup-error.json'),
                                            {'category': type(error).__name__})
                         finally:
@@ -915,57 +1345,85 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
                         # safe to rescue even if no observer sample succeeded.
                         process.kill()
                         process.wait(timeout=10)
-            except Exception as error:
-                passed = False
+            except BaseException as error:
+                record_failure('Process cleanup failed.', error)
                 record_cleanup(root / (label + '.cleanup-error.json'), {'category': type(error).__name__})
             finally:
                 # Rescue remains possible even if a malformed snapshot or a
                 # failed pidfd interrupted the per-identity rescue above.
                 if process.poll() is None:
-                    passed = False
+                    record_failure('Direct child remained alive before rescue.')
                     try:
                         process.kill()
                         process.wait(timeout=10)
-                    except Exception as error:
+                    except BaseException as error:
+                        record_failure('Direct child cleanup failed.', error)
                         record_cleanup(root / (label + '.parent-cleanup-error.json'),
                                        {'category': type(error).__name__})
                 try:
                     watch.result.close()
-                except Exception as error:
-                    passed = False
+                except BaseException as error:
+                    record_failure('Result witness cleanup failed.', error)
                     record_cleanup(root / (label + '.result-cleanup-error.json'),
                                    {'category': type(error).__name__})
         for gate in gates.values():
-            gate.set()
+            try:
+                gate.set()
+            except BaseException as error:
+                record_failure('Fixture barrier cleanup failed.', error)
         try:
             if server:
                 server.shutdown()
                 server.server_close()
-        except Exception as error:
-            passed = False
+        except BaseException as error:
+            record_failure('Fixture server cleanup failed.', error)
             record_cleanup(root / 'server-cleanup-error.json', {'category': type(error).__name__})
         finally:
             if session:
                 try:
                     session.close()
-                except Exception as error:
-                    passed = False
+                except BaseException as error:
+                    record_failure('Fixture session cleanup failed.', error)
                     record_cleanup(root / 'session-cleanup-error.json', {'category': type(error).__name__})
         for raw in (root / 'private-diagnostics').glob('*.raw'):
             try:
                 raw.unlink()
-            except Exception as error:
-                passed = False
+            except BaseException as error:
+                record_failure('Private diagnostic cleanup failed.', error)
                 record_cleanup(root / 'diagnostic-cleanup-error.json', {'category': type(error).__name__})
-        record_cleanup(root / 'summary.json', dict(schema=1, passed=passed, failure=failure, scenarios=rows))
-        try:
-            export_evidence(root, evidence, dict(schema=1, passed=passed, failure=failure, scenarios=rows))
-        except Exception as error:
-            passed = False
-            print('FAIL: evidence export failed (' + type(error).__name__ + ')', file=sys.stderr, flush=True)
-        finally:
-            for number, handler in old_handlers.items():
+        for number, handler in old_handlers.items():
+            try:
                 signal.signal(number, handler)
+            except BaseException as error:
+                record_failure('Qualification signal handler restoration failed.', error)
+        if DIAGNOSTICS is not None:
+            if DIAGNOSTICS.incomplete:
+                record_failure('First-failure diagnostic is incomplete.')
+            elif DIAGNOSTICS.events and passed:
+                # Metadata is not a success oracle; an error observed only by
+                # the opt-in diagnostic still prevents a diagnostic-run PASS.
+                record_failure('First-failure diagnostic recorded an error.')
+            try:
+                write_json(root / 'watch-first-failure-summary.json', DIAGNOSTICS.snapshot())
+            except BaseException as error:
+                DIAGNOSTICS.incomplete = True
+                record_failure('First-failure diagnostic snapshot failed.', error)
+        record_cleanup(root / 'summary.json', dict(schema=1, passed=False, failure=failure,
+                                                  errors=errors, scenarios=rows))
+        try:
+            export_evidence(root, evidence, dict(schema=1, passed=passed, failure=failure,
+                                                 errors=errors, scenarios=rows))
+        except BaseException as error:
+            record_failure('Qualification evidence export failed.', error)
+            if DIAGNOSTICS is not None:
+                try:
+                    write_json(root / 'watch-first-failure-summary.json', DIAGNOSTICS.snapshot())
+                except BaseException as snapshot_error:
+                    DIAGNOSTICS.incomplete = True
+                    record_failure('First-failure diagnostic snapshot failed.', snapshot_error)
+    if passed:
+        for row in rows:
+            print(f"PASS: {row['label']}", flush=True)
     print('PASS: autonomous Zenity qualification' if passed else 'FAIL: autonomous Zenity qualification', flush=True)
     return 0 if passed else 1
 

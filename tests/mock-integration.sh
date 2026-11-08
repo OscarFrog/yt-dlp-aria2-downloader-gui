@@ -137,14 +137,13 @@ done
 [[ -r /proc/self/cmdline ]] \
     || test_error 'mock integration tests require a readable Linux /proc filesystem.'
 enable_mock_child_subreaping "$@"
-TEST_ROOT=$(mktemp -d)
-readonly TEST_ROOT
+# shellcheck source=tests/lib/mock-common.sh
+source "${PROJECT_DIR}/tests/lib/mock-common.sh"
+create_mock_test_root
+readonly TEST_ROOT TEST_ROOT_FD TEST_ROOT_IDENTITY
 readonly TEST_OWNER_BASHPID=${BASHPID}
-trap '
-    if [[ ${BASHPID} == "${TEST_OWNER_BASHPID}" ]]; then
-        rm -rf -- "${TEST_ROOT}" || true
-    fi
-' EXIT
+export YTDLP_ARIA2_MOCK_PROCESS_TOKEN=${TEST_ROOT}
+trap 'cleanup_test_root files-only' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -182,8 +181,6 @@ chmod 700 -- "${RUNTIME_DIR}"
 # after the PID-preserving subreaper bootstrap and before PATH/HOME overrides.
 # shellcheck source=tests/lib/mock-fixtures.sh
 source "${PROJECT_DIR}/tests/lib/mock-fixtures.sh"
-# shellcheck source=tests/lib/mock-common.sh
-source "${PROJECT_DIR}/tests/lib/mock-common.sh"
 # shellcheck source=tests/lib/mock-engine.sh
 source "${PROJECT_DIR}/tests/lib/mock-engine.sh"
 # shellcheck source=tests/lib/mock-gui.sh

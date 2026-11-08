@@ -9,9 +9,9 @@
 # Caller-owned globals: declare names without assigning values or changing
 # their existing readonly/export/array attributes, including function sourcing.
 declare -g \
-    OUTPUT_DIR GUI_UNDER_TEST LIST_ARGS_LOG \
+    PROJECT_DIR OUTPUT_DIR GUI_UNDER_TEST LIST_ARGS_LOG \
     RUNTIME_DIR TEST_OWNER_BASHPID HOME_DIR \
-    MOCK_BIN
+    MOCK_BIN TEST_ROOT TEST_ROOT_FD TEST_ROOT_IDENTITY
 
 # Sourced by mock-integration.sh in the same Bash process. Helpers and tests
 # share its PROJECT_DIR, private TEST_ROOT paths, command doubles and assertions;
@@ -370,28 +370,41 @@ wait_for_mock_process_to_stop() {
     local timeout=$3
     local label=$4
     local deadline=$((SECONDS + timeout))
-    local observed_start_time=''
-    local process_stat=''
-    local process_state=''
-    local -a process_fields=()
+    local observation_status=0
 
     while ((SECONDS < deadline)); do
-        [[ -r /proc/${pid}/stat ]] || return 0
-        process_stat=''
-        if ! { IFS= read -r process_stat <"/proc/${pid}/stat"; } 2>/dev/null; then
-            sleep 0.1
-            continue
+        if python3 -I -B - "${PROJECT_DIR}/tests/process-observer.py" \
+            "${pid}" "${expected_start_time}" <<'PY_MOCK_STOP'
+import importlib.util
+from pathlib import Path
+import sys
+
+helper, pid, expected = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('mock_stop_observer', helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+try:
+    for attempt in range(2):
+        try:
+            row = module.process_row(Path(f'/proc/{pid}/stat'))
+            break
+        except FileNotFoundError:
+            sys.exit(0)
+        except (ProcessLookupError, InterruptedError):
+            if attempt:
+                raise
+    if row['start'] != int(expected) or module.threads_are_quiescent(int(pid), row):
+        sys.exit(0)
+    sys.exit(1)
+except (OSError, ValueError, IndexError):
+    sys.exit(70)
+PY_MOCK_STOP
+        then
+            return 0
+        else
+            observation_status=$?
         fi
-        process_fields=()
-        read -r -a process_fields <<<"${process_stat##*) }"
-        if ((${#process_fields[@]} >= 20)); then
-            process_state=${process_fields[0]}
-            observed_start_time=${process_fields[19]}
-            if [[ ${observed_start_time} != "${expected_start_time}" ||
-                ${process_state} == Z || ${process_state} == X ]]; then
-                return 0
-            fi
-        fi
+        ((observation_status == 1)) || fail "${label}: process observation is incomplete"
         sleep 0.1
     done
 
@@ -456,75 +469,211 @@ proc_children_fallback_is_observable() {
 }
 
 find_test_processes() {
-    local cmdline_file
-    local pid
-    local cmdline
-    local IFS=' '
-    local -a cmdline_arguments=()
+    local observations=''
+    local pid start_time
+    local -a previous_identities=("${TEST_PROCESS_IDENTITIES[@]:-}")
+
+    if ! observations=$(
+        python3 -I -B - \
+            "${PROJECT_DIR}/tests/process-observer.py" \
+            "${YTDLP_ARIA2_MOCK_PROCESS_TOKEN:?mock process token is absent}" \
+            "${TEST_OWNER_BASHPID:-$$}" "${BASHPID}" \
+            "${previous_identities[@]}" <<'PY_MOCK_OBSERVATION'
+import importlib.util
+import os
+import sys
+
+helper, token, owner, caller, *previous = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('mock_process_observer', helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+try:
+    observed = module.Observer(token, marker_name='YTDLP_ARIA2_MOCK_PROCESS_TOKEN', allow_external=False)
+    rows = module.snapshot()
+    excluded = {int(owner), int(caller), os.getpid()}
+    for pid in excluded:
+        if pid in rows:
+            observed.known.add((pid, rows[pid]['start']))
+    for identity in previous:
+        if identity:
+            pid, start = identity.split(':')
+            observed.known.add((int(pid), int(start)))
+    state = observed.sample()
+    for pid, row in state['live'].items():
+        if int(pid) not in excluded:
+            print(pid, row['start'])
+except (OSError, ValueError, IndexError):
+    print('FAIL: mock process observation is incomplete.', file=sys.stderr)
+    sys.exit(70)
+PY_MOCK_OBSERVATION
+    ); then
+        return 70
+    fi
     TEST_PROCESS_PIDS=()
-
-    for cmdline_file in /proc/[0-9]*/cmdline; do
-        [[ -r ${cmdline_file} ]] || continue
-        pid=${cmdline_file#/proc/}
-        pid=${pid%/cmdline}
-        [[ ${pid} =~ ^[1-9][0-9]*$ ]] || continue
-        [[ ${pid} != "$$" && ${pid} != "${BASHPID}" ]] || continue
-
-        # Join argv with the same boundary spaces used by the leak-token
-        # predicate, without starting another process for every visible PID.
-        if ! { mapfile -d '' -t cmdline_arguments <"${cmdline_file}"; } 2>/dev/null; then
-            continue
-        fi
-        cmdline=${cmdline_arguments[*]}
-        [[ ${cmdline} == *"${TEST_ROOT}"* ]] || continue
+    TEST_PROCESS_IDENTITIES=()
+    while read -r pid start_time; do
+        [[ -n ${pid} ]] || continue
+        [[ ${pid} =~ ^[1-9][0-9]*$ && ${start_time} =~ ^[1-9][0-9]*$ ]] || return 70
         TEST_PROCESS_PIDS+=("${pid}")
-    done
+        TEST_PROCESS_IDENTITIES+=("${pid}:${start_time}")
+    done <<<"${observations}"
+}
+
+signal_test_processes() {
+    local requested_signal=$1
+    python3 -I -B - \
+        "${PROJECT_DIR}/tests/process-observer.py" \
+        "${YTDLP_ARIA2_MOCK_PROCESS_TOKEN:?mock process token is absent}" \
+        "${requested_signal}" "${TEST_PROCESS_IDENTITIES[@]:-}" <<'PY_MOCK_SIGNAL'
+import importlib.util
+import os
+from pathlib import Path
+import signal
+import sys
+
+helper, token, requested, *identities = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('mock_signal_observer', helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+marker = b'YTDLP_ARIA2_MOCK_PROCESS_TOKEN=' + token.encode()
+failed = False
+for identity in identities:
+    if not identity:
+        continue
+    pid, start = map(int, identity.split(':'))
+    descriptor = None
+    try:
+        descriptor = os.pidfd_open(pid)
+        row = module.process_row(Path(f'/proc/{pid}/stat'))
+        if row['start'] != start or module.threads_are_quiescent(pid, row):
+            continue
+        # A numeric identity alone never authorizes rescue of an unmarked task.
+        if not module.token_process_is_live(pid, marker):
+            if module.same_process(pid, row):
+                failed = True
+            continue
+        if not module.same_process(pid, row):
+            continue
+        signal.pidfd_send_signal(descriptor, getattr(signal, 'SIG' + requested))
+    except (FileNotFoundError, ProcessLookupError):
+        pass
+    except (OSError, ValueError, IndexError):
+        failed = True
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+if failed:
+    print('FAIL: mock rescue could not authenticate every live identity.', file=sys.stderr)
+    sys.exit(70)
+PY_MOCK_SIGNAL
 }
 
 assert_no_test_processes() {
     local label=$1
     local attempt
-    local pid
-    local cmdline=''
 
     for ((attempt = 0; attempt < 50; attempt++)); do
-        find_test_processes
+        find_test_processes || fail "${label}: process observation is incomplete"
         ((${#TEST_PROCESS_PIDS[@]} == 0)) && return 0
         sleep 0.1
     done
 
     printf 'FAIL: %s\n' "${label}" >&2
-    for pid in "${TEST_PROCESS_PIDS[@]}"; do
-        if [[ -r /proc/${pid}/cmdline ]]; then
-            cmdline=$(tr '\0' ' ' 2>/dev/null <"/proc/${pid}/cmdline" || true)
-        else
-            cmdline='<unavailable>'
-        fi
-        printf 'Leaked process %s: %s\n' "${pid}" "${cmdline}" >&2
-        kill -TERM -- "${pid}" 2>/dev/null || true
-    done
-
-    sleep 0.2
-    for pid in "${TEST_PROCESS_PIDS[@]}"; do
-        kill -KILL -- "${pid}" 2>/dev/null || true
-    done
+    printf 'Leaked mock process identity: %s\n' "${TEST_PROCESS_IDENTITIES[@]}" >&2
+    cleanup_test_processes || true
     exit 1
 }
 
 cleanup_test_processes() {
-    local pid
+    local attempt
 
-    set +e
-    find_test_processes
-    for pid in "${TEST_PROCESS_PIDS[@]}"; do
-        kill -TERM -- "${pid}" 2>/dev/null || true
-    done
+    find_test_processes || return 70
+    ((${#TEST_PROCESS_PIDS[@]} > 0)) || return 0
+    signal_test_processes TERM || return 70
     sleep 0.2
-    find_test_processes
-    for pid in "${TEST_PROCESS_PIDS[@]}"; do
-        kill -KILL -- "${pid}" 2>/dev/null || true
+    find_test_processes || return 70
+    signal_test_processes KILL || return 70
+    for ((attempt = 0; attempt < 20; attempt++)); do
+        find_test_processes || return 70
+        ((${#TEST_PROCESS_PIDS[@]} == 0)) && return 0
+        sleep 0.05
     done
-    set -e
+    return 70
+}
+
+create_mock_test_root() {
+    local visible_identity held_identity current_identity
+
+    TEST_ROOT=$(mktemp -d) || return 70
+    # Keep the admitted inode alive until cleanup; a pathname alone cannot
+    # distinguish our directory from a replacement at the same location.
+    if [[ ${TEST_ROOT} != /* || ${TEST_ROOT} == / || -L ${TEST_ROOT} ]] \
+        || ! visible_identity=$(stat -c '%d:%i:%u:%a' -- "${TEST_ROOT}") \
+        || ! exec {TEST_ROOT_FD}<"${TEST_ROOT}" \
+        || ! held_identity=$(stat -Lc '%d:%i:%u:%a' -- "/proc/self/fd/${TEST_ROOT_FD}") \
+        || ! current_identity=$(stat -c '%d:%i:%u:%a' -- "${TEST_ROOT}") \
+        || [[ ${visible_identity} != "${held_identity}" ||
+            ${current_identity} != "${held_identity}" ||
+            ${held_identity} != *":${EUID}:700" || ! -d ${TEST_ROOT} || -L ${TEST_ROOT} ]]; then
+        printf '%s\n' 'TEST ERROR: cannot authenticate the private test root; preserving it.' >&2
+        return 70
+    fi
+    TEST_ROOT_IDENTITY=${held_identity%:*:*}
+}
+
+remove_owned_mock_test_root() {
+    # Python 3.10 supports fd-safe rmtree, but not its later dir_fd argument.
+    # Only this child changes cwd, anchoring every recursive operation to the
+    # retained root. Refuse ambiguous roots before touching their contents.
+    python3 -I -B - "${TEST_ROOT}" "${TEST_ROOT_IDENTITY}" "${TEST_ROOT_FD}" <<'PY_MOCK_ROOT_CLEANUP'
+import os
+import shutil
+import stat
+import sys
+
+
+def remove_owned_root(path, identity, descriptor):
+    expected = tuple(int(part) for part in identity.split(":"))
+    if len(expected) != 2 or not os.path.isabs(path) or path == "/":
+        raise ValueError("invalid root identity")
+    root_fd = int(descriptor)
+    held = os.fstat(root_fd)
+    if (held.st_dev, held.st_ino) != expected or not stat.S_ISDIR(held.st_mode):
+        raise ValueError("root descriptor mismatch")
+    if held.st_uid != os.geteuid() or stat.S_IMODE(held.st_mode) != 0o700:
+        raise ValueError("root ownership mismatch")
+    if not shutil.rmtree.avoids_symlink_attacks:
+        raise ValueError("fd-safe cleanup unavailable")
+    parent, name = os.path.split(path)
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        def require_visible_root():
+            visible = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(visible.st_mode) or (visible.st_dev, visible.st_ino) != expected:
+                raise ValueError("visible root mismatch")
+
+        require_visible_root()
+        os.fchdir(root_fd)
+        for child in os.listdir(root_fd):
+            entry = os.stat(child, dir_fd=root_fd, follow_symlinks=False)
+            if stat.S_ISDIR(entry.st_mode):
+                shutil.rmtree(child)
+            else:
+                os.unlink(child, dir_fd=root_fd)
+        # The traversal never follows a replacement of the root pathname.
+        # This final check/rmdir is not an atomic same-UID adversary boundary.
+        require_visible_root()
+        os.rmdir(name, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+try:
+    remove_owned_root(*sys.argv[1:])
+except (OSError, ValueError):
+    print("TEST ERROR: test-root cleanup refused; preserving ambiguous or remaining files.", file=sys.stderr)
+    sys.exit(70)
+PY_MOCK_ROOT_CLEANUP
 }
 
 cleanup_test_root() {
@@ -539,10 +688,23 @@ cleanup_test_root() {
         exit "${status}"
     fi
 
-    cleanup_test_processes
-    if [[ -n ${TEST_ROOT:-} && ${TEST_ROOT} == /* && ${TEST_ROOT} != / ]]; then
-        rm -rf -- "${TEST_ROOT}" || true
+    # Before mock initialization no process registry exists yet.
+    if [[ ${1:-processes} == processes ]]; then
+        if ! cleanup_test_processes; then
+            printf '%s\n' 'TEST ERROR: test-process shutdown unconfirmed; preserving the test root.' >&2
+            if ((status == 0)); then
+                status=70
+            fi
+            exec {TEST_ROOT_FD}<&-
+            exit "${status}"
+        fi
     fi
+    if ! remove_owned_mock_test_root; then
+        if ((status == 0)); then
+            status=70
+        fi
+    fi
+    exec {TEST_ROOT_FD}<&-
     exit "${status}"
 }
 

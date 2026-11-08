@@ -3,7 +3,7 @@
 # ==============================================================================
 # Project     : yt-dlp-aria2-downloader-gui
 # File        : tests/rpm6-multisig-integration.sh
-# Purpose     : Validate RPM v6 multi-signature ordering and corruption semantics.
+# Purpose     : Validate RPM signatures and RPM Fusion bootstrap authentication.
 # ==============================================================================
 
 #
@@ -15,6 +15,8 @@
 # path cannot silently accumulate a second signer. Multi-signature semantics
 # are then exercised independently on a tiny RPM v6 fixture built locally with
 # %_rpmformat=6. Only ephemeral keys are used.
+# The qualification bootstrap is exercised with real signatures and isolated
+# trust stores. DNF is intercepted; this suite never installs an RPM on its host.
 
 set -Eeuo pipefail
 umask 077
@@ -435,6 +437,165 @@ test_rpm_v6_multisig_semantics() {
         || fail 'RPM 6 accepted one corrupt known signature alongside one valid signature'
 }
 
+test_rpm_fusion_bootstrap_authentication() {
+    local source_rpm=$1
+    local good_rpm="${root}/bootstrap-good.rpm"
+    local wrong_rpm="${root}/bootstrap-wrong.rpm"
+    local corrupt_rpm="${root}/bootstrap-corrupt.rpm"
+    local workflow="${BASH_SOURCE[0]%/*}/../.github/workflows/qualification.yml"
+    local signature=''
+
+    cp -- "${source_rpm}" "${good_rpm}"
+    cp -- "${source_rpm}" "${wrong_rpm}"
+    sign_rpm_v6 "${home_a}" "${fingerprint_a}" "${pass_a}" "${good_rpm}"
+    sign_rpm_v6 "${home_b}" "${fingerprint_b}" "${pass_b}" "${wrong_rpm}"
+    rpmkeys_fs "${keyring_a}" --checksig "${good_rpm}"
+    rpmkeys_fs "${keyring_b}" --checksig "${wrong_rpm}"
+    cp -- "${good_rpm}" "${corrupt_rpm}"
+    signature=$(first_signature "${corrupt_rpm}")
+    corrupt_signature_bytes "${corrupt_rpm}" "${signature}"
+
+    python3 -I -B - "${workflow}" "${root}" \
+        "${source_rpm}" "${good_rpm}" "${wrong_rpm}" "${corrupt_rpm}" \
+        "${pub_a}" "${pub_b}" "${fingerprint_a}" <<'PY_BOOTSTRAP_AUTHENTICATION'
+from pathlib import Path
+import hashlib
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+
+workflow, root, unsigned, good, wrong, corrupt, key_a, key_b = map(Path, sys.argv[1:9])
+fingerprint = sys.argv[9]
+source = workflow.read_text()
+start = '\n          gpg --homedir "${gpg_home}" --batch --no-options \\\n'
+end = '          dnf install --assumeyes aria2 ffmpeg\n'
+if source.count(start) != 1 or source.count(end) != 1:
+    raise AssertionError('RPM Fusion authentication block is not uniquely located')
+body = textwrap.dedent(source[source.index(start):source.index(end)])
+nevra = subprocess.check_output(
+    ['rpm', '-qp', '--qf', '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}', '--', str(unsigned)],
+    text=True,
+)
+
+# Exercise the workflow's actual verifier with fixture trust roots. The original
+# workflow retains its pinned RPM Fusion certificate and NEVRA. Both RPM trust
+# domains here are private; DNF is observed, never executed or installed on host.
+prefix = r'''set -Eeuo pipefail
+umask 077
+bootstrap_dir=$1
+readonly rpmfusion_fingerprint=$2
+readonly rpmfusion_nevra=$3
+gpg_home=${bootstrap_dir}/gpg
+key_listing=${bootstrap_dir}/key-listing
+rpm_keyring=${bootstrap_dir}/isolated-keyring
+system_keyring=${bootstrap_dir}/system-keyring
+events=${bootstrap_dir}/events
+rpmkeys() {
+    if [[ $# == 2 && $1 == --import ]]; then
+        printf 'system-import\n' >>"${events}"
+        command rpmkeys --define "_keyring fs" \
+            --define "_keyringpath ${system_keyring}" \
+            --define "_keyring_lockpath ${system_keyring}/.keyring.lock" \
+            --define "_rpmlock_path ${system_keyring}/.rpm.lock" "$@"
+    else
+        if [[ " $* " == *' --checksig '* ]]; then
+            printf 'verify\n' >>"${events}"
+        fi
+        command rpmkeys "$@"
+    fi
+}
+dnf() {
+    printf 'dnf\n' >>"${events}"
+    [[ $# == 4 && $1 == install && $2 == --assumeyes &&
+       $3 == --setopt=localpkg_gpgcheck=True &&
+       $4 == "${bootstrap_dir}/rpmfusion-free-release-44.noarch.rpm" ]] || exit 89
+}
+'''
+
+
+def run(label, package, key=key_a, expected_nevra=nevra, implementation=body):
+    with tempfile.TemporaryDirectory(prefix='bootstrap-' + label + '-', dir=root) as directory:
+        case = Path(directory)
+        for name in ('gpg', 'isolated-keyring', 'system-keyring'):
+            (case / name).mkdir(mode=0o700)
+        staged = case / 'rpmfusion-free-release-44.noarch.rpm'
+        shutil.copyfile(package, staged)
+        shutil.copyfile(key, case / 'RPM-GPG-KEY-rpmfusion-free-fedora-2020')
+        before = hashlib.sha256(staged.read_bytes()).hexdigest()
+        # Model global trust of the foreign signer without importing anything
+        # into the host RPM database. The workflow's private verifier must not
+        # acquire this authority from the separate transaction trust domain.
+        subprocess.run(['rpmkeys', '--define', '_keyring fs',
+                        '--define', f'_keyringpath {case / "system-keyring"}',
+                        '--define', f'_keyring_lockpath {case / "system-keyring/.keyring.lock"}',
+                        '--define', f'_rpmlock_path {case / "system-keyring/.rpm.lock"}',
+                        '--import', str(key_b)], check=True, capture_output=True)
+        result = subprocess.run(['bash', '-c', prefix + implementation, 'bootstrap-test',
+                                 str(case), fingerprint, expected_nevra],
+                                capture_output=True, text=True, timeout=20)
+        events = (case / 'events').read_text().splitlines() if (case / 'events').exists() else []
+        if hashlib.sha256(staged.read_bytes()).hexdigest() != before:
+            raise AssertionError('bootstrap verification changed its RPM input')
+        return result, events
+
+
+def require_refusal(observed, expected_events, reason):
+    result, events = observed
+    if result.returncode == 0 or events != expected_events:
+        raise AssertionError(reason)
+
+
+for label, package in (('signed-v6', good), ('signed-legacy', root / 'project-v4-one-signer.rpm')):
+    passed, events = run(label, package)
+    if passed.returncode or events != ['verify', 'system-import', 'dnf']:
+        raise AssertionError('valid signed fixture failed the complete authentication order: ' + passed.stderr)
+require_refusal(run('unsigned', unsigned), [], 'unsigned RPM reached installation')
+require_refusal(run('foreign-signer', wrong), ['verify'], 'foreign signer reached installation')
+require_refusal(run('corrupt-signature', corrupt), ['verify'], 'corrupt signature reached installation')
+require_refusal(run('foreign-certificate', good, key_b), [], 'foreign certificate reached verification')
+require_refusal(run('wrong-nevra', good, expected_nevra=nevra + '-different'),
+                ['verify'], 'wrong NEVRA reached installation')
+
+# Signature presence is independent of RPM's digest-only success. Deleting that
+# guard must reproduce the formerly admitted unsigned-package installation.
+presence_start = body.index('signature_state=$(\n')
+presence_end = body.index('\nrpmkeys \\\n', presence_start)
+without_presence = body[:presence_start] + body[presence_end:]
+observed = run('mutant-presence', unsigned, implementation=without_presence)
+if observed[0].returncode or observed[1] != ['verify', 'system-import', 'dnf']:
+    raise AssertionError('signature-presence mutant did not reach the expected unsafe admission')
+try:
+    require_refusal(observed, [], 'unsigned RPM reached installation')
+except AssertionError as error:
+    if str(error) != 'unsigned RPM reached installation':
+        raise
+else:
+    raise AssertionError('signature-presence deletion escaped the refusal oracle')
+
+verify_start = body.index('rpmkeys \\\n', body.index('rpmkeys \\\n') + 1)
+verify_end = body.index('\nresolved_nevra=', verify_start)
+without_verification = body[:verify_start] + body[verify_end:]
+observed = run('mutant-verifier', wrong, implementation=without_verification)
+if observed[0].returncode or observed[1] != ['system-import', 'dnf']:
+    raise AssertionError('isolated-verifier mutant did not admit the foreign signer')
+try:
+    require_refusal(observed, ['verify'], 'foreign signer reached installation')
+except AssertionError as error:
+    if str(error) != 'foreign signer reached installation':
+        raise
+else:
+    raise AssertionError('isolated-verifier deletion escaped the refusal oracle')
+
+without_dnf_check = body.replace(' --setopt=localpkg_gpgcheck=True', '', 1)
+observed = run('mutant-dnf', good, implementation=without_dnf_check)
+if observed[0].returncode != 89 or observed[1] != ['verify', 'system-import', 'dnf']:
+    raise AssertionError('DNF signature-policy deletion escaped its argument oracle')
+print('RPM Fusion bootstrap: real signatures, isolated signer, unsigned/corrupt/identity refusals and mutations passed; DNF was intercepted, no installation performed.')
+PY_BOOTSTRAP_AUTHENTICATION
+}
+
 main() {
     local source_rpm
 
@@ -446,6 +607,7 @@ main() {
     test_rpm_v4_legacy_signature "${source_rpm}"
     test_rpm_v4_v6_multisig "${source_rpm}"
     test_rpm_v6_multisig_semantics
+    test_rpm_fusion_bootstrap_authentication "${source_rpm}"
 
     printf 'Project RPM format: v%s (single-signature production model confirmed).\n' "${project_format}"
     printf 'RPM v6 multi-signature qualification passed (%s).\n' "${rpm_version}"
