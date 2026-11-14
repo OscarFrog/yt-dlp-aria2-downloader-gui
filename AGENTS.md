@@ -111,6 +111,41 @@ Permanent comments explain durable intent, constraints, fallbacks, or caller
 contracts. Keep chronological findings in commits, pull requests, issues,
 `CHANGELOG.md`, or qualification reports.
 
+## Locale Independence — Mandatory Development Rule
+
+All Python, Bash, test, tooling, packaging and workflow code must behave
+deterministically regardless of the host system locale. Machine-readable
+command output, security decisions, parsing, numeric formats and test verdicts
+must never depend on an inherited locale.
+
+Use a deterministic C locale at appropriate executable or subprocess boundaries,
+or a documented structured machine protocol. Establish a required locale before
+the first sensitive operation. Neutralize GNU `LANGUAGE` at technical boundaries
+when translated diagnostics form part of the protocol. Prefer structured output
+and checked exit statuses to human-readable messages; translated success text
+never substitutes for cryptographic verification.
+
+All text data requiring UTF-8 must have an explicit encoding contract. Preserve
+Unicode paths, filenames, media titles, metadata and subtitles; retain binary
+data as bytes. Neither C nor `C.UTF-8` alone proves the correct stream encoding.
+Do not depend on a locale being installed without checking availability and
+providing a compatible path. Do not alter the user's session or system locale.
+Sourced libraries must not silently mutate their caller's locale, and importable
+Python modules must not change process-wide locale or environment as a side
+effect. English user-facing messages are acceptable.
+
+New code must include locale-independence regression tests when it invokes
+locale-sensitive tools or processes text. Update the canonical source and locale
+contract inventories, exercise contrasting available locales and retain negative
+controls for changed technical boundaries. Passing a static inventory check does
+not prove semantic independence; review and behavioral tests remain mandatory.
+
+Fedora 45 with a French host locale is a primary supported developer environment.
+Python 3.10 and Bash 4.4 remain the minimum compatibility targets. Keep useful
+Ubuntu and earlier Fedora coverage unless an explicit compatibility decision
+changes it. See `SHELL_STYLE.md` and `TESTING.md` for boundary and qualification
+contracts. Changes violating these requirements are review-blocking.
+
 ## Code Review Rules
 
 Treat the following as blocking findings unless the task explicitly and safely

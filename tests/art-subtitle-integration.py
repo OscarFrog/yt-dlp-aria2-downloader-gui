@@ -14,6 +14,7 @@ import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -221,6 +222,140 @@ class ParserTests(unittest.TestCase):
         second = SUBS.parse_webvtt(mapped_vtt("00:00:00.000", 90000, "00:00:00.100", "00:00:00.900", "second"))
         cues, _timeline = SUBS.normalize_fragments([first, second], structure["discontinuities"])
         self.assertEqual(cues[1]["start_ms"], 1100)
+
+
+class LocaleProtocolTests(unittest.TestCase):
+    def test_track_summaries_are_utf8_with_ascii_stdout(self):
+        plan, expected = sample_plan()
+        selection = plan["arte_selection"]["selection"]
+        catalogue = {"version": 1, "policy": TRACKS.POLICY, "id": selection["catalogue_id"],
+                     "audio": plan["_arte_sources"]["audio"],
+                     "subtitles": plan["_arte_sources"]["subtitles"]}
+        with tempfile.TemporaryDirectory(prefix="locale-summary-") as temporary:
+            directory = Path(temporary)
+            for name, data in (("plan", plan), ("expected", expected),
+                               ("catalogue", catalogue), ("selection", selection)):
+                TRACKS.write_json(directory / (name + ".json"), data)
+            for command, arguments in (
+                ("verified-summary", ["--plan", str(directory / "plan.json"),
+                                      "--expectation", str(directory / "expected.json")]),
+                ("summary", ["--catalogue", str(directory / "catalogue.json"),
+                             "--selection", str(directory / "selection.json")]),
+            ):
+                with self.subTest(command=command):
+                    result = subprocess.run(
+                        [sys.executable, "-I", "-B", "-X", "utf8=0", str(ROOT / "private-art-tracks.py"),
+                         command, *arguments], env=dict(os.environ, LC_ALL="C", LANGUAGE="fr_FR:fr"),
+                        capture_output=True, timeout=15, check=False)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    decoded = result.stdout.decode("utf-8")
+                    self.assertIn("Japanese — original audio", decoded)
+                    self.assertIn("French — full subtitles", decoded)
+                    self.assertEqual(result.stderr, b"")
+
+    def test_utf8_paths_subtitles_digests_and_machine_numbers(self):
+        # Start a fresh interpreter so the caller's locale affects startup as
+        # well as libc categories. Protocol bytes must not follow that locale.
+        script = r'''
+import hashlib
+import importlib.util
+import json
+import locale
+from pathlib import Path
+import sys
+import tempfile
+
+locale.setlocale(locale.LC_ALL, "")
+if len(sys.argv) > 2:
+    assert locale.localeconv()["decimal_point"] == sys.argv[2]
+root = Path(sys.argv[1])
+def load(name):
+    spec = importlib.util.spec_from_file_location(name, root / (name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+tracks = load("private-art-tracks")
+subs = load("private-art-subtitle")
+media = load("private-art-media")
+words = "\u00c9t\u00e9 fran\u00e7ais \u2014 \u65e5\u672c\u8a9e"
+payload = ("WEBVTT\n\n00:01.125 --> 00:02.250\n" + words + "\n").encode("utf-8")
+cues = subs.parse_webvtt(payload)["cues"]
+srt = subs.serialize_srt(cues)
+assert subs.parse_srt(srt) == subs.normalized_cues(cues)
+assert words.encode("utf-8") in srt
+assert subs.timestamp_string(1125) == "00:00:01,125"
+assert media.decimal_value("1.125") == media.Decimal("1.125")
+assert media.decimal_value("1,125") is None
+assert media.decimal_value("NaN") is None
+assert media.duration_from_stream({"tags": {"DURATION": "00:00:01.125"}}) == media.Decimal("1.125")
+assert media.duration_from_stream({"tags": {"DURATION": "00:00:01,125"}}) is None
+unordered = [dict(cues[0], text=text) for text in ("\u00e9", "z", "a")]
+assert [cue["text"] for cue in subs.normalized_cues(unordered)] == ["a", "z", "\u00e9"]
+with tempfile.TemporaryDirectory(prefix="locale-art-") as temporary:
+    directory = Path(temporary) / words
+    directory.mkdir(mode=0o700)
+    path = directory / "sous titres \u00e9.json"
+    state = {"title": words, "cues": subs.normalized_cues(cues)}
+    tracks.write_json(path, state)
+    assert tracks.read_json(path) == state
+    assert words.encode("utf-8") in path.read_bytes()
+    assert path.stat().st_mode & 0o777 == 0o600
+    before = path.read_bytes()
+    try:
+        tracks.write_json(path, {"title": "replaced"})
+    except OSError:
+        pass
+    else:
+        raise AssertionError("pre-existing Unicode file overwritten")
+    assert path.read_bytes() == before
+    assert tracks.canonical_digest(state) == hashlib.sha256(
+        json.dumps(state, sort_keys=True, separators=(",", ":"),
+                   ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+print("UTF-8 protocols and machine numbers preserved")
+'''
+        cases = [("inherited", os.environ.copy(), None)]
+        available = subprocess.run(["locale", "-a"], capture_output=True, check=True,
+                                   timeout=10).stdout.decode("ascii").splitlines()
+        french = next((name for name in available
+                       if name.lower().replace("-", "") == "fr_fr.utf8"), None)
+        if french:
+            # Exercise category precedence with a UTF-8 filesystem category;
+            # numeric protocols remain decimal-dot even when libc uses commas.
+            cases.extend([
+                ("LC_ALL overrides French categories",
+                 dict(os.environ, LANG=french, LC_ALL="C", LC_NUMERIC=french,
+                      LANGUAGE="fr_FR:fr"), "."),
+                ("French LC_ALL overrides C categories",
+                 dict(os.environ, LANG="C", LC_ALL=french, LC_NUMERIC="C",
+                      LANGUAGE="en_US:en"), ","),
+                ("explicit numeric C with French text",
+                 dict(os.environ, LANG=french, LC_ALL="", LC_CTYPE=french,
+                      LC_NUMERIC="C", LANGUAGE="fr_FR:fr"), "."),
+                ("French numbers with C language",
+                 dict(os.environ, LANG="C", LC_ALL="", LC_CTYPE=french,
+                      LC_NUMERIC=french, LANGUAGE="en_US:en"), ","),
+            ])
+        for label, environment, decimal_point in cases:
+            with self.subTest(environment=label):
+                arguments = [sys.executable, "-I", "-B", "-c", script, str(ROOT)]
+                if decimal_point is not None:
+                    arguments.append(decimal_point)
+                result = subprocess.run(arguments, env=environment,
+                                        capture_output=True, timeout=15, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+                self.assertEqual(result.stdout, b"UTF-8 protocols and machine numbers preserved\n")
+
+    def test_unavailable_locale_cannot_report_a_qualified_protocol_run(self):
+        # Locale qualification must prove libc accepted the requested locale;
+        # Python's startup fallback alone is not evidence that it was tested.
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c",
+             'import locale; locale.setlocale(locale.LC_ALL, ""); print("qualified")'],
+            env=dict(os.environ, LANG="C", LC_ALL="project_missing_LOCALE.utf8",
+                     LC_NUMERIC="C", LANGUAGE="fr_FR:fr"),
+            capture_output=True, timeout=15, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"")
 
 
 class ConversionTests(unittest.TestCase):

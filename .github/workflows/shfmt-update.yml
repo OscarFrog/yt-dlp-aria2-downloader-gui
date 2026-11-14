@@ -712,7 +712,7 @@ jobs:
             printf 'Error: shfmt automation may not modify its canonical inventory controller.\n' >&2
             exit 65
           fi
-          comm -23 -- "${patch_paths}" "${allowed_file}" >"${unexpected_paths}"
+          LC_ALL=C comm -23 -- "${patch_paths}" "${allowed_file}" >"${unexpected_paths}"
           if [[ -s ${unexpected_paths} ]]; then
             printf 'Error: shfmt candidate contains paths outside the trusted allowlist:\n' >&2
             cat -- "${unexpected_paths}" >&2
@@ -1059,7 +1059,7 @@ jobs:
 
           [[ -s ${patch_paths} ]]
           grep -Fxq 'scripts/dev-tools/shfmt-pin.env' "${patch_paths}"
-          comm -23 -- "${patch_paths}" "${allowed_file}" >"${unexpected_paths}"
+          LC_ALL=C comm -23 -- "${patch_paths}" "${allowed_file}" >"${unexpected_paths}"
           if [[ -s ${unexpected_paths} ]]; then
             printf 'Error: shfmt handoff contains paths outside the allowlist:\n' >&2
             cat -- "${unexpected_paths}" >&2
@@ -1088,7 +1088,7 @@ jobs:
           git diff --name-only --no-renames | LC_ALL=C sort -u >"${changed_paths}"
           [[ -s ${changed_paths} ]]
           grep -Fxq 'scripts/dev-tools/shfmt-pin.env' "${changed_paths}"
-          comm -23 -- "${changed_paths}" "${allowed_file}" >"${unexpected_paths}"
+          LC_ALL=C comm -23 -- "${changed_paths}" "${allowed_file}" >"${unexpected_paths}"
           if [[ -s ${unexpected_paths} ]]; then
             printf 'Error: applied shfmt handoff changed unexpected paths:\n' >&2
             cat -- "${unexpected_paths}" >&2
@@ -1145,7 +1145,7 @@ jobs:
               fail("invalid immutable source identity")
           source_pattern = r'(?m)^readonly VERSION=([\x22\x27])([0-9]+\.[0-9]+\.[0-9]+)\1$'
           original = subprocess.check_output(
-              ["git", "show", f"{base}:download-video.sh"], text=True
+              ["git", "show", f"{base}:download-video.sh"], text=True, encoding="utf-8"
           )
           source_versions = re.findall(source_pattern, original)
           if len(source_versions) != 1 or source_versions[0][1] != project_text:

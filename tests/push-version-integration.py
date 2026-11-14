@@ -35,12 +35,12 @@ def write_version_sources(root, version, published="2.3.11"):
     (root / "download-video.sh").write_text(
         f'#!/usr/bin/env bash\nreadonly VERSION="{version}"\n', encoding="utf-8"
     )
-    (root / "install-fedora.sh").write_text(f"readonly APP_VERSION='{version}'\n")
+    (root / "install-fedora.sh").write_text(f"readonly APP_VERSION='{version}'\n", encoding="utf-8")
     (root / "test-static.sh").write_text(
         f"readonly EXPECTED_VERSION='{version}'\n"
         f"readonly EXPECTED_PUBLISHED_VERSION='{published}'\n"
-    )
-    (root / "CHANGELOG.md").write_text(f"# Changelog\n\n## {version} - Unreleased\n")
+    , encoding="utf-8")
+    (root / "CHANGELOG.md").write_text(f"# Changelog\n\n## {version} - Unreleased\n", encoding="utf-8")
     markers = {
         "README.md": f"The current development version is **{version}**.\n",
         "README.fr.md": f"La version de développement actuelle est la **{version}**.\n",
@@ -52,7 +52,7 @@ def write_version_sources(root, version, published="2.3.11"):
         (root / name).write_text(text, encoding="utf-8")
     spec = root / PREPARE.RPM_PATH
     spec.parent.mkdir(parents=True, exist_ok=True)
-    spec.write_text(f"Name: fixture\n%changelog\n* Sat Sep 12 2026 Fixture - {version}-1\n- Previous.\n")
+    spec.write_text(f"Name: fixture\n%changelog\n* Sat Sep 12 2026 Fixture - {version}-1\n- Previous.\n", encoding="utf-8")
 
 
 @unittest.skipUnless(shutil.which("git"), "Git is required for the local push-hook qualification")
@@ -185,7 +185,7 @@ class PushVersionTests(unittest.TestCase):
     def test_ordinary_push_needs_no_remote_version_objects_but_context_does(self):
         other = self.root / "other checkout"
         self.git("clone", str(self.remote), str(other))
-        (other / "download-video.sh").write_text('readonly VERSION="2.3.13"\n')
+        (other / "download-video.sh").write_text('readonly VERSION="2.3.13"\n', encoding="utf-8")
         self.git("add", ".", cwd=other)
         self.git("commit", "--no-gpg-sign", "-m", "remote advance", cwd=other)
         self.git("push", "origin", "main", cwd=other)
@@ -200,7 +200,7 @@ class PushVersionTests(unittest.TestCase):
         self.commit("2.3.13", "valid branch")
         self.git("switch", "-c", "invalid", "main")
         self.commit("2.3.12", "invalid branch")
-        (self.repo / "install-fedora.sh").write_text("readonly APP_VERSION='2.3.11'\n")
+        (self.repo / "install-fedora.sh").write_text("readonly APP_VERSION='2.3.11'\n", encoding="utf-8")
         self.git("add", ".")
         self.git("commit", "--no-gpg-sign", "-m", "incoherent source")
         self.git("push", "origin", "feature", "invalid", expected=1)
@@ -209,7 +209,7 @@ class PushVersionTests(unittest.TestCase):
 
     def test_engine_only_bump_is_rejected_before_remote_lookup_or_push(self):
         self.commit("2.3.12", "coherent baseline")
-        (self.repo / "download-video.sh").write_text('readonly VERSION="2.3.13"\n')
+        (self.repo / "download-video.sh").write_text('readonly VERSION="2.3.13"\n', encoding="utf-8")
         result = self.check("check", "--remote", "not-configured", expected=65)
         self.assertIn(b"test-static.sh development version", result.stderr)
         self.git("add", ".")
@@ -220,7 +220,7 @@ class PushVersionTests(unittest.TestCase):
 
     def test_committed_incoherence_cannot_be_hidden_by_worktree_repairs(self):
         self.commit("2.3.13", "candidate")
-        (self.repo / "install-fedora.sh").write_text("readonly APP_VERSION='2.3.12'\n")
+        (self.repo / "install-fedora.sh").write_text("readonly APP_VERSION='2.3.12'\n", encoding="utf-8")
         self.git("add", ".")
         self.git("commit", "--no-gpg-sign", "-m", "stale bootstrap")
         write_version_sources(self.repo, "2.3.13")
@@ -242,7 +242,7 @@ class PushVersionTests(unittest.TestCase):
 
     def test_local_replace_refs_cannot_disguise_the_pushed_commit(self):
         self.commit("2.3.12", "source before corruption")
-        (self.repo / "install-fedora.sh").write_text("readonly APP_VERSION='2.3.11'\n")
+        (self.repo / "install-fedora.sh").write_text("readonly APP_VERSION='2.3.11'\n", encoding="utf-8")
         self.git("add", ".")
         self.git("commit", "--no-gpg-sign", "-m", "incoherent source")
         invalid = self.git("rev-parse", "HEAD").stdout.strip().decode()
@@ -336,13 +336,13 @@ class OfflineCoherenceTests(unittest.TestCase):
             with self.subTest(carrier=name):
                 write_version_sources(self.root, "2.3.13")
                 path = self.root / name
-                path.write_text(path.read_text().replace("2.3.13", "2.3.12"))
+                path.write_text(path.read_text(encoding="utf-8").replace("2.3.13", "2.3.12"), encoding="utf-8")
                 with self.assertRaises(CHECK.CheckError):
                     CHECK.worktree_version(self.root)
 
     def test_published_metadata_stays_distinct_and_coherent(self):
         readme = self.root / "README.fr.md"
-        readme.write_text(readme.read_text().replace("2.3.11", "2.3.12"))
+        readme.write_text(readme.read_text(encoding="utf-8").replace("2.3.11", "2.3.12"), encoding="utf-8")
         with self.assertRaisesRegex(CHECK.CheckError, "published references"):
             CHECK.worktree_version(self.root)
         write_version_sources(self.root, "2.3.13")
@@ -360,7 +360,7 @@ class OfflineCoherenceTests(unittest.TestCase):
             with self.subTest(carrier=name):
                 write_version_sources(self.root, "2.3.13")
                 path = self.root / name
-                path.write_text(previous + path.read_text())
+                path.write_text(previous + path.read_text(encoding="utf-8"), encoding="utf-8")
                 with self.assertRaisesRegex(CHECK.CheckError, "exactly once"):
                     CHECK.worktree_version(self.root)
 
@@ -369,9 +369,9 @@ class OfflineCoherenceTests(unittest.TestCase):
         for inserted_version in ("2.3.14", "2.3.13"):
             with self.subTest(heading=inserted_version):
                 write_version_sources(self.root, "2.3.13")
-                path.write_text(path.read_text().replace(
+                path.write_text(path.read_text(encoding="utf-8").replace(
                     "# Changelog\n", f"# Changelog\n\n## {inserted_version} - Unreleased\n", 1
-                ))
+                ), encoding="utf-8")
                 with self.assertRaisesRegex(CHECK.CheckError, "begin with one unique"):
                     CHECK.worktree_version(self.root)
 
@@ -381,7 +381,7 @@ class OfflineCoherenceTests(unittest.TestCase):
                               ("-f tag=v2.3.13", "-f tag=v2.3.130")):
             with self.subTest(argument=before):
                 write_version_sources(self.root, "2.3.13")
-                path.write_text(path.read_text().replace(before, after))
+                path.write_text(path.read_text(encoding="utf-8").replace(before, after), encoding="utf-8")
                 with self.assertRaisesRegex(CHECK.CheckError, "manual release"):
                     CHECK.worktree_version(self.root)
 
@@ -392,7 +392,7 @@ class OfflineCoherenceTests(unittest.TestCase):
                            "* malformed leading entry\n"):
             with self.subTest(entry=additional):
                 write_version_sources(self.root, "2.3.13")
-                path.write_text(path.read_text().replace("%changelog\n", "%changelog\n" + additional))
+                path.write_text(path.read_text(encoding="utf-8").replace("%changelog\n", "%changelog\n" + additional), encoding="utf-8")
                 with self.assertRaisesRegex(CHECK.CheckError, "RPM changelog"):
                     CHECK.worktree_version(self.root)
 
@@ -407,6 +407,17 @@ class OfflineCoherenceTests(unittest.TestCase):
         static.symlink_to("other-static")
         with self.assertRaisesRegex(CHECK.CheckError, "regular file"):
             CHECK.worktree_version(self.root)
+
+
+class LocaleProtocolTests(unittest.TestCase):
+    def test_source_carrier_validation_under_an_ascii_parent(self):
+        result = subprocess.run(
+            [sys.executable, "-B", str(Path(__file__).resolve()), "OfflineCoherenceTests"],
+            env=dict(os.environ, LC_ALL="C", LANGUAGE="fr_FR:fr",
+                     PYTHONUTF8="0", PYTHONCOERCECLOCALE="0"),
+            capture_output=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class SourceVersionPreparationTests(unittest.TestCase):
@@ -469,16 +480,16 @@ class SourceVersionPreparationTests(unittest.TestCase):
             with self.subTest(maintenance=maintenance, existing_reason=existing_reason):
                 write_version_sources(self.root, "2.3.13")
                 changelog = self.root / "CHANGELOG.md"
-                history = changelog.read_text().removeprefix("# Changelog\n\n")
+                history = changelog.read_text(encoding="utf-8").removeprefix("# Changelog\n\n")
                 notes = "\n### Features\n\n- Accumulated feature.\n\n"
                 if maintenance:
                     notes += "### Maintenance\n\n"
                 notes += "- Accumulated correction.\n\n"
                 if existing_reason:
                     notes += f"- {reason}\n\n"
-                changelog.write_text("# Changelog\n\n## Unreleased\n" + notes + history)
+                changelog.write_text("# Changelog\n\n## Unreleased\n" + notes + history, encoding="utf-8")
                 self.prepare(target="2.4.0", reason=reason)
-                prepared = changelog.read_text()
+                prepared = changelog.read_text(encoding="utf-8")
                 self.assertTrue(prepared.startswith("# Changelog\n\n## 2.4.0 - Unreleased\n"))
                 self.assertTrue(prepared.endswith(history))
                 self.assertNotIn("\n## Unreleased\n", prepared)
@@ -507,7 +518,7 @@ class SourceVersionPreparationTests(unittest.TestCase):
             with self.subTest(arguments=arguments), self.assertRaises(PREPARE.CHECK.CheckError):
                 self.prepare(**arguments)
             self.assertEqual(self.snapshot(), before)
-        (self.root / "README.md").write_text("unexpected source")
+        (self.root / "README.md").write_text("unexpected source", encoding="utf-8")
         invalid = self.snapshot()
         with self.assertRaises(PREPARE.CHECK.CheckError):
             self.prepare()
@@ -520,7 +531,7 @@ class SourceVersionPreparationTests(unittest.TestCase):
         source.symlink_to(other.name)
         with self.assertRaisesRegex(PREPARE.CHECK.CheckError, "regular file"):
             self.prepare()
-        self.assertEqual(other.read_text(), "readonly APP_VERSION='2.3.13'\n")
+        self.assertEqual(other.read_text(encoding="utf-8"), "readonly APP_VERSION='2.3.13'\n")
         source.unlink()
         other.rename(source)
         packaging = self.root / "packaging"
@@ -576,13 +587,13 @@ class SourceVersionPreparationTests(unittest.TestCase):
             staged = real_stage(path, text)
             calls += 1
             if calls == 14:
-                (self.root / "install-fedora.sh").write_text("foreign writer\n")
+                (self.root / "install-fedora.sh").write_text("foreign writer\n", encoding="utf-8")
             return staged
 
         with patch.object(PREPARE.CHECK.PUBLISHED, "stage_text", side_effect=stage):
             with self.assertRaisesRegex(PREPARE.CHECK.CheckError, "changed while"):
                 self.prepare()
-        self.assertEqual((self.root / "install-fedora.sh").read_text(), "foreign writer\n")
+        self.assertEqual((self.root / "install-fedora.sh").read_text(encoding="utf-8"), "foreign writer\n")
         self.assertEqual(CHECK.extract_version((self.root / "download-video.sh").read_bytes()), (2, 3, 13))
         self.assertFalse(list(self.root.rglob(".*")))
 

@@ -304,6 +304,8 @@ select_profile() {
 }
 
 validate_jobs() {
+    # Public count settings accept ASCII decimal digits in every locale.
+    local LC_ALL=C
     (($# == 1)) || return 2
     local candidate=$1
     local jobs_value=0

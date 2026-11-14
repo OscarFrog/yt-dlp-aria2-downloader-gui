@@ -72,6 +72,7 @@ run_root() {
 }
 
 root_stage_path_is_safe() {
+    local LC_ALL=C
     local stage_path=${1:-}
 
     [[ ${stage_path} =~ ^/tmp/yt-dlp-aria2-downloader-(application|rpmfusion)\.[[:alnum:]]{8}$ ]]

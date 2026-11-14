@@ -458,5 +458,29 @@ class CoordinationTests(unittest.TestCase):
         self.finish(self.launch(), 75)
 
 
+class LocaleProtocolTests(unittest.TestCase):
+    def test_progress_identifiers_use_utf8_in_an_ascii_process(self):
+        with tempfile.TemporaryDirectory(prefix='progress-locale-') as temporary:
+            plan = Path(temporary) / 'plan.json'
+            for identifier, expected in (('α:é', 0), ('α|é', 65)):
+                with self.subTest(identifier=identifier):
+                    plan.write_text(json.dumps({'requested_downloads': [{
+                        'format_id': identifier, 'protocol': 'https',
+                        'url': 'https://example.invalid/PRIVATE_LOCALE_SENTINEL',
+                    }]}), encoding='utf-8')
+                    plan.chmod(0o600)
+                    result = subprocess.run(
+                        [sys.executable, '-I', '-B', '-X', 'utf8=0', str(HELPER),
+                         'progress-plan', '--plan', str(plan)],
+                        env=dict(os.environ, LC_ALL='C', LANGUAGE='fr_FR:fr',
+                                 PYTHONCOERCECLOCALE='0'),
+                        capture_output=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    self.assertEqual(result.stdout,
+                                     'YTDLP_PLAN_V2|1|α:é\n'.encode('utf-8') if expected == 0 else b'')
+                    self.assertNotIn(b'PRIVATE_LOCALE_SENTINEL', result.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()

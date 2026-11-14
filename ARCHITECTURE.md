@@ -6,6 +6,34 @@ the security and lifecycle boundaries live. Use `REPOSITORY_FILES.md` for the
 path-by-path inventory, `TESTING.md` for validation procedures, and the READMEs
 for user-facing behavior.
 
+## Locale and text boundaries
+
+Host locale is not an input to technical security or validation decisions.
+Structured JSON, NUL, kernel/status and cryptographic byte protocols keep their
+own contracts. The progress monitor validates Unicode format identifiers with
+the Python helper grammar rather than relying on an installed C.UTF-8 locale;
+ASCII identifiers stay on the shell fast path and admitted plan identities are
+reused byte-for-byte. Parsed human-readable tool output and ASCII validators establish
+a deterministic C locale at the relevant child or function boundary. A sorted
+allowlist uses the same byte collation during construction and comparison.
+
+These technical boundaries do not replace the graphical session's locale.
+Zenity's [GLib option parser](https://docs.gtk.org/glib/goption.html) decodes textual
+arguments using LC_CTYPE. The GUI
+checks the effective encoding with the native `locale charmap` protocol before
+opening dialogs. UTF-8 environments pass through unchanged. Otherwise it probes
+neutral UTF-8 locale names, then installed alternatives, and refuses startup if
+none is usable. A command array applies only a validated UTF-8 LC_CTYPE to Zenity;
+when LC_ALL was set, its effective non-character categories are copied before
+removing that override in this child. LANG and LANGUAGE remain unchanged. The
+GUI shell, engine and monitor retain their original environment and the
+supervised Zenity PID remains the executable child through env's exec.
+Unicode filenames, media titles, metadata and subtitles retain their UTF-8
+contracts; Python text I/O must name the encoding and binary media remains
+binary. Sourced Bash libraries and imported Python helpers do not modify the
+caller's locale. `AGENTS.md` and `SHELL_STYLE.md` make these review requirements
+mandatory; `TESTING.md` owns contrasting-locale and mutation qualification.
+
 ## System overview
 
 The project is a GNU/Linux desktop application with a Bash CLI engine, a Zenity
@@ -1427,7 +1455,7 @@ mapped dialogs, delivered progress and button events to output contents,
 statuses, argument privacy and process/window quiescence before fixture
 rescue. The deliberately opened real folder viewer remains independent of GUI
 cleanup and is owned by the isolated fixture; this route currently supports
-Nautilus on Fedora 44 or Ubuntu 24.04 Wayland sessions. Captures of owned
+Nautilus on Fedora 44/45 or Ubuntu 24.04 Wayland sessions. Captures of owned
 windows retain dimensions and SHA-256 identity under the isolated Cairo
 renderer. Nautilus's D-Bus location property binds its mapped window to the
 selected directory. Dialog arguments, real

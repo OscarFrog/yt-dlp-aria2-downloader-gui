@@ -260,10 +260,10 @@ main() {
     # shellcheck disable=SC1091
     source /etc/os-release
     case ${ID:-}:${VERSION_ID:-} in
-        fedora:44 | ubuntu:24.04) ;;
+        fedora:44 | fedora:45 | ubuntu:24.04) ;;
         *)
             fail_test \
-                "real Zenity qualification requires Fedora 44 or Ubuntu 24.04; got ${ID:-unknown} ${VERSION_ID:-unknown}."
+                "real Zenity qualification requires Fedora 44/45 or Ubuntu 24.04; got ${ID:-unknown} ${VERSION_ID:-unknown}."
             ;;
     esac
 

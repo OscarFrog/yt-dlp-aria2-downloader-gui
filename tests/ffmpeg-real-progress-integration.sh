@@ -25,7 +25,7 @@ readonly TEST_ROOT
 WORKER_PID=''
 MONITOR_PID=''
 WAIT_SECONDS=${FFMPEG_REAL_PROGRESS_WAIT_SECONDS:-20}
-[[ ${WAIT_SECONDS} =~ ^[0-9]{1,3}$ ]] || {
+[[ ${WAIT_SECONDS} =~ ^[0123456789]{1,3}$ ]] || {
     printf 'Error: FFMPEG_REAL_PROGRESS_WAIT_SECONDS must be an integer between 1 and 120.\n' >&2
     exit 64
 }

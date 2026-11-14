@@ -56,6 +56,8 @@ EOF_USAGE
 }
 
 normalize_count() {
+    # Public count settings accept ASCII decimal digits in every locale.
+    local LC_ALL=C
     (($# == 4)) || return 2
     local raw_value=$1
     local maximum=$2

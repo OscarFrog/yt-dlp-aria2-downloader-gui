@@ -162,6 +162,51 @@ specific use.
   paths it owns or can identify unambiguously; preserve ambiguous external
   state and report the reason.
 
+## Mandatory locale independence
+
+Every technical decision must be independent of the host locale. This applies
+to executable shell, sourced libraries, generated fixtures and workflow shell.
+English UI messages are acceptable; filenames, media titles, metadata and
+subtitles must retain their declared Unicode behavior.
+
+Choose and document the smallest complete technical boundary:
+
+- A standalone technical executable whose entire protocol requires C semantics
+  must establish `export LC_ALL=C` before its first sensitive operation. Set
+  `LANGUAGE=C` as well when controlling GNU translated diagnostics. Do not export
+  these values across the whole GUI or into an unrelated user-facing child.
+- For a single command, use `LC_ALL=C LANGUAGE=C command ...`. For a pure Bash
+  validator, a function-local `LC_ALL=C` can stabilize ranges, classes,
+  arithmetic input and case conversion without changing the caller's locale.
+  Preserve or explicitly set export status when the function invokes children.
+- A sourced library must not change locale during loading. Its functions must
+  restore caller state on every return; use local variables or child environments
+  instead of setting and manually resetting globals.
+- Prefer JSON, NUL records, documented numeric/status protocols and checked exit
+  codes. Never interpret a translated checksum or signature message as proof of
+  verification. Unknown output and nonzero statuses remain failures.
+- Use one declared collation for every participant in a sorted-list protocol,
+  including `sort`, `comm` and order checks. An ASCII identifier grammar must not
+  admit non-ASCII characters through locale-sensitive ranges or classes.
+- Preserve byte streams and explicitly encode/decode UTF-8 protocols in embedded
+  Python. Do not use the host's implicit text codec for repository source or
+  UTF-8 data. C is not a Unicode character-classification locale; `C.UTF-8` is
+  neither a portable availability guarantee nor a substitute for an encoding
+  contract. Probe availability and retain a compatible fallback when required.
+
+`LC_ALL` overrides category-specific `LC_*` values, which override `LANG`.
+GNU gettext can additionally select messages through `LANGUAGE` when the effective
+message locale is not C. Test contradictory inherited settings, not just `LANG`.
+Never change `/etc/locale.conf` or the user's session to make a test pass.
+
+New or changed sensitive operations require a documented locale contract and a
+behavioral regression under contrasting installed locales. Negative controls
+must demonstrate rejection of the corresponding faulty parser, collation,
+numeric/regex rule or child environment. Keep source inventory coverage complete;
+the presence of a literal `LC_ALL=C` is not proof of correct placement or behavior.
+These rules are mandatory in code review. `TESTING.md` defines the execution
+matrix, including Fedora 45 French and the Python 3.10/Bash 4.4 minimum pair.
+
 ## Exit-status and error-handling contract
 
 Exit status is part of a shell function or executable's public behavior.
@@ -378,7 +423,8 @@ workflow contracts.
 
 Sourced-library state is checked by loading each library in an isolated Bash
 under both enabled and disabled option states, then comparing shell options
-(including errexit), shopt options, traps, umask and working directory. Quoted
+(including errexit), shopt options, traps, umask, working directory, and locale
+variable values plus their unset/export state (LANG, LANGUAGE and LC_*). Quoted
 heredoc contents are data, so generated fixture shell
 is not confused with commands executed when the library is loaded. Positive
 and negative controls cover that distinction and actual state changes.

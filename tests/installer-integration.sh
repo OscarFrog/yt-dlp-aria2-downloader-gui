@@ -170,7 +170,7 @@ test_installer_initial_installation() {
 
     if command -v gio >/dev/null 2>&1; then
         gio_timeout=${GIO_LAUNCH_TIMEOUT:-20}
-        [[ ${gio_timeout} =~ ^[1-9][0-9]*$ ]] \
+        [[ ${gio_timeout} =~ ^[123456789][0123456789]*$ ]] \
             || fail "GIO_LAUNCH_TIMEOUT must be a positive integer: ${gio_timeout}"
         gio_timeout=$((10#${gio_timeout}))
         rm -f -- "${EXEC_MARKER}"

@@ -149,6 +149,14 @@ GNU/Linux sur `x86_64` ou `aarch64` pour les runtimes gérés, avec :
 - GNU coreutils/grep, findutils et util-linux (`setsid`, `flock`) ;
 - pidfds Linux et WNOWAIT utilisables, informations procfs des processus/threads lisibles.
 
+L'interface graphique nécessite aussi l'outil système `locale` et une locale
+UTF-8 installée pour les textes et noms de fichiers Unicode. Un environnement
+UTF-8 existant est préservé. Sous C ou un autre encodage non UTF-8, seul Zenity
+reçoit un `LC_CTYPE` UTF-8 validé ; la langue des messages et les autres catégories
+restent inchangées. Le moteur CLI et votre session graphique conservent leur
+environnement. Sans locale UTF-8 utilisable, le démarrage graphique signale une
+erreur avant toute ouverture de fenêtre.
+
 Firefox avec une session YouTube authentifiée n'est nécessaire que pour le
 profil YouTube HLS/Firefox explicitement sélectionné. Les installateurs de
 paquets gèrent les dépendances système ; pour ZIP/Git, installez-les avec

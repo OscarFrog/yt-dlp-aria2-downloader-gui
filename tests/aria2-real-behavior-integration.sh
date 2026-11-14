@@ -18,6 +18,8 @@ WAIT_SECONDS=${ARIA2_BEHAVIOR_WAIT_SECONDS:-15}
 readonly MIN_COMPLETED_RANGE_BYTES=262144
 
 normalize_bounded_uint() {
+    # Public count settings accept ASCII decimal digits in every locale.
+    local LC_ALL=C
     local name=$1
     local raw=$2
     local minimum=$3

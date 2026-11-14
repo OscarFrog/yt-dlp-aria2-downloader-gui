@@ -181,6 +181,8 @@ warning() {
 }
 
 validate_bounded_uint() {
+    # Numeric/version protocols admit ASCII digits, not locale collation equivalents.
+    local LC_ALL=C
     local name=$1
     local value=$2
     local minimum=$3
@@ -850,6 +852,8 @@ activate_version() {
 }
 
 is_valid_ytdlp_version() {
+    # Numeric/version protocols admit ASCII digits, not locale collation equivalents.
+    local LC_ALL=C
     [[ ${1:-} =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}([.][0-9]{6})?$ ]]
 }
 
@@ -999,6 +1003,8 @@ validate_ytdlp() {
 }
 
 parse_deno_version() {
+    # Numeric/version protocols admit ASCII digits, not locale collation equivalents.
+    local LC_ALL=C
     local candidate=$1
     local output_variable=$2
     local output=''
@@ -1250,6 +1256,8 @@ reuse_installed_deno_version() {
 }
 
 latest_ytdlp_version() {
+    # Numeric/version protocols admit ASCII digits, not locale collation equivalents.
+    local LC_ALL=C
     local output_variable=$1
     local effective_url=''
     local expected_prefix="https://github.com/${YTDLP_RELEASE_REPOSITORY}/releases/tag/"
@@ -1276,6 +1284,8 @@ latest_ytdlp_version() {
 }
 
 latest_deno_version() {
+    # Numeric/version protocols admit ASCII digits, not locale collation equivalents.
+    local LC_ALL=C
     local output_variable=$1
     local effective_url=''
     local expected_prefix="https://github.com/${DENO_RELEASE_REPOSITORY}/releases/tag/v"
@@ -1414,7 +1424,7 @@ bootstrap_deno_version() {
     local checksum_line=''
     local base_url=''
 
-    [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    [[ ${version} =~ ^[0123456789]+\.[0123456789]+\.[0123456789]+$ ]] || return 1
     if reuse_installed_deno_version "${version}"; then
         return 0
     fi

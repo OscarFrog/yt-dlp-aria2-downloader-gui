@@ -1089,22 +1089,26 @@ def main() -> int:
         elif args.command == "summary":
             catalogue, selection = read_json(args.catalogue), read_json(args.selection)
             validate_selection(catalogue, selection)
-            print("MKV: one video; " + str(len(selection["audio"])) + " audio(s); " + str(len(selection["subtitles"])) + " subtitle(s)")
+            lines = ["MKV: one video; " + str(len(selection["audio"])) + " audio(s); " + str(len(selection["subtitles"])) + " subtitle(s)"]
             for kind in ("audio", "subtitles"):
-                print("\n".join(item["label"] for item in catalogue[kind] if item["id"] in selection[kind]))
+                lines.append("\n".join(item["label"] for item in catalogue[kind] if item["id"] in selection[kind]))
             for message in selection["messages"]:
-                print(MESSAGE_TEXT[message])
+                lines.append(MESSAGE_TEXT[message])
+            # The GUI and retained log consume UTF-8, even when the invoking
+            # terminal's locale cannot encode a validated track label.
+            sys.stdout.buffer.write(("\n".join(lines) + "\n").encode("utf-8"))
         elif args.command == "verified-summary":
             plan, expected = read_json(args.plan), read_json(args.expectation)
             validate_plan_provenance(plan, expected)
-            print("MKV selected: one video; " + str(len(expected["audio"])) + " audio(s); " + str(len(expected["subtitles"])) + " subtitle(s)")
+            lines = ["MKV selected: one video; " + str(len(expected["audio"])) + " audio(s); " + str(len(expected["subtitles"])) + " subtitle(s)"]
             for kind in ("audio", "subtitles"):
                 for item in expected[kind]:
-                    print(text_value(item["title"], limit=256))
+                    lines.append(text_value(item["title"], limit=256))
             for message in plan["arte_selection"]["selection"]["messages"]:
                 if message not in MESSAGE_TEXT:
                     raise ArteError("ARTE selection messages are invalid")
-                print(MESSAGE_TEXT[message])
+                lines.append(MESSAGE_TEXT[message])
+            sys.stdout.buffer.write(("\n".join(lines) + "\n").encode("utf-8"))
         return 0
     except ArteError as error:
         print(f"[ARTE_TRACKS] {error}", file=sys.stderr)

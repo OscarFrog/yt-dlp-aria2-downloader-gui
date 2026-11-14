@@ -100,6 +100,8 @@ assert_invocable_command() {
 
 # Normalize an expected exit status into 0..255 and assign it by name.
 validate_expected_status() {
+    # Exit-status protocol values are ASCII decimal digits.
+    local LC_ALL=C
     (($# == 3)) || test_error "validate_expected_status requires 3 arguments; got $#."
     local raw=$1
     local label=$2

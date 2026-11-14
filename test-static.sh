@@ -282,12 +282,15 @@ before_shopt=${BASHOPTS}
 before_traps=$(trap -p)
 before_umask=$(umask)
 before_directory=$PWD
+# Declarations preserve values, absence and export attributes of locale state.
+before_locale=$(declare -p LANG LANGUAGE "${!LC_@}" 2>/dev/null || :)
 source "$1"
 source_status=$?
 ((source_status == 0)) || exit 65
 [[ ${SHELLOPTS} == "${before_options}" && ${BASHOPTS} == "${before_shopt}" &&
    $(trap -p) == "${before_traps}" && $(umask) == "${before_umask}" &&
-   ${PWD} == "${before_directory}" ]] || exit 65
+   ${PWD} == "${before_directory}" &&
+   $(declare -p LANG LANGUAGE "${!LC_@}" 2>/dev/null || :) == "${before_locale}" ]] || exit 65
 printf "\\nsourced-state-preserved\\n"
 ' sourced-state "${absolute_path}" "${initial_state}") || return 65
         [[ ${observed##*$'\n'} == sourced-state-preserved ]] || return 65
@@ -1164,6 +1167,7 @@ for name in (
     "assert_standard_python_header",
     "assert_sourced_shell_state",
     "assert_file_fragments_ordered",
+    "assert_workflow_dependencies_are_hardened",
 ):
     match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", source, re.M | re.S)
     if match is None:
@@ -1173,6 +1177,7 @@ for name in (
 # Invoke the actual functions in an isolated shell, never the complete main.
 shell_prefix = '''set -euo pipefail
 umask 077
+fail() { printf "%s\\n" "$*" >&2; exit 1; }
 SCRIPT_DIR=$1
 STANDARD_HEADER_PROJECT=yt-dlp-aria2-downloader-gui
 SOURCE_INVENTORY_FILE=''
@@ -1371,9 +1376,33 @@ with tempfile.TemporaryDirectory(prefix="static-harness-") as temporary:
     validate_static_dispatch(root)
     validate_application_dispatch(root)
 
+    pin_root = root / "pin-validation"
+    workflow_directory = pin_root / ".github/workflows"
+    workflow_directory.mkdir(parents=True)
+    workflow = workflow_directory / "fixture.yml"
+    # Exercise the actual validator under the caller locale, not the Git fixture locale.
+    if "LC_ALL" in os.environ:
+        environment["LC_ALL"] = os.environ["LC_ALL"]
+    else:
+        environment.pop("LC_ALL", None)
+    for pin, expected in (("a" * 40, 0), ("é" * 40, 1), ("١" * 40, 1)):
+        workflow.write_text(
+            "name: Fixture\non: push\njobs:\n  check:\n"
+            "    runs-on: ubuntu-24.04\n    steps:\n"
+            f"      - uses: actions/setup-python@{pin} # v5\n",
+            encoding="utf-8",
+        )
+        validate(pin_root, "assert_workflow_dependencies_are_hardened", expected)
+    environment["LC_ALL"] = "C"
+    print("Workflow pins: exact ASCII SHA accepted; accented letters and Unicode digits rejected.")
+
     library = root / "library.sh"
+    previous_environment = environment.copy()
+    environment.update(LANG="C", LANGUAGE="fr_FR:fr")
+    environment.pop("LC_NUMERIC", None)
     for body, expected in (
-        ("function_only() { cat <<'SHELL'\nset -euo pipefail\nSHELL\n}\n", 0),
+        ("function_only() { cat <<'SHELL'\nset -euo pipefail\nexport LC_ALL=POSIX\nSHELL\n}\n", 0),
+        ("scoped_locale() { local LC_ALL=POSIX LANGUAGE=C LC_NUMERIC=C; :; }\nscoped_locale\n", 0),
         ("EXPORTED_FIXTURE=value\nexport EXPORTED_FIXTURE\n", 0),
         ("set +e\n", 65), ("set +u\n", 65), ("set +o pipefail\n", 65),
         ("set -e\n", 65), ("set -u\n", 65), ("set -o pipefail\n", 65),
@@ -1381,11 +1410,20 @@ with tempfile.TemporaryDirectory(prefix="static-harness-") as temporary:
         ("trap - EXIT\n", 65), ("trap : EXIT\n", 65),
         ("trap : USR1\n", 65), ("umask 022\n", 65),
         ("cd /\n", 65), ("exit 0\n", 65),
+        ("export LC_ALL=POSIX\n", 65), ("unset LC_ALL\n", 65),
+        ("LANGUAGE=C\n", 65), ("LC_NUMERIC=C\n", 65),
+        ("export -n LC_ALL\n", 65), ("unset LANG\n", 65),
     ):
         library.write_text(body, encoding="utf-8")
         subprocess.run(["bash", "-n", str(library)], check=True)
         validate(root, "assert_sourced_shell_state", expected, str(library))
-    print("Sourced libraries: inert heredocs/exports accepted; option, trap, umask, directory and premature-exit changes rejected.")
+    # Unset locale variables are valid caller state, not a failed declaration.
+    environment.pop("LANG", None)
+    environment.pop("LANGUAGE", None)
+    library.write_text("scoped_locale() { local LANG=C LANGUAGE=C; :; }\nscoped_locale\n", encoding="utf-8")
+    validate(root, "assert_sourced_shell_state", 0, str(library))
+    environment = previous_environment
+    print("Sourced libraries: inert heredocs/exports and scoped locales accepted; option, trap, umask, directory, locale state and premature-exit changes rejected.")
 
     ordered_source = root / "ordered source é.txt"
     ordered_cases = (
@@ -1738,6 +1776,8 @@ PY_WORKFLOW_VALIDATOR_TESTS
 }
 
 assert_workflow_dependencies_are_hardened() {
+    # Commit pins and YAML protocol syntax have an ASCII grammar.
+    local LC_ALL=C
     local action_reference=''
     local checkout_has_disabled_credentials=false
     local checkout_indent=0
@@ -3742,7 +3782,7 @@ test_static_release_contracts() {
         'readonly ZENITY_CAPTURE_MAX_BYTES=65536' \
         'captured Zenity output memory bound'
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
-        "zenity \"\$@\" >\"\${output_file}\" 2>\"\${error_file}\" &" \
+        "\"\${ZENITY_COMMAND[@]}\" \"\$@\" >\"\${output_file}\" 2>\"\${error_file}\" &" \
         'captured Zenity dialogs run as supervised children'
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         "mkfifo -m 600 -- \"\${PROGRESS_PIPE}\"" \

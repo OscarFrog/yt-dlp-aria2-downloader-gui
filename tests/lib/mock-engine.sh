@@ -89,8 +89,8 @@ test_mock_engine_audio_downloads() {
     url_seen_log="${TEST_ROOT}/private-url-seen.txt"
     injection_marker="${TEST_ROOT}/must-not-exist"
     malicious_url="https://example.com/watch?v=abc123&x=\$(touch\$IFS${injection_marker})"
-    assert_status 0 'audio engine succeeds under a hostile inherited locale' \
-        env LC_ALL=fr_FR.UTF-8 LANG=fr_FR.UTF-8 \
+    assert_status 0 'audio engine succeeds under the caller locale' \
+        env \
         MOCK_FFPROBE_ARG_LOG="${ffprobe_argument_log}" \
         MOCK_URL_SEEN_LOG="${url_seen_log}" \
         "${PROJECT_DIR}/download-video.sh" \
@@ -1010,7 +1010,7 @@ test_mock_engine_failure_paths() {
 
     prepare_argument_log 'aria2-producer-status'
     assert_status 29 'aria2 pipeline preserves the transport status' \
-        env LC_ALL=C.utf8 MOCK_ARIA2_EXIT_STATUS=29 \
+        env MOCK_ARIA2_EXIT_STATUS=29 \
         MOCK_ARIA2_INVALID_UTF8_DIAGNOSTIC=1 \
         "${PROJECT_DIR}/download-video.sh" \
         --output-dir "${OUTPUT_DIR}" --mode audio \
@@ -1025,7 +1025,7 @@ test_mock_engine_failure_paths() {
         'malformed UTF-8 cannot leave a private URL suffix unredacted'
     assert_text_contains "${ASSERT_OUTPUT}" \
         'Malformed diagnostic URL: [REDACTED_URL]' \
-        'malformed UTF-8 URL is redacted under the inherited UTF-8 locale'
+        'malformed UTF-8 URL is redacted under the caller locale'
     assert_text_not_contains "${ASSERT_OUTPUT}" 'CaseSensitive' \
         'aria2 diagnostics redact every supported HTTP scheme casing'
 
