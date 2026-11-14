@@ -65,6 +65,8 @@ fail() {
 }
 
 read_pin() {
+    # Versions and cryptographic digests use an exact ASCII grammar.
+    local LC_ALL=C
     local pin_file=$1
     local version_variable=$2
     local amd64_variable=$3

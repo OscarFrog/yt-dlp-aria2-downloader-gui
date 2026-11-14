@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -38,7 +39,7 @@ REASON = "Synchronize published release documentation."
 
 def workflow_step(name):
     """Read the actual literal run block without a YAML parsing dependency."""
-    lines = (PROJECT / ".github/workflows/release-docs.yml").read_text().splitlines()
+    lines = (PROJECT / ".github/workflows/release-docs.yml").read_text(encoding="utf-8").splitlines()
     marker = "      - name: " + name
     start = lines.index(marker) + 1
     while lines[start] != "        run: |":
@@ -64,7 +65,7 @@ import sys
 
 root = Path(os.environ["REPLAY_ROOT"])
 state_path = root / "api-state.json"
-state = json.loads(state_path.read_text())
+state = json.loads(state_path.read_text(encoding="utf-8"))
 args = sys.argv[1:]
 
 def save():
@@ -93,7 +94,7 @@ path = next(arg for arg in args if arg.startswith("repos/"))
 route = path.split("/", 3)[3]
 method = args[args.index("--method") + 1] if "--method" in args else "GET"
 if method != "GET":
-    payload = json.loads(Path(args[args.index("--input") + 1]).read_text())
+    payload = json.loads(Path(args[args.index("--input") + 1]).read_text(encoding="utf-8"))
     state["writes"].append([method, route, payload])
     save()
     if route == "git/blobs":
@@ -141,9 +142,9 @@ elif route.startswith("contents/"):
     require(revision in ("a" * 40, state["base_sha"]))
     sys.stdout.buffer.write((root / "base" / relative).read_bytes())
 elif route == "git/commits/" + state["base_sha"]:
-    emit(json.loads((root / "commit.json").read_text()))
+    emit(json.loads((root / "commit.json").read_text(encoding="utf-8")))
 elif route == "git/trees/" + "d" * 40 + "?recursive=true":
-    emit(json.loads((root / "tree.json").read_text()))
+    emit(json.loads((root / "tree.json").read_text(encoding="utf-8")))
 else:
     raise AssertionError("unexpected simulated GitHub API route")
 '''
@@ -178,9 +179,9 @@ class ReleaseDocsReplay(unittest.TestCase):
         cls.command("update-published-version.py", RELEASE_VERSION, "--root", handoff)
         (root / "bin").mkdir()
         gh = root / "bin/gh"
-        gh.write_text(FAKE_GH)
+        gh.write_text(FAKE_GH, encoding="utf-8")
         gh.chmod(0o700)
-        (root / "publisher.sh").write_text(workflow_step("Revalidate release and publish allowlisted branch"))
+        (root / "publisher.sh").write_text(workflow_step("Revalidate release and publish allowlisted branch"), encoding="utf-8")
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="release-docs-replay-")
@@ -201,8 +202,9 @@ class ReleaseDocsReplay(unittest.TestCase):
     def git(self, *arguments, cwd=None):
         return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *map(str, arguments)],
                               cwd=cwd or self.base,
-                              env=dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1"),
-                              capture_output=True, text=True, timeout=15, check=True)
+                              env=dict(os.environ, LC_ALL="C", LANGUAGE="C",
+                                       GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1"),
+                              capture_output=True, text=True, encoding="utf-8", timeout=15, check=True)
 
     def initialize_git_source(self):
         (self.base / "scripts").mkdir()
@@ -222,7 +224,7 @@ class ReleaseDocsReplay(unittest.TestCase):
 
     def run_preparation(self, sha):
         script = self.root / "prepare.sh"
-        script.write_text(workflow_step("Prepare allowlisted documentation patch"))
+        script.write_text(workflow_step("Prepare allowlisted documentation patch"), encoding="utf-8")
         environment = dict(os.environ, RELEASE_TAG="v" + RELEASE_VERSION, RELEASE_SHA=sha,
                            RUNNER_TEMP=str(self.root / "prepare-runtime"),
                            GITHUB_OUTPUT=str(self.root / "prepare-output"),
@@ -239,13 +241,13 @@ class ReleaseDocsReplay(unittest.TestCase):
         gh = fake_bin / "gh"
         gh.write_text("#!/bin/bash\nset -eu\ncase \"$1 $2\" in\n"
                       "'release view') printf '%s\\n' true ;;\n"
-                      "'release verify') exit 0 ;;\n*) exit 99 ;;\nesac\n")
+                      "'release verify') exit 0 ;;\n*) exit 99 ;;\nesac\n", encoding="utf-8")
         gh.chmod(0o700)
         script = self.root / "verify.sh"
-        script.write_text(workflow_step("Revalidate and reproduce candidate patch"))
+        script.write_text(workflow_step("Revalidate and reproduce candidate patch"), encoding="utf-8")
         environment = dict(os.environ, RELEASE_TAG="v" + RELEASE_VERSION,
                            RELEASE_SHA=context["release_sha"], RELEASE_VERSION=RELEASE_VERSION,
-                           VERSION_CONTEXT=(self.root / "prepare-runtime/release-docs-candidate/release-docs-metadata.json").read_text().strip(),
+                           VERSION_CONTEXT=(self.root / "prepare-runtime/release-docs-candidate/release-docs-metadata.json").read_text(encoding="utf-8").strip(),
                            GITHUB_REPOSITORY="fixture/repository",
                            PATH=str(fake_bin) + os.pathsep + os.environ["PATH"],
                            RUNNER_TEMP=str(self.root / "prepare-runtime"),
@@ -256,7 +258,7 @@ class ReleaseDocsReplay(unittest.TestCase):
     def manifest(self, root, output, paths):
         (root / output).write_text("".join(
             f"{hashlib.sha256((root / path).read_bytes()).hexdigest()}  {path}\n" for path in paths
-        ))
+        ), encoding="utf-8")
 
     def prepare(self, followup=False, scenario="normal"):
         target = TARGET if followup else ZERO
@@ -271,23 +273,23 @@ class ReleaseDocsReplay(unittest.TestCase):
             "refs_sha256": hashlib.sha256(catalog).hexdigest(),
             "release_tag": "v" + RELEASE_VERSION, "release_sha": RELEASE, "release_version": RELEASE_VERSION,
         }
-        (self.handoff / "release-docs-metadata.json").write_text(json.dumps(self.context) + "\n")
+        (self.handoff / "release-docs-metadata.json").write_text(json.dumps(self.context) + "\n", encoding="utf-8")
         self.manifest(self.base, "base.sha256", PATHS)
         shutil.copyfile(self.base / "base.sha256", self.handoff / "release-docs-base-tree.sha256")
         self.rehash()
         (self.root / "commit.json").write_text(json.dumps({
             "sha": base, "tree": {"sha": TREE}, "committer": {"date": DATE + "T08:09:10Z"},
-        }))
+        }), encoding="utf-8")
         (self.root / "tree.json").write_text(json.dumps({
             "sha": TREE, "truncated": False, "tree": [{
                 "path": path, "type": "blob", "mode": "100755" if path in
                 ("download-video.sh", "install-fedora.sh", "test-static.sh") else "100644",
             } for path in PATHS],
-        }))
+        }), encoding="utf-8")
         (self.root / "api-state.json").write_text(json.dumps({
             "branch": BRANCH, "base_sha": base, "target_sha": target, "scenario": scenario,
             "main_reads": 0, "writes": [],
-        }))
+        }), encoding="utf-8")
 
     def rehash(self):
         self.manifest(self.handoff, "release-docs-tested-tree.sha256", PATHS)
@@ -302,7 +304,7 @@ class ReleaseDocsReplay(unittest.TestCase):
                            RELEASE_SHA=RELEASE, VERSION_CONTEXT=json.dumps(self.context))
         result = subprocess.run(["bash", str(self.script)], env=environment, cwd=self.root,
                                 capture_output=True, text=True, timeout=30)
-        state = json.loads((self.root / "api-state.json").read_text())
+        state = json.loads((self.root / "api-state.json").read_text(encoding="utf-8"))
         return result, state
 
     def test_creation_preserves_verified_large_bytes_and_modes(self):
@@ -336,7 +338,7 @@ class ReleaseDocsReplay(unittest.TestCase):
             self.assertEqual(copied.stat().st_mode, original.stat().st_mode)
             self.assertEqual(len({(path.stat().st_dev, path.stat().st_ino)
                                   for path in (original, copied, other)}), 3)
-        (self.base / "download-video.sh").write_text("mutated private source\n")
+        (self.base / "download-video.sh").write_text("mutated private source\n", encoding="utf-8")
         self.prepare()
         self.assertFalse((sibling / "api-state.json").exists())
         self.assertFalse((self.seed / "api-state.json").exists())
@@ -349,7 +351,7 @@ class ReleaseDocsReplay(unittest.TestCase):
             with self.subTest(optimization=level):
                 self.prepare()
                 payload = self.root / "unsafe-ref-update.json"
-                payload.write_text(json.dumps({"sha": "2" * 40, "force": True}))
+                payload.write_text(json.dumps({"sha": "2" * 40, "force": True}), encoding="utf-8")
                 result = subprocess.run(
                     [str(self.root / "bin/gh"), "api", "repos/fixture/repository/git/refs/heads/" + BRANCH,
                      "--method", "PATCH", "--input", str(payload)],
@@ -358,7 +360,7 @@ class ReleaseDocsReplay(unittest.TestCase):
                 )
                 self.assertNotEqual(result.returncode, 0, "optimized API oracle accepted a forced update")
                 self.assertIn("invalid simulated API request", result.stderr)
-                state = json.loads((self.root / "api-state.json").read_text())
+                state = json.loads((self.root / "api-state.json").read_text(encoding="utf-8"))
                 self.assertEqual(state["target_sha"], ZERO)
 
     def test_seed_creation_failure_releases_its_temporary_directory(self):
@@ -368,7 +370,7 @@ class ReleaseDocsReplay(unittest.TestCase):
             @classmethod
             def populate_seed(cls, root):
                 roots.append(root)
-                (root / "partial").write_text("incomplete fixture")
+                (root / "partial").write_text("incomplete fixture", encoding="utf-8")
                 raise RuntimeError("fixture preparation failed")
 
         with self.assertRaisesRegex(RuntimeError, "fixture preparation failed"):
@@ -413,17 +415,17 @@ class ReleaseDocsReplay(unittest.TestCase):
         original = self.handoff / "packaging"
         saved = self.root / "foreign-packaging"
         saved.mkdir()
-        (saved / "untouched").write_text("foreign fixture")
+        (saved / "untouched").write_text("foreign fixture", encoding="utf-8")
         original.symlink_to(saved, target_is_directory=True)
         result, state = self.run_publisher()
         self.assertEqual(result.returncode, 65, result.stderr)
         self.assertEqual(state["writes"], [])
-        self.assertEqual((saved / "untouched").read_text(), "foreign fixture")
+        self.assertEqual((saved / "untouched").read_text(encoding="utf-8"), "foreign fixture")
 
     def test_source_version_metadata_mismatch_is_rejected(self):
         self.prepare()
         self.context["current_version"] = "102.4.6"
-        (self.handoff / "release-docs-metadata.json").write_text(json.dumps(self.context))
+        (self.handoff / "release-docs-metadata.json").write_text(json.dumps(self.context), encoding="utf-8")
         self.rehash()
         result, state = self.run_publisher()
         self.assertEqual(result.returncode, 65, result.stderr)
@@ -433,8 +435,8 @@ class ReleaseDocsReplay(unittest.TestCase):
     def test_rehashed_artificial_source_bump_is_rejected(self):
         self.prepare()
         static = self.handoff / "test-static.sh"
-        static.write_text(static.read_text().replace(
-            "readonly EXPECTED_VERSION='100.0.1'", "readonly EXPECTED_VERSION='100.0.2'"))
+        static.write_text(static.read_text(encoding="utf-8").replace(
+            "readonly EXPECTED_VERSION='100.0.1'", "readonly EXPECTED_VERSION='100.0.2'"), encoding="utf-8")
         self.rehash()
         result, state = self.run_publisher()
         self.assertEqual(result.returncode, 65, result.stderr)
@@ -449,14 +451,14 @@ class ReleaseDocsReplay(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.base / "download-video.sh").read_bytes(), before)
         self.assertEqual(self.git("diff", "--name-only").stdout, "")
-        self.assertIn("update=false\n", (self.root / "prepare-output").read_text())
+        self.assertIn("update=false\n", (self.root / "prepare-output").read_text(encoding="utf-8"))
         self.assertFalse((self.root / "prepare-runtime/release-docs-candidate").exists())
 
     def test_preparation_uses_target_descendant_without_source_bump(self):
         # This fixture qualifies preparation and object binding. Its static
         # command is deliberately inert; it does not claim full-tree validation.
         static = self.base / "test-static.sh"
-        static.write_text(static.read_text().replace("#!/usr/bin/env bash\n", "#!/usr/bin/env bash\nexit 0\n", 1))
+        static.write_text(static.read_text(encoding="utf-8").replace("#!/usr/bin/env bash\n", "#!/usr/bin/env bash\nexit 0\n", 1), encoding="utf-8")
         release_sha = self.initialize_git_source()
         self.git("checkout", "-b", BRANCH)
         self.command("prepare-source-version.py", "--root", self.base, "--floor-version", "103.0.0", "--date", DATE, "--reason", REASON)
@@ -468,7 +470,7 @@ class ReleaseDocsReplay(unittest.TestCase):
         result = self.run_preparation(release_sha)
         self.assertEqual(result.returncode, 0, result.stderr)
         candidate = self.root / "prepare-runtime/release-docs-candidate"
-        context = json.loads((candidate / "release-docs-metadata.json").read_text())
+        context = json.loads((candidate / "release-docs-metadata.json").read_text(encoding="utf-8"))
         self.assertEqual(context["base_sha"], target_sha)
         self.assertEqual(context["target_sha"], target_sha)
         self.assertEqual(context["current_version"], "100.0.1")
@@ -476,9 +478,9 @@ class ReleaseDocsReplay(unittest.TestCase):
         self.assertNotIn("floor_version", context)
         self.assertEqual(set(self.git("diff", "--name-only").stdout.splitlines()), set(PATHS))
         declarations = re.findall(r"^readonly VERSION=[\"']([0-9.]+)[\"']$",
-                                  (self.base / "download-video.sh").read_text(), re.M)
+                                  (self.base / "download-video.sh").read_text(encoding="utf-8"), re.M)
         self.assertEqual(declarations, ["103.0.1"])
-        self.assertIn("update=true\n", (self.root / "prepare-output").read_text())
+        self.assertIn("update=true\n", (self.root / "prepare-output").read_text(encoding="utf-8"))
         for path in set(SOURCE_PATHS) - set(PATHS):
             self.assertEqual((self.base / path).read_bytes(),
                              self.git("show", target_sha + ":" + path).stdout.encode())
@@ -509,6 +511,38 @@ class ReleaseDocsReplay(unittest.TestCase):
                 ], capture_output=True, text=True, timeout=15)
                 self.assertEqual(result.returncode, 65, result.stderr)
                 self.assertEqual({path: (self.base / path).read_bytes() for path in PATHS}, before)
+
+
+class LocaleProtocolTests(unittest.TestCase):
+    def test_source_bytes_survive_an_ascii_parent_locale(self):
+        # UTF-8 source files and Git blobs keep their encoding even when Python
+        # coercion and UTF-8 mode are disabled in the caller's C locale.
+        code = r'''
+import runpy, sys
+module = runpy.run_path(sys.argv[1])
+suite = module["ReleaseDocsReplay"]
+suite.setUpClass()
+case = suite("test_creation_preserves_verified_large_bytes_and_modes")
+try:
+    case.setUp()
+    try:
+        commit = case.initialize_git_source()
+        for path in module["SOURCE_PATHS"]:
+            actual = case.git("show", commit + ":" + path).stdout.encode("utf-8")
+            if actual != (case.base / path).read_bytes():
+                raise AssertionError("UTF-8 source bytes changed with the caller locale")
+    finally:
+        case.doCleanups()
+finally:
+    suite.doClassCleanups()
+'''
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", code, str(Path(__file__).resolve())],
+            env=dict(os.environ, LC_ALL="C", LANGUAGE="fr_FR:fr",
+                     PYTHONUTF8="0", PYTHONCOERCECLOCALE="0"),
+            capture_output=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

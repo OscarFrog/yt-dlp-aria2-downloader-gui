@@ -3038,17 +3038,17 @@ signals = ["process-supervision", "signal_unbound_directory_registration",
            "signal_gui_untrusted_group_presence", "signal_gui_foreground_group_registration",
            "signal_gui_blocked_progress", "signal_gui_cancellation",
            "signal_gui_startup_error", "signal_zenity_status"]
-runtime = ["managed_runtime_attestation", "runtime_version_formats",
+runtime = ["locale_contracts", "managed_runtime_attestation", "runtime_version_formats",
            "runtime_worker_failure", "runtime_version_overflow", "runtime_media_validation",
            "runtime_dependencies", "runtime_progress_errors", "runtime_missing_zenity"]
 groups = {
     "engine-core": core, "engine-hls": hls, "engine-staging": staging + [composition],
     "engine-network": network, "gui-progress": progress, "gui-state": state,
-    "signals": signals, "runtime-compat": [runtime[i] for i in (0, 1, 3, 5)],
-    "runtime-validation": [runtime[i] for i in (2, 4, 6, 7)],
+    "signals": signals, "runtime-compat": [runtime[i] for i in (0, 1, 2, 4, 6)],
+    "runtime-validation": [runtime[i] for i in (3, 5, 7, 8)],
 }
 expected_all = core + hls + staging + network + progress + state + signals + runtime
-assert len(expected_all) == len(set(expected_all)) == 65
+assert len(expected_all) == len(set(expected_all)) == 66
 assert source.endswith('main "$@"\n')
 # The actual entry point still parses options, bootstraps its subreaper,
 # creates fixtures and initializes/cleans their environment. Replace only
@@ -3157,6 +3157,9 @@ load_mock_libraries "$@"
     run(["--group=engine"], core + hls + staging + network)
     run(["--group", "gui"], progress + state)
     run(["--group", "runtime"], runtime)
+    run(["--group", "locale"], ["locale_contracts"])
+    run(["--group", "locale"], ["locale_contracts"], 23,
+        MOCK_DISPATCH_FAIL_PHASE="locale_contracts")
     run(["--group", "stress-signals"], signals + ["engine_network_signals", "runtime_progress_errors"])
     for arguments in (["--group"], ["engine"], ["--group", "unknown"], ["--group", ""]):
         run(arguments, [], 2)

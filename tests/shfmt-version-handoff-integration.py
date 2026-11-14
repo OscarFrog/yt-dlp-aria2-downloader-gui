@@ -164,7 +164,7 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
             path.chmod(0o755)
 
     def git(self, cwd, *args, check=True):
-        return subprocess.run(["git", *args], cwd=cwd, env=self.env, text=True,
+        return subprocess.run(["git", *args], cwd=cwd, env=self.env, text=True, encoding="utf-8",
                               capture_output=True, timeout=20, check=check)
 
     def clone(self, name):
@@ -177,7 +177,7 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
     def run_step(self, name, cwd, success=True):
         env = dict(self.env, GITHUB_WORKSPACE=str(cwd))
         result = subprocess.run(["bash", "-c", step(name)], cwd=cwd, env=env,
-                                text=True, capture_output=True, timeout=35)
+                                text=True, encoding="utf-8", capture_output=True, timeout=35)
         if success:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         else:
@@ -235,6 +235,38 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
         self.assertEqual(self.git(self.seed, "ls-remote", "--heads", "origin", "refs/heads/main").stdout.split()[0],
                          self.base_sha)
 
+    def test_localized_collation_preserves_the_byte_sorted_allowlist(self):
+        available = subprocess.run(["locale", "-a"], capture_output=True,
+                                   check=True, timeout=10).stdout.decode("ascii").splitlines()
+        selected = next((name for name in available
+                         if name.lower().replace("-", "") in ("fr_fr.utf8", "fr_fr.utf8@euro")), None)
+        if selected is None:
+            self.skipTest("French UTF-8 locale is not installed")
+        # These adjacent byte-sorted paths have the opposite collation order
+        # in French. Replay the real verifier and both publisher comparisons.
+        fixture = self.seed / "tests/locale-fixture.sh"
+        fixture.write_text("#!/usr/bin/env bash\nprintf    '%s\\n' fixture\n", encoding="utf-8")
+        static = self.seed / "test-static.sh"
+        static.write_text(static.read_text(encoding="utf-8").replace(
+            "set -euo pipefail", "set    -euo pipefail", 1), encoding="utf-8")
+        inventory = self.seed / "tests/lib/project-files.sh"
+        inventory.write_text(inventory.read_text(encoding="utf-8").replace(
+            "TEST_SHELL_FILES=(\n)",
+            "TEST_SHELL_FILES=(\ntests/locale-fixture.sh\n)", 1), encoding="utf-8")
+        self.git(self.seed, "add", ".")
+        self.git(self.seed, "-c", "core.hooksPath=/dev/null", "commit", "-m", "Collation fixture")
+        self.git(self.seed, "push", "origin", "main")
+        self.base_sha = self.git(self.seed, "rev-parse", "HEAD").stdout.strip()
+        self.env.update(EXPECTED_BASE_SHA=self.base_sha, GITHUB_SHA=self.base_sha,
+                        LC_ALL=selected, LANGUAGE="fr_FR:fr")
+        self.prepare()
+        subprocess.run([self.formatter, "-w", "-i", "4", "-ci", "-bn", "--", str(fixture)],
+                       check=True, capture_output=True, timeout=20)
+        self.verify()
+        publisher = self.publish_checkout()
+        self.assertEqual((publisher / "tests/locale-fixture.sh").read_bytes(), fixture.read_bytes())
+        self.assertEqual(self.git(publisher, "rev-parse", "HEAD").stdout.strip(), self.base_sha)
+
     def test_candidate_runtime_change_is_rejected_before_mock_docker(self):
         self.prepare()
         with (self.seed / "download-video.sh").open("a") as output:
@@ -287,6 +319,49 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
         manifest = self.runtime / "shfmt-verified-handoff/shfmt-tested-tree.sha256"
         manifest.write_text("\n".join(manifest.read_text().splitlines()[1:]) + "\n", encoding="utf-8")
         self.publish_checkout(success=False)
+
+    def test_checksum_errors_remain_fatal_with_translated_or_missing_output(self):
+        self.prepare()
+        self.verify()
+        handoff = self.runtime / "shfmt-update-handoff"
+        checker = self.bin / "sha256sum"
+        # Replay the actual publisher: familiar translated text, an empty
+        # stream or an incomplete line cannot replace a successful verifier.
+        for index, output in enumerate(("", "shfmt-update.patch: Réussi\n",
+                                        "shfmt-update.patch: Échec\n",
+                                        "unrecognized output\n", "shfmt-update.patch: Réu")):
+            with self.subTest(output=output):
+                shutil.rmtree(handoff)
+                shutil.copytree(self.runtime / "shfmt-verified-handoff", handoff)
+                checker.write_text("#!/usr/bin/env bash\nprintf '%s' '" + output + "'\nexit 23\n",
+                                   encoding="utf-8")
+                checker.chmod(0o700)
+                publisher = self.clone(f"checksum-output-{index}")
+                result = self.run_step("Verify base and apply allowlisted patch", publisher, success=False)
+                self.assertEqual(result.returncode, 23)
+                self.assertEqual(self.git(publisher, "rev-parse", "HEAD").stdout.strip(), self.base_sha)
+                self.assertEqual(self.git(publisher, "diff", "--name-only").stdout, "")
+        self.assertEqual(self.git(self.seed, "ls-remote", "--heads", "origin",
+                                 f"refs/heads/automation/shfmt-v{UPSTREAM}").stdout, "")
+
+    def test_publisher_refuses_empty_truncated_invalid_and_missing_checksum_inputs(self):
+        self.prepare()
+        self.verify()
+        handoff = self.runtime / "shfmt-update-handoff"
+        for label, payload in (("empty", b""), ("truncated", b"1234"),
+                               ("invalid", b"not a manifest\n"),
+                               ("missing", hashlib.sha256(b"missing").hexdigest().encode()
+                                + b"  absent.patch\n")):
+            with self.subTest(label=label):
+                shutil.rmtree(handoff)
+                shutil.copytree(self.runtime / "shfmt-verified-handoff", handoff)
+                (handoff / "shfmt-update.patch.sha256").write_bytes(payload)
+                publisher = self.clone("checksum-input-" + label)
+                self.run_step("Verify base and apply allowlisted patch", publisher, success=False)
+                self.assertEqual(self.git(publisher, "rev-parse", "HEAD").stdout.strip(), self.base_sha)
+                self.assertEqual(self.git(publisher, "diff", "--name-only").stdout, "")
+        self.assertEqual(self.git(self.seed, "ls-remote", "--heads", "origin",
+                                 f"refs/heads/automation/shfmt-v{UPSTREAM}").stdout, "")
 
     def test_publisher_rejects_wrong_project_version(self):
         self.prepare()
@@ -580,6 +655,61 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
         self.assertEqual(self.git(publisher, "diff", "--name-only").stdout, "")
         self.assertEqual(self.git(self.seed, "ls-remote", "--heads", "origin",
                                  f"refs/heads/automation/shfmt-v{UPSTREAM}").stdout, "")
+
+
+class LocaleProtocolTests(unittest.TestCase):
+    def test_french_workflow_output_with_ascii_parent(self):
+        available = subprocess.run(["locale", "-a"], capture_output=True, check=True,
+                                   timeout=10).stdout.decode("ascii").splitlines()
+        if not any(name.lower().replace("-", "") == "fr_fr.utf8" for name in available):
+            self.skipTest("French UTF-8 locale is unavailable")
+        result = subprocess.run(
+            [sys.executable, "-B", "-X", "utf8=0", str(Path(__file__).resolve()),
+             "ShfmtVersionHandoffTests.test_localized_collation_preserves_the_byte_sorted_allowlist"],
+            env=dict(os.environ, LC_ALL="C", PYTHONUTF8="0", PYTHONCOERCECLOCALE="0"),
+            capture_output=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+        self.assertNotIn(b"skipped", result.stderr)
+        self.assertIn(b"Ran 1 test", result.stderr)
+
+
+class LocaleChecksumTests(unittest.TestCase):
+    """Real checksum verdicts are independent of installed GNU translations."""
+
+    def test_real_checksum_verdicts_with_french_and_c_diagnostics(self):
+        available = subprocess.check_output(["locale", "-a"], timeout=10).decode("ascii").splitlines()
+        french = next((name for name in available
+                       if name.lower().replace("-", "") == "fr_fr.utf8"), None)
+        if french is None:
+            self.skipTest("French UTF-8 locale is not installed; CI requires it before this test")
+        outcomes = {}
+        with tempfile.TemporaryDirectory(prefix="locale-checksum-") as raw:
+            directory = Path(raw)
+            target = directory / "été 日本語.txt"
+            data = b"fixed synthetic payload\n"
+            target.write_bytes(data)
+            valid = (hashlib.sha256(data).hexdigest() + "  " + target.name + "\n").encode("utf-8")
+            cases = (("valid", valid), ("mismatch", b"0" * 64 + valid[64:]),
+                     ("missing", valid.replace(target.name.encode("utf-8"), b"missing.txt")),
+                     ("empty", b""), ("truncated", valid[:20]), ("invalid", b"not a checksum\n"))
+            for selected in ("C", french):
+                for label, manifest in cases:
+                    with self.subTest(locale=selected, case=label):
+                        (directory / "manifest").write_bytes(manifest)
+                        result = subprocess.run(
+                            ["sha256sum", "--check", "manifest"], cwd=directory,
+                            env=dict(os.environ, LC_ALL=selected, LANGUAGE="fr_FR:fr"),
+                            capture_output=True, timeout=10,
+                        )
+                        self.assertEqual(result.returncode, 0 if label == "valid" else 1)
+                        self.assertEqual(target.read_bytes(), data)
+                        outcomes[selected, label] = result.stdout
+            # Availability of libc locale data alone does not install gettext
+            # catalogues. Prove that this test really exercised translated GNU
+            # diagnostics; verdicts above depend only on status and exact bytes.
+            for label in ("valid", "mismatch"):
+                self.assertNotEqual(outcomes["C", label], outcomes[french, label],
+                                    "French coreutils translations were not exercised")
 
 
 if __name__ == "__main__":

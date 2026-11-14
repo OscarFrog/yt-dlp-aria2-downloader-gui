@@ -29,6 +29,16 @@ Ordinary workflow editing does not authorize triggering publication, changing
 repository settings or secrets, creating tags, or retrying a privileged job.
 Obtain explicit authority for those external mutations.
 
+## Locale and encoding review
+
+Apply the mandatory locale rule in `AGENTS.md` to every shell block and embedded
+Python program. Check sorting/comparison pairs, GNU diagnostic translations,
+structured signature/checksum statuses and explicit UTF-8 source decoding.
+Update the locale contract inventory and behavioral regressions for changed
+boundaries. Provision additional locales only in disposable qualification
+runners; never weaken verification or rename required checks to obtain a pass.
+Keep Fedora 45 French and the minimum-interpreter qualification distinct.
+
 ## Validate
 
 Run focused static or integration coverage while developing, followed by:

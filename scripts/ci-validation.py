@@ -25,7 +25,7 @@ MAX_BYTES = 8 * 1024 * 1024
 MAX_PAGES = 10
 WORKFLOWS = {
     "shell.yml": {
-        "Ubuntu", "Fedora 44", "Python 3.10 / Ubuntu",
+        "Ubuntu", "Fedora 44", "Fedora 45 / French locale", "Python 3.10 / Ubuntu",
     },
     "packages.yml": {
         "Git-free source archive", "Previous immutable release",
@@ -61,8 +61,12 @@ REQUIRED_STEPS = {
         "Run current-stable shared-destination GUI and CLI qualification",
         "Retain current-stable shared-destination verdicts and monotonic events",
     },
-    "Ubuntu": {"Check workflow syntax and embedded shell", "Check Python with reviewed Ruff", "Run validation"},
+    "Ubuntu": {"Check workflow syntax and embedded shell", "Check Python with reviewed Ruff",
+               "Check locale-independent protocols", "Run validation"},
     "Fedora 44": {"Run validation"},
+    "Fedora 45 / French locale": {
+        "Install targeted locale validation tools", "Check French locale protocols and negative mutations",
+    },
     "Python 3.10 / Ubuntu": {
         "Build and bind verified Bash 4.4 on the disposable runner",
         "Bind every test interpreter to the minimum Python",

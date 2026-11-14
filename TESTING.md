@@ -21,7 +21,7 @@ project. It is intentionally independent of a particular release date.
 - [Shared-destination and process qualification](#shared-destination-and-process-qualification)
 - [Release maintainer preflight](#release-maintainer-preflight)
 - [Post-release evidence qualification](#post-release-evidence-qualification)
-- [Real-world checks on Fedora 44](#real-world-checks-on-fedora-44)
+- [Real-world checks on Fedora 45](#real-world-checks-on-fedora-45)
 - [Locale-stabilized probes](#locale-stabilized-probes)
 - [Stress validation](#stress-validation)
 - [Network destination qualification](#network-destination-regression-and-opt-in-cifs-qualification)
@@ -1419,7 +1419,9 @@ both behavioral guarantees.
 The five qualification workflows run on pull requests, with manual dispatch
 available for diagnostics. Each checks event/checkout identity, version
 coherence and Bash syntax before its own qualification jobs. `shell.yml`
-qualifies Ubuntu 24.04, Fedora 44 and actual Python 3.10; package, real-tool,
+qualifies Ubuntu 24.04, Fedora 44 and actual Python 3.10. A separate Fedora 45
+French job requires the focused locale guard while retaining the Fedora 44
+coverage and existing required-check names; package, real-tool,
 FFmpeg and stress work need not wait for that complete shell contract. Root
 jobs retain `needs: identity` and downstream package/shard dependencies.
 This avoids four allocated runners polling for shell completion and overlaps
@@ -1596,6 +1598,13 @@ is then imported into the transaction keyring and DNF must enforce
 synthetic authorized, unsigned, foreign-signed, corrupt and wrong-identity
 packages, including mutations of each guard. Its DNF stand-in checks the
 transaction arguments without installing anything on the host.
+The signature-presence mutation uses an explicit historical digest-only policy
+only on the private fixture's `rpmkeys --checksig` invocation. The unchanged
+presence guard must still reject that unsigned input; deleting the guard must
+then reach the intercepted transaction and fail the refusal oracle. RPM's native
+`all`/`signature` policy is exercised separately: it must continue rejecting an
+unsigned package after the explicit guard is removed. No host configuration,
+production verification policy or actual package transaction is changed.
 PR CI qualifies RPM-v4/v6 signature semantics once; the fixture also covers
 multiple signers, signature ordering and corruption. Release CI reuses that
 source qualification, builds the RPM once, explicitly requires RPM package
@@ -1854,7 +1863,7 @@ the other source, packaging and release requirements continue to apply.
 
 `tests/zenity-real-session-qualification.sh` is the interactive end-to-end
 protocol. An operator performs and confirms visible desktop interactions in a
-real Fedora 44 or Ubuntu 24.04 graphical session.
+real Fedora 44/45 or Ubuntu 24.04 graphical session.
 
 Run one documented scenario at a time:
 
@@ -1879,7 +1888,7 @@ explicit second path when another evidence store owns the result.
 
 ### Autonomous route
 
-Use Fedora 44 or Ubuntu 24.04 in a graphical Wayland session with Zenity,
+Use Fedora 44/45 or Ubuntu 24.04 in a graphical Wayland session with Zenity,
 Xwayland, D-Bus, `gdbus`, libX11, libXtst and Nautilus. Nautilus is currently the only
 supported autonomous folder viewer. The real tool prerequisites are usable
 yt-dlp (including its `curl_cffi` impersonation dependencies), Deno, aria2c,
@@ -1890,6 +1899,34 @@ binary under the same admission checks. Run from the source checkout:
 ```bash
 python3 -B tests/zenity-autonomous-qualification.py
 ```
+
+The default qualification preserves and validates the inherited locale. To
+qualify an explicit French environment, first confirm an installed French UTF-8
+locale, then run:
+
+```bash
+LANGUAGE=fr_FR:fr python3 -B tests/zenity-autonomous-qualification.py --locale fr_FR.utf8
+```
+
+`--locale` validates availability before launching the application; it never
+changes the desktop session's language. The exported environment evidence records
+the effective locale environment used by the private graphical fixture, including
+category-specific overrides. Record that evidence rather than inferring it from
+the invoking terminal. An unavailable explicit request or invalid category still
+present at admission refuses qualification; C does not require C.UTF-8. Python
+may already have coerced LC_CTYPE before this program starts. The default route
+qualifies that effective environment, not the original pre-Python settings; a
+coerced environment is never evidence that the unavailable locale was exercised.
+Use an explicit --locale to bind the intended qualification locale.
+The application's Zenity boundary independently validates its required UTF-8
+character encoding. A C run therefore keeps C in the GUI shell, engine and
+non-character Zenity categories while selecting an installed UTF-8 LC_CTYPE only
+for Zenity. No particular UTF-8 locale name is assumed. LocaleProtocolTests
+exercise native-call environment construction, preserved UTF-8 settings,
+contradictory categories, alternate names, unavailable locales and failed probes
+without claiming real graphical qualification. The actual startup and all three
+Zenity launch functions also run with a private recording child; bypass mutants
+for each launch and startup must fail the same environment/PID/status oracle.
 
 This entry point uses private HOME/XDG roots, loopback media fixtures, real
 download/remux tools and the isolated display adapter in
@@ -2040,7 +2077,7 @@ boundary; an exception injected into a deterministic fixture is synthetic, not
 evidence of a kernel response. Diagnostic work has a timing cost and is not an
 identical scheduling replay.
 
-The detailed I/O path is limited to the inspected CPython 3.10–3.14
+The detailed I/O path is limited to the inspected CPython 3.10–3.15
 `Path.read_bytes` implementations. A customized reader or unsupported context
 protocol keeps its original execution and marks the diagnostic incomplete;
 an already opened stream is never reopened to obtain more detail. A task's
@@ -2514,7 +2551,7 @@ or provide a production override. Schedule selection, attempts and job evidence
 retain their existing contracts; strict date parsing adds no new provenance
 claim.
 
-## Real-world checks on Fedora 44
+## Real-world checks on Fedora 45
 
 After the automated suite passes, perform lawful manual tests:
 
@@ -2535,8 +2572,150 @@ left behind.
 
 ## Locale-stabilized probes
 
+### Mandatory development and review contract
+
+The locale rule in `AGENTS.md` and `SHELL_STYLE.md` applies to every Python,
+Bash, tooling, packaging, test and workflow change. Fedora 45 French is a
+primary developer environment; Python 3.10 and Bash 4.4 remain distinct minimum
+runtime targets. English UI text is acceptable, but UTF-8 data must be preserved.
+New locale-sensitive code requires a behavioral regression and a reviewed entry
+in `tests/locale-contracts.json`, whose paths must exactly match the canonical
+Bash/Python arrays plus all workflow files. Register embedded programs through
+their containing source. A structured/status-only protocol must explain why it
+does not interpret localized text; an empty justification is not an exemption.
+
+The existing sourced-library state validator also snapshots LANG, LANGUAGE and
+LC_* values and their unset/export state before and after loading every canonical
+library. Its positive and negative controls permit function-local locale scopes
+and inert generated text, while rejecting source-time locale mutation. This
+check runs in the ordinary static task; no separate job or literal-export rule
+substitutes for observing caller state.
+
+`LocaleRegistryTests` rejects missing/new/duplicate paths, unknown test selectors
+and unreviewed boundaries. `LocaleGuardTests` runs the registered focused cases
+under C and an installed French UTF-8 locale. It also mutates private copies of
+real sources: translated checksum text, sorted-list collation, decimal grammar,
+regex admission, child environment and implicit source decoding must be caught by
+their actual regressions. Unmodified controls must pass first. Neither a static
+registry nor a finite test matrix proves every future semantic change: review
+must update contracts and witnesses when an existing file gains a new boundary.
+
+Run the permanent guard directly during development:
+
+```bash
+python3 -B tests/ci-validation-integration.py LocaleRegistryTests LocaleGuardTests
+```
+
+The ordinary CI-validation task includes both classes. The dedicated Ubuntu and
+Fedora 45 steps require French availability and message catalogues with
+`YTDLP_LOCALE_GUARD_REQUIRE_FRENCH=1`; absence is a failure there. An optional local
+French skip is reported as missing qualification, never a multilingual pass.
+These steps are required by the existing qualification aggregator and promotion
+verifier without changing the nine GitHub required checks or repository rules.
+
+### Technical boundaries and encodings
+
 Version, help, and progress output is generated under `LC_ALL=C` for stable
 parsing. Zenity windows remain in the graphical session's locale.
+
+Prefer structured output (JSON, NUL records, GPG status records, numeric fields)
+and exit status over translated diagnostics. When a textual technical protocol
+needs a stable locale, restrict `LC_ALL=C` to that command or a pure validation
+function. A pipeline comparing sorted lists must use the same `LC_COLLATE` for
+both sorting and comparison. ASCII identifiers and numeric grammars must not
+expand to Unicode characters through locale-sensitive Bash ranges or classes.
+Libraries must preserve the caller's locale after returning.
+
+Do not export a C locale over the whole GUI. Keep filenames, media titles,
+subtitles and user messages in UTF-8 where that is their protocol, explicitly
+encoding/decoding those streams in Python. Binary media and cryptographic
+evidence remain bytes. Python's automatic C-locale UTF-8 mode is useful but is
+not a substitute for a declared stream encoding: it can be disabled. `C` and
+`C.UTF-8` also differ in character classification; do not substitute one for
+the other without a behavioral test.
+
+Check `locale -a` before selecting a locale. Names such as `C.utf8` and
+`fr_FR.utf8` depend on the host. Never treat Bash's warning and fallback for an
+unavailable locale as successful multilingual coverage. On an existing system,
+use installed locales without changing its language configuration. The Ubuntu
+CI job generates French UTF-8 and installs the French GNU message catalogues
+only on its disposable runner. A real checksum regression requires different
+C/French diagnostics while checking identical success/failure statuses; locale
+definitions alone are insufficient to prove that translations were exercised.
+
+The `Check locale-independent protocols` step in the existing Ubuntu job runs
+targeted C/French regressions; the promotion verifier requires its success.
+It does not add or rename a required check. The canonical FAST/FULL task counts
+are unchanged; locale regressions also run inside their existing suites.
+For an installed French locale, the focused entry points are:
+
+```bash
+LC_ALL=fr_FR.utf8 LANGUAGE=fr_FR:fr ./tests/mock-integration.sh --group locale
+LC_ALL=fr_FR.utf8 LANGUAGE=fr_FR:fr python3 -B tests/art-subtitle-integration.py LocaleProtocolTests
+LC_ALL=fr_FR.utf8 LANGUAGE=fr_FR:fr python3 -B tests/release-docs-integration.py LocaleProtocolTests
+LC_ALL=fr_FR.utf8 LANGUAGE=fr_FR:fr python3 -B tests/coordination-integration.py LocaleProtocolTests
+LC_ALL=fr_FR.utf8 LANGUAGE=fr_FR:fr python3 -B tests/push-version-integration.py LocaleProtocolTests
+python3 -B tests/ci-validation-integration.py LocaleProtocolTests
+python3 -B tests/shfmt-version-handoff-integration.py LocaleChecksumTests
+python3 -B tests/shfmt-version-handoff-integration.py \
+  ShfmtVersionHandoffTests.test_localized_collation_preserves_the_byte_sorted_allowlist
+```
+
+Repeat the locale-sensitive commands with `LC_ALL=C` and with an installed
+UTF-8 reference locale. `LANGUAGE=fr_FR:fr` deliberately remains set to exercise
+GNU message selection: an explicit C locale overrides translated messages.
+The fixtures that assert checksum diagnostics use their own C child environment;
+the checksum and publication verdicts still require successful verification and
+unchanged authenticated bytes. Unknown or failing operations must never become
+success because a message looks familiar.
+
+The synthetic privacy-filter memory stress establishes C and LANGUAGE=C before
+launching its limited child pipeline. Loading a host locale archive can exceed
+the fixture's 64 MiB address-space ceiling independently of filter memory use.
+The ceiling, byte/line limits, complete drainage and failure assertions remain
+unchanged; the other diagnostic tests still inherit the selected qualification
+locale. The locale guard also exercises the observer's inspected CPython I/O
+boundaries and conservative refusal of unsupported runtimes.
+
+### Required contrast matrix
+
+Record `locale -a` and the actual OS, Python, Bash and tool versions before
+qualification. Use installed spellings rather than silently selecting an absent
+locale. Do not change the workstation's locale configuration or install locales
+globally merely to satisfy this matrix.
+
+| Environment | Required evidence |
+| --- | --- |
+| Fedora 45 French | French UTF-8 targeted protocols, FAST, FULL and applicable real GUI/CLI scenarios |
+| C | Same targeted verdicts, FAST and a complete controlled-locale FULL |
+| C.UTF-8 or installed equivalent | Targeted Unicode/protocol comparisons; explicitly report absence |
+| English and German UTF-8 | Targeted comparisons when installed; otherwise report unavailable |
+| Contradictory inherited categories | LC_ALL overrides LANG/LC_MESSAGES/LC_NUMERIC while LANGUAGE requests French; statuses and bytes remain equivalent |
+| Python UTF-8 mode disabled | Explicit ASCII/ISO parent witnesses catch implicit codecs even on newer Python defaults |
+| Invalid/unavailable requested locale | Explicit requests and invalid categories received at admission must refuse; record Python startup coercion separately and never claim the unavailable locale was tested |
+
+Locale availability and translated message catalogues are separate prerequisites.
+The checksum witness requires genuinely different French/C diagnostics while
+valid, invalid, missing, empty and truncated inputs retain their expected status.
+Unicode witnesses cover accents, non-Latin and multibyte identifiers, spaces,
+subtitles, metadata, malformed byte rejection, no-overwrite publication and
+caller-environment preservation. Security failures remain failures in every case.
+
+After focused checks, run version coherence and the canonical FAST/FULL profiles
+sequentially, never two FULL instances on the same resources. Preserve their
+26/41 task contracts, assertions and existing deadlines. An already qualified
+identical tree need not be rerun without a demonstrated reason. Record the exact
+source tree and environment for each result. A Python 3.10 syntax check does not
+prove execution on Python 3.10; the minimum-version CI job executes the actual
+Python 3.10/Bash 4.4 pair under French. Native Fedora versions are not substitutes.
+
+References: [GNU locale precedence](https://www.gnu.org/software/gettext/manual/html_node/Locale-Environment-Variables.html),
+[GNU LANGUAGE selection](https://www.gnu.org/software/gettext/manual/html_node/The-LANGUAGE-variable.html),
+[Bash pattern matching](https://www.gnu.org/software/bash/manual/html_node/Pattern-Matching.html),
+[GNU comm](https://www.gnu.org/software/coreutils/manual/html_node/comm-invocation.html),
+[Python subprocess encodings](https://docs.python.org/3.10/library/subprocess.html),
+[PEP 538](https://peps.python.org/pep-0538/) and
+[PEP 540](https://peps.python.org/pep-0540/).
 
 ## Stress validation
 

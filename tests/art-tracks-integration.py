@@ -616,7 +616,7 @@ class CatalogueTests(unittest.TestCase):
             ARTE.write_json(plan_path, selected)
             ARTE.write_json(expected_path, expected)
             result = subprocess.run([sys.executable, "-B", str(ROOT / "private-art-tracks.py"), "verified-summary",
-                                     "--plan", str(plan_path), "--expectation", str(expected_path)], capture_output=True, text=True)
+                                     "--plan", str(plan_path), "--expectation", str(expected_path)], capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("3 audio(s); 4 subtitle(s)", result.stdout)
         self.assertNotIn("https:", result.stdout + result.stderr)

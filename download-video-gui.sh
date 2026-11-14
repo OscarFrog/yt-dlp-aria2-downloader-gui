@@ -44,6 +44,7 @@ TEMP_DIR=''
 CLEANUP_DONE=false
 DEFERRED_SIGNAL_STATUS=''
 SIGNAL_REGISTRATION_ACTIVE=false
+ZENITY_COMMAND=(zenity)
 ZENITY_STATUS=0
 ZENITY_ERROR=''
 ZENITY_PID=''
@@ -312,6 +313,74 @@ show_zenity_error() {
     return 0
 }
 
+# GLib decodes dialog arguments using LC_CTYPE, including Unicode media paths.
+# Keep an existing UTF-8 environment intact; otherwise adapt only Zenity's
+# character encoding without changing the GUI shell, worker or message locale.
+zenity_locale_is_utf8() {
+    local candidate=$1
+    local charmap=''
+
+    charmap=$(LC_ALL="${candidate}" locale charmap 2>&1) || return 1
+    [[ ${charmap} == UTF-8 || ${charmap} == UTF8 ]]
+}
+
+initialize_zenity_command() {
+    local charmap=''
+    local candidate=''
+    local selected=''
+    local available=''
+    local category=''
+
+    ZENITY_COMMAND=(zenity)
+    # locale may return zero while reporting invalid categories on stderr.
+    # Its successful charmap protocol is exactly one nonempty line.
+    if ! charmap=$(locale charmap 2>&1) \
+        || [[ -z ${charmap} || ${charmap} == *$'\n'* ]]; then
+        printf '%s\n' 'Error: unable to inspect the character encoding for Zenity.' >&2
+        return 69
+    fi
+    if [[ ${charmap} == UTF-8 || ${charmap} == UTF8 ]]; then
+        return 0
+    fi
+    # Names are candidates, never availability assumptions. Prefer neutral
+    # UTF-8 categories, then accept any installed locale proven by libc.
+    for candidate in C.UTF-8 C.utf8; do
+        # shellcheck disable=SC2310 # Locale availability is a checked predicate.
+        if zenity_locale_is_utf8 "${candidate}"; then
+            selected=${candidate}
+            break
+        fi
+    done
+    if [[ -z ${selected} ]]; then
+        if ! available=$(LC_ALL=C locale -a 2>/dev/null); then
+            printf '%s\n' 'Error: unable to enumerate installed locales for Zenity.' >&2
+            return 69
+        fi
+        while IFS= read -r candidate; do
+            [[ -n ${candidate} ]] || continue
+            # shellcheck disable=SC2310 # Locale availability is a checked predicate.
+            if zenity_locale_is_utf8 "${candidate}"; then
+                selected=${candidate}
+                break
+            fi
+        done <<<"${available}"
+    fi
+    if [[ -z ${selected} ]]; then
+        printf '%s\n' 'Error: Zenity requires an installed UTF-8 locale to preserve Unicode text and paths.' >&2
+        return 69
+    fi
+    ZENITY_COMMAND=(env -u LC_ALL "LC_CTYPE=${selected}")
+    if [[ -n ${LC_ALL:-} ]]; then
+        # Removing LC_ALL must not expose previously shadowed category values.
+        # Include GNU categories because the supported hosts are GNU/Linux.
+        for category in LC_COLLATE LC_MESSAGES LC_MONETARY LC_NUMERIC LC_TIME \
+            LC_ADDRESS LC_IDENTIFICATION LC_MEASUREMENT LC_NAME LC_PAPER LC_TELEPHONE; do
+            ZENITY_COMMAND+=("${category}=${LC_ALL}")
+        done
+    fi
+    ZENITY_COMMAND+=(zenity)
+}
+
 run_zenity_capture() {
     local output_variable=$1
     shift
@@ -345,7 +414,7 @@ run_zenity_capture() {
     fi
 
     begin_signal_registration
-    zenity "$@" >"${output_file}" 2>"${error_file}" &
+    "${ZENITY_COMMAND[@]}" "$@" >"${output_file}" 2>"${error_file}" &
     ZENITY_PID=$!
     finish_signal_registration
 
@@ -2249,6 +2318,8 @@ save_settings() {
 }
 
 prune_old_logs() {
+    # Staging names use mktemp's ASCII alphabet, independently of GUI locale.
+    local LC_ALL=C
     local current_time=''
     local cutoff=0
     local file_device=''
@@ -2417,6 +2488,8 @@ select_url() {
 
 url_is_youtube() {
     (($# == 1)) || return 2
+    # DNS case folding must not apply language-specific mappings such as I/ı.
+    local LC_ALL=C
     local requested_url=$1
     local url_authority=''
     local url_host=''
@@ -2644,7 +2717,7 @@ initialize_gui_environment() {
     # Establish the minimal capture stack first. Once it is available, later
     # startup failures remain visible from a desktop launcher without creating
     # an artificial diagnostic log.
-    for command_name in dirname mktemp python3 realpath rm stat tail zenity; do
+    for command_name in dirname mktemp python3 realpath rm stat tail zenity env locale; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then
             printf 'Error: required command "%s" was not found.\n' \
                 "${command_name}" >&2
@@ -2653,6 +2726,12 @@ initialize_gui_environment() {
             exit 127
         fi
     done
+
+    # Admit Unicode before any dialog can receive user input or a media path.
+    # shellcheck disable=SC2310 # Initialization explicitly checks every fallible probe.
+    if ! initialize_zenity_command; then
+        exit 69
+    fi
 
     # Resolve the shared storage helper before any dialog captures user input.
     # shellcheck disable=SC2310 # The resolver explicitly checks each command.
@@ -2945,7 +3024,7 @@ wait_for_arte_catalogue() {
     local catalogue_ready=false
 
     begin_signal_registration
-    zenity --progress --pulsate --auto-close \
+    "${ZENITY_COMMAND[@]}" --progress --pulsate --auto-close \
         --title="${APP_DIALOG_TITLE}" \
         --text='Analyzing the available audio and subtitle tracks...' \
         --percentage=0 --cancel-label='Cancel' --width=700 \
@@ -3363,7 +3442,7 @@ run_progress_dialog() {
     local timeout_text='The progress dialog timed out; the download was stopped.'
 
     begin_signal_registration
-    zenity --progress \
+    "${ZENITY_COMMAND[@]}" --progress \
         --title="${APP_DIALOG_TITLE}" \
         --text='Initializing...' \
         --percentage=0 \

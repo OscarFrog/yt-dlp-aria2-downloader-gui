@@ -36,6 +36,17 @@ pre-push hook for the committed objects. Choose a new version only during
 explicit release preparation. The signed-tag publication preflight remains a
 separate release-only boundary.
 
+## Locale and cryptographic decisions
+
+Apply the mandatory locale rule in `AGENTS.md` to installers, package tools and
+release fixtures. Prefer authenticated structured identities and return statuses
+over translated RPM, GPG or checksum diagnostics. Confine deterministic locales
+to technical boundaries and preserve UTF-8 destination paths and user data.
+Register new boundaries and exercise both successful and rejected localized
+cases without changing signer, digest, cleanup or release-immutability guarantees.
+Use the multilingual procedures in `TESTING.md`; Fedora 45 is not a replacement
+for the minimum Python/Bash compatibility targets.
+
 ## Validate
 
 Use focused package or cleanup integration tests during development. Before

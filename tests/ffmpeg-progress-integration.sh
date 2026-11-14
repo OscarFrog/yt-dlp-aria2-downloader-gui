@@ -42,6 +42,8 @@ require_test_commands() {
 }
 
 parse_wait_seconds() {
+    # Public count settings accept ASCII decimal digits in every locale.
+    local LC_ALL=C
     local wait_seconds=${FFMPEG_PROGRESS_WAIT_SECONDS:-10}
     [[ ${wait_seconds} =~ ^[0-9]{1,3}$ ]] || {
         printf 'Error: FFMPEG_PROGRESS_WAIT_SECONDS must be an integer between 1 and 120.\n' >&2

@@ -75,6 +75,270 @@ test_mock_managed_runtime_attestation() {
         'malformed managed runtime attestation diagnostic'
 }
 
+test_mock_locale_contracts() {
+    # Run the actual protocol functions under the caller's locale; a localized
+    # collation must neither admit Unicode digits nor widen cleanup authority.
+    python3 - "${PROJECT_DIR}" "${BASH}" <<'PY_LOCALE_PROTOCOLS'
+from pathlib import Path
+import importlib.util
+import os
+import subprocess
+import sys
+import tempfile
+
+project, shell = Path(sys.argv[1]), sys.argv[2]
+
+def run(path, statements, arguments=(), executable=True):
+    source = (project / path).read_text(encoding="utf-8")
+    if executable:
+        if source.count('\nmain "$@"') != 1:
+            raise AssertionError("unexpected executable entrypoint")
+        source = source.rsplit('\nmain "$@"', 1)[0]
+    result = subprocess.run(
+        [shell, "-s", "--", *arguments], input=source + "\n" + statements,
+        capture_output=True, text=True, encoding="utf-8", timeout=10,
+    )
+    if result.returncode != 0 or result.stdout != "locale-protocols-ok\n":
+        raise AssertionError(f"locale protocol verdict failed: {path}: {result.returncode}: {result.stderr}")
+
+# Invalid public numeric settings must keep their documented refusal statuses,
+# rather than reaching locale-sensitive Bash arithmetic.
+for entry, arguments, expected_status, diagnostic in (
+    ("tests/run-all.sh", ["--list", "--jobs", "١"], 2, "test concurrency must be an integer"),
+    ("tests/repeat-qualification.sh", ["--runs", "١", "--", "true"], 2, "repetition count must be an integer"),
+):
+    result = subprocess.run(
+        [shell, str(project / entry), *arguments], capture_output=True,
+        text=True, encoding="utf-8", timeout=10,
+    )
+    if result.returncode != expected_status or diagnostic not in result.stderr or "10#" in result.stderr:
+        raise AssertionError(f"locale-dependent numeric refusal: {entry}: {result.returncode}: {result.stderr}")
+# Exercise the installer's actual admission block without launching a desktop.
+installer_source = (project / "tests/installer-integration.sh").read_text(encoding="utf-8")
+gio_block = installer_source.split('        gio_timeout=${GIO_LAUNCH_TIMEOUT:-20}\n', 1)[1]
+gio_block = 'gio_timeout=${GIO_LAUNCH_TIMEOUT:-20}\n' + gio_block.split('        rm -f -- "${EXEC_MARKER}"', 1)[0]
+for value, expected_status in (("20", 0), ("١", 1), ("１", 1), ("0", 1)):
+    result = subprocess.run(
+        [shell, "-s"], input='set -eu\nfail() { printf "%s\\n" "$*" >&2; exit 1; }\n' + gio_block,
+        env=dict(os.environ, GIO_LAUNCH_TIMEOUT=value), capture_output=True,
+        text=True, encoding="utf-8", timeout=10,
+    )
+    if (result.returncode != expected_status or "10#" in result.stderr
+            or (expected_status and "GIO_LAUNCH_TIMEOUT must be a positive integer" not in result.stderr)):
+        raise AssertionError(f"locale-dependent installer setting refusal: {value}: {result.stderr}")
+# No test tools can start even if a broken validator accidentally continues.
+for name in ("ARIA2_BEHAVIOR_BASIC_RUNS", "ARIA2_BEHAVIOR_CANCEL_RESTART_RUNS",
+             "ARIA2_BEHAVIOR_QUIESCENCE_RUNS", "ARIA2_BEHAVIOR_WAIT_SECONDS"):
+    environment = dict(os.environ, PROJECT_DIR=str(project), PATH="/nonexistent")
+    environment[name] = "١"
+    result = subprocess.run(
+        [shell, str(project / "tests/aria2-real-behavior-integration.sh")],
+        env=environment, capture_output=True, text=True, encoding="utf-8", timeout=10,
+    )
+    if (result.returncode != 64 or f"{name} must be a decimal integer" not in result.stderr
+            or "10#" in result.stderr):
+        raise AssertionError(f"locale-dependent aria2 setting refusal: {name}: {result.stderr}")
+run("tests/lib/test-runner.sh", r'''
+set -eu
+original_locale=${LC_ALL-}
+TEST_RUNNER_TERMINATION_POLL_ATTEMPTS=050
+test_runner_validate_termination_poll_attempts
+[[ $TEST_RUNNER_TERMINATION_POLL_ATTEMPTS == 50 ]]
+TEST_RUNNER_TERMINATION_POLL_ATTEMPTS=١
+status=0
+test_runner_validate_termination_poll_attempts 2>/dev/null || status=$?
+[[ $status == 64 ]]
+[[ ${LC_ALL-} == "$original_locale" ]]
+printf '%s\n' locale-protocols-ok
+''', executable=False)
+run("tests/lib/assert.sh", r'''
+set -eu
+original_locale=${LC_ALL-}
+validate_expected_status 023 witness result
+[[ $result == 23 ]]
+status=0
+errors=$(validate_expected_status '١' witness result 2>&1) || status=$?
+[[ $status == 2 && $errors == 'TEST ERROR: witness: expected status is not an integer: ١' ]]
+[[ ${LC_ALL-} == "$original_locale" ]]
+printf '%s\n' locale-protocols-ok
+''', executable=False)
+run("download-video.sh", r'''
+original_locale=${LC_ALL-}
+compare_versions '2026.06.09' '2026.06.09'
+[[ $VERSION_PARSE_VALID == true && $VERSION_AT_LEAST == true ]]
+for value in '١.2.3' '１.2.3' '2026.０６.09'; do
+    compare_versions "$value" '2.0.0'
+    [[ $VERSION_PARSE_VALID == false && $VERSION_AT_LEAST == false ]]
+done
+[[ ${LC_ALL-} == "$original_locale" ]]
+printf '%s\n' locale-protocols-ok
+''')
+run("download-video.sh", r'''
+original_locale=${LC_ALL-}
+URL_HOST=YOUTUBE-NOCOOKIE.COM
+normalize_url_host
+[[ $URL_HOST == youtube-nocookie.com ]]
+[[ ${LC_ALL-} == "$original_locale" ]]
+printf '%s\n' locale-protocols-ok
+''')
+run("install-fedora.sh", r'''
+original_locale=${LC_ALL-}
+root_stage_path_is_safe '/tmp/yt-dlp-aria2-downloader-application.a1234567'
+if root_stage_path_is_safe '/tmp/yt-dlp-aria2-downloader-application.éééééééé'; then exit 99; fi
+[[ ${LC_ALL-} == "$original_locale" ]]
+printf '%s\n' locale-protocols-ok
+''')
+run("download-video-gui.sh", r'''
+original_locale=${LC_ALL-}
+url_is_youtube 'https://YOUTUBE-NOCOOKIE.COM/watch'
+url_is_youtube 'https://WWW.YOUTUBE.COM/watch'
+if url_is_youtube 'https://YOUTUBE-NOCOOKIE.COM.example.invalid/watch'; then exit 99; fi
+[[ ${LC_ALL-} == "$original_locale" ]]
+printf '%s\n' locale-protocols-ok
+''')
+run("runtime-manager.sh", r'''
+# This executable intentionally avoids errexit; the witness must assert failures.
+set -e
+original_locale=${LC_ALL-}
+is_valid_ytdlp_version '2026.06.09'
+for value in '２０２６.06.09' '2026.٠٦.09'; do
+    if is_valid_ytdlp_version "$value"; then exit 99; fi
+done
+validate_bounded_uint timeout 15 1 300
+for value in '١' '１'; do
+    if validate_bounded_uint timeout "$value" 1 300 2>/dev/null; then exit 99; fi
+done
+[[ ${LC_ALL-} == "$original_locale" ]]
+printf '%s\n' locale-protocols-ok
+''')
+with tempfile.TemporaryDirectory(prefix="locale-staging-") as temporary:
+    root = Path(temporary)
+    # Exercise the bootstrap's actual parser: translated collation must not
+    # admit non-ASCII version components or cryptographic digest characters.
+    pin = root / "shfmt-pin.env"
+    for version, digest, expected in (("3.14.1", "a" * 64, 0),
+                                      ("3.14.1", "é" * 64, 65),
+                                      ("3.14.1", "١" * 64, 65),
+                                      ("３.14.1", "a" * 64, 65)):
+        pin.write_text(f"SHFMT_VERSION={version}\nSHFMT_LINUX_AMD64_SHA256={digest}\n"
+                       f"SHFMT_LINUX_ARM64_SHA256={'b' * 64}\n", encoding="utf-8")
+        run("scripts/dev-tools/ensure-shfmt.sh", r'''
+original_locale=${LC_ALL-}
+status=0
+read_pin "$1" version amd64 arm64 2>/dev/null || status=$?
+[[ $status == "$2" ]]
+[[ ${LC_ALL-} == "$original_locale" ]]
+printf '%s\n' locale-protocols-ok
+''', (str(pin), str(expected)))
+
+    spec = importlib.util.spec_from_file_location("locale_format_helper", project / "private-aria2-plan.py")
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    identifiers = root / "identifiers.bin"
+    cases = ["ascii-1_2.3:4", "français", "carré²", "中", "𐐀", "١", "Ⅰ",
+             "é" * 128, "é" * 129, "𐐀" * 128, "𐐀" * 129,
+             "", "é/slash", "e\u0301", "\u0345", "\u05b0", "\u093e", "$()"]
+    records = [(value.encode("utf-8"), helper.format_id_is_representable(value) and len(value) <= 128)
+               for value in cases]
+    # Combined IDs are a monitor-only extension; malformed UTF-8 is never data.
+    records.extend((("vidéo+音声".encode("utf-8"), True), (b"invalid-\xff", False),
+                    (b"truncated-\xc3", False), (b"overlong-\xc0\xaf", False)))
+    identifiers.write_bytes(b"".join(value + b"\0" + (b"1" if valid else b"0") + b"\0"
+                                     for value, valid in records))
+    monitor_log = root / "monitor.log"
+    monitor_log.write_bytes(b"")
+    run("progress-monitor.sh", r'''
+initialize_progress_inputs "$1/monitor.log" "$$" "$1/result" video "$1"
+initialize_progress_state
+while IFS= read -r -d '' value && IFS= read -r -d '' expected; do
+    sanitize_identifier "$value"
+    if [[ $expected == 1 ]]; then
+        [[ $SANITIZED_IDENTIFIER == "$value" ]]
+    else
+        [[ -z $SANITIZED_IDENTIFIER ]]
+    fi
+done <"$1/identifiers.bin"
+# Each new Unicode ID is checked once; known plan/native IDs reuse exact bytes.
+probe_log=$1/python-probes
+python3() {
+    printf 'probe\n' >>"$probe_log"
+    command python3 "$@"
+}
+set_multistream_plan 2 'vidéo' 'carré²'
+[[ ${#PLANNED_FORMAT_IDS[@]} == 2 && ${PLANNED_FORMAT_IDS[1]} == 'carré²' ]]
+[[ $(wc -l <"$probe_log") == 2 ]]
+: >"$probe_log"
+for ((record = 0; record < 1000; record++)); do
+    resolve_native_key 'carré²'
+    [[ $RESOLVED_KEY == plan:2 ]]
+done
+[[ ! -s $probe_log ]]
+initialize_progress_state
+resolve_native_key 'carré²'
+[[ $RESOLVED_KEY == native:1 && ${NATIVE_FORMAT_IDS[0]} == 'carré²' ]]
+[[ $(wc -l <"$probe_log") == 1 ]]
+: >"$probe_log"
+for ((record = 0; record < 1000; record++)); do
+    resolve_native_key 'carré²'
+    [[ $RESOLVED_KEY == native:1 ]]
+done
+[[ ! -s $probe_log ]]
+printf '%s\n' locale-protocols-ok
+''', (str(root),))
+    duration = root / "durée média.txt"
+    duration.write_text("12.5\n", encoding="utf-8")
+    run("download-video.sh", r'''
+original_locale=${LC_ALL-}
+PROBE_OUTPUT_FILE=$1
+capture_media_probe() { return 0; }
+probe_duration_microseconds actual 'synthetic media'
+[[ $actual == 12500000 ]]
+for value in '١.5' '１.5' '12,5'; do
+    printf '%s\n' "$value" >"$PROBE_OUTPUT_FILE"
+    probe_duration_microseconds actual 'synthetic media'
+    [[ -z $actual ]]
+done
+[[ ${LC_ALL-} == "$original_locale" ]]
+printf '%s\n' locale-protocols-ok
+''', (str(duration),))
+    for name in (".yt-dlp-aria2.a1234567", ".yt-dlp-aria2.é1234567"):
+        directory = root / name
+        directory.mkdir(mode=0o700)
+        marker = directory / ".yt-dlp-aria2-owner-v1"
+        marker.write_text("yt-dlp-aria2-private-staging-v1\n", encoding="ascii")
+        marker.chmod(0o600)
+    run("download-video.sh", r'''
+original_locale=${LC_ALL-}
+OUTPUT_DIR=$1
+entries=()
+private_aria2_staging_candidate_is_safe "$1/.yt-dlp-aria2.a1234567" entries
+if private_aria2_staging_candidate_is_safe "$1/.yt-dlp-aria2.é1234567" entries; then exit 99; fi
+[[ -f $1/.yt-dlp-aria2.é1234567/.yt-dlp-aria2-owner-v1 ]]
+[[ ${LC_ALL-} == "$original_locale" ]]
+printf '%s\n' locale-protocols-ok
+''', (str(root),))
+    state = root / "état privé"
+    state.mkdir(mode=0o700)
+    for suffix in ("a1234567", "é1234567"):
+        log = state / f".download-20250101-010101-{suffix}.log.part"
+        log.write_bytes(b"synthetic retained data\n")
+        log.chmod(0o600)
+        os.utime(log, (1, 1))
+    run("download-video-gui.sh", r'''
+original_locale=${LC_ALL-}
+STATE_DIR=$1
+prune_old_logs
+[[ ! -e $1/.download-20250101-010101-a1234567.log.part ]]
+[[ -f $1/.download-20250101-010101-é1234567.log.part ]]
+[[ ${LC_ALL-} == "$original_locale" ]]
+printf '%s\n' locale-protocols-ok
+''', (str(state),))
+    if (state / ".download-20250101-010101-é1234567.log.part").read_bytes() != b"synthetic retained data\n":
+        raise AssertionError("ambiguous retained log bytes changed")
+print("Locale protocols: ASCII versions/numbers, cleanup names and caller environment preserved.")
+PY_LOCALE_PROTOCOLS
+}
+
 test_mock_runtime_version_formats() {
     local compatible_ytdlp_version
 
@@ -785,6 +1049,7 @@ test_mock_runtime_missing_zenity() {
 }
 
 run_mock_runtime_compat_group() {
+    test_mock_locale_contracts
     test_mock_managed_runtime_attestation
     test_mock_runtime_version_formats
     test_mock_runtime_version_overflow
@@ -799,6 +1064,7 @@ run_mock_runtime_validation_group() {
 }
 
 run_mock_runtime_group() {
+    test_mock_locale_contracts
     test_mock_managed_runtime_attestation
     test_mock_runtime_version_formats
     test_mock_runtime_worker_failure
@@ -813,6 +1079,7 @@ run_selected_mock_runtime_group() {
     case ${MOCK_GROUP} in
         all | runtime) run_mock_runtime_group ;;
         runtime-compat) run_mock_runtime_compat_group ;;
+        locale) test_mock_locale_contracts ;;
         runtime-validation) run_mock_runtime_validation_group ;;
         *) ;;
     esac

@@ -855,6 +855,93 @@ class ObservationRetirementTests(unittest.TestCase):
         result.known.add((self.pid, self.row['start']))
         return result
 
+    def test_identity_read_bytes_preserves_the_native_buffering_and_exit_contract(self):
+        def exercise(detailed, read_errno, close_errno):
+            calls = []
+            observed = self.observed(True, True)
+            scope = observer._DiagnosticScope(observed)
+            path = Path('/synthetic/attribute')
+
+            class Stream:
+                def __enter__(self):
+                    calls.append(('enter',))
+                    return self
+
+                def read(self):
+                    calls.append(('read',))
+                    if read_errno is not None:
+                        raise OSError(read_errno, 'synthetic read refusal')
+                    return b'synthetic attribute bytes'
+
+                def __exit__(self, kind, error, traceback):
+                    calls.append(('exit', None if error is None else error.errno))
+                    if close_errno is not None:
+                        raise OSError(close_errno, 'synthetic close refusal')
+                    return False
+
+            def opened(actual, *args, **kwargs):
+                self.assertEqual(actual, path)
+                calls.append(('open', args, kwargs))
+                return Stream()
+
+            token = observer._DIAGNOSTIC_SCOPE.set(scope)
+            try:
+                with mock.patch.object(Path, 'open', new=opened):
+                    try:
+                        value = observer._identity_read_bytes(path) if detailed else path.read_bytes()
+                    except OSError as error:
+                        outcome = ('error', type(error), error.errno)
+                    else:
+                        outcome = ('value', value)
+            finally:
+                observer._DIAGNOSTIC_SCOPE.reset(token)
+            return outcome, calls, observed.diagnostics_incomplete
+
+        for read_errno, close_errno in ((None, None), (errno.EACCES, None),
+                                        (None, errno.EIO), (errno.EACCES, errno.EIO)):
+            with self.subTest(read_errno=read_errno, close_errno=close_errno):
+                native = exercise(False, read_errno, close_errno)
+                detailed = exercise(True, read_errno, close_errno)
+                self.assertEqual(detailed[:2], native[:2],
+                                 'instrumentation changed native open/read/exit behavior')
+                self.assertFalse(detailed[2], 'the inspected runtime became opaque')
+
+    def test_uninspected_python_keeps_failures_blocking_and_diagnostics_incomplete(self):
+        for implementation, minor in (('cpython', 9), ('cpython', 16), ('pypy', 15)):
+            with self.subTest(implementation=implementation, minor=minor):
+                runtime = SimpleNamespace(implementation=SimpleNamespace(name=implementation),
+                                          version_info=SimpleNamespace(major=3, minor=minor))
+                with mock.patch.object(observer, 'sys', runtime), \
+                        self.retired_group(read_errno=errno.EACCES, fdinfo_close_errno=errno.EIO):
+                    observed = self.observed(True, True)
+                    with self.assertRaises(observer.ObservationError) as failure:
+                        observed.sample()
+                    self.assertEqual(failure.exception.errno, errno.EACCES)
+                    self.assertIs(observed.error, failure.exception)
+                    self.assertTrue(observed.diagnostics_incomplete)
+                    self.assertFalse(observed.identity_failure(failure.exception)['complete'])
+
+    def test_customized_reader_stays_opaque_without_repeating_the_read(self):
+        calls = []
+        expected = PermissionError(errno.EACCES, 'synthetic customized reader refusal')
+
+        class CustomReader:
+            def read_bytes(self):
+                calls.append('read')
+                raise expected
+
+        observed = self.observed(True, True)
+        token = observer._DIAGNOSTIC_SCOPE.set(observer._DiagnosticScope(observed))
+        try:
+            with self.assertRaises(PermissionError) as failure:
+                observer._identity_read_bytes(CustomReader())
+        finally:
+            observer._DIAGNOSTIC_SCOPE.reset(token)
+        self.assertIs(failure.exception, expected)
+        self.assertEqual(calls, ['read'])
+        self.assertTrue(observed.diagnostics_incomplete)
+        self.assertFalse(observed.identity_failure(failure.exception)['complete'])
+
     def test_enoent_after_leader_exit_requires_independent_group_termination(self):
         for diagnostics, identity in ((False, False), (True, False), (True, True)):
             with self.subTest(diagnostics=diagnostics, identity=identity), self.retired_group() as state:
@@ -4447,8 +4534,12 @@ os.write(1, b"complete")
 ''')
         def constrain_memory():
             resource.setrlimit(resource.RLIMIT_AS, (64 * 1024 * 1024,) * 2)
+        # This byte-protocol ceiling excludes the host's locale archive, which
+        # can exceed 64 MiB before Bash starts. Keep the limit and every emitted
+        # diagnostic observable; other fixtures retain the caller's locale.
         result = subprocess.run(['bash', str(self.wrapper), sys.executable, str(producer)],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20,
+                                env=dict(os.environ, LC_ALL='C', LANGUAGE='C'),
                                 preexec_fn=constrain_memory)
         self.assertEqual(result.returncode, 0, 'bounded filter broke the producer pipe')
         self.assertEqual(result.stdout, b'complete')

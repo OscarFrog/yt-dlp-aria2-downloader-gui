@@ -558,12 +558,32 @@ require_refusal(run('foreign-certificate', good, key_b), [], 'foreign certificat
 require_refusal(run('wrong-nevra', good, expected_nevra=nevra + '-different'),
                 ['verify'], 'wrong NEVRA reached installation')
 
-# Signature presence is independent of RPM's digest-only success. Deleting that
-# guard must reproduce the formerly admitted unsigned-package installation.
+# Keep the real native verification policy. RPM 6.1's all/signature policy
+# independently refuses unsigned payloads even after the explicit presence
+# guard is deleted; that defense is not evidence that the deleted guard ran.
 presence_start = body.index('signature_state=$(\n')
 presence_end = body.index('\nrpmkeys \\\n', presence_start)
 without_presence = body[:presence_start] + body[presence_end:]
-observed = run('mutant-presence', unsigned, implementation=without_presence)
+native_policy = subprocess.check_output(
+    ['rpm', '--eval', '%{_pkgverify_level}'], text=True, encoding='ascii',
+).strip()
+if native_policy in ('all', 'signature'):
+    require_refusal(run('mutant-presence-native', unsigned, implementation=without_presence),
+                    ['verify'], 'native signature policy admitted an unsigned RPM')
+elif native_policy not in ('digest', 'none'):
+    raise AssertionError('unrecognized native RPM verification policy')
+
+# Model the historical digest-only verifier only at this private fixture's
+# checksig invocation. The unchanged production body above retains native
+# verification, isolated signers and every certificate/identity refusal.
+checksig = '--checksig "${bootstrap_dir}/rpmfusion-free-release-44.noarch.rpm"'
+if body.count(checksig) != 1:
+    raise AssertionError('RPM checksum verification call is not uniquely located')
+legacy_body = body.replace(checksig, '--define "_pkgverify_level digest" ' + checksig, 1)
+require_refusal(run('unsigned-legacy-policy', unsigned, implementation=legacy_body),
+                [], 'explicit signature presence did not reject an unsigned RPM')
+legacy_without_presence = legacy_body[:presence_start] + legacy_body[presence_end:]
+observed = run('mutant-presence', unsigned, implementation=legacy_without_presence)
 if observed[0].returncode or observed[1] != ['verify', 'system-import', 'dnf']:
     raise AssertionError('signature-presence mutant did not reach the expected unsafe admission')
 try:

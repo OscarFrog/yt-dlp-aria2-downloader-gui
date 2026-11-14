@@ -85,6 +85,87 @@ def aac_declared_end_matches_packets(before: dict, after: dict, packet_pts: list
     return any(abs(declared - candidate) <= allowance for candidate in candidates)
 
 
+class LocaleProtocolTests(unittest.TestCase):
+    def test_real_selection_callbacks_and_result_path_preserve_bytes(self):
+        # Execute the two callbacks used by the real HLS scenarios without
+        # starting encoders or a server. Their input is the UTF-8 JSON protocol.
+        script = r"""
+import ast
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+from types import SimpleNamespace
+source = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("media_fixture", source)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+payload = {"version": 1, "policy": module.TRACKS.POLICY, "id": "a" * 64,
+           "audio": [{"id": "audio-ja", "language": "ja", "role": "main",
+                      "label": "Fran\u00e7ais \u65e5\u672c\u8a9e", "original": True}],
+           "subtitles": []}
+callbacks = [node for node in ast.walk(ast.parse(source.read_bytes()))
+             if isinstance(node, ast.FunctionDef)
+             and node.name in ("select_without_subtitles", "select_and_withdraw")]
+assert len(callbacks) == 2
+for callback in callbacks:
+    with tempfile.TemporaryDirectory(prefix="locale-catalogue-") as temporary:
+        directory = Path(temporary)
+        catalogue = directory / "catalogue.json"
+        selection = directory / "selection.json"
+        manifest = directory / "index.m3u8"
+        retained = directory / "index.retained"
+        module.write_json(catalogue, payload)
+        manifest.write_bytes(b"#EXTM3U\n")
+        def choose(actual, **kwargs):
+            assert actual == payload, "UTF-8 catalogue changed before selection"
+            return module.TRACKS.choose(actual, **kwargs)
+        namespace = dict(catalogue=catalogue, selection=selection, manifest=manifest,
+                         retained=retained, json=json, write_json=module.write_json,
+                         TRACKS=SimpleNamespace(choose=choose))
+        code = compile(ast.Module(body=[callback], type_ignores=[]), str(source), "exec")
+        exec(code, namespace)
+        namespace[callback.name]()
+        result = json.loads(selection.read_bytes())
+        assert result["audio"] == ["audio-ja"] and result["subtitles"] == []
+        assert result["catalogue_id"] == payload["id"]
+# The result record contains filesystem bytes plus one newline, not text in
+# the fixture interpreter's preferred encoding. Exercise its real consumer.
+readers = [node for node in ast.walk(ast.parse(source.read_bytes()))
+           if isinstance(node, ast.Assign)
+           and any(isinstance(target, ast.Name) and target.id == "final" for target in node.targets)
+           and any(isinstance(part, ast.Name) and part.id == "result" for part in ast.walk(node.value))]
+assert len(readers) == 1
+with tempfile.TemporaryDirectory(prefix="locale-result-") as temporary:
+    raw_path = os.fsencode(temporary) + b"/" + "Film \u00e9t\u00e9 \u65e5\u672c\u8a9e.mkv ".encode("utf-8")
+    with open(raw_path, "wb") as stream:
+        stream.write(b"synthetic media")
+    record = Path(temporary) / "result"
+    record.write_bytes(raw_path + b"\n")
+    namespace = dict(result=record, Path=Path, os=os)
+    exec(compile(ast.Module(body=readers, type_ignores=[]), str(source), "exec"), namespace)
+    final = namespace["final"]
+    assert os.fsencode(final) == raw_path and final.is_file()
+print("UTF-8 selection callbacks preserved")
+"""
+        available = subprocess.run(["locale", "-a"], capture_output=True, check=True,
+                                   timeout=10).stdout.decode("ascii").splitlines()
+        locales = ["C"]
+        if "fr_FR.iso88591" in available:
+            locales.append("fr_FR.iso88591")
+        for selected in locales:
+            with self.subTest(locale=selected):
+                result = subprocess.run(
+                    [sys.executable, "-I", "-B", "-X", "utf8=0", "-c", script, str(Path(__file__).resolve())],
+                    env=dict(os.environ, LC_ALL=selected, LANGUAGE="fr_FR:fr",
+                             PYTHONUTF8="0", PYTHONCOERCECLOCALE="0"),
+                    capture_output=True, timeout=15, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+                self.assertEqual(result.stdout, b"UTF-8 selection callbacks preserved\n")
+
+
 class DecimalValueTests(unittest.TestCase):
     def test_extreme_exponents_are_controlled_refusals(self) -> None:
         for value in ("1e999999999", "-1e999999999", "NaN", "sNaN", "Infinity", "-Infinity"):
@@ -731,7 +812,7 @@ if REAL_TOOLS:
                 def select_without_subtitles() -> None:
                     if not catalogue.exists() or selection.exists():
                         return
-                    choices = json.loads(catalogue.read_text())
+                    choices = json.loads(catalogue.read_bytes())
                     original = next(track["id"] for track in choices["audio"] if track["language"] == "ja")
                     pending = selection.with_suffix(".tmp")
                     write_json(pending, TRACKS.choose(choices, audio_mode="custom", subtitle_mode="none",
@@ -744,7 +825,7 @@ if REAL_TOOLS:
                 "--result-file", str(result), "--machine-progress", *selection_arguments,
                 "https://www.arte.tv/fr/videos/133131-synthetic/"], self.environment, self.root, on_tick)
             self.assertEqual(completed.returncode, 0, (completed.stdout + completed.stderr).decode(errors="replace")[-10000:])
-            final = Path(result.read_text().strip())
+            final = Path(os.fsdecode(result.read_bytes()).removesuffix("\n"))
             self.assertEqual(final.parent, directory)
             self.assertTrue(final.is_file())
             self.assertEqual(list(directory.iterdir()), [final], "Successful assembly left source components in the destination")
@@ -1043,7 +1124,7 @@ if REAL_TOOLS:
             def select_and_withdraw() -> None:
                 if not catalogue.exists() or selection.exists():
                     return
-                choices = json.loads(catalogue.read_text())
+                choices = json.loads(catalogue.read_bytes())
                 original = next(track["id"] for track in choices["audio"] if track["language"] == "ja")
                 manifest.rename(retained)
                 pending = selection.with_suffix(".tmp")

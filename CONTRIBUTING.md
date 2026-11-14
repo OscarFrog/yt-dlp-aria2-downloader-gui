@@ -37,6 +37,24 @@ Ordinary contributions do not require a version bump. Keep all version copies
 coherent and leave published tags and release assets unchanged; see
 [version coherence](TESTING.md#version-coherence-and-release-preparation).
 
+## Mandatory locale-independent behavior
+
+Contributions must satisfy [the locale development rule](AGENTS.md#locale-independence--mandatory-development-rule)
+and [the shell boundary contract](SHELL_STYLE.md#mandatory-locale-independence).
+Technical parsing, security decisions, numeric formats and test verdicts must
+not depend on the host language. Prefer structured protocols and exit statuses;
+otherwise establish a C locale at the relevant executable or child-process
+boundary before parsing. Preserve explicit UTF-8 data contracts and do not change
+a caller's locale while sourcing a library or importing a module.
+
+Register new Python, Bash and workflow sources in the locale contract inventory
+and add a behavioral regression whenever code invokes a locale-sensitive tool or
+processes text. Exercise a stable reference and an installed French locale, plus
+negative controls for the changed boundary. A static check alone is insufficient.
+English interface messages are acceptable; Unicode paths and media data remain
+supported. Fedora 45 French is a primary developer environment, while Python 3.10
+and Bash 4.4 remain the minimum supported interpreters. Violations block review.
+
 ## Validate your change
 
 Run from the repository root. The doctor checks your environment before the

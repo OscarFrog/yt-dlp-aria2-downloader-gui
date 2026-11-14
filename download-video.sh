@@ -451,6 +451,8 @@ compare_decimal_components() {
 }
 
 compare_versions() {
+    # Version components are ASCII protocol fields, independent of collation.
+    local LC_ALL=C
     local current=$1
     local minimum=$2
     local current_triplet=''
@@ -2311,6 +2313,8 @@ remove_active_private_aria2_sensitive_metadata() {
 }
 
 remove_marked_private_aria2_sensitive_metadata() {
+    # Only the ASCII names created by mktemp and the planner grant cleanup.
+    local LC_ALL=C
     (($# > 1)) || return 2
     local candidate=$1
     shift
@@ -2381,6 +2385,8 @@ remove_marked_private_aria2_sensitive_metadata() {
 }
 
 private_aria2_staging_candidate_is_safe() {
+    # Only the ASCII names created by mktemp and the planner grant cleanup.
+    local LC_ALL=C
     local candidate=$1
     local -n validated_entries=$2
     local candidate_name=${candidate##*/}
@@ -2579,6 +2585,8 @@ print(
 }
 
 probe_duration_microseconds() {
+    # FFprobe durations use ASCII decimal fields regardless of the caller locale.
+    local LC_ALL=C
     local probe_duration_output_variable=$1
     local media_path=$2
     local probe_duration=''
@@ -3038,6 +3046,12 @@ parse_arguments() {
     done
 }
 
+# DNS host matching must use ASCII case folding, including under Turkish locales.
+normalize_url_host() {
+    local LC_ALL=C
+    URL_HOST=${URL_HOST,,}
+}
+
 # Resolve the single URL from argv or its private file and classify its host.
 resolve_requested_url() {
     local url_control_pattern=$'[\001-\037\177]'
@@ -3130,7 +3144,7 @@ resolve_requested_url() {
         exit 2
     fi
     URL_HOST=${url_authority%%:*}
-    URL_HOST=${URL_HOST,,}
+    normalize_url_host
     URL_HOST=${URL_HOST%.}
     case ${URL_HOST} in
         youtube.com | *.youtube.com | youtu.be | *.youtu.be | \

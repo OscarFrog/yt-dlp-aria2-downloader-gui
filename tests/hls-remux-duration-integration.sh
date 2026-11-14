@@ -22,7 +22,7 @@ done
 TEST_ROOT=$(mktemp -d)
 readonly TEST_ROOT
 ENGINE_TIMEOUT_SECONDS=${HLS_ENGINE_TIMEOUT_SECONDS:-60}
-[[ ${ENGINE_TIMEOUT_SECONDS} =~ ^[0-9]{1,3}$ ]] || {
+[[ ${ENGINE_TIMEOUT_SECONDS} =~ ^[0123456789]{1,3}$ ]] || {
     printf 'Error: HLS_ENGINE_TIMEOUT_SECONDS must be an integer between 1 and 300.\n' >&2
     exit 64
 }

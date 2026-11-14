@@ -181,6 +181,8 @@ class ProofTests(unittest.TestCase):
     def test_minimum_shell_and_shared_destination_steps_cannot_be_missing_or_skipped(self):
         checks = (
             (1, "Ubuntu", "Check Python with reviewed Ruff"),
+            (1, "Ubuntu", "Check locale-independent protocols"),
+            (1, "Fedora 45 / French locale", "Check French locale protocols and negative mutations"),
             (1, "Python 3.10 / Ubuntu", "Build and bind verified Bash 4.4 on the disposable runner"),
             (1, "Python 3.10 / Ubuntu", "Bind every test interpreter to the minimum Python"),
             (4, "Local media, pinned yt-dlp 2026.8.19", "Install verified Deno for shared-destination qualification"),
@@ -348,6 +350,20 @@ class ProofTests(unittest.TestCase):
                 with self.assertRaises(CHECK.Refusal):
                     self.verify()
 
+    def test_fedora45_locale_job_cannot_be_missing_or_unsuccessful(self):
+        endpoint = "actions/runs/100/attempts/1/jobs?per_page=100&page=1"
+        for outcome in ("missing", "failure", "skipped", "cancelled"):
+            with self.subTest(outcome=outcome):
+                api = fixture()
+                jobs = api.responses[endpoint]["jobs"]
+                job = next(item for item in jobs if item["name"] == "Fedora 45 / French locale")
+                if outcome == "missing":
+                    jobs.remove(job)
+                else:
+                    job["conclusion"] = outcome
+                with self.assertRaises(CHECK.Refusal):
+                    CHECK.Verifier(api, NOW).required(SOURCE, api.responses["pulls/23"], {})
+
     def test_forged_or_missing_identity_is_rejected(self):
         job = next(job for job in self.jobs() if job["name"].startswith(CHECK.IDENTITY_PREFIX))
         for identity in ("Source identity refs/pull/23/merge", "Source identity " + OTHER, "Other identity"):
@@ -389,6 +405,8 @@ class ProofTests(unittest.TestCase):
         # REQUIRED_STEPS: removing a production requirement must fail this test.
         for index, name, obligation in (
             (1, "Ubuntu", "Check Python with reviewed Ruff"),
+            (1, "Ubuntu", "Check locale-independent protocols"),
+            (1, "Fedora 45 / French locale", "Check French locale protocols and negative mutations"),
             (2, "Fedora 44 RPM build-once", "Qualify RPM v4/v6 signature semantics"),
             (2, "Previous immutable release", "Verify exact published previous packages"),
             (2, "Fedora 44 RPM (fresh)", "Reject a different globally trusted RPM signer in PR CI"),
@@ -1347,6 +1365,28 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
                         job.index("./tests/run-all.sh --full --jobs 4"))
         self.assertIn("timeout --signal=TERM --kill-after=10s 8m", job)
         self.assertIn("timeout-minutes: 10", job)
+        self.assertIn("sudo localedef -i fr_FR -f UTF-8 fr_FR.UTF-8", job)
+        self.assertIn('locale.setlocale(locale.LC_ALL, "")', job)
+        for name in ("Confirm minimum Python and environment",
+                     "Exercise the complete contract under Python 3.10"):
+            step = job.split("      - name: " + name + "\n", 1)[1].split("      - name:", 1)[0]
+            self.assertIn("        env:\n          LC_ALL: fr_FR.UTF-8\n"
+                          "          LANGUAGE: fr_FR:fr\n", step)
+
+    def test_fedora45_and_ubuntu_require_the_behavioral_locale_guard(self):
+        jobs = self.jobs(self.workflow("shell.yml"))
+        for name in ("validate-ubuntu", "validate-fedora-locale"):
+            with self.subTest(job=name):
+                job = jobs[name]
+                self.assertIn("YTDLP_LOCALE_GUARD_REQUIRE_FRENCH: '1'", job)
+                self.assertIn("tests/ci-validation-integration.py LocaleRegistryTests LocaleGuardTests", job)
+                self.assertNotIn("continue-on-error", job)
+        fedora = jobs["validate-fedora-locale"]
+        self.assertIn("image: registry.fedoraproject.org/fedora:45", fedora)
+        self.assertIn("glibc-langpack-fr", fedora)
+        self.assertIn("LC_ALL: fr_FR.UTF-8", fedora)
+        self.assertIn("LANGUAGE: fr_FR:fr", fedora)
+        self.assertNotIn("run-all.sh --full", fedora)
 
     def test_fedora_suite_budget_preserves_workers_and_validation_status(self):
         job = self.jobs(self.workflow("shell.yml"))["validate-fedora"]
@@ -2079,7 +2119,7 @@ class UbuntuMirrorTests(unittest.TestCase):
     def test_exact_nine_jobs_prepare_mirrors_before_apt_and_exclude_privileged_jobs(self):
         for path in (PROJECT / ".github/workflows").glob("*.yml"):
             with self.subTest(workflow=path.name):
-                self.assert_workflow_scope(path.name, path.read_text())
+                self.assert_workflow_scope(path.name, path.read_text(encoding="utf-8"))
 
     def test_missing_late_or_failure_masked_preparation_is_rejected(self):
         for filename in self.TARGETS:
@@ -2280,7 +2320,7 @@ class VersionBoundaryTests(unittest.TestCase):
 
     @staticmethod
     def step(workflow, name):
-        text = (PROJECT / ".github/workflows" / workflow).read_text()
+        text = (PROJECT / ".github/workflows" / workflow).read_text(encoding="utf-8")
         block = text.split("      - name: " + name + "\n", 1)[1]
         block = block.split("\n      - ", 1)[0].split("        run: |\n", 1)[1]
         return "\n".join(line[10:] for line in block.splitlines()
@@ -2679,7 +2719,7 @@ timeout() { printf invoked >"${CHECK_RUN}"; }
                         exec(compile(program, "workflow-deno-compatibility", "exec"), {})
 
     def test_development_artifact_names_bind_source_and_run_across_consumer_reruns(self):
-        text = (PROJECT / ".github/workflows/packages.yml").read_text()
+        text = (PROJECT / ".github/workflows/packages.yml").read_text(encoding="utf-8")
         rpm_names = re.findall(r"(?m)^          name: (rpm-under-test-.+)$", text)
         # Producer and consumer share a run-scoped identity even if only the
         # consumer is rerun. Attempt metadata belongs to the artifact producer.
@@ -2747,7 +2787,7 @@ gh() {
             fixture = 'git() { if [[ $1 == rev-parse ]]; then printf "%s\\n" "${GITHUB_SHA}"; fi; }\n'
             for tag, expected in (("v" + version, 0), ("v999.9.9", 65)):
                 with self.subTest(tag=tag):
-                    result = subprocess.run(["bash", "-c", fixture + script], cwd=root,
+                    result = subprocess.run(["bash", "-c", (fixture + script).encode("utf-8")], cwd=root,
                                             env=dict(os.environ, RELEASE_TAG=tag, GITHUB_SHA=SOURCE,
                                                      GITHUB_EVENT_NAME="push"), capture_output=True,
                                             timeout=10, check=False)
@@ -2794,6 +2834,271 @@ gh() {
                     self.assertEqual(result.returncode, 65 if changed else 0, result.stderr)
                     if changed:
                         self.assertIn(b"differs byte-for-byte", result.stderr)
+
+
+LOCALE_CASES = {
+    "utf8-gui": (sys.executable, "-B", "tests/zenity-autonomous-integration.py",
+                 "LocaleProtocolTests", "PlatformAdmissionTests"),
+    "bash-protocols": ("bash", "tests/mock-integration.sh", "--group", "locale"),
+    "byte-collation": (sys.executable, "-B", "tests/shfmt-version-handoff-integration.py",
+                       "ShfmtVersionHandoffTests.test_localized_collation_preserves_the_byte_sorted_allowlist"),
+    "checksum-status": (sys.executable, "-B", "tests/shfmt-version-handoff-integration.py", "LocaleChecksumTests"),
+    "checksum-publisher": (sys.executable, "-B", "tests/shfmt-version-handoff-integration.py",
+                           "ShfmtVersionHandoffTests.test_checksum_errors_remain_fatal_with_translated_or_missing_output",
+                           "ShfmtVersionHandoffTests.test_publisher_refuses_empty_truncated_invalid_and_missing_checksum_inputs"),
+    "observer-diagnostics": (sys.executable, "-B", "tests/process-supervision-integration.py",
+                             "ObservationRetirementTests", "YtdlpDiagnosticTests"),
+    **{name: (sys.executable, "-B", path, "LocaleProtocolTests") for name, path in (
+        ("utf8-media", "tests/art-subtitle-integration.py"),
+        ("utf8-media-fixtures", "tests/art-media-integration.py"),
+        ("utf8-handoff", "tests/shfmt-version-handoff-integration.py"),
+        ("utf8-progress", "tests/coordination-integration.py"),
+        ("utf8-ci", "tests/ci-validation-integration.py"),
+        ("utf8-release", "tests/release-docs-integration.py"),
+        ("utf8-version", "tests/push-version-integration.py"),
+    )},
+}
+
+
+def locale_source_inventory():
+    """Use the same source arrays as syntax, Ruff and ShellCheck validation."""
+    result = subprocess.run(
+        ["bash", "-c", 'source tests/lib/project-files.sh; '
+         'printf "bash:%s\\0" "${ALL_SHELL_FILES[@]}"; '
+         'printf "python:%s\\0" "${PYTHON_FILES[@]}"'],
+        cwd=PROJECT, capture_output=True, check=True, timeout=10,
+    )
+    pairs = [item.decode("utf-8").split(":", 1) for item in result.stdout.split(b"\0") if item]
+    pairs.extend(("workflow", str(path.relative_to(PROJECT)))
+                 for path in sorted((PROJECT / ".github/workflows").iterdir())
+                 if path.suffix in {".yml", ".yaml"})
+    paths = {path: kind for kind, path in pairs}
+    if len(paths) != len(pairs) or any(not (PROJECT / path).is_file() for path in paths):
+        raise ValueError("invalid canonical locale source inventory")
+    return paths
+
+
+def validate_locale_registry(document, inventory):
+    """Require explicit coverage/review; this is not an automatic semantic audit."""
+    if not isinstance(document, dict) or document.get("schema_version") != 1:
+        raise ValueError("unsupported locale registry")
+    rows = document.get("sources")
+    if not isinstance(rows, list):
+        raise ValueError("missing locale source records")
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("invalid locale source record")
+        path = row.get("path")
+        if not isinstance(path, str) or path in seen or path not in inventory:
+            raise ValueError("unknown or duplicate locale source")
+        seen.add(path)
+        if row.get("kind") != inventory[path]:
+            raise ValueError("incorrect locale source kind")
+        boundaries, cases = row.get("boundaries"), row.get("tests")
+        reason = row.get("reviewed_no_sensitive_boundary")
+        if (not isinstance(boundaries, list) or not boundaries
+                or any(not isinstance(value, str) or not value.strip() for value in boundaries)):
+            raise ValueError("locale source requires a boundary description")
+        if (not isinstance(cases, list)
+                or any(not isinstance(case, str) or case not in LOCALE_CASES for case in cases)
+                or len(set(cases)) != len(cases)):
+            raise ValueError("unknown or duplicate locale regression case")
+        if reason is not None and (not isinstance(reason, str) or not reason.strip()):
+            raise ValueError("empty locale review justification")
+        if not cases and not reason:
+            raise ValueError("unreviewed locale boundary without a regression")
+    if seen != set(inventory):
+        raise ValueError("locale registry differs from canonical source inventory")
+
+
+class LocaleRegistryTests(unittest.TestCase):
+    def setUp(self):
+        self.inventory = locale_source_inventory()
+        self.document = json.loads((PROJECT / "tests/locale-contracts.json").read_text(encoding="utf-8"))
+
+    def test_every_canonical_source_has_an_executed_contract_or_explicit_review(self):
+        validate_locale_registry(self.document, self.inventory)
+
+    def test_new_workflow_with_either_github_suffix_requires_a_registry_record(self):
+        with tempfile.TemporaryDirectory(prefix="locale-workflow-inventory-") as temporary:
+            fixture = Path(temporary)
+            for relative in self.inventory:
+                target = fixture / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(PROJECT / relative, target)
+            with patch.dict(locale_source_inventory.__globals__, PROJECT=fixture):
+                self.assertEqual(locale_source_inventory(), self.inventory)
+                validate_locale_registry(self.document, locale_source_inventory())
+                for suffix in (".yml", ".yaml"):
+                    with self.subTest(suffix=suffix):
+                        relative = ".github/workflows/new-locale-sensitive" + suffix
+                        target = fixture / relative
+                        target.write_text(
+                            "name: New locale boundary\non: push\njobs:\n"
+                            "  probe:\n    runs-on: ubuntu-24.04\n    steps:\n"
+                            "      - run: locale\n", encoding="utf-8")
+                        try:
+                            discovered = locale_source_inventory()
+                            self.assertEqual(discovered[relative], "workflow")
+                            self.assertEqual(set(discovered), set(self.inventory) | {relative})
+                            with self.assertRaisesRegex(ValueError, "differs from canonical"):
+                                validate_locale_registry(self.document, discovered)
+                        finally:
+                            target.unlink()
+
+    def test_mandatory_development_policy_remains_linked_to_qualification(self):
+        agents = (PROJECT / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("## Locale Independence — Mandatory Development Rule", agents)
+        for path in ("SHELL_STYLE.md", "TESTING.md"):
+            self.assertIn(path, agents)
+        for path in ("SHELL_STYLE.md", "TESTING.md", "CONTRIBUTING.md",
+                     ".agents/skills/shell-change/SKILL.md",
+                     ".agents/skills/workflow-supply-chain/SKILL.md"):
+            with self.subTest(document=path):
+                text = (PROJECT / path).read_text(encoding="utf-8").lower()
+                self.assertIn("locale", text)
+                self.assertIn("behavioral", text)
+                self.assertIn("contract", text)
+
+    def test_dedicated_ci_guard_refuses_an_unavailable_french_locale(self):
+        with patch("subprocess.check_output", return_value=b"C\nPOSIX\n"), \
+                patch.dict(os.environ, YTDLP_LOCALE_GUARD_REQUIRE_FRENCH="1"):
+            with self.assertRaisesRegex(AssertionError, "requires provisioned French"):
+                LocaleGuardTests.setUpClass()
+
+    def test_new_sources_unknown_cases_and_empty_reviews_are_refused(self):
+        validate_locale_registry(self.document, self.inventory)
+        extra = dict(self.inventory, **{"tests/new-locale-sensitive.py": "python"})
+        with self.assertRaises(ValueError):
+            validate_locale_registry(self.document, extra)
+        for change in ("duplicate", "missing", "unknown-case", "empty-boundary", "unreviewed"):
+            with self.subTest(change=change):
+                document = copy.deepcopy(self.document)
+                row = document["sources"][0]
+                if change == "duplicate":
+                    document["sources"].append(copy.deepcopy(row))
+                elif change == "missing":
+                    document["sources"].pop()
+                elif change == "unknown-case":
+                    row["tests"] = ["not-an-executed-locale-test"]
+                elif change == "empty-boundary":
+                    row["boundaries"] = [""]
+                else:
+                    row["tests"] = []
+                    row["reviewed_no_sensitive_boundary"] = None
+                with self.assertRaises(ValueError):
+                    validate_locale_registry(document, self.inventory)
+
+
+class LocaleGuardTests(unittest.TestCase):
+    """Replay actual boundaries and prove their witnesses reject source mutants."""
+
+    @classmethod
+    def setUpClass(cls):
+        available = subprocess.check_output(["locale", "-a"], timeout=10).decode("ascii").splitlines()
+        cls.french = next((name for name in available
+                           if name.lower().replace("-", "") == "fr_fr.utf8"), None)
+        if cls.french is None:
+            if os.environ.get("YTDLP_LOCALE_GUARD_REQUIRE_FRENCH") == "1":
+                raise AssertionError("CI locale guard requires provisioned French locale and catalogues")
+            raise unittest.SkipTest("French locale unavailable; bilingual mutation guard not qualified")
+
+    def run_case(self, case, root, selected):
+        result = subprocess.run(
+            LOCALE_CASES[case], cwd=root,
+            env=dict(os.environ, LC_ALL=selected, LANGUAGE="fr_FR:fr"),
+            capture_output=True, timeout=90, check=False,
+        )
+        return result
+
+    def assert_pass(self, case, root, selected):
+        result = self.run_case(case, root, selected)
+        self.assertEqual(result.returncode, 0, (case, result.stdout, result.stderr))
+        self.assertNotIn(b"skipped", result.stderr, (case, result.stderr))
+        if case != "bash-protocols":
+            self.assertRegex(result.stderr.decode("utf-8", errors="replace"), r"Ran [1-9][0-9]* tests?")
+        return result
+
+    def test_real_protocols_have_identical_verdicts_under_c_and_french(self):
+        for selected in ("C", self.french):
+            for case in LOCALE_CASES:
+                with self.subTest(locale=selected, case=case):
+                    self.assert_pass(case, PROJECT, selected)
+
+    def test_real_source_mutants_are_rejected_by_their_regressions(self):
+        # Never modify the checkout, invoke publication or accept a mere crash
+        # before running the true regression. Each selected witness must first
+        # pass against the byte-identical private copy.
+        mutations = (
+            ("localized-message-parser", ".github/workflows/shfmt-update.yml",
+             "sha256sum --check shfmt-update.patch.sha256",
+             'sha256sum --check shfmt-update.patch.sha256 | grep -q ": OK$"', "byte-collation"),
+            ("host-collation", ".github/workflows/shfmt-update.yml",
+             "LC_ALL=C comm -23", "comm -23", "byte-collation"),
+            ("locale-regex", "install-fedora.sh", "root_stage_path_is_safe() {\n    local LC_ALL=C\n",
+             "root_stage_path_is_safe() {\n", "bash-protocols"),
+            ("decimal-separator", "download-video.sh",
+             r"^([0-9]+)(\.([0-9]+))?$", r"^([0-9]+)(,([0-9]+))?$", "bash-protocols"),
+            ("hostile-child-environment", "tests/zenity-autonomous-qualification.py",
+             "environment = dict(os.environ, LC_ALL=name)",
+             "environment = dict(os.environ, LC_ALL='invalid-locale-from-parent')", "utf8-gui"),
+            ("implicit-source-encoding", "tests/ci-validation-integration.py",
+             '(PROJECT / ".github/workflows" / workflow).read_text(encoding="utf-8")',
+             '(PROJECT / ".github/workflows" / workflow).read_text()', "utf8-ci"),
+        )
+        with tempfile.TemporaryDirectory(prefix="locale-source-mutants-") as temporary:
+            root = Path(temporary) / "source"
+            shutil.copytree(PROJECT, root, ignore=shutil.ignore_patterns(
+                ".git", "qualification-evidence", "__pycache__", ".ruff_cache"))
+            checked = set()
+            for label, path, original, mutated, case in mutations:
+                with self.subTest(mutant=label):
+                    if case not in checked:
+                        self.assert_pass(case, root, self.french)
+                        checked.add(case)
+                    target = root / path
+                    source = target.read_text(encoding="utf-8")
+                    self.assertIn(original, source, "source contract changed: update the explicit mutation")
+                    try:
+                        target.write_text(source.replace(original, mutated), encoding="utf-8")
+                        result = self.run_case(case, root, self.french)
+                        self.assertNotEqual(result.returncode, 0, (label, "locale mutant escaped its witness"))
+                        self.assertIn(b"AssertionError", result.stderr + result.stdout,
+                                      (label, "mutation did not reach a failing assertion", result.stderr))
+                    finally:
+                        target.write_text(source, encoding="utf-8")
+
+
+class LocaleProtocolTests(unittest.TestCase):
+    """Repository UTF-8 sources are independent of Python's default codec."""
+
+    def test_workflow_sources_are_utf8_under_an_ascii_parent_locale(self):
+        environment = dict(os.environ, LC_ALL="C", LANGUAGE="fr_FR:fr",
+                           PYTHONUTF8="0", PYTHONCOERCECLOCALE="0")
+        program = r'''
+import importlib.util
+import locale
+from pathlib import Path
+import unittest
+if locale.getpreferredencoding(False).lower() not in {"ascii", "ansi_x3.4-1968"}:
+    raise AssertionError("the child must exercise an ASCII default encoding")
+path = Path("tests/ci-validation-integration.py")
+spec = importlib.util.spec_from_file_location("fixture", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+text = module.VersionBoundaryTests.step("release.yml", "Verify tag and versions")
+if "d\u00e9veloppement actuelle" not in text:
+    raise AssertionError("the UTF-8 workflow source was not preserved")
+case = module.VersionBoundaryTests("test_release_still_refuses_tag_version_mismatch")
+result = unittest.TestResult()
+case.run(result)
+if not result.wasSuccessful():
+    raise AssertionError((result.failures, result.errors))
+'''
+        result = subprocess.run([sys.executable, "-B", "-c", program], cwd=PROJECT,
+                                env=environment, capture_output=True, timeout=10, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
 
 
 class PassiveDiagnosticsTests(unittest.TestCase):
@@ -3019,7 +3324,7 @@ class PassiveDiagnosticsTests(unittest.TestCase):
             self.assertEqual(record.read_text(), "preserve-me")
 
     def test_runner_consumes_optional_variable_before_any_child(self):
-        source = (PROJECT / "tests/run-all.sh").read_text()
+        source = (PROJECT / "tests/run-all.sh").read_text(encoding="utf-8")
         main = source[source.rindex("\nmain() {\n"):]
         fixture = r'''
 set -euo pipefail

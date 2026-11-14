@@ -26,6 +26,8 @@ TEST_RUNNER_TERMINATION_POLL_ATTEMPTS=${YTDLP_ARIA2_TEST_RUNNER_TERMINATION_POLL
 # Validate the bounded grace-period override used by the runner's own signal
 # integration test. Ordinary callers retain fifty 100 ms polls (five seconds).
 test_runner_validate_termination_poll_attempts() {
+    # Public count settings accept ASCII decimal digits in every locale.
+    local LC_ALL=C
     if [[ ! ${TEST_RUNNER_TERMINATION_POLL_ATTEMPTS} =~ ^[0-9]{1,3}$ ]]; then
         printf '%s\n' \
             'Error: test-runner termination poll attempts must be an integer from 1 through 600.' >&2

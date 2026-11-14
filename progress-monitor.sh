@@ -186,14 +186,44 @@ register_item() {
 }
 
 sanitize_identifier() {
+    local LC_ALL=C
     local value=${1:-}
-    # The helper preserves Unicode format IDs. Restrict them to letters,
-    # numbers and the same punctuation without treating text as shell syntax.
-    local LC_ALL=C.UTF-8
+    local known_identifier=''
+    local non_ascii_pattern=$'[\200-\377]'
 
     SANITIZED_IDENTIFIER=''
-    if ((${#value} <= 128)) \
-        && [[ ${value} =~ ^[[:alnum:]_.:+-]+$ ]]; then
+    # At most 128 Unicode characters, each encoded in at most four bytes.
+    # Keep ASCII records entirely in Bash and never pass identifiers in argv.
+    ((${#value} > 0 && ${#value} <= 512)) || return 0
+    if [[ ! ${value} =~ ${non_ascii_pattern} ]]; then
+        if ((${#value} <= 128)) && [[ ${value} =~ ^[A-Za-z0-9_.:+-]+$ ]]; then
+            SANITIZED_IDENTIFIER=${value}
+        fi
+        return 0
+    fi
+
+    # Existing plan/native entries have already passed this validator. Exact
+    # byte matching avoids a Python process on every Unicode progress record.
+    for known_identifier in "${PLANNED_FORMAT_IDS[@]}" "${NATIVE_FORMAT_IDS[@]}"; do
+        if [[ ${value} == "${known_identifier}" ]]; then
+            SANITIZED_IDENTIFIER=${value}
+            return 0
+        fi
+    done
+
+    # Match the helper's Unicode word grammar, plus '+' for combined IDs.
+    # POSIX alnum classes vary by libc and locale and are not Python's \w.
+    # Read bytes explicitly so neither a UTF-8 locale nor Python coercion is
+    # required. Invalid text remains an unknown identifier, never shell syntax.
+    if printf '%s' "${value}" | python3 -I -S -c '
+import re
+import sys
+try:
+    value = sys.stdin.buffer.read(513).decode("utf-8", errors="strict")
+except UnicodeError:
+    raise SystemExit(1)
+raise SystemExit(0 if re.fullmatch(r"[\w.:+\-]{1,128}", value) else 1)
+' 2>/dev/null; then
         SANITIZED_IDENTIFIER=${value}
     fi
 }

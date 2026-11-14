@@ -46,7 +46,10 @@ jobs:
           sudo env DEBIAN_FRONTEND=noninteractive \
             apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
             aria2 coreutils curl desktop-file-utils diffutils findutils git gnupg \
-            grep jq procps python3 python3-venv sed shellcheck unzip util-linux
+            grep jq language-pack-fr-base locales procps python3 python3-venv sed shellcheck unzip util-linux
+          # Only this disposable runner is provisioned; the host/session locale
+          # remains unchanged and each probe receives its own environment.
+          sudo localedef -i fr_FR -f UTF-8 fr_FR.UTF-8
       - name: Install reviewed workflow linter
         run: |
           set -Eeuo pipefail
@@ -81,6 +84,12 @@ jobs:
             --requirement scripts/dev-tools/ruff-requirements.txt
           source tests/lib/project-files.sh
           "${tool_dir}/bin/ruff" check --no-cache --config ruff.toml "${PYTHON_FILES[@]}"
+      - name: Check locale-independent protocols
+        env:
+          YTDLP_LOCALE_GUARD_REQUIRE_FRENCH: '1'
+        run: |
+          set -Eeuo pipefail
+          python3 -B tests/ci-validation-integration.py LocaleRegistryTests LocaleGuardTests
       - name: Run validation
         run: |
           set -Eeuo pipefail
@@ -128,7 +137,8 @@ jobs:
           sudo env DEBIAN_FRONTEND=noninteractive \
             apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
             aria2 build-essential coreutils curl desktop-file-utils diffutils findutils git gnupg \
-            grep jq procps sed shellcheck unzip util-linux
+            grep jq language-pack-fr-base locales procps sed shellcheck unzip util-linux
+          sudo localedef -i fr_FR -f UTF-8 fr_FR.UTF-8
       - name: Build and bind verified Bash 4.4 on the disposable runner
         run: |
           set -Eeuo pipefail
@@ -189,11 +199,19 @@ jobs:
           env PATH=/usr/bin:/bin python3 -c 'import sys; print(sys.version); assert sys.version_info[:2] == (3, 10)'
           [[ $(readlink -f /usr/bin/python3) == "${python_binary}" ]]
       - name: Confirm minimum Python and environment
+        env:
+          LC_ALL: fr_FR.UTF-8
+          LANGUAGE: fr_FR:fr
         run: |
+          locale -a | grep -Eix 'fr_FR\.utf-?8'
+          python3 -c 'import locale; locale.setlocale(locale.LC_ALL, "")'
           python3 -c 'import sys; print(sys.version); assert sys.version_info[:2] == (3, 10)'
           bash -c 'printf "%s\n" "${BASH_VERSION}"; [[ ${BASH_VERSINFO[0]} == 4 && ${BASH_VERSINFO[1]} == 4 && ${BASH_VERSINFO[2]} == 0 ]]'
           bash ./tests/run-all.sh --doctor
       - name: Exercise the complete contract under Python 3.10
+        env:
+          LC_ALL: fr_FR.UTF-8
+          LANGUAGE: fr_FR:fr
         run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/run-all.sh --full --jobs 4
   validate-fedora:
     needs: identity
@@ -221,3 +239,36 @@ jobs:
           persist-credentials: false
       - name: Run validation
         run: timeout --signal=TERM --kill-after=10s 7m bash ./tests/run-all.sh --jobs 4
+  validate-fedora-locale:
+    needs: identity
+    name: Fedora 45 / French locale
+    runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45
+      volumes:
+        - /tmp
+        - /var/tmp
+    env:
+      TMPDIR: /var/tmp
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install targeted locale validation tools
+        run: |
+          dnf install --assumeyes --no-docs --setopt=install_weak_deps=False \
+            bash coreutils curl diffutils findutils git glibc-langpack-fr \
+            grep jq procps-ng python3 sed unzip util-linux
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check French locale protocols and negative mutations
+        env:
+          LC_ALL: fr_FR.UTF-8
+          LANGUAGE: fr_FR:fr
+          YTDLP_LOCALE_GUARD_REQUIRE_FRENCH: '1'
+        run: |
+          set -Eeuo pipefail
+          python3 -c 'import locale; locale.setlocale(locale.LC_ALL, "")'
+          python3 -B tests/ci-validation-integration.py LocaleRegistryTests LocaleGuardTests

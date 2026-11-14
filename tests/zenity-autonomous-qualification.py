@@ -967,10 +967,53 @@ def make_media_handler(routes, active, event_log):
     return Handler
 
 
+def qualification_locale_environment(name=None):
+    """Validate effective post-startup or explicitly selected libc categories."""
+    environment = dict(os.environ)
+    if name is not None:
+        require(isinstance(name, str) and bool(name), 'Requested graphical qualification locale is unavailable')
+        environment = dict(os.environ, LC_ALL=name)
+    # The driver has already undergone Python startup coercion. Validate its
+    # effective environment, restoring LC_CTYPE after the probe's own startup
+    # so that a second coercion cannot hide an invalid value still present.
+    probe = subprocess.run(
+        [sys.executable, '-I', '-B', '-c',
+         'import json, locale, os, sys\n'
+         'ctype = json.loads(sys.stdin.buffer.read())\n'
+         'if ctype is None:\n'
+         '    os.environ.pop("LC_CTYPE", None)\n'
+         'else:\n'
+         '    os.environ["LC_CTYPE"] = ctype\n'
+         'locale.setlocale(locale.LC_ALL, sys.argv[1])', name if name is not None else ''],
+        input=json.dumps(environment.get('LC_CTYPE')).encode('ascii'),
+        env=environment, capture_output=True, timeout=10,
+    )
+    require(probe.returncode == 0, 'Requested graphical qualification locale is unavailable')
+    return environment
+
+
+def qualification_locale_evidence(environment):
+    """Record only effective locale categories and Python startup controls."""
+    return {name: environment.get(name) for name in (
+        'LC_ALL', 'LANG', 'LANGUAGE', 'LC_CTYPE', 'LC_NUMERIC', 'LC_MESSAGES',
+        'LC_COLLATE', 'LC_TIME', 'LC_MONETARY', 'PYTHONUTF8', 'PYTHONCOERCECLOCALE',
+    )}
+
+
+def qualification_distribution(os_release):
+    """Keep graphical admission limited to explicitly supported releases."""
+    distro = tuple(os_release.get(key, '').strip('"') for key in ('ID', 'VERSION_ID'))
+    require(distro in (('fedora', '44'), ('fedora', '45'), ('ubuntu', '24.04')),
+            'Real Zenity qualification requires Fedora 44/45 or Ubuntu 24.04')
+    return distro
+
+
 def main():
     global DIAGNOSTICS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--evidence-dir', type=Path)
+    parser.add_argument('--locale',
+                        help='installed locale override for graphical children (default: host environment)')
     parser.add_argument('--watch-diagnostics', action='store_true',
                         help='retain bounded first-failure metadata in the private fixture')
     parser.add_argument('--observer-diagnostics', action='store_true',
@@ -1034,21 +1077,20 @@ def main():
             DIAGNOSTICS.register_observer(observer_module)
             if args.observer_identity_diagnostics:
                 DIAGNOSTICS.register_identity_observer(observer_module)
-        os_release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
+        os_release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text(encoding='utf-8').splitlines()
                           if '=' in line)
-        distro = tuple(os_release.get(key, '').strip('"') for key in ('ID', 'VERSION_ID'))
-        require(distro in (('fedora', '44'), ('ubuntu', '24.04')),
-                'Real Zenity qualification requires Fedora 44 or Ubuntu 24.04')
+        qualification_distribution(os_release)
         identity = source_identity()
         write_json(root / 'source-identity.json', identity)
         for name in ('home', 'config', 'state', 'data', 'cache', 'runtime', 'bin',
                      'private-diagnostics', 'output 100% $ é'):
             (root / name).mkdir(mode=0o700)
         output = root / 'output 100% $ é'
-        shared = dict(os.environ, HOME=str(root / 'home'), XDG_CONFIG_HOME=str(root / 'config'),
+        shared = dict(qualification_locale_environment(args.locale),
+                      HOME=str(root / 'home'), XDG_CONFIG_HOME=str(root / 'config'),
                       XDG_STATE_HOME=str(root / 'state'), XDG_DATA_HOME=str(root / 'data'),
                       XDG_CACHE_HOME=str(root / 'cache'), XDG_RUNTIME_DIR=str(root / 'runtime'),
-                      PYTHONNOUSERSITE='1', LC_ALL='C.UTF-8', GSK_RENDERER='cairo', FIXTURE_AUTONOMOUS='1',
+                      PYTHONNOUSERSITE='1', GSK_RENDERER='cairo', FIXTURE_AUTONOMOUS='1',
                       FIXTURE_OUTPUT=str(output), FIXTURE_DIALOG_LOG_DIR=str(root))
         for key in tuple(shared):
             if key.startswith('YTDLP_') or key in ('PYTHONPATH', 'PYTHONHOME', 'BASH_ENV', 'ENV',
@@ -1073,12 +1115,13 @@ def main():
         event_path = PROJECT / 'tests/zenity-x11-events.py'
         zenity = root / 'bin/zenity'
         zenity.write_text('#!/usr/bin/python3\nimport os, sys\n' +
-                          f'os.execv(sys.executable, [sys.executable, "-I", "-B", {str(event_path)!r}, *sys.argv[1:]])\n')
+                          f'os.execv(sys.executable, [sys.executable, "-I", "-B", {str(event_path)!r}, *sys.argv[1:]])\n',
+                          encoding='utf-8')
         zenity.chmod(0o700)
         opener = root / 'bin/xdg-open'
         opener.write_text('#!/usr/bin/python3\nimport os, sys\n' +
                           f'os.execv(sys.executable, [sys.executable, "-I", "-B", {str(event_path)!r}, '
-                          '"--autonomous-open-folder", *sys.argv[1:]])\n')
+                          '"--autonomous-open-folder", *sys.argv[1:]])\n', encoding='utf-8')
         opener.chmod(0o700)
         slow = root / 'bin/ffmpeg'
         slow.write_text('''#!/usr/bin/python3
@@ -1100,7 +1143,9 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
                         str(source)], check=True, timeout=20, env=shared)
         expected_hash = decoded_hash(source, ffmpeg)
         write_json(root / 'environment.json', dict(python=sys.version, kernel=os.uname().release,
-                   os_release=Path('/etc/os-release').read_text(), display_isolated=True, renderer='cairo'))
+                   os_release=Path('/etc/os-release').read_text(encoding='utf-8'),
+                   display_isolated=True, renderer='cairo',
+                   locale=qualification_locale_evidence(shared)))
         handler = make_media_handler(routes, active, root / 'dialog-events.jsonl')
         server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
         server.daemon_threads = True

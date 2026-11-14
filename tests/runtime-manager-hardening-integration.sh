@@ -44,6 +44,8 @@ cleanup() {
 }
 
 validate_hardening_run_count() {
+    # Public count settings accept ASCII decimal digits in every locale.
+    local LC_ALL=C
     local variable_name=$1
     local environment_name=$2
     local value=${!variable_name}

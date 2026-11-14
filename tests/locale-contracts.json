@@ -1,0 +1,992 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "path": ".githooks/pre-push",
+      "kind": "bash",
+      "boundaries": [
+        "Git reference protocol from stdin and checked Python coherence helper status; no diagnostic parsing."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Git reference protocol from stdin and checked Python coherence helper status; no diagnostic parsing."
+    },
+    {
+      "path": ".github/workflows/packages.yml",
+      "kind": "workflow",
+      "boundaries": [
+        "RPM queryformat, checksum status, GitHub JSON and C sorted package inventories."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "RPM queryformat, checksum status, GitHub JSON and C sorted package inventories."
+    },
+    {
+      "path": ".github/workflows/promotion.yml",
+      "kind": "workflow",
+      "boundaries": [
+        "Python GitHub JSON verifier and immutable Git identities; API vocabulary is a machine protocol."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Python GitHub JSON verifier and immutable Git identities; API vocabulary is a machine protocol."
+    },
+    {
+      "path": ".github/workflows/qualification.yml",
+      "kind": "workflow",
+      "boundaries": [
+        "GPG colon/status records, binary digest comparisons and C RPM queryformat."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "GPG colon/status records, binary digest comparisons and C RPM queryformat."
+    },
+    {
+      "path": ".github/workflows/real-tools.yml",
+      "kind": "workflow",
+      "boundaries": [
+        "Machine tool versions, PyPI JSON, RFC3339 dates and explicit embedded UTF-8 source."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Machine tool versions, PyPI JSON, RFC3339 dates and explicit embedded UTF-8 source."
+    },
+    {
+      "path": ".github/workflows/release-docs.yml",
+      "kind": "workflow",
+      "boundaries": [
+        "GitHub JSON, ASCII manifest, explicit UTF-8 Markdown and C sorted data-only publication inputs."
+      ],
+      "tests": [
+        "utf8-release"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "kind": "workflow",
+      "boundaries": [
+        "Authenticated RPM/GPG status, GitHub JSON and binary manifests; translated text does not authorize publication."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Authenticated RPM/GPG status, GitHub JSON and binary manifests; translated text does not authorize publication."
+    },
+    {
+      "path": ".github/workflows/shell.yml",
+      "kind": "workflow",
+      "boundaries": [
+        "Contrast-locale qualification, actual minimum interpreters and checked tool provisioning with machine signatures."
+      ],
+      "tests": [
+        "bash-protocols",
+        "utf8-ci",
+        "checksum-status"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": ".github/workflows/shfmt-update.yml",
+      "kind": "workflow",
+      "boundaries": [
+        "One C collation for sorted allowlists and comm, explicit UTF-8 source and checked cryptographic statuses."
+      ],
+      "tests": [
+        "byte-collation",
+        "checksum-publisher"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": ".github/workflows/stress.yml",
+      "kind": "workflow",
+      "boundaries": [
+        "Numeric jitter and fixed GitHub API states; no parsing of human-localized verdicts."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Numeric jitter and fixed GitHub API states; no parsing of human-localized verdicts."
+    },
+    {
+      "path": "download-video-gui.sh",
+      "kind": "bash",
+      "boundaries": [
+        "ASCII DNS case conversion and cleanup names are scoped C; Zenity alone receives validated UTF-8 LC_CTYPE when required, preserving effective non-character categories and caller/engine environment. Native charmap diagnostics and unavailable UTF-8 locales fail startup."
+      ],
+      "tests": [
+        "bash-protocols",
+        "utf8-gui"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "download-video.sh",
+      "kind": "bash",
+      "boundaries": [
+        "ASCII version, DNS and cleanup predicates; C tool probes and FFprobe numbers; opaque Unicode paths."
+      ],
+      "tests": [
+        "bash-protocols",
+        "utf8-progress"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "install-fedora.sh",
+      "kind": "bash",
+      "boundaries": [
+        "C root-stage cleanup whitelist; GPG colon records, RPM query formats and checked cryptographic statuses."
+      ],
+      "tests": [
+        "bash-protocols"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "install-gui.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Quoted filesystem paths and numeric stat/proc identity; launcher helper return codes, not localized diagnostic text."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Quoted filesystem paths and numeric stat/proc identity; launcher helper return codes, not localized diagnostic text."
+    },
+    {
+      "path": "packaging/deb/build-deb.sh",
+      "kind": "bash",
+      "boundaries": [
+        "C RFC date and NUL-sorted checksum inventory; machine du size and checked package command statuses."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "C RFC date and NUL-sorted checksum inventory; machine du size and checked package command statuses."
+    },
+    {
+      "path": "packaging/deb/test-package-lifecycle.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Documented dpkg-query fields, C sorted inventories and application-owned version strings."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Documented dpkg-query fields, C sorted inventories and application-owned version strings."
+    },
+    {
+      "path": "packaging/deb/test-package-upgrade.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Structured dpkg-query identity, application version and byte snapshots of preserved user data."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Structured dpkg-query identity, application version and byte snapshots of preserved user data."
+    },
+    {
+      "path": "packaging/install-tree.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Quoted path operands, fixed payload identities and install/copy exit statuses; no translated-output parser."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Quoted path operands, fixed payload identities and install/copy exit statuses; no translated-output parser."
+    },
+    {
+      "path": "packaging/package-user-cleanup.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Numeric stat fields, C Linux-ID normalization and explicit path byte validation; cleanup failures remain failures."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Numeric stat fields, C Linux-ID normalization and explicit path byte validation; cleanup failures remain failures."
+    },
+    {
+      "path": "packaging/rpm/build-rpm.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Git porcelain and RPM queryformat under C; displayed package diagnostics do not determine identity."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Git porcelain and RPM queryformat under C; displayed package diagnostics do not determine identity."
+    },
+    {
+      "path": "packaging/rpm/test-package-lifecycle.sh",
+      "kind": "bash",
+      "boundaries": [
+        "RPM queryformat dependency identities and C sorted payload inventory; checked command statuses."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "RPM queryformat dependency identities and C sorted payload inventory; checked command statuses."
+    },
+    {
+      "path": "packaging/rpm/test-package-upgrade.sh",
+      "kind": "bash",
+      "boundaries": [
+        "RPM VERSION queryformat and application-owned CLI version; user-state byte preservation."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "RPM VERSION queryformat and application-owned CLI version; user-state byte preservation."
+    },
+    {
+      "path": "private-aria2-plan.py",
+      "kind": "python",
+      "boundaries": [
+        "Private UTF-8 JSON, filesystem bytes, Unicode identifiers and explicit UTF-8 progress output."
+      ],
+      "tests": [
+        "utf8-progress"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "private-art-media.py",
+      "kind": "python",
+      "boundaries": [
+        "FFprobe JSON decoded from bytes, Decimal timestamps and binary media hashes; no locale-aware numbers."
+      ],
+      "tests": [
+        "utf8-media"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "private-art-subtitle.py",
+      "kind": "python",
+      "boundaries": [
+        "Strict UTF-8 subtitle byte protocol and invariant numeric timestamps; invalid streams remain rejected."
+      ],
+      "tests": [
+        "utf8-media"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "private-art-tracks.py",
+      "kind": "python",
+      "boundaries": [
+        "UTF-8 catalogue and summary streams, Unicode labels, binary hashes and code-point ordering."
+      ],
+      "tests": [
+        "utf8-media"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "private-launcher-manager.py",
+      "kind": "python",
+      "boundaries": [
+        "Explicit UTF-8 desktop protocol, binary icons, validator exit status and numeric proc identity."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Explicit UTF-8 desktop protocol, binary icons, validator exit status and numeric proc identity."
+    },
+    {
+      "path": "private-process-supervisor.py",
+      "kind": "python",
+      "boundaries": [
+        "Kernel ASCII/surrogateescape proc data, numeric identities, monotonic clocks and errno; bytes stay bytes."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Kernel ASCII/surrogateescape proc data, numeric identities, monotonic clocks and errno; bytes stay bytes."
+    },
+    {
+      "path": "progress-monitor.sh",
+      "kind": "bash",
+      "boundaries": [
+        "C numeric progress protocol; Unicode format identifiers match the Python helper grammar."
+      ],
+      "tests": [
+        "bash-protocols",
+        "utf8-progress"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "runtime-manager.sh",
+      "kind": "bash",
+      "boundaries": [
+        "ASCII version and numeric admission; GPG machine status and checksum return codes remain authoritative."
+      ],
+      "tests": [
+        "bash-protocols"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "scripts/check-push-version.py",
+      "kind": "python",
+      "boundaries": [
+        "Binary Git object/reference protocol, C Git child environment and explicit UTF-8 source."
+      ],
+      "tests": [
+        "utf8-version"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "scripts/check-shell-format.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Pinned shfmt version token and canonical path arrays; command return status determines formatting success."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Pinned shfmt version token and canonical path arrays; command return status determines formatting success."
+    },
+    {
+      "path": "scripts/check-workflows.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Pinned actionlint version token and validator return status; diagnostic language is not parsed."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Pinned actionlint version token and validator return status; diagnostic language is not parsed."
+    },
+    {
+      "path": "scripts/ci-ubuntu-mirrors.py",
+      "kind": "python",
+      "boundaries": [
+        "Documented ASCII APT source protocol, structural parsing and binary metadata-preserving writes."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Documented ASCII APT source protocol, structural parsing and binary metadata-preserving writes."
+    },
+    {
+      "path": "scripts/ci-validation-diagnostics.py",
+      "kind": "python",
+      "boundaries": [
+        "Bounded byte logs/proc data and closed diagnostic categories with escaped JSON."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Bounded byte logs/proc data and closed diagnostic categories with escaped JSON."
+    },
+    {
+      "path": "scripts/ci-validation.py",
+      "kind": "python",
+      "boundaries": [
+        "Bounded binary JSON, numeric RFC3339 timestamps and fixed GitHub API state vocabulary."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Bounded binary JSON, numeric RFC3339 timestamps and fixed GitHub API state vocabulary. The component suite remains part of canonical or dedicated qualification; the focused locale guard does not execute it."
+    },
+    {
+      "path": "scripts/dev-tools/ensure-shfmt.sh",
+      "kind": "bash",
+      "boundaries": [
+        "ASCII pin/digest grammar, exact version and independently pinned binary hash; no translated verification text."
+      ],
+      "tests": [
+        "bash-protocols"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "scripts/format-shell.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Pinned shfmt version token and canonical path arrays; no translated-output parser."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Pinned shfmt version token and canonical path arrays; no translated-output parser."
+    },
+    {
+      "path": "scripts/git-inspect.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Closed Git inspection runs in an explicit C environment; caller arguments cannot change the protocol."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Closed Git inspection runs in an explicit C environment; caller arguments cannot change the protocol."
+    },
+    {
+      "path": "scripts/prepare-source-version.py",
+      "kind": "python",
+      "boundaries": [
+        "Explicit UTF-8 source and ISO dates; RPM month/weekday names use a fixed English protocol table."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Explicit UTF-8 source and ISO dates; RPM month/weekday names use a fixed English protocol table."
+    },
+    {
+      "path": "scripts/release-evidence-qualification.sh",
+      "kind": "bash",
+      "boundaries": [
+        "GitHub JSON, RFC3339/epoch dates and C sorted reference lists; cryptographic data remains bytes."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "GitHub JSON, RFC3339/epoch dates and C sorted reference lists; cryptographic data remains bytes."
+    },
+    {
+      "path": "scripts/release-preflight.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Git porcelain and raw GPG status, GitHub JSON and numeric epochs; diagnostics are not authorization evidence."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Git porcelain and raw GPG status, GitHub JSON and numeric epochs; diagnostics are not authorization evidence."
+    },
+    {
+      "path": "scripts/update-published-version.py",
+      "kind": "python",
+      "boundaries": [
+        "Explicit UTF-8 Markdown and temporary files; source-version grammar uses ASCII digits."
+      ],
+      "tests": [
+        "utf8-release"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "scripts/verify-source-archive.py",
+      "kind": "python",
+      "boundaries": [
+        "NUL Git tree records and binary objects; ZIP names use the ZIP UTF-8/CP437 contract."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "NUL Git tree records and binary objects; ZIP names use the ZIP UTF-8/CP437 contract."
+    },
+    {
+      "path": "test-static.sh",
+      "kind": "bash",
+      "boundaries": [
+        "C inventory order and ASCII Action SHA admission; repository documents and embedded source are UTF-8.",
+        "The sourced-library state oracle compares locale values, unset state and export attributes, with positive and negative controls in the canonical static task."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "C inventory order and ASCII Action SHA admission; repository documents and embedded source are UTF-8. The component suite remains part of canonical or dedicated qualification; the focused locale guard does not execute it."
+    },
+    {
+      "path": "tests/aria2-auth-headers-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "UTF-8 JSON/header fixture, ASCII port protocol and real-transfer exit status."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "UTF-8 JSON/header fixture, ASCII port protocol and real-transfer exit status."
+    },
+    {
+      "path": "tests/aria2-real-behavior-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "ASCII public decimal tunables, structured loopback server records and FFprobe numeric fields."
+      ],
+      "tests": [
+        "bash-protocols"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/art-media-integration.py",
+      "kind": "python",
+      "boundaries": [
+        "Synthetic Unicode HLS/JSON data, binary FFprobe captures and numeric clocks."
+      ],
+      "tests": [
+        "utf8-media-fixtures"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/art-subtitle-integration.py",
+      "kind": "python",
+      "boundaries": [
+        "Real Unicode title/path/subtitle protocols under ASCII and contradictory parent locales."
+      ],
+      "tests": [
+        "utf8-media"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/art-tracks-integration.py",
+      "kind": "python",
+      "boundaries": [
+        "Unicode catalogue fixtures and explicit summary subprocess encoding."
+      ],
+      "tests": [
+        "utf8-media"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/ci-validation-integration.py",
+      "kind": "python",
+      "boundaries": [
+        "Explicit UTF-8 workflow/source extraction, structured fixtures and real locale-boundary mutation witnesses."
+      ],
+      "tests": [
+        "utf8-ci"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/coordination-integration.py",
+      "kind": "python",
+      "boundaries": [
+        "Explicit UTF-8 engine source and progress streams; invalid identifiers remain nonzero failures."
+      ],
+      "tests": [
+        "utf8-progress"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/ffmpeg-generation-compatibility.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Machine version tokens, FFprobe CSV/numeric fields and process-group IDs; no translated success messages."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Machine version tokens, FFprobe CSV/numeric fields and process-group IDs; no translated success messages."
+    },
+    {
+      "path": "tests/ffmpeg-generation-qualification.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Exact FFmpeg version tokens and checked wrapper statuses; display text is not a verdict."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Exact FFmpeg version tokens and checked wrapper statuses; display text is not a verdict."
+    },
+    {
+      "path": "tests/ffmpeg-progress-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "ASCII timeout input and structured progress records; integer arithmetic and return status."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "ASCII timeout input and structured progress records; integer arithmetic and return status. The component suite remains part of canonical or dedicated qualification; the focused locale guard does not execute it."
+    },
+    {
+      "path": "tests/ffmpeg-real-progress-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "FFprobe numeric fields and structured FFmpeg progress; decimal parsing has a C technical boundary."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "FFprobe numeric fields and structured FFmpeg progress; decimal parsing has a C technical boundary. The component suite remains part of canonical or dedicated qualification; the focused locale guard does not execute it."
+    },
+    {
+      "path": "tests/fixture-safety-integration.py",
+      "kind": "python",
+      "boundaries": [
+        "Controlled generated programs, escaped JSON, errno and numeric statuses; filesystem operations use Python APIs."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Controlled generated programs, escaped JSON, errno and numeric statuses; filesystem operations use Python APIs."
+    },
+    {
+      "path": "tests/hls-cancellation-witness.py",
+      "kind": "python",
+      "boundaries": [
+        "Bounded ASCII socket protocol, numeric monotonic time and proc identity; binary private logs."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Bounded ASCII socket protocol, numeric monotonic time and proc identity; binary private logs."
+    },
+    {
+      "path": "tests/hls-remux-duration-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Controlled ASCII JSON tools and C numeric FFprobe duration parsing; opaque path presence."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Controlled ASCII JSON tools and C numeric FFprobe duration parsing; opaque path presence. The component suite remains part of canonical or dedicated qualification; the focused locale guard does not execute it."
+    },
+    {
+      "path": "tests/install-fedora-authentication-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "GPG colon/RPM query fixtures, root-stage identity and cryptographic return statuses."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "GPG colon/RPM query fixtures, root-stage identity and cryptographic return statuses. The component suite remains part of canonical or dedicated qualification; the focused locale guard does not execute it."
+    },
+    {
+      "path": "tests/installer-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Explicit UTF-8 desktop data, numeric signal/errno results and validator exit codes; no translated success parser."
+      ],
+      "tests": [
+        "bash-protocols"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/lib/assert.sh",
+      "kind": "bash",
+      "boundaries": [
+        "ASCII expected-exit-status grammar and literal fixture/application protocol assertions; caller locale preserved."
+      ],
+      "tests": [
+        "bash-protocols"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/lib/mock-common.sh",
+      "kind": "bash",
+      "boundaries": [
+        "NUL argv, application-owned UI strings, numeric stat/proc identities and filesystem-byte APIs."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "NUL argv, application-owned UI strings, numeric stat/proc identities and filesystem-byte APIs."
+    },
+    {
+      "path": "tests/lib/mock-engine.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Actual engine probes must stabilize technical child output while preserving Unicode paths and private data."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Actual engine probes must stabilize technical child output while preserving Unicode paths and private data. The component suite remains part of canonical or dedicated qualification; the focused locale guard does not execute it."
+    },
+    {
+      "path": "tests/lib/mock-fixtures.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Generated controlled tool protocols and explicit child-environment assertions; no sourcing-time locale changes."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Generated controlled tool protocols and explicit child-environment assertions; no sourcing-time locale changes. The component suite remains part of canonical or dedicated qualification; the focused locale guard does not execute it."
+    },
+    {
+      "path": "tests/lib/mock-gui.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Zenity argv records, UTF-8 source and JSON fixture data; assertions target application-owned messages."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Zenity argv records, UTF-8 source and JSON fixture data; assertions target application-owned messages. The component suite remains part of canonical or dedicated qualification; the focused locale guard does not execute it."
+    },
+    {
+      "path": "tests/lib/mock-runtime.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Real ASCII validators, numeric and cleanup boundaries under contrasting locales; caller state must be unchanged."
+      ],
+      "tests": [
+        "bash-protocols"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/lib/mock-signals.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Generated UTF-8 source, numeric clocks/proc identities and byte digests; signal statuses do not use diagnostics."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Generated UTF-8 source, numeric clocks/proc identities and byte digests; signal statuses do not use diagnostics."
+    },
+    {
+      "path": "tests/lib/package-lifecycle.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Fixed fixture data, C technical children, numeric modes and checked package/application statuses."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Fixed fixture data, C technical children, numeric modes and checked package/application statuses."
+    },
+    {
+      "path": "tests/lib/package-runtime-preservation.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Deterministic tar name order and UTC mtime with binary SHA-256 snapshots."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Deterministic tar name order and UTC mtime with binary SHA-256 snapshots."
+    },
+    {
+      "path": "tests/lib/project-files.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Quoted canonical source-path arrays only; no external text parsing or locale mutation."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Quoted canonical source-path arrays only; no external text parsing or locale mutation."
+    },
+    {
+      "path": "tests/lib/run-all-hup-observer.py",
+      "kind": "python",
+      "boundaries": [
+        "Explicit UTF-8 generated source, bounded ASCII trace and numeric proc identity."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Explicit UTF-8 generated source, bounded ASCII trace and numeric proc identity."
+    },
+    {
+      "path": "tests/lib/test-runner.sh",
+      "kind": "bash",
+      "boundaries": [
+        "ASCII grace/count admission, numeric proc identity and structured completion records; caller locale preserved."
+      ],
+      "tests": [
+        "bash-protocols"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/mock-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "ASCII timeout admission and explicit test dispatch; ambient locale reaches the tested boundaries."
+      ],
+      "tests": [
+        "bash-protocols"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/multi-instance-real.py",
+      "kind": "python",
+      "boundaries": [
+        "Machine filesystem type, recorded versions, escaped JSON and hashed raw video; terminal status is explicit."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Machine filesystem type, recorded versions, escaped JSON and hashed raw video; terminal status is explicit."
+    },
+    {
+      "path": "tests/package-user-cleanup-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Byte-exact bilingual desktop data, numeric stat and C byte-length fixtures; preservation verified directly."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Byte-exact bilingual desktop data, numeric stat and C byte-length fixtures; preservation verified directly."
+    },
+    {
+      "path": "tests/packaging-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Application-owned version strings, numeric modes and exact symlink targets; no localized status parser."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Application-owned version strings, numeric modes and exact symlink targets; no localized status parser."
+    },
+    {
+      "path": "tests/private-aria2-plan-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "UTF-8 JSON plans/source, numeric stat fields, binary hashes and Python Unicode identifiers."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "UTF-8 JSON plans/source, numeric stat fields, binary hashes and Python Unicode identifiers. The component suite remains part of canonical or dedicated qualification; the focused locale guard does not execute it."
+    },
+    {
+      "path": "tests/process-observer.py",
+      "kind": "python",
+      "boundaries": [
+        "ASCII/surrogateescape proc data, binary environ/cmdline and closed numeric JSON schemas.",
+        "Observed CPython 3.10–3.15 byte-read boundaries retain original errors and conservative unsupported-runtime behavior; synthetic bounded-memory diagnostics establish C before child startup."
+      ],
+      "tests": [
+        "observer-diagnostics"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/process-supervision-integration.py",
+      "kind": "python",
+      "boundaries": [
+        "Explicit source encodings, proc identities, truncated UTF-8 byte witnesses, signals and numeric statuses.",
+        "Observed CPython 3.10–3.15 byte-read boundaries retain original errors and conservative unsupported-runtime behavior; synthetic bounded-memory diagnostics establish C before child startup."
+      ],
+      "tests": [
+        "observer-diagnostics"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/progress-monitor-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Fixed progress records and Unicode identifiers; decimal conversion and status are technical protocols."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Fixed progress records and Unicode identifiers; decimal conversion and status are technical protocols. The component suite remains part of canonical or dedicated qualification; the focused locale guard does not execute it."
+    },
+    {
+      "path": "tests/push-version-integration.py",
+      "kind": "python",
+      "boundaries": [
+        "Explicit UTF-8 source/README fixtures and actual coherence helper under an ASCII parent."
+      ],
+      "tests": [
+        "utf8-version"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/real-tools-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "FFprobe CSV/numeric output, binary captures, UTF-8 JSON/HTTP fixtures and Python code-point ordering."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "FFprobe CSV/numeric output, binary captures, UTF-8 JSON/HTTP fixtures and Python code-point ordering."
+    },
+    {
+      "path": "tests/release-docs-integration.py",
+      "kind": "python",
+      "boundaries": [
+        "Explicit UTF-8 workflow/Markdown/Git-source captures and data-only publication verification."
+      ],
+      "tests": [
+        "utf8-release"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/repeat-qualification.sh",
+      "kind": "bash",
+      "boundaries": [
+        "ASCII iteration input and elapsed-time protocol; child suites receive the selected qualification environment."
+      ],
+      "tests": [
+        "bash-protocols"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/rpm6-multisig-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "C-scoped legacy rpmsign diagnostic, RPM queryformat, GPG colons and checksig status; unknown output fails."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "C-scoped legacy rpmsign diagnostic, RPM queryformat, GPG colons and checksig status; unknown output fails."
+    },
+    {
+      "path": "tests/run-all-signal-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Numeric process identities and signal statuses; explicit UTF-8 capture and fixed generated child protocols."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Numeric process identities and signal statuses; explicit UTF-8 capture and fixed generated child protocols."
+    },
+    {
+      "path": "tests/run-all.sh",
+      "kind": "bash",
+      "boundaries": [
+        "ASCII public numeric arguments, C version probes, Git porcelain and schema-defined JSON results."
+      ],
+      "tests": [
+        "bash-protocols"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/runtime-manager-hardening-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "ASCII iteration admission, GPG machine-status fixtures and digest/version/rollback contracts."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "ASCII iteration admission, GPG machine-status fixtures and digest/version/rollback contracts. The component suite remains part of canonical or dedicated qualification; the focused locale guard does not execute it."
+    },
+    {
+      "path": "tests/runtime-manager-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Controlled mock protocols, byte hashes, version tokens and process identities; application-owned diagnostics."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Controlled mock protocols, byte hashes, version tokens and process identities; application-owned diagnostics."
+    },
+    {
+      "path": "tests/shfmt-bootstrap-integration.py",
+      "kind": "python",
+      "boundaries": [
+        "Explicit generated UTF-8 source, ASCII sentinels and exact digest/version schemas."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Explicit generated UTF-8 source, ASCII sentinels and exact digest/version schemas. The component suite remains part of canonical or dedicated qualification; the focused locale guard does not execute it."
+    },
+    {
+      "path": "tests/shfmt-version-handoff-integration.py",
+      "kind": "python",
+      "boundaries": [
+        "C diagnostic fixture, real localized checksum statuses and byte-collated verifier/publisher allowlists."
+      ],
+      "tests": [
+        "byte-collation",
+        "checksum-status",
+        "checksum-publisher",
+        "utf8-handoff"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/source-archive-integration.py",
+      "kind": "python",
+      "boundaries": [
+        "Binary Git data, explicit UTF-8 byte decoding and accented path fixtures."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Binary Git data, explicit UTF-8 byte decoding and accented path fixtures."
+    },
+    {
+      "path": "tests/static/application-contracts.sh",
+      "kind": "bash",
+      "boundaries": [
+        "Fixed source assertions with literal matching; sourcing performs no validation and changes no caller locale."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Fixed source assertions with literal matching; sourcing performs no validation and changes no caller locale."
+    },
+    {
+      "path": "tests/terminal-proof-fixtures.py",
+      "kind": "python",
+      "boundaries": [
+        "Inert fixed protocols and escaped JSON exercise actual entrypoints and numeric terminal statuses."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "Inert fixed protocols and escaped JSON exercise actual entrypoints and numeric terminal statuses."
+    },
+    {
+      "path": "tests/test-runner-integration.sh",
+      "kind": "bash",
+      "boundaries": [
+        "C-controlled negative permission diagnostic; structured JSON/NUL and numeric process identities."
+      ],
+      "tests": [],
+      "reviewed_no_sensitive_boundary": "C-controlled negative permission diagnostic; structured JSON/NUL and numeric process identities. The component suite remains part of canonical or dedicated qualification; the focused locale guard does not execute it."
+    },
+    {
+      "path": "tests/zenity-autonomous-integration.py",
+      "kind": "python",
+      "boundaries": [
+        "UTF-8 mutation source, X11 encoding witnesses and actual child-locale admission/terminal status."
+      ],
+      "tests": [
+        "utf8-gui"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/zenity-autonomous-qualification.py",
+      "kind": "python",
+      "boundaries": [
+        "Validated child qualification locale, UTF-8/byte evidence and explicit terminal verdict; no desktop locale mutation."
+      ],
+      "tests": [
+        "utf8-gui"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/zenity-real-session-qualification.sh",
+      "kind": "bash",
+      "boundaries": [
+        "User session locale is retained; versions are recorded, privacy scans use C and operator answers are explicit.",
+        "Real manual admission block accepts Fedora 44/45 and Ubuntu 24.04 and rejects unsupported or missing distribution identities; headless admission coverage is not a manual graphical qualification."
+      ],
+      "tests": [
+        "utf8-gui"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    },
+    {
+      "path": "tests/zenity-x11-events.py",
+      "kind": "python",
+      "boundaries": [
+        "X11 UTF8_STRING and documented Latin-1 fallback; exact UTF-8 selected-path output and escaped D-Bus URI."
+      ],
+      "tests": [
+        "utf8-gui"
+      ],
+      "reviewed_no_sensitive_boundary": null
+    }
+  ]
+}

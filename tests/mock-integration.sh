@@ -27,6 +27,7 @@ readonly -a MOCK_GROUPS=(
     runtime
     runtime-compat
     runtime-validation
+    locale
 )
 
 MOCK_GROUP='all'
@@ -49,6 +50,7 @@ Run every mock scenario by default. GROUP is one of:
   runtime         Complete runtime/validation aggregate.
   runtime-compat  Runtime versions, capabilities, and dependencies.
   runtime-validation  Worker, media, progress-error, and GUI dependency validation.
+  locale          ASCII protocol admission and cleanup under the caller locale.
 EOF_USAGE
 }
 
@@ -159,7 +161,7 @@ readonly MANAGED_ENGINE_DIR="${TEST_ROOT}/managed-engine"
 readonly MANAGED_ENGINE_UNDER_TEST="${MANAGED_ENGINE_DIR}/download-video.sh"
 readonly MOCK_RUNTIME_MANAGER_LOG="${TEST_ROOT}/runtime-manager-args.bin"
 GUI_SCENARIO_TIMEOUT_SECONDS=${MOCK_GUI_SCENARIO_TIMEOUT_SECONDS:-30}
-[[ ${GUI_SCENARIO_TIMEOUT_SECONDS} =~ ^[0-9]{1,3}$ ]] || test_error 'MOCK_GUI_SCENARIO_TIMEOUT_SECONDS must be an integer between 1 and 120.'
+[[ ${GUI_SCENARIO_TIMEOUT_SECONDS} =~ ^[0123456789]{1,3}$ ]] || test_error 'MOCK_GUI_SCENARIO_TIMEOUT_SECONDS must be an integer between 1 and 120.'
 GUI_SCENARIO_TIMEOUT_SECONDS=$((10#${GUI_SCENARIO_TIMEOUT_SECONDS}))
 ((GUI_SCENARIO_TIMEOUT_SECONDS >= 1 && GUI_SCENARIO_TIMEOUT_SECONDS <= 120)) || test_error 'MOCK_GUI_SCENARIO_TIMEOUT_SECONDS must be between 1 and 120.'
 readonly GUI_SCENARIO_TIMEOUT_SECONDS
