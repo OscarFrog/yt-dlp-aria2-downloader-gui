@@ -1022,7 +1022,7 @@ def _identity_read_bytes(path):
         scope.failed()
         return _identity_opaque_read(reader)
     if (sys.implementation.name != 'cpython' or sys.version_info.major != 3
-            or not 10 <= sys.version_info.minor <= 14):
+            or not 10 <= sys.version_info.minor <= 15):
         scope.failed()
         return _identity_opaque_read(reader)
     try:

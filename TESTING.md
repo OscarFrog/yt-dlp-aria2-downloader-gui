@@ -2040,7 +2040,7 @@ boundary; an exception injected into a deterministic fixture is synthetic, not
 evidence of a kernel response. Diagnostic work has a timing cost and is not an
 identical scheduling replay.
 
-The detailed I/O path is limited to the inspected CPython 3.10–3.14
+The detailed I/O path is limited to the inspected CPython 3.10–3.15
 `Path.read_bytes` implementations. A customized reader or unsupported context
 protocol keeps its original execution and marks the diagnostic incomplete;
 an already opened stream is never reopened to obtain more detail. A task's

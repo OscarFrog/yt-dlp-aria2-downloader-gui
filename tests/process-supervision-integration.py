@@ -1267,6 +1267,95 @@ class ObservationRetirementTests(unittest.TestCase):
                                      'an excluded or unattributed group entered the failure chain')
                 self.assertEqual(state['polls'], [])
 
+    def test_attribute_reader_matches_native_context_and_error_precedence(self):
+        path = self.root / 'environ'
+        for fault in ('none', 'open', 'enter', 'read', 'close', 'read-and-close'):
+            outcomes = []
+            for instrumented in (False, True):
+                calls = []
+                first = PermissionError(errno.EACCES, 'synthetic private read')
+                last = OSError(errno.EIO, 'synthetic private close')
+
+                class Stream:
+                    def __enter__(self):
+                        calls.append(('enter',))
+                        if fault == 'enter':
+                            raise first
+                        return self
+
+                    def read(self):
+                        calls.append(('read',))
+                        if fault in ('read', 'read-and-close'):
+                            raise first
+                        return b'private fixture bytes'
+
+                    def __exit__(self, kind, error, traceback):
+                        calls.append(('exit', kind, getattr(error, 'errno', None)))
+                        if fault in ('close', 'read-and-close'):
+                            raise last
+                        return False
+
+                def opened(current, *args, **kwargs):
+                    self.assertEqual(current, path)
+                    calls.append(('open', args, kwargs))
+                    if fault == 'open':
+                        raise first
+                    return Stream()
+
+                observed = self.observed(True, True)
+                scope = observer._DiagnosticScope(observed)
+                token = observer._DIAGNOSTIC_SCOPE.set(scope)
+                try:
+                    with mock.patch.object(Path, 'open', new=opened):
+                        try:
+                            result = (observer._identity_read_bytes(path) if instrumented
+                                      else path.read_bytes())
+                            outcome = ('result', result)
+                        except OSError as error:
+                            self.assertIs(error, last if fault in ('close', 'read-and-close') else first)
+                            outcome = ('error', type(error), error.errno)
+                    if instrumented:
+                        self.assertFalse(observed.diagnostics_incomplete,
+                                         'the current inspected reader became opaque')
+                    outcomes.append((calls, outcome))
+                finally:
+                    observer._DIAGNOSTIC_SCOPE.reset(token)
+            with self.subTest(fault=fault):
+                self.assertEqual(outcomes[0], outcomes[1],
+                                 'instrumentation changed native I/O order or exception precedence')
+
+    def test_uninspected_reader_keeps_execution_but_refuses_complete_diagnostics(self):
+        path = self.root / 'environ'
+        variants = ((3, 9, 'cpython', False), (3, 16, 'cpython', False),
+                    (4, 0, 'cpython', False), (3, 15, 'pypy', False),
+                    (3, 15, 'cpython', True))
+        for major, minor, implementation, customized in variants:
+            with self.subTest(major=major, minor=minor, implementation=implementation,
+                              customized=customized):
+                observed = self.observed(True, True)
+                scope = observer._DiagnosticScope(observed)
+                token = observer._DIAGNOSTIC_SCOPE.set(scope)
+                error = PermissionError(errno.EACCES, 'synthetic private refusal')
+                runtime = SimpleNamespace(version_info=SimpleNamespace(major=major, minor=minor),
+                                          implementation=SimpleNamespace(name=implementation))
+                try:
+                    with ExitStack() as stack:
+                        stack.enter_context(mock.patch.object(observer, 'sys', runtime))
+                        opened = stack.enter_context(mock.patch.object(Path, 'open', side_effect=error))
+                        if customized:
+                            reader = stack.enter_context(mock.patch.object(Path, 'read_bytes', side_effect=error))
+                        with self.assertRaises(PermissionError) as caught:
+                            observer._identity_read_bytes(path)
+                        self.assertIs(caught.exception, error)
+                        self.assertTrue(observed.diagnostics_incomplete)
+                        if customized:
+                            reader.assert_called_once_with()
+                            opened.assert_not_called()
+                        else:
+                            opened.assert_called_once()
+                finally:
+                    observer._DIAGNOSTIC_SCOPE.reset(token)
+
     def test_retirement_mutations_fail_their_behavioral_oracles(self):
         original = (PROJECT / 'tests/process-observer.py').read_text()
         readiness = (
@@ -1317,6 +1406,9 @@ class ObservationRetirementTests(unittest.TestCase):
             ('ignored-fdinfo-close', '                    self.cleanup_error = error',
              '                    pass',
              'test_fdinfo_close_failure_remains_blocking_after_complete_inventory'),
+            ('uninspected-runtime-accepted', 'not 10 <= sys.version_info.minor <= 15',
+             'not 10 <= sys.version_info.minor',
+             'test_uninspected_reader_keeps_execution_but_refuses_complete_diagnostics'),
         )
         detected = 0
         for name, before, after, method in changes:
@@ -1332,7 +1424,7 @@ class ObservationRetirementTests(unittest.TestCase):
                 self.assertEqual(result.errors, [], 'mutation crashed outside its behavioral assertion')
                 self.assertTrue(result.failures, 'mutation escaped its specific behavioral oracle')
                 detected += 1
-        self.assertEqual(detected, 12)
+        self.assertEqual(detected, 13)
 
 
 class ProcessTests(unittest.TestCase):
@@ -4447,8 +4539,12 @@ os.write(1, b"complete")
 ''')
         def constrain_memory():
             resource.setrlimit(resource.RLIMIT_AS, (64 * 1024 * 1024,) * 2)
+        # This byte-protocol ceiling excludes the host's locale archive, which
+        # can exceed 64 MiB before Bash starts. Keep the limit and every emitted
+        # diagnostic observable; other fixtures retain the caller's locale.
         result = subprocess.run(['bash', str(self.wrapper), sys.executable, str(producer)],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20,
+                                env=dict(os.environ, LC_ALL='C', LANGUAGE='C'),
                                 preexec_fn=constrain_memory)
         self.assertEqual(result.returncode, 0, 'bounded filter broke the producer pipe')
         self.assertEqual(result.stdout, b'complete')
