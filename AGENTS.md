@@ -141,48 +141,27 @@ changes the underlying contract:
 
 ## Validation discipline
 
-Use repository entry points instead of substituting ad hoc checks when a
-canonical check exists.
+Select existing entry points using **Local validation levels** in `TESTING.md`:
+focused checks for development, FAST for integration, FULL for sensitive changes
+and before merge/release. Documentation-only local review does not require FULL.
+Component-specific delivery checks and required GitHub checks remain mandatory.
 
-Before selecting a validation profile on a new or restricted environment,
-diagnose its capabilities without running the suite:
+Run `./tests/run-all.sh --doctor` (`--json` for structured results) in a new or
+changed execution environment. Reuse diagnosis and test evidence only under
+`TESTING.md`'s unchanged-input conditions; do not stack FAST and FULL by habit.
+Run `python3 -B scripts/check-push-version.py coherence` before suites, and the
+live-remote `check` when a source push is authorized. Shell changes also require
+`./scripts/check-shell-format.sh`; follow the affected component's skill.
 
-```bash
-./tests/run-all.sh --doctor
-```
+Inspect staged and unstaged diffs and run `git diff --check`. Formatting does
+not replace behavioral or security validation. Diagnose failures before reruns;
+report their cause and any rerun, and preserve unexplained failures. Report
+actual commands, tested sources, conditions and omitted checks. Specialized,
+privileged, interactive and network qualifications retain their scope and
+approval requirements.
 
-Use `--doctor --json` when a machine-readable, versioned result is needed.
-
-During development, run focused tests and, when useful:
-
-```bash
-./tests/run-all.sh --fast --jobs 4
-```
-
-Before review, run the complete local contract for repository changes:
-
-```bash
-./tests/run-all.sh --full --jobs 4
-```
-
-Run `python3 -B scripts/check-push-version.py coherence` before those suites.
-It checks local version copies without network access or a required increment.
-Use the live-remote `check` as well when a source push is authorized. Diagnose
-cheap failures first; do not stack fast and full runs after every small edit.
-
-For shell changes, also run `./scripts/check-shell-format.sh`. For workflow,
-packaging, installation, cleanup, runtime, or release work, run the applicable
-targeted qualifications documented in `TESTING.md`. Release-only, privileged,
-interactive, or external-network procedures must not be claimed when they were
-not actually run.
-
-For every change, run `git diff --check` and inspect both staged and unstaged
-diffs. A formatter result does not replace syntax, ShellCheck, integration,
-packaging, or behavioral validation.
-
-Diagnose a failure before rerunning it. If evidence proves an environmental or
-timing failure, report that evidence and the successful rerun; do not hide an
-unexplained failure.
+Stop when the requested acceptance criteria and applicable validation are met.
+Record unrelated, non-blocking findings for follow-up instead of expanding scope.
 
 ## Delivery and release boundary
 

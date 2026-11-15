@@ -76,17 +76,53 @@ and imports when the change crosses a boundary.
 | Launcher/install/cleanup | Entrypoints/packaging sections; `install-gui.sh`, `private-launcher-manager.py`, `packaging/` | Installer and package-user-cleanup suites; lifecycle/upgrade qualification as applicable |
 | Versioning/contributor guards | Version section below; `scripts/check-push-version.py`, `.githooks/pre-push` | `python3 -B scripts/check-push-version.py coherence`; `python3 -B tests/push-version-integration.py` |
 | Workflows, packages or release | CI/release trust zones; matching skill and full affected workflow | `./scripts/check-workflows.sh` for workflows; `./test-static.sh`; applicable packaging or release qualification below |
-| Documentation or inventories | Both READMEs, relevant source of truth, `REPOSITORY_FILES.md` | `./test-static.sh`; inspect links in installed documentation as well as GitHub |
+| Documentation or inventories | Relevant source of truth, `REPOSITORY_FILES.md`; both READMEs for shared user-facing guidance | `./test-static.sh --source-only`; affected behavioral suites if a contract changes; inspect installed and GitHub links |
 
-Run cheap coherence, syntax and formatting checks before focused integration.
-Use `--fast --jobs 4` for broader development feedback and `--full --jobs 4`
-for final review, after failures are diagnosed. Both profiles include the same
-static checks; running fast immediately before full is not an extra environment
-qualification. Reuse a successful doctor diagnosis while its environment stays
-unchanged. A sandbox-denied loopback bind requires an authorized environment
-change, not repeated identical test runs. External GitHub reads still need
-their own authorized network access; a hermetic full pass does not check live
-release-tag availability.
+### Local validation levels
+
+Select the level from the diff and affected interfaces, not the number of files.
+These are local development levels, distinct from the CI proof classes below.
+
+| Level | When | Required local validation |
+| --- | --- | --- |
+| A — focused development | Small iterations; documentation-only local review | Coherence, affected static checks and directly relevant regressions. For documentation, use `./test-static.sh --source-only` and review the changed policy against implementation; add behavioral tests when their contract or inputs change. |
+| B — integration | Significant functional changes or interactions between components | FAST plus affected integration and security regressions from the task table. FAST does not include every mock group. |
+| C — deep qualification | Security, privacy, supervision, cleanup, publication, workflow/packaging trust or test-orchestration changes; before merge or release | FULL, affected specialized qualifications, relevant mutations and independent review. Real-tool, native, graphical and release checks remain required in their documented scopes and authorized environments. |
+
+A and B provide intermediate feedback; they do not waive the component-specific
+skills' delivery checks or the complete pre-merge contract. Every PR still needs
+all required GitHub checks on its actual qualified tree. A documentation-only
+local commit can be reviewed at A; this does not claim merge readiness or a FULL
+pass. A policy change affecting a safety invariant requires the corresponding
+review and validation, even when only Markdown changes.
+
+Use the existing selectors: `./tests/mock-integration.sh --group gui-progress`
+runs that group; use `--group signals` when cancellation/supervision is affected.
+`./tests/run-all.sh --list` only lists tasks and profile membership: it does not
+select or execute an individual task. Invoke the focused entry point from the
+task table. `--source-only` omits ten separately scheduled Python behavioral
+families; it is a focused source check, never a complete static or FAST/FULL pass.
+
+Run cheap coherence, syntax and formatting checks first. Both profiles include
+the same static tasks; if C is already needed on the final bytes, run FULL
+without an immediately preceding FAST. Reuse a successful doctor diagnosis only
+while its environment is unchanged. A sandbox-denied loopback bind requires an
+authorized environment change, not repeated identical runs.
+
+Reuse a successful test result only when its source inputs (including callers,
+fixtures, dependencies and configuration), command, tool versions and execution
+conditions are unchanged. Record the tested revision/diff and result; if that
+scope cannot be established, rerun the affected checks. Recheck documentation
+and inventories after their edits. A new tree is not qualified by a result from
+another tree; required CI retains its own immutable-tree verification. A failed,
+interrupted or incomplete run is not reusable success. Keep unrelated failures
+visible without turning them into an unlimited repair mission.
+
+Experimental work on a separate branch does not become a prerequisite for an
+independent product change. Preserve the canonical tests on the actual branch;
+focused mocks do not replace a required native or graphical proof. External
+GitHub reads need their own authorized access; a hermetic pass does not check
+live release-tag availability.
 
 A task prompt only needs the problem, current/expected behavior, observable
 acceptance criteria, task-specific constraints and the requested delivery
@@ -597,6 +633,24 @@ therefore cannot leave a worker idle while an unrelated long suite is still
 running. Reports and the first nonzero status remain selected in manifest order
 rather than completion order.
 
+For a captured runner log, inspect existing progress records before loading
+all suite output. Set `qualification_log` to the retained log path:
+
+```bash
+rg -n '^(Validation profile:|Runner event:|All (fast|full) validation suites passed)' "$qualification_log"
+rg -n -m 1 '^Runner event: .* event=complete .* status=[1-9][0-9]*$' "$qualification_log"
+```
+
+The second command locates a failed task in completion order, not necessarily
+the first failure in canonical report order. Read that suite's detailed section
+and nearby traceback with a bounded `sed -n` range, then expand as needed.
+Preserve the complete log and the original command's exit status in a private
+location outside the checkout; do not pipe the test command into a filter that
+can hide its failure. Filtering is navigation, not a verdict: absent completion
+records may mean interruption, and expected negative tests can print `Error:`
+even in a successful suite. Never infer PASS from missing grep matches or from
+a truncated excerpt. Check logs for private data before sharing them.
+
 The Python version, source-archive, CI-proof, automation-handoff, formatter
 bootstrap and autonomous Zenity evidence suites are explicit timed tasks in
 that same bounded static phase, not serial subprocesses hidden inside the
@@ -838,7 +892,8 @@ validation:
 
 `YTDLP_ARIA2_TEST_JOBS` supplies the default concurrency when `--jobs` is not
 provided. Values are restricted to `1..32`. The fast profile is a developer
-convenience, not a substitute for the complete suite before review or release.
+convenience, not a substitute for level C when required or for the complete
+pre-merge and release qualification.
 
 Independent stability repetitions use the same bounded process supervision:
 
