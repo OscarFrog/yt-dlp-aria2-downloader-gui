@@ -1290,8 +1290,11 @@ It recognizes the runner's exact Azure/Ubuntu mirror list, removes the Azure
 endpoint and retains the official archive and security endpoints over HTTPS.
 It changes only that owned regular mirror-list file, atomically; the DEB822
 source stanzas, suites, components and Ubuntu archive keyring remain unchanged.
-An unknown layout or changed source identity stops preparation. The helper is
-not installed with the application and never executes in pre-tag validation,
+An unknown layout or changed source identity stops preparation with exit status
+65 and a fixed failure category; the helper never prints
+source contents, arbitrary paths or exception messages. Categories distinguish
+layout, ownership, permissions, concurrent changes and I/O failures.
+The helper is not installed with the application and never executes in pre-tag validation,
 signing or publication jobs.
 
 Within a release run, builds, signing, package tests, publication and public

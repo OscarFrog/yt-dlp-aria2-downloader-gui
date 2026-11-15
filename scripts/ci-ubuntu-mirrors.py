@@ -6,6 +6,7 @@ This source-only helper never installs packages or changes repository trust.
 """
 
 import os
+import errno
 from pathlib import Path
 import secrets
 import stat
@@ -25,13 +26,42 @@ SELECTED = (
 )
 OPEN_READ = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
 MAX_BYTES = 16384
+FAILURE_CATEGORIES = (
+    "directory-path", "owner", "permissions", "file-type", "file-links",
+    "size-limit", "source-syntax", "source-uri", "source-signature",
+    "source-fields", "mirror-list", "concurrent-change",
+)
+
+
+class PreparationError(ValueError):
+    """Carry only a fixed diagnostic category, never configuration contents."""
+
+    def __init__(self, category):
+        super().__init__(category)
+        self.category = category
+
+
+def failure_category(error):
+    """Reduce rejected input and OS errors to bounded, non-sensitive labels."""
+    if isinstance(error, PreparationError):
+        if type(error.category) is str and error.category in FAILURE_CATEGORIES:
+            return error.category
+    if isinstance(error, OSError):
+        if error.errno == errno.ENOENT:
+            return "missing-file"
+        if error.errno in (errno.EACCES, errno.EPERM):
+            return "access-denied"
+        if error.errno in (errno.ELOOP, errno.ENOTDIR):
+            return "path-type"
+        return "io-error"
+    return "unrecognized-configuration"
 
 
 def open_directory(path, owner):
     """Pin every path component without following a symlink."""
     path = Path(path)
     if not path.is_absolute() or ".." in path.parts:
-        raise ValueError("invalid APT directory")
+        raise PreparationError("directory-path")
     descriptor = os.open("/", OPEN_READ | os.O_DIRECTORY)
     try:
         for component in path.parts[1:]:
@@ -39,8 +69,10 @@ def open_directory(path, owner):
             os.close(descriptor)
             descriptor = child
         metadata = os.fstat(descriptor)
-        if metadata.st_uid != owner or stat.S_IMODE(metadata.st_mode) & 0o022:
-            raise ValueError("APT directory is not owned and protected")
+        if metadata.st_uid != owner:
+            raise PreparationError("owner")
+        if stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise PreparationError("permissions")
         return descriptor
     except BaseException:
         os.close(descriptor)
@@ -51,13 +83,19 @@ def read_file(directory, name, owner):
     descriptor = os.open(name, OPEN_READ, dir_fd=directory)
     try:
         metadata = os.fstat(descriptor)
-        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != owner
-                or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) & 0o022
-                or metadata.st_size > MAX_BYTES):
-            raise ValueError("APT configuration is not a bounded owned regular file")
+        if not stat.S_ISREG(metadata.st_mode):
+            raise PreparationError("file-type")
+        if metadata.st_uid != owner:
+            raise PreparationError("owner")
+        if metadata.st_nlink != 1:
+            raise PreparationError("file-links")
+        if stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise PreparationError("permissions")
+        if metadata.st_size > MAX_BYTES:
+            raise PreparationError("size-limit")
         data = os.read(descriptor, MAX_BYTES + 1)
         if len(data) > MAX_BYTES:
-            raise ValueError("APT configuration exceeds its size bound")
+            raise PreparationError("size-limit")
         return data, metadata
     finally:
         os.close(descriptor)
@@ -77,16 +115,19 @@ def validate_sources(data):
             continue
         key, separator, value = line.partition(":")
         if not separator or not key or key != key.strip() or key in current:
-            raise ValueError("unsupported Ubuntu source stanza")
+            raise PreparationError("source-syntax")
         current[key] = value.strip()
     if not stanzas:
-        raise ValueError("missing Ubuntu source stanza")
+        raise PreparationError("source-syntax")
     for stanza in stanzas:
-        if (stanza.get("URIs") != MIRROR_URI or stanza.get("Signed-By") != KEYRING
-                or stanza.get("Types") not in ("deb", "deb deb-src")
+        if stanza.get("URIs") != MIRROR_URI:
+            raise PreparationError("source-uri")
+        if stanza.get("Signed-By") != KEYRING:
+            raise PreparationError("source-signature")
+        if (stanza.get("Types") not in ("deb", "deb deb-src")
                 or not stanza.get("Suites") or not stanza.get("Components")
                 or set(stanza) - {"Types", "URIs", "Signed-By", "Suites", "Components"}):
-            raise ValueError("unsupported Ubuntu source or signature configuration")
+            raise PreparationError("source-fields")
 
 
 def configure(directory, owner):
@@ -97,14 +138,16 @@ def configure(directory, owner):
     try:
         sources = os.open("sources.list.d", OPEN_READ | os.O_DIRECTORY, dir_fd=parent)
         source_metadata = os.fstat(sources)
-        if source_metadata.st_uid != owner or stat.S_IMODE(source_metadata.st_mode) & 0o022:
-            raise ValueError("Ubuntu source directory is not owned and protected")
+        if source_metadata.st_uid != owner:
+            raise PreparationError("owner")
+        if stat.S_IMODE(source_metadata.st_mode) & 0o022:
+            raise PreparationError("permissions")
         source, _ = read_file(sources, "ubuntu.sources", owner)
         validate_sources(source)
         data, metadata = read_file(parent, "apt-mirrors.txt", owner)
         entries = tuple(tuple(line.split()) for line in data.decode("ascii").splitlines())
         if entries not in (ORIGINAL, SELECTED):
-            raise ValueError("unrecognized Ubuntu runner mirror list")
+            raise PreparationError("mirror-list")
         if entries == SELECTED:
             return False
         replacement = "".join(f"{uri}\t{priority}\n" for uri, priority in SELECTED).encode("ascii")
@@ -121,7 +164,7 @@ def configure(directory, owner):
         if (current != data or (current_metadata.st_dev, current_metadata.st_ino)
                 != (metadata.st_dev, metadata.st_ino)
                 or read_file(sources, "ubuntu.sources", owner)[0] != source):
-            raise ValueError("APT configuration changed during preparation")
+            raise PreparationError("concurrent-change")
         os.replace(temporary, "apt-mirrors.txt", src_dir_fd=parent, dst_dir_fd=parent)
         temporary = None
         os.fsync(parent)
@@ -140,9 +183,10 @@ def main():
         return 64
     try:
         changed = configure("/etc/apt", 0)
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError) as error:
         print("Error: Ubuntu CI mirror preparation failed; package setup must stop.",
               file=sys.stderr)
+        print("Category: " + failure_category(error), file=sys.stderr)
         return 65
     print("Ubuntu CI mirrors: official HTTPS archives " + ("selected." if changed else "already selected."))
     return 0
