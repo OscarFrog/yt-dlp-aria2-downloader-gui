@@ -3184,6 +3184,7 @@ class DedicatedAPTTests(unittest.TestCase):
     def setUpClass(cls):
         UbuntuMirrorTests.setUpClass()
         cls.helper = UbuntuMirrorTests.helper
+        cls.canonical_keyring = cls.helper.CI_KEYRING
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -3194,7 +3195,7 @@ class DedicatedAPTTests(unittest.TestCase):
         self.key = self.parent / 'keyring.gpg'
         self.key.write_bytes(b'fixture key; cryptographic rejection is tested with actual APT')
         self.key.chmod(0o644)
-        self.key_patch = patch.object(self.helper, 'KEYRING', str(self.key))
+        self.key_patch = patch.object(self.helper, 'CI_KEYRING', str(self.key))
         self.key_patch.start()
         self.addCleanup(self.key_patch.stop)
 
@@ -3218,7 +3219,9 @@ class DedicatedAPTTests(unittest.TestCase):
         self.setup()
         sources = (self.root / 'ubuntu.sources').read_text(encoding='ascii')
         self.assertEqual(sources.count('Types: deb\n'), 2)
-        self.assertEqual(sources.count('Signed-By: ' + str(self.key)), 2)
+        self.assertEqual(self.canonical_keyring, '/etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg')
+        self.assertEqual(self.helper.CI_SIGNER, 'F6ECB3762474EDA9D21B7022871920D1991BC93C')
+        self.assertEqual(sources.count(f'Signed-By: {self.key} {self.helper.CI_SIGNER}\n'), 2)
         self.assertIn('URIs: https://archive.ubuntu.com/ubuntu/\nSuites: noble noble-updates noble-backports\n', sources)
         self.assertIn('URIs: https://security.ubuntu.com/ubuntu/\nSuites: noble-security\n', sources)
         self.assertEqual(sources.count('Components: main restricted universe multiverse\n'), 2)
@@ -3237,18 +3240,118 @@ class DedicatedAPTTests(unittest.TestCase):
         for forbidden in ('trusted=yes', 'AllowUnauthenticated', 'AllowInsecureRepositories', 'mirror+file'):
             self.assertNotIn(forbidden, sources + config)
 
+    @contextlib.contextmanager
+    def assert_ambient_unread(self, source):
+        """Observe Python opens directly; access times cannot prove non-reading."""
+        identity = source.stat()
+        opened = []
+
+        def watch(opener):
+            def observed(*args, **kwargs):
+                result = opener(*args, **kwargs)
+                descriptor = result if isinstance(result, int) else result.fileno()
+                metadata = os.fstat(descriptor)
+                if (metadata.st_dev, metadata.st_ino) == (identity.st_dev, identity.st_ino):
+                    opened.append(True)
+                return result
+            return observed
+
+        # Path.open is a separate boundary: Python 3.10 caches its io opener.
+        # Also cover direct io/builtins and dir_fd-based os.open, including aliases.
+        with patch.object(Path, 'open', watch(Path.open)), \
+                patch('builtins.open', watch(open)), patch.object(io, 'open', watch(io.open)), \
+                patch.object(os, 'open', watch(os.open)):
+            yield
+        self.assertFalse(opened, 'ambient source opened during dedicated preparation')
+
+    def assert_ambient_unchanged(self, source, before, content):
+        # Verify stable identity and nanosecond metadata before our own read.
+        # Reading to compare contents can update atime on an otherwise intact file.
+        after = source.stat()
+        for field in ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid',
+                      'st_size', 'st_mtime_ns', 'st_ctime_ns'):
+            self.assertEqual(getattr(after, field), getattr(before, field), field)
+        self.assertEqual(source.read_text(encoding='utf-8'), content)
+
     def test_all_host_source_shapes_are_unread_and_unchanged(self):
         ambient = self.parent / 'ambient'
         ambient.mkdir()
         for content in (UbuntuMirrorTests.SOURCE, 'mixed sources', 'unknown mirror secret', 'external hostile source'):
             source = ambient / 'ubuntu.sources'
             source.write_text(content, encoding='utf-8')
+            # Force the verification read to be eligible for a relatime update,
+            # without sleeping or depending on crossing a clock-second boundary.
+            os.utime(source, ns=(1, source.stat().st_mtime_ns))
             before = source.stat()
-            with patch.object(self.helper, 'configure', side_effect=AssertionError('legacy used')):
+            with self.assert_ambient_unread(source), \
+                    patch.object(self.helper, 'configure', side_effect=AssertionError('legacy used')):
                 self.setup()
                 self.assertEqual(self.run_apt()[0], 0)
-            self.assertEqual(source.read_text(encoding='utf-8'), content)
-            self.assertEqual(source.stat(), before)
+            self.assert_ambient_unchanged(source, before, content)
+
+    def test_ambient_read_witness_detects_open_mutations(self):
+        source = self.parent / 'ambient.sources'
+        source.write_text('synthetic ambient source', encoding='utf-8')
+        alias = self.parent / 'ambient-alias'
+        alias.symlink_to(source)
+        self.setup()
+
+        def descriptor_read():
+            with self.helper.scoped_descriptor(os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY)) as directory:
+                with self.helper.scoped_descriptor(os.open(source.name, os.O_RDONLY, dir_fd=directory)) as descriptor:
+                    os.read(descriptor, 1)
+
+        def builtin_read():
+            with open(source, encoding='utf-8') as stream:
+                stream.read()
+
+        def io_read():
+            with io.open(source, encoding='utf-8') as stream:
+                stream.read()
+
+        for reader in (source.read_bytes, alias.read_text, io_read, builtin_read, descriptor_read):
+            with self.subTest(reader=reader.__name__), \
+                    self.assertRaisesRegex(AssertionError, 'ambient source opened'):
+                with self.assert_ambient_unread(source):
+                    self.run_apt(action=lambda *_: reader())
+
+    def test_ambient_integrity_witness_checks_metadata_before_read(self):
+        source = self.parent / 'ambient.sources'
+        source.write_text('synthetic ambient source', encoding='utf-8')
+        before = source.stat()
+        order = []
+        real_stat, real_read = Path.stat, Path.read_text
+
+        def inspect(path, *args, **kwargs):
+            order.append('stat')
+            return real_stat(path, *args, **kwargs)
+
+        def read(path, *args, **kwargs):
+            self.assertEqual(order, ['stat'])
+            order.append('read')
+            return real_read(path, *args, **kwargs)
+
+        with patch.object(Path, 'stat', inspect), patch.object(Path, 'read_text', read):
+            self.assert_ambient_unchanged(source, before, 'synthetic ambient source')
+        self.assertEqual(order, ['stat', 'read'])
+
+    def test_ambient_integrity_witness_rejects_metadata_and_content_mutations(self):
+        from types import SimpleNamespace
+
+        source = self.parent / 'ambient.sources'
+        source.write_text('synthetic ambient source', encoding='utf-8')
+        before = source.stat()
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid',
+                  'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        for field in fields:
+            changed = SimpleNamespace(**{name: getattr(before, name) for name in fields})
+            setattr(changed, field, getattr(changed, field) + 1)
+            with self.subTest(field=field), patch.object(Path, 'stat', return_value=changed), \
+                    patch.object(Path, 'read_text') as read, self.assertRaisesRegex(AssertionError, field):
+                self.assert_ambient_unchanged(source, before, 'synthetic ambient source')
+            read.assert_not_called()
+        with patch.object(Path, 'read_text', return_value='modified source'), self.assertRaises(AssertionError):
+            self.assert_ambient_unchanged(source, before, 'synthetic ambient source')
 
     def test_update_and_install_share_exact_environment_and_protected_files(self):
         self.setup()
@@ -3496,6 +3599,91 @@ class DedicatedAPTTests(unittest.TestCase):
                     contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(self.helper.dedicated_main(['--setup']), 65)
                 prepare.assert_not_called()
+
+    def test_writable_legacy_keyring_is_neither_read_nor_repaired(self):
+        legacy = self.parent / 'legacy-keyrings'
+        legacy.mkdir()
+        key = legacy / 'ubuntu-archive-keyring.gpg'
+        key.write_bytes(b'untrusted legacy key')
+        legacy.chmod(0o777)
+        key.chmod(0o777)
+        before = (legacy.stat(), key.stat())
+        open_directory = self.helper.open_directory
+
+        def checked(path, owner):
+            self.assertNotEqual(Path(path), legacy, 'legacy key directory consumed')
+            return open_directory(path, owner)
+
+        with patch.object(self.helper, 'KEYRING', str(key)), \
+                patch.object(self.helper, 'open_directory', side_effect=checked):
+            self.setup()
+            self.assertEqual(self.run_apt()[0], 0)
+            self.assertEqual(self.run_apt(['install', '--yes', 'aria2'])[0], 0)
+        self.assertEqual(self.helper.file_identity(legacy.stat()), self.helper.file_identity(before[0]))
+        self.assertEqual(self.helper.file_identity(key.stat()), self.helper.file_identity(before[1]))
+        self.assertEqual(key.read_bytes(), b'untrusted legacy key')
+
+    def test_selected_keyring_permissions_are_not_relaxed(self):
+        keys = self.parent / 'selected-keys'
+        keys.mkdir(mode=0o755)
+        self.key.rename(keys / self.key.name)
+        self.key = keys / self.key.name
+        with patch.object(self.helper, 'CI_KEYRING', str(self.key)):
+            self.setup()
+            for target, mode in ((keys, 0o775), (keys, 0o777),
+                                 (self.key, 0o664), (self.key, 0o666)):
+                original_mode = target.stat().st_mode & 0o777
+                target.chmod(mode)
+                try:
+                    with self.subTest(target=target.name, mode=mode), \
+                            patch.object(self.helper.subprocess, 'run') as execute:
+                        for operation in (self.setup, self.run_apt):
+                            with self.assertRaises(self.helper.PreparationError) as error:
+                                operation()
+                            self.assertEqual(error.exception.category, 'permissions')
+                        execute.assert_not_called()
+                        self.assertEqual(target.stat().st_mode & 0o777, mode)
+                finally:
+                    target.chmod(original_mode)
+
+    def test_selected_keyring_missing_or_linked_never_falls_back(self):
+        self.setup()
+        original = self.parent / 'saved-key'
+        self.key.rename(original)
+        for variant in ('missing', 'symlink', 'hardlink'):
+            if variant == 'symlink':
+                self.key.symlink_to(original)
+            elif variant == 'hardlink':
+                os.link(original, self.key)
+            try:
+                with self.subTest(variant=variant), patch.object(self.helper.subprocess, 'run') as execute, \
+                        self.assertRaises((OSError, self.helper.PreparationError)):
+                    self.run_apt()
+                execute.assert_not_called()
+            finally:
+                if variant != 'missing':
+                    self.key.unlink()
+        original.rename(self.key)
+        self.assertEqual(self.run_apt()[0], 0)
+
+    def test_selected_keyring_directory_symlink_is_rejected(self):
+        alias = self.parent / 'key-directory-alias'
+        alias.symlink_to(self.key.parent, target_is_directory=True)
+        with patch.object(self.helper, 'CI_KEYRING', str(alias / self.key.name)), \
+                patch.object(self.helper.subprocess, 'run') as execute, self.assertRaises(OSError):
+            self.setup()
+        execute.assert_not_called()
+
+    def test_signature_fingerprint_removed_from_sources_blocks_apt(self):
+        self.setup()
+        source = self.root / 'ubuntu.sources'
+        original = source.read_bytes()
+        source.write_bytes(original.replace((' ' + self.helper.CI_SIGNER).encode('ascii'), b''))
+        with patch.object(self.helper.subprocess, 'run') as execute, \
+                self.assertRaises(self.helper.PreparationError) as error:
+            self.run_apt()
+        self.assertEqual(error.exception.category, 'source-fields')
+        execute.assert_not_called()
 
 
 class ProcessExitObservationTests(unittest.TestCase):

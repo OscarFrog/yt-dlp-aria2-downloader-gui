@@ -1290,8 +1290,16 @@ dedicated root-owned `/run/yt-dlp-ci-apt` tree, without reading or changing the
 runner's APT sources or mirror list. Two exact deb822 `deb` stanzas select
 `https://archive.ubuntu.com/ubuntu/` for `noble noble-updates noble-backports`
 and `https://security.ubuntu.com/ubuntu/` for `noble-security`, with the four
-components main/restricted/universe/multiverse and
-`Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg`.
+components main/restricted/universe/multiverse and an explicit `Signed-By`
+selecting `/etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg` with the
+Ubuntu archive fingerprint `F6ECB3762474EDA9D21B7022871920D1991BC93C`.
+Noble's `ubuntu-keyring` package supplies this separate archive key. The
+dedicated path never falls back to `/usr/share`, whose permissions runner
+provisioning may relax, and never imports the other keys in `trusted.gpg.d`.
+APT verifies the selected primary key or its authenticated signing subkeys;
+an unrelated key cannot authorize these sources. A missing or unsafe key file
+refuses preparation; an invalid signature or unavailable selected signing key
+refuses update. Key rotation requires an explicit reviewed contract change.
 
 Every related APT command uses the same helper's `--apt` boundary, including
 DEB lifecycle, reinstall, upgrade and cleanup via explicit `YT_DLP_CI_APT=1`.
@@ -1325,9 +1333,14 @@ left for runner teardown. Repeated setup must establish durability again.
 This is a command-scoped source boundary, not hardening of the whole runner.
 The trusted kernel, root, system APT/dpkg binaries, Ubuntu keyring, dpkg
 configuration, installed package state and maintainer scripts remain trusted.
+Reading the one explicit archive key does not consume ambient APT sources,
+preferences, hooks or the global trust store; it is the sole required key input.
 An already installed foreign package can satisfy a dependency; the boundary
 controls repository candidates, not the provenance of every installed package.
-Concurrent cloud-init changes to `/etc/apt` are irrelevant to these commands.
+Concurrent changes to ambient APT source lists, preferences and hooks do not
+affect these commands. Changes to the one selected archive key remain relevant:
+its identity and metadata are revalidated, and APT must authenticate signatures
+against the explicit fingerprint.
 Root replacement at observed boundaries is refused, but this is not a kernel
 compare-and-swap against a malicious root writer during APT reads.
 

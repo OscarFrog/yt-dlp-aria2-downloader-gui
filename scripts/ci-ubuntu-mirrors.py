@@ -403,6 +403,11 @@ def configure(directory, owner):
 # runner's sources. The legacy normalizer below remains separately regression
 # tested; CI uses only --setup / --apt.
 CI_APT_ROOT = Path('/run/yt-dlp-ci-apt')
+# Noble ships this archive key separately from /usr/share, whose permissions
+# runner provisioning may relax. Select only this protected file and signer;
+# never inherit trusted.gpg.d or fall back to a writable keyring.
+CI_KEYRING = '/etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg'
+CI_SIGNER = 'F6ECB3762474EDA9D21B7022871920D1991BC93C'
 APT_OPTIONS = frozenset((
     'Acquire::Retries=3', 'Acquire::http::Timeout=30',
     'Acquire::https::Timeout=30', 'DPkg::Lock::Timeout=60',
@@ -424,7 +429,7 @@ def dedicated_files(root):
     sources = ''.join(
         f'Types: deb\nURIs: {uri}\nSuites: {" ".join(suites)}\n'
         'Components: main restricted universe multiverse\n'
-        f'Signed-By: {KEYRING}\n\n'
+        f'Signed-By: {CI_KEYRING} {CI_SIGNER}\n\n'
         for uri, suites in zip(DIRECT_URIS, NOBLE_SUITES)
     ).encode('ascii')
     # APT_CONFIG is read before parts/main. Command-line -o alone is too late
@@ -499,8 +504,8 @@ def dedicated_snapshot(root, owner):
                 if stat.S_IMODE(info.st_mode) != 0o755:
                     raise PreparationError('permissions')
                 snapshot.append((name, info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode))
-        with scoped_descriptor(open_directory(Path(KEYRING).parent, owner)) as keys:
-            data, info = read_file(keys, Path(KEYRING).name, owner)
+        with scoped_descriptor(open_directory(Path(CI_KEYRING).parent, owner)) as keys:
+            data, info = read_file(keys, Path(CI_KEYRING).name, owner)
             if not data or not stat.S_IMODE(info.st_mode) & 0o004:
                 raise PreparationError('source-signature')
             snapshot.append(('keyring', file_identity(info), data))

@@ -1729,6 +1729,17 @@ failure, TERM, timeout and forced-kill assertions. `tests/packaging-integration.
 checks explicit CI routing and unchanged native behavior, Unicode arguments
 and failure propagation under C and available French locales.
 
+The dedicated key regressions retain refusal of writable/missing/linked keys
+and verify that a writable legacy `/usr/share` keyring is neither consumed nor
+repaired. Native APT must verify the explicit Noble archive fingerprint even
+when another key exists in the selected file. Ambient-source non-reading is
+observed at Python open boundaries, including aliases and descriptor-relative
+opens; APT's own reads require the separate real-APT fixture below. The witness
+compares stable identity/security metadata in nanoseconds before its own content
+read. Access time is not proof of non-reading: the verification read can change
+it, while filesystem policies can suppress updates on an actual read. Mutations
+must detect ambient opens, changed metadata/content and misplaced observations.
+
 Real APT qualification requires a disposable Ubuntu 24.04 environment, never
 host APT. Use the exact proposed helper with private lists/cache, hostile
 ambient sources/configuration, fresh signed update, dependency resolution and
