@@ -59,14 +59,14 @@ jobs:
           set -Eeuo pipefail
           # Bound stalled connections and the complete package transaction;
           # provisioning must leave the independently bounded media tests time.
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py
+          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup
           apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30
             -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
           sudo timeout --signal=TERM --kill-after=10s 2m \
-            apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update
           sudo timeout --signal=TERM --kill-after=10s 4m \
             env DEBIAN_FRONTEND=noninteractive \
-            apt-get "${apt_options[@]}" install --yes --no-install-recommends \
+            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends \
             aria2 curl ffmpeg python3-venv unzip
 
           case ${YT_DLP_VERSION} in
@@ -237,14 +237,14 @@ jobs:
           umask 077
           # Bound stalled connections and the complete package transaction;
           # provisioning must leave the independently bounded media tests time.
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py
+          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup
           apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30
             -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
           sudo timeout --signal=TERM --kill-after=10s 2m \
-            apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update
           sudo timeout --signal=TERM --kill-after=10s 4m \
             env DEBIAN_FRONTEND=noninteractive \
-            apt-get "${apt_options[@]}" install --yes --no-install-recommends \
+            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends \
             aria2 curl ffmpeg python3-venv unzip
           python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
           mkdir -p -- "${RUNNER_TEMP}/shared-destination-evidence"

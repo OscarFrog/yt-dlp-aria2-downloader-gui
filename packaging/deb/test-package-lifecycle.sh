@@ -18,8 +18,10 @@ package_files=()
 
 cleanup() {
     if [[ ${package_installed} == true ]]; then
+        # Rescue removal is best-effort; the APT router checks failures explicitly.
+        # shellcheck disable=SC2310
         DEBIAN_FRONTEND=noninteractive \
-            apt-get remove --yes "${PACKAGE_NAME}" >/dev/null 2>&1 || true
+            package_test_apt remove --yes "${PACKAGE_NAME}" >/dev/null 2>&1 || true
     fi
     package_runtime_fixture_cleanup
     if [[ -n ${WORK_DIR} ]]; then
@@ -225,7 +227,7 @@ assert_deb_private_payload() {
 }
 
 install_initial_deb() {
-    DEBIAN_FRONTEND=noninteractive apt-get install --yes "${PACKAGE_PATH}"
+    DEBIAN_FRONTEND=noninteractive package_test_apt install --yes "${PACKAGE_PATH}"
     package_installed=true
     assert_installed_deb 'initial installation'
     assert_runtime_preserved 'initial DEB installation'
@@ -236,7 +238,7 @@ remove_and_purge_deb() {
     local remaining_status=''
 
     DEBIAN_FRONTEND=noninteractive \
-        apt-get remove --yes "${PACKAGE_NAME}"
+        package_test_apt remove --yes "${PACKAGE_NAME}"
     package_installed=false
     assert_runtime_preserved 'DEB remove'
     assert_deb_payload_absent 'remove'
@@ -254,12 +256,12 @@ remove_and_purge_deb() {
 }
 
 reinstall_and_purge_deb() {
-    DEBIAN_FRONTEND=noninteractive apt-get install --yes "${PACKAGE_PATH}"
+    DEBIAN_FRONTEND=noninteractive package_test_apt install --yes "${PACKAGE_PATH}"
     package_installed=true
     assert_installed_deb 'reinstallation'
     assert_runtime_preserved 'DEB reinstallation'
 
-    DEBIAN_FRONTEND=noninteractive apt-get purge --yes "${PACKAGE_NAME}"
+    DEBIAN_FRONTEND=noninteractive package_test_apt purge --yes "${PACKAGE_NAME}"
     package_installed=false
     assert_runtime_preserved 'direct DEB purge'
     assert_deb_payload_absent 'direct purge'

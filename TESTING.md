@@ -1684,16 +1684,16 @@ failure stops that step; neither stale package lists nor unchecked downloads
 substitute for a successful installation. Ubuntu package authentication and
 the wheel, Deno and impersonation-dependency pins remain mandatory.
 
-Before package setup, the two real-tool jobs, the Ubuntu FFmpeg 6/9 qualification
-jobs, source-archive/DEB package jobs and release runtime/ZIP/DEB jobs select
-the official Ubuntu HTTPS archives through `scripts/ci-ubuntu-mirrors.py`.
-The helper accepts only the reviewed runner mirror list or its already selected
-form and refuses unfamiliar, unsafe or changed configuration. It removes the
-Azure mirror that can continue transferring too slowly to trigger an inactivity
-timeout. Existing Ubuntu source stanzas, suites, components, signing keyring,
-APT authentication and test deadlines remain unchanged. This preparation is
-limited to disposable CI runners; it does not modify users' package settings
-or introduce candidate execution in privileged validation/signing jobs.
+The nine media, qualification, source/DEB and release build jobs prepare an
+owned dedicated configuration with `scripts/ci-ubuntu-mirrors.py --setup` and
+route update/install through `--apt`. DEB lifecycle/upgrade invocations opt in
+with `YT_DLP_CI_APT=1`, so later dependency resolution uses the same sources.
+The two exact official HTTPS Noble stanzas and all configuration boundaries
+are specified in `ARCHITECTURE.md`. Runner `ubuntu.sources`, mirror lists,
+extra sources, APT hooks/preferences/auth and old caches are not consumed by
+this path. No runner source file is rewritten. There is no mirror fallback;
+unavailable sources and partial updates remain failures. Signatures and HTTPS
+verification are mandatory. Privileged publication jobs are unchanged.
 
 The existing installation step, including the venv and pip, has eight minutes.
 Checkout, version checks, Deno/prerequisite installation and evidence upload
@@ -1720,9 +1720,37 @@ pipes before exposing the terminal process state. A surviving process or a
 changed PID identity still fails; exit flags alone never satisfy the check.
 Deterministic clock tests cover both exit transitions and a process that remains
 alive beyond that deadline. This observation does not extend the APT deadlines.
-Mirror fixtures also verify idempotence, exact source preservation, rejected
-unknown endpoints, unsafe filesystem objects and failed-preparation propagation
-before APT. Local fixtures use temporary directories and never modify `/etc/apt`.
+`python3 -B tests/ci-validation-integration.py DedicatedAPTTests UbuntuMirrorTests`
+checks dedicated configuration, closed arguments, clean environments, exact
+update/install consistency, links/modes/owners, incomplete reads, changed
+files/directories, failed writes/syncs, first-error preservation and legacy
+normalizer regressions. Existing workflow replay tests retain update/install
+failure, TERM, timeout and forced-kill assertions. `tests/packaging-integration.sh`
+checks explicit CI routing and unchanged native behavior, Unicode arguments
+and failure propagation under C and available French locales.
+
+The dedicated key regressions retain refusal of writable/missing/linked keys
+and verify that a writable legacy `/usr/share` keyring is neither consumed nor
+repaired. Native APT must verify the explicit Noble archive fingerprint even
+when another key exists in the selected file. Ambient-source non-reading is
+observed at Python open boundaries, including aliases and descriptor-relative
+opens; APT's own reads require the separate real-APT fixture below. The witness
+compares stable identity/security metadata in nanoseconds before its own content
+read. Access time is not proof of non-reading: the verification read can change
+it, while filesystem policies can suppress updates on an actual read. Mutations
+must detect ambient opens, changed metadata/content and misplaced observations.
+
+Real APT qualification requires a disposable Ubuntu 24.04 environment, never
+host APT. Use the exact proposed helper with private lists/cache, hostile
+ambient sources/configuration, fresh signed update, dependency resolution and
+an actual approved package installation. Record the APT version and source
+hashes. Offline URI plans alone do not prove signature verification or an
+installation. Negative fixtures must reject unsigned/tampered repository
+metadata and preserve unavailable-source/install failures. Network execution
+and native containers require their applicable environment approvals.
+A controlled source configuration is not a reproducible package-version pin:
+Ubuntu's signed repositories evolve. Local candidate DEBs retain separate
+immutable-artifact and package-identity checks.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the exact-source qualification proof and release-specific identity checks, verifies
@@ -2040,7 +2068,7 @@ boundary; an exception injected into a deterministic fixture is synthetic, not
 evidence of a kernel response. Diagnostic work has a timing cost and is not an
 identical scheduling replay.
 
-The detailed I/O path is limited to the inspected CPython 3.10–3.14
+The detailed I/O path is limited to the inspected CPython 3.10–3.15
 `Path.read_bytes` implementations. A customized reader or unsupported context
 protocol keeps its original execution and marks the diagnostic incomplete;
 an already opened stream is never reopened to obtain more detail. A task's

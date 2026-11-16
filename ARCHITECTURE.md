@@ -1284,15 +1284,72 @@ the unchanged individual test deadlines. The required stress aggregate allows
 seventy-five minutes for the latest complementary cohort inside an eighty-minute
 job; longer waiting never turns missing, failed or cancelled evidence into proof.
 
-Ubuntu jobs that install media, generation-qualification or source/DEB package
-dependencies first run the source-only `scripts/ci-ubuntu-mirrors.py` helper.
-It recognizes the runner's exact Azure/Ubuntu mirror list, removes the Azure
-endpoint and retains the official archive and security endpoints over HTTPS.
-It changes only that owned regular mirror-list file, atomically; the DEB822
-source stanzas, suites, components and Ubuntu archive keyring remain unchanged.
-An unknown layout or changed source identity stops preparation. The helper is
-not installed with the application and never executes in pre-tag validation,
-signing or publication jobs.
+Ubuntu media, generation-qualification and source/DEB build jobs use the
+source-only `scripts/ci-ubuntu-mirrors.py --setup` boundary. It creates a
+dedicated root-owned `/run/yt-dlp-ci-apt` tree, without reading or changing the
+runner's APT sources or mirror list. Two exact deb822 `deb` stanzas select
+`https://archive.ubuntu.com/ubuntu/` for `noble noble-updates noble-backports`
+and `https://security.ubuntu.com/ubuntu/` for `noble-security`, with the four
+components main/restricted/universe/multiverse and an explicit `Signed-By`
+selecting `/etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg` with the
+Ubuntu archive fingerprint `F6ECB3762474EDA9D21B7022871920D1991BC93C`.
+Noble's `ubuntu-keyring` package supplies this separate archive key. The
+dedicated path never falls back to `/usr/share`, whose permissions runner
+provisioning may relax, and never imports the other keys in `trusted.gpg.d`.
+APT verifies the selected primary key or its authenticated signing subkeys;
+an unrelated key cannot authorize these sources. A missing or unsafe key file
+refuses preparation; an invalid signature or unavailable selected signing key
+refuses update. Key rotation requires an explicit reviewed contract change.
+
+Every related APT command uses the same helper's `--apt` boundary, including
+DEB lifecycle, reinstall, upgrade and cleanup via explicit `YT_DLP_CI_APT=1`.
+Ordinary package tests keep their native APT behavior. The closed command API
+admits only reviewed dependency names, intended lifecycle remove/purge and
+already authenticated local DEB artifacts; it rejects caller configuration,
+source, version, release, regex and authentication overrides. Local DEB
+identity and provenance remain the lifecycle caller's independent obligation.
+No candidate helper is introduced in privileged validation/signing/publication.
+
+`APT_CONFIG` is supplied in a clean subprocess environment before APT reads
+its normal main/parts files. The dedicated configuration replaces main/parts,
+source lists/parts, preferences/parts, auth files/parts and global trust paths
+with exact private files or an empty protected directory. Separate package
+lists and caches prevent stale runner indexes from reintroducing foreign
+candidates. The two signed source stanzas use the explicit Ubuntu keyring;
+HTTPS verification stays enabled and redirects are disabled. A partial update
+is an error. An update failure prevents the subsequent installation, and
+all existing media timeouts, signal escalation and exit statuses remain intact.
+
+The configuration files are bounded regular single-link root-owned 0644 files
+inside protected 0755 directories, readable by APT's sandbox user. Setup is
+exclusive; incomplete state is refused, never silently repaired. A directory
+lock serializes helper operations. Before each APT invocation, exact bytes,
+permissions, identities, the keyring and empty configuration directory are
+validated, synced and revalidated. The same identities are checked afterward;
+an original APT failure takes precedence over a secondary validation/close
+failure. No cleanup removes ambiguous state: this disposable `/run` tree is
+left for runner teardown. Repeated setup must establish durability again.
+
+This is a command-scoped source boundary, not hardening of the whole runner.
+The trusted kernel, root, system APT/dpkg binaries, Ubuntu keyring, dpkg
+configuration, installed package state and maintainer scripts remain trusted.
+Reading the one explicit archive key does not consume ambient APT sources,
+preferences, hooks or the global trust store; it is the sole required key input.
+An already installed foreign package can satisfy a dependency; the boundary
+controls repository candidates, not the provenance of every installed package.
+Concurrent changes to ambient APT source lists, preferences and hooks do not
+affect these commands. Changes to the one selected archive key remain relevant:
+its identity and metadata are revalidated, and APT must authenticate signatures
+against the explicit fingerprint.
+Root replacement at observed boundaries is refused, but this is not a kernel
+compare-and-swap against a malicious root writer during APT reads.
+
+The dedicated path deliberately has no mirror-list fallback, unlike historical
+indirection. An unavailable official source fails rather than selecting an
+unknown mirror. The no-argument legacy normalizer and its strict diagnostic
+regressions remain for compatibility; none of the nine CI consumers uses it.
+Its closed legacy acceptance rules are unchanged and do not authorize unknown
+lists. Other APT usage outside these nine job scopes is unchanged.
 
 Within a release run, builds, signing, package tests, publication and public
 download verification pass immutable Actions artifact IDs through job outputs.

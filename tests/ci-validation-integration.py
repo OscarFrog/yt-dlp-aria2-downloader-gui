@@ -1199,8 +1199,8 @@ class WorkflowContractTests(unittest.TestCase):
         for option in ("Acquire::Retries=3", "Acquire::http::Timeout=30",
                        "Acquire::https::Timeout=30", "DPkg::Lock::Timeout=60"):
             self.assertEqual(install.count(option), 1)
-        self.assertIn('sudo timeout --signal=TERM --kill-after=10s 2m \\\n            apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update', install)
-        self.assertIn('sudo timeout --signal=TERM --kill-after=10s 4m \\\n            env DEBIAN_FRONTEND=noninteractive \\\n            apt-get "${apt_options[@]}" install --yes --no-install-recommends', install)
+        self.assertIn('sudo timeout --signal=TERM --kill-after=10s 2m \\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update', install)
+        self.assertIn('sudo timeout --signal=TERM --kill-after=10s 4m \\\n            env DEBIAN_FRONTEND=noninteractive \\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends', install)
         for forbidden in ("continue-on-error", "|| true", "--allow-unauthenticated", "--fix-missing",
                           "trusted=yes", "Acquire::AllowInsecureRepositories", "/etc/apt/sources"):
             self.assertNotIn(forbidden, install)
@@ -1889,7 +1889,7 @@ class UbuntuMirrorTests(unittest.TestCase):
         "packages.yml": {"source-archive", "deb"},
         "release.yml": {"release-runtime", "zip", "deb"},
     }
-    COMMAND = "sudo python3 -I -B scripts/ci-ubuntu-mirrors.py"
+    COMMAND = "sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup"
     ORIGINAL = ("http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n"
                 "https://archive.ubuntu.com/ubuntu/\tpriority:2\n"
                 "https://security.ubuntu.com/ubuntu/\tpriority:3\n")
@@ -1930,6 +1930,24 @@ class UbuntuMirrorTests(unittest.TestCase):
     def configure(self):
         return self.helper.configure(self.apt, os.geteuid())
 
+    def assert_cli_refusal(self, category, *, owner=None, detail=None):
+        """Exercise the real preparation with only its host APT path redirected."""
+        configure = self.helper.configure
+        fixture_owner = os.geteuid() if owner is None else owner
+        output, errors = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", ["helper"]), \
+                patch.object(self.helper.os, "geteuid", return_value=0), \
+                patch.object(self.helper, "configure", side_effect=lambda _path, _owner:
+                             configure(self.apt, fixture_owner)) as redirected, \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            self.assertEqual(self.helper.main(), 65)
+            redirected.assert_called_once_with("/etc/apt", 0)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(errors.getvalue(),
+                         "Error: Ubuntu CI mirror preparation failed; package setup must stop.\n"
+                         f"Category: {category}\n" + (f"{detail}\n" if detail is not None else ""))
+        self.assertFalse(list(self.apt.glob(".apt-mirrors-*")))
+
     def assert_preserved(self):
         self.assertEqual(self.source.read_text(), self.SOURCE)
         self.assertEqual(self.source.stat().st_mode & 0o7777, 0o640)
@@ -1966,6 +1984,7 @@ class UbuntuMirrorTests(unittest.TestCase):
     def test_unknown_sources_or_signature_configuration_refused_without_write(self):
         for value in (self.SOURCE.replace(self.helper.MIRROR_URI, "http://azure.archive.ubuntu.com/ubuntu/", 1),
                       self.SOURCE.replace(self.helper.KEYRING, "/tmp/untrusted.gpg", 1),
+                      self.SOURCE.replace(f"Signed-By: {self.helper.KEYRING}\n", ""),
                       self.SOURCE + "Trusted: yes\n", self.SOURCE + "Allow-Insecure: yes\n",
                       self.SOURCE + "URIs: https://unknown.invalid/\n", "", "x" * 16385,
                       self.SOURCE.replace("Types: deb", " Types: deb", 1)):
@@ -1990,10 +2009,14 @@ class UbuntuMirrorTests(unittest.TestCase):
                     path.unlink()
                     saved.rename(path)
         hardlink = self.root / "second-link"
-        os.link(self.mirrors, hardlink)
-        with self.assertRaises(ValueError):
-            self.configure()
-        hardlink.unlink()
+        for path in (self.mirrors, self.source):
+            with self.subTest(hardlink=path.name):
+                os.link(path, hardlink)
+                try:
+                    with self.assertRaises(ValueError):
+                        self.configure()
+                finally:
+                    hardlink.unlink()
         self.mirrors.unlink()
         os.mkfifo(self.mirrors, 0o600)
         with self.assertRaises(ValueError):
@@ -2034,8 +2057,9 @@ class UbuntuMirrorTests(unittest.TestCase):
                 return original_read(*args)
 
             with self.subTest(mutation=mutation), patch.object(self.helper, "read_file", read_file):
-                with self.assertRaises(ValueError):
+                with self.assertRaises(self.helper.PreparationError) as caught:
                     self.configure()
+                self.assertEqual(caught.exception.category, "concurrent-change")
             self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
             self.source.write_text(self.SOURCE)
             self.assert_preserved()
@@ -2061,6 +2085,1009 @@ class UbuntuMirrorTests(unittest.TestCase):
             configure.assert_called_once_with("/etc/apt", 0)
         self.assertNotIn("secret-source-url", output.getvalue())
 
+    def test_cli_source_diagnostics_preserve_rejected_bytes(self):
+        cases = (
+            (b"", "source-syntax"),
+            (b"private malformed configuration", "source-syntax"),
+            (self.SOURCE.replace(self.helper.MIRROR_URI, "https://private.invalid/secret").encode(),
+             "source-uri"),
+            (self.SOURCE.replace(f"Signed-By: {self.helper.KEYRING}\n", "").encode(),
+             "source-signature"),
+            (self.SOURCE.replace(self.helper.KEYRING, "/private/secret.gpg").encode(),
+             "source-signature"),
+            ((self.SOURCE + "Trusted: yes\n").encode(), "source-fields"),
+            (self.SOURCE.replace("Types: deb", "Types: private").encode(), "source-fields"),
+            (b"x" * 16385, "size-limit"),
+            (b"\xffprivate-non-ascii-configuration", "unrecognized-configuration"),
+        )
+        for source, category in cases:
+            with self.subTest(category=category):
+                self.source.write_bytes(source)
+                before = [(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_mode)
+                          for path in (self.source, self.mirrors)]
+                self.assert_cli_refusal(category, detail=(
+                    "Source URI shape: other; stanza: 1/2" if category == "source-uri" else None))
+                self.assertEqual(self.source.read_bytes(), source)
+                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+                self.assertEqual([(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_mode)
+                                  for path in (self.source, self.mirrors)], before)
+
+    def test_cli_reports_first_rejection_without_inspecting_later_faults(self):
+        self.source.write_text("broken source without a separator\n", encoding="utf-8")
+        self.mirrors.write_text("https://private.invalid/secret priority:1\n", encoding="utf-8")
+        original_read = self.helper.read_file
+        self.apt.chmod(0o775)
+        try:
+            with patch.object(self.helper, "read_file", wraps=original_read) as read:
+                self.assert_cli_refusal("owner", owner=os.geteuid() + 1)
+                read.assert_not_called()
+                self.assert_cli_refusal("permissions")
+                read.assert_not_called()
+        finally:
+            self.apt.chmod(0o755)
+        with patch.object(self.helper, "read_file", wraps=original_read) as read:
+            self.assert_cli_refusal("source-syntax")
+            self.assertEqual([call.args[1] for call in read.call_args_list], ["ubuntu.sources"])
+        self.source.write_text(self.SOURCE, encoding="utf-8")
+        with patch.object(self.helper, "read_file", wraps=original_read) as read:
+            self.assert_cli_refusal("mirror-list", detail=(
+                "Mirror list profile: historical-indirect; entries: 1; entry-shapes: other/priority-1"))
+            self.assertEqual([call.args[1] for call in read.call_args_list],
+                             ["ubuntu.sources", "apt-mirrors.txt"])
+        self.assertEqual(self.mirrors.read_text(), "https://private.invalid/secret priority:1\n")
+        self.assert_preserved()
+
+    def test_uri_shape_exact_values_remain_refusals_without_extra_reads(self):
+        cases = (
+            (None, "missing"), ("", "empty"),
+            ("https://archive.ubuntu.com/ubuntu/", "https-archive"),
+            ("https://security.ubuntu.com/ubuntu/", "https-security"),
+            ("http://azure.archive.ubuntu.com/ubuntu/", "http-azure"),
+            ("http://azure.archive.ubuntu.com/ubuntu", "http-azure-no-slash"),
+            ("http://archive.ubuntu.com/ubuntu/", "http-archive"),
+            ("http://archive.ubuntu.com/ubuntu", "http-archive-no-slash"),
+            ("http://security.ubuntu.com/ubuntu/", "http-security"),
+            ("http://security.ubuntu.com/ubuntu", "http-security-no-slash"),
+        )
+        original_read = self.helper.read_file
+        for value, shape in cases:
+            with self.subTest(shape=shape):
+                line = f"URIs: {self.helper.MIRROR_URI}\n"
+                source = self.SOURCE.replace(line, "" if value is None else f"URIs: {value}\n", 1)
+                self.source.write_text(source, encoding="ascii")
+                before = [(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_mode)
+                          for path in (self.source, self.mirrors)]
+                with patch.object(self.helper, "read_file", wraps=original_read) as read:
+                    self.assert_cli_refusal("source-uri", detail=f"Source URI shape: {shape}; stanza: 1/2")
+                    self.assertEqual([call.args[1] for call in read.call_args_list], ["ubuntu.sources"])
+                self.assertEqual(self.source.read_text(encoding="ascii"), source)
+                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+                self.assertEqual([(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_mode)
+                                  for path in (self.source, self.mirrors)], before)
+        self.assertEqual(self.helper.source_uri_shape(self.helper.MIRROR_URI), "expected-mirror-file")
+
+    def test_uri_shape_does_not_normalize_or_export_unknown_values(self):
+        values = (
+            "https://archive.ubuntu.com.attacker.invalid/ubuntu/",
+            "https://archive.ubuntu.com@attacker.invalid/ubuntu/",
+            "https://secret@archive.ubuntu.com/ubuntu/",
+            "https://archive.ubuntu.com/ubuntu/?token=private",
+            "https://archive.ubuntu.com/ubuntu/#private",
+            "https://archive.ubuntu.com/private/", "https://archive.ubuntu.com/ubuntu",
+            "HTTPS://archive.ubuntu.com/ubuntu/", "https://archive.ubuntu.com:443/ubuntu/",
+            "https://archive.ubuntu.com./ubuntu/", "http://private.invalid/secret",
+            "file:/private/secret", "mirror+file:/private/secret",
+            "https://archive.ubuntu.com/ubuntu/ https://security.ubuntu.com/ubuntu/",
+            "https://security.ubuntu.com/ubuntu/ https://archive.ubuntu.com/ubuntu/",
+            f"{self.helper.MIRROR_URI} {self.helper.MIRROR_URI}",
+            "private\x1b[31msecret", "private\x00secret",
+        )
+        for value in values:
+            with self.subTest(case=values.index(value)):
+                source = self.SOURCE.replace(self.helper.MIRROR_URI, value, 1)
+                self.source.write_text(source, encoding="ascii")
+                self.assert_cli_refusal("source-uri", detail="Source URI shape: other; stanza: 1/2")
+                self.assertEqual(self.source.read_text(encoding="ascii"), source)
+                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+
+    def test_uri_diagnostic_preserves_stanza_order_and_first_guard(self):
+        first, second = self.SOURCE.strip().split("\n\n")
+        bad = second.replace(self.helper.MIRROR_URI, "https://security.ubuntu.com/ubuntu/")
+        cases = (
+            (first + "\n\n" + bad, "source-uri", "Source URI shape: https-security; stanza: 2/2"),
+            (self.SOURCE + "\n" + bad, "source-uri", "Source URI shape: https-security; stanza: 3/3"),
+            (bad + "\n\n" + first, "source-uri", "Source URI shape: https-security; stanza: 1/2"),
+            (bad.replace(self.helper.KEYRING, "private") + "\n\n" + first,
+             "source-uri", "Source URI shape: https-security; stanza: 1/2"),
+            (first.replace(self.helper.KEYRING, "private") + "\n\n" + bad, "source-signature", None),
+            (first.replace(f"Signed-By: {self.helper.KEYRING}", "") + "\n\n" + bad,
+             "source-signature", None),
+            (first + "\nTrusted: yes\n\n" + bad, "source-fields", None),
+            (bad + "\n\nbroken syntax", "source-syntax", None),
+            (bad + "\nURIs: private", "source-syntax", None),
+        )
+        for source, category, detail in cases:
+            with self.subTest(category=category, detail=detail):
+                self.source.write_text(source, encoding="ascii")
+                self.assert_cli_refusal(category, detail=detail)
+                self.assertEqual(self.source.read_text(encoding="ascii"), source)
+                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+
+    def test_uri_detail_rendering_is_closed_and_bounded(self):
+        class Hostile(str):
+            def __eq__(self, _other):
+                raise AssertionError("unexpected comparison of untrusted detail")
+
+        for detail in (None, "private", [], ("private", 1, 2),
+                       (Hostile("other"), 1, 2), ("other", True, 2),
+                       ("other", 0, 2), ("other", 3, 2), ("other", 1, 16385),
+                       ("other", "private", 2), ("other", 1), ("other", 1, 2, "private")):
+            with self.subTest(case=type(detail).__name__):
+                error = self.helper.PreparationError("source-uri", source_uri_detail=detail)
+                self.assertIsNone(self.helper.source_uri_diagnostic(error))
+                with patch.object(sys, "argv", ["helper"]), \
+                        patch.object(self.helper.os, "geteuid", return_value=0), \
+                        patch.object(self.helper, "configure", side_effect=error), \
+                        contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(self.helper.main(), 65)
+                self.assertEqual(errors.getvalue(),
+                                 "Error: Ubuntu CI mirror preparation failed; package setup must stop.\n"
+                                 "Category: source-uri\n")
+        self.assertIsNone(self.helper.source_uri_diagnostic(self.helper.PreparationError(
+            "source-signature", source_uri_detail=("other", 1, 2))))
+
+    def test_uri_diagnostic_does_not_reread_a_replaced_source(self):
+        source = self.SOURCE.replace(self.helper.MIRROR_URI, "https://security.ubuntu.com/ubuntu/", 1)
+        self.source.write_text(source, encoding="ascii")
+        original_read = self.helper.read_file
+        calls = []
+
+        def read_file(*args):
+            calls.append(args[1])
+            data, metadata = original_read(*args)
+            replacement = self.sources / "replacement"
+            replacement.write_text(self.SOURCE, encoding="ascii")
+            replacement.replace(self.source)
+            return data, metadata
+
+        with patch.object(self.helper, "read_file", read_file):
+            self.assert_cli_refusal("source-uri", detail="Source URI shape: https-security; stanza: 1/2")
+        self.assertEqual(calls, ["ubuntu.sources"])
+        self.assertEqual(self.source.read_text(), self.SOURCE)
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+
+    def test_uri_diagnostic_success_remains_silent_and_idempotent(self):
+        configure = self.helper.configure
+        for message in ("selected.", "already selected."):
+            with patch.object(sys, "argv", ["helper"]), \
+                    patch.object(self.helper.os, "geteuid", return_value=0), \
+                    patch.object(self.helper, "configure", side_effect=lambda _path, _owner:
+                                 configure(self.apt, os.stat(self.apt).st_uid)), \
+                    contextlib.redirect_stdout(io.StringIO()) as output, \
+                    contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(self.helper.main(), 0)
+            self.assertEqual(errors.getvalue(), "")
+            self.assertEqual(output.getvalue(), f"Ubuntu CI mirrors: official HTTPS archives {message}\n")
+        self.assert_preserved()
+
+    def test_cli_metadata_categories_keep_configuration_unchanged(self):
+        for path in (self.apt, self.sources, self.source, self.mirrors):
+            with self.subTest(path=path.name):
+                mode = path.stat().st_mode & 0o7777
+                path.chmod(mode | 0o020)
+                try:
+                    self.assert_cli_refusal("permissions")
+                finally:
+                    path.chmod(mode)
+        for path in (self.source, self.mirrors):
+            with self.subTest(hardlink=path.name):
+                linked = self.root / "second-link"
+                os.link(path, linked)
+                try:
+                    self.assert_cli_refusal("file-links")
+                finally:
+                    linked.unlink()
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_preserved()
+
+    def test_cli_missing_symlink_and_nonregular_configuration_are_distinct(self):
+        self.source.rename(self.sources / "source.saved")
+        saved = self.sources / "source.saved"
+        try:
+            self.assert_cli_refusal("missing-file")
+            self.source.symlink_to(saved)
+            try:
+                self.assert_cli_refusal("path-type")
+            finally:
+                self.source.unlink()
+            os.mkfifo(self.source, 0o600)
+            try:
+                self.assert_cli_refusal("file-type")
+            finally:
+                self.source.unlink()
+        finally:
+            saved.rename(self.source)
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_preserved()
+
+    def test_cli_io_and_unknown_errors_never_expose_exception_details(self):
+        class HostileCategory(str):
+            def __eq__(self, _other):
+                raise AssertionError("untrusted category must not be compared")
+
+        cases = [
+            (OSError(errno.ENOENT, "private reason", "/private/path"), "missing-file"),
+            (OSError(errno.EACCES, "private reason", "/private/path"), "access-denied"),
+            (OSError(errno.EPERM, "private reason", "/private/path"), "access-denied"),
+            (OSError(errno.EIO, "private reason", "/private/path"), "io-error"),
+            (OSError(errno.ELOOP, "private reason", "/private/path"), "path-type"),
+            (OSError(errno.ENOTDIR, "private reason", "/private/path"), "path-type"),
+            (OSError("private reason"), "io-error"),
+            (ValueError("https://private.invalid/secret\nCategory: success"), "unrecognized-configuration"),
+            (self.helper.PreparationError("private\nCategory: success"), "unrecognized-configuration"),
+            (self.helper.PreparationError(HostileCategory("owner")), "unrecognized-configuration"),
+            (self.helper.PreparationError({"private": "value"}), "unrecognized-configuration"),
+        ]
+        for error, category in cases:
+            with self.subTest(category=category):
+                output, errors = io.StringIO(), io.StringIO()
+                with patch.object(sys, "argv", ["helper"]), \
+                        patch.object(self.helper.os, "geteuid", return_value=0), \
+                        patch.object(self.helper, "configure", side_effect=error), \
+                        contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                    self.assertEqual(self.helper.main(), 65)
+                self.assertEqual(output.getvalue(), "")
+                self.assertEqual(errors.getvalue(),
+                                 "Error: Ubuntu CI mirror preparation failed; package setup must stop.\n"
+                                 f"Category: {category}\n")
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_preserved()
+
+    @staticmethod
+    def apt_stat_identity(metadata):
+        # Reading can legitimately update atime; it is not a mutation guard.
+        return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid,
+                metadata.st_gid, metadata.st_nlink, metadata.st_size,
+                metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+    def mixed_source(self):
+        first, second = self.SOURCE.split("\n\n", 1)
+        return first + "\n\n" + second.replace(
+            "mirror+file:/etc/apt/apt-mirrors.txt", "http://security.ubuntu.com/ubuntu", 1)
+
+    def normalized_source(self, source):
+        return source.replace("URIs: mirror+file:/etc/apt/apt-mirrors.txt",
+                              "URIs: https://archive.ubuntu.com/ubuntu/", 1).replace(
+                                  "URIs: http://security.ubuntu.com/ubuntu",
+                                  "URIs: https://security.ubuntu.com/ubuntu/", 1)
+
+    def assert_no_apt_staging(self):
+        self.assertFalse(list(self.apt.glob(".apt-mirrors-*")))
+        self.assertFalse(list(self.sources.glob(".apt-mirrors-*")))
+
+    def test_mixed_exact_layout_changes_only_source_and_is_idempotent(self):
+        for types in ("deb", "deb deb-src"):
+            for mirrors in (self.ORIGINAL, self.SELECTED):
+                with self.subTest(types=types, mirrors_selected=mirrors == self.SELECTED):
+                    source = self.mixed_source().replace("Types: deb\n", f"Types: {types}\n")
+                    self.source.write_text(source, encoding="ascii")
+                    self.mirrors.write_text(mirrors, encoding="ascii")
+                    source_before, mirror_before = self.source.stat(), self.mirrors.stat()
+                    self.assertEqual(self.configure(), "direct-selected")
+                    source_after = self.source.stat()
+                    self.assertEqual(self.source.read_text(encoding="ascii"), self.normalized_source(source))
+                    self.assertNotEqual(source_before.st_ino, source_after.st_ino)
+                    self.assertEqual((source_after.st_uid, source_after.st_gid, source_after.st_mode),
+                                     (source_before.st_uid, source_before.st_gid, source_before.st_mode))
+                    self.assertEqual(self.mirrors.read_text(encoding="ascii"), mirrors)
+                    self.assertEqual(self.apt_stat_identity(self.mirrors.stat()), self.apt_stat_identity(mirror_before))
+                    self.assertEqual(self.configure(), "direct-current")
+                    self.assertEqual(self.apt_stat_identity(self.source.stat()), self.apt_stat_identity(source_after))
+                    self.assertEqual(self.apt_stat_identity(self.mirrors.stat()), self.apt_stat_identity(mirror_before))
+                    self.assertEqual(self.external.read_text(), "external fixture retained byte for byte\n")
+                    self.assert_no_apt_staging()
+
+    def test_mixed_preserves_comments_components_order_and_line_endings(self):
+        source = (self.mixed_source().replace("main universe restricted multiverse",
+                                             "multiverse restricted main universe")
+                  .replace("\n\n", "\n\n# private fixture comment retained\n")
+                  .replace("\n", "\r\n"))
+        self.source.write_bytes(source.encode("ascii"))
+        self.assertEqual(self.configure(), "direct-selected")
+        self.assertEqual(self.source.read_bytes(), self.normalized_source(source).encode("ascii"))
+        self.assertEqual(self.configure(), "direct-current")
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_no_apt_staging()
+
+    def test_mixed_and_direct_require_every_field_in_both_stanzas(self):
+        replacements = (
+            ("Types: deb", "Types: deb-src", "source-fields"),
+            ("Types: deb", "Types: deb deb", "source-fields"),
+            ("Types: deb", "Types: deb deb-src extra", "source-fields"),
+            ("Components: main universe restricted multiverse", "Components: main universe restricted", "source-fields"),
+            ("Components: main universe restricted multiverse", "Components: main main universe restricted multiverse", "source-fields"),
+            ("Components: main universe restricted multiverse", "Components: main universe restricted private", "source-fields"),
+            ("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg",
+             "Signed-By: /tmp/private.gpg", "source-signature"),
+            ("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg", "", "source-signature"),
+        )
+        for direct in (False, True):
+            baseline = self.normalized_source(self.mixed_source()) if direct else self.mixed_source()
+            first, second = baseline.strip().split("\n\n")
+            for index in (0, 1):
+                for old, new, category in replacements:
+                    with self.subTest(direct=direct, stanza=index, category=category, field=old.split(":")[0]):
+                        stanzas = [first, second]
+                        stanzas[index] = stanzas[index].replace(old, new)
+                        source = "\n\n".join(stanzas) + "\n"
+                        self.source.write_text(source, encoding="ascii")
+                        self.assert_cli_refusal(category)
+                        self.assertEqual(self.source.read_text(encoding="ascii"), source)
+                        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+                        self.assert_no_apt_staging()
+                for extra in ("Trusted: yes", "Allow-Insecure: yes", "Enabled: no", "Private: value"):
+                    with self.subTest(direct=direct, stanza=index, extra=extra.split(":")[0]):
+                        stanzas = [first, second]
+                        stanzas[index] += "\n" + extra
+                        source = "\n\n".join(stanzas) + "\n"
+                        self.source.write_text(source, encoding="ascii")
+                        self.assert_cli_refusal("source-fields")
+                        self.assertEqual(self.source.read_text(encoding="ascii"), source)
+                        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+                        self.assert_no_apt_staging()
+
+    def test_mixed_and_direct_require_noble_suites_and_stanza_order(self):
+        for direct in (False, True):
+            source = self.normalized_source(self.mixed_source()) if direct else self.mixed_source()
+            cases = (
+                source.replace("noble noble-updates noble-backports", "noble-updates noble noble-backports"),
+                source.replace("noble noble-updates noble-backports", "noble noble-updates"),
+                source.replace("noble noble-updates noble-backports", "noble noble-updates noble-backports noble-security"),
+                source.replace("noble-security", "noble-updates"),
+                source.replace("noble-security", "noble-security noble-security"),
+                source.replace("noble", "jammy"),
+                source.replace("Suites: noble-security", "Suites:"),
+            )
+            for number, bad in enumerate(cases):
+                with self.subTest(direct=direct, case=number):
+                    self.source.write_text(bad, encoding="ascii")
+                    self.assert_cli_refusal("source-fields")
+                    self.assertEqual(self.source.read_text(encoding="ascii"), bad)
+                    self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+            first, second = source.strip().split("\n\n")
+            layouts = [second + "\n\n" + first, source + "\n" + second]
+            if direct:
+                layouts.append(first + "\n")
+            for bad in layouts:
+                with self.subTest(direct=direct, layout=bad.count("Types:")):
+                    self.source.write_text(bad, encoding="ascii")
+                    with self.assertRaises(self.helper.PreparationError):
+                        self.configure()
+                    self.assertEqual(self.source.read_text(encoding="ascii"), bad)
+                    self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+                    self.assert_no_apt_staging()
+
+    def test_mixed_rejects_uri_variants_without_broadening_endpoints(self):
+        original = self.mixed_source()
+        uris = (
+            "http://security.ubuntu.com/ubuntu/",
+            "https://security.ubuntu.com/ubuntu/",
+            "http://security.ubuntu.com:80/ubuntu",
+            "http://security.ubuntu.com./ubuntu",
+            "http://security.ubuntu.com.attacker.invalid/ubuntu",
+            "http://security.ubuntu.com@attacker.invalid/ubuntu",
+            "http://secret@security.ubuntu.com/ubuntu",
+            "http://security.ubuntu.com/ubuntu?token=private",
+            "http://security.ubuntu.com/private",
+            "HTTP://security.ubuntu.com/ubuntu",
+            "http://security.ubuntu.com/ubuntu http://security.ubuntu.com/ubuntu",
+        )
+        for number, uri in enumerate(uris):
+            with self.subTest(case=number):
+                source = original.replace("http://security.ubuntu.com/ubuntu", uri)
+                self.source.write_text(source, encoding="ascii")
+                with self.assertRaises(self.helper.PreparationError) as caught:
+                    self.configure()
+                self.assertEqual(caught.exception.category, "source-uri")
+                self.assertEqual(self.source.read_text(encoding="ascii"), source)
+                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+                self.assert_no_apt_staging()
+
+    def test_mixed_cli_reports_direct_preparation_and_idempotence(self):
+        self.source.write_text(self.mixed_source(), encoding="ascii")
+        configure = self.helper.configure
+        owner = os.geteuid()
+        for message in ("selected.", "already selected."):
+            with patch.object(sys, "argv", ["helper"]), \
+                    patch.object(self.helper.os, "geteuid", return_value=0), \
+                    patch.object(self.helper, "configure", side_effect=lambda _path, _owner:
+                                 configure(self.apt, owner)), \
+                    contextlib.redirect_stdout(io.StringIO()) as output, \
+                    contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(self.helper.main(), 0)
+            self.assertEqual(errors.getvalue(), "")
+            self.assertEqual(output.getvalue(), f"Ubuntu CI sources: official HTTPS archive/security {message}\n")
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_no_apt_staging()
+
+    def test_mixed_requires_safe_source_mirror_and_directory_properties(self):
+        self.source.write_text(self.mixed_source(), encoding="ascii")
+        for path in (self.apt, self.sources, self.source, self.mirrors):
+            with self.subTest(permissions=path.name):
+                mode = path.stat().st_mode & 0o7777
+                path.chmod(mode | 0o020)
+                try:
+                    self.assert_cli_refusal("permissions")
+                finally:
+                    path.chmod(mode)
+            with self.subTest(symlink=path.name):
+                saved = path.with_name(path.name + ".saved")
+                path.rename(saved)
+                path.symlink_to(saved)
+                try:
+                    with self.assertRaises(OSError):
+                        self.configure()
+                finally:
+                    path.unlink()
+                    saved.rename(path)
+        for path in (self.source, self.mirrors):
+            with self.subTest(hardlink=path.name):
+                linked = self.root / "link"
+                os.link(path, linked)
+                try:
+                    self.assert_cli_refusal("file-links")
+                finally:
+                    linked.unlink()
+        with self.assertRaises(self.helper.PreparationError):
+            self.helper.configure(self.apt, os.geteuid() + 1)
+        self.assertEqual(self.source.read_text(), self.mixed_source())
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_no_apt_staging()
+
+    def test_mixed_still_validates_unused_mirror_list(self):
+        for source in (self.mixed_source(), self.normalized_source(self.mixed_source())):
+            for mirrors, shapes in (
+                    (self.ORIGINAL.replace("archive.ubuntu.com", "private.invalid", 1),
+                     "other/priority-1,https-archive/priority-2,https-security/priority-3"),
+                    (self.ORIGINAL.replace("https://archive", "http://archive"),
+                     "http-azure/priority-1,http-archive/priority-2,https-security/priority-3"),
+                    ("", "empty")):
+                with self.subTest(direct="https://archive.ubuntu.com/ubuntu/" in source, empty=not mirrors):
+                    self.source.write_text(source, encoding="ascii")
+                    self.mirrors.write_text(mirrors, encoding="ascii")
+                    profile = "direct" if "https://archive.ubuntu.com/ubuntu/" in source else "mixed"
+                    self.assert_cli_refusal("mirror-list", detail=(
+                        f"Mirror list profile: {profile}; entries: {3 if mirrors else 0}; entry-shapes: {shapes}"))
+                    self.assertEqual(self.source.read_text(), source)
+                    self.assertEqual(self.mirrors.read_text(), mirrors)
+                    self.assert_no_apt_staging()
+
+    def test_mixed_complete_read_handles_short_chunks_and_rejects_truncation(self):
+        mixed = self.mixed_source().encode("ascii")
+        self.source.write_bytes(mixed)
+        real_read = self.helper.os.read
+        calls = []
+
+        def short_read(fd, limit):
+            calls.append(limit)
+            return real_read(fd, min(limit, 11))
+
+        with patch.object(self.helper.os, "read", short_read):
+            self.assertEqual(self.configure(), "direct-selected")
+        self.assertGreater(len(calls), 30)
+        self.assertEqual(self.source.read_text(), self.normalized_source(self.mixed_source()))
+        hidden = mixed + b"\nTypes: deb\nURIs: https://private.invalid/secret\n"
+        self.source.write_bytes(hidden)
+        source_inode = self.source.stat().st_ino
+        delivered = [False]
+
+        def truncated_read(fd, limit):
+            if os.fstat(fd).st_ino == source_inode:
+                if delivered[0]:
+                    return b""
+                delivered[0] = True
+                return real_read(fd, min(limit, len(mixed)))
+            return real_read(fd, limit)
+
+        with patch.object(self.helper.os, "read", truncated_read):
+            self.assert_cli_refusal("concurrent-change")
+        self.assertEqual(self.source.read_bytes(), hidden)
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_no_apt_staging()
+
+    def test_mixed_rejects_growth_during_source_read(self):
+        self.source.write_text(self.mixed_source(), encoding="ascii")
+        source_inode = self.source.stat().st_ino
+        real_read = self.helper.os.read
+        changed = [False]
+        suffix = b"\nTypes: deb\nURIs: https://private.invalid/secret\n"
+
+        def growing_read(fd, limit):
+            data = real_read(fd, limit)
+            if not changed[0] and os.fstat(fd).st_ino == source_inode:
+                changed[0] = True
+                with self.source.open("ab") as stream:
+                    stream.write(suffix)
+            return data
+
+        with patch.object(self.helper.os, "read", growing_read):
+            self.assert_cli_refusal("concurrent-change")
+        self.assertEqual(self.source.read_bytes(), self.mixed_source().encode("ascii") + suffix)
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_no_apt_staging()
+
+    def test_mixed_source_changes_before_commit_refuse_without_overwriting_writer(self):
+        real_read = self.helper.read_file
+        for mutation in ("inode", "bytes", "mode"):
+            mixed = self.mixed_source()
+            self.source.write_text(mixed, encoding="ascii")
+            self.source.chmod(0o640)
+            calls = []
+
+            def read_file(*args):
+                calls.append(args[1])
+                if len(calls) == 3:
+                    if mutation == "inode":
+                        replacement = self.sources / "replacement"
+                        replacement.write_text(mixed, encoding="ascii")
+                        replacement.chmod(0o640)
+                        replacement.replace(self.source)
+                    elif mutation == "bytes":
+                        self.source.write_text(mixed + "# cloud-init update\n", encoding="ascii")
+                    else:
+                        self.source.chmod(0o600)
+                return real_read(*args)
+
+            with self.subTest(mutation=mutation), patch.object(self.helper, "read_file", read_file):
+                self.assert_cli_refusal("concurrent-change")
+            self.assertEqual(self.source.read_text(), mixed + ("# cloud-init update\n" if mutation == "bytes" else ""))
+            self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+            self.assert_no_apt_staging()
+
+    def test_mixed_idempotent_path_revalidates_source_and_mirrors(self):
+        source = self.normalized_source(self.mixed_source())
+        real_read = self.helper.read_file
+        for target in ("source", "mirrors"):
+            self.source.write_text(source, encoding="ascii")
+            self.mirrors.write_text(self.ORIGINAL, encoding="ascii")
+            calls = []
+
+            def read_file(*args):
+                calls.append(args[1])
+                if len(calls) == 3:
+                    path = self.source if target == "source" else self.mirrors
+                    replacement = path.with_name("replacement")
+                    replacement.write_bytes(path.read_bytes())
+                    replacement.chmod(path.stat().st_mode & 0o7777)
+                    replacement.replace(path)
+                return real_read(*args)
+
+            with self.subTest(target=target), patch.object(self.helper, "read_file", read_file):
+                self.assert_cli_refusal("concurrent-change")
+            self.assertEqual(self.source.read_text(), source)
+            self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+            self.assert_no_apt_staging()
+
+    def test_mixed_changed_directory_refuses_detached_preparation(self):
+        self.source.write_text(self.mixed_source(), encoding="ascii")
+        original_fsync = self.helper.os.fsync
+        moved = self.apt / "sources.saved"
+        replaced = [False]
+
+        def fsync(fd):
+            original_fsync(fd)
+            if not replaced[0]:
+                replaced[0] = True
+                self.sources.rename(moved)
+                self.sources.mkdir(mode=0o755)
+                self.source.write_text(self.SOURCE, encoding="ascii")
+
+        with patch.object(self.helper.os, "fsync", fsync):
+            self.assert_cli_refusal("concurrent-change")
+        self.assertEqual(self.source.read_text(), self.SOURCE)
+        self.assertEqual((moved / "ubuntu.sources").read_text(), self.mixed_source())
+        self.assertFalse(list(moved.glob(".apt-mirrors-*")))
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_no_apt_staging()
+
+    def test_mixed_fsync_failure_preserves_precommit_or_reports_committed_state(self):
+        original_fsync = self.helper.os.fsync
+        for failure in (1, 2):
+            mixed = self.mixed_source()
+            self.source.write_text(mixed, encoding="ascii")
+            before = self.source.stat()
+            mirror_before = self.mirrors.stat()
+            calls = []
+
+            def fsync(fd):
+                calls.append(fd)
+                if len(calls) == failure:
+                    raise OSError(errno.EIO, "private durability failure")
+                return original_fsync(fd)
+
+            with self.subTest(fsync_call=failure), patch.object(self.helper.os, "fsync", fsync):
+                self.assert_cli_refusal("io-error")
+            self.assertEqual(len(calls), failure)
+            self.assertEqual(self.source.read_text(), mixed if failure == 1 else self.normalized_source(mixed))
+            self.assertEqual(self.source.stat().st_ino == before.st_ino, failure == 1)
+            self.assertEqual(self.apt_stat_identity(self.mirrors.stat()), self.apt_stat_identity(mirror_before))
+            self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+            self.assert_no_apt_staging()
+
+    def test_mixed_interruption_before_commit_preserves_original_and_cleans_staging(self):
+        self.source.write_text(self.mixed_source(), encoding="ascii")
+        before = self.source.stat()
+        with patch.object(self.helper.os, "fsync", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.configure()
+        self.assertEqual(self.source.read_text(), self.mixed_source())
+        self.assertEqual(self.apt_stat_identity(self.source.stat()), self.apt_stat_identity(before))
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_no_apt_staging()
+
+    def test_mixed_failed_replace_and_short_write_never_commit(self):
+        mixed = self.mixed_source()
+        self.source.write_text(mixed, encoding="ascii")
+        before = self.source.stat()
+        real_fdopen = self.helper.os.fdopen
+
+        class ShortWriter:
+            def __init__(self, fd, mode):
+                self.stream = real_fdopen(fd, mode)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return self.stream.__exit__(*args)
+
+            def __getattr__(self, name):
+                return getattr(self.stream, name)
+
+            def write(self, data):
+                return self.stream.write(data[:-1])
+
+        with patch.object(self.helper.os, "fdopen", ShortWriter):
+            self.assert_cli_refusal("io-error")
+        self.assertEqual(self.apt_stat_identity(self.source.stat()), self.apt_stat_identity(before))
+        with patch.object(self.helper.os, "replace", side_effect=OSError(errno.EIO, "private replacement failure")):
+            self.assert_cli_refusal("io-error")
+        self.assertEqual(self.apt_stat_identity(self.source.stat()), self.apt_stat_identity(before))
+        self.assertEqual(self.source.read_text(), mixed)
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_no_apt_staging()
+
+    def test_mixed_postcommit_cloud_init_changes_stay_failures_without_rollback(self):
+        real_replace = self.helper.os.replace
+        mixed = self.mixed_source()
+        for target in ("source", "mirrors"):
+            self.source.write_text(mixed, encoding="ascii")
+            self.mirrors.write_text(self.ORIGINAL, encoding="ascii")
+
+            def replace(*args, **kwargs):
+                real_replace(*args, **kwargs)
+                if target == "source":
+                    self.source.write_text(mixed + "# cloud-init writer\n", encoding="ascii")
+                else:
+                    self.mirrors.write_text(self.ORIGINAL + "# cloud-init writer\n", encoding="ascii")
+
+            with self.subTest(target=target), patch.object(self.helper.os, "replace", replace):
+                self.assert_cli_refusal("concurrent-change")
+            self.assertEqual(self.source.read_text(), mixed + "# cloud-init writer\n"
+                             if target == "source" else self.normalized_source(mixed))
+            self.assertEqual(self.mirrors.read_text(), self.ORIGINAL + ("# cloud-init writer\n"
+                                                                      if target == "mirrors" else ""))
+            self.assert_no_apt_staging()
+
+    def test_mixed_control_bytes_cannot_create_an_alternate_source_parse(self):
+        for value in (*range(9), 11, 12, *range(14, 32), 127):
+            with self.subTest(control=value):
+                source = self.mixed_source().encode("ascii") + b"# fixture" + bytes([value]) + b"\n"
+                self.source.write_bytes(source)
+                self.assert_cli_refusal("source-syntax")
+                self.assertEqual(self.source.read_bytes(), source)
+                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+                self.assert_no_apt_staging()
+        source = self.mixed_source().encode("ascii").replace(b"\n", b"\r")
+        self.source.write_bytes(source)
+        self.assert_cli_refusal("source-syntax")
+        self.assertEqual(self.source.read_bytes(), source)
+
+    def test_mixed_postcommit_durability_failure_cannot_be_bypassed_by_idempotence(self):
+        self.source.write_text(self.mixed_source(), encoding="ascii")
+        original_fsync = self.helper.os.fsync
+        calls = []
+
+        def fail_directory(fd):
+            calls.append(fd)
+            if len(calls) == 2:
+                raise OSError(errno.EIO, "private durability failure")
+            original_fsync(fd)
+
+        with patch.object(self.helper.os, "fsync", fail_directory):
+            self.assert_cli_refusal("io-error")
+        committed = self.source.stat()
+        self.assertEqual(self.source.read_text(), self.normalized_source(self.mixed_source()))
+        for failure in (1, 2):
+            calls.clear()
+
+            def repeat_fsync(fd):
+                calls.append(fd)
+                if len(calls) == failure:
+                    raise OSError(errno.EIO, "private repeated durability failure")
+                original_fsync(fd)
+
+            with self.subTest(fsync_call=failure), patch.object(self.helper.os, "fsync", repeat_fsync), \
+                    patch.object(self.helper.os, "replace") as replace:
+                self.assert_cli_refusal("io-error")
+                replace.assert_not_called()
+            self.assertEqual(len(calls), failure)
+            self.assertEqual(self.apt_stat_identity(self.source.stat()), self.apt_stat_identity(committed))
+        with patch.object(self.helper.os, "fsync", wraps=original_fsync) as sync, \
+                patch.object(self.helper.os, "replace") as replace:
+            self.assertEqual(self.configure(), "direct-current")
+            self.assertEqual(sync.call_count, 2)
+            replace.assert_not_called()
+        self.assertEqual(self.apt_stat_identity(self.source.stat()), self.apt_stat_identity(committed))
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_no_apt_staging()
+
+    def test_mixed_cleanup_failure_keeps_primary_error_and_closes_directories(self):
+        self.source.write_text(self.mixed_source(), encoding="ascii")
+        original_close = self.helper.os.close
+        closed = []
+        primary = OSError(errno.EIO, "private primary write failure")
+
+        def close(fd):
+            inode = os.fstat(fd).st_ino
+            original_close(fd)
+            closed.append(inode)
+
+        with patch.object(self.helper.os, "fsync", side_effect=primary), \
+                patch.object(self.helper.os, "unlink", side_effect=OSError(errno.EACCES, "private cleanup failure")), \
+                patch.object(self.helper.os, "close", close):
+            with self.assertRaises(OSError) as caught:
+                self.configure()
+        self.assertIs(caught.exception, primary)
+        self.assertIn(self.apt.stat().st_ino, closed)
+        self.assertIn(self.sources.stat().st_ino, closed)
+        self.assertEqual(self.source.read_text(), self.mixed_source())
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        residue = list(self.sources.glob(".apt-mirrors-*"))
+        self.assertEqual(len(residue), 1)
+        residue[0].unlink()
+        self.assert_no_apt_staging()
+
+    def test_mixed_postcommit_permission_change_is_not_a_success(self):
+        self.source.write_text(self.mixed_source(), encoding="ascii")
+        original_replace = self.helper.os.replace
+
+        def replace(*args, **kwargs):
+            original_replace(*args, **kwargs)
+            self.source.chmod(0o600)
+
+        with patch.object(self.helper.os, "replace", replace):
+            self.assert_cli_refusal("concurrent-change")
+        self.assertEqual(self.source.read_text(), self.normalized_source(self.mixed_source()))
+        self.assertEqual(self.source.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_no_apt_staging()
+
+    def test_mixed_ambient_exception_does_not_hide_final_close_failure(self):
+        self.source.write_text(self.mixed_source(), encoding="ascii")
+        original_open = self.helper.open_directory
+        original_close = self.helper.os.close
+        parent = []
+
+        def open_directory(*args):
+            fd = original_open(*args)
+            if not parent:
+                parent.append(fd)
+            return fd
+
+        def close(fd):
+            original_close(fd)
+            if parent and fd == parent[0]:
+                raise OSError(errno.EIO, "private final close failure")
+
+        try:
+            raise ValueError("ambient caller exception")
+        except ValueError:
+            with patch.object(self.helper, "open_directory", open_directory), \
+                    patch.object(self.helper.os, "close", close):
+                with self.assertRaises(OSError) as caught:
+                    self.configure()
+        self.assertEqual(caught.exception.errno, errno.EIO)
+        self.assertEqual(self.source.read_text(), self.normalized_source(self.mixed_source()))
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assert_no_apt_staging()
+
+    def test_mirror_diagnostic_profiles_keep_unknown_lists_blocking_and_unchanged(self):
+        cases = (("historical-indirect", self.SOURCE), ("mixed", self.mixed_source()),
+                 ("direct", self.normalized_source(self.mixed_source())))
+        mirrors = "https://private.invalid/secret priority:1\n"
+        for profile, source in cases:
+            with self.subTest(profile=profile):
+                self.source.write_text(source, encoding="ascii")
+                self.mirrors.write_text(mirrors, encoding="ascii")
+                before = [self.apt_stat_identity(path.stat()) for path in (self.source, self.mirrors)]
+                self.assert_cli_refusal("mirror-list", detail=(
+                    f"Mirror list profile: {profile}; entries: 1; entry-shapes: other/priority-1"))
+                self.assertEqual(self.source.read_text(encoding="ascii"), source)
+                self.assertEqual(self.mirrors.read_text(encoding="ascii"), mirrors)
+                self.assertEqual([self.apt_stat_identity(path.stat()) for path in (self.source, self.mirrors)],
+                                 before)
+                self.assertEqual(self.external.read_text(), "external fixture retained byte for byte\n")
+                self.assert_no_apt_staging()
+
+    def test_mirror_diagnostic_keeps_known_order_priority_and_arity_distinct(self):
+        cases = (
+            ("https://security.ubuntu.com/ubuntu/ priority:3\n"
+             "https://archive.ubuntu.com/ubuntu/ priority:2\n"
+             "http://azure.archive.ubuntu.com/ubuntu/ priority:1\n", 3,
+             "https-security/priority-3,https-archive/priority-2,http-azure/priority-1"),
+            ("http://azure.archive.ubuntu.com/ubuntu priority:1\n"
+             "http://archive.ubuntu.com/ubuntu priority:2\n"
+             "http://security.ubuntu.com/ubuntu priority:3\n", 3,
+             "http-azure-no-slash/priority-1,http-archive-no-slash/priority-2,http-security-no-slash/priority-3"),
+            ("https://archive.ubuntu.com/ubuntu/ priority:1\n"
+             "https://security.ubuntu.com/ubuntu/ priority:1\n", 2,
+             "https-archive/priority-1,https-security/priority-1"),
+            ("https://archive.ubuntu.com/ubuntu/ priority:99\n", 1, "https-archive/other"),
+            ("https://archive.ubuntu.com/ubuntu/\n", 1, "invalid-entry/other"),
+            ("https://archive.ubuntu.com/ubuntu/ priority:1 private-extra\n", 1, "invalid-entry/other"),
+            ("\n", 1, "invalid-entry/other"),
+            ("", 0, "empty"),
+            (self.ORIGINAL + self.ORIGINAL, 6,
+             "http-azure/priority-1,https-archive/priority-2,https-security/priority-3,"
+             "http-azure/priority-1,https-archive/priority-2,https-security/priority-3"),
+        )
+        for mirrors, count, shapes in cases:
+            with self.subTest(entries=count, expected=shapes):
+                self.mirrors.write_text(mirrors, encoding="ascii")
+                self.assert_cli_refusal("mirror-list", detail=(
+                    f"Mirror list profile: historical-indirect; entries: {count}; entry-shapes: {shapes}"))
+                self.assertEqual(self.mirrors.read_text(encoding="ascii"), mirrors)
+                self.assert_preserved()
+
+    def test_mirror_diagnostic_bounds_without_presenting_omitted_entries_as_complete(self):
+        for count in (8, 9, 200):
+            mirrors = "https://archive.ubuntu.com/ubuntu/ priority:1\n" * count
+            self.mirrors.write_text(mirrors, encoding="ascii")
+            shapes = ",".join(["https-archive/priority-1"] * count) if count <= 8 else "omitted-limit"
+            self.assert_cli_refusal("mirror-list", detail=(
+                f"Mirror list profile: historical-indirect; entries: {count}; entry-shapes: {shapes}"))
+            self.assertEqual(self.mirrors.read_text(encoding="ascii"), mirrors)
+            self.assert_preserved()
+        self.mirrors.write_bytes(b"x" * (self.helper.MAX_BYTES + 1))
+        self.assert_cli_refusal("size-limit")
+
+    def test_mirror_diagnostic_unknown_values_are_not_normalized_or_disclosed(self):
+        values = (
+            "https://archive.ubuntu.com.attacker.invalid/ubuntu/",
+            "https://archive.ubuntu.com/ubuntu/?private=secret",
+            "https://private:secret@archive.ubuntu.com/ubuntu/",
+            "HTTPS://archive.ubuntu.com/ubuntu/",
+            "https://archive.ubuntu.com:443/ubuntu/",
+            "https://archive.ubuntu.com/ubuntu/private",
+            "file:/private/secret", "mirror+file:/private/secret",
+            "https://archive.ubuntu.com/ubuntu/#secret", "private\x1b[31msecret",
+        )
+        for value in values:
+            with self.subTest(case=values.index(value)):
+                mirrors = f"{value} priority:1\n"
+                self.mirrors.write_text(mirrors, encoding="ascii")
+                self.assert_cli_refusal("mirror-list", detail=(
+                    "Mirror list profile: historical-indirect; entries: 1; entry-shapes: other/priority-1"))
+                self.assertEqual(self.mirrors.read_text(encoding="ascii"), mirrors)
+        self.mirrors.write_bytes(b"https://private.invalid/\xff priority:1\n")
+        self.assert_cli_refusal("unrecognized-configuration")
+        self.assert_preserved()
+
+    def test_mirror_diagnostic_renderer_refuses_forged_unbounded_or_private_details(self):
+        class Hostile(str):
+            def __eq__(self, _other):
+                raise AssertionError("untrusted detail compared")
+
+        pair = (("https-archive", "priority-1"),)
+        invalid = (
+            None, [], "private", ("private", 1, pair), (Hostile("mixed"), 1, pair),
+            ("mixed", True, pair), ("mixed", -1, ()), ("mixed", 16385, None),
+            ("mixed", 1, None), ("mixed", 9, pair), ("mixed", 1, []),
+            ("mixed", 2, pair), ("mixed", 0, pair), ("mixed", 1, (("private", "priority-1"),)),
+            ("mixed", 1, (("https-archive", "private"),)),
+            ("mixed", 1, ((Hostile("other"), "other"),)),
+            ("mixed", 1, (("other", Hostile("other")),)),
+            ("mixed", 1, (("other",),)), ("mixed", 1, (["other", "other"],)),
+            ("mixed", 1), ("mixed", 1, pair, "private"),
+        )
+        for detail in invalid:
+            with self.subTest(kind=type(detail).__name__):
+                error = self.helper.PreparationError("mirror-list", mirror_list_detail=detail)
+                self.assertIsNone(self.helper.mirror_list_diagnostic(error))
+                with patch.object(sys, "argv", ["helper"]), \
+                        patch.object(self.helper.os, "geteuid", return_value=0), \
+                        patch.object(self.helper, "configure", side_effect=error), \
+                        contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(self.helper.main(), 65)
+                self.assertEqual(errors.getvalue(),
+                                 "Error: Ubuntu CI mirror preparation failed; package setup must stop.\n"
+                                 "Category: mirror-list\n")
+        for category in ("source-signature", "source-uri", "concurrent-change"):
+            self.assertIsNone(self.helper.mirror_list_diagnostic(self.helper.PreparationError(
+                category, mirror_list_detail=("mixed", 1, pair))))
+
+    def test_mirror_diagnostic_uses_only_secured_bytes_already_read(self):
+        self.source.write_text(self.mixed_source(), encoding="ascii")
+        self.mirrors.write_text("https://security.ubuntu.com/ubuntu/ priority:1\n", encoding="ascii")
+        original_read = self.helper.read_file
+        calls = []
+
+        def read_file(*args):
+            calls.append(args[1])
+            data, metadata = original_read(*args)
+            if args[1] == "apt-mirrors.txt":
+                replacement = self.apt / "replacement"
+                replacement.write_text(self.ORIGINAL, encoding="ascii")
+                replacement.replace(self.mirrors)
+            return data, metadata
+
+        with patch.object(self.helper, "read_file", read_file):
+            self.assert_cli_refusal("mirror-list", detail=(
+                "Mirror list profile: mixed; entries: 1; entry-shapes: https-security/priority-1"))
+        self.assertEqual(calls, ["ubuntu.sources", "apt-mirrors.txt"])
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assertEqual(self.source.read_text(), self.mixed_source())
+        self.assert_no_apt_staging()
+
+    def test_mirror_diagnostic_does_not_run_before_earlier_guards(self):
+        self.source.write_text(self.mixed_source().replace(self.helper.KEYRING, "/private/secret.gpg"),
+                               encoding="ascii")
+        self.mirrors.write_text("private unknown list\n", encoding="ascii")
+        original_read = self.helper.read_file
+        with patch.object(self.helper, "mirror_list_shape", side_effect=AssertionError("late diagnostic")), \
+                patch.object(self.helper, "read_file", wraps=original_read) as read:
+            self.assert_cli_refusal("source-signature")
+        self.assertEqual([call.args[1] for call in read.call_args_list], ["ubuntu.sources"])
+        self.source.write_text(self.mixed_source(), encoding="ascii")
+        self.mirrors.chmod(0o666)
+        with patch.object(self.helper, "mirror_list_shape", side_effect=AssertionError("late diagnostic")):
+            self.assert_cli_refusal("permissions")
+        self.assertEqual(self.mirrors.read_text(), "private unknown list\n")
+        self.assertEqual(self.source.read_text(), self.mixed_source())
+
+    def test_mirror_diagnostic_is_absent_on_all_accepted_profiles_and_repeats(self):
+        profiles = ((self.SOURCE, "mirrors", self.SOURCE),
+                    (self.mixed_source(), "sources", self.normalized_source(self.mixed_source())),
+                    (self.normalized_source(self.mixed_source()), "sources",
+                     self.normalized_source(self.mixed_source())))
+        configure = self.helper.configure
+        for source, kind, final_source in profiles:
+            for mirrors in (self.ORIGINAL, self.SELECTED):
+                with self.subTest(kind=kind, already_direct=source == final_source,
+                                  selected=mirrors == self.SELECTED):
+                    self.source.write_text(source, encoding="ascii")
+                    self.mirrors.write_text(mirrors, encoding="ascii")
+                    for repeat in (False, True):
+                        with patch.object(sys, "argv", ["helper"]), \
+                                patch.object(self.helper.os, "geteuid", return_value=0), \
+                                patch.object(self.helper, "configure", side_effect=lambda _path, _owner:
+                                             configure(self.apt, os.stat(self.apt).st_uid)), \
+                                patch.object(self.helper, "mirror_list_shape",
+                                             side_effect=AssertionError("diagnostic on success")), \
+                                contextlib.redirect_stdout(io.StringIO()) as output, \
+                                contextlib.redirect_stderr(io.StringIO()) as errors:
+                            self.assertEqual(self.helper.main(), 0)
+                        self.assertEqual(errors.getvalue(), "")
+                        already = repeat or (kind == "mirrors" and mirrors == self.SELECTED) or (
+                            kind == "sources" and source == final_source)
+                        action = "already selected." if already else "selected."
+                        label = "archives " if kind == "mirrors" else "archive/security "
+                        self.assertEqual(output.getvalue(), f"Ubuntu CI {kind}: official HTTPS {label}{action}\n")
+                        self.assertEqual(self.source.read_text(), final_source)
+                        self.assertEqual(self.mirrors.read_text(), self.SELECTED if kind == "mirrors" else mirrors)
+                        self.assert_no_apt_staging()
+
     def assert_workflow_scope(self, filename, text):
         jobs = WorkflowContractTests.jobs(text)
         selected = self.TARGETS.get(filename, set())
@@ -2071,8 +3098,9 @@ class UbuntuMirrorTests(unittest.TestCase):
             self.assertEqual(job.count(self.COMMAND), 1)
             self.assertIn("runs-on: ubuntu-24.04", job)
             self.assertLess(job.index("persist-credentials: false"), job.index(self.COMMAND))
-            self.assertLess(job.index(self.COMMAND), job.index("apt-get"))
-            line = next(line.strip() for line in job.splitlines() if "ci-ubuntu-mirrors.py" in line)
+            self.assertLess(job.index(self.COMMAND), job.index("ci-ubuntu-mirrors.py --apt"))
+            self.assertNotIn("apt-get", job)
+            line = next(line.strip() for line in job.splitlines() if "ci-ubuntu-mirrors.py --setup" in line)
             self.assertEqual(line, self.COMMAND)
             self.assertNotIn("/etc/apt/", job)
 
@@ -2101,7 +3129,7 @@ class UbuntuMirrorTests(unittest.TestCase):
         binary.mkdir()
         sudo = binary / "sudo"
         sudo.write_text('#!/bin/bash\n'
-                        'if [[ $* == "python3 -I -B scripts/ci-ubuntu-mirrors.py" ]]; then exit 65; fi\n'
+                        'if [[ $* == "python3 -I -B scripts/ci-ubuntu-mirrors.py --setup" ]]; then exit 65; fi\n'
                         'printf unexpected >"${CHECK_UNEXPECTED}"\nexit 99\n')
         sudo.chmod(0o755)
         for filename, names in self.TARGETS.items():
@@ -2147,6 +3175,515 @@ def require_fixture_process_exit(pid, starttime, *, read_stat=None,
         if remaining <= 0:
             raise AssertionError("Bounded APT fixture is still executing after 1s")
         sleep(min(0.005, remaining))
+
+
+class DedicatedAPTTests(unittest.TestCase):
+    """Exercise the real scoped helper without invoking the host package manager."""
+
+    @classmethod
+    def setUpClass(cls):
+        UbuntuMirrorTests.setUpClass()
+        cls.helper = UbuntuMirrorTests.helper
+        cls.canonical_keyring = cls.helper.CI_KEYRING
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.parent = Path(self.temp.name)
+        self.root = self.parent / 'ci-apt'
+        self.owner = os.geteuid()
+        self.key = self.parent / 'keyring.gpg'
+        self.key.write_bytes(b'fixture key; cryptographic rejection is tested with actual APT')
+        self.key.chmod(0o644)
+        self.key_patch = patch.object(self.helper, 'CI_KEYRING', str(self.key))
+        self.key_patch.start()
+        self.addCleanup(self.key_patch.stop)
+
+    def setup(self):
+        self.helper.prepare_dedicated(self.root, self.owner)
+
+    def run_apt(self, arguments=None, *, action=None, status=0):
+        calls = []
+
+        def execute(command, **kwargs):
+            calls.append((command, kwargs))
+            if action:
+                action(command, kwargs)
+            return subprocess.CompletedProcess(command, status)
+
+        with patch.object(self.helper.subprocess, 'run', side_effect=execute):
+            result = self.helper.run_dedicated(self.root, self.owner, arguments or ['update'])
+        return result, calls
+
+    def test_exact_official_sources_and_no_ambient_apt_configuration(self):
+        self.setup()
+        sources = (self.root / 'ubuntu.sources').read_text(encoding='ascii')
+        self.assertEqual(sources.count('Types: deb\n'), 2)
+        self.assertEqual(self.canonical_keyring, '/etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg')
+        self.assertEqual(self.helper.CI_SIGNER, 'F6ECB3762474EDA9D21B7022871920D1991BC93C')
+        self.assertEqual(sources.count(f'Signed-By: {self.key} {self.helper.CI_SIGNER}\n'), 2)
+        self.assertIn('URIs: https://archive.ubuntu.com/ubuntu/\nSuites: noble noble-updates noble-backports\n', sources)
+        self.assertIn('URIs: https://security.ubuntu.com/ubuntu/\nSuites: noble-security\n', sources)
+        self.assertEqual(sources.count('Components: main restricted universe multiverse\n'), 2)
+        config = (self.root / 'apt.conf').read_text(encoding='ascii')
+        for setting in ('main', 'parts', 'sourcelist', 'sourceparts', 'preferences',
+                        'preferencesparts', 'trusted', 'trustedparts', 'netrc', 'netrcparts'):
+            self.assertIn(f'Dir::Etc::{setting} "{self.root}/', config)
+        for setting in ('Dir::State::lists', 'Dir::Cache'):
+            self.assertIn(f'{setting} "{self.root}/', config)
+        for setting in ('Dir::Cache::pkgcache', 'Dir::Cache::srcpkgcache'):
+            self.assertIn(f'{setting} "";', config)
+        self.assertIn('APT::Update::Error-Mode "any";', config)
+        self.assertIn('Acquire::https::AllowRedirect "false";', config)
+        for setting in ('Verify-Peer', 'Verify-Host'):
+            self.assertIn(f'Acquire::https::{setting} "true";', config)
+        for forbidden in ('trusted=yes', 'AllowUnauthenticated', 'AllowInsecureRepositories', 'mirror+file'):
+            self.assertNotIn(forbidden, sources + config)
+
+    @contextlib.contextmanager
+    def assert_ambient_unread(self, source):
+        """Observe Python opens directly; access times cannot prove non-reading."""
+        identity = source.stat()
+        opened = []
+
+        def watch(opener):
+            def observed(*args, **kwargs):
+                result = opener(*args, **kwargs)
+                descriptor = result if isinstance(result, int) else result.fileno()
+                metadata = os.fstat(descriptor)
+                if (metadata.st_dev, metadata.st_ino) == (identity.st_dev, identity.st_ino):
+                    opened.append(True)
+                return result
+            return observed
+
+        # Path.open is a separate boundary: Python 3.10 caches its io opener.
+        # Also cover direct io/builtins and dir_fd-based os.open, including aliases.
+        with patch.object(Path, 'open', watch(Path.open)), \
+                patch('builtins.open', watch(open)), patch.object(io, 'open', watch(io.open)), \
+                patch.object(os, 'open', watch(os.open)):
+            yield
+        self.assertFalse(opened, 'ambient source opened during dedicated preparation')
+
+    def assert_ambient_unchanged(self, source, before, content):
+        # Verify stable identity and nanosecond metadata before our own read.
+        # Reading to compare contents can update atime on an otherwise intact file.
+        after = source.stat()
+        for field in ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid',
+                      'st_size', 'st_mtime_ns', 'st_ctime_ns'):
+            self.assertEqual(getattr(after, field), getattr(before, field), field)
+        self.assertEqual(source.read_text(encoding='utf-8'), content)
+
+    def test_all_host_source_shapes_are_unread_and_unchanged(self):
+        ambient = self.parent / 'ambient'
+        ambient.mkdir()
+        for content in (UbuntuMirrorTests.SOURCE, 'mixed sources', 'unknown mirror secret', 'external hostile source'):
+            source = ambient / 'ubuntu.sources'
+            source.write_text(content, encoding='utf-8')
+            # Force the verification read to be eligible for a relatime update,
+            # without sleeping or depending on crossing a clock-second boundary.
+            os.utime(source, ns=(1, source.stat().st_mtime_ns))
+            before = source.stat()
+            with self.assert_ambient_unread(source), \
+                    patch.object(self.helper, 'configure', side_effect=AssertionError('legacy used')):
+                self.setup()
+                self.assertEqual(self.run_apt()[0], 0)
+            self.assert_ambient_unchanged(source, before, content)
+
+    def test_ambient_read_witness_detects_open_mutations(self):
+        source = self.parent / 'ambient.sources'
+        source.write_text('synthetic ambient source', encoding='utf-8')
+        alias = self.parent / 'ambient-alias'
+        alias.symlink_to(source)
+        self.setup()
+
+        def descriptor_read():
+            with self.helper.scoped_descriptor(os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY)) as directory:
+                with self.helper.scoped_descriptor(os.open(source.name, os.O_RDONLY, dir_fd=directory)) as descriptor:
+                    os.read(descriptor, 1)
+
+        def builtin_read():
+            with open(source, encoding='utf-8') as stream:
+                stream.read()
+
+        def io_read():
+            with io.open(source, encoding='utf-8') as stream:
+                stream.read()
+
+        for reader in (source.read_bytes, alias.read_text, io_read, builtin_read, descriptor_read):
+            with self.subTest(reader=reader.__name__), \
+                    self.assertRaisesRegex(AssertionError, 'ambient source opened'):
+                with self.assert_ambient_unread(source):
+                    self.run_apt(action=lambda *_: reader())
+
+    def test_ambient_integrity_witness_checks_metadata_before_read(self):
+        source = self.parent / 'ambient.sources'
+        source.write_text('synthetic ambient source', encoding='utf-8')
+        before = source.stat()
+        order = []
+        real_stat, real_read = Path.stat, Path.read_text
+
+        def inspect(path, *args, **kwargs):
+            order.append('stat')
+            return real_stat(path, *args, **kwargs)
+
+        def read(path, *args, **kwargs):
+            self.assertEqual(order, ['stat'])
+            order.append('read')
+            return real_read(path, *args, **kwargs)
+
+        with patch.object(Path, 'stat', inspect), patch.object(Path, 'read_text', read):
+            self.assert_ambient_unchanged(source, before, 'synthetic ambient source')
+        self.assertEqual(order, ['stat', 'read'])
+
+    def test_ambient_integrity_witness_rejects_metadata_and_content_mutations(self):
+        from types import SimpleNamespace
+
+        source = self.parent / 'ambient.sources'
+        source.write_text('synthetic ambient source', encoding='utf-8')
+        before = source.stat()
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid',
+                  'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        for field in fields:
+            changed = SimpleNamespace(**{name: getattr(before, name) for name in fields})
+            setattr(changed, field, getattr(changed, field) + 1)
+            with self.subTest(field=field), patch.object(Path, 'stat', return_value=changed), \
+                    patch.object(Path, 'read_text') as read, self.assertRaisesRegex(AssertionError, field):
+                self.assert_ambient_unchanged(source, before, 'synthetic ambient source')
+            read.assert_not_called()
+        with patch.object(Path, 'read_text', return_value='modified source'), self.assertRaises(AssertionError):
+            self.assert_ambient_unchanged(source, before, 'synthetic ambient source')
+
+    def test_update_and_install_share_exact_environment_and_protected_files(self):
+        self.setup()
+        environments = []
+        snapshots = []
+        with patch.dict(os.environ, {'APT_CONFIG': '/private/hostile', 'http_proxy': 'private',
+                                     'LANGUAGE': 'fr', 'LD_PRELOAD': '/private/secret'}):
+            for args in (['update'], ['install', '--yes', 'aria2']):
+                status, calls = self.run_apt(args)
+                self.assertEqual(status, 0)
+                self.assertEqual(calls[0][0], ['/usr/bin/apt-get', *args])
+                environments.append(calls[0][1]['env'])
+                snapshots.append(self.helper.dedicated_snapshot(self.root, self.owner))
+        self.assertEqual(environments[0], environments[1])
+        self.assertEqual(snapshots[0], snapshots[1])
+        self.assertEqual(environments[0], {
+            'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'HOME': '/root', 'LC_ALL': 'C',
+            'LANGUAGE': 'C', 'DEBIAN_FRONTEND': 'noninteractive',
+            'APT_CONFIG': str(self.root / 'apt.conf'),
+        })
+
+    def test_repeated_setup_preserves_bytes_modes_and_inodes(self):
+        self.setup()
+        before = self.helper.dedicated_snapshot(self.root, self.owner)
+        self.setup()
+        self.assertEqual(self.helper.dedicated_snapshot(self.root, self.owner), before)
+
+    def test_unknown_options_and_package_selectors_refuse_before_execution(self):
+        self.setup()
+        variants = (['-c', '/private'], ['-o', 'Dir::Etc::sourcelist=/private', 'update'],
+                    ['-o', 'APT::Get::AllowUnauthenticated=true', 'update'],
+                    ['-o', 'Acquire::Retries=0', 'update'], ['-o'], ['upgrade'],
+                    ['install', '--yes', '--allow-unauthenticated', 'aria2'],
+                    ['install', '--yes', 'aria2-'], ['install', '--yes', 'aria2+'],
+                    ['install', '--yes', 'aria2/noble'], ['install', '--yes', 'aria2=1'],
+                    ['install', '--yes', '.*'], ['install', '--yes', 'unreviewed'],
+                    ['install', '--yes', './local.deb'], ['remove', '--yes', 'aria2'],
+                    ['install', '--yes'], ['update', 'extra'], ['install', '--yes', '/x\nsecret.deb'])
+        for args in variants:
+            with self.subTest(args=args), patch.object(self.helper.subprocess, 'run') as execute:
+                with self.assertRaises(self.helper.PreparationError):
+                    self.helper.run_dedicated(self.root, self.owner, args)
+                execute.assert_not_called()
+
+    def test_existing_options_packages_and_local_artifact_boundary(self):
+        self.setup()
+        options = [part for value in sorted(self.helper.APT_OPTIONS) for part in ('-o', value)]
+        for args in (options + ['update'],
+                     ['install', '--yes', '--no-install-recommends', *sorted(self.helper.CI_PACKAGES)],
+                     ['install', '--yes', '/tmp/Téléchargements été/local.deb'],
+                     ['remove', '--yes', 'yt-dlp-aria2-downloader-gui'],
+                     ['purge', '--yes', 'yt-dlp-aria2-downloader-gui']):
+            with self.subTest(operation=args):
+                self.assertEqual(self.run_apt(args)[0], 0)
+
+    def test_missing_setup_or_partial_setup_never_executes_apt(self):
+        for partial in (False, True):
+            if partial:
+                self.root.mkdir(mode=0o700)
+                (self.root / 'apt.conf').write_text('partial', encoding='ascii')
+            with self.subTest(partial=partial), patch.object(self.helper.subprocess, 'run') as execute:
+                with self.assertRaises((OSError, self.helper.PreparationError)):
+                    self.helper.run_dedicated(self.root, self.owner, ['update'])
+                execute.assert_not_called()
+
+    def test_changed_config_sources_or_signature_refuses_without_repair(self):
+        self.setup()
+        for name in self.helper.dedicated_files(self.root):
+            path = self.root / name
+            original = path.read_bytes()
+            for replacement in (b'foreign', original + b'\n'):
+                path.write_bytes(replacement)
+                with self.subTest(name=name), patch.object(self.helper.subprocess, 'run') as execute:
+                    with self.assertRaises(self.helper.PreparationError):
+                        self.helper.run_dedicated(self.root, self.owner, ['update'])
+                    execute.assert_not_called()
+                    self.assertEqual(path.read_bytes(), replacement)
+                path.write_bytes(original)
+        self.key.write_bytes(b'')
+        with self.assertRaises(self.helper.PreparationError):
+            self.run_apt()
+
+    def test_replaced_source_between_update_and_install_refuses_install(self):
+        self.setup()
+        self.assertEqual(self.run_apt()[0], 0)
+        (self.root / 'ubuntu.sources').write_bytes(b'URIs: https://hostile.invalid/')
+        with patch.object(self.helper.subprocess, 'run') as execute:
+            with self.assertRaises(self.helper.PreparationError):
+                self.helper.run_dedicated(self.root, self.owner, ['install', '--yes', 'aria2'])
+            execute.assert_not_called()
+
+    def test_unsafe_permissions_owners_links_and_extra_config_refuse(self):
+        self.setup()
+        for name in ('apt.conf', 'ubuntu.sources', 'empty.conf'):
+            path = self.root / name
+            for mode in (0o666, 0o600, 0o664):
+                path.chmod(mode)
+                with self.subTest(name=name, mode=mode), self.assertRaises(self.helper.PreparationError):
+                    self.run_apt()
+            path.chmod(0o644)
+            backup = self.parent / 'backup'
+            path.rename(backup)
+            path.symlink_to(backup)
+            with self.assertRaises(OSError):
+                self.run_apt()
+            path.unlink()
+            os.link(backup, path)
+            with self.assertRaises(self.helper.PreparationError):
+                self.run_apt()
+            path.unlink()
+            backup.rename(path)
+        for name in ('empty', 'lists', 'cache', 'cache/archives'):
+            directory = self.root / name
+            for mode in (0o700, 0o777):
+                directory.chmod(mode)
+                with self.subTest(directory=name, mode=mode), self.assertRaises(self.helper.PreparationError):
+                    self.run_apt()
+            directory.chmod(0o755)
+        with self.assertRaises(self.helper.PreparationError):
+            self.helper.dedicated_snapshot(self.root, self.owner + 1)
+        (self.root / 'empty' / 'injected.conf').write_text('hostile', encoding='ascii')
+        with self.assertRaises(self.helper.PreparationError):
+            self.run_apt()
+
+    def test_read_error_or_short_read_never_executes(self):
+        self.setup()
+        read = self.helper.os.read
+        for error in (OSError(errno.EIO, 'secret'), PermissionError(errno.EACCES, 'private')):
+            with patch.object(self.helper.os, 'read', side_effect=error), \
+                    patch.object(self.helper.subprocess, 'run') as execute:
+                with self.assertRaises(OSError):
+                    self.helper.run_dedicated(self.root, self.owner, ['update'])
+                execute.assert_not_called()
+        with patch.object(self.helper.os, 'read', side_effect=lambda fd, size: read(fd, min(size, 3))):
+            self.assertEqual(self.run_apt()[0], 0)
+        with patch.object(self.helper.os, 'read', return_value=b''), self.assertRaises(self.helper.PreparationError):
+            self.run_apt()
+
+    def test_failed_write_and_fsync_are_blocking_and_do_not_run_apt(self):
+        with patch.object(self.helper.os, 'write', return_value=0), self.assertRaises(self.helper.PreparationError):
+            self.setup()
+        with self.assertRaises(self.helper.PreparationError):
+            self.run_apt()
+        # A separate owned fixture permits testing sync failures without fixing
+        # the deliberately incomplete previous fixture.
+        self.root = self.parent / 'sync-apt'
+        self.setup()
+        for call_number in range(1, 10):
+            fsync = self.helper.os.fsync
+            count = 0
+
+            def failing(fd):
+                nonlocal count
+                count += 1
+                if count == call_number:
+                    raise OSError(errno.EIO, 'private sync failure')
+                return fsync(fd)
+
+            with self.subTest(call=call_number), patch.object(self.helper.os, 'fsync', side_effect=failing), \
+                    patch.object(self.helper.subprocess, 'run') as execute:
+                with self.assertRaises(OSError):
+                    self.helper.run_dedicated(self.root, self.owner, ['update'])
+                execute.assert_not_called()
+
+    def test_apt_failures_signals_and_secondary_refusal_keep_original_status(self):
+        self.setup()
+        for raw, expected in ((0, 0), (23, 23), (100, 100), (-15, 143), (-9, 137)):
+            self.assertEqual(self.run_apt(status=raw)[0], expected)
+        config = self.root / 'apt.conf'
+        data = config.read_bytes()
+        self.assertEqual(self.run_apt(status=100, action=lambda *_: config.write_bytes(b'changed'))[0], 100)
+        config.write_bytes(data)
+        with self.assertRaises(self.helper.PreparationError):
+            self.run_apt(action=lambda *_: config.write_bytes(b'changed'))
+
+    def test_directory_or_keyring_replacement_during_apt_is_not_success(self):
+        self.setup()
+        for name in ('lists', 'cache/archives'):
+            path = self.root / name
+            old = self.parent / 'displaced'
+
+            def replace(*_):
+                path.rename(old)
+                path.mkdir(mode=0o755)
+
+            with self.subTest(name=name), self.assertRaises(self.helper.PreparationError):
+                self.run_apt(action=replace)
+            path.rmdir()
+            old.rename(path)
+        with self.assertRaises(self.helper.PreparationError):
+            self.run_apt(action=lambda *_: self.key.write_bytes(b'replaced'))
+
+    def test_held_directory_cannot_validate_a_replaced_path(self):
+        self.setup()
+        held = self.helper.open_directory(self.root, self.owner)
+        self.addCleanup(os.close, held)
+        self.root.rename(self.parent / 'old-root')
+        self.setup()
+        with self.assertRaises(self.helper.PreparationError):
+            self.helper.durable_snapshot(self.root, held, self.owner)
+
+    def test_primary_read_error_is_not_replaced_by_close_failure(self):
+        self.setup()
+        descriptor = self.helper.open_directory(self.root, self.owner)
+        self.addCleanup(os.close, descriptor)
+        close = self.helper.os.close
+
+        def failing_close(fd):
+            close(fd)
+            raise OSError(errno.EIO, 'secondary private close error')
+
+        with patch.object(self.helper.os, 'read', side_effect=PermissionError(errno.EACCES, 'primary')), \
+                patch.object(self.helper.os, 'close', side_effect=failing_close):
+            with self.assertRaises(PermissionError) as caught:
+                self.helper.read_file(descriptor, 'apt.conf', self.owner)
+            self.assertEqual(caught.exception.errno, errno.EACCES)
+
+    def test_scoped_close_preserves_primary_and_reports_standalone_failure(self):
+        for primary in (False, True):
+            fd = os.open(self.key, os.O_RDONLY)
+            close = self.helper.os.close
+
+            def failing_close(value):
+                close(value)
+                raise OSError(errno.EIO, 'secondary')
+
+            with self.subTest(primary=primary), patch.object(self.helper.os, 'close', side_effect=failing_close):
+                expected = self.helper.PreparationError if primary else OSError
+                with self.assertRaises(expected):
+                    with self.helper.scoped_descriptor(fd):
+                        if primary:
+                            raise self.helper.PreparationError('permissions')
+
+    def test_cli_refuses_wrong_platform_and_redacts_unknown_error(self):
+        for error in (OSError(errno.EIO, '/private/secret'), ValueError('https://private.invalid/token')):
+            with patch.object(self.helper.os, 'geteuid', return_value=0), \
+                    patch.object(Path, 'read_text', side_effect=error), \
+                    contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(self.helper.dedicated_main(['--setup']), 65)
+                self.assertNotIn('private', errors.getvalue())
+        for platform in ('ID=fedora\nVERSION_ID=45\n', 'ID=ubuntu\nVERSION_ID=22.04\n'):
+            with patch.object(self.helper.os, 'geteuid', return_value=0), \
+                    patch.object(Path, 'read_text', return_value=platform), \
+                    patch.object(self.helper, 'prepare_dedicated') as prepare, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(self.helper.dedicated_main(['--setup']), 65)
+                prepare.assert_not_called()
+
+    def test_writable_legacy_keyring_is_neither_read_nor_repaired(self):
+        legacy = self.parent / 'legacy-keyrings'
+        legacy.mkdir()
+        key = legacy / 'ubuntu-archive-keyring.gpg'
+        key.write_bytes(b'untrusted legacy key')
+        legacy.chmod(0o777)
+        key.chmod(0o777)
+        before = (legacy.stat(), key.stat())
+        open_directory = self.helper.open_directory
+
+        def checked(path, owner):
+            self.assertNotEqual(Path(path), legacy, 'legacy key directory consumed')
+            return open_directory(path, owner)
+
+        with patch.object(self.helper, 'KEYRING', str(key)), \
+                patch.object(self.helper, 'open_directory', side_effect=checked):
+            self.setup()
+            self.assertEqual(self.run_apt()[0], 0)
+            self.assertEqual(self.run_apt(['install', '--yes', 'aria2'])[0], 0)
+        self.assertEqual(self.helper.file_identity(legacy.stat()), self.helper.file_identity(before[0]))
+        self.assertEqual(self.helper.file_identity(key.stat()), self.helper.file_identity(before[1]))
+        self.assertEqual(key.read_bytes(), b'untrusted legacy key')
+
+    def test_selected_keyring_permissions_are_not_relaxed(self):
+        keys = self.parent / 'selected-keys'
+        keys.mkdir(mode=0o755)
+        self.key.rename(keys / self.key.name)
+        self.key = keys / self.key.name
+        with patch.object(self.helper, 'CI_KEYRING', str(self.key)):
+            self.setup()
+            for target, mode in ((keys, 0o775), (keys, 0o777),
+                                 (self.key, 0o664), (self.key, 0o666)):
+                original_mode = target.stat().st_mode & 0o777
+                target.chmod(mode)
+                try:
+                    with self.subTest(target=target.name, mode=mode), \
+                            patch.object(self.helper.subprocess, 'run') as execute:
+                        for operation in (self.setup, self.run_apt):
+                            with self.assertRaises(self.helper.PreparationError) as error:
+                                operation()
+                            self.assertEqual(error.exception.category, 'permissions')
+                        execute.assert_not_called()
+                        self.assertEqual(target.stat().st_mode & 0o777, mode)
+                finally:
+                    target.chmod(original_mode)
+
+    def test_selected_keyring_missing_or_linked_never_falls_back(self):
+        self.setup()
+        original = self.parent / 'saved-key'
+        self.key.rename(original)
+        for variant in ('missing', 'symlink', 'hardlink'):
+            if variant == 'symlink':
+                self.key.symlink_to(original)
+            elif variant == 'hardlink':
+                os.link(original, self.key)
+            try:
+                with self.subTest(variant=variant), patch.object(self.helper.subprocess, 'run') as execute, \
+                        self.assertRaises((OSError, self.helper.PreparationError)):
+                    self.run_apt()
+                execute.assert_not_called()
+            finally:
+                if variant != 'missing':
+                    self.key.unlink()
+        original.rename(self.key)
+        self.assertEqual(self.run_apt()[0], 0)
+
+    def test_selected_keyring_directory_symlink_is_rejected(self):
+        alias = self.parent / 'key-directory-alias'
+        alias.symlink_to(self.key.parent, target_is_directory=True)
+        with patch.object(self.helper, 'CI_KEYRING', str(alias / self.key.name)), \
+                patch.object(self.helper.subprocess, 'run') as execute, self.assertRaises(OSError):
+            self.setup()
+        execute.assert_not_called()
+
+    def test_signature_fingerprint_removed_from_sources_blocks_apt(self):
+        self.setup()
+        source = self.root / 'ubuntu.sources'
+        original = source.read_bytes()
+        source.write_bytes(original.replace((' ' + self.helper.CI_SIGNER).encode('ascii'), b''))
+        with patch.object(self.helper.subprocess, 'run') as execute, \
+                self.assertRaises(self.helper.PreparationError) as error:
+            self.run_apt()
+        self.assertEqual(error.exception.category, 'source-fields')
+        execute.assert_not_called()
 
 
 class ProcessExitObservationTests(unittest.TestCase):
@@ -2298,9 +3835,16 @@ class VersionBoundaryTests(unittest.TestCase):
             binary.mkdir()
             sudo = binary / "sudo"
             sudo.write_text('#!/bin/bash\n'
-                            'if [[ $* == "python3 -I -B scripts/ci-ubuntu-mirrors.py" ]]; then exit 0; fi\n'
+                            'if [[ $* == "python3 -I -B scripts/ci-ubuntu-mirrors.py --setup" ]]; then exit 0; fi\n'
                             'exec "$@"\n')
             sudo.chmod(0o755)
+            proxy = binary / "python3"
+            proxy.write_text('#!/bin/bash\n'
+                             'if [[ $* == "-I -B scripts/ci-ubuntu-mirrors.py --apt "* ]]; then\n'
+                             '    shift 4; exec apt-get "$@"\n'
+                             'fi\n'
+                             f'exec "{sys.executable}" "$@"\n')
+            proxy.chmod(0o755)
             apt = binary / "apt-get"
             apt.write_text('''#!/usr/bin/env python3
 import json, os, signal, sys
@@ -2330,7 +3874,7 @@ if stage == os.environ["CHECK_APT_STAGE"]:
                 # subsequent venv/pip work, never a substitute package command.
                 ending = "\ncase ${YT_DLP_VERSION}" if "\ncase ${YT_DLP_VERSION}" in script else "\npython3 -m venv"
                 prefix = script.split(ending, 1)[0]
-                self.assertIn("apt-get", prefix)
+                self.assertIn("ci-ubuntu-mirrors.py --apt", prefix)
                 self.assertNotIn("python3 -m venv", prefix)
                 for stage, action, expected in (("none", "success", 0), ("update", "failure", 23),
                                                  ("install", "failure", 27), ("update", "interrupt", 143),

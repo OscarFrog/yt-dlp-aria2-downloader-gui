@@ -15,7 +15,9 @@ package_installed=false
 
 cleanup() {
     if [[ ${package_installed} == true ]]; then
-        DEBIAN_FRONTEND=noninteractive apt-get remove --yes \
+        # Rescue removal is best-effort; the APT router checks failures explicitly.
+        # shellcheck disable=SC2310
+        DEBIAN_FRONTEND=noninteractive package_test_apt remove --yes \
             "${PACKAGE_NAME}" >/dev/null 2>&1 || true
     fi
     package_runtime_fixture_cleanup
@@ -144,7 +146,7 @@ assert_installed_deb_version() {
 }
 
 install_previous_deb() {
-    DEBIAN_FRONTEND=noninteractive apt-get install --yes "${OLD_PACKAGE}"
+    DEBIAN_FRONTEND=noninteractive package_test_apt install --yes "${OLD_PACKAGE}"
     package_installed=true
     assert_installed_deb_version \
         "${OLD_VERSION}" 'previous package installation'
@@ -152,7 +154,7 @@ install_previous_deb() {
 }
 
 upgrade_deb_package() {
-    DEBIAN_FRONTEND=noninteractive apt-get install --yes "${NEW_PACKAGE}"
+    DEBIAN_FRONTEND=noninteractive package_test_apt install --yes "${NEW_PACKAGE}"
     assert_installed_deb_version "${NEW_VERSION}" 'package upgrade'
     assert_runtime_preserved 'package upgrade'
     assert_common_package_payload DEB
@@ -165,7 +167,7 @@ upgrade_deb_package() {
 remove_upgraded_deb() {
     local status=''
 
-    DEBIAN_FRONTEND=noninteractive apt-get remove --yes "${PACKAGE_NAME}"
+    DEBIAN_FRONTEND=noninteractive package_test_apt remove --yes "${PACKAGE_NAME}"
     package_installed=false
     assert_runtime_preserved 'final DEB package removal'
 
