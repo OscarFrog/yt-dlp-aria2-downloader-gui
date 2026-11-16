@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: MIT
 """yt-dlp-aria2-downloader-gui: scripts/ci-ubuntu-mirrors.py.
 
-Prepare official HTTPS archives for reviewed Ubuntu CI source layouts.
-This source-only helper never installs packages or changes repository trust.
+Run CI APT with dedicated signed Ubuntu sources; retain the legacy normalizer.
+This source-only helper never changes repository signing trust.
 """
 
 import os
+from contextlib import contextmanager
+import fcntl
+import re
+import subprocess
 import errno
 from pathlib import Path
 import secrets
@@ -179,8 +183,7 @@ def file_identity(metadata):
 
 
 def read_file(directory, name, owner):
-    descriptor = os.open(name, OPEN_READ, dir_fd=directory)
-    try:
+    with scoped_descriptor(os.open(name, OPEN_READ, dir_fd=directory)) as descriptor:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             raise PreparationError("file-type")
@@ -203,8 +206,6 @@ def read_file(directory, name, owner):
         if len(data) != metadata.st_size or file_identity(os.fstat(descriptor)) != file_identity(metadata):
             raise PreparationError("concurrent-change")
         return data, metadata
-    finally:
-        os.close(descriptor)
 
 
 def validate_sources(data):
@@ -398,7 +399,254 @@ def configure(directory, owner):
             raise cleanup_error
 
 
+# A dedicated configuration is a command-scoped boundary, not a repair of the
+# runner's sources. The legacy normalizer below remains separately regression
+# tested; CI uses only --setup / --apt.
+CI_APT_ROOT = Path('/run/yt-dlp-ci-apt')
+APT_OPTIONS = frozenset((
+    'Acquire::Retries=3', 'Acquire::http::Timeout=30',
+    'Acquire::https::Timeout=30', 'DPkg::Lock::Timeout=60',
+    'APT::Update::Error-Mode=any',
+))
+CI_PACKAGES = frozenset((
+    'aria2', 'build-essential', 'curl', 'desktop-file-utils', 'ffmpeg',
+    'findutils', 'gnupg', 'libmp3lame-dev', 'libopus-dev', 'libvpx-dev',
+    'libx264-dev', 'lintian', 'nasm', 'pkg-config', 'python3-venv',
+    'shellcheck', 'unzip', 'xz-utils',
+))
+
+
+def dedicated_files(root):
+    """Exact public bytes; no runner source, preference, hook or proxy input."""
+    root = str(root)
+    if not re.fullmatch(r'/[a-zA-Z0-9/_-]+', root):
+        raise PreparationError('directory-path')
+    sources = ''.join(
+        f'Types: deb\nURIs: {uri}\nSuites: {" ".join(suites)}\n'
+        'Components: main restricted universe multiverse\n'
+        f'Signed-By: {KEYRING}\n\n'
+        for uri, suites in zip(DIRECT_URIS, NOBLE_SUITES)
+    ).encode('ascii')
+    # APT_CONFIG is read before parts/main. Command-line -o alone is too late
+    # to exclude ambient configuration and hooks. Empty lists/cache also avoid
+    # installing candidates from stale foreign indexes left by the runner.
+    config = '\n'.join((
+        f'Dir::Etc::main "{root}/empty.conf";',
+        f'Dir::Etc::parts "{root}/empty";',
+        f'Dir::Etc::sourcelist "{root}/ubuntu.sources";',
+        f'Dir::Etc::sourceparts "{root}/empty";',
+        f'Dir::Etc::preferences "{root}/empty.conf";',
+        f'Dir::Etc::preferencesparts "{root}/empty";',
+        f'Dir::Etc::trusted "{root}/empty.conf";',
+        f'Dir::Etc::trustedparts "{root}/empty";',
+        f'Dir::Etc::netrc "{root}/empty.conf";',
+        f'Dir::Etc::netrcparts "{root}/empty";',
+        f'Dir::State::lists "{root}/lists";',
+        f'Dir::Cache "{root}/cache";',
+        'Dir::Cache::pkgcache "";', 'Dir::Cache::srcpkgcache "";',
+        'Acquire::Retries "3";', 'APT::Update::Error-Mode "any";',
+        'Acquire::https::AllowRedirect "false";',
+        'Acquire::https::Verify-Peer "true";',
+        'Acquire::https::Verify-Host "true";',
+        '',
+    )).encode('ascii')
+    return {'apt.conf': config, 'ubuntu.sources': sources, 'empty.conf': b''}
+
+
+@contextmanager
+def scoped_descriptor(descriptor):
+    """A teardown failure cannot replace this operation's first exception."""
+    failed = False
+    try:
+        yield descriptor
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            if not failed:
+                raise
+
+
+def dedicated_snapshot(root, owner):
+    """Authenticate the configuration consumed by each operation; never repair."""
+    with scoped_descriptor(open_directory(root, owner)) as descriptor:
+        metadata = os.fstat(descriptor)
+        if stat.S_IMODE(metadata.st_mode) != 0o755:
+            raise PreparationError('permissions')
+        snapshot = [('root', metadata.st_dev, metadata.st_ino)]
+        for name, expected in dedicated_files(root).items():
+            data, info = read_file(descriptor, name, owner)
+            if data != expected:
+                raise PreparationError('source-fields')
+            if stat.S_IMODE(info.st_mode) != 0o644:
+                raise PreparationError('permissions')
+            snapshot.append((name, file_identity(info)))
+        with scoped_descriptor(open_directory(root / 'empty', owner)) as empty:
+            if os.listdir(empty):
+                raise PreparationError('source-fields')
+            info = os.fstat(empty)
+            if stat.S_IMODE(info.st_mode) != 0o755:
+                raise PreparationError('permissions')
+            snapshot.append(('empty', info.st_dev, info.st_ino, info.st_mode))
+        # APT can chown partial subdirectories to its sandbox user, but their
+        # containing directories must stay owned and writable only by root.
+        for name in ('lists', 'cache', 'cache/archives'):
+            with scoped_descriptor(open_directory(root / name, owner)) as child:
+                info = os.fstat(child)
+                if stat.S_IMODE(info.st_mode) != 0o755:
+                    raise PreparationError('permissions')
+                snapshot.append((name, info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode))
+        with scoped_descriptor(open_directory(Path(KEYRING).parent, owner)) as keys:
+            data, info = read_file(keys, Path(KEYRING).name, owner)
+            if not data or not stat.S_IMODE(info.st_mode) & 0o004:
+                raise PreparationError('source-signature')
+            snapshot.append(('keyring', file_identity(info), data))
+        return snapshot
+
+
+def prepare_dedicated(root, owner):
+    """Create once in a protected parent; incomplete preparation stays refused."""
+    with scoped_descriptor(open_directory(root.parent, owner)) as parent:
+        try:
+            os.mkdir(root.name, mode=0o700, dir_fd=parent)
+            created = True
+        except FileExistsError:
+            created = False
+        with scoped_descriptor(os.open(root.name, OPEN_READ | os.O_DIRECTORY, dir_fd=parent)) as descriptor:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            if created:
+                for name in ('empty', 'lists', 'cache', 'cache/archives'):
+                    os.mkdir(root / name, mode=0o755)
+                    os.chmod(root / name, 0o755)
+                for name, data in dedicated_files(root).items():
+                    with scoped_descriptor(os.open(
+                            name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                            0o600, dir_fd=descriptor)) as fd:
+                        if os.write(fd, data) != len(data):
+                            raise PreparationError('concurrent-change')
+                        os.fchmod(fd, 0o644)
+                        os.fsync(fd)
+                os.fchmod(descriptor, 0o755)
+            durable_snapshot(root, descriptor, owner)
+
+
+def durable_snapshot(root, descriptor, owner):
+    """Re-establish durability before every use, including a failed setup repeat."""
+    before = dedicated_snapshot(root, owner)
+    held = os.fstat(descriptor)
+    if before[0] != ('root', held.st_dev, held.st_ino):
+        raise PreparationError('concurrent-change')
+    for name in dedicated_files(root):
+        with scoped_descriptor(os.open(name, OPEN_READ, dir_fd=descriptor)) as fd:
+            os.fsync(fd)
+    for name in ('empty', 'lists', 'cache', 'cache/archives'):
+        with scoped_descriptor(open_directory(root / name, owner)) as child:
+            os.fsync(child)
+    os.fsync(descriptor)
+    with scoped_descriptor(open_directory(root.parent, owner)) as parent:
+        os.fsync(parent)
+    if dedicated_snapshot(root, owner) != before:
+        raise PreparationError('concurrent-change')
+    return before
+
+
+def validated_apt_arguments(arguments):
+    """Closed workflow API: no caller source/config/authentication overrides."""
+    arguments = list(arguments)
+    if len(arguments) > 100 or any(type(value) is not str or len(value) > 4096 for value in arguments):
+        raise PreparationError('source-fields')
+    while arguments[:1] == ['-o']:
+        if len(arguments) < 2 or arguments[1] not in APT_OPTIONS:
+            raise PreparationError('source-fields')
+        arguments = arguments[2:]
+    if arguments == ['update']:
+        return
+    if not arguments or arguments[0] not in ('install', 'remove', 'purge'):
+        raise PreparationError('source-fields')
+    operation = arguments.pop(0)
+    if arguments[:1] != ['--yes']:
+        raise PreparationError('source-fields')
+    arguments.pop(0)
+    if operation == 'install' and arguments[:1] == ['--no-install-recommends']:
+        arguments.pop(0)
+    if not arguments:
+        raise PreparationError('source-fields')
+    for value in arguments:
+        if value in CI_PACKAGES and operation == 'install':
+            continue
+        if value == 'yt-dlp-aria2-downloader-gui' and operation in ('remove', 'purge'):
+            continue
+        # Local DEBs are candidate artifacts already authenticated by the
+        # package lifecycle caller; accepting them does not authenticate them.
+        if (operation == 'install' and value.startswith('/') and value.endswith('.deb')
+                and '\n' not in value and '\r' not in value and '\x00' not in value):
+            continue
+        raise PreparationError('source-fields')
+
+
+def run_dedicated(root, owner, arguments):
+    validated_apt_arguments(arguments)
+    descriptor = open_directory(root, owner)
+    status = 0
+    failed = False
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        before = durable_snapshot(root, descriptor, owner)
+        environment = {
+            'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'HOME': '/root',
+            'LC_ALL': 'C', 'LANGUAGE': 'C', 'DEBIAN_FRONTEND': 'noninteractive',
+            'APT_CONFIG': str(root / 'apt.conf'),
+        }
+        result = subprocess.run(['/usr/bin/apt-get', *arguments], env=environment, check=False)
+        status = result.returncode if result.returncode >= 0 else 128 - result.returncode
+        # Preserve the original APT failure even if revalidation also fails.
+        try:
+            if dedicated_snapshot(root, owner) != before:
+                raise PreparationError('concurrent-change')
+        except (OSError, ValueError, UnicodeError):
+            if status:
+                return status
+            raise
+        return status
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            if not failed and not status:
+                raise
+
+
+def dedicated_main(arguments):
+    if os.geteuid() != 0 or not arguments or arguments[0] not in ('--setup', '--apt'):
+        return 64
+    try:
+        # Supported disposable target, not an installation interface for hosts.
+        platform = Path('/usr/lib/os-release').read_text(encoding='utf-8')
+        fields = dict(line.split('=', 1) for line in platform.splitlines() if '=' in line)
+        if fields.get('ID', '').strip('"') != 'ubuntu' or fields.get('VERSION_ID', '').strip('"') != '24.04':
+            raise PreparationError('source-fields')
+        if arguments == ['--setup']:
+            prepare_dedicated(CI_APT_ROOT, 0)
+            print('Ubuntu CI APT: dedicated signed HTTPS sources ready.')
+            return 0
+        if arguments[0] == '--apt':
+            return run_dedicated(CI_APT_ROOT, 0, arguments[1:])
+        return 64
+    except (OSError, ValueError, UnicodeError) as error:
+        print('Error: Ubuntu CI APT preparation or validation failed; package setup must stop.', file=sys.stderr)
+        print('Category: ' + failure_category(error), file=sys.stderr)
+        return 65
+
+
 def main():
+    if sys.argv[1:2] in (["--setup"], ["--apt"]):
+        return dedicated_main(sys.argv[1:])
     if len(sys.argv) != 1 or os.geteuid() != 0:
         print("Error: CI mirror preparation requires root and accepts no arguments.", file=sys.stderr)
         return 64

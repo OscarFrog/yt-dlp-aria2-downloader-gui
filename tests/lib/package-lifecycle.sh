@@ -3,11 +3,34 @@
 # ==============================================================================
 # Project     : yt-dlp-aria2-downloader-gui
 # File        : tests/lib/package-lifecycle.sh
-# Purpose     : Share package lifecycle payload and removal assertions.
+# Purpose     : Share package lifecycle assertions and scoped CI APT routing.
 # ==============================================================================
 
 readonly PACKAGE_DESKTOP_FILE='/usr/share/applications/yt-dlp-aria2-downloader.desktop'
 readonly PACKAGE_ICON_FILE='/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg'
+
+# CI callers opt in explicitly; ordinary package tests retain native APT.
+# PROJECT_DIR is the caller's resolved absolute checkout path, established
+# before this library is sourced. The Python boundary validates its private
+# configuration again for every operation, including best-effort removal.
+package_test_apt() {
+    case ${YT_DLP_CI_APT:-} in
+        '')
+            apt-get "$@"
+            ;;
+        1)
+            [[ ${PROJECT_DIR:-} == /* ]] || {
+                printf '%s\n' 'Error: CI APT requires an absolute project directory.' >&2
+                return 65
+            }
+            python3 -I -B "${PROJECT_DIR}/scripts/ci-ubuntu-mirrors.py" --apt "$@"
+            ;;
+        *)
+            printf '%s\n' 'Error: invalid CI APT selection.' >&2
+            return 65
+            ;;
+    esac
+}
 
 # Require the installed command to report the expected package version.
 assert_package_cli_version() {

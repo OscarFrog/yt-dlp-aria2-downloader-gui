@@ -281,14 +281,14 @@ jobs:
           set -Eeuo pipefail
           # Bound stalled connections and the complete package transaction;
           # provisioning must leave the independently bounded media tests time.
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py
+          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup
           apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30
             -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
           sudo timeout --signal=TERM --kill-after=10s 2m \
-            apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update
           sudo timeout --signal=TERM --kill-after=10s 4m \
             env DEBIAN_FRONTEND=noninteractive \
-            apt-get "${apt_options[@]}" install --yes --no-install-recommends \
+            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends \
             aria2 ffmpeg python3-venv
 
           case ${YT_DLP_VERSION} in
@@ -587,9 +587,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - run: |
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py
-          sudo apt-get update
-          sudo apt-get install --yes unzip
+          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup
+          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --apt update
+          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --apt install --yes unzip
       - name: Build and verify exact source ZIP
         shell: bash
         run: |
@@ -1128,9 +1128,9 @@ jobs:
           persist-credentials: false
       - name: Install DEB build tools
         run: |
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes desktop-file-utils
+          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup
+          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --apt -o Acquire::Retries=3 update
+          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --apt -o Acquire::Retries=3 install --yes desktop-file-utils
       - name: Require immutable artifact identity
         env:
           ARTIFACT_IDS: ${{ needs.previous-release.outputs.artifact_id }}
@@ -1155,7 +1155,7 @@ jobs:
           bash packaging/deb/build-deb.sh "${RELEASE_TAG#v}" dist
           shopt -s nullglob; packages=(dist/*.deb); shopt -u nullglob
           ((${#packages[@]} == 1))
-          sudo bash packaging/deb/test-package-lifecycle.sh "${packages[0]}" "${RELEASE_TAG#v}"
+          sudo env YT_DLP_CI_APT=1 bash packaging/deb/test-package-lifecycle.sh "${packages[0]}" "${RELEASE_TAG#v}"
 
           (
             cd "${PREVIOUS_DIR}"
@@ -1168,7 +1168,7 @@ jobs:
 
           ((${#old[@]} == 1))
 
-          sudo bash packaging/deb/test-package-upgrade.sh             "${old[0]}"             "${packages[0]}"             "${{ needs.previous-release.outputs.version }}"             "${RELEASE_TAG#v}"
+          sudo env YT_DLP_CI_APT=1 bash packaging/deb/test-package-upgrade.sh             "${old[0]}"             "${packages[0]}"             "${{ needs.previous-release.outputs.version }}"             "${RELEASE_TAG#v}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         id: artifact
         with:

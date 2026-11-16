@@ -1199,8 +1199,8 @@ class WorkflowContractTests(unittest.TestCase):
         for option in ("Acquire::Retries=3", "Acquire::http::Timeout=30",
                        "Acquire::https::Timeout=30", "DPkg::Lock::Timeout=60"):
             self.assertEqual(install.count(option), 1)
-        self.assertIn('sudo timeout --signal=TERM --kill-after=10s 2m \\\n            apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update', install)
-        self.assertIn('sudo timeout --signal=TERM --kill-after=10s 4m \\\n            env DEBIAN_FRONTEND=noninteractive \\\n            apt-get "${apt_options[@]}" install --yes --no-install-recommends', install)
+        self.assertIn('sudo timeout --signal=TERM --kill-after=10s 2m \\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update', install)
+        self.assertIn('sudo timeout --signal=TERM --kill-after=10s 4m \\\n            env DEBIAN_FRONTEND=noninteractive \\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends', install)
         for forbidden in ("continue-on-error", "|| true", "--allow-unauthenticated", "--fix-missing",
                           "trusted=yes", "Acquire::AllowInsecureRepositories", "/etc/apt/sources"):
             self.assertNotIn(forbidden, install)
@@ -1889,7 +1889,7 @@ class UbuntuMirrorTests(unittest.TestCase):
         "packages.yml": {"source-archive", "deb"},
         "release.yml": {"release-runtime", "zip", "deb"},
     }
-    COMMAND = "sudo python3 -I -B scripts/ci-ubuntu-mirrors.py"
+    COMMAND = "sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup"
     ORIGINAL = ("http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n"
                 "https://archive.ubuntu.com/ubuntu/\tpriority:2\n"
                 "https://security.ubuntu.com/ubuntu/\tpriority:3\n")
@@ -3098,8 +3098,9 @@ class UbuntuMirrorTests(unittest.TestCase):
             self.assertEqual(job.count(self.COMMAND), 1)
             self.assertIn("runs-on: ubuntu-24.04", job)
             self.assertLess(job.index("persist-credentials: false"), job.index(self.COMMAND))
-            self.assertLess(job.index(self.COMMAND), job.index("apt-get"))
-            line = next(line.strip() for line in job.splitlines() if "ci-ubuntu-mirrors.py" in line)
+            self.assertLess(job.index(self.COMMAND), job.index("ci-ubuntu-mirrors.py --apt"))
+            self.assertNotIn("apt-get", job)
+            line = next(line.strip() for line in job.splitlines() if "ci-ubuntu-mirrors.py --setup" in line)
             self.assertEqual(line, self.COMMAND)
             self.assertNotIn("/etc/apt/", job)
 
@@ -3128,7 +3129,7 @@ class UbuntuMirrorTests(unittest.TestCase):
         binary.mkdir()
         sudo = binary / "sudo"
         sudo.write_text('#!/bin/bash\n'
-                        'if [[ $* == "python3 -I -B scripts/ci-ubuntu-mirrors.py" ]]; then exit 65; fi\n'
+                        'if [[ $* == "python3 -I -B scripts/ci-ubuntu-mirrors.py --setup" ]]; then exit 65; fi\n'
                         'printf unexpected >"${CHECK_UNEXPECTED}"\nexit 99\n')
         sudo.chmod(0o755)
         for filename, names in self.TARGETS.items():
@@ -3174,6 +3175,327 @@ def require_fixture_process_exit(pid, starttime, *, read_stat=None,
         if remaining <= 0:
             raise AssertionError("Bounded APT fixture is still executing after 1s")
         sleep(min(0.005, remaining))
+
+
+class DedicatedAPTTests(unittest.TestCase):
+    """Exercise the real scoped helper without invoking the host package manager."""
+
+    @classmethod
+    def setUpClass(cls):
+        UbuntuMirrorTests.setUpClass()
+        cls.helper = UbuntuMirrorTests.helper
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.parent = Path(self.temp.name)
+        self.root = self.parent / 'ci-apt'
+        self.owner = os.geteuid()
+        self.key = self.parent / 'keyring.gpg'
+        self.key.write_bytes(b'fixture key; cryptographic rejection is tested with actual APT')
+        self.key.chmod(0o644)
+        self.key_patch = patch.object(self.helper, 'KEYRING', str(self.key))
+        self.key_patch.start()
+        self.addCleanup(self.key_patch.stop)
+
+    def setup(self):
+        self.helper.prepare_dedicated(self.root, self.owner)
+
+    def run_apt(self, arguments=None, *, action=None, status=0):
+        calls = []
+
+        def execute(command, **kwargs):
+            calls.append((command, kwargs))
+            if action:
+                action(command, kwargs)
+            return subprocess.CompletedProcess(command, status)
+
+        with patch.object(self.helper.subprocess, 'run', side_effect=execute):
+            result = self.helper.run_dedicated(self.root, self.owner, arguments or ['update'])
+        return result, calls
+
+    def test_exact_official_sources_and_no_ambient_apt_configuration(self):
+        self.setup()
+        sources = (self.root / 'ubuntu.sources').read_text(encoding='ascii')
+        self.assertEqual(sources.count('Types: deb\n'), 2)
+        self.assertEqual(sources.count('Signed-By: ' + str(self.key)), 2)
+        self.assertIn('URIs: https://archive.ubuntu.com/ubuntu/\nSuites: noble noble-updates noble-backports\n', sources)
+        self.assertIn('URIs: https://security.ubuntu.com/ubuntu/\nSuites: noble-security\n', sources)
+        self.assertEqual(sources.count('Components: main restricted universe multiverse\n'), 2)
+        config = (self.root / 'apt.conf').read_text(encoding='ascii')
+        for setting in ('main', 'parts', 'sourcelist', 'sourceparts', 'preferences',
+                        'preferencesparts', 'trusted', 'trustedparts', 'netrc', 'netrcparts'):
+            self.assertIn(f'Dir::Etc::{setting} "{self.root}/', config)
+        for setting in ('Dir::State::lists', 'Dir::Cache'):
+            self.assertIn(f'{setting} "{self.root}/', config)
+        for setting in ('Dir::Cache::pkgcache', 'Dir::Cache::srcpkgcache'):
+            self.assertIn(f'{setting} "";', config)
+        self.assertIn('APT::Update::Error-Mode "any";', config)
+        self.assertIn('Acquire::https::AllowRedirect "false";', config)
+        for setting in ('Verify-Peer', 'Verify-Host'):
+            self.assertIn(f'Acquire::https::{setting} "true";', config)
+        for forbidden in ('trusted=yes', 'AllowUnauthenticated', 'AllowInsecureRepositories', 'mirror+file'):
+            self.assertNotIn(forbidden, sources + config)
+
+    def test_all_host_source_shapes_are_unread_and_unchanged(self):
+        ambient = self.parent / 'ambient'
+        ambient.mkdir()
+        for content in (UbuntuMirrorTests.SOURCE, 'mixed sources', 'unknown mirror secret', 'external hostile source'):
+            source = ambient / 'ubuntu.sources'
+            source.write_text(content, encoding='utf-8')
+            before = source.stat()
+            with patch.object(self.helper, 'configure', side_effect=AssertionError('legacy used')):
+                self.setup()
+                self.assertEqual(self.run_apt()[0], 0)
+            self.assertEqual(source.read_text(encoding='utf-8'), content)
+            self.assertEqual(source.stat(), before)
+
+    def test_update_and_install_share_exact_environment_and_protected_files(self):
+        self.setup()
+        environments = []
+        snapshots = []
+        with patch.dict(os.environ, {'APT_CONFIG': '/private/hostile', 'http_proxy': 'private',
+                                     'LANGUAGE': 'fr', 'LD_PRELOAD': '/private/secret'}):
+            for args in (['update'], ['install', '--yes', 'aria2']):
+                status, calls = self.run_apt(args)
+                self.assertEqual(status, 0)
+                self.assertEqual(calls[0][0], ['/usr/bin/apt-get', *args])
+                environments.append(calls[0][1]['env'])
+                snapshots.append(self.helper.dedicated_snapshot(self.root, self.owner))
+        self.assertEqual(environments[0], environments[1])
+        self.assertEqual(snapshots[0], snapshots[1])
+        self.assertEqual(environments[0], {
+            'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'HOME': '/root', 'LC_ALL': 'C',
+            'LANGUAGE': 'C', 'DEBIAN_FRONTEND': 'noninteractive',
+            'APT_CONFIG': str(self.root / 'apt.conf'),
+        })
+
+    def test_repeated_setup_preserves_bytes_modes_and_inodes(self):
+        self.setup()
+        before = self.helper.dedicated_snapshot(self.root, self.owner)
+        self.setup()
+        self.assertEqual(self.helper.dedicated_snapshot(self.root, self.owner), before)
+
+    def test_unknown_options_and_package_selectors_refuse_before_execution(self):
+        self.setup()
+        variants = (['-c', '/private'], ['-o', 'Dir::Etc::sourcelist=/private', 'update'],
+                    ['-o', 'APT::Get::AllowUnauthenticated=true', 'update'],
+                    ['-o', 'Acquire::Retries=0', 'update'], ['-o'], ['upgrade'],
+                    ['install', '--yes', '--allow-unauthenticated', 'aria2'],
+                    ['install', '--yes', 'aria2-'], ['install', '--yes', 'aria2+'],
+                    ['install', '--yes', 'aria2/noble'], ['install', '--yes', 'aria2=1'],
+                    ['install', '--yes', '.*'], ['install', '--yes', 'unreviewed'],
+                    ['install', '--yes', './local.deb'], ['remove', '--yes', 'aria2'],
+                    ['install', '--yes'], ['update', 'extra'], ['install', '--yes', '/x\nsecret.deb'])
+        for args in variants:
+            with self.subTest(args=args), patch.object(self.helper.subprocess, 'run') as execute:
+                with self.assertRaises(self.helper.PreparationError):
+                    self.helper.run_dedicated(self.root, self.owner, args)
+                execute.assert_not_called()
+
+    def test_existing_options_packages_and_local_artifact_boundary(self):
+        self.setup()
+        options = [part for value in sorted(self.helper.APT_OPTIONS) for part in ('-o', value)]
+        for args in (options + ['update'],
+                     ['install', '--yes', '--no-install-recommends', *sorted(self.helper.CI_PACKAGES)],
+                     ['install', '--yes', '/tmp/Téléchargements été/local.deb'],
+                     ['remove', '--yes', 'yt-dlp-aria2-downloader-gui'],
+                     ['purge', '--yes', 'yt-dlp-aria2-downloader-gui']):
+            with self.subTest(operation=args):
+                self.assertEqual(self.run_apt(args)[0], 0)
+
+    def test_missing_setup_or_partial_setup_never_executes_apt(self):
+        for partial in (False, True):
+            if partial:
+                self.root.mkdir(mode=0o700)
+                (self.root / 'apt.conf').write_text('partial', encoding='ascii')
+            with self.subTest(partial=partial), patch.object(self.helper.subprocess, 'run') as execute:
+                with self.assertRaises((OSError, self.helper.PreparationError)):
+                    self.helper.run_dedicated(self.root, self.owner, ['update'])
+                execute.assert_not_called()
+
+    def test_changed_config_sources_or_signature_refuses_without_repair(self):
+        self.setup()
+        for name in self.helper.dedicated_files(self.root):
+            path = self.root / name
+            original = path.read_bytes()
+            for replacement in (b'foreign', original + b'\n'):
+                path.write_bytes(replacement)
+                with self.subTest(name=name), patch.object(self.helper.subprocess, 'run') as execute:
+                    with self.assertRaises(self.helper.PreparationError):
+                        self.helper.run_dedicated(self.root, self.owner, ['update'])
+                    execute.assert_not_called()
+                    self.assertEqual(path.read_bytes(), replacement)
+                path.write_bytes(original)
+        self.key.write_bytes(b'')
+        with self.assertRaises(self.helper.PreparationError):
+            self.run_apt()
+
+    def test_replaced_source_between_update_and_install_refuses_install(self):
+        self.setup()
+        self.assertEqual(self.run_apt()[0], 0)
+        (self.root / 'ubuntu.sources').write_bytes(b'URIs: https://hostile.invalid/')
+        with patch.object(self.helper.subprocess, 'run') as execute:
+            with self.assertRaises(self.helper.PreparationError):
+                self.helper.run_dedicated(self.root, self.owner, ['install', '--yes', 'aria2'])
+            execute.assert_not_called()
+
+    def test_unsafe_permissions_owners_links_and_extra_config_refuse(self):
+        self.setup()
+        for name in ('apt.conf', 'ubuntu.sources', 'empty.conf'):
+            path = self.root / name
+            for mode in (0o666, 0o600, 0o664):
+                path.chmod(mode)
+                with self.subTest(name=name, mode=mode), self.assertRaises(self.helper.PreparationError):
+                    self.run_apt()
+            path.chmod(0o644)
+            backup = self.parent / 'backup'
+            path.rename(backup)
+            path.symlink_to(backup)
+            with self.assertRaises(OSError):
+                self.run_apt()
+            path.unlink()
+            os.link(backup, path)
+            with self.assertRaises(self.helper.PreparationError):
+                self.run_apt()
+            path.unlink()
+            backup.rename(path)
+        for name in ('empty', 'lists', 'cache', 'cache/archives'):
+            directory = self.root / name
+            for mode in (0o700, 0o777):
+                directory.chmod(mode)
+                with self.subTest(directory=name, mode=mode), self.assertRaises(self.helper.PreparationError):
+                    self.run_apt()
+            directory.chmod(0o755)
+        with self.assertRaises(self.helper.PreparationError):
+            self.helper.dedicated_snapshot(self.root, self.owner + 1)
+        (self.root / 'empty' / 'injected.conf').write_text('hostile', encoding='ascii')
+        with self.assertRaises(self.helper.PreparationError):
+            self.run_apt()
+
+    def test_read_error_or_short_read_never_executes(self):
+        self.setup()
+        read = self.helper.os.read
+        for error in (OSError(errno.EIO, 'secret'), PermissionError(errno.EACCES, 'private')):
+            with patch.object(self.helper.os, 'read', side_effect=error), \
+                    patch.object(self.helper.subprocess, 'run') as execute:
+                with self.assertRaises(OSError):
+                    self.helper.run_dedicated(self.root, self.owner, ['update'])
+                execute.assert_not_called()
+        with patch.object(self.helper.os, 'read', side_effect=lambda fd, size: read(fd, min(size, 3))):
+            self.assertEqual(self.run_apt()[0], 0)
+        with patch.object(self.helper.os, 'read', return_value=b''), self.assertRaises(self.helper.PreparationError):
+            self.run_apt()
+
+    def test_failed_write_and_fsync_are_blocking_and_do_not_run_apt(self):
+        with patch.object(self.helper.os, 'write', return_value=0), self.assertRaises(self.helper.PreparationError):
+            self.setup()
+        with self.assertRaises(self.helper.PreparationError):
+            self.run_apt()
+        # A separate owned fixture permits testing sync failures without fixing
+        # the deliberately incomplete previous fixture.
+        self.root = self.parent / 'sync-apt'
+        self.setup()
+        for call_number in range(1, 10):
+            fsync = self.helper.os.fsync
+            count = 0
+
+            def failing(fd):
+                nonlocal count
+                count += 1
+                if count == call_number:
+                    raise OSError(errno.EIO, 'private sync failure')
+                return fsync(fd)
+
+            with self.subTest(call=call_number), patch.object(self.helper.os, 'fsync', side_effect=failing), \
+                    patch.object(self.helper.subprocess, 'run') as execute:
+                with self.assertRaises(OSError):
+                    self.helper.run_dedicated(self.root, self.owner, ['update'])
+                execute.assert_not_called()
+
+    def test_apt_failures_signals_and_secondary_refusal_keep_original_status(self):
+        self.setup()
+        for raw, expected in ((0, 0), (23, 23), (100, 100), (-15, 143), (-9, 137)):
+            self.assertEqual(self.run_apt(status=raw)[0], expected)
+        config = self.root / 'apt.conf'
+        data = config.read_bytes()
+        self.assertEqual(self.run_apt(status=100, action=lambda *_: config.write_bytes(b'changed'))[0], 100)
+        config.write_bytes(data)
+        with self.assertRaises(self.helper.PreparationError):
+            self.run_apt(action=lambda *_: config.write_bytes(b'changed'))
+
+    def test_directory_or_keyring_replacement_during_apt_is_not_success(self):
+        self.setup()
+        for name in ('lists', 'cache/archives'):
+            path = self.root / name
+            old = self.parent / 'displaced'
+
+            def replace(*_):
+                path.rename(old)
+                path.mkdir(mode=0o755)
+
+            with self.subTest(name=name), self.assertRaises(self.helper.PreparationError):
+                self.run_apt(action=replace)
+            path.rmdir()
+            old.rename(path)
+        with self.assertRaises(self.helper.PreparationError):
+            self.run_apt(action=lambda *_: self.key.write_bytes(b'replaced'))
+
+    def test_held_directory_cannot_validate_a_replaced_path(self):
+        self.setup()
+        held = self.helper.open_directory(self.root, self.owner)
+        self.addCleanup(os.close, held)
+        self.root.rename(self.parent / 'old-root')
+        self.setup()
+        with self.assertRaises(self.helper.PreparationError):
+            self.helper.durable_snapshot(self.root, held, self.owner)
+
+    def test_primary_read_error_is_not_replaced_by_close_failure(self):
+        self.setup()
+        descriptor = self.helper.open_directory(self.root, self.owner)
+        self.addCleanup(os.close, descriptor)
+        close = self.helper.os.close
+
+        def failing_close(fd):
+            close(fd)
+            raise OSError(errno.EIO, 'secondary private close error')
+
+        with patch.object(self.helper.os, 'read', side_effect=PermissionError(errno.EACCES, 'primary')), \
+                patch.object(self.helper.os, 'close', side_effect=failing_close):
+            with self.assertRaises(PermissionError) as caught:
+                self.helper.read_file(descriptor, 'apt.conf', self.owner)
+            self.assertEqual(caught.exception.errno, errno.EACCES)
+
+    def test_scoped_close_preserves_primary_and_reports_standalone_failure(self):
+        for primary in (False, True):
+            fd = os.open(self.key, os.O_RDONLY)
+            close = self.helper.os.close
+
+            def failing_close(value):
+                close(value)
+                raise OSError(errno.EIO, 'secondary')
+
+            with self.subTest(primary=primary), patch.object(self.helper.os, 'close', side_effect=failing_close):
+                expected = self.helper.PreparationError if primary else OSError
+                with self.assertRaises(expected):
+                    with self.helper.scoped_descriptor(fd):
+                        if primary:
+                            raise self.helper.PreparationError('permissions')
+
+    def test_cli_refuses_wrong_platform_and_redacts_unknown_error(self):
+        for error in (OSError(errno.EIO, '/private/secret'), ValueError('https://private.invalid/token')):
+            with patch.object(self.helper.os, 'geteuid', return_value=0), \
+                    patch.object(Path, 'read_text', side_effect=error), \
+                    contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(self.helper.dedicated_main(['--setup']), 65)
+                self.assertNotIn('private', errors.getvalue())
+        for platform in ('ID=fedora\nVERSION_ID=45\n', 'ID=ubuntu\nVERSION_ID=22.04\n'):
+            with patch.object(self.helper.os, 'geteuid', return_value=0), \
+                    patch.object(Path, 'read_text', return_value=platform), \
+                    patch.object(self.helper, 'prepare_dedicated') as prepare, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(self.helper.dedicated_main(['--setup']), 65)
+                prepare.assert_not_called()
 
 
 class ProcessExitObservationTests(unittest.TestCase):
@@ -3325,9 +3647,16 @@ class VersionBoundaryTests(unittest.TestCase):
             binary.mkdir()
             sudo = binary / "sudo"
             sudo.write_text('#!/bin/bash\n'
-                            'if [[ $* == "python3 -I -B scripts/ci-ubuntu-mirrors.py" ]]; then exit 0; fi\n'
+                            'if [[ $* == "python3 -I -B scripts/ci-ubuntu-mirrors.py --setup" ]]; then exit 0; fi\n'
                             'exec "$@"\n')
             sudo.chmod(0o755)
+            proxy = binary / "python3"
+            proxy.write_text('#!/bin/bash\n'
+                             'if [[ $* == "-I -B scripts/ci-ubuntu-mirrors.py --apt "* ]]; then\n'
+                             '    shift 4; exec apt-get "$@"\n'
+                             'fi\n'
+                             f'exec "{sys.executable}" "$@"\n')
+            proxy.chmod(0o755)
             apt = binary / "apt-get"
             apt.write_text('''#!/usr/bin/env python3
 import json, os, signal, sys
@@ -3357,7 +3686,7 @@ if stage == os.environ["CHECK_APT_STAGE"]:
                 # subsequent venv/pip work, never a substitute package command.
                 ending = "\ncase ${YT_DLP_VERSION}" if "\ncase ${YT_DLP_VERSION}" in script else "\npython3 -m venv"
                 prefix = script.split(ending, 1)[0]
-                self.assertIn("apt-get", prefix)
+                self.assertIn("ci-ubuntu-mirrors.py --apt", prefix)
                 self.assertNotIn("python3 -m venv", prefix)
                 for stage, action, expected in (("none", "success", 0), ("update", "failure", 23),
                                                  ("install", "failure", 27), ("update", "interrupt", 143),

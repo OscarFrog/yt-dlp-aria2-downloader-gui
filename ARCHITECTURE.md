@@ -1284,75 +1284,59 @@ the unchanged individual test deadlines. The required stress aggregate allows
 seventy-five minutes for the latest complementary cohort inside an eighty-minute
 job; longer waiting never turns missing, failed or cancelled evidence into proof.
 
-Ubuntu jobs that install media, generation-qualification or source/DEB package
-dependencies first run the source-only `scripts/ci-ubuntu-mirrors.py` helper.
-It recognizes the runner's exact Azure/Ubuntu mirror list, removes the Azure
-endpoint and retains the official archive and security endpoints over HTTPS.
-For the historical all-indirect layout it changes only that owned regular
-mirror-list file, atomically; the DEB822 sources remain unchanged.
-One additional profile admits exactly two ordered Noble stanzas: ordinary
-`noble noble-updates noble-backports` using the mirror indirection, then
-`noble-security` using exactly `http://security.ubuntu.com/ubuntu`. Both require
-`Types: deb` or `deb deb-src`, the four components main/restricted/universe/
-multiverse without duplication, the exact Ubuntu archive keyring and no extra
-fields. Component order is retained; stanza and suite order are fixed. Only
-LF/CRLF ASCII source text with optional horizontal tabs is admitted by this
-profile. Its exact HTTPS output is the only additional idempotent layout.
+Ubuntu media, generation-qualification and source/DEB build jobs use the
+source-only `scripts/ci-ubuntu-mirrors.py --setup` boundary. It creates a
+dedicated root-owned `/run/yt-dlp-ci-apt` tree, without reading or changing the
+runner's APT sources or mirror list. Two exact deb822 `deb` stanzas select
+`https://archive.ubuntu.com/ubuntu/` for `noble noble-updates noble-backports`
+and `https://security.ubuntu.com/ubuntu/` for `noble-security`, with the four
+components main/restricted/universe/multiverse and
+`Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg`.
 
-For this mixed profile, the helper replaces only `ubuntu.sources`, changing its
-two URI lines to `https://archive.ubuntu.com/ubuntu/` and
-`https://security.ubuntu.com/ubuntu/` respectively. All other source bytes and
-file permissions/ownership are retained. The mirror list must still be a
-reviewed list, but stays byte-for-byte unchanged. APT therefore consumes the
-prepared HTTPS endpoints directly; mirror fallback is deliberately absent for
-this profile. The CLI distinguishes direct-source preparation from mirror
-selection. Restoring indirection instead would normally require two file
-replacements and an unsafe rollback decision if an independent writer intervened.
+Every related APT command uses the same helper's `--apt` boundary, including
+DEB lifecycle, reinstall, upgrade and cleanup via explicit `YT_DLP_CI_APT=1`.
+Ordinary package tests keep their native APT behavior. The closed command API
+admits only reviewed dependency names, intended lifecycle remove/purge and
+already authenticated local DEB artifacts; it rejects caller configuration,
+source, version, release, regex and authentication overrides. Local DEB
+identity and provenance remain the lifecycle caller's independent obligation.
+No candidate helper is introduced in privileged validation/signing/publication.
 
-Reads are bounded and complete, with metadata checked before/after reading.
-Source and mirror identities, contents and metadata, directory linkage and
-staged bytes are revalidated before replacement. The staged file is synced,
-one file is atomically replaced, its directory is synced and the result is
-revalidated. No-op repeats also sync and revalidate: an earlier failed directory
-sync is not repaired by byte equality alone. A failure before replacement
-preserves originals; an error after replacement remains blocking even if the
-new file is visible. No rollback overwrites a concurrent writer. A process
-killed before cleanup may leave a staging file with the target permissions
-once prepared; its name is never an APT source filename.
-These checks detect changes at observed boundaries, including cloud-init
-replacements. They are not a kernel compare-and-swap against a non-cooperating
-root writer between the last check and rename, nor a guarantee against changes
-after the helper returns. Signing trust and APT authentication are unchanged.
-An unknown layout or changed source identity stops preparation with exit status
-65 and a fixed failure category; the helper never prints
-source contents, arbitrary paths or exception messages. Categories distinguish
-layout, ownership, permissions, concurrent changes and I/O failures.
-On `source-uri` refusal only, one additional bounded line reports an exact
-known URI shape and the first rejected stanza's position/count from the same
-parsed bytes. Missing, empty and unknown values have neutral fixed labels;
-unknown values, multiple-URI combinations and arbitrary exception text are
-never exported. The diagnostic vocabulary alone is not an acceptance list:
-recognized endpoints outside the complete profiles still fail with status 65.
-Direct sources do not use the mirror-list file, so changing that file alone
-cannot prepare them.
-This statement concerns the two validated stanzas, not every active APT source:
-other `.list`/`.sources` files and APT configuration are outside this helper's
-inspection. The mirror-list acceptance check therefore remains mandatory for
-all three profiles; normalizing `ubuntu.sources` alone cannot prove that the
-list is globally unused. On `mirror-list` refusal, a bounded diagnostic reports
-the validated source profile, parsed entry count and ordered endpoint/priority
-shapes using only fixed labels from the bytes already read. At most eight
-entry shapes are emitted; larger lists are explicitly marked `omitted-limit`.
-Unknown tokens are never printed or accepted. Recognition of a known endpoint
-does not establish an authorized combination, a deployed image's provenance,
-or an additional permitted mirror list.
-The endpoint vocabulary follows the
-[versioned runner recipe](https://github.com/actions/runner-images/blob/fb099341ddaf44a428fb17495341cb7c2300faf2/images/ubuntu/scripts/build/configure-apt-sources.sh):
-HTTP Azure/archive/security `/ubuntu` with or without a trailing slash and the
-two HTTPS archive/security mirror targets with a trailing slash. A recipe is
-not evidence of the contents, signing configuration or suites of a running job.
-The helper is not installed with the application and never executes in pre-tag validation,
-signing or publication jobs.
+`APT_CONFIG` is supplied in a clean subprocess environment before APT reads
+its normal main/parts files. The dedicated configuration replaces main/parts,
+source lists/parts, preferences/parts, auth files/parts and global trust paths
+with exact private files or an empty protected directory. Separate package
+lists and caches prevent stale runner indexes from reintroducing foreign
+candidates. The two signed source stanzas use the explicit Ubuntu keyring;
+HTTPS verification stays enabled and redirects are disabled. A partial update
+is an error. An update failure prevents the subsequent installation, and
+all existing media timeouts, signal escalation and exit statuses remain intact.
+
+The configuration files are bounded regular single-link root-owned 0644 files
+inside protected 0755 directories, readable by APT's sandbox user. Setup is
+exclusive; incomplete state is refused, never silently repaired. A directory
+lock serializes helper operations. Before each APT invocation, exact bytes,
+permissions, identities, the keyring and empty configuration directory are
+validated, synced and revalidated. The same identities are checked afterward;
+an original APT failure takes precedence over a secondary validation/close
+failure. No cleanup removes ambiguous state: this disposable `/run` tree is
+left for runner teardown. Repeated setup must establish durability again.
+
+This is a command-scoped source boundary, not hardening of the whole runner.
+The trusted kernel, root, system APT/dpkg binaries, Ubuntu keyring, dpkg
+configuration, installed package state and maintainer scripts remain trusted.
+An already installed foreign package can satisfy a dependency; the boundary
+controls repository candidates, not the provenance of every installed package.
+Concurrent cloud-init changes to `/etc/apt` are irrelevant to these commands.
+Root replacement at observed boundaries is refused, but this is not a kernel
+compare-and-swap against a malicious root writer during APT reads.
+
+The dedicated path deliberately has no mirror-list fallback, unlike historical
+indirection. An unavailable official source fails rather than selecting an
+unknown mirror. The no-argument legacy normalizer and its strict diagnostic
+regressions remain for compatibility; none of the nine CI consumers uses it.
+Its closed legacy acceptance rules are unchanged and do not authorize unknown
+lists. Other APT usage outside these nine job scopes is unchanged.
 
 Within a release run, builds, signing, package tests, publication and public
 download verification pass immutable Actions artifact IDs through job outputs.
