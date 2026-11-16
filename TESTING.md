@@ -1723,6 +1723,14 @@ alive beyond that deadline. This observation does not extend the APT deadlines.
 Mirror fixtures also verify idempotence, exact source preservation, rejected
 unknown endpoints, unsafe filesystem objects and failed-preparation propagation
 before APT. Local fixtures use temporary directories and never modify `/etc/apt`.
+`python3 -B tests/ci-validation-integration.py UbuntuMirrorTests` also checks
+the fixed `source-uri` shape/position diagnostic: exact known endpoints remain
+refusals, missing/empty fields are distinct, lookalike hosts, credentials,
+parameters and multiple-URI combinations disclose no values. Stanza order,
+first-error priority, original bytes/modes, bounded output and the absence of
+additional file reads remain part of the contract. A replaced source cannot
+change the diagnostic for the bytes already read. Recognition is not permission
+to accept direct sources or bypass signing and mirror-list validation.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the exact-source qualification proof and release-specific identity checks, verifies

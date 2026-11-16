@@ -1930,7 +1930,7 @@ class UbuntuMirrorTests(unittest.TestCase):
     def configure(self):
         return self.helper.configure(self.apt, os.geteuid())
 
-    def assert_cli_refusal(self, category, *, owner=None):
+    def assert_cli_refusal(self, category, *, owner=None, detail=None):
         """Exercise the real preparation with only its host APT path redirected."""
         configure = self.helper.configure
         fixture_owner = os.geteuid() if owner is None else owner
@@ -1945,7 +1945,7 @@ class UbuntuMirrorTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
         self.assertEqual(errors.getvalue(),
                          "Error: Ubuntu CI mirror preparation failed; package setup must stop.\n"
-                         f"Category: {category}\n")
+                         f"Category: {category}\n" + (f"{detail}\n" if detail is not None else ""))
         self.assertFalse(list(self.apt.glob(".apt-mirrors-*")))
 
     def assert_preserved(self):
@@ -2105,7 +2105,8 @@ class UbuntuMirrorTests(unittest.TestCase):
                 self.source.write_bytes(source)
                 before = [(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_mode)
                           for path in (self.source, self.mirrors)]
-                self.assert_cli_refusal(category)
+                self.assert_cli_refusal(category, detail=(
+                    "Source URI shape: other; stanza: 1/2" if category == "source-uri" else None))
                 self.assertEqual(self.source.read_bytes(), source)
                 self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
                 self.assertEqual([(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_mode)
@@ -2133,6 +2134,139 @@ class UbuntuMirrorTests(unittest.TestCase):
             self.assertEqual([call.args[1] for call in read.call_args_list],
                              ["ubuntu.sources", "apt-mirrors.txt"])
         self.assertEqual(self.mirrors.read_text(), "https://private.invalid/secret priority:1\n")
+        self.assert_preserved()
+
+    def test_uri_shape_exact_values_remain_refusals_without_extra_reads(self):
+        cases = (
+            (None, "missing"), ("", "empty"),
+            ("https://archive.ubuntu.com/ubuntu/", "https-archive"),
+            ("https://security.ubuntu.com/ubuntu/", "https-security"),
+            ("http://azure.archive.ubuntu.com/ubuntu/", "http-azure"),
+            ("http://azure.archive.ubuntu.com/ubuntu", "http-azure-no-slash"),
+            ("http://archive.ubuntu.com/ubuntu/", "http-archive"),
+            ("http://archive.ubuntu.com/ubuntu", "http-archive-no-slash"),
+            ("http://security.ubuntu.com/ubuntu/", "http-security"),
+            ("http://security.ubuntu.com/ubuntu", "http-security-no-slash"),
+        )
+        original_read = self.helper.read_file
+        for value, shape in cases:
+            with self.subTest(shape=shape):
+                line = f"URIs: {self.helper.MIRROR_URI}\n"
+                source = self.SOURCE.replace(line, "" if value is None else f"URIs: {value}\n", 1)
+                self.source.write_text(source, encoding="ascii")
+                before = [(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_mode)
+                          for path in (self.source, self.mirrors)]
+                with patch.object(self.helper, "read_file", wraps=original_read) as read:
+                    self.assert_cli_refusal("source-uri", detail=f"Source URI shape: {shape}; stanza: 1/2")
+                    self.assertEqual([call.args[1] for call in read.call_args_list], ["ubuntu.sources"])
+                self.assertEqual(self.source.read_text(encoding="ascii"), source)
+                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+                self.assertEqual([(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_mode)
+                                  for path in (self.source, self.mirrors)], before)
+        self.assertEqual(self.helper.source_uri_shape(self.helper.MIRROR_URI), "expected-mirror-file")
+
+    def test_uri_shape_does_not_normalize_or_export_unknown_values(self):
+        values = (
+            "https://archive.ubuntu.com.attacker.invalid/ubuntu/",
+            "https://archive.ubuntu.com@attacker.invalid/ubuntu/",
+            "https://secret@archive.ubuntu.com/ubuntu/",
+            "https://archive.ubuntu.com/ubuntu/?token=private",
+            "https://archive.ubuntu.com/ubuntu/#private",
+            "https://archive.ubuntu.com/private/", "https://archive.ubuntu.com/ubuntu",
+            "HTTPS://archive.ubuntu.com/ubuntu/", "https://archive.ubuntu.com:443/ubuntu/",
+            "https://archive.ubuntu.com./ubuntu/", "http://private.invalid/secret",
+            "file:/private/secret", "mirror+file:/private/secret",
+            "https://archive.ubuntu.com/ubuntu/ https://security.ubuntu.com/ubuntu/",
+            "https://security.ubuntu.com/ubuntu/ https://archive.ubuntu.com/ubuntu/",
+            f"{self.helper.MIRROR_URI} {self.helper.MIRROR_URI}",
+            "private\x1b[31msecret", "private\x00secret",
+        )
+        for value in values:
+            with self.subTest(case=values.index(value)):
+                source = self.SOURCE.replace(self.helper.MIRROR_URI, value, 1)
+                self.source.write_text(source, encoding="ascii")
+                self.assert_cli_refusal("source-uri", detail="Source URI shape: other; stanza: 1/2")
+                self.assertEqual(self.source.read_text(encoding="ascii"), source)
+                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+
+    def test_uri_diagnostic_preserves_stanza_order_and_first_guard(self):
+        first, second = self.SOURCE.strip().split("\n\n")
+        bad = second.replace(self.helper.MIRROR_URI, "https://security.ubuntu.com/ubuntu/")
+        cases = (
+            (first + "\n\n" + bad, "source-uri", "Source URI shape: https-security; stanza: 2/2"),
+            (self.SOURCE + "\n" + bad, "source-uri", "Source URI shape: https-security; stanza: 3/3"),
+            (bad + "\n\n" + first, "source-uri", "Source URI shape: https-security; stanza: 1/2"),
+            (bad.replace(self.helper.KEYRING, "private") + "\n\n" + first,
+             "source-uri", "Source URI shape: https-security; stanza: 1/2"),
+            (first.replace(self.helper.KEYRING, "private") + "\n\n" + bad, "source-signature", None),
+            (first.replace(f"Signed-By: {self.helper.KEYRING}", "") + "\n\n" + bad,
+             "source-signature", None),
+            (first + "\nTrusted: yes\n\n" + bad, "source-fields", None),
+            (bad + "\n\nbroken syntax", "source-syntax", None),
+            (bad + "\nURIs: private", "source-syntax", None),
+        )
+        for source, category, detail in cases:
+            with self.subTest(category=category, detail=detail):
+                self.source.write_text(source, encoding="ascii")
+                self.assert_cli_refusal(category, detail=detail)
+                self.assertEqual(self.source.read_text(encoding="ascii"), source)
+                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+
+    def test_uri_detail_rendering_is_closed_and_bounded(self):
+        class Hostile(str):
+            def __eq__(self, _other):
+                raise AssertionError("unexpected comparison of untrusted detail")
+
+        for detail in (None, "private", [], ("private", 1, 2),
+                       (Hostile("other"), 1, 2), ("other", True, 2),
+                       ("other", 0, 2), ("other", 3, 2), ("other", 1, 16385),
+                       ("other", "private", 2), ("other", 1), ("other", 1, 2, "private")):
+            with self.subTest(case=type(detail).__name__):
+                error = self.helper.PreparationError("source-uri", source_uri_detail=detail)
+                self.assertIsNone(self.helper.source_uri_diagnostic(error))
+                with patch.object(sys, "argv", ["helper"]), \
+                        patch.object(self.helper.os, "geteuid", return_value=0), \
+                        patch.object(self.helper, "configure", side_effect=error), \
+                        contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(self.helper.main(), 65)
+                self.assertEqual(errors.getvalue(),
+                                 "Error: Ubuntu CI mirror preparation failed; package setup must stop.\n"
+                                 "Category: source-uri\n")
+        self.assertIsNone(self.helper.source_uri_diagnostic(self.helper.PreparationError(
+            "source-signature", source_uri_detail=("other", 1, 2))))
+
+    def test_uri_diagnostic_does_not_reread_a_replaced_source(self):
+        source = self.SOURCE.replace(self.helper.MIRROR_URI, "https://security.ubuntu.com/ubuntu/", 1)
+        self.source.write_text(source, encoding="ascii")
+        original_read = self.helper.read_file
+        calls = []
+
+        def read_file(*args):
+            calls.append(args[1])
+            data, metadata = original_read(*args)
+            replacement = self.sources / "replacement"
+            replacement.write_text(self.SOURCE, encoding="ascii")
+            replacement.replace(self.source)
+            return data, metadata
+
+        with patch.object(self.helper, "read_file", read_file):
+            self.assert_cli_refusal("source-uri", detail="Source URI shape: https-security; stanza: 1/2")
+        self.assertEqual(calls, ["ubuntu.sources"])
+        self.assertEqual(self.source.read_text(), self.SOURCE)
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+
+    def test_uri_diagnostic_success_remains_silent_and_idempotent(self):
+        configure = self.helper.configure
+        for message in ("selected.", "already selected."):
+            with patch.object(sys, "argv", ["helper"]), \
+                    patch.object(self.helper.os, "geteuid", return_value=0), \
+                    patch.object(self.helper, "configure", side_effect=lambda _path, _owner:
+                                 configure(self.apt, os.stat(self.apt).st_uid)), \
+                    contextlib.redirect_stdout(io.StringIO()) as output, \
+                    contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(self.helper.main(), 0)
+            self.assertEqual(errors.getvalue(), "")
+            self.assertEqual(output.getvalue(), f"Ubuntu CI mirrors: official HTTPS archives {message}\n")
         self.assert_preserved()
 
     def test_cli_metadata_categories_keep_configuration_unchanged(self):

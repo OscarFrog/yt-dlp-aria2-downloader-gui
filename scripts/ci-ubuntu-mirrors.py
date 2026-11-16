@@ -31,14 +31,52 @@ FAILURE_CATEGORIES = (
     "size-limit", "source-syntax", "source-uri", "source-signature",
     "source-fields", "mirror-list", "concurrent-change",
 )
+# Diagnostic vocabulary only, never an acceptance list. These exact endpoints
+# occur in the reviewed runner-image recipe; no host/scheme normalization occurs.
+SOURCE_URI_SHAPES = {
+    MIRROR_URI: "expected-mirror-file",
+    "https://archive.ubuntu.com/ubuntu/": "https-archive",
+    "https://security.ubuntu.com/ubuntu/": "https-security",
+    "http://azure.archive.ubuntu.com/ubuntu/": "http-azure",
+    "http://azure.archive.ubuntu.com/ubuntu": "http-azure-no-slash",
+    "http://archive.ubuntu.com/ubuntu/": "http-archive",
+    "http://archive.ubuntu.com/ubuntu": "http-archive-no-slash",
+    "http://security.ubuntu.com/ubuntu/": "http-security",
+    "http://security.ubuntu.com/ubuntu": "http-security-no-slash",
+}
 
 
 class PreparationError(ValueError):
     """Carry only a fixed diagnostic category, never configuration contents."""
 
-    def __init__(self, category):
+    def __init__(self, category, *, source_uri_detail=None):
         super().__init__(category)
         self.category = category
+        self.source_uri_detail = source_uri_detail
+
+
+def source_uri_shape(value):
+    """Classify an already parsed field without retaining any received URI."""
+    if value is None:
+        return "missing"
+    if value == "":
+        return "empty"
+    return SOURCE_URI_SHAPES.get(value, "other")
+
+
+def source_uri_diagnostic(error):
+    """Export only a closed label and bounded parser positions on URI refusal."""
+    if not isinstance(error, PreparationError) or failure_category(error) != "source-uri":
+        return None
+    detail = error.source_uri_detail
+    if type(detail) is not tuple or len(detail) != 3:
+        return None
+    shape, index, count = detail
+    if (type(shape) is not str or shape not in (*SOURCE_URI_SHAPES.values(), "missing", "empty", "other")
+            or type(index) is not int or type(count) is not int
+            or not 1 <= index <= count <= MAX_BYTES):
+        return None
+    return f"Source URI shape: {shape}; stanza: {index}/{count}"
 
 
 def failure_category(error):
@@ -119,9 +157,10 @@ def validate_sources(data):
         current[key] = value.strip()
     if not stanzas:
         raise PreparationError("source-syntax")
-    for stanza in stanzas:
+    for index, stanza in enumerate(stanzas, 1):
         if stanza.get("URIs") != MIRROR_URI:
-            raise PreparationError("source-uri")
+            raise PreparationError("source-uri", source_uri_detail=(
+                source_uri_shape(stanza.get("URIs")), index, len(stanzas)))
         if stanza.get("Signed-By") != KEYRING:
             raise PreparationError("source-signature")
         if (stanza.get("Types") not in ("deb", "deb deb-src")
@@ -187,6 +226,9 @@ def main():
         print("Error: Ubuntu CI mirror preparation failed; package setup must stop.",
               file=sys.stderr)
         print("Category: " + failure_category(error), file=sys.stderr)
+        detail = source_uri_diagnostic(error)
+        if detail is not None:
+            print(detail, file=sys.stderr)
         return 65
     print("Ubuntu CI mirrors: official HTTPS archives " + ("selected." if changed else "already selected."))
     return 0

@@ -1294,6 +1294,18 @@ An unknown layout or changed source identity stops preparation with exit status
 65 and a fixed failure category; the helper never prints
 source contents, arbitrary paths or exception messages. Categories distinguish
 layout, ownership, permissions, concurrent changes and I/O failures.
+On `source-uri` refusal only, one additional bounded line reports an exact
+known URI shape and the first rejected stanza's position/count from the same
+parsed bytes. Missing, empty and unknown values have neutral fixed labels;
+unknown values, multiple-URI combinations and arbitrary exception text are
+never exported. The diagnostic vocabulary is not an acceptance list: even a
+recognized direct Ubuntu HTTPS URI still fails with status 65. Direct sources
+do not use the mirror-list file, so changing that file alone cannot prepare them.
+The endpoint vocabulary follows the
+[versioned runner recipe](https://github.com/actions/runner-images/blob/fb099341ddaf44a428fb17495341cb7c2300faf2/images/ubuntu/scripts/build/configure-apt-sources.sh):
+HTTP Azure/archive/security `/ubuntu` with or without a trailing slash and the
+two HTTPS archive/security mirror targets with a trailing slash. A recipe is
+not evidence of the contents, signing configuration or suites of a running job.
 The helper is not installed with the application and never executes in pre-tag validation,
 signing or publication jobs.
 
