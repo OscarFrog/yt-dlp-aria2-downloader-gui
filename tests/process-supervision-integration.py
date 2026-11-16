@@ -4116,21 +4116,167 @@ assert_no_residual_processes "$2" "$2/stop"
         self.assertNotIn(str(os.getpid()), state['live'])
         self.assertTrue(self.observer.sample()['live'], 'harness rescued the witness before its verdict')
 
+    def timeout_pidfd_terminal(self, descriptor):
+        readiness = select.poll()
+        readiness.register(descriptor, select.POLLIN)
+        events = readiness.poll(0)
+        if not events:
+            return False
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], descriptor)
+        self.assertTrue(events[0][1] & select.POLLIN)
+        self.assertFalse(events[0][1] & ~(select.POLLIN | select.POLLHUP))
+        return True
+
+    def admit_timeout_launcher(self, identities, descriptors, release):
+        # The fixture's voluntary exit must follow its first complete privacy
+        # observation. The production timeout remains armed throughout; a late
+        # or failed observation cannot authorize release or repair its refusal.
+        for descriptor in descriptors.values():
+            self.assertFalse(self.timeout_pidfd_terminal(descriptor),
+                             'fixture terminated before initial observation')
+        state = self.observer.sample()
+        self.assertFalse(state['url_in_argv'], 'initial fixture observation found a URL')
+        for pid, row in identities.items():
+            self.assertIn(str(pid), state['live'], 'fixture missing from initial observation')
+            for field in ('start', 'parent', 'group', 'session'):
+                self.assertEqual(state['live'][str(pid)][field], row[field],
+                                 'initial fixture identity changed')
+        for descriptor in descriptors.values():
+            self.assertFalse(self.timeout_pidfd_terminal(descriptor),
+                             'fixture terminated during initial observation')
+        self.assertEqual(os.write(release, b'R'), 1, 'launcher acknowledgement was not written')
+
+    def test_timeout_admission_requires_current_complete_observation(self):
+        identities = {101: {'start': 11, 'parent': 100, 'group': 101, 'session': 101},
+                      102: {'start': 12, 'parent': 101, 'group': 102, 'session': 101}}
+        descriptors = {101: 201, 102: 202}
+        cases = ('valid', 'missing', 'reused', 'privacy', 'terminal-before', 'terminal-after',
+                 'esrch', 'eacces', 'eio', 'missing-ack')
+        for case in cases:
+            with self.subTest(case=case):
+                state = {'live': {str(pid): dict(row) for pid, row in identities.items()},
+                         'url_in_argv': []}
+                if case == 'missing':
+                    state['live'].pop('101')
+                elif case == 'reused':
+                    state['live']['101']['start'] += 1
+                elif case == 'privacy':
+                    state['url_in_argv'] = [(102, 12)]
+                events = []
+                reads, writes = os.pipe()
+                os.set_blocking(reads, False)
+                original_write = os.write
+                error = None
+                if case in ('esrch', 'eacces', 'eio'):
+                    error = observer.ObservationError(
+                        {'esrch': errno.ESRCH, 'eacces': errno.EACCES, 'eio': errno.EIO}[case],
+                        'synthetic initial observation refusal')
+
+                def terminal(descriptor):
+                    events.append(('pidfd', descriptor))
+                    return ((case == 'terminal-before' and len(events) == 1)
+                            or (case == 'terminal-after' and len(events) == 4))
+
+                def sample():
+                    events.append(('sample',))
+                    if error is not None:
+                        raise error
+                    return state
+
+                def write(descriptor, payload):
+                    events.append(('ack',))
+                    self.assertEqual((descriptor, payload), (writes, b'R'))
+                    return 0 if case == 'missing-ack' else original_write(descriptor, payload)
+
+                try:
+                    with mock.patch.object(self, 'timeout_pidfd_terminal', side_effect=terminal), \
+                            mock.patch.object(self.observer, 'sample', side_effect=sample), \
+                            mock.patch.object(os, 'write', side_effect=write):
+                        if case == 'valid':
+                            self.admit_timeout_launcher(identities, descriptors, writes)
+                        elif error is not None:
+                            with self.assertRaises(observer.ObservationError) as caught:
+                                self.admit_timeout_launcher(identities, descriptors, writes)
+                            self.assertIs(caught.exception, error)
+                        else:
+                            with self.assertRaises(self.failureException):
+                                self.admit_timeout_launcher(identities, descriptors, writes)
+                    if case == 'valid':
+                        self.assertEqual(os.read(reads, 2), b'R')
+                        self.assertEqual(events, [('pidfd', 201), ('pidfd', 202), ('sample',),
+                                                  ('pidfd', 201), ('pidfd', 202), ('ack',)])
+                    else:
+                        with self.assertRaises(BlockingIOError):
+                            os.read(reads, 1)
+                        if case != 'missing-ack':
+                            self.assertNotIn(('ack',), events)
+                finally:
+                    os.close(reads)
+                    os.close(writes)
+
     def test_timeout_early_leader_resistant_descendant_holding_pipe(self):
         child = self.child(resistant=True, new_group=True)
         launcher = self.root / 'launch.py'
-        launcher.write_text('''import subprocess, sys, time
+        launcher.write_text('''import os, subprocess, sys, time
 from pathlib import Path
 subprocess.Popen([sys.executable, sys.argv[1]])
 while not Path(sys.argv[1]).with_name('ready').exists(): time.sleep(.01)
+if os.read(int(sys.argv[2]), 1) != b'R': raise SystemExit(70)
 ''')
-        p = self.launch([sys.executable, str(PROJECT / 'private-process-supervisor.py'),
-                         '--timeout', '.3', '--grace', '.2', '--', sys.executable,
-                         str(launcher), str(child)])
-        self.wait_file('ready', p)
-        self.observer.sample()
+        admission, release = os.pipe()
+        self.addCleanup(os.close, release)
+        try:
+            p = subprocess.Popen(
+                [sys.executable, str(PROJECT / 'private-process-supervisor.py'),
+                 '--timeout', '.3', '--grace', '.2', '--', sys.executable,
+                 str(launcher), str(child), str(admission)], pass_fds=(admission,),
+                env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            self.processes.append(p)
+        finally:
+            os.close(admission)
+        consumer = int(self.wait_file('ready', p))
+        consumer_row = observer.current_process(consumer)
+        self.assertIsNotNone(consumer_row)
+        leader = consumer_row['parent']
+        leader_row = observer.current_process(leader)
+        self.assertIsNotNone(leader_row)
+        self.assertEqual((leader_row['parent'], leader_row['group'], leader_row['session']),
+                         (p.pid, leader, leader))
+        self.assertEqual((consumer_row['group'], consumer_row['session']), (consumer, leader))
+        identities = {leader: leader_row, consumer: consumer_row}
+        descriptors = {}
+        for pid, row in identities.items():
+            descriptor = os.pidfd_open(pid)
+            self.addCleanup(os.close, descriptor)
+            current = observer.current_process(pid)
+            self.assertIsNotNone(current)
+            for field in ('start', 'parent', 'group', 'session'):
+                self.assertEqual(current[field], row[field], 'pidfd fixture identity changed')
+            descriptors[pid] = descriptor
+        self.admit_timeout_launcher(identities, descriptors, release)
+        deadline = time.monotonic() + 5
+        while not self.timeout_pidfd_terminal(descriptors[leader]):
+            self.assertIsNone(p.poll(), 'supervisor returned before launcher retirement')
+            self.assertLess(time.monotonic(), deadline, 'launcher did not acknowledge release')
+            time.sleep(.001)
+        # The supervisor pins its zombie child. Check raw exit_code as well as
+        # identity: terminal readiness alone could be TERM, not voluntary exit.
+        fields = Path(f'/proc/{leader}/stat').read_text(
+            encoding='ascii', errors='surrogateescape').rsplit(') ', 1)[1].split()
+        self.assertEqual((int(fields[19]), fields[0], int(fields[1])),
+                         (leader_row['start'], 'Z', p.pid))
+        self.assertEqual(int(fields[49]), 0, 'launcher did not exit normally after observation')
+        self.assertFalse(self.timeout_pidfd_terminal(descriptors[consumer]))
+        self.assertFalse((self.root / 'term').exists(), 'timeout preceded the early leader exit')
+        self.assertIsNone(p.poll(), 'supervisor returned while the descendant remained live')
+        # Pipe EOF must not hide a premature supervisor return. Check the
+        # authenticated last FD holder immediately after wait(), before drain.
+        self.assertEqual(p.wait(timeout=5), 137)
+        self.assertTrue(self.timeout_pidfd_terminal(descriptors[consumer]),
+                        'supervisor returned before last FD holder stopped')
         p.communicate(timeout=5)
-        self.assertEqual(p.returncode, 137)
         self.assertTrue((self.root / 'term').exists())
         self.assertFalse(self.observer.sample()['live'], 'timeout returned before last FD holder stopped')
 
