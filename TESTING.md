@@ -1690,8 +1690,12 @@ the official Ubuntu HTTPS archives through `scripts/ci-ubuntu-mirrors.py`.
 The helper accepts only the reviewed runner mirror list or its already selected
 form and refuses unfamiliar, unsafe or changed configuration. It removes the
 Azure mirror that can continue transferring too slowly to trigger an inactivity
-timeout. Existing Ubuntu source stanzas, suites, components, signing keyring,
-APT authentication and test deadlines remain unchanged. This preparation is
+timeout. The historical indirect profile preserves all source bytes. A strict
+mixed Noble profile normalizes only the two URI lines of `ubuntu.sources` to
+official HTTPS archive/security endpoints; its reviewed mirror list is retained.
+Both strophes must match the complete profile in `ARCHITECTURE.md` before any
+change. Suites, components, signing keyring, APT authentication and test
+deadlines remain unchanged. This preparation is
 limited to disposable CI runners; it does not modify users' package settings
 or introduce candidate execution in privileged validation/signing jobs.
 
@@ -1724,13 +1728,22 @@ Mirror fixtures also verify idempotence, exact source preservation, rejected
 unknown endpoints, unsafe filesystem objects and failed-preparation propagation
 before APT. Local fixtures use temporary directories and never modify `/etc/apt`.
 `python3 -B tests/ci-validation-integration.py UbuntuMirrorTests` also checks
-the fixed `source-uri` shape/position diagnostic: exact known endpoints remain
-refusals, missing/empty fields are distinct, lookalike hosts, credentials,
+the fixed `source-uri` shape/position diagnostic: known endpoints outside the
+complete accepted profiles remain refusals, missing/empty fields are distinct, lookalike hosts, credentials,
 parameters and multiple-URI combinations disclose no values. Stanza order,
 first-error priority, original bytes/modes, bounded output and the absence of
-additional file reads remain part of the contract. A replaced source cannot
+additional diagnostic file reads remain part of the contract. A replaced source cannot
 change the diagnostic for the bytes already read. Recognition is not permission
-to accept direct sources or bypass signing and mirror-list validation.
+to bypass complete source-profile, signing or mirror-list validation.
+The same suite exercises mixed-to-HTTPS normalization and its exact repeated
+form, full field/ordering checks, byte and mode preservation, short/truncated
+reads, staged partial writes, inode/directory changes and in-place cloud-init
+replacements. Interrupted transactions and file/directory `fsync` errors must
+refuse success. Before replacement, originals remain; after replacement, a
+durability failure stays FAIL without rollback. Repetition must establish
+durability again, including on an otherwise unchanged layout. SIGKILL/power-loss
+recovery is not claimed by deterministic exception-injection tests; staging
+names are outside APT's source filename patterns.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the exact-source qualification proof and release-specific identity checks, verifies

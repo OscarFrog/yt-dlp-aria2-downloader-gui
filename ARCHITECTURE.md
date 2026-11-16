@@ -1288,8 +1288,41 @@ Ubuntu jobs that install media, generation-qualification or source/DEB package
 dependencies first run the source-only `scripts/ci-ubuntu-mirrors.py` helper.
 It recognizes the runner's exact Azure/Ubuntu mirror list, removes the Azure
 endpoint and retains the official archive and security endpoints over HTTPS.
-It changes only that owned regular mirror-list file, atomically; the DEB822
-source stanzas, suites, components and Ubuntu archive keyring remain unchanged.
+For the historical all-indirect layout it changes only that owned regular
+mirror-list file, atomically; the DEB822 sources remain unchanged.
+One additional profile admits exactly two ordered Noble stanzas: ordinary
+`noble noble-updates noble-backports` using the mirror indirection, then
+`noble-security` using exactly `http://security.ubuntu.com/ubuntu`. Both require
+`Types: deb` or `deb deb-src`, the four components main/restricted/universe/
+multiverse without duplication, the exact Ubuntu archive keyring and no extra
+fields. Component order is retained; stanza and suite order are fixed. Only
+LF/CRLF ASCII source text with optional horizontal tabs is admitted by this
+profile. Its exact HTTPS output is the only additional idempotent layout.
+
+For this mixed profile, the helper replaces only `ubuntu.sources`, changing its
+two URI lines to `https://archive.ubuntu.com/ubuntu/` and
+`https://security.ubuntu.com/ubuntu/` respectively. All other source bytes and
+file permissions/ownership are retained. The mirror list must still be a
+reviewed list, but stays byte-for-byte unchanged. APT therefore consumes the
+prepared HTTPS endpoints directly; mirror fallback is deliberately absent for
+this profile. The CLI distinguishes direct-source preparation from mirror
+selection. Restoring indirection instead would normally require two file
+replacements and an unsafe rollback decision if an independent writer intervened.
+
+Reads are bounded and complete, with metadata checked before/after reading.
+Source and mirror identities, contents and metadata, directory linkage and
+staged bytes are revalidated before replacement. The staged file is synced,
+one file is atomically replaced, its directory is synced and the result is
+revalidated. No-op repeats also sync and revalidate: an earlier failed directory
+sync is not repaired by byte equality alone. A failure before replacement
+preserves originals; an error after replacement remains blocking even if the
+new file is visible. No rollback overwrites a concurrent writer. A process
+killed before cleanup may leave a staging file with the target permissions
+once prepared; its name is never an APT source filename.
+These checks detect changes at observed boundaries, including cloud-init
+replacements. They are not a kernel compare-and-swap against a non-cooperating
+root writer between the last check and rename, nor a guarantee against changes
+after the helper returns. Signing trust and APT authentication are unchanged.
 An unknown layout or changed source identity stops preparation with exit status
 65 and a fixed failure category; the helper never prints
 source contents, arbitrary paths or exception messages. Categories distinguish
@@ -1298,9 +1331,10 @@ On `source-uri` refusal only, one additional bounded line reports an exact
 known URI shape and the first rejected stanza's position/count from the same
 parsed bytes. Missing, empty and unknown values have neutral fixed labels;
 unknown values, multiple-URI combinations and arbitrary exception text are
-never exported. The diagnostic vocabulary is not an acceptance list: even a
-recognized direct Ubuntu HTTPS URI still fails with status 65. Direct sources
-do not use the mirror-list file, so changing that file alone cannot prepare them.
+never exported. The diagnostic vocabulary alone is not an acceptance list:
+recognized endpoints outside the complete profiles still fail with status 65.
+Direct sources do not use the mirror-list file, so changing that file alone
+cannot prepare them.
 The endpoint vocabulary follows the
 [versioned runner recipe](https://github.com/actions/runner-images/blob/fb099341ddaf44a428fb17495341cb7c2300faf2/images/ubuntu/scripts/build/configure-apt-sources.sh):
 HTTP Azure/archive/security `/ubuntu` with or without a trailing slash and the
