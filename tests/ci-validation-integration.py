@@ -3177,6 +3177,258 @@ def require_fixture_process_exit(pid, starttime, *, read_stat=None,
         sleep(min(0.005, remaining))
 
 
+class DirectoryOwnershipTests(unittest.TestCase):
+    """Observe real FD lifetimes independently of injected syscall failures."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("apt_directory_ownership", PROJECT / "scripts/ci-ubuntu-mirrors.py")
+        cls.helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.helper)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.directory = self.root / 'first' / 'second'
+        self.directory.mkdir(parents=True, mode=0o700)
+        self.sentinel = self.root / 'sentinel'
+        self.sentinel.write_bytes(b'independently owned descriptor')
+        self.owner = os.geteuid()
+
+    @contextlib.contextmanager
+    def acquisitions(self, *, open_error=None, stat_error=None, close_errors=None, reuse=False):
+        """Record generations, not reusable integers; clean only witness-owned FDs."""
+        real_open, real_close, real_stat = os.open, os.close, os.fstat
+        trace = {'events': [], 'live': {}, 'opens': 0, 'closes': 0, 'sentinel': None}
+        close_errors = close_errors or {}
+
+        def opening(path, flags, **kwargs):
+            trace['opens'] += 1
+            generation = trace['opens']
+            parent = trace['live'].get(kwargs.get('dir_fd'))
+            trace['events'].append(('open', generation, parent, flags))
+            if open_error is not None and generation == open_error[0]:
+                raise open_error[1]
+            fd = real_open(path, flags, **kwargs)
+            trace['live'][fd] = generation
+            trace['events'].append(('acquired', generation))
+            return fd
+
+        def closing(fd):
+            trace['closes'] += 1
+            generation = trace['live'].get(fd, 'foreign-or-consumed')
+            trace['events'].append(('close', generation))
+            real_close(fd)
+            trace['live'].pop(fd, None)
+            if reuse and trace['closes'] == 1:
+                sentinel = real_open(self.sentinel, os.O_RDONLY | os.O_CLOEXEC)
+                if sentinel != fd:
+                    os.dup2(sentinel, fd, inheritable=False)
+                    real_close(sentinel)
+                trace['sentinel'] = fd
+            if trace['closes'] in close_errors:
+                raise close_errors[trace['closes']]
+
+        def examining(fd):
+            trace['events'].append(('fstat', trace['live'].get(fd, 'foreign-or-consumed')))
+            if stat_error is not None:
+                raise stat_error
+            return real_stat(fd)
+
+        try:
+            with patch.object(self.helper.os, 'open', side_effect=opening), \
+                    patch.object(self.helper.os, 'close', side_effect=closing), \
+                    patch.object(self.helper.os, 'fstat', side_effect=examining):
+                yield trace
+        finally:
+            # The witness owns leaked resources for cleanup, but asserts their
+            # state before cleanup; it never turns a candidate leak into PASS.
+            for fd in tuple(trace['live']):
+                real_close(fd)
+            sentinel = trace['sentinel']
+            if sentinel is not None:
+                try:
+                    metadata = real_stat(sentinel)
+                except OSError as error:
+                    if error.errno != errno.EBADF:
+                        raise
+                else:
+                    if (metadata.st_dev, metadata.st_ino) == (self.sentinel.stat().st_dev, self.sentinel.stat().st_ino):
+                        real_close(sentinel)
+
+    def test_nominal_walk_returns_only_the_final_live_descriptor(self):
+        real_stat = os.fstat
+        for directory in (self.root, self.directory):
+            with self.subTest(components=len(directory.parts)), self.acquisitions() as trace:
+                fd = self.helper.open_directory(directory, self.owner)
+                count = len(directory.parts)
+                self.assertEqual(trace['live'], {fd: count})
+                self.assertEqual((real_stat(fd).st_dev, real_stat(fd).st_ino),
+                                 (directory.stat().st_dev, directory.stat().st_ino))
+                expected = [('open', 1, None, self.helper.OPEN_READ | os.O_DIRECTORY), ('acquired', 1)]
+                for generation in range(2, count + 1):
+                    expected += [('open', generation, generation - 1, self.helper.OPEN_READ | os.O_DIRECTORY),
+                                 ('acquired', generation), ('close', generation - 1)]
+                self.assertEqual(trace['events'], expected + [('fstat', count)])
+                self.assertEqual(trace['closes'], count - 1)
+                # Only the caller releases the successfully transferred FD.
+                self.helper.os.close(fd)
+                self.assertEqual(trace['live'], {})
+
+    def test_child_open_failure_preserves_exact_primary_and_releases_parent(self):
+        for failed_open in (2, len(self.directory.parts)):
+            primary = PermissionError(errno.EACCES, 'private opening failure')
+            with self.subTest(failed_open=failed_open), self.acquisitions(open_error=(failed_open, primary)) as trace:
+                with self.assertRaises(PermissionError) as caught:
+                    self.helper.open_directory(self.directory, self.owner)
+                self.assertIs(caught.exception, primary)
+                self.assertEqual(caught.exception.errno, errno.EACCES)
+                self.assertEqual(trace['live'], {})
+                self.assertEqual([event[1] for event in trace['events'] if event[0] == 'close'],
+                                 list(range(1, failed_open)))
+
+    def test_failed_validation_releases_final_descriptor_without_masking(self):
+        primary = OSError(errno.EIO, 'private stat failure')
+        with self.acquisitions(stat_error=primary) as trace:
+            with self.assertRaises(OSError) as caught:
+                self.helper.open_directory(self.directory, self.owner)
+            self.assertIs(caught.exception, primary)
+            self.assertEqual(trace['live'], {})
+        for category in ('owner', 'permissions'):
+            if category == 'permissions':
+                self.directory.chmod(0o777)
+            with self.subTest(category=category), self.acquisitions() as trace:
+                with self.assertRaises(self.helper.PreparationError) as caught:
+                    self.helper.open_directory(self.directory, self.owner + (category == 'owner'))
+                self.assertEqual(caught.exception.category, category)
+                self.assertEqual(trace['live'], {})
+            self.directory.chmod(0o700)
+
+    def test_parent_close_errors_never_retry_or_lose_the_child(self):
+        for error_number in (errno.EIO, errno.EINTR, errno.EBADF):
+            for failed_close in (1, len(self.directory.parts) - 1):
+                primary = OSError(error_number, 'injected after native close')
+                with self.subTest(errno=error_number, position=failed_close), \
+                        self.acquisitions(close_errors={failed_close: primary}) as trace:
+                    with self.assertRaises(OSError) as caught:
+                        self.helper.open_directory(self.directory, self.owner)
+                    self.assertIs(caught.exception, primary)
+                    self.assertEqual(caught.exception.errno, error_number)
+                    self.assertEqual(trace['live'], {})
+                    self.assertEqual([event[1] for event in trace['events'] if event[0] == 'close'],
+                                     list(range(1, failed_close + 2)))
+
+    def test_reassigned_parent_number_is_not_closed_during_cleanup(self):
+        real_stat = os.fstat
+        primary = OSError(errno.EIO, 'injected after native close and reuse')
+        with self.acquisitions(close_errors={1: primary}, reuse=True) as trace:
+            with self.assertRaises(OSError) as caught:
+                self.helper.open_directory(self.directory, self.owner)
+            self.assertIs(caught.exception, primary)
+            try:
+                metadata = real_stat(trace['sentinel'])
+            except OSError as error:
+                self.fail(f'foreign sentinel was closed: errno {error.errno}')
+            self.assertEqual((metadata.st_dev, metadata.st_ino),
+                             (self.sentinel.stat().st_dev, self.sentinel.stat().st_ino))
+            self.assertEqual(trace['live'], {})
+            self.assertEqual([event for event in trace['events'] if event[0] == 'close'],
+                             [('close', 1), ('close', 2)])
+
+    def test_open_error_precedes_cleanup_error_with_bounded_secondary(self):
+        primary = PermissionError(errno.EACCES, 'private primary')
+        secondary = OSError(errno.EIO, 'private cleanup /token')
+        with self.acquisitions(open_error=(2, primary), close_errors={1: secondary}) as trace:
+            with self.assertRaises(PermissionError) as caught:
+                self.helper.open_directory(self.directory, self.owner)
+            self.assertIs(caught.exception, primary)
+            self.assertEqual(caught.exception.errno, errno.EACCES)
+            self.assertEqual(caught.exception.directory_close_category, 'io-error')
+            self.assertEqual(trace['live'], {})
+            self.assertEqual([event for event in trace['events'] if event[0] == 'close'], [('close', 1)])
+
+    def test_two_failed_closes_keep_first_error_and_consume_each_fd_once(self):
+        primary = InterruptedError(errno.EINTR, 'private primary')
+        secondary = PermissionError(errno.EPERM, 'private secondary')
+        with self.acquisitions(close_errors={1: primary, 2: secondary}) as trace:
+            with self.assertRaises(InterruptedError) as caught:
+                self.helper.open_directory(self.directory, self.owner)
+            self.assertIs(caught.exception, primary)
+            self.assertEqual(caught.exception.directory_close_category, 'access-denied')
+            self.assertEqual(trace['live'], {})
+            self.assertEqual([event for event in trace['events'] if event[0] == 'close'],
+                             [('close', 1), ('close', 2)])
+
+    def test_validation_refusal_precedes_cleanup_failure(self):
+        count = len(self.directory.parts)
+        for primary in (None, OSError(errno.EIO, 'private stat'), KeyboardInterrupt()):
+            secondary = OSError(errno.EIO, 'private cleanup')
+            expected = type(primary) if primary is not None else self.helper.PreparationError
+            with self.subTest(primary=expected.__name__), \
+                    self.acquisitions(stat_error=primary, close_errors={count: secondary}) as trace:
+                with self.assertRaises(expected) as caught:
+                    self.helper.open_directory(self.directory, self.owner + 1)
+                if primary is None:
+                    self.assertEqual(caught.exception.category, 'owner')
+                else:
+                    self.assertIs(caught.exception, primary)
+                self.assertEqual(caught.exception.directory_close_category, 'io-error')
+                self.assertEqual(trace['live'], {})
+                self.assertEqual([event[1] for event in trace['events'] if event[0] == 'close'],
+                                 list(range(1, count + 1)))
+
+    def test_invalid_paths_and_symlink_components_remain_rejected(self):
+        for directory in ('relative/path', str(self.directory / '..')):
+            with self.subTest(directory=directory), self.acquisitions() as trace:
+                with self.assertRaises(self.helper.PreparationError) as caught:
+                    self.helper.open_directory(directory, self.owner)
+                self.assertEqual(caught.exception.category, 'directory-path')
+                self.assertEqual(trace['events'], [])
+        alias = self.root / 'alias'
+        alias.symlink_to(self.directory, target_is_directory=True)
+        with self.acquisitions() as trace:
+            with self.assertRaises(OSError) as caught:
+                self.helper.open_directory(alias, self.owner)
+            self.assertIn(caught.exception.errno, (errno.ELOOP, errno.ENOTDIR))
+            self.assertEqual(trace['live'], {})
+
+    def test_cleanup_diagnostic_rejects_unbounded_or_private_forged_details(self):
+        error = OSError(errno.EACCES, 'private primary')
+        self.assertIsNone(self.helper.directory_close_diagnostic(error))
+        for detail in (None, '', 5, True, ['io-error'], 'private/token', 'io-error\nprivate', 'x' * 20000):
+            error.directory_close_category = detail
+            with self.subTest(detail_type=type(detail).__name__):
+                self.assertIsNone(self.helper.directory_close_diagnostic(error))
+        for category in ('missing-file', 'access-denied', 'path-type', 'io-error'):
+            error.directory_close_category = category
+            self.assertEqual(self.helper.directory_close_diagnostic(error), f'Directory cleanup: {category}')
+
+    def test_cli_preserves_primary_category_secondary_and_refuses_apt(self):
+        for dedicated in (False, True):
+            primary = PermissionError(errno.EACCES, 'private primary /token')
+            secondary = OSError(errno.EIO, 'private secondary /token')
+            output, errors = io.StringIO(), io.StringIO()
+            def refused(*_):
+                return self.helper.open_directory(self.directory, self.owner)
+            with self.subTest(dedicated=dedicated), \
+                    self.acquisitions(open_error=(2, primary), close_errors={1: secondary}), \
+                    patch.object(self.helper.os, 'geteuid', return_value=0), \
+                    patch.object(sys, 'argv', ['helper']), \
+                    patch.object(Path, 'read_text', return_value='ID=ubuntu\nVERSION_ID=24.04\n'), \
+                    patch.object(self.helper, 'prepare_dedicated', side_effect=refused), \
+                    patch.object(self.helper, 'configure', side_effect=refused), \
+                    patch.object(self.helper.subprocess, 'run') as execute, \
+                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                status = self.helper.dedicated_main(['--setup']) if dedicated else self.helper.main()
+                self.assertEqual(status, 65)
+                self.assertEqual(output.getvalue(), '')
+                expected = ('Error: Ubuntu CI APT preparation or validation failed; package setup must stop.\n'
+                            if dedicated else 'Error: Ubuntu CI mirror preparation failed; package setup must stop.\n')
+                self.assertEqual(errors.getvalue(), expected + 'Category: access-denied\nDirectory cleanup: io-error\n')
+                execute.assert_not_called()
+
+
 class DedicatedAPTTests(unittest.TestCase):
     """Exercise the real scoped helper without invoking the host package manager."""
 

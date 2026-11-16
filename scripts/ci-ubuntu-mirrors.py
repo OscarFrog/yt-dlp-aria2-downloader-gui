@@ -153,6 +153,14 @@ def failure_category(error):
     return "unrecognized-configuration"
 
 
+def directory_close_diagnostic(error):
+    """Expose only the bounded secondary failure of directory cleanup."""
+    category = getattr(error, "directory_close_category", None)
+    if type(category) is str and category in ("missing-file", "access-denied", "path-type", "io-error"):
+        return f"Directory cleanup: {category}"
+    return None
+
+
 def open_directory(path, owner):
     """Pin every path component without following a symlink."""
     path = Path(path)
@@ -162,16 +170,23 @@ def open_directory(path, owner):
     try:
         for component in path.parts[1:]:
             child = os.open(component, OPEN_READ | os.O_DIRECTORY, dir_fd=descriptor)
-            os.close(descriptor)
-            descriptor = child
+            # Linux can release a descriptor even when close reports an error.
+            # Own the child before attempting the parent's non-retryable close.
+            parent, descriptor = descriptor, child
+            os.close(parent)
         metadata = os.fstat(descriptor)
         if metadata.st_uid != owner:
             raise PreparationError("owner")
         if stat.S_IMODE(metadata.st_mode) & 0o022:
             raise PreparationError("permissions")
         return descriptor
-    except BaseException:
-        os.close(descriptor)
+    except BaseException as error:
+        try:
+            os.close(descriptor)
+        except OSError as cleanup_error:
+            # Keep the first exception and only a fixed secondary category;
+            # never retry a consumed number or retain private exception text.
+            error.directory_close_category = failure_category(cleanup_error)
         raise
 
 
@@ -646,6 +661,9 @@ def dedicated_main(arguments):
     except (OSError, ValueError, UnicodeError) as error:
         print('Error: Ubuntu CI APT preparation or validation failed; package setup must stop.', file=sys.stderr)
         print('Category: ' + failure_category(error), file=sys.stderr)
+        detail = directory_close_diagnostic(error)
+        if detail is not None:
+            print(detail, file=sys.stderr)
         return 65
 
 
@@ -661,6 +679,9 @@ def main():
         print("Error: Ubuntu CI mirror preparation failed; package setup must stop.",
               file=sys.stderr)
         print("Category: " + failure_category(error), file=sys.stderr)
+        detail = directory_close_diagnostic(error)
+        if detail is not None:
+            print(detail, file=sys.stderr)
         detail = source_uri_diagnostic(error)
         if detail is not None:
             print(detail, file=sys.stderr)
