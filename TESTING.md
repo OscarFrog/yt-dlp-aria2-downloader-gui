@@ -1735,6 +1735,16 @@ first-error priority, original bytes/modes, bounded output and the absence of
 additional diagnostic file reads remain part of the contract. A replaced source cannot
 change the diagnostic for the bytes already read. Recognition is not permission
 to bypass complete source-profile, signing or mirror-list validation.
+The `mirror-list` diagnostic uses the same secured read to distinguish the
+validated historical/mixed/direct source profile and ordered exact endpoint
+and priority shapes. Empty, malformed and unknown entries have closed labels;
+lists over eight entries report their count with `omitted-limit`, never a
+partial sequence presented as complete. Tests retain the same acceptance,
+first refusal, exit status, file bytes and I/O order; diagnostic recognition
+does not authorize a new list. Other active APT sources may still consume the
+mirror file even after these two stanzas become direct, so all profiles retain
+the list check. A private APT plan demonstrates only the sources included in
+that fixture, not the absence of other references on a hosted runner.
 The same suite exercises mixed-to-HTTPS normalization and its exact repeated
 form, full field/ordering checks, byte and mode preservation, short/truncated
 reads, staged partial writes, inode/directory changes and in-place cloud-init

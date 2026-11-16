@@ -2130,7 +2130,8 @@ class UbuntuMirrorTests(unittest.TestCase):
             self.assertEqual([call.args[1] for call in read.call_args_list], ["ubuntu.sources"])
         self.source.write_text(self.SOURCE, encoding="utf-8")
         with patch.object(self.helper, "read_file", wraps=original_read) as read:
-            self.assert_cli_refusal("mirror-list")
+            self.assert_cli_refusal("mirror-list", detail=(
+                "Mirror list profile: historical-indirect; entries: 1; entry-shapes: other/priority-1"))
             self.assertEqual([call.args[1] for call in read.call_args_list],
                              ["ubuntu.sources", "apt-mirrors.txt"])
         self.assertEqual(self.mirrors.read_text(), "https://private.invalid/secret priority:1\n")
@@ -2545,12 +2546,18 @@ class UbuntuMirrorTests(unittest.TestCase):
 
     def test_mixed_still_validates_unused_mirror_list(self):
         for source in (self.mixed_source(), self.normalized_source(self.mixed_source())):
-            for mirrors in (self.ORIGINAL.replace("archive.ubuntu.com", "private.invalid", 1),
-                            self.ORIGINAL.replace("https://archive", "http://archive"), ""):
+            for mirrors, shapes in (
+                    (self.ORIGINAL.replace("archive.ubuntu.com", "private.invalid", 1),
+                     "other/priority-1,https-archive/priority-2,https-security/priority-3"),
+                    (self.ORIGINAL.replace("https://archive", "http://archive"),
+                     "http-azure/priority-1,http-archive/priority-2,https-security/priority-3"),
+                    ("", "empty")):
                 with self.subTest(direct="https://archive.ubuntu.com/ubuntu/" in source, empty=not mirrors):
                     self.source.write_text(source, encoding="ascii")
                     self.mirrors.write_text(mirrors, encoding="ascii")
-                    self.assert_cli_refusal("mirror-list")
+                    profile = "direct" if "https://archive.ubuntu.com/ubuntu/" in source else "mixed"
+                    self.assert_cli_refusal("mirror-list", detail=(
+                        f"Mirror list profile: {profile}; entries: {3 if mirrors else 0}; entry-shapes: {shapes}"))
                     self.assertEqual(self.source.read_text(), source)
                     self.assertEqual(self.mirrors.read_text(), mirrors)
                     self.assert_no_apt_staging()
@@ -2894,6 +2901,192 @@ class UbuntuMirrorTests(unittest.TestCase):
         self.assertEqual(self.source.read_text(), self.normalized_source(self.mixed_source()))
         self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
         self.assert_no_apt_staging()
+
+    def test_mirror_diagnostic_profiles_keep_unknown_lists_blocking_and_unchanged(self):
+        cases = (("historical-indirect", self.SOURCE), ("mixed", self.mixed_source()),
+                 ("direct", self.normalized_source(self.mixed_source())))
+        mirrors = "https://private.invalid/secret priority:1\n"
+        for profile, source in cases:
+            with self.subTest(profile=profile):
+                self.source.write_text(source, encoding="ascii")
+                self.mirrors.write_text(mirrors, encoding="ascii")
+                before = [self.apt_stat_identity(path.stat()) for path in (self.source, self.mirrors)]
+                self.assert_cli_refusal("mirror-list", detail=(
+                    f"Mirror list profile: {profile}; entries: 1; entry-shapes: other/priority-1"))
+                self.assertEqual(self.source.read_text(encoding="ascii"), source)
+                self.assertEqual(self.mirrors.read_text(encoding="ascii"), mirrors)
+                self.assertEqual([self.apt_stat_identity(path.stat()) for path in (self.source, self.mirrors)],
+                                 before)
+                self.assertEqual(self.external.read_text(), "external fixture retained byte for byte\n")
+                self.assert_no_apt_staging()
+
+    def test_mirror_diagnostic_keeps_known_order_priority_and_arity_distinct(self):
+        cases = (
+            ("https://security.ubuntu.com/ubuntu/ priority:3\n"
+             "https://archive.ubuntu.com/ubuntu/ priority:2\n"
+             "http://azure.archive.ubuntu.com/ubuntu/ priority:1\n", 3,
+             "https-security/priority-3,https-archive/priority-2,http-azure/priority-1"),
+            ("http://azure.archive.ubuntu.com/ubuntu priority:1\n"
+             "http://archive.ubuntu.com/ubuntu priority:2\n"
+             "http://security.ubuntu.com/ubuntu priority:3\n", 3,
+             "http-azure-no-slash/priority-1,http-archive-no-slash/priority-2,http-security-no-slash/priority-3"),
+            ("https://archive.ubuntu.com/ubuntu/ priority:1\n"
+             "https://security.ubuntu.com/ubuntu/ priority:1\n", 2,
+             "https-archive/priority-1,https-security/priority-1"),
+            ("https://archive.ubuntu.com/ubuntu/ priority:99\n", 1, "https-archive/other"),
+            ("https://archive.ubuntu.com/ubuntu/\n", 1, "invalid-entry/other"),
+            ("https://archive.ubuntu.com/ubuntu/ priority:1 private-extra\n", 1, "invalid-entry/other"),
+            ("\n", 1, "invalid-entry/other"),
+            ("", 0, "empty"),
+            (self.ORIGINAL + self.ORIGINAL, 6,
+             "http-azure/priority-1,https-archive/priority-2,https-security/priority-3,"
+             "http-azure/priority-1,https-archive/priority-2,https-security/priority-3"),
+        )
+        for mirrors, count, shapes in cases:
+            with self.subTest(entries=count, expected=shapes):
+                self.mirrors.write_text(mirrors, encoding="ascii")
+                self.assert_cli_refusal("mirror-list", detail=(
+                    f"Mirror list profile: historical-indirect; entries: {count}; entry-shapes: {shapes}"))
+                self.assertEqual(self.mirrors.read_text(encoding="ascii"), mirrors)
+                self.assert_preserved()
+
+    def test_mirror_diagnostic_bounds_without_presenting_omitted_entries_as_complete(self):
+        for count in (8, 9, 200):
+            mirrors = "https://archive.ubuntu.com/ubuntu/ priority:1\n" * count
+            self.mirrors.write_text(mirrors, encoding="ascii")
+            shapes = ",".join(["https-archive/priority-1"] * count) if count <= 8 else "omitted-limit"
+            self.assert_cli_refusal("mirror-list", detail=(
+                f"Mirror list profile: historical-indirect; entries: {count}; entry-shapes: {shapes}"))
+            self.assertEqual(self.mirrors.read_text(encoding="ascii"), mirrors)
+            self.assert_preserved()
+        self.mirrors.write_bytes(b"x" * (self.helper.MAX_BYTES + 1))
+        self.assert_cli_refusal("size-limit")
+
+    def test_mirror_diagnostic_unknown_values_are_not_normalized_or_disclosed(self):
+        values = (
+            "https://archive.ubuntu.com.attacker.invalid/ubuntu/",
+            "https://archive.ubuntu.com/ubuntu/?private=secret",
+            "https://private:secret@archive.ubuntu.com/ubuntu/",
+            "HTTPS://archive.ubuntu.com/ubuntu/",
+            "https://archive.ubuntu.com:443/ubuntu/",
+            "https://archive.ubuntu.com/ubuntu/private",
+            "file:/private/secret", "mirror+file:/private/secret",
+            "https://archive.ubuntu.com/ubuntu/#secret", "private\x1b[31msecret",
+        )
+        for value in values:
+            with self.subTest(case=values.index(value)):
+                mirrors = f"{value} priority:1\n"
+                self.mirrors.write_text(mirrors, encoding="ascii")
+                self.assert_cli_refusal("mirror-list", detail=(
+                    "Mirror list profile: historical-indirect; entries: 1; entry-shapes: other/priority-1"))
+                self.assertEqual(self.mirrors.read_text(encoding="ascii"), mirrors)
+        self.mirrors.write_bytes(b"https://private.invalid/\xff priority:1\n")
+        self.assert_cli_refusal("unrecognized-configuration")
+        self.assert_preserved()
+
+    def test_mirror_diagnostic_renderer_refuses_forged_unbounded_or_private_details(self):
+        class Hostile(str):
+            def __eq__(self, _other):
+                raise AssertionError("untrusted detail compared")
+
+        pair = (("https-archive", "priority-1"),)
+        invalid = (
+            None, [], "private", ("private", 1, pair), (Hostile("mixed"), 1, pair),
+            ("mixed", True, pair), ("mixed", -1, ()), ("mixed", 16385, None),
+            ("mixed", 1, None), ("mixed", 9, pair), ("mixed", 1, []),
+            ("mixed", 2, pair), ("mixed", 0, pair), ("mixed", 1, (("private", "priority-1"),)),
+            ("mixed", 1, (("https-archive", "private"),)),
+            ("mixed", 1, ((Hostile("other"), "other"),)),
+            ("mixed", 1, (("other", Hostile("other")),)),
+            ("mixed", 1, (("other",),)), ("mixed", 1, (["other", "other"],)),
+            ("mixed", 1), ("mixed", 1, pair, "private"),
+        )
+        for detail in invalid:
+            with self.subTest(kind=type(detail).__name__):
+                error = self.helper.PreparationError("mirror-list", mirror_list_detail=detail)
+                self.assertIsNone(self.helper.mirror_list_diagnostic(error))
+                with patch.object(sys, "argv", ["helper"]), \
+                        patch.object(self.helper.os, "geteuid", return_value=0), \
+                        patch.object(self.helper, "configure", side_effect=error), \
+                        contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(self.helper.main(), 65)
+                self.assertEqual(errors.getvalue(),
+                                 "Error: Ubuntu CI mirror preparation failed; package setup must stop.\n"
+                                 "Category: mirror-list\n")
+        for category in ("source-signature", "source-uri", "concurrent-change"):
+            self.assertIsNone(self.helper.mirror_list_diagnostic(self.helper.PreparationError(
+                category, mirror_list_detail=("mixed", 1, pair))))
+
+    def test_mirror_diagnostic_uses_only_secured_bytes_already_read(self):
+        self.source.write_text(self.mixed_source(), encoding="ascii")
+        self.mirrors.write_text("https://security.ubuntu.com/ubuntu/ priority:1\n", encoding="ascii")
+        original_read = self.helper.read_file
+        calls = []
+
+        def read_file(*args):
+            calls.append(args[1])
+            data, metadata = original_read(*args)
+            if args[1] == "apt-mirrors.txt":
+                replacement = self.apt / "replacement"
+                replacement.write_text(self.ORIGINAL, encoding="ascii")
+                replacement.replace(self.mirrors)
+            return data, metadata
+
+        with patch.object(self.helper, "read_file", read_file):
+            self.assert_cli_refusal("mirror-list", detail=(
+                "Mirror list profile: mixed; entries: 1; entry-shapes: https-security/priority-1"))
+        self.assertEqual(calls, ["ubuntu.sources", "apt-mirrors.txt"])
+        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
+        self.assertEqual(self.source.read_text(), self.mixed_source())
+        self.assert_no_apt_staging()
+
+    def test_mirror_diagnostic_does_not_run_before_earlier_guards(self):
+        self.source.write_text(self.mixed_source().replace(self.helper.KEYRING, "/private/secret.gpg"),
+                               encoding="ascii")
+        self.mirrors.write_text("private unknown list\n", encoding="ascii")
+        original_read = self.helper.read_file
+        with patch.object(self.helper, "mirror_list_shape", side_effect=AssertionError("late diagnostic")), \
+                patch.object(self.helper, "read_file", wraps=original_read) as read:
+            self.assert_cli_refusal("source-signature")
+        self.assertEqual([call.args[1] for call in read.call_args_list], ["ubuntu.sources"])
+        self.source.write_text(self.mixed_source(), encoding="ascii")
+        self.mirrors.chmod(0o666)
+        with patch.object(self.helper, "mirror_list_shape", side_effect=AssertionError("late diagnostic")):
+            self.assert_cli_refusal("permissions")
+        self.assertEqual(self.mirrors.read_text(), "private unknown list\n")
+        self.assertEqual(self.source.read_text(), self.mixed_source())
+
+    def test_mirror_diagnostic_is_absent_on_all_accepted_profiles_and_repeats(self):
+        profiles = ((self.SOURCE, "mirrors", self.SOURCE),
+                    (self.mixed_source(), "sources", self.normalized_source(self.mixed_source())),
+                    (self.normalized_source(self.mixed_source()), "sources",
+                     self.normalized_source(self.mixed_source())))
+        configure = self.helper.configure
+        for source, kind, final_source in profiles:
+            for mirrors in (self.ORIGINAL, self.SELECTED):
+                with self.subTest(kind=kind, already_direct=source == final_source,
+                                  selected=mirrors == self.SELECTED):
+                    self.source.write_text(source, encoding="ascii")
+                    self.mirrors.write_text(mirrors, encoding="ascii")
+                    for repeat in (False, True):
+                        with patch.object(sys, "argv", ["helper"]), \
+                                patch.object(self.helper.os, "geteuid", return_value=0), \
+                                patch.object(self.helper, "configure", side_effect=lambda _path, _owner:
+                                             configure(self.apt, os.stat(self.apt).st_uid)), \
+                                patch.object(self.helper, "mirror_list_shape",
+                                             side_effect=AssertionError("diagnostic on success")), \
+                                contextlib.redirect_stdout(io.StringIO()) as output, \
+                                contextlib.redirect_stderr(io.StringIO()) as errors:
+                            self.assertEqual(self.helper.main(), 0)
+                        self.assertEqual(errors.getvalue(), "")
+                        already = repeat or (kind == "mirrors" and mirrors == self.SELECTED) or (
+                            kind == "sources" and source == final_source)
+                        action = "already selected." if already else "selected."
+                        label = "archives " if kind == "mirrors" else "archive/security "
+                        self.assertEqual(output.getvalue(), f"Ubuntu CI {kind}: official HTTPS {label}{action}\n")
+                        self.assertEqual(self.source.read_text(), final_source)
+                        self.assertEqual(self.mirrors.read_text(), self.SELECTED if kind == "mirrors" else mirrors)
+                        self.assert_no_apt_staging()
 
     def assert_workflow_scope(self, filename, text):
         jobs = WorkflowContractTests.jobs(text)

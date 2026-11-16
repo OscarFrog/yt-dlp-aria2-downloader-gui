@@ -53,10 +53,11 @@ SOURCE_URI_SHAPES = {
 class PreparationError(ValueError):
     """Carry only a fixed diagnostic category, never configuration contents."""
 
-    def __init__(self, category, *, source_uri_detail=None):
+    def __init__(self, category, *, source_uri_detail=None, mirror_list_detail=None):
         super().__init__(category)
         self.category = category
         self.source_uri_detail = source_uri_detail
+        self.mirror_list_detail = mirror_list_detail
 
 
 def source_uri_shape(value):
@@ -81,6 +82,55 @@ def source_uri_diagnostic(error):
             or not 1 <= index <= count <= MAX_BYTES):
         return None
     return f"Source URI shape: {shape}; stanza: {index}/{count}"
+
+
+def mirror_list_shape(layout, entries):
+    """Describe already parsed rejected entries; never retain received tokens."""
+    profile = "historical-indirect" if layout is None else layout
+    # The complete count remains visible, but no partial list is presented as
+    # complete. The diagnostic has a separate bound from the secured file read.
+    if len(entries) > 8:
+        return profile, len(entries), None
+    shapes = []
+    for entry in entries:
+        if len(entry) != 2:
+            shapes.append(("invalid-entry", "other"))
+            continue
+        uri, priority = entry
+        shapes.append((SOURCE_URI_SHAPES.get(uri, "other"), {
+            "priority:1": "priority-1", "priority:2": "priority-2",
+            "priority:3": "priority-3",
+        }.get(priority, "other")))
+    return profile, len(entries), tuple(shapes)
+
+
+def mirror_list_diagnostic(error):
+    """Export only closed labels, ordered shapes and a bounded entry count."""
+    if not isinstance(error, PreparationError) or failure_category(error) != "mirror-list":
+        return None
+    detail = error.mirror_list_detail
+    if type(detail) is not tuple or len(detail) != 3:
+        return None
+    profile, count, shapes = detail
+    if (type(profile) is not str or profile not in ("historical-indirect", "mixed", "direct")
+            or type(count) is not int or not 0 <= count <= MAX_BYTES):
+        return None
+    if count > 8:
+        if shapes is not None:
+            return None
+        summary = "omitted-limit"
+    else:
+        if type(shapes) is not tuple or len(shapes) != count:
+            return None
+        for shape in shapes:
+            if (type(shape) is not tuple or len(shape) != 2
+                    or type(shape[0]) is not str
+                    or shape[0] not in (*SOURCE_URI_SHAPES.values(), "other", "invalid-entry")
+                    or type(shape[1]) is not str
+                    or shape[1] not in ("priority-1", "priority-2", "priority-3", "other")):
+                return None
+        summary = ",".join(f"{uri}/{priority}" for uri, priority in shapes) or "empty"
+    return f"Mirror list profile: {profile}; entries: {count}; entry-shapes: {summary}"
 
 
 def failure_category(error):
@@ -255,7 +305,7 @@ def configure(directory, owner):
         data, metadata = read_file(parent, "apt-mirrors.txt", owner)
         entries = tuple(tuple(line.split()) for line in data.decode("ascii").splitlines())
         if entries not in (ORIGINAL, SELECTED):
-            raise PreparationError("mirror-list")
+            raise PreparationError("mirror-list", mirror_list_detail=mirror_list_shape(layout, entries))
         if layout in ("mixed", "direct"):
             target_directory, target_name, target_metadata = sources, "ubuntu.sources", source_file_metadata
             replacement = direct_sources(source) if layout == "mixed" else source
@@ -359,6 +409,9 @@ def main():
               file=sys.stderr)
         print("Category: " + failure_category(error), file=sys.stderr)
         detail = source_uri_diagnostic(error)
+        if detail is not None:
+            print(detail, file=sys.stderr)
+        detail = mirror_list_diagnostic(error)
         if detail is not None:
             print(detail, file=sys.stderr)
         return 65

@@ -1335,6 +1335,17 @@ never exported. The diagnostic vocabulary alone is not an acceptance list:
 recognized endpoints outside the complete profiles still fail with status 65.
 Direct sources do not use the mirror-list file, so changing that file alone
 cannot prepare them.
+This statement concerns the two validated stanzas, not every active APT source:
+other `.list`/`.sources` files and APT configuration are outside this helper's
+inspection. The mirror-list acceptance check therefore remains mandatory for
+all three profiles; normalizing `ubuntu.sources` alone cannot prove that the
+list is globally unused. On `mirror-list` refusal, a bounded diagnostic reports
+the validated source profile, parsed entry count and ordered endpoint/priority
+shapes using only fixed labels from the bytes already read. At most eight
+entry shapes are emitted; larger lists are explicitly marked `omitted-limit`.
+Unknown tokens are never printed or accepted. Recognition of a known endpoint
+does not establish an authorized combination, a deployed image's provenance,
+or an additional permitted mirror list.
 The endpoint vocabulary follows the
 [versioned runner recipe](https://github.com/actions/runner-images/blob/fb099341ddaf44a428fb17495341cb7c2300faf2/images/ubuntu/scripts/build/configure-apt-sources.sh):
 HTTP Azure/archive/security `/ubuntu` with or without a trailing slash and the
