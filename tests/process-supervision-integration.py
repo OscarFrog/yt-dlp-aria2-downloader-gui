@@ -1427,6 +1427,378 @@ class ObservationRetirementTests(unittest.TestCase):
         self.assertEqual(detected, 13)
 
 
+class TeardownRescueTests(unittest.TestCase):
+    """Exercise the rescue consumer with private children and native pidfds."""
+
+    @contextmanager
+    def fixture(self, count=2, foreign=False):
+        real_os, real_signal, real_observer = os, signal, observer
+        case = ProcessTests('test_mock_rescue_requires_token_and_current_start_identity')
+        case.setUp()
+        children, witnesses, sentinels, attempts, events = [], [], [], [], []
+        active = {}
+        fixture = SimpleNamespace(case=case, events=events, children=children,
+                                  witnesses=witnesses, sentinels=sentinels,
+                                  close_attempts=attempts, active=active, outcome=None)
+        try:
+            for index in range(count + int(foreign)):
+                environment = dict(real_os.environ)
+                environment.pop('YTDLP_QUALIFICATION_TOKEN', None)
+                if index < count:
+                    environment['YTDLP_QUALIFICATION_TOKEN'] = case.token
+                process = subprocess.Popen(
+                    [sys.executable, '-I', '-c',
+                     'import time; print("ready", flush=True); time.sleep(30)'],
+                    env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    start_new_session=True)
+                children.append(process)
+                readiness = select.poll()
+                readiness.register(process.stdout, select.POLLIN)
+                self.assertTrue(readiness.poll(3000), 'private child did not acknowledge startup')
+                self.assertEqual(process.stdout.readline(), b'ready\n')
+                witnesses.append(real_os.pidfd_open(process.pid))
+            rows = {str(process.pid): real_observer.current_process(process.pid)
+                    for process in children}
+            fixture.rows = rows
+            fixture.count = count
+            fixture.real_os = real_os
+            fixture.real_signal = real_signal
+            fixture.real_observer = real_observer
+            fixture.marker = case.observer.marker
+            fixture.sentinel_path = case.root / 'sentinel'
+            fixture.sentinel_path.write_bytes(b'private descriptor sentinel')
+            fixture.sentinel_identity = fixture.sentinel_path.stat()
+            yield fixture
+        finally:
+            # Assertions precede this owner-only safety net. It cannot turn an
+            # unconfirmed candidate rescue into a passing behavioral oracle.
+            for process in children:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=3)
+            for descriptor in list(active):
+                real_os.close(descriptor)
+            for descriptor in sentinels + witnesses:
+                real_os.close(descriptor)
+            case.temp.cleanup()
+
+    def drive(self, fixture, *, initial_error=None, snapshot_error=None,
+              open_errors=None, identity_errors=None, replaced=(), signal_errors=None,
+              close_errors=None, reuse=(), communicate_errors=None,
+              terminal_error=None, terminal_live=False, initial_live=True,
+              popen_fallback=False, disappear_at=None):
+        """Inject at local boundaries, leaving observer/kernel global APIs alone."""
+        open_errors, identity_errors = open_errors or {}, identity_errors or {}
+        signal_errors, close_errors = signal_errors or {}, close_errors or {}
+        communicate_errors = communicate_errors or {}
+        case, events = fixture.case, fixture.events
+        real_os, real_signal = fixture.real_os, fixture.real_signal
+        by_pid = {process.pid: index for index, process in enumerate(fixture.children)}
+        owned = dict(list(fixture.rows.items())[:fixture.count])
+        generation = 0
+
+        def sample():
+            events.append(('sample',))
+            if initial_error is not None:
+                raise initial_error
+            return {'live': owned if initial_live else {}}
+
+        def snapshot():
+            events.append(('snapshot',))
+            if snapshot_error is not None:
+                raise snapshot_error
+            return {int(pid): row for pid, row in fixture.rows.items()}
+
+        def disappear(phase, index):
+            if disappear_at == phase and index == 0:
+                process = fixture.children[index]
+                process.kill()
+                process.communicate(timeout=3)
+                raise ProcessLookupError(errno.ESRCH, 'injected after confirmed child exit')
+
+        def opener(pid):
+            nonlocal generation
+            index = by_pid[pid]
+            events.append(('open', index))
+            disappear('open', index)
+            if index in open_errors:
+                raise open_errors[index]
+            descriptor = real_os.pidfd_open(pid)
+            generation += 1
+            fixture.active[descriptor] = (index, generation)
+            return descriptor
+
+        def current(pid):
+            index = by_pid[pid]
+            events.append(('identity', index))
+            disappear('identity', index)
+            if index in identity_errors:
+                raise identity_errors[index]
+            row = fixture.rows[str(pid)]
+            return dict(row, start=row['start'] + 1) if index in replaced else row
+
+        def send(descriptor, number):
+            index, _generation = fixture.active[descriptor]
+            events.append(('signal', index, number))
+            disappear('signal', index)
+            if index in signal_errors:
+                raise signal_errors[index]
+            # Invalid candidates are recorded for a causal no-signal assertion,
+            # without exposing an unrelated child to the deliberately bad mutant.
+            if index < fixture.count and index not in replaced:
+                real_signal.pidfd_send_signal(descriptor, number)
+
+        def closer(descriptor):
+            value = fixture.active.pop(descriptor, None)
+            fixture.close_attempts.append((descriptor, value))
+            events.append(('close', value))
+            if value is None:
+                # Do not actually close a sentinel on an intentionally bad retry.
+                return
+            index, _generation = value
+            real_os.close(descriptor)
+            if index in reuse:
+                sentinel = real_os.open(fixture.sentinel_path, real_os.O_RDONLY)
+                if sentinel != descriptor:
+                    real_os.dup2(sentinel, descriptor)
+                    real_os.close(sentinel)
+                fixture.sentinels.append(descriptor)
+            if index in close_errors:
+                raise close_errors[index]
+
+        def terminal_sample():
+            events.append(('terminal',))
+            if terminal_error is not None:
+                raise terminal_error
+            live = {str(process.pid): fixture.rows[str(process.pid)]
+                    for index, process in enumerate(fixture.children[:fixture.count])
+                    if not self.exited(fixture, index)}
+            return {'live': owned if terminal_live else live}
+
+        terminal = SimpleNamespace(known=set(), sample=terminal_sample)
+        case.observer = SimpleNamespace(marker=fixture.marker,
+                                        known={(int(pid), row['start']) for pid, row in owned.items()},
+                                        sample=sample)
+        if popen_fallback:
+            for index, process in enumerate(fixture.children[:fixture.count]):
+                def poll(index=index, process=process):
+                    events.append(('poll', index))
+                    return process.poll()
+
+                def kill(index=index, process=process):
+                    events.append(('kill', index))
+                    return process.kill()
+
+                def communicate(timeout, index=index, process=process):
+                    events.append(('communicate', index))
+                    if index in communicate_errors:
+                        raise communicate_errors[index]
+                    return process.communicate(timeout=timeout)
+                case.processes.append(SimpleNamespace(poll=poll, kill=kill, communicate=communicate))
+        fake_os = SimpleNamespace(
+            pidfd_open=opener, close=closer, waitpid=real_os.waitpid, WNOHANG=real_os.WNOHANG,
+            kill=lambda pid, number: events.append(('unsafe-pid-signal', pid, number)))
+        fake_signal = SimpleNamespace(SIGKILL=real_signal.SIGKILL, pidfd_send_signal=send)
+        fake_observer = SimpleNamespace(snapshot=snapshot, current_process=current,
+                                        Observer=lambda _token: terminal,
+                                        ObservationError=fixture.real_observer.ObservationError)
+        with mock.patch.dict(globals(), os=fake_os, signal=fake_signal, observer=fake_observer):
+            try:
+                case.tearDown()
+            except BaseException as error:
+                fixture.outcome = error
+        fixture.terminal = terminal
+        return fixture.outcome
+
+    def exited(self, fixture, index):
+        poller = select.poll()
+        poller.register(fixture.witnesses[index], select.POLLIN)
+        return bool(poller.poll(0))
+
+    def assert_rescued(self, fixture):
+        self.assertFalse(any(event[0] == 'unsafe-pid-signal' for event in fixture.events),
+                         'candidate attempted signal authority based on a numeric PID alone')
+        self.assertTrue(all(self.exited(fixture, index) for index in range(fixture.count)),
+                        'a private child survived candidate rescue')
+        self.assertIn(('terminal',), fixture.events, 'terminal observation was skipped')
+        expected = {(int(pid), row['start'])
+                    for pid, row in list(fixture.rows.items())[:fixture.count]}
+        self.assertEqual(fixture.terminal.known, expected, 'terminal identities were not preserved')
+        self.assertFalse(fixture.active, 'a candidate-owned pidfd remained open')
+        generations = [value for _descriptor, value in fixture.close_attempts]
+        self.assertNotIn(None, generations, 'a consumed/reassigned descriptor was closed again')
+        self.assertEqual(len(generations), len(set(generations)), 'a pidfd generation was closed twice')
+
+    def secondary(self, error):
+        return getattr(error, 'teardown_secondary_errors', None)
+
+    def test_nominal_rescue_closes_each_generation_and_confirms_terminal(self):
+        with self.fixture() as fixture:
+            self.assertIsNone(self.drive(fixture))
+            self.assert_rescued(fixture)
+            self.assertEqual(len(fixture.close_attempts), 2)
+            self.assertEqual([event[1] for event in fixture.events if event[0] == 'signal'], [0, 1])
+            self.assertFalse(fixture.case.root.exists(), 'confirmed clean fixture was not removed')
+
+    def test_first_observation_error_survives_close_error_and_rescue_continues(self):
+        with self.fixture() as fixture:
+            first = PermissionError(errno.EACCES, 'private observation detail')
+            later = OSError(errno.EIO, 'private close detail')
+            self.assertIs(self.drive(fixture, initial_error=first, close_errors={0: later}), first)
+            self.assertEqual(first.errno, errno.EACCES)
+            self.assert_rescued(fixture)
+            self.assertEqual(self.secondary(first), (('OSError', errno.EIO),))
+            self.assertTrue(fixture.case.root.is_dir())
+
+    def test_isolated_close_error_remains_blocking_without_stopping_next_rescue(self):
+        with self.fixture() as fixture:
+            first = OSError(errno.EIO, 'private close detail')
+            self.assertIs(self.drive(fixture, close_errors={0: first}), first)
+            self.assert_rescued(fixture)
+            self.assertEqual(self.secondary(first), ())
+            self.assertTrue(fixture.case.root.is_dir())
+            names = [event[0:2] for event in fixture.events]
+            self.assertLess(names.index(('close', (0, 1))), names.index(('open', 1)))
+
+    def test_consumed_fd_is_never_retried_even_after_number_reuse(self):
+        for number in (errno.EIO, errno.EINTR, errno.EBADF):
+            with self.subTest(errno=number), self.fixture() as fixture:
+                first = OSError(number, 'injected after real kernel close')
+                self.assertIs(self.drive(fixture, close_errors={0: first}, reuse=(0,)), first)
+                self.assert_rescued(fixture)
+                self.assertEqual(len(fixture.sentinels), 1)
+                actual = fixture.real_os.fstat(fixture.sentinels[0])
+                expected = fixture.sentinel_identity
+                self.assertEqual((actual.st_dev, actual.st_ino), (expected.st_dev, expected.st_ino))
+                self.assertEqual(fixture.real_os.read(fixture.sentinels[0], 27), b'private descriptor sentinel')
+
+    def test_close_failure_does_not_skip_owned_popen_or_terminal_checks(self):
+        with self.fixture() as fixture:
+            first = OSError(errno.EIO, 'injected close')
+            self.assertIs(self.drive(fixture, close_errors={0: first}, popen_fallback=True), first)
+            self.assert_rescued(fixture)
+            self.assertEqual([event[1] for event in fixture.events if event[0] == 'communicate'], [0, 1])
+            self.assertLess(fixture.events.index(('communicate', 1)), fixture.events.index(('terminal',)))
+
+    def test_replaced_identity_is_not_signaled_or_declared_terminal(self):
+        with self.fixture() as fixture:
+            result = self.drive(fixture, replaced=(0,))
+            self.assertIsInstance(result, fixture.real_observer.ObservationError)
+            self.assertNotIn(('signal', 0, fixture.real_signal.SIGKILL), fixture.events)
+            self.assertFalse(self.exited(fixture, 0))
+            self.assertTrue(self.exited(fixture, 1))
+            self.assertTrue(fixture.case.root.is_dir())
+            self.assertIn(('terminal',), fixture.events)
+            self.assertFalse(fixture.active)
+
+    def test_foreign_marker_is_excluded_from_snapshot_rescue(self):
+        with self.fixture(foreign=True) as fixture:
+            self.assertIsNone(self.drive(fixture, initial_live=False))
+            self.assert_rescued(fixture)
+            self.assertFalse(self.exited(fixture, 2), 'foreign witness was signaled')
+            self.assertNotIn(('open', 2), fixture.events, 'foreign marker entered rescue selection')
+            self.assertFalse(fixture.case.root.exists())
+
+    def test_disappearance_does_not_skip_other_rescue_or_claim_unknown_exit(self):
+        for phase in ('open', 'identity', 'signal'):
+            for number in (errno.ESRCH, errno.ENOENT):
+                with self.subTest(phase=phase, errno=number), self.fixture() as fixture:
+                    arguments = {phase + '_errors': {0: OSError(number, 'injected disappearance')}}
+                    result = self.drive(fixture, **arguments)
+                    self.assertIsInstance(result, fixture.real_observer.ObservationError)
+                    self.assertFalse(self.exited(fixture, 0), 'injection unexpectedly terminated its witness')
+                    self.assertTrue(self.exited(fixture, 1), 'independent rescue was skipped')
+                    self.assertIn(('terminal',), fixture.events)
+                    self.assertTrue(fixture.case.root.is_dir())
+                    self.assertFalse(fixture.active)
+
+    def test_confirmed_disappearance_allows_remaining_rescue_without_false_error(self):
+        for phase in ('open', 'identity', 'signal'):
+            with self.subTest(phase=phase), self.fixture() as fixture:
+                self.assertIsNone(self.drive(fixture, disappear_at=phase))
+                self.assert_rescued(fixture)
+                self.assertFalse(fixture.case.root.exists())
+
+    def test_snapshot_primary_survives_close_error_with_initial_live_inventory(self):
+        with self.fixture() as fixture:
+            first = ValueError('private snapshot detail')
+            later = OSError(errno.EIO, 'private close detail')
+            self.assertIs(self.drive(fixture, snapshot_error=first, close_errors={0: later}), first)
+            self.assert_rescued(fixture)
+            self.assertEqual(self.secondary(first), (('OSError', errno.EIO),))
+            self.assertTrue(fixture.case.root.is_dir())
+
+    def test_combined_errors_keep_chronological_primary_and_bounded_metadata(self):
+        with self.fixture(count=3) as fixture:
+            first = PermissionError(errno.EPERM, 'private initial text')
+            timeout = subprocess.TimeoutExpired('private command', 5)
+            terminal = OSError(errno.EIO, 'private terminal text')
+            result = self.drive(
+                fixture, initial_error=first,
+                open_errors={0: OSError(errno.EMFILE, 'private open')},
+                signal_errors={1: PermissionError(errno.EPERM, 'private signal')},
+                close_errors={1: OSError(errno.EIO, 'private close')},
+                communicate_errors={0: timeout}, terminal_error=terminal, popen_fallback=True)
+            self.assertIs(result, first)
+            self.assertEqual(first.errno, errno.EPERM)
+            self.assertEqual([event[1] for event in fixture.events if event[0] == 'open'], [0, 1, 2])
+            self.assertEqual([event[1] for event in fixture.events if event[0] == 'communicate'], [0, 1, 2])
+            self.assertIn(('terminal',), fixture.events)
+            secondary = self.secondary(first)
+            self.assertEqual(secondary, (('OSError', errno.EMFILE), ('OSError', errno.EPERM),
+                                         ('OSError', errno.EIO), ('TimeoutExpired', None),
+                                         ('OSError', errno.EIO)))
+            self.assertNotIn('private', repr(secondary))
+            self.assertTrue(fixture.case.root.is_dir())
+
+    def test_snapshot_error_keeps_original_identity_and_fallback_rescue(self):
+        with self.fixture() as fixture:
+            first = IndexError('private initial parser detail')
+            second = ValueError('private snapshot detail')
+            result = self.drive(fixture, initial_error=first, snapshot_error=second,
+                                popen_fallback=True)
+            self.assertIs(result, first)
+            self.assertEqual(self.secondary(first), (('ValueError', None),))
+            self.assert_rescued(fixture)
+            self.assertEqual([event[1] for event in fixture.events if event[0] == 'communicate'], [0, 1])
+            self.assertTrue(fixture.case.root.is_dir())
+
+    def test_terminal_failure_never_allows_fixture_cleanup(self):
+        for mode in ('error', 'live'):
+            with self.subTest(mode=mode), self.fixture() as fixture:
+                terminal = PermissionError(errno.EACCES, 'private terminal detail')
+                options = {'terminal_error': terminal} if mode == 'error' else {'terminal_live': True}
+                result = self.drive(fixture, **options)
+                if mode == 'error':
+                    self.assertIs(result, terminal)
+                else:
+                    self.assertIsInstance(result, fixture.real_observer.ObservationError)
+                self.assert_rescued(fixture)
+                self.assertTrue(fixture.case.root.is_dir(), 'uncertain fixture evidence was erased')
+                self.assertFalse(fixture.case.temp._finalizer.alive)
+                fixture.case.doCleanups()
+                self.assertTrue(fixture.case.root.is_dir(), 'unittest cleanup erased uncertain evidence')
+
+    def test_secondary_metadata_is_bounded_without_private_exception_text(self):
+        with self.fixture(count=10) as fixture:
+            first = ValueError('private initial detail')
+            errors = {index: OSError(errno.EIO, 'private close detail') for index in range(10)}
+            self.assertIs(self.drive(fixture, initial_error=first, close_errors=errors), first)
+            self.assert_rescued(fixture)
+            self.assertEqual(self.secondary(first), (('OSError', errno.EIO),) * 8)
+            self.assertEqual(getattr(first, 'teardown_secondary_overflow', None), 2)
+            self.assertNotIn('private', repr(self.secondary(first)))
+
+    def test_programming_errors_and_base_exceptions_are_not_silently_accepted(self):
+        for interruption in (AssertionError('injected programming failure'),
+                             KeyboardInterrupt(), SystemExit(7)):
+            with self.subTest(exception=type(interruption).__name__), self.fixture() as fixture:
+                self.assertIs(self.drive(fixture, close_errors={0: interruption}), interruption)
+                self.assertTrue(fixture.case.root.is_dir())
+                self.assertFalse(fixture.case.temp._finalizer.alive)
+                self.assertEqual(len(fixture.close_attempts), 1)
+
+
 class ProcessTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='process-contract-')
@@ -1475,7 +1847,12 @@ class ProcessTests(unittest.TestCase):
                 failures.append(error)
             finally:
                 if descriptor is not None:
-                    os.close(descriptor)
+                    # Linux may release the number even when close fails.
+                    # Consume this ownership once; other rescues remain independent.
+                    try:
+                        os.close(descriptor)
+                    except OSError as error:
+                        failures.append(error)
         for process in self.processes:
             try:
                 if process.poll() is None:
@@ -1502,6 +1879,19 @@ class ProcessTests(unittest.TestCase):
             if not failures:
                 self.temp.cleanup()
         if failures:
+            # Preserve the native primary exception, without chaining private
+            # secondary messages. Metadata is inspectable even on Python 3.10;
+            # unittest's ordinary traceback does not render these attributes.
+            secondary = []
+            for error in failures[1:9]:
+                category = ('OSError' if isinstance(error, OSError) else
+                            'ValueError' if isinstance(error, ValueError) else
+                            'IndexError' if isinstance(error, IndexError) else
+                            'TimeoutExpired')
+                number = error.errno if isinstance(error, OSError) else None
+                secondary.append((category, number if type(number) is int and 0 <= number <= 4095 else None))
+            failures[0].teardown_secondary_errors = tuple(secondary)
+            failures[0].teardown_secondary_overflow = max(0, len(failures) - 9)
             raise failures[0]
 
     def launch(self, argv):
