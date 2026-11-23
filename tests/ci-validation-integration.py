@@ -1361,6 +1361,13 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
     def test_minimum_interpreters_share_one_full_run_and_bind_absolute_fixtures(self):
         job = self.jobs(self.workflow("shell.yml"))["validate-python-minimum"]
         self.assertEqual(job.count("./tests/run-all.sh --full --jobs 4"), 1)
+        capture = "YTDLP_PY310_FIRST_FAILURE"
+        workflows = (PROJECT / ".github/workflows").glob("*.yml")
+        self.assertEqual(sum(path.read_text().count(capture) for path in workflows), 1)
+        self.assertIn("      - name: Exercise the complete contract under Python 3.10\n"
+                      "        env:\n"
+                      f"          {capture}: engine-cli-first-sample\n"
+                      "        run: timeout ", job)
         self.assertIn("name: Python 3.10 / Ubuntu", job)
         for guard in (
             "${RUNNER_ENVIRONMENT} == github-hosted",
