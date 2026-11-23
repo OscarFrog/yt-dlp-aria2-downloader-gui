@@ -75,12 +75,17 @@ jobs:
             worker=${worker_timings[index % ${#worker_timings[@]}]}
             ffmpeg_start=${ffmpeg_timings[index % ${#ffmpeg_timings[@]}]}
             supervisor=${supervisor_timings[index % ${#supervisor_timings[@]}]}
+            first_failure=''
+            if ((shard == 2 && iteration == 18)); then
+              first_failure='2:18'
+            fi
 
             printf '%s\n' \
               "=== mock jitter iteration ${iteration}/20: cancel=${cancel}s late=${late_cancel}s pgid=${pgid}s worker=${worker}s ffmpeg=${ffmpeg_start}s supervisor=${supervisor}s ==="
 
             timeout --signal=TERM --kill-after=10s 5m \
               env \
+                YTDLP_STRESS_FIRST_FAILURE="${first_failure}" \
                 MOCK_CANCEL_JITTER_SECONDS="${cancel}" \
                 MOCK_CANCEL_AFTER_EOF_JITTER_SECONDS="${late_cancel}" \
                 MOCK_PGID_PUBLISH_DELAY_SECONDS="${pgid}" \

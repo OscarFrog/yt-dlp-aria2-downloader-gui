@@ -1799,6 +1799,191 @@ class TeardownRescueTests(unittest.TestCase):
                 self.assertEqual(len(fixture.close_attempts), 1)
 
 
+def report_stress_first_failure(watcher, error):
+    """Emit only closed public metadata; recording a failure must preserve it."""
+    fallback = '{"stress_first_failure":{"complete":false}}'
+    limit = 16 * 1024
+    line = fallback
+    try:
+        evidence = dict(complete=False, diagnostic=observer._empty_diagnostic())
+        try:
+            evidence['diagnostic'] = observer.copy_diagnostic(watcher.diagnostic_failure(error))
+        except BaseException:
+            pass
+        try:
+            projection = observer.IdentityProjection()
+            # Preserve the independent primitive evidence even if projection fails.
+            empty = dict(observer._empty_identity_diagnostic(), view='public', scope_id=projection.scope_id)
+            evidence['identity'] = observer.copy_identity_export(empty)
+            projected = projection.project(watcher.identity_failure(error))
+            evidence['identity'] = observer.copy_identity_export(projected)
+        except BaseException:
+            pass
+        packets = [evidence[key] for key in ('diagnostic', 'identity') if key in evidence]
+        evidence['complete'] = len(packets) == 2 and all(packet['complete'] for packet in packets)
+        record = {'stress_first_failure': evidence}
+        line = json.dumps(record, separators=(',', ':'), ensure_ascii=True)
+        if len(line) + 1 > limit:
+            # Preserve the first primitive even when the complete history is too large.
+            evidence['complete'] = False
+            for packet in packets:
+                omitted = len(packet['events'][1:])
+                if omitted:
+                    del packet['events'][1:]
+                    packet['omitted'] = min(2147483647, packet['omitted'] + omitted)
+                    packet['complete'] = False
+            line = json.dumps(record, separators=(',', ':'), ensure_ascii=True)
+    except BaseException:
+        line = fallback
+    try:
+        # unittest writes progress dots without a trailing newline.
+        sys.stderr.write('\n' + (line if len(line) + 1 <= limit else fallback) + '\n')
+    except BaseException:
+        pass
+
+
+class StressFirstFailureTests(unittest.TestCase):
+    target = 'test_cli_escalates_subgroup_before_retiring_sentinel'
+    selection = {'STRESS_SHARD': '2', 'YTDLP_STRESS_FIRST_FAILURE': '2:18'}
+
+    def capture(self, case, stream):
+        with redirect_stderr(stream), self.assertRaises(observer.ObservationError) as caught:
+            case.sample_before_cli_escalation()
+        self.assertIs(caught.exception, case.observer.error)
+        return caught.exception
+
+    def test_scope_and_success_are_silent(self):
+        other = 'test_mock_rescue_requires_token_and_current_start_identity'
+        for method, env, enabled in (
+                (self.target, {}, False), (self.target, {'STRESS_SHARD': '2'}, False),
+                (self.target, dict(self.selection, STRESS_SHARD='1'), False),
+                (self.target, dict(self.selection, YTDLP_STRESS_FIRST_FAILURE='2:19'), False),
+                (other, self.selection, False), (self.target, self.selection, True)):
+            with self.subTest(method=method, env=env):
+                case = ProcessTests(method)
+                case.observer = observer.Observer('private-fixture')
+                output = io.StringIO()
+
+                def sample():
+                    self.assertIs(case.observer.diagnostics_enabled, enabled)
+                    self.assertIs(case.observer.identity_diagnostics_enabled, enabled)
+
+                with mock.patch.dict(os.environ, env, clear=True), \
+                        mock.patch.object(case.observer, 'sample', side_effect=sample) as sampled, \
+                        redirect_stderr(output):
+                    case.sample_before_cli_escalation()
+                sampled.assert_called_once_with()
+                self.assertFalse(case.observer.diagnostics_enabled)
+                self.assertFalse(case.observer.identity_diagnostics_enabled)
+                self.assertEqual(output.getvalue(), '')
+
+    def test_private_child_open_refusal_survives_capture_and_teardown(self):
+        case = ProcessTests(self.target)
+        case.setUp()
+        private = 'private-first-failure-canary'
+        environment = {'YTDLP_QUALIFICATION_TOKEN': case.token, 'PRIVATE_SAMPLE': private}
+        with subprocess.Popen(['cat'], env=environment, stdin=subprocess.PIPE) as child:
+            try:
+                row = observer.current_process(child.pid)
+                denied = Path(f'/proc/{child.pid}/environ')
+                original_open = Path.open
+
+                def deny(path, *args, **kwargs):
+                    if path == denied:
+                        raise PermissionError(errno.EACCES, private, str(denied))
+                    return original_open(path, *args, **kwargs)
+
+                with mock.patch.object(observer, 'snapshot', return_value={child.pid: row}):
+                    for enabled in (False, True):
+                        case.observer = observer.Observer(case.token)
+                        self.assertIn(str(child.pid), case.observer.sample()['live'])
+                        self.assertIn((child.pid, row['start']), case.observer.known)
+                        output = io.StringIO()
+                        with mock.patch.dict(os.environ, self.selection if enabled else {}, clear=True), \
+                                mock.patch.object(Path, 'open', new=deny):
+                            refusal = self.capture(case, output)
+                        self.assertEqual(refusal.errno, errno.EACCES)
+                        if not enabled:
+                            self.assertEqual(output.getvalue(), '')
+            finally:
+                child.communicate(timeout=5)
+        self.assertEqual(child.returncode, 0)
+        with mock.patch.object(observer, 'snapshot', return_value={}), \
+                self.assertRaises(observer.ObservationError) as cleanup:
+            case.tearDown()
+        self.assertIs(cleanup.exception, refusal)
+        self.assertTrue(case.root.exists())
+        case.temp.cleanup()
+
+        line, = output.getvalue().strip().splitlines()
+        self.assertLessEqual(len(line.encode('ascii')) + 1, 16384)
+        self.assertFalse(any(secret in line for secret in
+                             (case.token, private, str(denied), 'YTDLP_QUALIFICATION_TOKEN')),
+                         'a private fixture value escaped into the diagnostic line')
+        wrapper = json.loads(line)
+        self.assertEqual(set(wrapper), {'stress_first_failure'})
+        packet = wrapper['stress_first_failure']
+        self.assertEqual(set(packet), {'complete', 'diagnostic', 'identity'})
+        self.assertIs(packet['complete'], True)
+        diagnostic = observer.copy_diagnostic(packet['diagnostic'])
+        identity = observer.copy_identity_export(packet['identity'])
+        for capsule, operation in ((diagnostic, 'attribute_read'), (identity, 'attribute_open')):
+            self.assertIs(capsule['complete'], True)
+            first, last = capsule['events']
+            self.assertEqual((first['operation'], first['phase'], first['primitive_errno'],
+                              first['exception_class'], first['attribution_source']),
+                             (operation, 'attribute_read', errno.EACCES, 'PermissionError', 'known_identity'))
+            self.assertEqual((last['operation'], last['relation'], last['cause_sequence'], last['normalized_errno']),
+                             ('error_normalization', 'normalization', first['sequence'], errno.EACCES))
+            self.assertLessEqual(first['monotonic_ns'], last['monotonic_ns'])
+        first = identity['events'][0]
+        self.assertEqual(first['resource_kind'], 'environ')
+        self.assertIs(first['kernel_return_proven'], False)
+        context = first['context']
+        self.assertEqual(context['group_expected']['reference'], 'g1')
+        task = context['task_before']
+        self.assertEqual((task['reference'], task['group_reference'], task['starttime_known']), ('t1', 'g1', True))
+
+        with mock.patch.dict(os.environ, self.selection):
+            # Pad a valid public history beyond the line budget without inventing private coordinates.
+            expanded = dict(identity, events=[dict(identity['events'][0], sequence=n, first_failure=n == 1)
+                                              for n in range(1, 33)])
+            with mock.patch.object(observer.IdentityProjection, 'project', return_value=expanded):
+                output = io.StringIO()
+                self.assertIs(self.capture(case, output), refusal)
+                self.assertLessEqual(len(output.getvalue().strip().encode('ascii')) + 1, 16384)
+                short = json.loads(output.getvalue())['stress_first_failure']
+                self.assertIs(short['complete'], False)
+                remaining = observer.copy_identity_export(short['identity'])
+                self.assertEqual(remaining['events'][0]['operation'], 'attribute_open')
+                self.assertEqual(remaining['omitted'], 32 - len(remaining['events']))
+            for projection in ({'side_effect': ValueError(private)}, {'return_value': dict(identity, pid=child.pid)}):
+                with mock.patch.object(observer.IdentityProjection, 'project', **projection):
+                    output = io.StringIO()
+                    self.assertIs(self.capture(case, output), refusal)
+                    partial = json.loads(output.getvalue())['stress_first_failure']
+                    self.assertIs(partial['complete'], False)
+                    self.assertEqual(observer.copy_diagnostic(partial['diagnostic']), diagnostic)
+                    empty = observer.copy_identity_export(partial['identity'])
+                    self.assertEqual((empty['complete'], empty['events']), (False, []))
+                    self.assertNotIn(private, output.getvalue())
+            with mock.patch.object(case.observer, 'diagnostic_failure', side_effect=ValueError(private)):
+                output = io.StringIO()
+                self.assertIs(self.capture(case, output), refusal)
+                partial = json.loads(output.getvalue())['stress_first_failure']
+                self.assertIs(partial['complete'], False)
+                empty = observer.copy_diagnostic(partial['diagnostic'])
+                self.assertEqual((empty['complete'], empty['events']), (False, []))
+                remaining = observer.copy_identity_export(partial['identity'])
+                self.assertEqual(remaining['events'], identity['events'])
+                self.assertIs(remaining['complete'], True)
+                self.assertNotIn(private, output.getvalue())
+            broken = mock.Mock()
+            broken.write.side_effect = OSError(errno.EIO, private)
+            self.assertIs(self.capture(case, broken), refusal)
+            self.assertTrue(broken.write.called)
+
+
 class ProcessTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='process-contract-')
@@ -4931,6 +5116,23 @@ exit "$DOWNLOAD_STATUS"
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.assertFalse(self.observer.sample()['live'])
 
+    def sample_before_cli_escalation(self):
+        if (self._testMethodName != 'test_cli_escalates_subgroup_before_retiring_sentinel'
+                or os.environ.get('STRESS_SHARD') != '2'
+                or os.environ.get('YTDLP_STRESS_FIRST_FAILURE') != '2:18'):
+            return self.observer.sample()
+
+        watcher = self.observer
+        previous = watcher.diagnostics_enabled, watcher.identity_diagnostics_enabled
+        watcher.diagnostics_enabled = watcher.identity_diagnostics_enabled = True
+        try:
+            return watcher.sample()
+        except Exception as error:
+            report_stress_first_failure(watcher, error)
+            raise
+        finally:
+            watcher.diagnostics_enabled, watcher.identity_diagnostics_enabled = previous
+
     def test_cli_escalates_subgroup_before_retiring_sentinel(self):
         self.child(resistant=True)
         source = self.root / 'engine-functions.sh'
@@ -4957,7 +5159,7 @@ exit "$DOWNLOAD_STATUS"
         p = self.launch(['bash', str(wrapper), str(source), str(self.root),
                          str(PROJECT / 'private-process-supervisor.py')])
         self.wait_file('ready', p)
-        self.observer.sample()
+        self.sample_before_cli_escalation()
         p.send_signal(signal.SIGTERM)
         self.wait_file('term', p)
         p.send_signal(signal.SIGUSR1)

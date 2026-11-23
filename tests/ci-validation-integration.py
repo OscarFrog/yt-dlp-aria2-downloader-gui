@@ -4105,6 +4105,23 @@ class VersionBoundaryTests(unittest.TestCase):
         return "\n".join(line[10:] for line in block.splitlines()
                          if line.startswith("          ")) + "\n"
 
+    def test_first_failure_capture_is_scoped_to_one_stress_invocation(self):
+        step = self.step("stress.yml", "Repeat race-sensitive integration scenarios with bounded jitter")
+        with tempfile.TemporaryDirectory() as temporary:
+            probe = Path(temporary) / "bash"
+            probe.write_text('#!/bin/sh\n'
+                             'test "$*" = "./tests/mock-integration.sh --group stress-signals" || exit 65\n'
+                             'printf "capture=%s\\n" "$YTDLP_STRESS_FIRST_FAILURE"\n')
+            probe.chmod(0o755)
+            for shard in range(1, 5):
+                with self.subTest(shard=shard):
+                    env = dict(os.environ, STRESS_SHARD=str(shard), YTDLP_STRESS_FIRST_FAILURE="2:18",
+                               PATH=temporary + os.pathsep + os.environ["PATH"])
+                    output = subprocess.check_output(["/bin/bash", "-c", step], env=env, text=True)
+                    captures = [line for line in output.splitlines() if line.startswith("capture=")]
+                    expected = ["capture=2:18" if n == 18 else "capture=" for n in range(shard, 21, 4)]
+                    self.assertEqual(captures, expected)
+
     def test_media_apt_blocks_preserve_errors_signals_and_stop_stalled_provisioning(self):
         targets = (("real-tools.yml", "Install real engines"),
                    ("real-tools.yml", "Install real engines and current yt-dlp stable"),
