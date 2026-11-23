@@ -32,6 +32,45 @@ package_test_apt() {
     esac
 }
 
+# Test-only transaction on a private copy. Signed inputs are authenticated
+# against the checkout's release certificate before DNF rechecks that copy.
+package_test_install_rpm() (
+    local package=$1
+    local allow_unsigned=$2
+    local stage=''
+    local state=''
+    local local_check=True
+    local -a verifier=()
+
+    umask 077
+    stage=$(mktemp -d) || exit 73
+    trap 'rm -rf -- "${stage}"' EXIT
+    install -m 600 -- "${package}" "${stage}/package.rpm" || exit 65
+    state=$(LC_ALL=C rpm -qp --qf '%|OPENPGP?{signed}:{unsigned}|\n' -- "${stage}/package.rpm") || exit 65
+    case "${state}:${allow_unsigned}" in
+        signed:false | signed:true)
+            install -m 600 -- "${PROJECT_DIR}/packaging/keys/RPM-GPG-KEY-OscarFrog" "${stage}/cert" || exit 65
+            mkdir -m 700 -- "${stage}/keyring" || exit 73
+            verifier=(rpmkeys --define '_keyring fs'
+                --define "_keyringpath ${stage}/keyring"
+                --define "_keyring_lockpath ${stage}/keyring/.keyring.lock"
+                --define "_rpmlock_path ${stage}/keyring/.rpm.lock")
+            "${verifier[@]}" --import "${stage}/cert" || exit 65
+            "${verifier[@]}" --checksig "${stage}/package.rpm" || exit 65
+            rpmkeys --import "${stage}/cert" || exit 65
+            ;;
+        unsigned:true)
+            local_check=False
+            ;;
+        *)
+            printf '%s\n' 'Error: package test requires a signed RPM or explicit development authorization.' >&2
+            exit 65
+            ;;
+    esac
+    dnf install --assumeyes --allowerasing --setopt=install_weak_deps=False \
+        "--setopt=localpkg_gpgcheck=${local_check}" "${stage}/package.rpm"
+)
+
 # Require the installed command to report the expected package version.
 assert_package_cli_version() {
     local package_kind=$1

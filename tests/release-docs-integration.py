@@ -87,7 +87,9 @@ def emit(value):
 if args[:2] == ["release", "verify"]:
     sys.exit(0)
 if args[:2] == ["release", "view"]:
-    emit({"isImmutable": True})
+    fedora = 44 if state["scenario"] == "wrong-release-rpm" else 45
+    asset = {"name": f"yt-dlp-aria2-downloader-gui-100.0.0-1.fc{fedora}.noarch.rpm", "size": 1024}
+    emit({"isImmutable": True, "assets": [asset]})
     sys.exit(0)
 path = next(arg for arg in args if arg.startswith("repos/"))
 route = path.split("/", 3)[3]
@@ -398,6 +400,29 @@ class ReleaseDocsReplay(unittest.TestCase):
                 result, _state = self.run_publisher()
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn("Prepared exact", result.stdout)
+
+    def test_release_platform_links_match_the_immutable_rpm_before_any_write(self):
+        self.prepare(scenario="wrong-release-rpm")
+        result, state = self.run_publisher()
+        self.assertEqual(result.returncode, 65, result.stderr)
+        self.assertIn("immutable release does not contain the expected Fedora RPM", result.stderr)
+        self.assertEqual(state["writes"], [])
+
+    def test_rehashed_french_fedora_link_cannot_substitute_a_different_build(self):
+        self.prepare()
+        for name in ("README.md", "README.fr.md"):
+            data = (self.handoff / name).read_text(encoding="utf-8")
+            self.assertEqual(data.count("100.0.0-1.fc45.noarch.rpm"), 3)
+            self.assertIn("### Fedora 45\n", data)
+            self.assertIn("| Fedora 45 | [RPM]", data)
+        french = self.handoff / "README.fr.md"
+        valid = french.read_text(encoding="utf-8")
+        french.write_text(valid.replace("100.0.0-1.fc45", "100.0.0-1.fc44", 1), encoding="utf-8")
+        self.rehash()
+        result, state = self.run_publisher()
+        self.assertEqual(result.returncode, 65, result.stderr)
+        self.assertIn("candidate changed bytes", result.stderr)
+        self.assertEqual(state["writes"], [])
 
     def test_rehashed_candidate_code_change_is_rejected_before_any_write(self):
         self.prepare()

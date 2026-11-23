@@ -11,8 +11,8 @@
 # and for RPM v6 multi-signature verification semantics.
 #
 # The production fixture is expected to be an unsigned RPM v4 package, matching
-# Fedora 44's deliberate default. The test proves that the legacy v4 signing
-# path cannot silently accumulate a second signer. Multi-signature semantics
+# the builder's explicitly pinned format. Legacy v4 signing cannot silently
+# accumulate a second signer. Multi-signature semantics
 # are then exercised independently on a tiny RPM v6 fixture built locally with
 # %_rpmformat=6. Only ephemeral keys are used.
 # The qualification bootstrap is exercised with real signatures and isolated
@@ -437,6 +437,133 @@ test_rpm_v6_multisig_semantics() {
         || fail 'RPM 6 accepted one corrupt known signature alongside one valid signature'
 }
 
+test_rpm_payload_extraction() {
+    local source_rpm=$1
+    local project=''
+    project=$(cd -- "${BASH_SOURCE[0]%/*}/.." && pwd -P)
+    python3 -I -B - "${project}" "${source_rpm}" "${root}" <<'PY_RPM_EXTRACTION'
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+project, source, root = map(Path, sys.argv[1:])
+fixture = root / 'extraction'
+fixture.mkdir(mode=0o700)
+name, version = subprocess.check_output(
+    ['rpm', '-qp', '--qf', '%{NEVRA}.rpm\\n%{VERSION}', '--', source],
+    text=True, encoding='ascii',
+).splitlines()
+if Path(name).name != name or not name.endswith('.fc45.noarch.rpm'):
+    raise AssertionError('unexpected RPM fixture identity')
+package = fixture / name
+shutil.copyfile(source, package)
+# Real CPIO permits zero padding after the end marker. A bounded writer that
+# outlives the reader makes the premature pipe closure deterministic.
+wrapper = fixture / 'rpm2cpio'
+wrapper.write_text(f'#!{sys.executable}\n' + '''import os, signal, subprocess, sys
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+if os.environ['CASE'] == 'writer':
+    sys.exit(74)
+subprocess.run([os.environ['REAL_RPM2CPIO'], *sys.argv[1:]], check=True)
+for _ in range(32):
+    sys.stdout.buffer.write(bytes(65536))
+sys.stdout.buffer.flush()
+''', encoding='utf-8')
+wrapper.chmod(0o700)
+reader = fixture / 'cpio'
+reader.write_text('#!/bin/sh\nprintf "reader\\n" >>"$EVENTS"\n'
+                  '[ "$CASE" != reader ] || exit 75\nexec "$REAL_CPIO" "$@"\n', encoding='ascii')
+reader.chmod(0o700)
+entry = r'''
+set -euo pipefail
+source <(sed '$d' -- "$1")
+if [[ $2 == builder ]]; then
+    work_dir=$3
+    VERSION=$4
+    validate_rpm_artifact "$5"
+else
+    WORK_DIR=$3
+    PACKAGE_PATH=$5
+    inspect_rpm_payload
+fi
+'''
+failures = []
+for site, script in [('builder', 'build-rpm.sh'), ('lifecycle', 'test-package-lifecycle.sh')]:
+    path = project / 'packaging/rpm' / script
+    if path.read_text(encoding='utf-8').splitlines()[-1] != 'main "$@"':
+        raise AssertionError('unrecognized RPM script entry point')
+    for case, expected, calls in [('padded', 0, 1), ('relative', 0, 1), ('writer', 74, 0), ('reader', 75, 1)]:
+        stage = fixture / (site + '-' + case)
+        stage.mkdir(mode=0o700)
+        events = stage / 'events'
+        env = dict(os.environ, PATH=str(fixture) + os.pathsep + os.environ['PATH'],
+                   REAL_RPM2CPIO=shutil.which('rpm2cpio'), REAL_CPIO=shutil.which('cpio'),
+                   CASE=case, EVENTS=str(events))
+        workspace = stage.name if case == 'relative' else stage
+        rc = subprocess.run(['bash', '-c', entry, 'extract', path, site, workspace, version, package],
+                            cwd=fixture, env=env, capture_output=True, timeout=20).returncode
+        observed = events.read_text(encoding='ascii').splitlines() if events.exists() else []
+        if rc != expected or observed != ['reader'] * calls:
+            failures.append(f'{site}/{case}: status {rc}, readers {len(observed)}, expected {expected}/{calls}')
+if failures:
+    raise AssertionError('; '.join(failures))
+print('Real RPM payload extraction: padded archive and independent producer/reader errors passed at both sites.')
+PY_RPM_EXTRACTION
+}
+
+test_package_transaction_policy() (
+    local unsigned=$1
+    local good=$2
+    local wrong=$3
+    local events="${root}/transactions"
+    local project="${root}/transaction-project"
+    local status=0
+    local PROJECT_DIR=${project}
+
+    # The production helper sees real RPM bytes and isolated keys. Only the
+    # system key import and the package-manager transaction are intercepted.
+    # shellcheck source=tests/lib/package-lifecycle.sh
+    source "${BASH_SOURCE[0]%/*}/lib/package-lifecycle.sh"
+    mkdir -p -- "${project}/packaging/keys"
+    cp -- "${pub_a}" "${project}/packaging/keys/RPM-GPG-KEY-OscarFrog"
+    rpmkeys() {
+        if [[ $# == 2 && $1 == --import ]]; then
+            printf '%s\n' import >>"${events}"
+            return 0
+        fi
+        command rpmkeys "$@"
+    }
+    dnf() {
+        [[ $# == 6 && $1 == install && $2 == --assumeyes && $3 == --allowerasing &&
+            $4 == --setopt=install_weak_deps=False && $6 == */package.rpm ]] || return 89
+        printf '%s\n' "$5" >>"${events}"
+    }
+
+    : >"${events}"
+    package_test_install_rpm "${good}" false
+    [[ $(<"${events}") == $'import\n--setopt=localpkg_gpgcheck=True' ]] \
+        || fail 'signed lifecycle package missed its verified transaction'
+    : >"${events}"
+    package_test_install_rpm "${unsigned}" true
+    [[ $(<"${events}") == '--setopt=localpkg_gpgcheck=False' ]] \
+        || fail 'development permission did not stay limited to the local RPM'
+    : >"${events}"
+    set +e
+    package_test_install_rpm "${unsigned}" false
+    status=$?
+    set -e
+    [[ ${status} == 65 && ! -s ${events} ]] \
+        || fail 'unsigned lifecycle package reached an unauthorized transaction'
+    set +e
+    package_test_install_rpm "${wrong}" true
+    status=$?
+    set -e
+    [[ ${status} == 65 && ! -s ${events} ]] \
+        || fail 'development permission admitted a foreign-signed lifecycle RPM'
+)
+
 test_rpm_fusion_bootstrap_authentication() {
     local source_rpm=$1
     local good_rpm="${root}/bootstrap-good.rpm"
@@ -454,6 +581,8 @@ test_rpm_fusion_bootstrap_authentication() {
     cp -- "${good_rpm}" "${corrupt_rpm}"
     signature=$(first_signature "${corrupt_rpm}")
     corrupt_signature_bytes "${corrupt_rpm}" "${signature}"
+
+    test_package_transaction_policy "${source_rpm}" "${good_rpm}" "${wrong_rpm}"
 
     python3 -I -B - "${workflow}" "${root}" \
         "${source_rpm}" "${good_rpm}" "${wrong_rpm}" "${corrupt_rpm}" \
@@ -510,7 +639,7 @@ dnf() {
     printf 'dnf\n' >>"${events}"
     [[ $# == 4 && $1 == install && $2 == --assumeyes &&
        $3 == --setopt=localpkg_gpgcheck=True &&
-       $4 == "${bootstrap_dir}/rpmfusion-free-release-44.noarch.rpm" ]] || exit 89
+       $4 == "${bootstrap_dir}/rpmfusion-free-release-45.noarch.rpm" ]] || exit 89
 }
 '''
 
@@ -520,7 +649,7 @@ def run(label, package, key=key_a, expected_nevra=nevra, implementation=body):
         case = Path(directory)
         for name in ('gpg', 'isolated-keyring', 'system-keyring'):
             (case / name).mkdir(mode=0o700)
-        staged = case / 'rpmfusion-free-release-44.noarch.rpm'
+        staged = case / 'rpmfusion-free-release-45.noarch.rpm'
         shutil.copyfile(package, staged)
         shutil.copyfile(key, case / 'RPM-GPG-KEY-rpmfusion-free-fedora-2020')
         before = hashlib.sha256(staged.read_bytes()).hexdigest()
@@ -558,12 +687,32 @@ require_refusal(run('foreign-certificate', good, key_b), [], 'foreign certificat
 require_refusal(run('wrong-nevra', good, expected_nevra=nevra + '-different'),
                 ['verify'], 'wrong NEVRA reached installation')
 
-# Signature presence is independent of RPM's digest-only success. Deleting that
-# guard must reproduce the formerly admitted unsigned-package installation.
+# Keep the real native verification policy. RPM 6.1's all/signature policy
+# independently refuses unsigned payloads even after the explicit presence
+# guard is deleted; that defense is not evidence that the deleted guard ran.
 presence_start = body.index('signature_state=$(\n')
 presence_end = body.index('\nrpmkeys \\\n', presence_start)
 without_presence = body[:presence_start] + body[presence_end:]
-observed = run('mutant-presence', unsigned, implementation=without_presence)
+native_policy = subprocess.check_output(
+    ['rpm', '--eval', '%{_pkgverify_level}'], text=True, encoding='ascii',
+).strip()
+if native_policy in ('all', 'signature'):
+    require_refusal(run('mutant-presence-native', unsigned, implementation=without_presence),
+                    ['verify'], 'native signature policy admitted an unsigned RPM')
+elif native_policy not in ('digest', 'none'):
+    raise AssertionError('unrecognized native RPM verification policy')
+
+# Model the historical digest-only verifier only at this private fixture's
+# checksig invocation. The unchanged production body above retains native
+# verification, isolated signers and every certificate/identity refusal.
+checksig = '--checksig "${bootstrap_dir}/rpmfusion-free-release-45.noarch.rpm"'
+if body.count(checksig) != 1:
+    raise AssertionError('RPM checksum verification call is not uniquely located')
+legacy_body = body.replace(checksig, '--define "_pkgverify_level digest" ' + checksig, 1)
+require_refusal(run('unsigned-legacy-policy', unsigned, implementation=legacy_body),
+                [], 'explicit signature presence did not reject an unsigned RPM')
+legacy_without_presence = legacy_body[:presence_start] + legacy_body[presence_end:]
+observed = run('mutant-presence', unsigned, implementation=legacy_without_presence)
 if observed[0].returncode or observed[1] != ['verify', 'system-import', 'dnf']:
     raise AssertionError('signature-presence mutant did not reach the expected unsafe admission')
 try:
@@ -603,6 +752,7 @@ main() {
     source_rpm=$1
     validate_rpm6_environment "${source_rpm}"
     prepare_rpm6_workspace
+    test_rpm_payload_extraction "${source_rpm}"
     prepare_rpm6_signers
     test_rpm_v4_legacy_signature "${source_rpm}"
     test_rpm_v4_v6_multisig "${source_rpm}"

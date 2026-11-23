@@ -47,6 +47,8 @@ The error log illustrates a simulated out-of-space diagnostic.
 
 Use the [latest GitHub release](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
 The filenames below match the currently published v2.4.5 release.
+This source tree targets Fedora 45 for future RPM builds. For a published RPM,
+use the Fedora version in the table and the installer from the same release.
 Download the files for your platform into the same folder, then open a terminal there.
 
 | Platform | Application download |

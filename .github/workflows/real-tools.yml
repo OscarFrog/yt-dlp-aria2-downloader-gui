@@ -43,7 +43,7 @@ jobs:
     # Include every test deadline, provisioning and diagnostic retention.
     timeout-minutes: 65
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         yt_dlp_version: ['2026.6.9', '2026.7.4', '2026.8.19']
     steps:
@@ -52,19 +52,36 @@ jobs:
         with:
           persist-credentials: false
       - name: Install real engines
-        timeout-minutes: 8
+        timeout-minutes: 10
         env:
           YT_DLP_VERSION: ${{ matrix.yt_dlp_version }}
         run: |
           set -Eeuo pipefail
-          # Bound stalled connections and the complete package transaction;
-          # provisioning must leave the independently bounded media tests time.
           sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup
           apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30
             -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
-          sudo timeout --signal=TERM --kill-after=10s 2m \
+          apt_uptime_seconds() {
+            local uptime
+            read -r uptime _ </proc/uptime || return 65
+            if [[ ! ${uptime} =~ ^([0123456789]{1,12})[.][0123456789]{2}$ ]]; then
+              printf 'Error: invalid Linux uptime for APT provisioning.\n' >&2
+              return 65
+            fi
+            printf '%d\n' "$((10#${BASH_REMATCH[1]}))"
+          }
+
+          # Share the APT deadline so time saved on indexes is available to dpkg.
+          apt_start=$(apt_uptime_seconds)
+          sudo timeout --signal=TERM --kill-after=10s 3m \
             python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update
-          sudo timeout --signal=TERM --kill-after=10s 4m \
+          apt_now=$(apt_uptime_seconds)
+          # Round elapsed time up. A zero duration would disable GNU timeout.
+          apt_remaining=$((480 - (apt_now - apt_start) - 1))
+          if (( apt_now < apt_start || apt_remaining <= 0 )); then
+            printf 'Error: shared APT provisioning deadline unavailable or exhausted.\n' >&2
+            exit 124
+          fi
+          sudo timeout --signal=TERM --kill-after=10s "${apt_remaining}s" \
             env DEBIAN_FRONTEND=noninteractive \
             python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends \
             aria2 curl ffmpeg python3-venv unzip

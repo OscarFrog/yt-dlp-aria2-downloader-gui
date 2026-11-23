@@ -2097,8 +2097,26 @@ while True:
                 raise AssertionError(f"{label}: invalid or absent publication was accepted")
             if label in ("paused-empty", "paused-third") and not pending_checked:
                 raise AssertionError(f"{label}: publication barrier was not exercised")
-            if (root / "signal").read_text() != str(int(fatal or signal.SIGTERM)):
-                raise AssertionError("capture sent the wrong shutdown signal")
+            expected_signal = int(fatal or signal.SIGTERM)
+            evidence = "unknown"
+            try:
+                with (root / "signal").open("rb") as stream:
+                    evidence = "present"
+                    # All admitted signals have at most two digits; a third byte rejects any suffix.
+                    recorded = stream.read(3)
+            except OSError as error:
+                recorded = None
+                if evidence == "unknown" and isinstance(error, FileNotFoundError):
+                    evidence = "absent"
+            if recorded != str(expected_signal).encode("ascii"):
+                valid = {str(int(n)).encode("ascii"): int(n) for n in signal.valid_signals()}
+                recorded_signal = "unavailable" if recorded is None else valid.get(recorded, "invalid")
+                engine_status = active[-1].returncode if active else None
+                if type(engine_status) is not int or not -signal.NSIG < engine_status <= 255:
+                    engine_status = "unknown"
+                raise AssertionError(
+                    f"capture sent the wrong shutdown signal: case={label} expected={expected_signal} "
+                    f"recorded={recorded_signal} evidence={evidence} engine_status={engine_status}")
             for ids, _ in observed:
                 if any(Path(f"/proc/{pid}").exists() for pid in set(ids)):
                     raise AssertionError("capture stranded an engine worker or sentinel")

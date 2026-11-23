@@ -26,8 +26,15 @@ cleanup() {
 }
 
 parse_rpm_lifecycle_arguments() {
+    local allow_unsigned=false
+
+    if [[ ${1:-} == --allow-unsigned-dev ]]; then
+        allow_unsigned=true
+        shift
+    fi
+    readonly ALLOW_UNSIGNED_DEV=${allow_unsigned}
     if (($# != 2)); then
-        printf 'Usage: %s PACKAGE.rpm VERSION\n' "${0##*/}" >&2
+        printf 'Usage: %s [--allow-unsigned-dev] PACKAGE.rpm VERSION\n' "${0##*/}" >&2
         exit 2
     fi
 
@@ -48,7 +55,7 @@ require_rpm_lifecycle_environment() {
     }
     for command_name in \
         cpio desktop-file-validate dirname dnf find grep mkdir mktemp \
-        realpath rm rpm rpm2cpio sort; do
+        install realpath rm rpm rpm2cpio rpmkeys sort; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             printf 'Error: required command is absent: %s\n' \
                 "${command_name}" >&2
@@ -120,11 +127,13 @@ initialize_rpm_lifecycle_workspace() {
 inspect_rpm_payload() {
     local package_list_file="${WORK_DIR}/package-files"
 
+    # cpio may finish at TRAILER!!! before rpm2cpio writes all padding.
+    rpm2cpio "${PACKAGE_PATH}" >"${WORK_DIR}/payload.cpio" || return $?
     mkdir -p -- "${WORK_DIR}/root"
     (
-        cd -- "${WORK_DIR}/root"
-        rpm2cpio "${PACKAGE_PATH}" | cpio -idm --quiet
-    )
+        cd -- "${WORK_DIR}/root" || exit $?
+        cpio -idm --quiet
+    ) <"${WORK_DIR}/payload.cpio" || return $?
     find "${WORK_DIR}/root" \
         \( -type f -o -type l \) \
         -printf '/%P\n' | LC_ALL=C sort >"${package_list_file}"
@@ -169,9 +178,7 @@ assert_rpm_payload_absent() {
 }
 
 install_initial_rpm() {
-    dnf install --assumeyes --allowerasing --nogpgcheck \
-        --setopt=install_weak_deps=False \
-        "${PACKAGE_PATH}"
+    package_test_install_rpm "${PACKAGE_PATH}" "${ALLOW_UNSIGNED_DEV}"
     package_installed=true
     assert_installed_rpm 'initial installation'
     assert_rpm_private_payload
@@ -190,8 +197,7 @@ remove_rpm() {
 }
 
 reinstall_and_remove_rpm() {
-    dnf install --assumeyes --allowerasing --nogpgcheck \
-        --setopt=install_weak_deps=False "${PACKAGE_PATH}"
+    package_test_install_rpm "${PACKAGE_PATH}" "${ALLOW_UNSIGNED_DEV}"
     package_installed=true
     assert_installed_rpm 'reinstallation'
     remove_rpm 'reinstall/removal'

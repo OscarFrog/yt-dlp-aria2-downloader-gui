@@ -47,6 +47,9 @@ Le journal illustre une erreur d'espace disque simulée.
 
 Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
 Les noms ci-dessous correspondent à la release v2.4.5 actuellement publiée.
+Les prochaines constructions RPM à partir de ces sources ciblent Fedora 45.
+Pour un RPM publié, utilisez la version de Fedora du tableau et l’installateur
+de la même release.
 Téléchargez les fichiers adaptés à votre système dans un même dossier, puis ouvrez-y un terminal.
 
 | Système | Application à télécharger |

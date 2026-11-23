@@ -300,9 +300,9 @@ jobs:
 
   rpm-build:
     needs: identity
-    name: Fedora 44 RPM build-once
+    name: Fedora 45 RPM build-once
     runs-on: ubuntu-24.04
-    container: fedora:44
+    container: fedora:45
     timeout-minutes: 20
     steps:
       - name: Install RPM build tools
@@ -345,13 +345,13 @@ jobs:
           overwrite: true
 
   rpm:
-    name: Fedora 44 RPM (${{ matrix.scenario }})
+    name: Fedora 45 RPM (${{ matrix.scenario }})
     needs:
       - rpm-build
       - previous-release
     runs-on: ubuntu-24.04
     container:
-      image: fedora:44
+      image: fedora:45
       volumes:
         - /tmp
         - /var/tmp
@@ -564,7 +564,7 @@ jobs:
           fi
           shopt -s nullglob; packages=(dist/*.rpm); shopt -u nullglob
           ((${#packages[@]} == 1))
-          bash packaging/rpm/test-package-lifecycle.sh "${packages[0]}" "${version}"
+          bash packaging/rpm/test-package-lifecycle.sh --allow-unsigned-dev "${packages[0]}" "${version}"
       - name: Test previous immutable release -> current RPM upgrade
         if: matrix.scenario == 'fresh'
         env:
@@ -598,7 +598,7 @@ jobs:
             exit 65
           fi
 
-          HOME="${PACKAGE_TEST_HOME}" bash packaging/rpm/test-package-upgrade.sh \
+          HOME="${PACKAGE_TEST_HOME}" bash packaging/rpm/test-package-upgrade.sh --allow-unsigned-dev \
             "${old[0]}" \
             "${current[0]}" \
             "${PREVIOUS_VERSION}" \

@@ -141,6 +141,10 @@ changes the underlying contract:
 
 ## Validation discipline
 
+Use Fedora 45 for Fedora package builds, installation tests and Fedora CI.
+Preserve the published release examples and the immutable packages used for
+upgrade testing. See `TESTING.md` for the real Zenity platform requirements.
+
 Use repository entry points instead of substituting ad hoc checks when a
 canonical check exists.
 

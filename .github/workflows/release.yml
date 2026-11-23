@@ -613,7 +613,7 @@ jobs:
       artifact_id: ${{ steps.artifact.outputs.artifact-id }}
     needs: validate
     runs-on: ubuntu-24.04
-    container: fedora:44
+    container: fedora:45
     timeout-minutes: 20
     steps:
       - name: Install RPM build tools
@@ -643,7 +643,7 @@ jobs:
       artifact_id: ${{ steps.artifact.outputs.artifact-id }}
     needs: [validate, rpm-build]
     runs-on: ubuntu-24.04
-    container: fedora:44
+    container: fedora:45
     timeout-minutes: 10
     environment: rpm-signing
     env:
@@ -883,7 +883,7 @@ jobs:
     needs: [validate, rpm-sign, previous-release]
     runs-on: ubuntu-24.04
     container:
-      image: fedora:44
+      image: fedora:45
       volumes:
         - /tmp
         - /var/tmp

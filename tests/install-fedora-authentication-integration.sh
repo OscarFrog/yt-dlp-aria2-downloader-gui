@@ -93,10 +93,15 @@ EOF_GPG
     cat >"${mock_bin}/rpm" <<'EOF_RPM'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ ${1:-} == -E && ${2:-} == %fedora ]]; then
+    printf '%s\n' "${MOCK_FEDORA_VERSION:?}"
+    exit 0
+fi
 if [[ ${1:-} == -q ]]; then
+    [[ ${3:-} == '%{NEVRA}\n' ]] || exit 64
     if [[ ${MOCK_RPM_FUSION_INSTALLED:-0} == 1 ]]; then
         printf '%s\n' \
-            "${MOCK_INSTALLED_RPM_FUSION_NEVRA:-rpmfusion-free-release-44-3.noarch}"
+            "${MOCK_INSTALLED_RPM_FUSION_NEVRA:-rpmfusion-free-release-45-2.noarch}"
         exit 0
     fi
     exit 1
@@ -128,8 +133,9 @@ if [[ ${1:-} == -qp ]]; then
             noarch
         exit 0
     fi
+    [[ ${query_format} == '%{NEVRA}\n' ]] || exit 64
     printf '%s\n' \
-        "${MOCK_RPM_FUSION_NEVRA:-rpmfusion-free-release-44-3.noarch}"
+        "${MOCK_RPM_FUSION_NEVRA:-rpmfusion-free-release-45-2.noarch}"
     exit 0
 fi
 exit 64
@@ -253,7 +259,7 @@ run_enable_rpm_fusion() {
         MOCK_STAGE_LOG="${TEST_ROOT}/stage.log" \
         "$@" \
         bash -c 'source "$1"; enable_rpm_fusion "$2"' \
-        bash "${library_copy}" 44
+        bash "${library_copy}" 45
 }
 
 write_project_key_listing() {
@@ -392,7 +398,7 @@ if [[ ${slot} == application ]]; then
     main fixture.rpm
 else
     ensure_rpm_fusion_bootstrap_tools() { :; }
-    enable_rpm_fusion 44
+    enable_rpm_fusion 45
 fi
 exit 99
 '''
@@ -490,7 +496,7 @@ main() {
     assert_status 65 'unqualified installed RPM Fusion release is rejected' \
         run_enable_rpm_fusion "${library_copy}" "${mock_bin}" \
         MOCK_RPM_FUSION_INSTALLED=1 \
-        MOCK_INSTALLED_RPM_FUSION_NEVRA=rpmfusion-free-release-44-99.noarch
+        MOCK_INSTALLED_RPM_FUSION_NEVRA=rpmfusion-free-release-45-99.noarch
 
     assert_status 65 'wrong RPM Fusion fingerprint is rejected' \
         run_enable_rpm_fusion "${library_copy}" "${mock_bin}" \
@@ -500,7 +506,7 @@ main() {
         MOCK_GPG_VALIDITY=r
     assert_status 65 'wrong RPM Fusion NEVRA is rejected' \
         run_enable_rpm_fusion "${library_copy}" "${mock_bin}" \
-        MOCK_RPM_FUSION_NEVRA=rpmfusion-free-release-44-99.noarch
+        MOCK_RPM_FUSION_NEVRA=rpmfusion-free-release-45-99.noarch
     assert_status 65 'unsigned RPM Fusion package is rejected' \
         run_enable_rpm_fusion "${library_copy}" "${mock_bin}" \
         MOCK_RPMKEYS_CHECK_FAIL=1
@@ -510,12 +516,22 @@ main() {
     assert_status 65 'unreadable RPM Fusion certificate is rejected' \
         run_enable_rpm_fusion "${library_copy}" "${mock_bin}" \
         MOCK_GPG_FAIL=1
+    assert_status 65 'a different RPM Fusion epoch is rejected' \
+        run_enable_rpm_fusion "${library_copy}" "${mock_bin}" \
+        MOCK_RPM_FUSION_NEVRA=rpmfusion-free-release-1:45-2.noarch
     # shellcheck disable=SC2016 # Positional parameters belong to bash -c.
-    assert_status 69 'unqualified Fedora release is rejected' \
-        env PATH="${mock_bin}:/usr/bin:/bin" \
-        MOCK_DNF_LOG="${TEST_ROOT}/dnf.log" \
-        bash -c 'source "$1"; enable_rpm_fusion 45' \
+    assert_status 0 'the Fedora 45 bootstrap is admitted' \
+        env PATH="${mock_bin}:/usr/bin:/bin" MOCK_FEDORA_VERSION=45 \
+        bash -c 'source "$1"; detect_supported_fedora version; [[ ${version} == 45 ]]' \
         bash "${library_copy}"
+    # shellcheck disable=SC2016 # Positional parameters belong to bash -c.
+    assert_status 69 'Fedora 44 is outside the installation contract' \
+        env PATH="${mock_bin}:/usr/bin:/bin" MOCK_FEDORA_VERSION=44 \
+        bash -c 'source "$1"; detect_supported_fedora version' bash "${library_copy}"
+    # shellcheck disable=SC2016 # Positional parameters belong to bash -c.
+    assert_status 69 'a preinstalled repository cannot admit an unqualified Fedora release' \
+        env PATH="${mock_bin}:/usr/bin:/bin" MOCK_RPM_FUSION_INSTALLED=1 \
+        bash -c 'source "$1"; enable_rpm_fusion 44' bash "${library_copy}"
 
     project_key_listing="${TEST_ROOT}/project-key.colons"
     write_project_key_listing "${project_key_listing}" - c \

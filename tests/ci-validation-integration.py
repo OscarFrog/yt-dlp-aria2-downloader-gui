@@ -348,6 +348,19 @@ class ProofTests(unittest.TestCase):
                 with self.assertRaises(CHECK.Refusal):
                     self.verify()
 
+    def test_fedora44_job_cannot_satisfy_fedora45_evidence(self):
+        for workflow, job_name in ((1, "Fedora 45"), (2, "Fedora 45 RPM build-once"),
+                                   (2, "Fedora 45 RPM (fresh)"), (2, "Fedora 45 RPM (ffmpeg-free)"),
+                                   (3, "FFmpeg 9.0.2 / Fedora 45")):
+            with self.subTest(job=job_name):
+                job = next(item for item in self.jobs(workflow) if item["name"] == job_name)
+                job["name"] = job_name.replace("Fedora 45", "Fedora 44")
+                try:
+                    with self.assertRaises(CHECK.Refusal):
+                        self.verify()
+                finally:
+                    job["name"] = job_name
+
     def test_forged_or_missing_identity_is_rejected(self):
         job = next(job for job in self.jobs() if job["name"].startswith(CHECK.IDENTITY_PREFIX))
         for identity in ("Source identity refs/pull/23/merge", "Source identity " + OTHER, "Other identity"):
@@ -373,7 +386,7 @@ class ProofTests(unittest.TestCase):
     def test_skip_exceptions_cannot_move_to_another_matrix_job(self):
         self.verify()
         for index, name, step_name in (
-            (2, "Fedora 44 RPM (fresh)", "Test previous immutable release -> current RPM upgrade"),
+            (2, "Fedora 45 RPM (fresh)", "Test previous immutable release -> current RPM upgrade"),
             (4, "Local media, pinned yt-dlp 2026.8.19", "Run real FFmpeg progress qualification"),
             (4, "Local media, pinned yt-dlp 2026.6.9", "Run aria2 direct-transfer behavior qualification"),
         ):
@@ -389,9 +402,9 @@ class ProofTests(unittest.TestCase):
         # REQUIRED_STEPS: removing a production requirement must fail this test.
         for index, name, obligation in (
             (1, "Ubuntu", "Check Python with reviewed Ruff"),
-            (2, "Fedora 44 RPM build-once", "Qualify RPM v4/v6 signature semantics"),
+            (2, "Fedora 45 RPM build-once", "Qualify RPM v4/v6 signature semantics"),
             (2, "Previous immutable release", "Verify exact published previous packages"),
-            (2, "Fedora 44 RPM (fresh)", "Reject a different globally trusted RPM signer in PR CI"),
+            (2, "Fedora 45 RPM (fresh)", "Reject a different globally trusted RPM signer in PR CI"),
             (4, "Local media, pinned yt-dlp 2026.8.19", "Run direct, audio, HLS and DASH boundary qualification"),
         ):
             with self.subTest(job=name, obligation=obligation):
@@ -1149,6 +1162,12 @@ rpmsign() {
 
 
 class WorkflowContractTests(unittest.TestCase):
+    # Workflow, job, minute limits for the job, setup, update, and the install timeout argument.
+    MEDIA_BUDGETS = (
+        ("real-tools.yml", "pinned-local-media", 65, 10, 3, '"${apt_remaining}s"'),
+        ("real-tools.yml", "current-stable-local-media", 65, 8, 2, "4m"),
+        ("release.yml", "release-runtime", 50, 8, 2, "4m"),
+    )
     @staticmethod
     def workflow(filename):
         return (PROJECT / ".github/workflows" / filename).read_text(encoding="utf-8")
@@ -1174,7 +1193,7 @@ class WorkflowContractTests(unittest.TestCase):
         sequence = re.search(r"(?m)^    needs: \[([a-z0-9, -]+)\]$", job)
         return {part.strip() for part in sequence.group(1).split(",")} if sequence else set()
 
-    def assert_media_provisioning_budgets(self, text, job_name, expected_minutes):
+    def assert_media_provisioning_budgets(self, text, job_name, expected_minutes, setup, update, apt_install):
         job = self.jobs(text)[job_name]
         minutes = int(re.search(r"(?m)^    timeout-minutes: (\d+)$", job).group(1))
         self.assertEqual(minutes, expected_minutes)
@@ -1195,12 +1214,14 @@ class WorkflowContractTests(unittest.TestCase):
         expected_tests = 33 * 60 + 40 if job_name == "release-runtime" else 41 * 60 + 50
         self.assertEqual(tests_seconds, expected_tests, "Test deadlines and coverage must remain unchanged")
         install = next(step for step in steps if "apt_options=(" in step)
-        self.assertIn("timeout-minutes: 8", install)
+        self.assertRegex(install, rf"(?m)^        timeout-minutes: {setup}$")
         for option in ("Acquire::Retries=3", "Acquire::http::Timeout=30",
                        "Acquire::https::Timeout=30", "DPkg::Lock::Timeout=60"):
             self.assertEqual(install.count(option), 1)
-        self.assertIn('sudo timeout --signal=TERM --kill-after=10s 2m \\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update', install)
-        self.assertIn('sudo timeout --signal=TERM --kill-after=10s 4m \\\n            env DEBIAN_FRONTEND=noninteractive \\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends', install)
+        self.assertIn(f'sudo timeout --signal=TERM --kill-after=10s {update}m '
+                      '\\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update', install)
+        self.assertIn(f'sudo timeout --signal=TERM --kill-after=10s {apt_install} '
+                      '\\\n            env DEBIAN_FRONTEND=noninteractive \\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends', install)
         for forbidden in ("continue-on-error", "|| true", "--allow-unauthenticated", "--fix-missing",
                           "trusted=yes", "Acquire::AllowInsecureRepositories", "/etc/apt/sources"):
             self.assertNotIn(forbidden, install)
@@ -1208,23 +1229,24 @@ class WorkflowContractTests(unittest.TestCase):
                         install.index('"${apt_options[@]}" install'))
         self.assertLess(install.index('"${apt_options[@]}" install'), install.index("python3 -m venv"))
 
+    def test_pinned_media_jobs_finish_independently_and_remain_required(self):
+        job = self.jobs(self.workflow("real-tools.yml"))["pinned-local-media"]
+        self.assertIn("    strategy:\n      fail-fast: false\n      matrix:", job)
+        self.assertNotIn("continue-on-error", job)
+
     def test_media_provisioning_and_job_budgets_cover_all_original_tests(self):
-        for workflow, name, minutes in (("real-tools.yml", "pinned-local-media", 65),
-                                        ("real-tools.yml", "current-stable-local-media", 65),
-                                        ("release.yml", "release-runtime", 50)):
+        for workflow, name, minutes, setup, update, apt_install in self.MEDIA_BUDGETS:
             with self.subTest(job=name):
-                self.assert_media_provisioning_budgets(self.workflow(workflow), name, minutes)
+                self.assert_media_provisioning_budgets(self.workflow(workflow), name, minutes, setup, update, apt_install)
 
     def test_media_deadlines_cannot_be_removed_or_consume_the_test_budget(self):
-        for workflow, name, minutes in (("real-tools.yml", "pinned-local-media", 65),
-                                        ("real-tools.yml", "current-stable-local-media", 65),
-                                        ("release.yml", "release-runtime", 50)):
+        for workflow, name, minutes, setup, update, apt_install in self.MEDIA_BUDGETS:
             text = self.workflow(workflow)
             job = self.jobs(text)[name]
             for old, new in ((f"    timeout-minutes: {minutes}", "    timeout-minutes: 25"),
-                             ("        timeout-minutes: 8", "        timeout-minutes: 30"),
-                             ("sudo timeout --signal=TERM --kill-after=10s 2m", "sudo"),
-                             ("sudo timeout --signal=TERM --kill-after=10s 4m", "sudo"),
+                             (f"        timeout-minutes: {setup}", "        timeout-minutes: 30"),
+                             (f"sudo timeout --signal=TERM --kill-after=10s {update}m", "sudo"),
+                             (f"sudo timeout --signal=TERM --kill-after=10s {apt_install}", "sudo"),
                              ("Acquire::http::Timeout=30", "Acquire::http::Timeout=0"),
                              ("Acquire::https::Timeout=30", "Acquire::https::Timeout=0"),
                              ("DPkg::Lock::Timeout=60", "DPkg::Lock::Timeout=-1"),
@@ -1236,7 +1258,7 @@ class WorkflowContractTests(unittest.TestCase):
                     self.assertIn(old, job)
                     mutated = text.replace(job, job.replace(old, new, 1), 1)
                     with self.assertRaises(AssertionError):
-                        self.assert_media_provisioning_budgets(mutated, name, minutes)
+                        self.assert_media_provisioning_budgets(mutated, name, minutes, setup, update, apt_install)
 
     def assert_gate(self, jobs, job, gate, seen=None):
         seen = (seen or set()) | {job}
@@ -1326,11 +1348,26 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
             for name in names | {CHECK.IDENTITY_PREFIX + SOURCE}:
                 for step in CHECK.required_steps(name):
                     with self.subTest(workflow=filename, job=name, step=step):
-                        self.assertIn("- name: " + step + "\n", text)
+                        if name.endswith(" / verified upstream source"):
+                            version = name.split()[1]
+                            upstream = self.jobs(text)["ffmpeg-upstream"]
+                            self.assertIn("version: ['8.1.3', '9.0.1']", upstream)
+                            self.assertIn("EXPECTED_FFMPEG_VERSION: ${{ matrix.version }}", upstream)
+                            self.assertIn("- name: " + step + "\n",
+                                          upstream.replace("${{ matrix.version }}", version))
+                        else:
+                            self.assertIn("- name: " + step + "\n", text)
 
     def test_minimum_interpreters_share_one_full_run_and_bind_absolute_fixtures(self):
         job = self.jobs(self.workflow("shell.yml"))["validate-python-minimum"]
         self.assertEqual(job.count("./tests/run-all.sh --full --jobs 4"), 1)
+        capture = "YTDLP_PY310_FIRST_FAILURE"
+        workflows = (PROJECT / ".github/workflows").glob("*.yml")
+        self.assertEqual(sum(path.read_text().count(capture) for path in workflows), 1)
+        self.assertIn("      - name: Exercise the complete contract under Python 3.10\n"
+                      "        env:\n"
+                      f"          {capture}: engine-cli-first-sample\n"
+                      "        run: timeout ", job)
         self.assertIn("name: Python 3.10 / Ubuntu", job)
         for guard in (
             "${RUNNER_ENVIRONMENT} == github-hosted",
@@ -1885,7 +1922,7 @@ class UbuntuMirrorTests(unittest.TestCase):
 
     TARGETS = {
         "real-tools.yml": {"pinned-local-media", "current-stable-local-media"},
-        "qualification.yml": {"ffmpeg-ubuntu-6", "ffmpeg-upstream-9"},
+        "qualification.yml": {"ffmpeg-ubuntu-6", "ffmpeg-upstream"},
         "packages.yml": {"source-archive", "deb"},
         "release.yml": {"release-runtime", "zip", "deb"},
     }
@@ -4075,6 +4112,24 @@ class VersionBoundaryTests(unittest.TestCase):
         return "\n".join(line[10:] for line in block.splitlines()
                          if line.startswith("          ")) + "\n"
 
+    def test_first_failure_capture_is_scoped_to_two_stress_invocations(self):
+        step = self.step("stress.yml", "Repeat race-sensitive integration scenarios with bounded jitter")
+        with tempfile.TemporaryDirectory() as temporary:
+            probe = Path(temporary) / "bash"
+            probe.write_text('#!/bin/sh\n'
+                             'test "$*" = "./tests/mock-integration.sh --group stress-signals" || exit 65\n'
+                             'printf "capture=%s\\n" "$YTDLP_STRESS_FIRST_FAILURE"\n')
+            probe.chmod(0o755)
+            for shard in range(1, 5):
+                with self.subTest(shard=shard):
+                    env = dict(os.environ, STRESS_SHARD=str(shard), YTDLP_STRESS_FIRST_FAILURE="2:18",
+                               PATH=temporary + os.pathsep + os.environ["PATH"])
+                    output = subprocess.check_output(["/bin/bash", "-c", step], env=env, text=True)
+                    captures = [line for line in output.splitlines() if line.startswith("capture=")]
+                    selected = {(2, 18): "capture=2:18", (4, 12): "capture=4:12"}
+                    expected = [selected.get((shard, n), "capture=") for n in range(shard, 21, 4)]
+                    self.assertEqual(captures, expected)
+
     def test_media_apt_blocks_preserve_errors_signals_and_stop_stalled_provisioning(self):
         targets = (("real-tools.yml", "Install real engines"),
                    ("real-tools.yml", "Install real engines and current yt-dlp stable"),
@@ -4142,8 +4197,11 @@ if stage == os.environ["CHECK_APT_STAGE"]:
                         env.pop("DEBIAN_FRONTEND", None)
                         current = prefix
                         if action in {"stall", "ignore-term"}:
-                            current = current.replace(" 2m ", " 0.5s ").replace(" 4m ", " 0.5s ")
-                            current = current.replace("--kill-after=10s", "--kill-after=0.1s")
+                            current, count = re.subn(
+                                r'(?m)^sudo timeout --signal=TERM --kill-after=10s (?:[1-9][0-9]*m|"\$\{apt_remaining\}s") ',
+                                "sudo timeout --signal=TERM --kill-after=0.1s 0.5s ", current,
+                            )
+                            self.assertEqual(count, 2)
                         current += '\nprintf completed >"${CHECK_CONTINUED}"\n'
                         result = subprocess.run(["bash", "-c", current], env=env, capture_output=True,
                                                 text=True, timeout=5, check=False)
@@ -4165,6 +4223,59 @@ if stage == os.environ["CHECK_APT_STAGE"]:
                             # close inherited pipes before the kernel exposes a
                             # terminal state; wait briefly for actual quiescence.
                             require_fixture_process_exit(identity["pid"], identity["starttime"])
+
+    def test_pinned_install_uses_only_the_remaining_apt_budget(self):
+        script = self.step("real-tools.yml", "Install real engines").split("\ncase ${YT_DLP_VERSION}", 1)[0]
+        # Substitute the kernel clock and record what the unchanged shell passes
+        # to timeout. Updating the clock in the update call fixes the chronology.
+        script = script.replace("/proc/uptime", '"${CHECK_UPTIME}"')
+        stub = r'''
+sudo() {
+    case $1 in
+        python3) [[ ${!#} == --setup ]] ;;
+        timeout)
+            if [[ ${!#} == update ]]; then
+                printf 'update %s\n' "$4"
+                printf '%s' "${CHECK_AFTER}" >"${CHECK_UPTIME}"
+            else
+                printf 'install %s\n' "$4"
+            fi
+            ;;
+        *) return 64 ;;
+    esac
+}
+'''
+        def uptime_record(value):
+            return f"{value} 1234.56\n" if value else ""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            clock = Path(temporary) / "uptime"
+
+            def replay(before, after, status, expected_calls):
+                with self.subTest(before=before, after=after):
+                    clock.write_text(uptime_record(before))
+                    env = dict(os.environ, CHECK_UPTIME=str(clock), CHECK_AFTER=uptime_record(after))
+                    result = subprocess.run(["bash", "-c", stub + script + "\necho continued\n"],
+                                            env=env, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    self.assertEqual(result.stdout.splitlines(), expected_calls)
+
+            update = ["update 3m"]
+            for before, after, expected in (("1000.01", "1000.99", "479s"),
+                                            ("1000.99", "1008.01", "471s"),
+                                            ("1000.01", "1048.90", "431s"),
+                                            ("1000.01", "1144.99", "335s"),
+                                            ("1000.01", "1478.99", "1s"),
+                                            ("0008.99", "0016.01", "471s"),
+                                            ("999999999991.99", "999999999999.01", "471s")):
+                replay(before, after, 0, [*update, "install " + expected, "continued"])
+
+            for after in ("1479.00", "1480.01", "999.99"):
+                replay("1000.01", after, 124, update)
+
+            for invalid in ("", "nonsense", "1+1.00", "１.00", "1000.2", "1000.123", "1000000000000.00"):
+                replay(invalid, "1008.01", 65, [])
+                replay("1000.01", invalid, 65, update)
 
     def test_pinned_engine_installation_preserves_hashes_and_pip_failure(self):
         pins = {"2026.6.9": "442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4",

@@ -36,13 +36,23 @@ PUBLISHED_VERSION_RE = re.compile(
     re.MULTILINE,
 )
 STATIC_CONTRACT_PATH = Path("test-static.sh")
+RPM_FILENAME = "yt-dlp-aria2-downloader-gui-{version}-1.fc{fedora}.noarch.rpm"
+PACKAGE_REFERENCES = (
+    ("| Fedora {fedora} | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/"
+     + RPM_FILENAME + ") |", 1),
+    ("\n### Fedora {fedora}\n", 1),
+    ("\n" + RPM_FILENAME + "\n", 1),
+    ("bash ./install-fedora.sh ./" + RPM_FILENAME + "\n", 1),
+    ("yt-dlp-aria2-downloader-gui-{version}.zip", 3),
+    ("cd yt-dlp-aria2-downloader-gui-{version}\n", 1),
+    ("yt-dlp-aria2-downloader-gui_{version}-1_all.deb", 3),
+)
 README_REFERENCE_TEMPLATES = {
     Path("README.md"): (
         ("latest published package release is **{version}**.", 1),
         ("currently published v{version} release.", 1),
         ("latest published release, {version}, provides", 1),
-        ("yt-dlp-aria2-downloader-gui-{version}", 7),
-        ("yt-dlp-aria2-downloader-gui_{version}", 3),
+        *PACKAGE_REFERENCES,
         ("gh release verify v{version} -R", 1),
         ("gh release verify-asset v{version} ./ARTIFACT", 1),
     ),
@@ -50,8 +60,7 @@ README_REFERENCE_TEMPLATES = {
         ("dernière release de paquets publiée est la **{version}**.", 1),
         ("release v{version} actuellement publiée.", 1),
         ("dernière release publiée, la {version}, fournit", 1),
-        ("yt-dlp-aria2-downloader-gui-{version}", 7),
-        ("yt-dlp-aria2-downloader-gui_{version}", 3),
+        *PACKAGE_REFERENCES,
         ("gh release verify v{version} -R", 1),
         ("gh release verify-asset v{version} ./ARTEFACT", 1),
     ),
@@ -105,13 +114,22 @@ def require_single_version(
     return matches[0].group("version")
 
 
+def published_fedora(version: str) -> int:
+    """v2.4.5 was the final immutable Fedora 44 RPM release."""
+    return 44 if parse_version(version) <= (2, 4, 5) else 45
+
+
 def validate_reference_counts(
     relative_path: Path, text: str, version: str
 ) -> None:
     """Require every generated release-reference shape at its exact count."""
 
+    if (text.count(f"yt-dlp-aria2-downloader-gui-{version}") != 7 or
+            text.count(f"yt-dlp-aria2-downloader-gui_{version}") != 3):
+        raise VersionUpdateError(f"{relative_path} has an unexpected published package reference count")
+    fedora = published_fedora(version)
     for template, expected_count in README_REFERENCE_TEMPLATES[relative_path]:
-        reference = template.format(version=version)
+        reference = template.format(version=version, fedora=fedora)
         actual_count = text.count(reference)
         if actual_count != expected_count:
             raise VersionUpdateError(
@@ -127,9 +145,10 @@ def replace_reference_set(
 
     validate_reference_counts(relative_path, text, old_version)
     updated = text
+    old_fedora, new_fedora = published_fedora(old_version), published_fedora(new_version)
     for template, _expected_count in README_REFERENCE_TEMPLATES[relative_path]:
-        old_reference = template.format(version=old_version)
-        new_reference = template.format(version=new_version)
+        old_reference = template.format(version=old_version, fedora=old_fedora)
+        new_reference = template.format(version=new_version, fedora=new_fedora)
         updated = updated.replace(old_reference, new_reference)
     validate_reference_counts(relative_path, updated, new_version)
     return updated

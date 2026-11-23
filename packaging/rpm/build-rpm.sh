@@ -35,10 +35,22 @@ parse_rpm_build_arguments() {
 
 require_rpm_build_commands() {
     local command_name=''
+    local build_target=''
+
+    command -v rpm >/dev/null 2>&1 || {
+        printf '%s\n' 'Error: required command is absent: rpm' >&2
+        exit 127
+    }
+    # The spec derives its Release suffix from the actual RPM buildroot.
+    build_target=$(LC_ALL=C rpm --eval '%{?fedora} %{?dist}')
+    if [[ ${build_target} != '45 .fc45' ]]; then
+        printf '%s\n' 'Error: the RPM build requires a Fedora 45 buildroot.' >&2
+        exit 69
+    fi
 
     for command_name in \
         basename cp cpio desktop-file-validate dirname find git gzip mkdir \
-        mktemp realpath rm rpm rpm2cpio rpmbuild; do
+        mktemp realpath rm rpm2cpio rpmbuild; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             printf 'Error: required command is absent: %s\n' \
                 "${command_name}" >&2
@@ -158,6 +170,7 @@ publish_rpm_artifact() {
 validate_rpm_artifact() {
     local rpm_path=$1
     local package_format=''
+    local package_name=''
     local extracted="${work_dir}/extracted"
     local packaged_version=''
 
@@ -175,15 +188,24 @@ validate_rpm_artifact() {
         exit 65
     fi
 
+    package_name=$(LC_ALL=C rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}.rpm' -- "${rpm_path}")
+    if [[ ${package_name} != "${PACKAGE_NAME}-${VERSION}-"*.fc45.noarch.rpm ||
+        ${package_name} != "${rpm_path##*/}" ]]; then
+        printf 'Error: unexpected Fedora 45 RPM identity: %s\n' "${package_name}" >&2
+        exit 65
+    fi
+
     rpm -qpi -- "${rpm_path}"
     rpm -qpl -- "${rpm_path}"
     rpm -qpR -- "${rpm_path}"
 
+    # cpio may finish at TRAILER!!! before rpm2cpio writes all padding.
+    rpm2cpio "${rpm_path}" >"${work_dir}/payload.cpio" || return $?
     mkdir -p -- "${extracted}"
     (
-        cd -- "${extracted}"
-        rpm2cpio "${rpm_path}" | cpio -idm --quiet
-    )
+        cd -- "${extracted}" || exit $?
+        cpio -idm --quiet
+    ) <"${work_dir}/payload.cpio" || return $?
     packaged_version=$(
         "${extracted}/usr/bin/yt-dlp-aria2-downloader" --version
     )
