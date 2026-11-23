@@ -50,7 +50,7 @@ does not implement a second download pipeline.
 | Graphical | `download-video-gui.sh` | `/usr/bin/yt-dlp-aria2-downloader-gui` symlink | Collect one request, supervise it, render progress, and report the result |
 | Command line | `download-video.sh` | `/usr/bin/yt-dlp-aria2-downloader` symlink | Validate inputs and runtimes, select transport, download, validate, and publish one result |
 | Portable launcher management | `install-gui.sh` plus `private-launcher-manager.py` | Run from a Git checkout or ZIP | Validate the request, then install or remove the current user's desktop launcher through anchored filesystem operations |
-| Fedora bootstrap | `install-fedora.sh` | Published beside release packages | Authenticate a release RPM, install dependencies and the package, then prepare managed runtimes |
+| Fedora bootstrap | `install-fedora.sh` | Published beside release packages | Authenticate a release RPM on Fedora 45, install dependencies and the package, then prepare managed runtimes |
 
 Native packages keep implementation files under a private libexec directory.
 `packaging/install-tree.sh` creates the shared RPM/DEB payload, public symlinks,
@@ -1235,8 +1235,9 @@ qualifications then run independently: none holds a runner merely to poll for
 shell completion. This favors the successful PR path; a late functional failure
 can occur after complementary work has already started. The existing required
 stress check still waits for all four complementary workflows and its own local
-shards/runtime. This preserves deployed required-check names and complete
-coverage before merge, without a circular wait or a partial-success shortcut.
+shards/runtime. The four Fedora job names include the target release. Moving
+them to Fedora 45 requires a coordinated update of the protected branch checks
+after the replacement jobs have succeeded on a published revision.
 Only `promotion.yml` runs on main pushes. It verifies source proof; release
 independently repeats this inexpensive identity check before building and after
 final package testing. Every release checkout directly uses `${{ github.sha }}`;
@@ -1398,7 +1399,7 @@ journal recovery and lock contention in their original stateful order, including
 the ten stress cycles. The default standalone entry still runs the complete
 original sequence, and coverage checks require every phase exactly once.
 
-Fedora download and RPM lifecycle/upgrade jobs use anonymous Docker volumes
+Fedora 45 download and RPM lifecycle/upgrade jobs use anonymous Docker volumes
 for `/tmp` and `/var/tmp`, with `TMPDIR=/var/tmp`. Installed-payload checks also
 read private plans and enter the engine workspace paths, so their temporary
 fixtures must use the volume's actual local filesystem instead of an unqualified

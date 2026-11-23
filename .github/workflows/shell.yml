@@ -197,10 +197,10 @@ jobs:
         run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/run-all.sh --full --jobs 4
   validate-fedora:
     needs: identity
-    name: Fedora 44
+    name: Fedora 45
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:44
+      image: registry.fedoraproject.org/fedora:45
       volumes:
         - /tmp
         - /var/tmp

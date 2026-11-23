@@ -129,6 +129,41 @@ print(f"Package APT routing: {checks} cases passed; locales: {', '.join(locales)
 PY_PACKAGE_APT
 }
 
+test_rpm_transaction_routing() {
+    local kind=''
+    local script=''
+
+    for kind in lifecycle upgrade; do
+        script="packaging/rpm/test-package-${kind}.sh"
+        assert_file_contains "${PROJECT_DIR}/.github/workflows/packages.yml" \
+            "bash ${script} --allow-unsigned-dev" "RPM ${kind} opts in for PR packages"
+        assert_file_not_contains "${PROJECT_DIR}/.github/workflows/release.yml" \
+            "bash ${script} --allow-unsigned-dev" "RPM ${kind} keeps release signature verification"
+    done
+    # shellcheck disable=SC2016 # Literal old-package call must never inherit the development flag.
+    assert_file_contains "${PROJECT_DIR}/packaging/rpm/test-package-upgrade.sh" \
+        'package_test_install_rpm "${OLD_PACKAGE}" false' 'previous immutable RPM always requires its signature'
+}
+
+test_rpm_build_target_refusal() {
+    local target=''
+    local probe_dir="${root}/rpm-build-target"
+
+    mkdir -p -- "${probe_dir}"
+    cat >"${probe_dir}/rpm" <<'RPM_PROBE'
+#!/usr/bin/env bash
+[[ $# == 2 && $1 == --eval && $2 == '%{?fedora} %{?dist}' ]] || exit 99
+printf '%s\n' "${FIXTURE_RPM_TARGET}"
+RPM_PROBE
+    chmod 700 -- "${probe_dir}/rpm"
+    for target in '44 .fc44' '44 .fc45' '45 .fc44'; do
+        assert_status 69 "RPM builder rejects target ${target}" \
+            env PATH="${probe_dir}:${PATH}" FIXTURE_RPM_TARGET="${target}" \
+            bash "${PROJECT_DIR}/packaging/rpm/build-rpm.sh" "${version}" "${probe_dir}/dist"
+        [[ ! -e ${probe_dir}/dist ]] || fail 'Rejected buildroot produced an output directory'
+    done
+}
+
 test_rejected_private_directories() {
     local invalid_private_dir=''
     local invalid_root=''
@@ -311,6 +346,8 @@ main() {
     trap 'exit 143' TERM
 
     test_package_apt_routing
+    test_rpm_build_target_refusal
+    test_rpm_transaction_routing
     test_rejected_private_directories
     test_alternate_private_directory
     test_packaged_install_tree

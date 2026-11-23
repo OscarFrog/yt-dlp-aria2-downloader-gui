@@ -48,7 +48,7 @@ def write_version_sources(root, version, published="2.3.11"):
     for name, marker in markers.items():
         text = marker + f"gh workflow run release.yml --ref v{version} -f tag=v{version}\n"
         for template, count in CHECK.PUBLISHED.README_REFERENCE_TEMPLATES[Path(name)]:
-            text += (template.format(version=published) + "\n") * count
+            text += (template.format(version=published, fedora=CHECK.PUBLISHED.published_fedora(published)) + "\n") * count
         (root / name).write_text(text, encoding="utf-8")
     spec = root / PREPARE.RPM_PATH
     spec.parent.mkdir(parents=True, exist_ok=True)
@@ -350,6 +350,28 @@ class OfflineCoherenceTests(unittest.TestCase):
             output.write("yt-dlp-aria2-downloader-gui-2.3.13.zip\n")
         with self.assertRaisesRegex(CHECK.CheckError, "unpublished"):
             CHECK.worktree_version(self.root)
+
+    def test_published_rpm_distribution_and_unpublished_references(self):
+        for name in ("README.md", "README.fr.md"):
+            for published, fedora, wrong in (("2.4.5", 44, 45), ("2.4.6", 45, 44)):
+                with self.subTest(name=name, published=published):
+                    write_version_sources(self.root, "2.4.7", published)
+                    path = self.root / name
+                    valid = path.read_text(encoding="utf-8")
+                    for before, after in (
+                        (f"-1.fc{fedora}.noarch.rpm", f"-1.fc{wrong}.noarch.rpm"),
+                        (f"### Fedora {fedora}\n", f"### Fedora {wrong}\n"),
+                        (f"| Fedora {fedora} | [RPM]", f"| Fedora {wrong} | [RPM]"),
+                    ):
+                        self.assertIn(before, valid)
+                        path.write_text(valid.replace(before, after, 1), encoding="utf-8")
+                        with self.assertRaisesRegex(CHECK.CheckError, "published references"):
+                            CHECK.worktree_version(self.root)
+                    for suffix in ("fc44", "fc45"):
+                        path.write_text(valid + f"yt-dlp-aria2-downloader-gui-2.4.7-1.{suffix}.noarch.rpm\n",
+                                        encoding="utf-8")
+                        with self.assertRaisesRegex(CHECK.CheckError, "unpublished"):
+                            CHECK.worktree_version(self.root)
 
     def test_conflicting_development_announcements_are_rejected(self):
         announcements = {

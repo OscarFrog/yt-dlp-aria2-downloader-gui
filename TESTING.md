@@ -1117,7 +1117,7 @@ The automated suite checks, among other things:
   fixture) and the later stable-link variant, while preserving portable target
   links and any current, modified, out-of-HOME, symbolic-link, mode-changed,
   or non-regular launcher candidate observed during validation;
-- real privileged installation and removal of the generated RPM in Fedora 44
+- real privileged installation and removal of the generated RPM in Fedora 45
   `fresh` and `ffmpeg-free` GitHub Actions environments, including launcher and
   icon cleanup;
 - fail-closed rejection of an unsigned PR RPM by the production Fedora bootstrap,
@@ -1419,7 +1419,7 @@ both behavioral guarantees.
 The five qualification workflows run on pull requests, with manual dispatch
 available for diagnostics. Each checks event/checkout identity, version
 coherence and Bash syntax before its own qualification jobs. `shell.yml`
-qualifies Ubuntu 24.04, Fedora 44 and actual Python 3.10; package, real-tool,
+qualifies Ubuntu 24.04, Fedora 45 and actual Python 3.10; package, real-tool,
 FFmpeg and stress work need not wait for that complete shell contract. Root
 jobs retain `needs: identity` and downstream package/shard dependencies.
 This avoids four allocated runners polling for shell completion and overlaps
@@ -1431,8 +1431,10 @@ every failing PR.
 The existing required check **Mock process/cancellation stress (20x deterministic
 jitter)** also waits for every complementary shell, package, real-tool and
 FFmpeg job. It excludes its own workflow from that API wait: its local `needs`
-cover its shards and runtime test, avoiding a self-dependency. All nine required
-check names are preserved; no remote ruleset change is necessary. Matrices
+cover its shards and runtime test, avoiding a self-dependency. Four of the nine required
+check names include the Fedora version. Verify the four Fedora 45 jobs on a
+published candidate before replacing their Fedora 44 counterparts in branch
+protection. Keep the other five required checks and strict status checks. Matrices
 cancel remaining entries after a failure, and PR concurrency cancels superseded
 revisions. Scheduled current-stable tools remain independent diagnostics.
 
@@ -1604,7 +1606,7 @@ isolated `rpm-signing` GitHub Environment. The signer has no
 repository checkout, uses the same private RPM 6 `fs` keyring model as the
 consumer bootstrap, removes materialized signing secrets as soon as they are no
 longer needed, and explicitly terminates its temporary `gpg-agent`. The
-identical signed RPM is then installed on Fedora 44 in `fresh` and
+identical signed RPM is then installed on Fedora 45 in `fresh` and
 `ffmpeg-free` scenarios through the supported RPM Fusion bootstrap. The
 architecture-independent DEB is built on Ubuntu 24.04 and qualified through
 install, remove, purge, remove-to-purge, reinstall, and previous-release upgrade
@@ -1638,9 +1640,11 @@ the wheel hashes come from the corresponding public PyPI releases. The other
 matrix entries retain their existing environments. The static contract binds
 each version/hash, the Python target, installation flags and latest-only
 placement before the shared run, with discriminating source mutations.
-The FFmpeg 6 generation job adds only generation-specific compatibility fixtures;
-Fedora 8 and upstream 9 each run the common fixtures with their distinct tools.
-The verified upstream FFmpeg 9 build enables libvpx as well as libopus so the
+Ubuntu 24.04 verifies FFmpeg and FFprobe 6.1.1 and adds only the
+generation-specific compatibility fixtures. Fedora 45 runs the common fixtures
+with the RPM Fusion build of 9.0.2. Two upstream builds from signed sources
+retain compatibility coverage for 8.1.3 and 9.0.1. Each job checks the exact
+version of both tools. The upstream builds enable libvpx and libopus so the
 foreign native WebM witness contains real VP9/Opus media. Missing encoders are
 qualification failures; that preservation witness is never skipped.
 The controlled
@@ -1813,7 +1817,9 @@ revalidates that exact successful run, semantic tag, source SHA, and immutable
 release. A read-only job invokes `scripts/update-published-version.py` to update
 only the known English/French release references and
 `EXPECTED_PUBLISHED_VERSION`; exact reference counts make documentation drift
-fail closed. All replacement and backup files are staged before publication.
+fail closed. The current examples identify the immutable v2.4.5 Fedora 44 RPM.
+Before advancing them, verify the exact Fedora 45 RPM name against the new
+immutable release. All replacement and backup files are staged before publication.
 A caught publication failure restores the previous generation with renames;
 failed restoration preserves the backup and reports its location. This does
 not claim recovery after SIGKILL or a filesystem-wide failure. The updater
@@ -2472,10 +2478,10 @@ Before approving the `rpm-sign` environment deployment, also verify the
    material; the primary private key itself must not be present in CI.
 
 After the final `publish` job succeeds, download the release RPM and independently
-confirm its signer and isolated trust binding on Fedora 44:
+confirm its signer and isolated trust binding on Fedora 45:
 
 ```bash
-rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc44.noarch.rpm
+rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc45.noarch.rpm
 
 VERIFY_ROOT=$(mktemp -d)
 VERIFY_KEYRING="${VERIFY_ROOT}/keyring"
@@ -2485,13 +2491,13 @@ chmod 700 "$VERIFY_ROOT" "$VERIFY_KEYRING"
 
 rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --import ./RPM-GPG-KEY-OscarFrog
 
-rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --checksig ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc44.noarch.rpm
+rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --checksig ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc45.noarch.rpm
 
 rm -rf -- "$VERIFY_ROOT"
 
 gh release verify vX.Y.Z -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset vX.Y.Z   ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh attestation verify   ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc44.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset vX.Y.Z   ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc45.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh attestation verify   ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc45.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 A specific release is considered qualified only after its final `publish` job

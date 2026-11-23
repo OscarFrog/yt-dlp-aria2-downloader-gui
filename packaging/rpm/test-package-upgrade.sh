@@ -23,8 +23,15 @@ cleanup() {
 parse_rpm_upgrade_arguments() {
     local version=''
 
+    local allow_unsigned=false
+
+    if [[ ${1:-} == --allow-unsigned-dev ]]; then
+        allow_unsigned=true
+        shift
+    fi
+    readonly ALLOW_UNSIGNED_DEV=${allow_unsigned}
     if (($# != 4)); then
-        printf 'Usage: %s OLD.rpm NEW.rpm OLD_VERSION NEW_VERSION\n' \
+        printf 'Usage: %s [--allow-unsigned-dev] OLD.rpm NEW.rpm OLD_VERSION NEW_VERSION\n' \
             "${0##*/}" >&2
         exit 2
     fi
@@ -50,7 +57,7 @@ require_rpm_upgrade_environment() {
     }
     for command_name in \
         desktop-file-validate dirname dnf grep mkdir mktemp realpath rm rmdir \
-        rpm sha256sum tar; do
+        install rpm rpmkeys sha256sum tar; do
         command -v "${command_name}" >/dev/null 2>&1 || {
             printf 'Error: required command is absent: %s\n' \
                 "${command_name}" >&2
@@ -142,8 +149,7 @@ assert_installed_rpm_version() {
 }
 
 install_previous_rpm() {
-    dnf install --assumeyes --allowerasing --nogpgcheck \
-        --setopt=install_weak_deps=False "${OLD_PACKAGE}"
+    package_test_install_rpm "${OLD_PACKAGE}" false
     package_installed=true
     assert_installed_rpm_version \
         "${OLD_VERSION}" 'previous package installation'
@@ -151,8 +157,7 @@ install_previous_rpm() {
 }
 
 upgrade_rpm_package() {
-    dnf install --assumeyes --allowerasing --nogpgcheck \
-        --setopt=install_weak_deps=False "${NEW_PACKAGE}"
+    package_test_install_rpm "${NEW_PACKAGE}" "${ALLOW_UNSIGNED_DEV}"
     assert_installed_rpm_version "${NEW_VERSION}" 'package upgrade'
     assert_runtime_preserved 'package upgrade'
     assert_common_package_payload RPM

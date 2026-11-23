@@ -3277,9 +3277,6 @@ test_static_python_interface_contracts() {
         assert_standard_python_header "${file}"
     done
 
-    assert_status 0 'published-version helper verifies current documentation' \
-        python3 -B "${SCRIPT_DIR}/scripts/update-published-version.py" \
-        --check "${EXPECTED_PUBLISHED_VERSION}"
     assert_status 2 'published-version helper requires a version' \
         python3 -B "${SCRIPT_DIR}/scripts/update-published-version.py"
 
@@ -3624,12 +3621,11 @@ test_static_release_contracts() {
     assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
         "dernière release de paquets publiée est la **${EXPECTED_PUBLISHED_VERSION}**." \
         'French README published version'
-    assert_file_contains "${SCRIPT_DIR}/README.md" \
-        "yt-dlp-aria2-downloader-gui-${EXPECTED_PUBLISHED_VERSION}-1.fc44.noarch.rpm" \
-        'English README published RPM asset'
-    assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
-        "yt-dlp-aria2-downloader-gui-${EXPECTED_PUBLISHED_VERSION}-1.fc44.noarch.rpm" \
-        'French README published RPM asset'
+    # The release reference checker validates all three exact RPM references per
+    # language and the Fedora release that produced the immutable package.
+    assert_status 0 'published RPM filenames and platforms match both READMEs' \
+        python3 -B "${SCRIPT_DIR}/scripts/update-published-version.py" \
+        --check "${EXPECTED_PUBLISHED_VERSION}"
     assert_file_contains "${SCRIPT_DIR}/README.md" \
         "yt-dlp-aria2-downloader-gui_${EXPECTED_PUBLISHED_VERSION}-1_all.deb" \
         'English README published DEB asset'
@@ -3647,7 +3643,7 @@ test_static_release_contracts() {
             "${SCRIPT_DIR}/README.md" \
             "${SCRIPT_DIR}/README.fr.md"; do
             assert_file_not_contains "${readme_path}" \
-                "yt-dlp-aria2-downloader-gui-${EXPECTED_VERSION}-1.fc44.noarch.rpm" \
+                "yt-dlp-aria2-downloader-gui-${EXPECTED_VERSION}-1.fc" \
                 'README does not advertise an unpublished RPM asset'
             assert_file_not_contains "${readme_path}" \
                 "yt-dlp-aria2-downloader-gui_${EXPECTED_VERSION}-1_all.deb" \
@@ -3846,10 +3842,10 @@ test_static_release_contracts() {
         'cancel-in-progress: true' \
         'outdated validation runs are cancelled'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/shell.yml" \
-        $'      image: registry.fedoraproject.org/fedora:44\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
+        $'      image: registry.fedoraproject.org/fedora:45\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
         'Fedora validation uses isolated local volumes for temporary fixtures'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
-        $'      image: fedora:44\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
+        $'      image: fedora:45\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
         'Fedora media qualification uses isolated local volumes'
 
     local package_storage_workflow package_storage_job package_storage_block
@@ -3863,7 +3859,7 @@ test_static_release_contracts() {
             "${SCRIPT_DIR}/.github/workflows/${package_storage_workflow}.yml" \
             "${package_storage_job}")
         assert_text_contains "${package_storage_block}" \
-            $'    container:\n      image: fedora:44\n      volumes:\n        - /tmp\n        - /var/tmp' \
+            $'    container:\n      image: fedora:45\n      volumes:\n        - /tmp\n        - /var/tmp' \
             "${package_storage_workflow} RPM lifecycle has private local volumes"
         assert_text_contains "${package_storage_block}" \
             $'    env:\n      TMPDIR: /var/tmp\n      PACKAGE_TEST_HOME: /root' \
@@ -3881,7 +3877,7 @@ test_static_release_contracts() {
         'readonly rpmfusion_fingerprint=E9A491A3DE247814E7E067EAE06F8ECDD651FF2E' \
         'Fedora qualification pins the RPM Fusion bootstrap signer'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
-        'rpmfusion-free-release-44-3.noarch' \
+        'rpmfusion-free-release-45-2.noarch' \
         'Fedora qualification pins the reviewed RPM Fusion bootstrap NEVRA'
     # shellcheck disable=SC2016 # Literal workflow authentication contract.
     assert_file_fragments_ordered "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
@@ -3891,7 +3887,7 @@ test_static_release_contracts() {
         'if [[ ${signature_state} != signed ]]; then' \
         'exit 65' \
         '--define "_keyring fs"' \
-        '--checksig "${bootstrap_dir}/rpmfusion-free-release-44.noarch.rpm"' \
+        '--checksig "${bootstrap_dir}/rpmfusion-free-release-45.noarch.rpm"' \
         'if [[ ${resolved_nevra} != "${rpmfusion_nevra}" ]]; then' \
         'rpmkeys --import "${bootstrap_dir}/RPM-GPG-KEY-rpmfusion-free-fedora-2020"' \
         'dnf install --assumeyes --setopt=localpkg_gpgcheck=True'
@@ -4355,7 +4351,7 @@ test_static_packaging_signing_contracts() {
         "readonly RPM_FUSION_SIGNING_FINGERPRINT='E9A491A3DE247814E7E067EAE06F8ECDD651FF2E'" \
         'Fedora bootstrap pins the RPM Fusion signing fingerprint'
     assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
-        "readonly RPM_FUSION_RELEASE_NEVRA='rpmfusion-free-release-44-3.noarch'" \
+        "readonly RPM_FUSION_RELEASE_NEVRA='rpmfusion-free-release-45-2.noarch'" \
         'Fedora bootstrap pins the reviewed RPM Fusion NEVRA'
     assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
         '--proto '\''=https'\''' \
@@ -4755,7 +4751,7 @@ PY_PUBLIC_TRACK_DOCUMENTATION
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
         'name: Ubuntu 24.04 DEB' 'DEB package validation job'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
-        'name: Fedora 44 RPM' 'RPM package validation job'
+        'name: Fedora 45 RPM' 'RPM package validation job'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'dist/*.deb' 'release publishes a DEB payload'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \

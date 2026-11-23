@@ -25,16 +25,16 @@ MAX_BYTES = 8 * 1024 * 1024
 MAX_PAGES = 10
 WORKFLOWS = {
     "shell.yml": {
-        "Ubuntu", "Fedora 44", "Python 3.10 / Ubuntu",
+        "Ubuntu", "Fedora 45", "Python 3.10 / Ubuntu",
     },
     "packages.yml": {
         "Git-free source archive", "Previous immutable release",
-        "Fedora 44 RPM build-once", "Fedora 44 RPM (fresh)",
-        "Fedora 44 RPM (ffmpeg-free)", "Ubuntu 24.04 DEB",
+        "Fedora 45 RPM build-once", "Fedora 45 RPM (fresh)",
+        "Fedora 45 RPM (ffmpeg-free)", "Ubuntu 24.04 DEB",
     },
     "qualification.yml": {
-        "FFmpeg 6.1.1 / Ubuntu 24.04", "FFmpeg 8.1.3 / Fedora 44",
-        "FFmpeg 9.0.1 / verified upstream source",
+        "FFmpeg 6.1.1 / Ubuntu 24.04", "FFmpeg 9.0.2 / Fedora 45",
+        "FFmpeg 8.1.3 / verified upstream source", "FFmpeg 9.0.1 / verified upstream source",
     },
     "real-tools.yml": {
         "Local media, pinned yt-dlp 2026.6.9",
@@ -62,7 +62,7 @@ REQUIRED_STEPS = {
         "Retain current-stable shared-destination verdicts and monotonic events",
     },
     "Ubuntu": {"Check workflow syntax and embedded shell", "Check Python with reviewed Ruff", "Run validation"},
-    "Fedora 44": {"Run validation"},
+    "Fedora 45": {"Run validation"},
     "Python 3.10 / Ubuntu": {
         "Build and bind verified Bash 4.4 on the disposable runner",
         "Bind every test interpreter to the minimum Python",
@@ -71,9 +71,9 @@ REQUIRED_STEPS = {
     },
     "Git-free source archive": {"Build and retest Git-free source archive"},
     "Previous immutable release": {"Resolve previous semantic-version release", "Verify exact published previous packages"},
-    "Fedora 44 RPM build-once": {"Build RPM once", "Qualify RPM v4/v6 signature semantics"},
+    "Fedora 45 RPM build-once": {"Build RPM once", "Qualify RPM v4/v6 signature semantics"},
     "Ubuntu 24.04 DEB": {"Build, lifecycle, reinstall, and upgrade DEB"},
-    **{f"Fedora 44 RPM ({scenario})": {
+    **{f"Fedora 45 RPM ({scenario})": {
         "Reject a different globally trusted RPM signer in PR CI",
         "Confirm unsigned PR RPM is rejected by release bootstrap",
         "Install exact unsigned PR RPM through explicit development bootstrap",
@@ -82,7 +82,8 @@ REQUIRED_STEPS = {
     } for scenario in ("fresh", "ffmpeg-free")},
     **{name: {f"Qualify FFmpeg {version} generation"} for name, version in (
         ("FFmpeg 6.1.1 / Ubuntu 24.04", "6.1.1"),
-        ("FFmpeg 8.1.3 / Fedora 44", "8.1.3"),
+        ("FFmpeg 9.0.2 / Fedora 45", "9.0.2"),
+        ("FFmpeg 8.1.3 / verified upstream source", "8.1.3"),
         ("FFmpeg 9.0.1 / verified upstream source", "9.0.1"),
     )},
     **{f"Local media, pinned yt-dlp {version}": {
@@ -105,7 +106,7 @@ REQUIRED_STEPS = {
     },
 }
 ALLOWED_SKIPS = {
-    ("Fedora 44 RPM (ffmpeg-free)", "Test previous immutable release -> current RPM upgrade"),
+    ("Fedora 45 RPM (ffmpeg-free)", "Test previous immutable release -> current RPM upgrade"),
     *((f"Local media, pinned yt-dlp {version}", step)
       for version in ("2026.6.9", "2026.7.4")
       for step in ("Run real FFmpeg progress qualification", "Run HLS post-remux duration validation",

@@ -373,6 +373,8 @@ jobs:
           immutable=$(gh release view "${RELEASE_TAG}" -R "${GITHUB_REPOSITORY}" --json isImmutable --jq '.isImmutable')
           [[ ${immutable} == true ]]
           gh release verify "${RELEASE_TAG}" -R "${GITHUB_REPOSITORY}"
+          gh release view "${RELEASE_TAG}" -R "${GITHUB_REPOSITORY}" --json assets \
+            --jq '[.assets[] | select(.size > 0) | .name]' >"${base_tree_dir}/release-asset-names.json"
           paths=(README.fr.md README.md test-static.sh)
           for path in "${paths[@]}"; do
             gh api -H 'Accept: application/vnd.github.raw+json' \
@@ -502,14 +504,30 @@ jobs:
               release = context["release_version"]
               require(version(published) < version(release) <= version(old_version),
                       "a no-op, downgrade or future release must not create a source push")
+              old_fedora = 44 if version(published) <= (2, 4, 5) else 45
+              new_fedora = 44 if version(release) <= (2, 4, 5) else 45
+              rpm_filename = "yt-dlp-aria2-downloader-gui-{version}-1.fc{fedora}.noarch.rpm"
+              asset_names = json.loads(read(base, "release-asset-names.json"))
+              require(isinstance(asset_names, list) and
+                      asset_names.count(rpm_filename.format(version=release, fedora=new_fedora)) == 1,
+                      "immutable release does not contain the expected Fedora RPM")
+              package_references = (
+                  ("| Fedora {fedora} | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/"
+                   + rpm_filename + ") |", 1),
+                  ("\n### Fedora {fedora}\n", 1),
+                  ("\n" + rpm_filename + "\n", 1),
+                  ("bash ./install-fedora.sh ./" + rpm_filename + "\n", 1),
+                  ("yt-dlp-aria2-downloader-gui-{version}.zip", 3),
+                  ("cd yt-dlp-aria2-downloader-gui-{version}\n", 1),
+                  ("yt-dlp-aria2-downloader-gui_{version}-1_all.deb", 3),
+              )
               expected = dict(old)
               templates = {
                   "README.md": (
                       ("latest published package release is **{version}**.", 1),
                       ("currently published v{version} release.", 1),
                       ("latest published release, {version}, provides", 1),
-                      ("yt-dlp-aria2-downloader-gui-{version}", 7),
-                      ("yt-dlp-aria2-downloader-gui_{version}", 3),
+                      *package_references,
                       ("gh release verify v{version} -R", 1),
                       ("gh release verify-asset v{version} ./ARTIFACT", 1),
                   ),
@@ -517,16 +535,21 @@ jobs:
                       ("dernière release de paquets publiée est la **{version}**.", 1),
                       ("release v{version} actuellement publiée.", 1),
                       ("dernière release publiée, la {version}, fournit", 1),
-                      ("yt-dlp-aria2-downloader-gui-{version}", 7),
-                      ("yt-dlp-aria2-downloader-gui_{version}", 3),
+                      *package_references,
                       ("gh release verify v{version} -R", 1),
                       ("gh release verify-asset v{version} ./ARTEFACT", 1),
                   ),
               }
               for path, rules in templates.items():
+                  require(old[path].count(f"yt-dlp-aria2-downloader-gui-{published}") == 7 and
+                          old[path].count(f"yt-dlp-aria2-downloader-gui_{published}") == 3,
+                          "unexpected prior package reference count")
                   for template, count in rules:
-                      expected[path] = replace(expected[path], template.format(version=published),
-                                               template.format(version=release), count)
+                      expected[path] = replace(expected[path], template.format(version=published, fedora=old_fedora),
+                                               template.format(version=release, fedora=new_fedora), count)
+                  require(expected[path].count(f"yt-dlp-aria2-downloader-gui-{release}") == 7 and
+                          expected[path].count(f"yt-dlp-aria2-downloader-gui_{release}") == 3,
+                          "unexpected published package reference count")
               expected["test-static.sh"] = replace(expected["test-static.sh"],
                   f"readonly EXPECTED_PUBLISHED_VERSION='{published}'", f"readonly EXPECTED_PUBLISHED_VERSION='{release}'")
               for path in paths:

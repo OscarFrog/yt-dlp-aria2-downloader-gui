@@ -15,11 +15,11 @@ readonly PRIVATE_DIR='/usr/libexec/yt-dlp-aria2-downloader'
 readonly RPM_SIGNING_KEY_NAME='RPM-GPG-KEY-OscarFrog'
 readonly RPM_SIGNING_FINGERPRINT='7B54065FE061E78ED2C96252E3BE996196ABEA7F'
 readonly RPM_SIGNING_SUBKEY_FINGERPRINT='1F5B769CE48A08AAC0A7D9DDECC9894B41830245'
-readonly RPM_FUSION_SUPPORTED_FEDORA='44'
+readonly RPM_FUSION_SUPPORTED_FEDORA='45'
 readonly RPM_FUSION_SIGNING_FINGERPRINT='E9A491A3DE247814E7E067EAE06F8ECDD651FF2E'
-readonly RPM_FUSION_RELEASE_NEVRA='rpmfusion-free-release-44-3.noarch'
+readonly RPM_FUSION_RELEASE_NEVRA='rpmfusion-free-release-45-2.noarch'
 readonly RPM_FUSION_KEY_URL='https://download1.rpmfusion.org/free/fedora/RPM-GPG-KEY-rpmfusion-free-fedora-2020'
-readonly RPM_FUSION_RELEASE_URL='https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm'
+readonly RPM_FUSION_RELEASE_URL='https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-45.noarch.rpm'
 
 ROOT_APPLICATION_STAGE=''
 STAGED_APPLICATION_RPM=''
@@ -601,7 +601,7 @@ validate_rpm_fusion_release_identity() {
 
     # shellcheck disable=SC2310 # Failure is converted to an identity diagnostic.
     resolved_nevra=$(LC_ALL=C run_root \
-        rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' \
+        rpm -qp --qf '%{NEVRA}\n' \
         -- "${rpm_path}") || {
         error 'unable to inspect the RPM Fusion bootstrap package.'
         exit 65
@@ -616,8 +616,12 @@ enable_rpm_fusion() {
     local fedora_version=$1
     local installed_nevra=''
 
+    [[ ${fedora_version} == "${RPM_FUSION_SUPPORTED_FEDORA}" ]] || {
+        error "no authenticated RPM Fusion bootstrap is pinned for Fedora ${fedora_version}."
+        exit 69
+    }
     if installed_nevra=$(rpm -q --qf \
-        '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' \
+        '%{NEVRA}\n' \
         rpmfusion-free-release 2>/dev/null); then
         [[ ${installed_nevra} == "${RPM_FUSION_RELEASE_NEVRA}" ]] || {
             error "installed RPM Fusion release package is outside the qualified contract: ${installed_nevra:-missing}"
@@ -625,10 +629,6 @@ enable_rpm_fusion() {
         }
         return 0
     fi
-    [[ ${fedora_version} == "${RPM_FUSION_SUPPORTED_FEDORA}" ]] || {
-        error "no authenticated RPM Fusion bootstrap is pinned for Fedora ${fedora_version}."
-        exit 69
-    }
 
     ensure_rpm_fusion_bootstrap_tools
     (
@@ -656,7 +656,7 @@ enable_rpm_fusion() {
         chmod 700 -- "${bootstrap_root}"
 
         key_path="${bootstrap_root}/RPM-GPG-KEY-rpmfusion-free-fedora-2020"
-        release_rpm="${bootstrap_root}/rpmfusion-free-release-44.noarch.rpm"
+        release_rpm="${bootstrap_root}/rpmfusion-free-release-45.noarch.rpm"
 
         printf 'Downloading authenticated RPM Fusion metadata...\n'
         curl --fail --location --proto '=https' --tlsv1.2 \

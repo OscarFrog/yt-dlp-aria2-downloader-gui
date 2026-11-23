@@ -189,7 +189,7 @@ def coherent_version(read_source):
             raise CheckError(f"{relative_path} published references must match {published}.") from None
         if published != version:
             unpublished_assets = (
-                f"yt-dlp-aria2-downloader-gui-{version}-1.fc44.noarch.rpm",
+                f"yt-dlp-aria2-downloader-gui-{version}-1.fc",
                 f"yt-dlp-aria2-downloader-gui_{version}-1_all.deb",
                 f"yt-dlp-aria2-downloader-gui-{version}.zip",
             )

@@ -348,6 +348,19 @@ class ProofTests(unittest.TestCase):
                 with self.assertRaises(CHECK.Refusal):
                     self.verify()
 
+    def test_fedora44_job_cannot_satisfy_fedora45_evidence(self):
+        for workflow, job_name in ((1, "Fedora 45"), (2, "Fedora 45 RPM build-once"),
+                                   (2, "Fedora 45 RPM (fresh)"), (2, "Fedora 45 RPM (ffmpeg-free)"),
+                                   (3, "FFmpeg 9.0.2 / Fedora 45")):
+            with self.subTest(job=job_name):
+                job = next(item for item in self.jobs(workflow) if item["name"] == job_name)
+                job["name"] = job_name.replace("Fedora 45", "Fedora 44")
+                try:
+                    with self.assertRaises(CHECK.Refusal):
+                        self.verify()
+                finally:
+                    job["name"] = job_name
+
     def test_forged_or_missing_identity_is_rejected(self):
         job = next(job for job in self.jobs() if job["name"].startswith(CHECK.IDENTITY_PREFIX))
         for identity in ("Source identity refs/pull/23/merge", "Source identity " + OTHER, "Other identity"):
@@ -373,7 +386,7 @@ class ProofTests(unittest.TestCase):
     def test_skip_exceptions_cannot_move_to_another_matrix_job(self):
         self.verify()
         for index, name, step_name in (
-            (2, "Fedora 44 RPM (fresh)", "Test previous immutable release -> current RPM upgrade"),
+            (2, "Fedora 45 RPM (fresh)", "Test previous immutable release -> current RPM upgrade"),
             (4, "Local media, pinned yt-dlp 2026.8.19", "Run real FFmpeg progress qualification"),
             (4, "Local media, pinned yt-dlp 2026.6.9", "Run aria2 direct-transfer behavior qualification"),
         ):
@@ -389,9 +402,9 @@ class ProofTests(unittest.TestCase):
         # REQUIRED_STEPS: removing a production requirement must fail this test.
         for index, name, obligation in (
             (1, "Ubuntu", "Check Python with reviewed Ruff"),
-            (2, "Fedora 44 RPM build-once", "Qualify RPM v4/v6 signature semantics"),
+            (2, "Fedora 45 RPM build-once", "Qualify RPM v4/v6 signature semantics"),
             (2, "Previous immutable release", "Verify exact published previous packages"),
-            (2, "Fedora 44 RPM (fresh)", "Reject a different globally trusted RPM signer in PR CI"),
+            (2, "Fedora 45 RPM (fresh)", "Reject a different globally trusted RPM signer in PR CI"),
             (4, "Local media, pinned yt-dlp 2026.8.19", "Run direct, audio, HLS and DASH boundary qualification"),
         ):
             with self.subTest(job=name, obligation=obligation):
@@ -1326,7 +1339,15 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
             for name in names | {CHECK.IDENTITY_PREFIX + SOURCE}:
                 for step in CHECK.required_steps(name):
                     with self.subTest(workflow=filename, job=name, step=step):
-                        self.assertIn("- name: " + step + "\n", text)
+                        if name.endswith(" / verified upstream source"):
+                            version = name.split()[1]
+                            upstream = self.jobs(text)["ffmpeg-upstream"]
+                            self.assertIn("version: ['8.1.3', '9.0.1']", upstream)
+                            self.assertIn("EXPECTED_FFMPEG_VERSION: ${{ matrix.version }}", upstream)
+                            self.assertIn("- name: " + step + "\n",
+                                          upstream.replace("${{ matrix.version }}", version))
+                        else:
+                            self.assertIn("- name: " + step + "\n", text)
 
     def test_minimum_interpreters_share_one_full_run_and_bind_absolute_fixtures(self):
         job = self.jobs(self.workflow("shell.yml"))["validate-python-minimum"]
@@ -1885,7 +1906,7 @@ class UbuntuMirrorTests(unittest.TestCase):
 
     TARGETS = {
         "real-tools.yml": {"pinned-local-media", "current-stable-local-media"},
-        "qualification.yml": {"ffmpeg-ubuntu-6", "ffmpeg-upstream-9"},
+        "qualification.yml": {"ffmpeg-ubuntu-6", "ffmpeg-upstream"},
         "packages.yml": {"source-archive", "deb"},
         "release.yml": {"release-runtime", "zip", "deb"},
     }
