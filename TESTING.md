@@ -1678,8 +1678,11 @@ run records the PyPI source, observation time and selected package version in
 the selected yt-dlp version again before the shared fixture, and retains these
 records and allowlisted
 pre-rescue diagnostics under a source/run/attempt-specific artifact name.
-The pinned Ubuntu media jobs allow three minutes for APT update and five for
-installation. The current-stable and release-runtime jobs allow two and four
+The pinned Ubuntu media jobs share eight minutes between APT update and
+installation. Update has a three-minute limit. Each runner rounds its first
+Linux uptime reading down and its second reading up to budget the remaining
+whole seconds. An exhausted budget stops provisioning before installation.
+The current-stable and release-runtime jobs allow two and four
 minutes respectively. Each command sends TERM at its deadline and KILL ten
 seconds later if needed. HTTP/HTTPS inactivity timeouts are thirty seconds,
 retries remain three and the dpkg-lock wait is at most sixty seconds. Update

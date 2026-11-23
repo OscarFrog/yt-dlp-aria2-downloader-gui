@@ -1162,11 +1162,11 @@ rpmsign() {
 
 
 class WorkflowContractTests(unittest.TestCase):
-    # Workflow, job, and deadlines in minutes for the job, setup, update and install.
+    # Workflow, job, minute limits for the job, setup, update, and the install timeout argument.
     MEDIA_BUDGETS = (
-        ("real-tools.yml", "pinned-local-media", 65, 10, 3, 5),
-        ("real-tools.yml", "current-stable-local-media", 65, 8, 2, 4),
-        ("release.yml", "release-runtime", 50, 8, 2, 4),
+        ("real-tools.yml", "pinned-local-media", 65, 10, 3, '"${apt_remaining}s"'),
+        ("real-tools.yml", "current-stable-local-media", 65, 8, 2, "4m"),
+        ("release.yml", "release-runtime", 50, 8, 2, "4m"),
     )
     @staticmethod
     def workflow(filename):
@@ -1220,7 +1220,7 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertEqual(install.count(option), 1)
         self.assertIn(f'sudo timeout --signal=TERM --kill-after=10s {update}m '
                       '\\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update', install)
-        self.assertIn(f'sudo timeout --signal=TERM --kill-after=10s {apt_install}m '
+        self.assertIn(f'sudo timeout --signal=TERM --kill-after=10s {apt_install} '
                       '\\\n            env DEBIAN_FRONTEND=noninteractive \\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends', install)
         for forbidden in ("continue-on-error", "|| true", "--allow-unauthenticated", "--fix-missing",
                           "trusted=yes", "Acquire::AllowInsecureRepositories", "/etc/apt/sources"):
@@ -1246,7 +1246,7 @@ class WorkflowContractTests(unittest.TestCase):
             for old, new in ((f"    timeout-minutes: {minutes}", "    timeout-minutes: 25"),
                              (f"        timeout-minutes: {setup}", "        timeout-minutes: 30"),
                              (f"sudo timeout --signal=TERM --kill-after=10s {update}m", "sudo"),
-                             (f"sudo timeout --signal=TERM --kill-after=10s {apt_install}m", "sudo"),
+                             (f"sudo timeout --signal=TERM --kill-after=10s {apt_install}", "sudo"),
                              ("Acquire::http::Timeout=30", "Acquire::http::Timeout=0"),
                              ("Acquire::https::Timeout=30", "Acquire::https::Timeout=0"),
                              ("DPkg::Lock::Timeout=60", "DPkg::Lock::Timeout=-1"),
@@ -4173,7 +4173,7 @@ if stage == os.environ["CHECK_APT_STAGE"]:
                         current = prefix
                         if action in {"stall", "ignore-term"}:
                             current, count = re.subn(
-                                r"(?m)^sudo timeout --signal=TERM --kill-after=10s [1-9][0-9]*m ",
+                                r'(?m)^sudo timeout --signal=TERM --kill-after=10s (?:[1-9][0-9]*m|"\$\{apt_remaining\}s") ',
                                 "sudo timeout --signal=TERM --kill-after=0.1s 0.5s ", current,
                             )
                             self.assertEqual(count, 2)
@@ -4198,6 +4198,59 @@ if stage == os.environ["CHECK_APT_STAGE"]:
                             # close inherited pipes before the kernel exposes a
                             # terminal state; wait briefly for actual quiescence.
                             require_fixture_process_exit(identity["pid"], identity["starttime"])
+
+    def test_pinned_install_uses_only_the_remaining_apt_budget(self):
+        script = self.step("real-tools.yml", "Install real engines").split("\ncase ${YT_DLP_VERSION}", 1)[0]
+        # Substitute the kernel clock and record what the unchanged shell passes
+        # to timeout. Updating the clock in the update call fixes the chronology.
+        script = script.replace("/proc/uptime", '"${CHECK_UPTIME}"')
+        stub = r'''
+sudo() {
+    case $1 in
+        python3) [[ ${!#} == --setup ]] ;;
+        timeout)
+            if [[ ${!#} == update ]]; then
+                printf 'update %s\n' "$4"
+                printf '%s' "${CHECK_AFTER}" >"${CHECK_UPTIME}"
+            else
+                printf 'install %s\n' "$4"
+            fi
+            ;;
+        *) return 64 ;;
+    esac
+}
+'''
+        def uptime_record(value):
+            return f"{value} 1234.56\n" if value else ""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            clock = Path(temporary) / "uptime"
+
+            def replay(before, after, status, expected_calls):
+                with self.subTest(before=before, after=after):
+                    clock.write_text(uptime_record(before))
+                    env = dict(os.environ, CHECK_UPTIME=str(clock), CHECK_AFTER=uptime_record(after))
+                    result = subprocess.run(["bash", "-c", stub + script + "\necho continued\n"],
+                                            env=env, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    self.assertEqual(result.stdout.splitlines(), expected_calls)
+
+            update = ["update 3m"]
+            for before, after, expected in (("1000.01", "1000.99", "479s"),
+                                            ("1000.99", "1008.01", "471s"),
+                                            ("1000.01", "1048.90", "431s"),
+                                            ("1000.01", "1144.99", "335s"),
+                                            ("1000.01", "1478.99", "1s"),
+                                            ("0008.99", "0016.01", "471s"),
+                                            ("999999999991.99", "999999999999.01", "471s")):
+                replay(before, after, 0, [*update, "install " + expected, "continued"])
+
+            for after in ("1479.00", "1480.01", "999.99"):
+                replay("1000.01", after, 124, update)
+
+            for invalid in ("", "nonsense", "1+1.00", "１.00", "1000.2", "1000.123", "1000000000000.00"):
+                replay(invalid, "1008.01", 65, [])
+                replay("1000.01", invalid, 65, update)
 
     def test_pinned_engine_installation_preserves_hashes_and_pip_failure(self):
         pins = {"2026.6.9": "442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4",

@@ -1275,8 +1275,11 @@ do not depend on yt-dlp. This checks an external environment not identified by
 the PR source proof. It records resolved package versions and gates final source
 verification/publication, without delaying independent package builds.
 
-Ubuntu's pinned media matrix budgets three minutes for APT update and five
-for installation within a ten-minute setup step. Each pinned job can finish
+Ubuntu's pinned media matrix shares an eight-minute budget between APT update
+and installation within a ten-minute setup step. Update has a three-minute
+limit. Installation receives the time left after update, measured using Linux
+uptime. The calculation rounds the start down and the end up to whole seconds.
+Each pinned job can finish
 independently, and the qualification gate requires all three successes.
 Current-stable and release-runtime jobs budget two minutes for update and four
 for installation within an eight-minute setup step. All three paths bound
