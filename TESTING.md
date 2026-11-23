@@ -1678,9 +1678,10 @@ run records the PyPI source, observation time and selected package version in
 the selected yt-dlp version again before the shared fixture, and retains these
 records and allowlisted
 pre-rescue diagnostics under a source/run/attempt-specific artifact name.
-Dependency provisioning has a separate bounded budget: APT update is limited
-to two minutes and installation to four minutes, each with TERM followed by
-KILL after ten seconds. HTTP/HTTPS inactivity timeouts are thirty seconds,
+The pinned Ubuntu media jobs allow three minutes for APT update and five for
+installation. The current-stable and release-runtime jobs allow two and four
+minutes respectively. Each command sends TERM at its deadline and KILL ten
+seconds later if needed. HTTP/HTTPS inactivity timeouts are thirty seconds,
 retries remain three and the dpkg-lock wait is at most sixty seconds. Update
 uses `APT::Update::Error-Mode=any` so partial index failures also fail. An active
 but very slow transfer cannot consume the entire qualification job. Any setup
@@ -1699,7 +1700,10 @@ this path. No runner source file is rewritten. There is no mirror fallback;
 unavailable sources and partial updates remain failures. Signatures and HTTPS
 verification are mandatory. Privileged publication jobs are unchanged.
 
-The existing installation step, including the venv and pip, has eight minutes.
+Installation, including the venv and pip, has ten minutes in the pinned
+matrix and eight minutes in the current-stable and release-runtime jobs.
+If a pinned job fails, its siblings continue collecting their own results.
+Qualification requires all three jobs to succeed in the same attempt.
 Checkout, version checks, Deno/prerequisite installation and evidence upload
 also have explicit bounds. PR and scheduled media jobs have sixty-five minutes:
 their longest route retains forty-one minutes of individual test deadlines,

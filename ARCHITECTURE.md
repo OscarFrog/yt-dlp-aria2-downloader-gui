@@ -1275,13 +1275,14 @@ do not depend on yt-dlp. This checks an external environment not identified by
 the PR source proof. It records resolved package versions and gates final source
 verification/publication, without delaying independent package builds.
 
-Ubuntu media provisioning in PR, scheduled and release-runtime jobs is bounded
-independently of tests. APT update and installation have two- and four-minute
-process deadlines, bounded network inactivity/retries and a bounded dpkg-lock
-wait. A failed or stalled setup cannot silently proceed to qualification.
-The eight-minute setup step and other bounded preparation steps fit within
-sixty-five-minute media jobs and a fifty-minute release-runtime job, alongside
-the unchanged individual test deadlines. The required stress aggregate allows
+Ubuntu's pinned media matrix budgets three minutes for APT update and five
+for installation within a ten-minute setup step. Each pinned job can finish
+independently, and the qualification gate requires all three successes.
+Current-stable and release-runtime jobs budget two minutes for update and four
+for installation within an eight-minute setup step. All three paths bound
+network inactivity, retries and dpkg-lock waits and propagate APT failures.
+The media jobs have sixty-five minutes and the release-runtime job has fifty
+minutes, including their individual test deadlines. The required stress aggregate allows
 seventy-five minutes for the latest complementary cohort inside an eighty-minute
 job; longer waiting never turns missing, failed or cancelled evidence into proof.
 

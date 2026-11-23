@@ -43,7 +43,7 @@ jobs:
     # Include every test deadline, provisioning and diagnostic retention.
     timeout-minutes: 65
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         yt_dlp_version: ['2026.6.9', '2026.7.4', '2026.8.19']
     steps:
@@ -52,7 +52,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install real engines
-        timeout-minutes: 8
+        timeout-minutes: 10
         env:
           YT_DLP_VERSION: ${{ matrix.yt_dlp_version }}
         run: |
@@ -62,9 +62,9 @@ jobs:
           sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup
           apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30
             -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
-          sudo timeout --signal=TERM --kill-after=10s 2m \
+          sudo timeout --signal=TERM --kill-after=10s 3m \
             python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update
-          sudo timeout --signal=TERM --kill-after=10s 4m \
+          sudo timeout --signal=TERM --kill-after=10s 5m \
             env DEBIAN_FRONTEND=noninteractive \
             python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends \
             aria2 curl ffmpeg python3-venv unzip

@@ -1162,6 +1162,12 @@ rpmsign() {
 
 
 class WorkflowContractTests(unittest.TestCase):
+    # Workflow, job, and deadlines in minutes for the job, setup, update and install.
+    MEDIA_BUDGETS = (
+        ("real-tools.yml", "pinned-local-media", 65, 10, 3, 5),
+        ("real-tools.yml", "current-stable-local-media", 65, 8, 2, 4),
+        ("release.yml", "release-runtime", 50, 8, 2, 4),
+    )
     @staticmethod
     def workflow(filename):
         return (PROJECT / ".github/workflows" / filename).read_text(encoding="utf-8")
@@ -1187,7 +1193,7 @@ class WorkflowContractTests(unittest.TestCase):
         sequence = re.search(r"(?m)^    needs: \[([a-z0-9, -]+)\]$", job)
         return {part.strip() for part in sequence.group(1).split(",")} if sequence else set()
 
-    def assert_media_provisioning_budgets(self, text, job_name, expected_minutes):
+    def assert_media_provisioning_budgets(self, text, job_name, expected_minutes, setup, update, apt_install):
         job = self.jobs(text)[job_name]
         minutes = int(re.search(r"(?m)^    timeout-minutes: (\d+)$", job).group(1))
         self.assertEqual(minutes, expected_minutes)
@@ -1208,12 +1214,14 @@ class WorkflowContractTests(unittest.TestCase):
         expected_tests = 33 * 60 + 40 if job_name == "release-runtime" else 41 * 60 + 50
         self.assertEqual(tests_seconds, expected_tests, "Test deadlines and coverage must remain unchanged")
         install = next(step for step in steps if "apt_options=(" in step)
-        self.assertIn("timeout-minutes: 8", install)
+        self.assertRegex(install, rf"(?m)^        timeout-minutes: {setup}$")
         for option in ("Acquire::Retries=3", "Acquire::http::Timeout=30",
                        "Acquire::https::Timeout=30", "DPkg::Lock::Timeout=60"):
             self.assertEqual(install.count(option), 1)
-        self.assertIn('sudo timeout --signal=TERM --kill-after=10s 2m \\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update', install)
-        self.assertIn('sudo timeout --signal=TERM --kill-after=10s 4m \\\n            env DEBIAN_FRONTEND=noninteractive \\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends', install)
+        self.assertIn(f'sudo timeout --signal=TERM --kill-after=10s {update}m '
+                      '\\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update', install)
+        self.assertIn(f'sudo timeout --signal=TERM --kill-after=10s {apt_install}m '
+                      '\\\n            env DEBIAN_FRONTEND=noninteractive \\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends', install)
         for forbidden in ("continue-on-error", "|| true", "--allow-unauthenticated", "--fix-missing",
                           "trusted=yes", "Acquire::AllowInsecureRepositories", "/etc/apt/sources"):
             self.assertNotIn(forbidden, install)
@@ -1221,23 +1229,24 @@ class WorkflowContractTests(unittest.TestCase):
                         install.index('"${apt_options[@]}" install'))
         self.assertLess(install.index('"${apt_options[@]}" install'), install.index("python3 -m venv"))
 
+    def test_pinned_media_jobs_finish_independently_and_remain_required(self):
+        job = self.jobs(self.workflow("real-tools.yml"))["pinned-local-media"]
+        self.assertIn("    strategy:\n      fail-fast: false\n      matrix:", job)
+        self.assertNotIn("continue-on-error", job)
+
     def test_media_provisioning_and_job_budgets_cover_all_original_tests(self):
-        for workflow, name, minutes in (("real-tools.yml", "pinned-local-media", 65),
-                                        ("real-tools.yml", "current-stable-local-media", 65),
-                                        ("release.yml", "release-runtime", 50)):
+        for workflow, name, minutes, setup, update, apt_install in self.MEDIA_BUDGETS:
             with self.subTest(job=name):
-                self.assert_media_provisioning_budgets(self.workflow(workflow), name, minutes)
+                self.assert_media_provisioning_budgets(self.workflow(workflow), name, minutes, setup, update, apt_install)
 
     def test_media_deadlines_cannot_be_removed_or_consume_the_test_budget(self):
-        for workflow, name, minutes in (("real-tools.yml", "pinned-local-media", 65),
-                                        ("real-tools.yml", "current-stable-local-media", 65),
-                                        ("release.yml", "release-runtime", 50)):
+        for workflow, name, minutes, setup, update, apt_install in self.MEDIA_BUDGETS:
             text = self.workflow(workflow)
             job = self.jobs(text)[name]
             for old, new in ((f"    timeout-minutes: {minutes}", "    timeout-minutes: 25"),
-                             ("        timeout-minutes: 8", "        timeout-minutes: 30"),
-                             ("sudo timeout --signal=TERM --kill-after=10s 2m", "sudo"),
-                             ("sudo timeout --signal=TERM --kill-after=10s 4m", "sudo"),
+                             (f"        timeout-minutes: {setup}", "        timeout-minutes: 30"),
+                             (f"sudo timeout --signal=TERM --kill-after=10s {update}m", "sudo"),
+                             (f"sudo timeout --signal=TERM --kill-after=10s {apt_install}m", "sudo"),
                              ("Acquire::http::Timeout=30", "Acquire::http::Timeout=0"),
                              ("Acquire::https::Timeout=30", "Acquire::https::Timeout=0"),
                              ("DPkg::Lock::Timeout=60", "DPkg::Lock::Timeout=-1"),
@@ -1249,7 +1258,7 @@ class WorkflowContractTests(unittest.TestCase):
                     self.assertIn(old, job)
                     mutated = text.replace(job, job.replace(old, new, 1), 1)
                     with self.assertRaises(AssertionError):
-                        self.assert_media_provisioning_budgets(mutated, name, minutes)
+                        self.assert_media_provisioning_budgets(mutated, name, minutes, setup, update, apt_install)
 
     def assert_gate(self, jobs, job, gate, seen=None):
         seen = (seen or set()) | {job}
@@ -4163,8 +4172,11 @@ if stage == os.environ["CHECK_APT_STAGE"]:
                         env.pop("DEBIAN_FRONTEND", None)
                         current = prefix
                         if action in {"stall", "ignore-term"}:
-                            current = current.replace(" 2m ", " 0.5s ").replace(" 4m ", " 0.5s ")
-                            current = current.replace("--kill-after=10s", "--kill-after=0.1s")
+                            current, count = re.subn(
+                                r"(?m)^sudo timeout --signal=TERM --kill-after=10s [1-9][0-9]*m ",
+                                "sudo timeout --signal=TERM --kill-after=0.1s 0.5s ", current,
+                            )
+                            self.assertEqual(count, 2)
                         current += '\nprintf completed >"${CHECK_CONTINUED}"\n'
                         result = subprocess.run(["bash", "-c", current], env=env, capture_output=True,
                                                 text=True, timeout=5, check=False)
