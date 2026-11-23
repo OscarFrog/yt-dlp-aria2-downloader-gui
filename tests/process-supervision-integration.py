@@ -1847,6 +1847,7 @@ def report_first_failure(watcher, error, *, python310):
 class StressFirstFailureTests(unittest.TestCase):
     target = 'test_cli_escalates_subgroup_before_retiring_sentinel'
     selection = {'STRESS_SHARD': '2', 'YTDLP_STRESS_FIRST_FAILURE': '2:18'}
+    shard4_selection = {'STRESS_SHARD': '4', 'YTDLP_STRESS_FIRST_FAILURE': '4:12'}
 
     engine_target = 'test_engine_cli_wrapper_exit_retains_resource_and_lock'
     engine_selection = {'YTDLP_PY310_FIRST_FAILURE': 'engine-cli-first-sample'}
@@ -1863,7 +1864,10 @@ class StressFirstFailureTests(unittest.TestCase):
                 (self.target, {}, False), (self.target, {'STRESS_SHARD': '2'}, False),
                 (self.target, dict(self.selection, STRESS_SHARD='1'), False),
                 (self.target, dict(self.selection, YTDLP_STRESS_FIRST_FAILURE='2:19'), False),
-                (other, self.selection, False), (self.target, self.selection, True)):
+                (self.target, dict(self.selection, STRESS_SHARD='4'), False),
+                (self.target, dict(self.shard4_selection, STRESS_SHARD='2'), False),
+                (other, self.selection, False), (other, self.shard4_selection, False),
+                (self.target, self.selection, True), (self.target, self.shard4_selection, True)):
             with self.subTest(method=method, env=env):
                 case = ProcessTests(method)
                 self.check_silent_scope(case, env, enabled, case.sample_before_cli_escalation)
@@ -1896,9 +1900,11 @@ class StressFirstFailureTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), '')
 
     def test_private_child_open_refusal_survives_capture_and_teardown(self):
-        case = ProcessTests(self.target)
-        self.check_private_open(case, case.sample_before_cli_escalation, self.selection, 'stress_first_failure',
-                                'environ', errno.EACCES, 'known_identity', True)
+        for selection in (self.selection, self.shard4_selection):
+            with self.subTest(shard=selection['STRESS_SHARD']):
+                case = ProcessTests(self.target)
+                self.check_private_open(case, case.sample_before_cli_escalation, selection, 'stress_first_failure',
+                                        'environ', errno.EACCES, 'known_identity', True)
 
     def test_python310_private_cmdline_error_survives_capture_and_teardown(self):
         case = ProcessTests(self.engine_target)
@@ -5157,9 +5163,9 @@ exit "$DOWNLOAD_STATUS"
         self.assertFalse(self.observer.sample()['live'])
 
     def sample_before_cli_escalation(self):
+        selection = (os.environ.get('STRESS_SHARD'), os.environ.get('YTDLP_STRESS_FIRST_FAILURE'))
         if (self._testMethodName != 'test_cli_escalates_subgroup_before_retiring_sentinel'
-                or os.environ.get('STRESS_SHARD') != '2'
-                or os.environ.get('YTDLP_STRESS_FIRST_FAILURE') != '2:18'):
+                or selection not in (('2', '2:18'), ('4', '4:12'))):
             return self.observer.sample()
         return self.sample_with_first_failure(python310=False)
 

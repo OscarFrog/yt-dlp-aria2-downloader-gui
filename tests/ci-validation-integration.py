@@ -4112,7 +4112,7 @@ class VersionBoundaryTests(unittest.TestCase):
         return "\n".join(line[10:] for line in block.splitlines()
                          if line.startswith("          ")) + "\n"
 
-    def test_first_failure_capture_is_scoped_to_one_stress_invocation(self):
+    def test_first_failure_capture_is_scoped_to_two_stress_invocations(self):
         step = self.step("stress.yml", "Repeat race-sensitive integration scenarios with bounded jitter")
         with tempfile.TemporaryDirectory() as temporary:
             probe = Path(temporary) / "bash"
@@ -4126,7 +4126,8 @@ class VersionBoundaryTests(unittest.TestCase):
                                PATH=temporary + os.pathsep + os.environ["PATH"])
                     output = subprocess.check_output(["/bin/bash", "-c", step], env=env, text=True)
                     captures = [line for line in output.splitlines() if line.startswith("capture=")]
-                    expected = ["capture=2:18" if n == 18 else "capture=" for n in range(shard, 21, 4)]
+                    selected = {(2, 18): "capture=2:18", (4, 12): "capture=4:12"}
+                    expected = [selected.get((shard, n), "capture=") for n in range(shard, 21, 4)]
                     self.assertEqual(captures, expected)
 
     def test_media_apt_blocks_preserve_errors_signals_and_stop_stalled_provisioning(self):

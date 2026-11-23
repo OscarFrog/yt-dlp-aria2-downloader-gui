@@ -75,10 +75,10 @@ jobs:
             worker=${worker_timings[index % ${#worker_timings[@]}]}
             ffmpeg_start=${ffmpeg_timings[index % ${#ffmpeg_timings[@]}]}
             supervisor=${supervisor_timings[index % ${#supervisor_timings[@]}]}
-            first_failure=''
-            if ((shard == 2 && iteration == 18)); then
-              first_failure='2:18'
-            fi
+            case ${shard}:${iteration} in
+              2:18 | 4:12) first_failure="${shard}:${iteration}" ;;
+              *) first_failure='' ;;
+            esac
 
             printf '%s\n' \
               "=== mock jitter iteration ${iteration}/20: cancel=${cancel}s late=${late_cancel}s pgid=${pgid}s worker=${worker}s ffmpeg=${ffmpeg_start}s supervisor=${supervisor}s ==="
