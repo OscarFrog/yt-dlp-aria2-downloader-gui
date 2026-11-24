@@ -3034,7 +3034,7 @@ core = ["cleanup_owner_guard", "engine_log_retention", "engine_audio_downloads",
 hls = ["engine_youtube_hls"]
 staging = ["active_staging_inventory", "engine_private_staging"]
 composition = "engine_internal_record_cleanup"
-network = ["engine_network_destination", "engine_network_failures",
+network = ["locale_contracts", "engine_network_destination", "engine_network_failures",
            "engine_network_publication_failures",
            "engine_network_signals", "engine_network_cleanup_boundaries"]
 progress = ["gui_aria_progress", "gui_profiles", "gui_progress_completion", "gui_arte_selection"]
@@ -3066,7 +3066,7 @@ groups = {
     "runtime-validation": [runtime[i] for i in (2, 4, 6, 7)],
 }
 expected_all = core + hls + staging + network + progress + state + signals + runtime
-assert len(expected_all) == len(set(expected_all)) == 65
+assert len(expected_all) == len(set(expected_all)) == 66
 assert source.endswith('main "$@"\n')
 # The actual entry point still parses options, bootstraps its subreaper,
 # creates fixtures and initializes/cleans their environment. Replace only
@@ -3173,6 +3173,8 @@ load_mock_libraries "$@"
             MOCK_DISPATCH_FAIL_PHASE=failing)
     assert Counter(union) == Counter(expected_all + [composition])
     run(["--group=engine"], core + hls + staging + network)
+    run(["--group", "locale"], ["locale_contracts"])
+    run(["--group", "locale"], ["locale_contracts"], 23, MOCK_DISPATCH_FAIL_PHASE="locale_contracts")
     run(["--group", "gui"], progress + state)
     run(["--group", "runtime"], runtime)
     run(["--group", "stress-signals"], signals + ["engine_network_signals", "runtime_progress_errors"])

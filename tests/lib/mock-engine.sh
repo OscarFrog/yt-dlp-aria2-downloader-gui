@@ -2327,6 +2327,151 @@ exit 42
 PY_STAGING_INVENTORY
 }
 
+test_mock_locale_contracts() {
+    python3 -B - "${PROJECT_DIR}" "${TEST_ROOT}" "${BASH}" <<'PY_LOCALE_PROTOCOLS'
+import locale
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+project, test_root, shell = map(Path, sys.argv[1:])
+locale.setlocale(locale.LC_ALL, "")
+if os.environ.get("PYTHONUTF8") == "0":
+    if sys.flags.utf8_mode != 0:
+        raise AssertionError("expected Python UTF-8 mode to be disabled")
+    if os.environ.get("LC_ALL") == "C" and os.environ.get("PYTHONCOERCECLOCALE") == "0":
+        if sys.getfilesystemencoding() != "ascii":
+            raise AssertionError("expected native ASCII filesystem encoding")
+
+
+def run(filename, statements, *paths):
+    # Run the script's own functions and options without starting an engine.
+    source = (project / filename).read_text(encoding="utf-8")
+    entry = '\nmain "$@"\n'
+    if not source.endswith(entry) or source.count(entry) != 1:
+        raise AssertionError(f"unexpected executable entry point in {filename}")
+    code = (source.removesuffix(entry) + '\nset -e\n' + statements +
+            '\n[[ ${LC_ALL-} == "$expected_locale" ]]\nprintf "locale-ok\\n"\n')
+    result = subprocess.run([shell, "-s", "--", *paths], input=code.encode("utf-8"),
+                            env=dict(os.environ, expected_locale=os.environ.get("LC_ALL", "")),
+                            capture_output=True, timeout=10)
+    if result.returncode != 0 or result.stdout != b"locale-ok\n":
+        raise AssertionError((filename, result.returncode, result.stderr))
+
+
+with tempfile.TemporaryDirectory(dir=test_root) as temporary:
+    root = Path(temporary)
+    # Even with Python's UTF-8 mode disabled, progress records use UTF-8 bytes.
+    plan = root / "progress.json"
+    identifier = "vidéo_日本語".encode("utf-8")
+    command = [sys.executable, "-I", "-X", "utf8=0", "-B", project / "private-aria2-plan.py",
+               "progress-plan", "--plan", plan]
+    # Also exercise ASCII stdout on runners whose default locale is UTF-8.
+    for raw_id, status, environment in (
+        (identifier, 0, dict(os.environ, LC_ALL="C")),
+        (identifier, 0, None),
+        (b"private-marker-\xff", 65, None),
+    ):
+        plan.write_bytes(b'{"requested_downloads":[{"format_id":"' + raw_id + b'"}]}')
+        plan.chmod(0o600)
+        result = subprocess.run(command, env=environment, capture_output=True, timeout=10)
+        if result.returncode != status:
+            raise AssertionError(f"progress-plan returned {result.returncode}, expected {status}")
+        if status == 0:
+            if result.stdout != b"YTDLP_PLAN_V2|1|" + identifier + b"\n" or result.stderr:
+                raise AssertionError("invalid UTF-8 progress record")
+        elif result.stdout or b"unable to read valid JSON" not in result.stderr or b"private-marker" in result.stderr:
+            raise AssertionError("malformed UTF-8 plan did not get a private refusal")
+
+    run("download-video.sh", r'''
+compare_versions '2026.06.09' '2026.06.09'
+[[ $VERSION_PARSE_VALID == true && $VERSION_AT_LEAST == true ]]
+for value in '١.2.3' '１.2.3' '2026.０６.09'; do
+    compare_versions "$value" '2.0.0'
+    [[ $VERSION_PARSE_VALID == false && $VERSION_AT_LEAST == false ]]
+done
+for host in 'WWW.YOUTUBE-NOCOOKIE.COM.' 'YOUTUBE.COM.example.invalid' 'YOUTUBE-NOCOOKIE.COM'; do
+    (
+        URL_FILE=''
+        POSITIONAL_ARGUMENTS=("https://$host/vidéo")
+        resolve_requested_url
+        [[ $URL == "https://$host/vidéo" && ${LC_ALL-} == "$expected_locale" ]]
+        case $host in
+            WWW.*) [[ $URL_HOST == www.youtube-nocookie.com && $IS_YOUTUBE_URL == true ]] ;;
+            *.invalid) [[ $URL_HOST == youtube.com.example.invalid && $IS_YOUTUBE_URL == false ]] ;;
+            *) [[ $URL_HOST == youtube-nocooKie.com && $IS_YOUTUBE_URL == false ]] ;;
+        esac
+    )
+done
+PROBE_OUTPUT_FILE="$1/durée.txt"
+capture_media_probe() { return 0; }
+for value in '12.5' '12,5' '١.5' '１.5'; do
+    printf '%s\n' "$value" >"$PROBE_OUTPUT_FILE"
+    probe_duration_microseconds actual 'synthetic media'
+    if [[ $value == 12.5 ]]; then [[ $actual == 12500000 ]]; else [[ -z $actual ]]; fi
+done
+OUTPUT_DIR=$1
+OUTPUT_LOCK_ROOT=$1
+for suffix in a1234567 é1234567; do
+    PRIVATE_ARIA2_METADATA="$1/.yt-dlp-aria2.$suffix"
+    mkdir -m 700 -- "$PRIVATE_ARIA2_METADATA"
+    printf '%s\n' "$PRIVATE_ARIA2_STAGING_MARKER_VALUE" >"$PRIVATE_ARIA2_METADATA/$PRIVATE_ARIA2_STAGING_MARKER"
+    printf '%s\n' 'synthetic retained data' >"$PRIVATE_ARIA2_METADATA/plan.json"
+    entries=()
+    admission=0 removal=0
+    private_aria2_staging_candidate_is_safe "$PRIVATE_ARIA2_METADATA" entries || admission=$?
+    remove_marked_private_aria2_sensitive_metadata "$PRIVATE_ARIA2_METADATA" plan.json || removal=$?
+    if [[ $suffix == a1234567 ]]; then
+        [[ $admission == 0 && $removal == 0 && ! -e $PRIVATE_ARIA2_METADATA/plan.json ]]
+    else
+        [[ $admission == 1 && $removal == 1 && $(<"$PRIVATE_ARIA2_METADATA/plan.json") == 'synthetic retained data' ]]
+    fi
+done
+''', root)
+    run("runtime-manager.sh", r'''
+is_valid_ytdlp_version '2026.06.09'
+validate_bounded_uint timeout '015' 1 300 seconds
+[[ $seconds == 15 ]]
+for digit in '١' '１'; do
+    version_status=0 integer_status=0
+    is_valid_ytdlp_version "2026.06.0$digit" || version_status=$?
+    validate_bounded_uint timeout "$digit" 1 300 2>/dev/null || integer_status=$?
+    [[ $version_status == 1 && $integer_status == 1 ]]
+done
+''')
+    run("progress-monitor.sh", r'''
+: >"$1/monitor.log"
+initialize_progress_inputs "$1/monitor.log" "$$" "$1/result" video "$1"
+initialize_progress_state
+# An identifier crossing the Python boundary must travel on stdin.
+python3() {
+    local argument
+    for argument in "$@"; do
+        [[ $argument != *'format-privé'* ]] || return 99
+    done
+    command python3 "$@"
+}
+for value in 'ascii-1_2.3:4' 'format-privé' 'vidéo+音声' 'carré²' '𐐀'; do
+    sanitize_identifier "$value"
+    [[ $SANITIZED_IDENTIFIER == "$value" ]]
+done
+for value in '' 'é/slash' $'e\xcc\x81' $'bad-\xff' $'truncated-\xc3' $'overlong-\xc0\xaf'; do
+    sanitize_identifier "$value"
+    [[ -z $SANITIZED_IDENTIFIER ]]
+done
+printf -v value '%*s' 128 ''
+value=${value// /𐐀}
+sanitize_identifier "$value"
+[[ $SANITIZED_IDENTIFIER == "$value" ]]
+sanitize_identifier "${value}𐐀"
+[[ -z $SANITIZED_IDENTIFIER ]]
+''', root)
+print("Locale protocols: ASCII versions/numbers, cleanup names and caller environment preserved.")
+PY_LOCALE_PROTOCOLS
+}
+
 run_mock_engine_core_group() {
     test_mock_cleanup_owner_guard
     test_mock_engine_log_retention
@@ -2353,6 +2498,7 @@ run_mock_engine_group() {
     run_mock_engine_core_group
     run_mock_engine_hls_group
     run_mock_engine_staging_group
+    test_mock_locale_contracts
     test_mock_engine_network_destination
     test_mock_engine_network_failures
     test_mock_engine_network_publication_failures
@@ -2366,7 +2512,9 @@ run_selected_mock_engine_group() {
         engine-core) run_mock_engine_core_group ;;
         engine-hls) run_mock_engine_hls_group ;;
         engine-staging) run_mock_engine_staging_group ;;
+        locale) test_mock_locale_contracts ;;
         engine-network)
+            test_mock_locale_contracts
             test_mock_engine_network_destination
             test_mock_engine_network_failures
             test_mock_engine_network_publication_failures
