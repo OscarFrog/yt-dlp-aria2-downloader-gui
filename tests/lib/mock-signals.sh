@@ -2748,18 +2748,57 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import time
 
 libc = ctypes.CDLL(None, use_errno=True)
 if libc.prctl(36, 1, 0, 0, 0) != 0:
     raise OSError(ctypes.get_errno(), "unable to adopt orphaned fixture processes")
+signal.signal(signal.SIGCHLD, signal.SIG_DFL)
 source = Path(sys.argv[1]).read_text().rsplit('\nmain "$@"', 1)[0]
 marker = Path(sys.argv[2]) / "gui-untrusted-group-child.pid"
+# This interpreter is exec'd by env -u. Read its initial environment before
+# publishing; both sides of the subsequent exec are therefore unmarked.
+descendant_program = r"""
+import os
+from pathlib import Path
+import sys
+
+def environment_bounds():
+    # The last closing parenthesis ends comm; the remaining fields start at 3.
+    _, separator, tail = Path("/proc/self/stat").read_bytes().rpartition(b") ")
+    bounds = tail.split()[47:49]
+    if not separator or len(bounds) != 2 or not all(field.isdigit() for field in bounds):
+        raise ValueError
+    start, end = map(int, bounds)
+    if not 0 < start < end or end - start > 8 * 1024 * 1024:
+        raise ValueError
+    return start, end
+
+try:
+    start, end = environment_bounds()
+    expected_size = end - start
+    with Path("/proc/self/environ").open("rb") as stream:
+        data = stream.read(expected_size + 1)
+    if environment_bounds() != (start, end) or len(data) != expected_size:
+        raise ValueError
+except (OSError, ValueError):
+    sys.exit("could not verify the complete initial environment")
+
+environment = data.split(b"\0")
+if not any(environment) or any(e.startswith(b"YTDLP_ARIA2_GUI_WORKER_TOKEN=") for e in environment):
+    sys.exit("could not confirm an unmarked descendant")
+marker = Path(sys.argv[1])
+pending = marker.with_suffix(".pending")
+pending.write_text(f"{os.getpid()}\n", encoding="ascii")
+pending.replace(marker)
+os.execlp("sleep", "sleep", "30")
+"""
 program = source + r'''
 marker=$1
 WORKER_IDENTITY_TOKEN='fixture-private-token'
 /usr/bin/setsid env YTDLP_ARIA2_GUI_WORKER_TOKEN="${WORKER_IDENTITY_TOKEN}" \
-    bash -c 'env -u YTDLP_ARIA2_GUI_WORKER_TOKEN sleep 30 >/dev/null 2>&1 & printf "%s\n" "$!" >"$1"; wait' \
-    bash "${marker}" &
+    bash -c 'env -u YTDLP_ARIA2_GUI_WORKER_TOKEN python3 -I -B -c "$2" "$1" >/dev/null 2>&1 & wait' \
+    bash "${marker}" "$2" &
 WORKER_PID=$!
 for _attempt in {1..100}; do
     [[ -s ${marker} ]] && break
@@ -2770,7 +2809,32 @@ process_is_direct_child_of "${WORKER_PID}" "${BASHPID}" WORKER_PID_START_TIME fa
 WORKER_PGID=${WORKER_PID}
 process_is_session_group_leader "${WORKER_PID}" "${BASHPID}" WORKER_PGID_START_TIME false
 original_pgid=${WORKER_PGID}
-kill -TERM -- "${WORKER_PID}"
+IFS= read -r descendant <"${marker}"
+[[ ${descendant} =~ ^[1-9][0-9]*$ ]] || exit 70
+# Pin the signal target and validate the published child before removing the leader.
+python3 -I -B - "${WORKER_PID}" "${WORKER_PGID_START_TIME}" "${descendant}" <<'PY_GROUP_READY'
+import os
+from pathlib import Path
+import signal
+import sys
+
+leader, start, child = map(int, sys.argv[1:])
+fd = os.pidfd_open(leader)
+try:
+    def fields(pid):
+        return Path(f"/proc/{pid}/stat").read_bytes().rsplit(b") ", 1)[1].split()
+
+    parent = fields(leader)
+    if (parent[0] in (b"Z", b"X") or int(parent[19]) != start or
+            list(map(int, parent[1:4])) != [os.getppid(), leader, leader]):
+        sys.exit("registered leader identity changed")
+    row = fields(child)
+    if row[0] in (b"Z", b"X") or list(map(int, row[1:4])) != [leader] * 3:
+        sys.exit("published child is not a live member of the fixture group")
+    signal.pidfd_send_signal(fd, signal.SIGTERM)
+finally:
+    os.close(fd)
+PY_GROUP_READY
 wait "${WORKER_PID}" 2>/dev/null || true
 if worker_group_is_current; then exit 71; fi
 if ! worker_tree_alive; then exit 72; fi
@@ -2778,7 +2842,6 @@ signal_worker_tree TERM
 signal_worker_tree KILL
 if wait_for_worker_exit 1; then exit 73; fi
 [[ ${WORKER_PGID} == "${original_pgid}" ]] || exit 74
-IFS= read -r descendant <"${marker}"
 kill -0 -- "${descendant}" || exit 75
 # A wrong recorded start time cannot turn an unrelated numeric group into
 # signaling authority, but observed presence still forbids cleanup.
@@ -2794,20 +2857,30 @@ if ! wait_for_worker_exit 1; then exit 78; fi
 [[ -z ${WORKER_PGID} ]] || exit 79
 '''
 try:
-    result = subprocess.run(["bash", "-s", "--", str(marker)], input=program,
+    result = subprocess.run(["bash", "-s", "--", str(marker), descendant_program], input=program,
                             text=True, capture_output=True, timeout=10)
     if result.returncode:
         raise AssertionError(f"GUI lost-group observation failed: {result.returncode}: {result.stderr}")
 finally:
-    if marker.exists():
-        child = int(marker.read_text())
-        # As subreaper this controller owns the still-unreaped orphan, so its
-        # PID cannot be recycled before this final cleanup signal.
+    # This single-threaded subreaper launched only the fixture. Reap successive
+    # generations even when publication failed or the controlling shell timed out.
+    children = Path("/proc/thread-self/children")
+    deadline = time.monotonic() + 5
+    while True:
         try:
-            os.kill(child, signal.SIGKILL)
-            os.waitpid(child, 0)
-        except (ProcessLookupError, ChildProcessError):
-            pass
+            reaped, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            break
+        if time.monotonic() >= deadline:
+            raise TimeoutError("fixture children were not all reaped")
+        if reaped:
+            continue
+        for child in map(int, children.read_text().split()):
+            # With default SIGCHLD and no other waiter, this child's PID stays
+            # reserved until our next wait, even if it exits before the signal.
+            if os.waitpid(child, os.WNOHANG)[0] == 0:
+                os.kill(child, signal.SIGKILL)
+        time.sleep(.01)
 PY_GUI_UNTRUSTED_GROUP
 }
 
