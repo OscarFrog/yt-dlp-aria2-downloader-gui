@@ -27,6 +27,7 @@ readonly -a MOCK_GROUPS=(
     runtime
     runtime-compat
     runtime-validation
+    locale
 )
 
 MOCK_GROUP='all'
@@ -49,6 +50,7 @@ Run every mock scenario by default. GROUP is one of:
   runtime         Complete runtime/validation aggregate.
   runtime-compat  Runtime versions, capabilities, and dependencies.
   runtime-validation  Worker, media, progress-error, and GUI dependency validation.
+  locale          Non-graphical engine protocols under the caller's locale.
 EOF_USAGE
 }
 

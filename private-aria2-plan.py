@@ -1112,7 +1112,9 @@ def progress_plan(args: argparse.Namespace) -> int:
         identifiers.append(identifier)
     if len(set(identifiers)) != len(identifiers):
         raise PlanError('duplicate progress format identifier')
-    print('YTDLP_PLAN_V2|' + str(len(identifiers)) + '|' + '|'.join(identifiers))
+    # This is the UTF-8 machine protocol consumed by the Bash progress parser.
+    payload = 'YTDLP_PLAN_V2|' + str(len(identifiers)) + '|' + '|'.join(identifiers) + '\n'
+    sys.stdout.buffer.write(payload.encode('utf-8'))
     return 0
 
 

@@ -181,6 +181,8 @@ warning() {
 }
 
 validate_bounded_uint() {
+    # Numeric/version protocols admit ASCII digits, not locale collation equivalents.
+    local LC_ALL=C
     local name=$1
     local value=$2
     local minimum=$3
@@ -850,6 +852,7 @@ activate_version() {
 }
 
 is_valid_ytdlp_version() {
+    local LC_ALL=C
     [[ ${1:-} =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}([.][0-9]{6})?$ ]]
 }
 
@@ -999,6 +1002,7 @@ validate_ytdlp() {
 }
 
 parse_deno_version() {
+    local LC_ALL=C
     local candidate=$1
     local output_variable=$2
     local output=''
@@ -1270,6 +1274,7 @@ latest_ytdlp_version() {
         error 'yt-dlp latest-release lookup returned an invalid tag URL.'
         return 1
     fi
+    local LC_ALL=C
     [[ ${resolved_version} =~ ${YTDLP_CHANNEL_VERSION_PATTERN} ]] || return 1
     printf -v "${output_variable}" '%s' "${resolved_version}" || return 1
     return 0
@@ -1291,6 +1296,7 @@ latest_deno_version() {
         return 1
     fi
     resolved_version=${effective_url#"${expected_prefix}"}
+    local LC_ALL=C
     if [[ ! ${resolved_version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         error 'Deno latest-release lookup returned an invalid stable tag URL.'
         return 1
@@ -1414,7 +1420,7 @@ bootstrap_deno_version() {
     local checksum_line=''
     local base_url=''
 
-    [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    [[ ${version} =~ ^[0123456789]+\.[0123456789]+\.[0123456789]+$ ]] || return 1
     if reuse_installed_deno_version "${version}"; then
         return 0
     fi
