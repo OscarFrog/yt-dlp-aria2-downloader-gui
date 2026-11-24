@@ -2759,10 +2759,43 @@ exit "$2"
 '''
 
 def fields(pid):
-    try:
-        return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
-    except FileNotFoundError:
-        return None
+    path = Path(f"/proc/{pid}/stat")
+    for attempt in range(2):
+        try:
+            return path.read_text().rsplit(") ", 1)[1].split()
+        except FileNotFoundError:
+            return None
+        except ProcessLookupError:
+            # A stale open handle needs a fresh lookup to establish disappearance.
+            if attempt:
+                raise
+
+def check_fields_reads():
+    pid = 42
+    path = Path(f"/proc/{pid}/stat")
+    row = "42 (fixture child) S 7 42 42"
+    parsed = ["S", "7", "42", "42"]
+    gone = FileNotFoundError(errno.ENOENT, "absent")
+    stale = ProcessLookupError(errno.ESRCH, "stale handle")
+    still_stale = ProcessLookupError(errno.ESRCH, "second read")
+    denied = PermissionError(errno.EACCES, "denied")
+    unreadable = OSError(errno.EIO, "unreadable")
+    for reads, expected in (
+        ((row,), parsed), ((gone,), None),
+        ((stale, gone), None), ((stale, row), parsed),
+        ((stale, still_stale), still_stale), ((stale, denied), denied),
+        ((stale, unreadable), unreadable), ((denied,), denied),
+    ):
+        with mock.patch.object(Path, "read_text", autospec=True, side_effect=reads) as reader:
+            try:
+                observed = fields(pid)
+            except OSError as error:
+                assert error is expected, (error, expected)
+            else:
+                assert not isinstance(expected, OSError) and observed == expected, (observed, expected)
+            assert reader.call_args_list == [mock.call(path)] * len(reads), reads
+
+check_fields_reads()
 
 def record(path, count):
     try:
