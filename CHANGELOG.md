@@ -1,12 +1,57 @@
 # Changelog
 
-## 2.4.5 - Unreleased
+## 2.4.6 - Unreleased
+
+### Maintenance
+
+- Preserve Unicode in Zenity dialogs and make engine protocols independent of the caller locale.
+
+### Application
+
+- Preserve Unicode text and directory names in Zenity dialogs opened from a
+  non-UTF-8 session. Select an installed UTF-8 character encoding for Zenity
+  while retaining the session's message language. If none is available,
+  report the error before opening a dialog.
+- Parse version numbers, DNS hostnames and FFprobe durations independently of
+  the caller's locale. Emit UTF-8 progress records explicitly and validate
+  Unicode format identifiers without depending on an installed UTF-8 locale.
+- Reject malformed ARTE subtitle references, including unexpected track
+  entries. Report an interruption received at the end of private aria2
+  publication while preserving files already committed to the destination.
+
+### Tests and static analysis
+
+- Check Python sources in Ubuntu CI with hash-pinned Ruff and Python 3.10
+  language rules. Split application contract checks out of the static test
+  runner and keep its existing entry point.
+- Revalidate process identity before fixture cleanup. Preserve the first
+  teardown error and continue independent cleanup of other owned processes.
+- Synchronize the GUI signal test with the worker group it exercises. In
+  the mock subreaper test, reopen the procfs stat file once after ESRCH,
+  propagate persistent errors and retain the unreaped-zombie negative control.
+  The cause of the separate historical supervision ESRCH remains undetermined.
+
+### Packaging and CI
+
+- Move RPM builds, lifecycle checks and Fedora CI to Fedora 45. Pin the
+  authenticated RPM Fusion bootstrap for that distribution and retain upgrade
+  coverage from the previous immutable release.
+- Provision Ubuntu CI jobs with isolated APT configuration, package lists
+  and caches for the official Noble archive and security mirrors. Preserve
+  descriptor ownership and the original error when mirror setup fails.
+
+### Documentation
+
+- Update the English and French guides with the Zenity locale requirements
+  and installation examples for the published v2.4.5 packages. Document
+  Python analysis and the Fedora 45 packaging and CI procedures.
+
+## 2.4.5 - 2026-11-07
 
 ### Maintenance
 
 - Harden HLS privacy, media integrity, runtime links and qualification.
-- Prepare an unpublished corrective candidate; the latest official package
-  release remains v2.4.4 until immutable publication is independently verified.
+- Published v2.4.5 on 7 November 2026.
 
 ### Security
 
