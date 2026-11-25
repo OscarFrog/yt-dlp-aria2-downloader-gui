@@ -2448,11 +2448,15 @@ real_open, real_pidfd_signal = builtins.open, signal.pidfd_send_signal
 real_pidfd_open = os.pidfd_open
 worker_source = '''import os,signal,sys
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(130))
-if sys.argv[2:3] == ['threads']:
+if sys.argv[2:3] in (['threads'], ['threads-nondumpable']):
     import ctypes, threading, time
     from pathlib import Path
     print("ready -1", flush=True)
     os.read(int(sys.argv[3]), 1)
+    if sys.argv[2] == 'threads-nondumpable':
+        # Vary kernel ownership of proc metadata without changing credentials.
+        assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0  # PR_SET_DUMPABLE
+        assert ctypes.CDLL(None).prctl(3, 0, 0, 0, 0) == 0  # PR_GET_DUMPABLE
     def companion():
         until = time.monotonic() + 3
         while Path('/proc/self/stat').read_bytes().rsplit(b') ',1)[1].split()[0] != b'Z':
@@ -2502,7 +2506,8 @@ def run_case(control, wanted, status=7, stat_steps=()):
         if control == 'real-opaque-comm':
             command.append('opaque')
         if thread_pipe:
-            command.extend(('threads', str(thread_pipe[0])))
+            kind = 'threads-nondumpable' if control == 'thread-late-nondumpable' else 'threads'
+            command.extend((kind, str(thread_pipe[0])))
         if pipe:
             command.append(str(pipe[0]))
         worker = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -2526,6 +2531,7 @@ def run_case(control, wanted, status=7, stat_steps=()):
         observed_fd = None
         closes = []
         pending_polls = []
+        terminal_stat_owner = None
         try:
             assert select.select([worker.stdout], [], [], 2)[0], 'child readiness absent'
             readiness = worker.stdout.readline().split()
@@ -2750,6 +2756,7 @@ def run_case(control, wanted, status=7, stat_steps=()):
                     assert events == select.POLLIN
                     self.poller.register(fd, events)
                 def poll(self, timeout):
+                    nonlocal terminal_stat_owner
                     assert timeout == 0
                     assert control != 'unbound-fd', 'unbound handle was polled'
                     if control in ('poll-error', 'poll-and-close'):
@@ -2767,10 +2774,12 @@ def run_case(control, wanted, status=7, stat_steps=()):
                             pending_polls.append(False)
                             release()
                             await_terminal(worker)
+                            # WNOWAIT retains this exact child throughout the next observation.
+                            terminal_stat_owner = os.stat('stat', dir_fd=anchor).st_uid
                         else:
                             assert events and os.waitid(os.P_PID, worker.pid, os.WEXITED|os.WNOWAIT)
                             pending_polls.append(True)
-                            if control == 'thread-late':
+                            if control in ('thread-late', 'thread-late-nondumpable'):
                                 namespace['clock_ns'] = lambda: started_ns + duration_ns + 10_000_000
                     return events
             def check_close(fd):
@@ -2862,6 +2871,13 @@ def run_case(control, wanted, status=7, stat_steps=()):
                     elif control in ('empty-without-prior-identity', 'late-absence', 'dir-io-reaped'):
                         row = report['initial_observation']
                         assert row['proc_owner'] == 'unavailable' and row['initial_gap']['proc_owner'] == os.getuid()
+                    elif thread_pipe:
+                        observed = report['initial_observation']
+                        assert (observed['pid'], observed['ppid'], observed['start'], observed['state']) == (
+                            worker.pid, parent, expected_start, 'Z'), control
+                        assert terminal_stat_owner is not None
+                        assert observed['proc_owner'] == terminal_stat_owner, (
+                            control, observed['proc_owner'], terminal_stat_owner)
                     else:
                         assert report['initial_observation']['proc_owner'] == os.getuid(), control
                 if control in ('unreadable-proc', 'truncated-proc'):
@@ -3179,7 +3195,8 @@ try:
         ('close-error', 65, 130, ('terminal',)), ('poll-and-close', 65, 130, ('terminal',)),
         ('replaced-directory', 65, 130, ('empty', 'terminal')),
         ('thread-direct', 0, 130, ('valid', 'valid')), ('thread-gap', 0, 130, ('empty', 'valid', 'valid')),
-        ('thread-late', 124, 130, ('valid', 'valid')))
+        ('thread-late', 124, 130, ('valid', 'valid')),
+        ('thread-late-nondumpable', 124, 130, ('valid', 'valid')))
     cases += tuple((name, 65, 130, ('valid', 'empty', 'stat-missing')) for name in
                    ('dir-perm', 'dir-io', 'dir-esrch', 'dir-notdir'))
     cases += tuple((name, 65, 130, ('empty', name)) for name in
