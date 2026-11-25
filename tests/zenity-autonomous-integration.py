@@ -813,6 +813,207 @@ class WindowTitleTests(unittest.TestCase):
                 display.x.XFetchName.assert_not_called()
 
 
+class LocaleProtocolTests(unittest.TestCase):
+    def test_gui_utf8_boundary_preserves_host_and_non_character_categories(self):
+        source = (PROJECT / 'download-video-gui.sh').read_text(encoding='utf-8')
+        self.assertEqual(source.count('\nmain "$@"'), 1)
+        source = source.rsplit('\nmain "$@"', 1)[0]
+        categories = ('LC_ALL', 'LC_CTYPE', 'LANG', 'LANGUAGE', 'LC_MESSAGES',
+                      'LC_NUMERIC', 'LC_COLLATE', 'LC_TIME', 'LC_MONETARY',
+                      'LC_ADDRESS', 'LC_IDENTIFICATION', 'LC_MEASUREMENT',
+                      'LC_NAME', 'LC_PAPER', 'LC_TELEPHONE')
+        probe = 'for category in ' + ' '.join(categories) + '; do\n'
+        probe += '    printf "%s\\0" "${!category-}"\ndone\n'
+        cases = (
+            ('preserved', 'fr_FR.utf8', {'fr_FR.utf8': 'UTF-8'}, [], 0, None),
+            ('neutral', 'C', {'C': 'ANSI_X3.4-1968', 'C.UTF-8': 'UTF-8'}, [], 0, 'C.UTF-8'),
+            ('alias', 'C', {'C': 'ANSI_X3.4-1968', 'C.utf8': 'UTF-8'}, [], 0, 'C.utf8'),
+            ('candidate-diagnostic', 'C', {'C': 'ANSI_X3.4-1968', 'C.UTF-8': 'UTF-8\nwarning',
+                                         'C.utf8': 'UTF-8'}, [], 0, 'C.utf8'),
+            ('fallback', 'C', {'C': 'ANSI_X3.4-1968', 'fr_FR.utf8': 'UTF-8'},
+             ['C', 'fr_FR.utf8'], 0, 'fr_FR.utf8'),
+            ('category-only', '', {'': 'ANSI_X3.4-1968', 'C.UTF-8': 'UTF-8'}, [], 0, 'C.UTF-8'),
+            ('unavailable', 'C', {'C': 'ANSI_X3.4-1968'}, ['C'], 69, None),
+            ('list-error', 'C', {'C': 'ANSI_X3.4-1968'}, None, 69, None),
+            ('probe-error', 'C', {}, [], 69, None),
+            ('invalid-category', 'project_missing_LOCALE.utf8', {'project_missing_LOCALE.utf8': 'ANSI_X3.4-1968'}, [], 69, None),
+        )
+        with tempfile.TemporaryDirectory(prefix='zenity-locale-boundary-') as temporary:
+            root = Path(temporary)
+            binary = root / 'bin'
+            binary.mkdir(mode=0o700)
+            locale = binary / 'locale'
+            locale.write_text('#!/usr/bin/python3\n'
+                              'import json, os, sys\n'
+                              'from pathlib import Path\n'
+                              'policy = json.loads(Path(os.environ["LOCALE_TEST_POLICY"]).read_bytes())\n'
+                              'if sys.argv[1:] == ["-a"]:\n'
+                              '    if policy["available"] is None: sys.exit(7)\n'
+                              '    print("\\n".join(policy["available"]))\n'
+                              'elif sys.argv[1:] == ["charmap"]:\n'
+                              '    value = policy["charmaps"].get(os.environ.get("LC_ALL", ""))\n'
+                              '    if value is None: sys.exit(1)\n'
+                              '    if os.environ.get("LC_ALL") == "project_missing_LOCALE.utf8": print("invalid locale", file=sys.stderr)\n'
+                              '    print(value)\n'
+                              'else: sys.exit(2)\n', encoding='utf-8')
+            locale.chmod(0o700)
+            zenity = binary / 'zenity'
+            zenity.write_text('#!/bin/bash\n' + probe + 'printf "%s\\0" "$@"\nexit 42\n', encoding='utf-8')
+            zenity.chmod(0o700)
+            policy = root / 'policy.json'
+            for label, inherited_all, charmaps, available, expected, selected in cases:
+                with self.subTest(case=label):
+                    policy.write_text(json.dumps(dict(charmaps=charmaps, available=available)), encoding='utf-8')
+                    environment = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ['PATH'],
+                                       LOCALE_TEST_POLICY=str(policy), LC_ALL=inherited_all, LC_CTYPE='C',
+                                       LANG='fr_FR.utf8', LANGUAGE='fr_FR:fr')
+                    for category in categories[4:]:
+                        environment[category] = 'fr_FR.utf8'
+                    statements = ('\n' + probe + 'initialize_zenity_command || exit $?\n'
+                                  + probe + 'set +e\n"${ZENITY_COMMAND[@]}" --text="été 日本語"\n'
+                                  + 'status=$?\n' + probe + 'exit "$status"\n')
+                    completed = subprocess.run(['bash', '-s'], input=(source + statements).encode('utf-8'),
+                                               env=environment, capture_output=True, timeout=10)
+                    self.assertEqual(completed.returncode, 42 if expected == 0 else expected, completed.stderr)
+                    fields = completed.stdout.split(b'\0')
+                    parent = [environment[name].encode('utf-8') for name in categories]
+                    self.assertEqual(fields[:len(categories)], parent)
+                    if expected:
+                        self.assertEqual(len(fields), len(categories) + 1)
+                        self.assertIn(b'Error:', completed.stderr)
+                        continue
+                    self.assertEqual(fields[len(categories):2 * len(categories)], parent)
+                    child = dict(zip(categories, fields[2 * len(categories):3 * len(categories)]))
+                    self.assertEqual(child['LANGUAGE'], b'fr_FR:fr')
+                    self.assertEqual(child['LANG'], b'fr_FR.utf8')
+                    if selected is None:
+                        self.assertEqual(list(child.values()), parent)
+                    else:
+                        self.assertEqual(child['LC_ALL'], b'')
+                        self.assertEqual(child['LC_CTYPE'], selected.encode('ascii'))
+                        for category in categories[4:]:
+                            self.assertEqual(child[category], (inherited_all or 'fr_FR.utf8').encode('ascii'))
+                    self.assertEqual(fields[3 * len(categories)], '--text=été 日本語'.encode('utf-8'))
+                    self.assertEqual(fields[3 * len(categories) + 1:-1], parent)
+
+    def run_gui_locale_callsite(self, source, target):
+        categories = ('LC_ALL', 'LC_CTYPE', 'LANG', 'LANGUAGE', 'LC_MESSAGES',
+                      'LC_NUMERIC', 'LC_COLLATE', 'LC_TIME', 'LC_MONETARY')
+        probe = 'for category in ' + ' '.join(categories) + '; do\n'
+        probe += '    printf "%s\\0" "${!category-}"\ndone\n'
+        self.assertEqual(source.count('\nmain "$@"'), 1)
+        source = source.rsplit('\nmain "$@"', 1)[0]
+        with tempfile.TemporaryDirectory(prefix='zenity-locale-callsite-') as temporary:
+            root = Path(temporary)
+            binary = root / 'bin'
+            binary.mkdir(mode=0o700)
+            (root / 'input').write_bytes(b'')
+            # Construct filesystem bytes explicitly even under native ASCII Python.
+            initial = os.fsencode(root) + '/préselection 日本語'.encode('utf-8')
+            destination = os.fsencode(root) + '/destination été 日本語'.encode('utf-8')
+            os.mkdir(initial)
+            os.mkdir(destination)
+            locale = binary / 'locale'
+            locale.write_text('#!/bin/bash\n'
+                              'if [[ ${1-} == charmap && ${LC_ALL-} == C.UTF-8 ]]; then\n'
+                              '    printf "UTF-8\\n"\n'
+                              'elif [[ ${1-} == charmap && ${LC_ALL-} == C ]]; then\n'
+                              '    printf "ANSI_X3.4-1968\\n"\n'
+                              'else exit 1; fi\n', encoding='utf-8')
+            locale.chmod(0o700)
+            zenity = binary / 'zenity'
+            zenity.write_text('#!/bin/bash\n{\n' + probe + '} >"${LOCALE_TEST_ROOT}/child.env"\n'
+                              'printf "%s\\0" "$@" >"${LOCALE_TEST_ROOT}/child.argv"\n'
+                              'printf "%s\\n" "$$" >"${LOCALE_TEST_ROOT}/child.pid"\n'
+                              'if [[ ${1-} == --file-selection ]]; then\n'
+                              '    printf "%s\\n" "$LOCALE_TEST_DESTINATION"\n    exit 0\nfi\n'
+                              'exit 1\n', encoding='utf-8')
+            zenity.chmod(0o700)
+            environment = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ['PATH'],
+                               LOCALE_TEST_ROOT=str(root), LOCALE_TEST_TARGET=target,
+                               LOCALE_TEST_INITIAL=os.fsdecode(initial),
+                               LOCALE_TEST_DESTINATION=os.fsdecode(destination),
+                               LC_ALL='C', LC_CTYPE='C', LANG='fr_FR.utf8', LANGUAGE='fr_FR:fr',
+                               LC_MESSAGES='fr_FR.utf8', LC_NUMERIC='fr_FR.utf8',
+                               LC_COLLATE='fr_FR.utf8', LC_TIME='fr_FR.utf8', LC_MONETARY='fr_FR.utf8')
+            # Actual main and startup run until script resolution, where the
+            # fixture enters the real launch function without a media session.
+            # Registered children are waited, and only fixture-owned files exist.
+            statements = r'''
+cleanup() { :; }
+begin_signal_registration() { :; }
+finish_signal_registration() {
+    printf '%s\n' "${ZENITY_PID}" >"${LOCALE_TEST_ROOT}/registered.pid"
+    if [[ ${LOCALE_TEST_TARGET} != capture ]]; then
+        set +e
+        wait "${ZENITY_PID}"
+        printf '%s\n' "$?" >"${LOCALE_TEST_ROOT}/status"
+        if [[ -n ${PROGRESS_MONITOR_PID} ]]; then
+            wait "${PROGRESS_MONITOR_PID}"
+        fi
+        exit 0
+    fi
+}
+bash() { return 0; }
+run_fixture() {
+    RUNTIME_TMPDIR=${LOCALE_TEST_ROOT}
+    PROGRESS_PIPE=${LOCALE_TEST_ROOT}/input
+    PROGRESS_DIALOG_ERROR_FILE=${LOCALE_TEST_ROOT}/dialog-error
+    PROGRESS_MONITOR_ERROR_FILE=${LOCALE_TEST_ROOT}/monitor-error
+    PROGRESS_MONITOR=/dev/null
+    OUTPUT_DIR=${LOCALE_TEST_ROOT}
+    case ${LOCALE_TEST_TARGET} in
+        capture)
+            captured=''
+            select_output_dir captured "${LOCALE_TEST_INITIAL}"
+            printf '%s\n' "${ZENITY_STATUS}" >"${LOCALE_TEST_ROOT}/status"
+            printf '%s' "${captured}" >"${LOCALE_TEST_ROOT}/captured"
+            exit 0
+            ;;
+        arte) wait_for_arte_catalogue ;;
+        progress) run_progress_dialog ;;
+    esac
+    exit 97
+}
+resolve_script_dir() {
+'''
+            statements += '{\n' + probe + '} >"${LOCALE_TEST_ROOT}/parent-after.env"\nrun_fixture\n}\n'
+            # A removed startup call must fail the same oracle, not accidentally
+            # continue to the real user's request-selection implementation.
+            statements += 'collect_download_request() { run_fixture; }\n'
+            statements += '{\n' + probe + '} >"${LOCALE_TEST_ROOT}/parent-before.env"\nmain\n'
+            completed = subprocess.run(['/bin/bash', '-s'], input=(source + statements).encode('utf-8'),
+                                       env=environment, capture_output=True, timeout=10)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual((root / 'status').read_bytes(), b'0\n' if target == 'capture' else b'1\n')
+            self.assertEqual((root / 'registered.pid').read_bytes(), (root / 'child.pid').read_bytes())
+            parent = [environment[name].encode('utf-8') for name in categories]
+            self.assertEqual((root / 'parent-before.env').read_bytes().split(b'\0')[:-1], parent)
+            self.assertEqual((root / 'parent-after.env').read_bytes().split(b'\0')[:-1], parent)
+            child = dict(zip(categories, (root / 'child.env').read_bytes().split(b'\0')[:-1]))
+            self.assertEqual(child['LC_ALL'], b'', 'Zenity launch bypassed the UTF-8 boundary')
+            self.assertEqual(child['LC_CTYPE'], b'C.UTF-8', 'Zenity launch bypassed the UTF-8 boundary')
+            self.assertEqual(child['LANG'], b'fr_FR.utf8')
+            self.assertEqual(child['LANGUAGE'], b'fr_FR:fr')
+            for category in categories[4:]:
+                self.assertEqual(child[category], b'C')
+            arguments = (root / 'child.argv').read_bytes().split(b'\0')[:-1]
+            if target == 'capture':
+                self.assertIn(b'--file-selection', arguments)
+                self.assertIn(b'--directory', arguments)
+                self.assertIn(b'--filename=' + initial + b'/', arguments)
+                self.assertEqual((root / 'captured').read_bytes(), os.path.realpath(destination))
+            else:
+                self.assertIn(b'--progress', arguments)
+                self.assertEqual(b'--pulsate' in arguments, target == 'arte')
+
+    def test_gui_utf8_boundary_is_wired_to_startup_and_all_three_launch_sites(self):
+        source = (PROJECT / 'download-video-gui.sh').read_text(encoding='utf-8')
+        for target in ('capture', 'arte', 'progress'):
+            with self.subTest(target=target):
+                self.run_gui_locale_callsite(source, target)
+
+
 class PublicationWitnessTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='zenity-publication-')

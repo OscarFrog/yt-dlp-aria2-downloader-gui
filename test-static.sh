@@ -3738,7 +3738,7 @@ test_static_release_contracts() {
         'readonly ZENITY_CAPTURE_MAX_BYTES=65536' \
         'captured Zenity output memory bound'
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
-        "zenity \"\$@\" >\"\${output_file}\" 2>\"\${error_file}\" &" \
+        "\"\${ZENITY_COMMAND[@]}\" \"\$@\" >\"\${output_file}\" 2>\"\${error_file}\" &" \
         'captured Zenity dialogs run as supervised children'
     assert_file_contains "${SCRIPT_DIR}/download-video-gui.sh" \
         "mkfifo -m 600 -- \"\${PROGRESS_PIPE}\"" \
