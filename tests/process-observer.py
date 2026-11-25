@@ -1005,7 +1005,7 @@ def _identity_special_definition(kind, name):
     return None
 
 
-def _identity_read_bytes(path):
+def _identity_read_bytes(path, proofs=None):
     # Match the inspected CPython Path.read_bytes implementations. The explicit
     # boundaries cost Python time; they do not establish identical scheduling or
     # prove that a mock's OSError came from a kernel system call.
@@ -1019,17 +1019,26 @@ def _identity_read_bytes(path):
             or reader.__func__ is not _PATH_READ_BYTES):
         # Replacing a customized read_bytes would change its contract. Preserve
         # the call and declare that its internal I/O boundaries are unavailable.
-        scope.failed()
+        if scope is not None:
+            scope.failed()
         return _identity_opaque_read(reader)
     if (sys.implementation.name != 'cpython' or sys.version_info.major != 3
             or not 10 <= sys.version_info.minor <= 15):
-        scope.failed()
+        if scope is not None:
+            scope.failed()
         return _identity_opaque_read(reader)
     try:
         stream = path.open(mode='rb', buffering=0) if sys.version_info.minor >= 14 else path.open(mode='rb')
     except BaseException as error:
         _identity_note(error, 'attribute_open', 'attribute_read')
+        if (proofs is not None and isinstance(error, (FileNotFoundError, ProcessLookupError))
+                and error.errno in (errno.ENOENT, errno.ESRCH) and error.__context__ is None
+                and error.__cause__ is None):
+            proofs.open_gap = error
         raise
+    if scope is None:
+        with stream as opened:
+            return opened.read()
     context = _IdentityAttributeContext(stream)
     if not context.supported:
         return _identity_opaque_context(stream)
@@ -1079,6 +1088,8 @@ class _GroupExitProofs:
     cleanup authority, and never excuses a failed memory observation.
     """
     def __init__(self, known):
+        self.leader_environ = None
+        self.open_gap = None
         self.allowed = set(known)
         self.attributions = {key: 'known_identity' for key in self.allowed}
         self.handles = {}
@@ -1142,6 +1153,7 @@ class _GroupExitProofs:
             # A failed context reset must not retain a usable proof, nor mask
             # an earlier refusal. The fallback only restores the previous
             # lexical scope.
+            self.open_gap = None
             self.handles.clear()
             self.bound.clear()
             self.allowed.clear()
@@ -1357,12 +1369,15 @@ def same_process(pid, row):
 
 def read_observation(path):
     """Retry an interrupted read once, without treating it as an empty file."""
-    if _identity_scope() is not None:
+    proofs = _GROUP_EXIT_PROOFS.get()
+    if proofs is not None and path != proofs.leader_environ:
+        proofs = None
+    if _identity_scope() is not None or proofs is not None:
         try:
-            return _call('attribute_read', 'attribute_read', _identity_read_bytes, path)
+            return _call('attribute_read', 'attribute_read', _identity_read_bytes, path, proofs)
         except InterruptedError as first_error:
             try:
-                return _call('attribute_read', 'attribute_read', _identity_read_bytes, path)
+                return _call('attribute_read', 'attribute_read', _identity_read_bytes, path, proofs)
             except BaseException as error:
                 _link(first_error, error, 'retry')
                 raise
@@ -1540,7 +1555,18 @@ def snapshot():
     return rows
 
 
-def observation_paths(pid, row, name):
+def _require_quiescent_inventory(pid, row):
+    quiescent, quiescence_error = _inventory_quiescence(pid, row)
+    if not quiescent:
+        error = _guard(OSError(errno.EIO, 'observation task inventory is incomplete'),
+                       'inventory_guard', 'task_inventory',
+                       identity_origin='application_state_check')
+        if quiescence_error is not None:
+            _link(quiescence_error, error, 'quiescence')
+        raise error
+
+
+def observation_paths(pid, row, name, defer_quiescence=None):
     """Choose live tasks; an exited leader need not retain accessible memory."""
     _identity_begin(pid, row, name)
     proofs = _GROUP_EXIT_PROOFS.get()
@@ -1576,15 +1602,8 @@ def observation_paths(pid, row, name):
                 live = True
                 _identity_inventory_task(pid, task, identity, selection=True)
                 yield task / name
-        if not live:
-            quiescent, quiescence_error = _inventory_quiescence(pid, current)
-            if not quiescent:
-                error = _guard(OSError(errno.EIO, 'observation task inventory is incomplete'),
-                               'inventory_guard', 'task_inventory',
-                               identity_origin='application_state_check')
-                if quiescence_error is not None:
-                    _link(quiescence_error, error, 'quiescence')
-                raise error
+        if not live and not (defer_quiescence and defer_quiescence(pid, current)):
+            _require_quiescent_inventory(pid, current)
 
 
 def threads_are_quiescent(pid, row):
@@ -1628,6 +1647,17 @@ def threads_are_quiescent(pid, row):
                 _link(scope.revalidation_error, error, 'quiescence', retain_initial=True)
         return False
     return True
+
+
+def _same_descendant(pid, row, parent):
+    """Bracket the child's current PPID with the selected parent's identity."""
+    ppid = row['parent']
+    if not same_process(ppid, parent):
+        return False
+    child = current_process(pid)
+    return (child is not None and child['start'] == row['start']
+            and child['parent'] == ppid and child['state'] in ('Z', 'X')
+            and same_process(ppid, parent))
 
 
 class Observer:
@@ -1724,6 +1754,18 @@ class Observer:
         selected = {}
         environment_errors = {}
         attribution_sources = {}
+        deferred = {}
+        proofs = _GROUP_EXIT_PROOFS.get()
+
+        def defer_quiescence(pid, current):
+            # All candidate memory paths have been visited, including live siblings.
+            # Only postpone the final inventory when leader memory disappeared.
+            error = environment_errors.get(pid)
+            if error is not None and proofs.open_gap is error:
+                deferred[pid] = current
+                return True
+            return False
+
         # The independent launch marker finds a worker even if its immediate
         # parent disappeared between samples. Recorded PID/start identities
         # continue to work after exec clears the environment.
@@ -1738,7 +1780,14 @@ class Observer:
             elif _identity_scope() is not None:
                 scope.identity_attribution = None
             try:
-                for path in observation_paths(pid, row, 'environ'):
+                defer = None
+                if proofs is not None:
+                    proofs.open_gap = None
+                    proofs.leader_environ = None
+                    if key not in self.known and row['parent'] in rows:
+                        proofs.leader_environ = Path(f'/proc/{pid}/environ')
+                        defer = defer_quiescence
+                for path in observation_paths(pid, row, 'environ', defer):
                     try:
                         environment = read_process_observation(pid, row, path).split(b'\0')
                     except OSError as error:
@@ -1791,6 +1840,9 @@ class Observer:
             if marked or key in self.known:
                 selected[pid] = row
                 attribution_sources[pid] = 'marker' if marked else 'known_identity'
+        if proofs is not None:
+            proofs.leader_environ = None
+            proofs.open_gap = None
         changed = True
         while changed:
             changed = False
@@ -1817,8 +1869,27 @@ class Observer:
                 scope.attribution = attribution_sources[pid]
             _identity_attribution(pid, row, attribution_sources[pid], selected)
             key = pid, row['start']
-            self.known.add(key)
             proofs = _GROUP_EXIT_PROOFS.get()
+            if pid in deferred:
+                # A previously unknown group gets no descriptor during marker or
+                # exclusion discovery. Only a direct edge to an authenticated root
+                # can grant a new exit proof before the pending quiescence inventory.
+                original = environment_errors[pid]
+                _identity_restore(original)
+                _identity_group_result(pid, row, deferred[pid], 'group_after', 'group_match_after')
+                try:
+                    parent = row['parent']
+                    if (proofs is not None and attribution_sources.get(parent) in ('marker', 'known_identity')
+                            and parent in selected and _same_descendant(pid, row, selected[parent])):
+                        proofs.allow(pid, row, 'descendant')
+                    _require_quiescent_inventory(pid, deferred[pid])
+                except (OSError, ValueError, IndexError) as error:
+                    _link(original, error, 'quiescence')
+                    _raise_incomplete_observation(error)
+                if proofs is not None and key in proofs.resolved:
+                    # Keep the recovered open in the inventory's diagnostic for a later close failure.
+                    _link(original, proofs.resolved[key], 'quiescence')
+            self.known.add(key)
             if proofs is not None:
                 proofs.allow(pid, row, attribution_sources[pid])
             if pid in environment_errors:

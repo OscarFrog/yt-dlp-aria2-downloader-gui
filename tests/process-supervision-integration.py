@@ -1084,6 +1084,281 @@ class ObservationRetirementTests(unittest.TestCase):
             self.assertEqual(state['polls'], [])
             self.assertEqual(state['closed'], [])
 
+    @contextmanager
+    def retiring_descendant(self, observed, *, parent_source='known', child_first=False,
+                            change=None, open_errno=errno.ESRCH, leader_inventory=True, **retirement):
+        """Inject an attribute-open race on a new descendant of a separate parent."""
+        parent = self.pid + 10
+        parent_root = Path(f'/proc/{parent}')
+        parent_row = dict(self.row, start=self.row['start'] - 1)
+        child_row = dict(self.row, state='R', parent=parent)
+        rows = {parent: dict(parent_row), self.pid: dict(child_row)}
+        if child_first:
+            rows = dict(reversed(rows.items()))
+        if parent_source == 'known':
+            observed.known.add((parent, parent_row['start']))
+        with self.retired_group(leader_inventory=leader_inventory, **retirement) as state:
+            if retirement.get('earlier_memory_error') is not None:
+                earlier_pid = self.pid - 1
+                earlier_row = observer.snapshot()[earlier_pid]
+                observed.known.add((earlier_pid, earlier_row['start']))
+                rows = {earlier_pid: earlier_row, **rows}
+            state['row'] = child_row
+            state['child_opens'] = 0
+            parent_seen_after_exit = False
+            post_read_stat_failure = False
+            previous_stat = observer.process_row
+            previous_open = Path.open
+
+            class OpenedMemory:
+                def __enter__(self):
+                    return self
+
+                def read(self):
+                    if change == 'stream-read':
+                        raise ProcessLookupError(errno.ESRCH, 'synthetic stream read failure')
+                    return b'fixture\0'
+
+                def __exit__(self, *_exception):
+                    if change == 'stream-close':
+                        raise ProcessLookupError(errno.ESRCH, 'synthetic stream close failure')
+                    return False
+
+            def stat(path):
+                nonlocal parent_seen_after_exit, post_read_stat_failure
+                if path == parent_root / 'stat':
+                    parent_seen_after_exit = bool(state['child_opens'])
+                    return dict(parent_row)
+                if change == 'parent-reused-during-check' and parent_seen_after_exit and path == self.root / 'stat':
+                    parent_row['start'] += 1
+                    parent_seen_after_exit = False
+                if post_read_stat_failure and path == self.root / 'stat':
+                    post_read_stat_failure = False
+                    raise ProcessLookupError(errno.ESRCH, 'synthetic post-read task stat failure')
+                return previous_stat(path)
+
+            def opened(path, *args, **kwargs):
+                nonlocal post_read_stat_failure
+                if path.parent == parent_root:
+                    self.assertIn(path.name, ('cmdline', 'environ'))
+                    data = b'fixture\0'
+                    if path.name == 'environ' and parent_source in ('marker', 'external'):
+                        data = self.marker + b'\0'
+                        if parent_source == 'external':
+                            data += b'YTDLP_QUALIFICATION_EXTERNAL=1\0'
+                    return io.BytesIO(data)
+                if path == self.root / 'environ':
+                    self.assertEqual(child_row['state'], 'R')
+                    state['child_opens'] += 1
+                    child_row['state'] = 'Z'
+                    if change in ('stream-read', 'stream-close'):
+                        return OpenedMemory()
+                    if change in ('post-read-stat', 'post-read-guard'):
+                        post_read_stat_failure = change == 'post-read-stat'
+                        return io.BytesIO(b'fixture\0')
+                    if change == 'parent-reused':
+                        parent_row['start'] += 1
+                    if change == 'child-reparented':
+                        child_row['parent'] = 1
+                    if change == 'child-reused':
+                        child_row['start'] += 1
+                    raise OSError(open_errno, 'synthetic attribute-open failure')
+                if change == 'external-sibling' and path == self.root / 'task' / str(self.tid) / 'environ':
+                    return io.BytesIO(self.marker + b'\0YTDLP_QUALIFICATION_EXTERNAL=1\0')
+                return previous_open(path, *args, **kwargs)
+
+            with mock.patch.object(observer, 'snapshot', return_value=rows), \
+                    mock.patch.object(observer, 'process_row', side_effect=stat), \
+                    mock.patch.object(Path, 'open', new=opened):
+                yield parent, state
+            self.assertEqual(state['child_opens'], 1)
+
+    def test_new_descendant_needs_bound_whole_group_exit_evidence(self):
+        for diagnostics, identity in ((False, False), (True, False), (True, True)):
+            for parent_source in ('known', 'marker'):
+                for child_first in (True, False):
+                    with self.subTest(diagnostics=diagnostics, identity=identity,
+                                      parent=parent_source, child_first=child_first):
+                        observed = observer.Observer(self.token, diagnostics=diagnostics,
+                                                     identity_diagnostics=identity)
+                        with self.retiring_descendant(observed, parent_source=parent_source,
+                                                     child_first=child_first) as (parent, state):
+                            result = observed.sample()
+                            self.assertEqual(set(result['live']), {str(parent)})
+                            self.assertEqual(len(state['opened']), 1)
+                            self.assertEqual(state['opened'], state['polls'])
+                            self.assertEqual(state['opened'], state['closed'])
+                            self.assertEqual(state['fdinfo_reads'], [4097])
+                            self.assertIsNone(observed.error)
+
+    def test_new_descendant_preserves_incomplete_and_strong_failures(self):
+        for options, expected in ((dict(ready=False), errno.EIO),
+                                  (dict(open_errno=errno.EACCES), errno.EACCES),
+                                  (dict(open_errno=errno.EIO), errno.EIO)):
+            with self.subTest(options=options):
+                observed = observer.Observer(self.token, diagnostics=True, identity_diagnostics=True)
+                prior_leak = (self.pid + 20, self.row['start'] + 20)
+                observed.leaks.add(prior_leak)
+                with self.retiring_descendant(observed, **options) as (_, state):
+                    with self.assertRaises(observer.ObservationError) as failure:
+                        observed.sample()
+                    self.assertEqual(failure.exception.errno, expected)
+                    self.assertIn(prior_leak, observed.leaks)
+                    first = next(event for event in observed.identity_failure(failure.exception)['events']
+                                 if event['first_failure'])
+                    self.assertEqual((first['operation'], first['primitive_errno']),
+                                     ('attribute_open', options.get('open_errno', errno.ESRCH)))
+                    with self.assertRaises(observer.ObservationError) as repeated:
+                        observed.sample()
+                    self.assertIs(repeated.exception, failure.exception)
+                    if not options.get('ready', True):
+                        self.assertTrue(state['polls'])
+
+    def test_new_descendant_close_failure_retains_the_resolved_open_and_inventory(self):
+        for diagnostics, identity in ((False, False), (True, False), (True, True)):
+            with self.subTest(diagnostics=diagnostics, identity=identity):
+                observed = observer.Observer(self.token, diagnostics=diagnostics, identity_diagnostics=identity)
+                with self.retiring_descendant(observed, close_errno=errno.EIO) as (_, state):
+                    with self.assertRaises(observer.ObservationError) as failure:
+                        observed.sample()
+                    with self.assertRaises(observer.ObservationError) as repeated:
+                        observed.sample()
+                    self.assertIs(repeated.exception, failure.exception)
+                    self.assertEqual(failure.exception.errno, errno.EIO)
+                    self.assertEqual(len(state['opened']), 1)
+                    self.assertEqual(state['polls'], state['opened'])
+                    self.assertEqual(state['closed'], state['opened'])
+                packets = []
+                if diagnostics:
+                    packets.append((observed.diagnostic_failure(failure.exception), 'attribute_read'))
+                if identity:
+                    packets.append((observed.identity_failure(failure.exception), 'attribute_open'))
+                for packet, first_operation in packets:
+                    events = packet['events']
+                    self.assertTrue(packet['complete'])
+                    self.assertEqual([(event['operation'], event['primitive_errno']) for event in events],
+                                     [(first_operation, errno.ESRCH), ('task_inventory', errno.ENOENT),
+                                      ('pidfd_close', errno.EIO), ('error_normalization', None)])
+                    self.assertTrue(events[0]['first_failure'])
+                    self.assertEqual(events[-1]['cause_sequence'], events[2]['sequence'])
+                    self.assertEqual(events[-1]['normalized_errno'], errno.EIO)
+
+    def test_new_descendant_requires_current_parent_and_child_identities(self):
+        for change in ('parent-reused', 'parent-reused-during-check', 'child-reparented', 'child-reused'):
+            with self.subTest(change=change):
+                observed = observer.Observer(self.token)
+                with self.retiring_descendant(observed, change=change) as (_, state):
+                    if change == 'child-reused':
+                        observed.sample()
+                        self.assertNotIn((self.pid, state['row']['start']), observed.known)
+                    else:
+                        with self.assertRaises(observer.ObservationError):
+                            observed.sample()
+                    self.assertFalse(state['opened'])
+
+    def test_descendant_esrch_after_open_never_grants_new_exit_proof(self):
+        cases = (('post-read-stat', 'stat_read', 'task_stat_after'),
+                 ('post-read-guard', 'identity_guard', 'task_stat_after'),
+                 ('stream-read', 'attribute_read', 'attribute_read'),
+                 ('stream-close', 'attribute_close', 'attribute_read'))
+        for diagnostics, identity in ((False, False), (True, False), (True, True)):
+            for change, operation, phase in cases:
+                with self.subTest(change=change, diagnostics=diagnostics, identity=identity):
+                    observed = observer.Observer(self.token, diagnostics=diagnostics,
+                                                 identity_diagnostics=identity)
+                    with self.retiring_descendant(observed, parent_source='marker', change=change) as (_, state):
+                        with self.assertRaises(observer.ObservationError) as failure:
+                            observed.sample()
+                        self.assertEqual(failure.exception.errno, errno.EIO)
+                        self.assertIs(observed.error, failure.exception)
+                        self.assertFalse(state['opened'])
+                        self.assertFalse(state['polls'])
+                        if identity:
+                            first = next(event for event in observed.identity_failure(failure.exception)['events']
+                                         if event['first_failure'])
+                            self.assertEqual((first['operation'], first['phase'], first['primitive_errno']),
+                                             (operation, phase, errno.ESRCH))
+
+    def test_external_parent_never_grants_descendant_exit_authority(self):
+        observed = observer.Observer(self.token)
+        with self.retiring_descendant(observed, parent_source='external', child_first=True) as (parent, state):
+            result = observed.sample()
+            self.assertFalse(result['live'])
+            self.assertIn((parent, self.row['start'] - 1), observed.external)
+            self.assertFalse(state['opened'])
+
+    def test_retained_external_child_does_not_acquire_a_pidfd(self):
+        observed = observer.Observer(self.token)
+        observed.external.add((self.pid, self.row['start']))
+        with self.retiring_descendant(observed) as (parent, state):
+            result = observed.sample()
+            self.assertEqual(set(result['live']), {str(parent)})
+            self.assertFalse(state['opened'])
+
+    def test_live_sibling_external_marker_excludes_a_retiring_descendant(self):
+        observed = observer.Observer(self.token)
+        with self.retiring_descendant(observed, parent_source='marker', child_first=True,
+                                     sibling_live=True, change='external-sibling') as (parent, state):
+            result = observed.sample()
+            self.assertEqual(set(result['live']), {str(parent)})
+            self.assertIn((self.pid, self.row['start']), observed.external)
+            self.assertFalse(state['opened'])
+
+    def test_missing_initial_descendant_inventory_retains_its_failure(self):
+        observed = observer.Observer(self.token, diagnostics=True, identity_diagnostics=True)
+        with self.retiring_descendant(observed, leader_inventory=False, ready=False):
+            with self.assertRaises(observer.ObservationError) as failure:
+                observed.sample()
+            self.assertIs(observed.error, failure.exception)
+            events = observed.identity_failure(failure.exception)['events']
+            self.assertTrue(any(event['operation'] == 'task_inventory'
+                                and event['phase'] == 'task_inventory'
+                                and event['primitive_errno'] == errno.ENOENT for event in events))
+
+    def test_live_sibling_of_new_descendant_still_requires_argument_inspection(self):
+        observed = observer.Observer(self.token)
+        with self.retiring_descendant(observed, sibling_live=True) as (_, state):
+            result = observed.sample()
+            self.assertIn(str(self.pid), result['live'])
+            self.assertEqual(state['read_tids'], [self.tid, self.tid])
+            self.assertEqual(state['reads'], ['environ', 'cmdline'])
+            self.assertFalse(state['polls'])
+
+    def test_new_descendant_cannot_displace_an_earlier_owned_memory_error(self):
+        observed = observer.Observer(self.token, diagnostics=True, identity_diagnostics=True)
+        with self.retiring_descendant(observed, earlier_memory_error=errno.EACCES, ready=False):
+            with self.assertRaises(observer.ObservationError) as failure:
+                observed.sample()
+            self.assertIs(observed.error, failure.exception)
+            self.assertEqual(failure.exception.errno, errno.EACCES)
+            first = next(event for event in observed.identity_failure(failure.exception)['events']
+                         if event['first_failure'])
+            self.assertEqual((first['operation'], first['context']['group_expected']['pid']),
+                             ('attribute_read', self.pid - 1))
+
+    def test_resolved_descendant_close_preserves_another_groups_prior_memory_failure(self):
+        observed = observer.Observer(self.token, diagnostics=True, identity_diagnostics=True)
+        with self.retiring_descendant(observed, earlier_memory_error=errno.EACCES,
+                                      close_errno=errno.EIO) as (_, state):
+            # Read this group's environment first. Its refusal is processed after its parent's exit proof.
+            earlier_pid = self.pid - 1
+            earlier = observer.snapshot()[earlier_pid]
+            observed.known.remove((earlier_pid, earlier['start']))
+            earlier['parent'] = self.pid
+            with self.assertRaises(observer.ObservationError) as failure:
+                observed.sample()
+            self.assertEqual(failure.exception.errno, errno.EACCES)
+            self.assertIs(observed.error, failure.exception)
+            self.assertEqual(len(state['opened']), 1)
+            self.assertEqual(state['polls'], state['opened'])
+            self.assertEqual(state['closed'], state['opened'])
+            events = observed.identity_failure(failure.exception)['events']
+            self.assertEqual((events[0]['operation'], events[0]['primitive_errno'],
+                              events[0]['context']['group_expected']['pid']),
+                             ('attribute_read', errno.EACCES, earlier_pid))
+            self.assertEqual([(event['primitive_errno'], event['context']['group_expected']['pid'])
+                              for event in events if event['operation'] == 'pidfd_close'], [(errno.EIO, self.pid)])
+
     def test_normalization_keeps_the_first_failing_close_group_identity(self):
         closed = []
         private = 'synthetic-private-close-detail'

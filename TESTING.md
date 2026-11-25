@@ -763,6 +763,13 @@ reaping or fixture-cleanup authority. Earlier privacy failures, EACCES/EIO and
 recorded argument leaks retain their refusal. Deterministic observer retirement
 regressions model these boundaries in all diagnostic modes, including a stale
 live snapshot followed by a zombie leader and a missing task inventory.
+If opening a new leader's environment returns ENOENT or ESRCH and the first
+task inventory completes without a live sibling, the observer can defer the
+final quiescence inventory until marker discovery and external exclusions are
+complete. A direct child of a marked or previously known parent can use the
+same exit proof when fresh parent identity checks bracket a matching child
+PID, start time and PPID. An identity-check failure, an error after the
+attribute was opened, or an opaque memory reader cannot enable this path.
 An unavailable auxiliary pidfd does not replace a complete procfs inventory;
 the existing two-inventory proof remains usable. The group-exit guarantee uses
 `pidfd_open(..., 0)`, without `PIDFD_THREAD`, as documented in
