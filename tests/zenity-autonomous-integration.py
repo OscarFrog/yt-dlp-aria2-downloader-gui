@@ -137,6 +137,52 @@ def complete_evidence():
     return {'schema': 1, 'scenarios': rows}
 
 
+class PlatformAdmissionTests(unittest.TestCase):
+    def test_graphical_protocol_platforms(self):
+        manual = PROJECT / 'tests/zenity-real-session-qualification.sh'
+        # Supply OS metadata only at the manual harness's trusted read. Stop at
+        # its first fixture allocation so an admitted case cannot open a dialog.
+        probe = '''
+release_id=$2
+release_version=$3
+source() {
+    [[ $1 == /etc/os-release ]] || return 1
+    ID=$release_id
+    VERSION_ID=$release_version
+}
+zenity() { return 1; }
+mktemp() { return 75; }
+builtin source "$1" success
+'''
+        for distro, version, admitted in (
+                ('fedora', '44', True), ('fedora', '45', True), ('ubuntu', '24.04', True),
+                ('fedora', '43', False), ('fedora', '46', False), ('ubuntu', '24.10', False),
+                ('debian', '45', False), ('ubuntu', '45', False), ('fedora', '', False)):
+            with self.subTest(route='autonomous', distro=distro, version=version):
+                metadata = f'ID={distro}\nVERSION_ID="{version}"\n'
+                # Stop at source identity, immediately after platform admission.
+                with tempfile.TemporaryDirectory() as root, \
+                        mock.patch.object(sys, 'argv', [str(DRIVER)]), \
+                        mock.patch.object(CHECK.tempfile, 'mkdtemp', return_value=root), \
+                        mock.patch.object(Path, 'read_text', autospec=True, return_value=metadata) as read, \
+                        mock.patch.object(CHECK, 'source_identity', side_effect=RuntimeError) as identity, \
+                        redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    umask = os.umask(0o077)
+                    try:
+                        self.assertEqual(CHECK.main(), 1)
+                    finally:
+                        os.umask(umask)
+                    read.assert_called_once_with(Path('/etc/os-release'))
+                    self.assertEqual(identity.call_count, int(admitted))
+            with self.subTest(route='manual', distro=distro, version=version):
+                result = subprocess.run(['bash', '-c', probe, 'bash', str(manual), distro, version],
+                                        env={'PATH': os.defpath, 'DISPLAY': ':fixture'}, capture_output=True,
+                                        text=True, timeout=5)
+                self.assertEqual(result.returncode, 75 if admitted else 65, result.stderr)
+                if not admitted:
+                    self.assertIn('real Zenity qualification requires Fedora', result.stderr)
+
+
 class EvidenceTests(unittest.TestCase):
     def reject(self, row):
         with self.assertRaises(ValueError):

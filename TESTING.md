@@ -1895,7 +1895,7 @@ the other source, packaging and release requirements continue to apply.
 
 `tests/zenity-real-session-qualification.sh` is the interactive end-to-end
 protocol. An operator performs and confirms visible desktop interactions in a
-real Fedora 44 or Ubuntu 24.04 graphical session.
+real Fedora 44, Fedora 45 or Ubuntu 24.04 graphical session.
 
 Run one documented scenario at a time:
 
@@ -1920,7 +1920,7 @@ explicit second path when another evidence store owns the result.
 
 ### Autonomous route
 
-Use Fedora 44 or Ubuntu 24.04 in a graphical Wayland session with Zenity,
+Use Fedora 44, Fedora 45 or Ubuntu 24.04 in a graphical Wayland session with Zenity,
 Xwayland, D-Bus, `gdbus`, libX11, libXtst and Nautilus. Nautilus is currently the only
 supported autonomous folder viewer. The real tool prerequisites are usable
 yt-dlp (including its `curl_cffi` impersonation dependencies), Deno, aria2c,

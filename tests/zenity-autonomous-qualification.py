@@ -1037,8 +1037,8 @@ def main():
         os_release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
                           if '=' in line)
         distro = tuple(os_release.get(key, '').strip('"') for key in ('ID', 'VERSION_ID'))
-        require(distro in (('fedora', '44'), ('ubuntu', '24.04')),
-                'Real Zenity qualification requires Fedora 44 or Ubuntu 24.04')
+        require(distro in (('fedora', '44'), ('fedora', '45'), ('ubuntu', '24.04')),
+                'Real Zenity qualification requires Fedora 44, Fedora 45 or Ubuntu 24.04')
         identity = source_identity()
         write_json(root / 'source-identity.json', identity)
         for name in ('home', 'config', 'state', 'data', 'cache', 'runtime', 'bin',

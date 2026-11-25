@@ -1489,7 +1489,7 @@ mapped dialogs, delivered progress and button events to output contents,
 statuses, argument privacy and process/window quiescence before fixture
 rescue. The deliberately opened real folder viewer remains independent of GUI
 cleanup and is owned by the isolated fixture; this route currently supports
-Nautilus on Fedora 44 or Ubuntu 24.04 Wayland sessions. Captures of owned
+Nautilus on Fedora 44, Fedora 45 or Ubuntu 24.04 Wayland sessions. Captures of owned
 windows retain dimensions and SHA-256 identity under the isolated Cairo
 renderer. Nautilus's D-Bus location property binds its mapped window to the
 selected directory. Dialog arguments, real
