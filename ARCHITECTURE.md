@@ -1523,7 +1523,11 @@ with separate evidence that the attributed thread group has exited. A
 whole-group pidfd is acquired before enumeration for a Z/X leader, with the
 same PID/start-time revalidated around acquisition. Nonblocking readiness may
 resolve that inventory's ENOENT, including a stale live row from the sample's
-initial snapshot. The proof and descriptor ownership end with that sample.
+initial snapshot. If the open of a selected nonleader's environment returns
+ESRCH, the same proof can resolve a change confined to that thread across the two
+quiescence inventories, including ENOENT on its stat. Other live tasks, identity
+changes and strong read errors still prevent this inference. The proof and
+descriptor ownership end with that sample.
 The descriptor's bounded `fdinfo/Pid` observation must agree in the procfs
 namespace; matching numeric PID arguments across namespaces alone is insufficient.
 When the inventory is incomplete, a zombie leader with surviving tasks or an

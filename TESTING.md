@@ -754,10 +754,14 @@ removed its token remains outside this attribution guarantee.
 An unavailable `/proc/PID/task` inventory is not evidence that every thread has
 exited. During one `Observer.sample()`, an already attributed Z/X identity can
 be bound to a whole-group pidfd before task enumeration, with the same
-PID/start-time checked before and after opening it. Only an ENOENT from that
+PID/start-time checked before and after opening it. An ENOENT from that
 enumeration may use immediate readiness of the authenticated pidfd as
-independent group-exit evidence. A live sibling, an unbound or unreadable
-descriptor, an ambiguous poll result, or a failed close cannot establish this
+independent group-exit evidence. If opening a selected nonleader's environment
+returns ESRCH, the two quiescence inventories can also use that proof when
+only that thread retires between them or its stat disappears. Its observed
+start time must match, the leader must retain its identity, and the final
+inventory must contain no observed live thread. A live sibling, an unbound or
+unreadable descriptor, an ambiguous poll result, or a failed close cannot establish this
 proof. The descriptor is closed within the sample and grants no signal, wait,
 reaping or fixture-cleanup authority. Earlier privacy failures, EACCES/EIO and
 recorded argument leaks retain their refusal. Deterministic observer retirement

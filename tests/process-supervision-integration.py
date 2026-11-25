@@ -1006,6 +1006,159 @@ class ObservationRetirementTests(unittest.TestCase):
                 self.assertEqual(state['read_tids'], [self.tid, self.tid])
                 self.assertEqual(state['polls'], [], 'readable live sibling was replaced by a stop inference')
 
+    @contextmanager
+    def vanishing_thread(self, scans, *, after_open=False, open_errno=errno.ESRCH,
+                         preceding_gap=False, replace_before_read=False, **options):
+        """Select a running nonleader, fail its environ open, then expose successive task inventories."""
+        task_root = self.root / 'task'
+        sibling = task_root / str(self.tid)
+        preceding = task_root / str(self.tid + 3)
+        with self.retired_group(already_exited=True, sibling_live=True,
+                                read_errno=open_errno if after_open else None, **options) as state:
+            state['task']['state'] = 'R'
+            state['thread_opens'] = 0
+            remaining = iter(scans)
+            current = {}
+            sibling_stat_reads = 0
+            previous_open, previous_inventory, previous_stat = Path.open, Path.iterdir, observer.process_row
+
+            def opened(path, *args, **kwargs):
+                if preceding_gap and path == preceding / 'environ':
+                    raise ProcessLookupError(errno.ESRCH, 'synthetic preceding thread gap')
+                if path == sibling / 'environ':
+                    state['thread_opens'] += 1
+                    if not after_open:
+                        raise OSError(open_errno, 'synthetic thread environment open')
+                return previous_open(path, *args, **kwargs)
+
+            def inventory(path):
+                nonlocal current
+                if not state['thread_opens']:
+                    if preceding_gap:
+                        yield preceding
+                    yield from previous_inventory(path)
+                    return
+                self.assertEqual(path, task_root)
+                current = next(remaining, scans[-1])
+                yield task_root / str(self.pid)
+                if isinstance(current, OSError):
+                    raise current
+                yield from (task_root / str(tid) for tid in current)
+
+            def identity(path):
+                nonlocal sibling_stat_reads
+                if path == preceding / 'stat':
+                    return dict(self.row, start=12403, state='R')
+                if path == sibling / 'stat' and not state['thread_opens']:
+                    sibling_stat_reads += 1
+                    if replace_before_read and sibling_stat_reads == 2:
+                        state['task']['start'] += 1
+                if path.parent.parent == task_root and isinstance(current, dict) and int(path.parent.name) in current:
+                    value = current[int(path.parent.name)]
+                    if isinstance(value, OSError):
+                        raise value
+                    start, status = value
+                    return dict(self.row, start=start, state=status)
+                return previous_stat(path)
+
+            with mock.patch.object(Path, 'open', new=opened), mock.patch.object(Path, 'iterdir', new=inventory), \
+                    mock.patch.object(observer, 'process_row', side_effect=identity):
+                yield state
+
+    def test_vanishing_thread_needs_bound_whole_group_readiness(self):
+        end = {self.tid: (12399, 'Z')}
+        missing = {self.tid: FileNotFoundError(errno.ENOENT, 'synthetic thread stat')}
+        lost_inventory = FileNotFoundError(errno.ENOENT, 'synthetic task inventory')
+        for first in (end, {self.tid: (12399, 'R')}, missing, lost_inventory):
+            for ready in (False, True):
+                for diagnostics, identity in ((False, False), (True, False), (True, True)):
+                    with self.subTest(first=first, ready=ready, diagnostics=diagnostics, identity=identity), \
+                            self.vanishing_thread((first, {}), ready=ready) as state:
+                        observed = self.observed(diagnostics, identity)
+                        if ready:
+                            result = observed.sample()
+                            self.assertFalse(result['live'])
+                            self.assertFalse(result['url_in_argv'])
+                            self.assertIsNone(observed.error)
+                        else:
+                            with self.assertRaises(observer.ObservationError) as failure:
+                                observed.sample()
+                            self.assertEqual(failure.exception.errno, errno.ESRCH)
+                            self.assertIs(observed.error, failure.exception)
+                            if identity:
+                                events = observed.identity_failure(failure.exception)['events']
+                                self.assertEqual((events[0]['operation'], events[0]['primitive_errno']),
+                                                 ('attribute_open', errno.ESRCH))
+                        self.assertEqual(state['thread_opens'], 1)
+                        self.assertEqual(len(state['opened']), 1)
+                        self.assertEqual(state['fdinfo_closed'], state['opened'])
+                        self.assertEqual(state['polls'], state['opened'])
+                        self.assertEqual(state['closed'], state['opened'])
+
+    def test_vanishing_thread_cannot_certify_survivors_replacements_or_strong_errors(self):
+        target = {self.tid: (12399, 'R')}
+        end = {self.tid: (12399, 'Z')}
+        survivors = {self.tid + 1: (12500, 'S'), self.tid + 2: (12501, 'R')}
+        cases = (
+            ((target, target), {}, errno.ESRCH),
+            ((end, survivors), {}, errno.ESRCH),
+            (({self.tid: (12400, 'Z')}, {}), {}, errno.ESRCH),
+            ((end, {self.tid + 1: (12500, 'Z')}), {}, errno.ESRCH),
+            (({self.tid: OSError(errno.EIO, 'synthetic stat refusal')}, {}), {}, errno.ESRCH),
+            (({self.tid + 1: FileNotFoundError(errno.ENOENT, 'synthetic other task')}, {}), {}, errno.ESRCH),
+            ((end, {}), {'open_errno': errno.EACCES}, errno.EACCES),
+            ((end, {}), {'after_open': True}, errno.ESRCH),
+            ((end, {}), {'preceding_gap': True}, errno.ESRCH),
+            (({self.tid: (12400, 'Z')}, {}), {'replace_before_read': True}, errno.ESRCH),
+            ((end, {}), {'pidfd_errno': errno.ENOSYS}, errno.ESRCH),
+            ((end, {}), {'fdinfo_payload': b'Pid:\t1\n'}, errno.ESRCH),
+            ((end, {}), {'earlier_memory_error': errno.EACCES}, errno.EACCES),
+        )
+        for scans, options, expected in cases:
+            for diagnostics, identity in ((False, False), (True, False), (True, True)):
+                with self.subTest(scans=scans, options=options, diagnostics=diagnostics, identity=identity), \
+                        self.vanishing_thread(scans, **options) as state:
+                    observed = self.observed(diagnostics, identity)
+                    if 'earlier_memory_error' in options:
+                        observed.known.add((self.pid - 1, self.row['start'] - 1))
+                    with self.assertRaises(observer.ObservationError) as failure:
+                        observed.sample()
+                    self.assertEqual(failure.exception.errno, expected)
+                    self.assertIs(observed.error, failure.exception)
+                    self.assertFalse(state['polls'])
+                    self.assertEqual(state['closed'], state['opened'])
+                    if identity and isinstance(scans[0].get(self.tid), OSError):
+                        events = observed.identity_failure(failure.exception)['events']
+                        self.assertIn(('stat_read', errno.EIO),
+                                      [(e['operation'], e['primitive_errno']) for e in events])
+
+    def test_vanishing_thread_proof_errors_retain_the_open_and_inventory_gap(self):
+        missing = {self.tid: FileNotFoundError(errno.ENOENT, 'synthetic thread stat')}
+        cases = (
+            (missing, 'stat_read', 'pidfd_close', {'close_errno': errno.EIO}, errno.EIO),
+            (missing, 'stat_read', 'pidfd_poll', {'poll_errno': errno.EIO}, errno.ESRCH),
+            (FileNotFoundError(errno.ENOENT, 'synthetic inventory'), 'task_inventory', 'pidfd_close',
+             {'close_errno': errno.EIO}, errno.EIO),
+        )
+        for first, gap, operation, options, expected in cases:
+            for diagnostics, identity in ((False, False), (True, False), (True, True)):
+                with self.subTest(gap=gap, operation=operation, diagnostics=diagnostics, identity=identity), \
+                        self.vanishing_thread((first, {}), **options) as state:
+                    observed = self.observed(diagnostics, identity)
+                    with self.assertRaises(observer.ObservationError) as failure:
+                        observed.sample()
+                    self.assertEqual(failure.exception.errno, expected)
+                    self.assertIs(observed.error, failure.exception)
+                    self.assertEqual(len(state['opened']), 1)
+                    self.assertEqual(state['polls'], state['opened'])
+                    self.assertEqual(state['closed'], state['opened'])
+                    if identity:
+                        packet = observed.identity_failure(failure.exception)
+                        self.assertTrue(packet['complete'])
+                        self.assertEqual([(e['operation'], e['primitive_errno']) for e in packet['events']],
+                                         [('attribute_open', errno.ESRCH), (gap, errno.ENOENT),
+                                          (operation, errno.EIO), ('error_normalization', None)])
+
     def test_reused_task_cannot_be_accepted_through_a_group_pidfd(self):
         with self.retired_group(already_exited=True, sibling_live=True, reuse_task=True) as state:
             observed = self.observed(True, True)

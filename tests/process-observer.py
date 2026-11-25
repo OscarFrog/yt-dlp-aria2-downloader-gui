@@ -1089,6 +1089,8 @@ class _GroupExitProofs:
     """
     def __init__(self, known):
         self.leader_environ = None
+        self.selected_thread = None
+        self.thread_gaps = {}
         self.open_gap = None
         self.allowed = set(known)
         self.attributions = {key: 'known_identity' for key in self.allowed}
@@ -1154,6 +1156,8 @@ class _GroupExitProofs:
             # an earlier refusal. The fallback only restores the previous
             # lexical scope.
             self.open_gap = None
+            self.selected_thread = None
+            self.thread_gaps.clear()
             self.handles.clear()
             self.bound.clear()
             self.allowed.clear()
@@ -1295,7 +1299,7 @@ class _GroupExitProofs:
         if self.cleanup_error is not None:
             self._raise_cleanup()
 
-    def resolve_inventory(self, pid, row, initial):
+    def resolve_inventory(self, pid, row, initial, *, final_check=False):
         key = pid, row['start']
         if key in self.terminated:
             return True
@@ -1315,6 +1319,9 @@ class _GroupExitProofs:
                 return False
         except (OSError, ValueError, IndexError) as error:
             _link(initial, error, 'quiescence', retain_initial=True)
+            if final_check:
+                # observation_failure immediately reports this same initial error.
+                return False
             # A later disappearance must not erase a failure of this proof.
             _raise_incomplete_observation(initial)
         self.terminated.add(key)
@@ -1370,7 +1377,8 @@ def same_process(pid, row):
 def read_observation(path):
     """Retry an interrupted read once, without treating it as an empty file."""
     proofs = _GROUP_EXIT_PROOFS.get()
-    if proofs is not None and path != proofs.leader_environ:
+    if (proofs is not None and path != proofs.leader_environ
+            and (proofs.selected_thread is None or path != proofs.selected_thread[0])):
         proofs = None
     if _identity_scope() is not None or proofs is not None:
         try:
@@ -1402,7 +1410,14 @@ def read_process_observation(pid, row, path):
     if before['state'] in ('Z', 'X'):
         raise _guard(ProcessLookupError(errno.ESRCH, 'observation task has terminated'),
                      'identity_guard', 'task_stat_before', identity_origin='application_state_check')
-    data = read_observation(path)
+    try:
+        data = read_observation(path)
+    except ProcessLookupError as error:
+        proofs = _GROUP_EXIT_PROOFS.get()
+        if (proofs is not None and proofs.open_gap is error and error.errno == errno.ESRCH
+                and proofs.selected_thread == (path, before['start'])):
+            proofs.thread_gaps[pid, row['start']] = (error, (path.parent.name, before['start']))
+        raise
     after = _call('stat_read', 'task_stat_after', process_row, path.with_name('stat'))
     _identity_task_result(pid, tid, after, 'task_after')
     if after['start'] != before['start'] or after['state'] in ('Z', 'X'):
@@ -1428,18 +1443,17 @@ def observation_failure(pid, row, error, *, current_presence_only=False):
         try:
             current = _call('stat_read', 'identity_after', current_process, pid)
             _identity_group_result(pid, row, current, 'group_revalidation', 'group_match_revalidation')
-            if _identity_scope() is None:
-                if current is None or current['start'] != row['start'] or threads_are_quiescent(pid, current):
-                    return
+            if current is None or current['start'] != row['start']:
+                return
+            proofs = _GROUP_EXIT_PROOFS.get()
+            gap = proofs.thread_gaps.get((pid, row['start'])) if proofs is not None else None
+            if gap is not None and gap[0] is error:
+                quiescent = threads_are_quiescent(pid, current, thread_gap=gap)
             else:
-                # Preserve the same short circuit and predicate calls. A later
-                # identity is distinct from the unavailable post-read identity.
-                if current is None or current['start'] != row['start']:
-                    return
                 quiescent = threads_are_quiescent(pid, current)
-                _identity_check('quiescence', 'true' if quiescent else 'false')
-                if quiescent:
-                    return
+            _identity_check('quiescence', 'true' if quiescent else 'false')
+            if quiescent:
+                return
         except (OSError, ValueError, IndexError) as identity_error:
             _link(error, identity_error, 'revalidation')
             error = identity_error
@@ -1601,12 +1615,21 @@ def observation_paths(pid, row, name, defer_quiescence=None):
                     continue
                 live = True
                 _identity_inventory_task(pid, task, identity, selection=True)
-                yield task / name
+                path = task / name
+                if name == 'environ' and proofs is not None and (pid, current['start']) in proofs.bound:
+                    proofs.selected_thread = path, identity['start']
+                    proofs.open_gap = None
+                    try:
+                        yield path
+                    finally:
+                        proofs.selected_thread = None
+                else:
+                    yield path
         if not live and not (defer_quiescence and defer_quiescence(pid, current)):
             _require_quiescent_inventory(pid, current)
 
 
-def threads_are_quiescent(pid, row):
+def threads_are_quiescent(pid, row, *, thread_gap=None):
     """Classify the thread group independently of the production predicates."""
     _identity_quiescence_begin(pid, row)
     proofs = _GROUP_EXIT_PROOFS.get()
@@ -1615,6 +1638,8 @@ def threads_are_quiescent(pid, row):
     if row['state'] not in ('Z', 'X'):
         return False
     previous = None
+    original, retiring = thread_gap if thread_gap is not None else (None, None)
+    needs_exit_proof = False
     try:
         if proofs is not None:
             proofs.pin(pid, row)
@@ -1622,20 +1647,41 @@ def threads_are_quiescent(pid, row):
             tasks = set()
             for task in _task_inventory(pid, row, 'quiescence_check'):
                 _identity_inventory_task(pid, task)
-                state = _call('stat_read', 'quiescence_check', process_row, task / 'stat')
+                selected = retiring is not None and task.name == retiring[0]
+                try:
+                    state = _call('stat_read', 'quiescence_check', process_row, task / 'stat')
+                except FileNotFoundError as error:
+                    if not selected or error.errno != errno.ENOENT:
+                        raise
+                    _link(original, error, 'quiescence', retain_initial=True)
+                    needs_exit_proof = True
+                    continue
                 _identity_inventory_task(pid, task, state)
-                if state['state'] not in ('Z', 'X'):
+                if selected and state['start'] != retiring[1]:
                     return False
+                if state['state'] not in ('Z', 'X'):
+                    # The selected thread may exit between the two existing scans.
+                    if not selected or previous is not None:
+                        return False
+                    needs_exit_proof = True
                 tasks.add((task.name, state['start']))
             if proofs is not None and proofs.retired(pid, row):
+                if original is not None:
+                    _link(original, proofs.resolved[pid, row['start']], 'quiescence')
                 return True
             current = _call('stat_read', 'quiescence_check', process_row, Path(f'/proc/{pid}/stat'))
             _identity_group_result(pid, row, current, 'group_quiescence')
             if current['start'] != row['start'] or current['state'] not in ('Z', 'X'):
                 return False
-            if not tasks or (previous is not None and tasks != previous):
+            if not tasks or (retiring is not None and (str(pid), row['start']) not in tasks):
                 return False
+            if previous is not None and tasks != previous:
+                if retiring is None or tasks != previous - {retiring}:
+                    return False
+                needs_exit_proof = True
             previous = tasks
+        if needs_exit_proof:
+            return proofs.resolve_inventory(pid, row, original, final_check=True)
     except ObservationError:
         raise
     except (OSError, ValueError, IndexError) as error:
@@ -1794,6 +1840,9 @@ class Observer:
                         if pid not in environment_errors or isinstance(environment_errors[pid],
                                                                        (FileNotFoundError, ProcessLookupError)):
                             if pid in environment_errors:
+                                # A single retiring thread cannot explain an earlier memory gap.
+                                if proofs is not None:
+                                    proofs.thread_gaps.pop(key, None)
                                 _link(environment_errors[pid], error, 'retry')
                             environment_errors[pid] = error
                         continue
