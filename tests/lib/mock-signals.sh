@@ -1309,37 +1309,363 @@ test_mock_signal_cli_runtime_preparation() {
     done
 }
 
+# Convert the bounded ASCII seconds used by procfs and the fixtures without rounding.
+mock_pre_env_nanoseconds() {
+    local text=$1 fraction
+    [[ ${text} =~ ^([0-9]{1,12})([.]([0-9]{1,9}))?$ ]] || return 65
+    fraction=${BASH_REMATCH[3]}000000000
+    printf -v "$2" '%s%s' "${BASH_REMATCH[1]}" "${fraction:0:9}"
+}
+
+# Only the custodian retains the child's proc directory across exec and Bash wait.
+prepare_mock_pre_env_launch() {
+    local started=$1 budget=$2 start_ns budget_ns announced=''
+    mock_pre_env_nanoseconds "${started}" start_ns && mock_pre_env_nanoseconds "${budget}" budget_ns || return 65
+    coproc PRE_ENV_KEEPER {
+        exec python3 -I -B /dev/fd/3 "${start_ns}" "${budget_ns}" 3<<'PY_PRE_ENV_CUSTODY'
+import array
+import hmac
+import os
+import select
+import socket
+import sys
+import time
+
+deadline_ns = sum(map(int, sys.argv[1:]))
+def remaining():
+    ns = deadline_ns - time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+    if ns <= 0:
+        raise TimeoutError
+    return ns / 1_000_000_000
+
+def await_request(endpoint):
+    readable, _, _ = select.select([0, endpoint], [], [], remaining())
+    if 0 in readable or endpoint not in readable:
+        raise RuntimeError("launch abandoned")
+
+def keep():
+    key = os.urandom(32)
+    anchor = None
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as listener:
+            listener.bind(b"\0mock-pre-env-" + os.urandom(20).hex().encode())
+            listener.listen(1)
+            print(os.getpid(), listener.getsockname()[1:].decode(), key.hex(), flush=True)
+            await_request(listener)
+            peer, _ = listener.accept()
+            with peer:
+                await_request(peer)
+                nonce = peer.recv(33)
+                if len(nonce) != 32:
+                    raise ValueError("invalid birth challenge")
+                peer.sendall(hmac.digest(key, b"server" + nonce, "sha256"))
+                await_request(peer)
+                fds = array.array("i")
+                data, control, flags, _ = peer.recvmsg(64, socket.CMSG_SPACE(fds.itemsize),
+                                                      socket.MSG_CMSG_CLOEXEC)
+                for level, kind, payload in control:
+                    if (level, kind) == (socket.SOL_SOCKET, socket.SCM_RIGHTS):
+                        fds.frombytes(payload)
+                if len(fds) != 1 or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
+                    for fd in fds:
+                        os.close(fd)
+                    raise ValueError("invalid launch transfer")
+                anchor = fds[0]
+                if not hmac.compare_digest(data, hmac.digest(key, b"birth" + nonce, "sha256")):
+                    raise ValueError("wrong launch ticket")
+                print("anchored", flush=True)
+                pending = None
+                launching = True
+                while True:
+                    readable, _, _ = select.select([0, listener], [], [], remaining() if launching else None)
+                    if not readable:
+                        raise TimeoutError
+                    if 0 in readable:
+                        message = os.read(0, 1)
+                        if not message:
+                            return
+                        if message == b"R":
+                            pending = os.urandom(32)
+                            print(pending.hex(), flush=True)
+                            continue
+                        if not launching or message != b"G":
+                            raise ValueError("invalid launch acknowledgement")
+                        remaining()
+                        peer.sendall(b"G")
+                        launching = False
+                    if listener in readable:
+                        requester, _ = listener.accept()
+                        with requester:
+                            # A stalled or closed client must not hold the parent's cleanup open.
+                            readable, _, _ = select.select([0, requester], [], [], remaining() if launching else 1)
+                            if requester not in readable:
+                                continue
+                            if pending is None:
+                                continue
+                            requester.settimeout(1)
+                            try:
+                                nonce = requester.recv(33)
+                                if len(nonce) != 32:
+                                    continue
+                                requester.sendall(hmac.digest(pending, b"server" + nonce, "sha256"))
+                                answer = requester.recv(33)
+                                if not hmac.compare_digest(answer, hmac.digest(pending, b"observer" + nonce, "sha256")):
+                                    continue
+                                pending = None
+                                requester.sendmsg([b"A"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                                            array.array("i", [anchor]))])
+                            except (ConnectionError, TimeoutError):
+                                continue
+    finally:
+        if anchor is not None:
+            os.close(anchor)
+
+try:
+    keep()
+except (OSError, RuntimeError, ValueError) as error:
+    print("PRE_ENV_CUSTODY", type(error).__name__, getattr(error, "errno", None), file=sys.stderr)
+    sys.exit(65)
+PY_PRE_ENV_CUSTODY
+    }
+    # shellcheck disable=SC2154 # Bash sets the PID of this named coprocess.
+    pre_env_keeper=${PRE_ENV_KEEPER_PID}
+    pre_env_launch_budget=${budget}
+    pre_env_writer=${PRE_ENV_KEEPER[1]}
+    pre_env_reader=${PRE_ENV_KEEPER[0]}
+    if IFS=' ' read -r -t "${budget}" -u "${pre_env_reader}" announced pre_env_address pre_env_ticket \
+        && [[ ${announced} == "${pre_env_keeper}" && ${#pre_env_ticket} == 64 ]]; then
+        return 0
+    fi
+    close_mock_pre_env_custody || printf '%s\n' 'PRE_ENV_SECONDARY launch_custody_close' >&2
+    return 65
+}
+
+# This asynchronous Bash is the child whose status its parent will wait.
+# Open self before any fork. Only the transfer helper receives this copy.
+run_mock_pre_env_program() {
+    local birth_fd status=0
+    exec {birth_fd}</proc/self || return 65
+    python3 -I -B /dev/fd/3 "${pre_env_keeper}" "${pre_env_address}" "${birth_fd}" \
+        4<<<"${pre_env_ticket}" 3<<'PY_PRE_ENV_BIRTH' || status=$?
+import array
+import hmac
+import os
+import socket
+import struct
+import sys
+
+keeper, address, handle = sys.argv[1:]
+try:
+    key = bytes.fromhex(os.read(4, 66).decode().strip())
+    os.close(4)
+    fd = int(handle)
+    os.set_inheritable(fd, False)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as peer:
+        peer.connect(b"\0" + address.encode())
+        pid, uid, _ = struct.unpack("3i", peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        if pid != int(keeper) or uid != os.getuid():
+            raise ValueError("different custodian")
+        nonce = os.urandom(32)
+        peer.sendall(nonce)
+        if not hmac.compare_digest(peer.recv(33), hmac.digest(key, b"server" + nonce, "sha256")):
+            raise ValueError("different launch")
+        peer.sendmsg([hmac.digest(key, b"birth" + nonce, "sha256")],
+                     [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [fd]))])
+        if peer.recv(1) != b"G":
+            raise ValueError("launch refused")
+except (OSError, ValueError) as error:
+    print("PRE_ENV_BIRTH", type(error).__name__, getattr(error, "errno", None), file=sys.stderr)
+    sys.exit(65)
+PY_PRE_ENV_BIRTH
+    exec {birth_fd}<&- || return 65
+    ((status == 0)) || return 65
+    unset pre_env_ticket
+    exec "$@"
+}
+
+close_mock_pre_env_custody() {
+    local failed=0
+    if [[ -n ${pre_env_writer:-} ]]; then
+        exec {pre_env_writer}>&- || failed=65
+        pre_env_writer=''
+    fi
+    if [[ -n ${pre_env_keeper:-} ]]; then
+        builtin wait "${pre_env_keeper}" || failed=65
+        pre_env_keeper=''
+    fi
+    return "${failed}"
+}
+
+capture_mock_pre_env_child() {
+    local target=$2 launching_parent=${BASHPID} held=''
+    if IFS= read -r -t "${pre_env_launch_budget}" -u "${pre_env_reader}" held && [[ ${held} == anchored ]]; then
+        pre_env_ticket=''
+        pre_env_proc_fd="${pre_env_keeper}:${pre_env_address}"
+        if read_mock_pre_env_result pre_env_identity --capture "${target}" 0 "${launching_parent}" 0 0 launch /dev/null \
+            && printf G >&"${pre_env_writer}"; then
+            printf -v "$1" '%s' "${pre_env_identity%%:*}"
+            return 0
+        fi
+    fi
+    close_mock_pre_env_custody || printf '%s\n' 'PRE_ENV_SECONDARY launch_custody_close' >&2
+    return 65
+}
+
 # Observe this shell's child without stealing its wait status. Expiration is a
 # test failure even if authenticated diagnostic cleanup subsequently succeeds.
-wait_for_mock_pre_env_exit() {
-    local observation=exit
-    if [[ ${1:-} == --marker ]]; then
-        observation=marker
-        shift
+# Only the owning Bash can mint an observation ticket through its coprocess
+# pipes. The single-use ticket is scoped to this synchronous observer call.
+read_mock_pre_env_result() {
+    local destination=$1 answer='' status=0
+    local +x pre_env_query=''
+    shift
+    printf R >&"${pre_env_writer}" && IFS= read -r -t 1 -u "${pre_env_reader}" pre_env_query || return 65
+    [[ ${pre_env_query} =~ ^[0-9a-f]{64}$ ]] || return 65
+    answer=$(run_mock_pre_env_observer "$@") || status=$?
+    if [[ -n ${destination} ]]; then
+        printf -v "${destination}" '%s' "${answer}"
+    elif [[ -n ${answer} ]]; then
+        printf '%s\n' "${answer}"
     fi
-    python3 -I -B - "${observation}" "$@" <<'PY_PRE_ENV_WAIT'
+    return "${status}"
+}
+
+wait_for_mock_pre_env_exit() {
+    read_mock_pre_env_result '' "$@"
+}
+
+run_mock_pre_env_observer() {
+    [[ ${pre_env_proc_fd:-} == "${pre_env_keeper}:${pre_env_address}" ]] || return 65
+    local observation=exit
+    case ${1:-} in
+        --capture | --marker | --reap | --harvest | --signal-HUP | --signal-INT | --signal-TERM)
+            observation=${1#--}
+            shift
+            ;;
+        *) : ;;
+    esac
+    local start_ns budget_ns
+    mock_pre_env_nanoseconds "$4" start_ns && mock_pre_env_nanoseconds "$5" budget_ns || return 65
+    python3 -I -B - "${observation}" "${pre_env_proc_fd:--1}" "${pre_env_identity:-}" "$1" "$2" "$3" "${start_ns}" "${budget_ns}" "${@:6}" 4<<<"${pre_env_query}" <<'PY_PRE_ENV_WAIT'
+import array
+import errno
+import hmac
 import itertools
+import socket
+import struct
 import json
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import sys
 import time
 
-observation = sys.argv[1]
-pid, expected_start, parent = map(int, sys.argv[2:5])
-started, budget = map(float, sys.argv[5:7])
-label, log_name = sys.argv[7:9]
-marker_names = sys.argv[9:]
-clock = lambda: time.clock_gettime(time.CLOCK_BOOTTIME)
-deadline = started + budget
+observation, anchor_text, receipt = sys.argv[1:4]
+pid, expected_start, parent = map(int, sys.argv[4:7])
+started_ns, budget_ns = map(int, sys.argv[7:9])
+label, log_name = sys.argv[9:11]
+marker_names = sys.argv[11:]
+clock_ns = lambda: time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+deadline_ns = started_ns + budget_ns
+states = (b"R", b"S", b"D", b"T", b"t", b"X", b"Z", b"P", b"I")
+# Signed seq_put_decimal_ll fields in Linux do_task_stat().
+signed_fields = {4, 5, 6, 7, 8, 16, 17, 18, 19, 20, 38, 39, 44, 52}
 
 
-def process_info(target):
-    # procfs inode ownership is diagnostic metadata, not process credentials or
-    # identity: it can change on a live task and while that task is exiting.
-    path = Path(f"/proc/{target}/stat")
+class EvidenceError(Exception):
+    def __init__(self, operation, issue, error=None):
+        self.details = dict(operation=operation, record_issue=issue,
+                            error=type(error).__name__ if error else "ValueError",
+                            errno=error.errno if error else None)
+        super().__init__(operation)
+
+
+def checked(operation, function, *args):
+    try:
+        return function(*args)
+    except OSError as error:
+        raise EvidenceError(operation, "io", error) from None
+    except (ValueError, RuntimeError, OverflowError):
+        raise EvidenceError(operation, "unexpected-error") from None
+
+
+def bounded_read(path, kind):
+    stream = checked(kind + "_open", path.open, "rb")
+    try:
+        record = checked(kind + "_read", stream.read, 4097)
+    except BaseException as first:
+        try:
+            checked(kind + "_close", stream.close)
+        except EvidenceError as later:
+            if isinstance(first, EvidenceError):
+                first.details["secondary"] = later.details
+        raise
+    checked(kind + "_close", stream.close)
+    return record
+
+
+def parse_stat(data, target):
+    # Linux emits fields 1..52 and a final LF. Only comm can contain arbitrary
+    # non-NUL bytes, including LF or an apparent ") state ppid" separator.
+    header = f"{target} (".encode("ascii")
+    def reject(issue):
+        raise EvidenceError("stat_parse", issue)
+    if not data:
+        reject("empty")
+    if len(data) > 4096 or b"\0" in data or not data.startswith(header):
+        reject("malformed")
+    complete = data.endswith(b"\n")
+    payload = data[len(header):-1] if complete else data[len(header):]
+    comm, sep, suffix = payload.rpartition(b") ")
+    if not sep:
+        reject("ambiguous" if not complete and len(payload) <= 64 else "malformed")
+    fields = suffix.split(b" ")
+    if len(comm) > 64 or len(fields) > 50 or fields[0] not in states:
+        reject("malformed")
+    if complete and len(fields) != 50:
+        reject("malformed")
+    for number, field in enumerate(fields[1:], 4):
+        tail = not complete and number == len(fields) + 2
+        if number in (4, 5, 6, 20) and field.startswith(b"-"):
+            reject("malformed")
+        if number in (21, 36, 37) and field not in ((b"", b"0") if tail else (b"0",)):
+            reject("malformed")
+        digits = field[1:] if number in signed_fields and field.startswith(b"-") else field
+        if tail and not digits and field in (b"", b"-") and (not field or number in signed_fields):
+            continue
+        if (not digits.isdigit() or len(digits) > 20
+                or (len(digits) > 1 and digits.startswith(b"0")) or field == b"-0"):
+            reject("malformed")
+        width = 32 if number in (4, 5, 6, 7, 8, 9, 38, 39, 40, 41, 52) else 64
+        limit = 1 << (width - (number in signed_fields))
+        if not -limit <= int(field) < limit:
+            reject("malformed")
+        if not complete and target == pid and number in (4, 22):
+            expected = str(parent if number == 4 else expected_start).encode("ascii")
+            if (tail and not expected.startswith(field)) or (not tail and field != expected):
+                reject("contradictory-prefix")
+    if not complete:
+        if len(fields) == 50:
+            reject("unterminated")
+        # A short record never identifies a task. Delimited fields can veto
+        # recovery; eligibility derives exclusively from the prior launch pin.
+        reject("partial" if len(fields) >= 3 else "ambiguous")
+    start, ppid, pgid, sid = (int(fields[index]) for index in (19, 1, 2, 3))
+    if start <= 0 or min(ppid, pgid, sid) < 0:
+        reject("malformed")
+    return dict(state=fields[0].decode("ascii"), ppid=ppid, pgid=pgid, sid=sid, start=start)
+
+
+def missing(row):
+    return (row.get("operation") in ("stat_open", "stat_read") and
+            row.get("errno") in (errno.ENOENT, errno.ESRCH) and "secondary" not in row)
+
+
+def process_info(target, keep_missing=False, path=None):
+    if path is None:
+        path = Path(f"/proc/{target}/stat")
     info = dict(pid=target, proc_owner="unavailable", state="unavailable",
                 ppid="unavailable", pgid="unavailable", sid="unavailable", start="unavailable")
     try:
@@ -1347,29 +1673,166 @@ def process_info(target):
     except OSError as error:
         info["owner_error"] = type(error).__name__
     try:
-        with path.open("r") as source:
-            record = source.read(4097)
-        prefix, suffix = record.rsplit(") ", 1)
-        fields = suffix.split()
-        if (len(record) > 4096 or len(fields) < 20
-                or int(prefix.split(" (", 1)[0]) != target
-                or fields[0] not in ("R", "S", "D", "Z", "T", "t", "X", "x", "K", "W", "P", "I")
-                or any(not fields[index].isdecimal() for index in (1, 2, 3, 19))):
-            raise ValueError("invalid process record")
-        info.update(state=fields[0], ppid=int(fields[1]), pgid=int(fields[2]),
-                    sid=int(fields[3]), start=int(fields[19]))
-        if info["start"] <= 0:
-            raise ValueError("invalid process start time")
-    except (FileNotFoundError, ProcessLookupError):
-        return None
-    except (OSError, ValueError, IndexError) as error:
-        info["error"] = type(error).__name__
+        info.update(parse_stat(bounded_read(path, "stat"), target))
+    except EvidenceError as error:
+        info.update(error.details)
+        if not keep_missing and missing(info):
+            return None
     return info
 
 
 def matches(info):
-    return (info is not None and "error" not in info
+    return (info is not None and "error" not in info and info["pid"] == pid
             and info["start"] == expected_start and info["ppid"] == parent)
+
+
+def ready(fd):
+    poller = select.poll()
+    checked("pidfd_register", poller.register, fd, select.POLLIN)
+    events = checked("pidfd_poll", poller.poll, 0)
+    if not events:
+        return False
+    if events not in ([(fd, select.POLLIN)], [(fd, select.POLLIN | select.POLLHUP)]):
+        raise EvidenceError("pidfd_poll", "unexpected-events")
+    return True
+
+
+def pidfd_subject(fd):
+    info = bounded_read(Path(f"/proc/self/fdinfo/{fd}"), "fdinfo")
+    if len(info) > 4096 or not info.endswith(b"\n"):
+        raise EvidenceError("fdinfo_identity", "malformed-fdinfo")
+    values = [line[4:].strip() for line in info.splitlines() if line.startswith(b"Pid:")]
+    if len(values) != 1 or not (values[0].isdigit() or values[0] == b"-1"):
+        raise EvidenceError("fdinfo_identity", "malformed-fdinfo")
+    return values[0]
+
+
+class Group:
+    def __init__(self):
+        self.fd = None
+        self.bound = False
+        self.anchor = None
+        self.owned_anchor = False
+
+    def attach(self):
+        if ":" in anchor_text:
+            keeper, address = anchor_text.split(":")
+            def receive():
+                with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as peer:
+                    peer.settimeout(1)
+                    peer.connect(b"\0" + address.encode("ascii"))
+                    ident = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+                    server, uid, _ = struct.unpack("3i", ident)
+                    if server != int(keeper) or uid != os.getuid():
+                        raise EvidenceError("custody_identity", "identity-rejected")
+                    ticket = bytes.fromhex(os.read(4, 66).decode("ascii").strip())
+                    os.close(4)
+                    if len(ticket) != 32:
+                        raise EvidenceError("custody_ticket", "identity-rejected")
+                    nonce = os.urandom(32)
+                    peer.sendall(nonce)
+                    if not hmac.compare_digest(peer.recv(33), hmac.digest(ticket, b"server" + nonce, "sha256")):
+                        raise EvidenceError("custody_identity", "identity-rejected")
+                    peer.sendall(hmac.digest(ticket, b"observer" + nonce, "sha256"))
+                    fds = array.array("i")
+                    tag, rights, flags, _ = peer.recvmsg(1, socket.CMSG_SPACE(fds.itemsize),
+                                                          socket.MSG_CMSG_CLOEXEC)
+                    for level, kind, data in rights:
+                        if (level, kind) == (socket.SOL_SOCKET, socket.SCM_RIGHTS):
+                            fds.frombytes(data)
+                    if tag != b"A" or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or len(fds) != 1:
+                        for fd in fds:
+                            os.close(fd)
+                        raise EvidenceError("custody_transfer", "identity-rejected")
+                    self.anchor = fds[0]
+                    self.owned_anchor = True
+            checked("custody_transfer", receive)
+        else:
+            # In-process callers can supply their own already-open proc directory.
+            self.anchor = int(anchor_text)
+        self.entry = checked("launch_fstat", os.fstat, self.anchor)
+
+    def key(self, start):
+        return f"{start}:{pid}:{parent}:{self.entry.st_dev}:{self.entry.st_ino}"
+
+    def visible(self):
+        try:
+            entry = checked("proc_directory", Path(f"/proc/{pid}").stat)
+        except EvidenceError as error:
+            if error.details["errno"] == errno.ENOENT:
+                if current is not None:
+                    current["directory_observation"] = error.details
+                return False
+            raise
+        if not os.path.samestat(entry, self.entry):
+            raise EvidenceError("proc_directory", "different-launch-inode")
+        return True
+
+    def anchor_exists(self):
+        try:
+            checked("launch_signal_zero", signal.pidfd_send_signal, self.anchor, 0)
+        except EvidenceError as error:
+            if error.details["errno"] == errno.ESRCH:
+                return False
+            raise
+        return True
+
+    def retired(self):
+        # Signal zero addresses the launch handle even after numeric PID reuse.
+        # A hidden directory alone says nothing about the original group.
+        if self.visible():
+            raise EvidenceError("proc_directory", "process-directory-present")
+        if self.anchor_exists():
+            raise EvidenceError("launch_signal_zero", "still-exists")
+        if self.bound and not ready(self.fd):
+            raise EvidenceError("pidfd_poll", "inconsistent-exit-proofs")
+        return True
+
+    def bind(self):
+        if self.fd is not None:
+            return self.bound
+        if not self.visible():
+            return False
+        self.bound = False
+        try:
+            self.fd = checked("pidfd_open", os.pidfd_open, pid, 0)
+        except EvidenceError as error:
+            if error.details["errno"] == errno.ESRCH and not self.visible():
+                return False
+            raise
+        subject = pidfd_subject(self.fd)
+        if subject == b"-1" and not self.visible():
+            return False
+        if subject != str(pid).encode("ascii"):
+            raise EvidenceError("fdinfo_identity", "unbound-pidfd")
+        if not self.visible():
+            return False
+        # A still-existing launch task excludes reuse at the fdinfo sample above.
+        if not self.anchor_exists():
+            if self.visible():
+                raise EvidenceError("launch_identity", "launch-handle-retired")
+            return False
+        self.bound = True
+        return True
+
+    def close(self):
+        failure = None
+        targets = [(self.fd, "pidfd_close")]
+        if self.owned_anchor:
+            targets.append((self.anchor, "custody_close"))
+        self.fd, self.owned_anchor = None, False
+        for fd, operation in targets:
+            if fd is None:
+                continue
+            try:
+                checked(operation, os.close, fd)
+            except EvidenceError as error:
+                if failure is None:
+                    failure = error
+                else:
+                    failure.details["secondary_close"] = error.details
+        if failure is not None:
+            raise failure
 
 
 def excerpt(path, limit, tail=False):
@@ -1385,10 +1848,10 @@ def excerpt(path, limit, tail=False):
 
 def report(reason, infos, limits=()):
     details = []
-    capture_deadline = clock() + 1.0
+    capture_deadline_ns = clock_ns() + 1_000_000_000
     limits = list(limits)
     for info in infos[:32]:
-        if clock() >= capture_deadline:
+        if clock_ns() >= capture_deadline_ns:
             limits.append("diagnostic-capture-budget-exhausted")
             break
         item = dict(info)
@@ -1408,7 +1871,7 @@ def report(reason, infos, limits=()):
         registration_names = []
         limits.append(f"registration-list-unavailable:{type(error).__name__}")
     for name in [*marker_names[:8], *registration_names]:
-        if clock() >= capture_deadline:
+        if clock_ns() >= capture_deadline_ns:
             limits.append("diagnostic-marker-budget-exhausted")
             break
         path = Path(name)
@@ -1432,17 +1895,15 @@ def report(reason, infos, limits=()):
     log = re.sub(r"(?im)^.*(?:authorization|cookie|password|secret|token|header).*$",
                  "[REDACTED_PRIVATE_DIAGNOSTIC]", log)
     print("PRE_ENV_DIAGNOSTIC " + json.dumps(dict(
-        scenario=label, phase=reason, monotonic=clock(), elapsed=clock()-started,
-        deadline=deadline, expected=dict(pid=pid, start=expected_start, ppid=parent),
+        scenario=label, phase=reason, monotonic=clock_ns()/1_000_000_000, elapsed=(clock_ns()-started_ns)/1_000_000_000,
+        deadline=deadline_ns/1_000_000_000, expected=dict(pid=pid, start=expected_start, ppid=parent),
         observer_uid=os.getuid(), kernel=os.uname().release,
         python=sys.version.split()[0],
         iteration=os.environ.get("MOCK_STRESS_ITERATION", "unavailable; see workflow iteration banner")[:80],
         processes=details, process_count=len(infos), limits=limits,
         initial_observation=current if current is not None else dict(pid=pid, state="absent"),
-        initial_termination=("process-entry-absent" if current is None else
-                     "terminal-state-observed" if current.get("state") in ("Z", "X")
-                     else "not-established"),
-        capture_budget_seconds=1, capture_overrun=max(0, clock()-capture_deadline),
+        initial_termination=("group-exit-proved" if group_done else "not-established"),
+        capture_budget_seconds=1, capture_overrun=max(0, clock_ns()-capture_deadline_ns)/1_000_000_000,
         markers=markers, log=log, engine_trace=trace, parameters={name: os.environ.get(name, "unset")[:32]
         for name in ("MOCK_CANCEL_JITTER_SECONDS", "MOCK_CANCEL_AFTER_EOF_JITTER_SECONDS",
                      "MOCK_PGID_PUBLISH_DELAY_SECONDS", "MOCK_WORKER_START_JITTER_SECONDS",
@@ -1450,191 +1911,411 @@ def report(reason, infos, limits=()):
         file=sys.stderr, flush=True)
 
 
-while True:
-    current = process_info(pid)
-    if current is None:
-        if observation == "marker":
-            report("engine-exited-before-marker", [])
-            raise SystemExit(66)
-        if clock() >= deadline:
-            report("functional-deadline-expired-after-exit", [])
-            raise SystemExit(124)
-        break
-    if "error" in current:
-        report("process-record-unavailable-or-invalid", [current])
-        raise SystemExit(65)
-    if not matches(current):
-        report("identity-rejected", [current])
-        raise SystemExit(65)
-    if current["state"] in ("Z", "X"):
-        if observation == "marker":
-            report("engine-exited-before-marker", [current])
-            raise SystemExit(66)
-        if clock() >= deadline:
-            report("functional-deadline-expired-after-exit", [current])
-            raise SystemExit(124)
-        break
-    if observation == "marker" and Path(marker_names[0]).is_file() and clock() < deadline:
-        break
-    if clock() >= deadline:
-        # Discovery has a separate one-second budget and a 32-identity cap.
-        # /proc I/O itself cannot promise a hard deadline under kernel stalls.
-        handles = []
-        limits = []
+def expired_cleanup(group):
+    # Discovery has a separate one-second budget and a 32-identity cap.
+    # /proc I/O itself cannot promise a hard deadline under kernel stalls.
+    handles = []
+    limits = []
 
-        def same_identity(info, fd=None):
-            if fd is not None:
-                try:
-                    signal.pidfd_send_signal(fd, 0)
-                except OSError as error:
-                    limits.append(f"pidfd-check:{type(error).__name__}")
-                    return False
-            seen = process_info(info["pid"])
-            if seen is not None and "error" in seen:
-                limits.append(f"process-record:{info['pid']}:{seen['error']}")
-            return seen is not None and "error" not in seen and all(seen[key] == info[key]
-                                           for key in ("ppid", "start", "pgid", "sid"))
-
-        def pin(info):
+    def same_identity(info, fd=None):
+        if fd is not None:
             try:
-                fd = os.pidfd_open(info["pid"])
+                if pidfd_subject(fd) != str(info["pid"]).encode("ascii"):
+                    limits.append("pidfd-identity-unconfirmed")
+                    return False
+                signal.pidfd_send_signal(fd, 0)
+            except EvidenceError as error:
+                limits.append(error.details)
+                return False
             except OSError as error:
-                limits.append(f"pidfd-open:{type(error).__name__}")
-                return None
-            if same_identity(info, fd):
+                limits.append(f"pidfd-check:{type(error).__name__}")
+                return False
+        seen = process_info(info["pid"])
+        if seen is not None and "error" in seen:
+            limits.append(f"process-record:{info['pid']}:{seen['error']}")
+        return seen is not None and "error" not in seen and all(seen[key] == info[key]
+                                       for key in ("ppid", "start", "pgid", "sid"))
+
+    def release_handle(fd):
+        try:
+            os.close(fd)
+        except OSError as error:
+            limits.append(f"cleanup-close:{error.errno}")
+            print("PRE_ENV_SECONDARY " + json.dumps(dict(operation="cleanup_close", errno=error.errno)),
+                  file=sys.stderr)
+
+    def pin(info):
+        try:
+            fd = os.pidfd_open(info["pid"])
+        except OSError as error:
+            limits.append(f"pidfd-open:{type(error).__name__}")
+            return None
+        keep = False
+        try:
+            keep = same_identity(info, fd) and (info["pid"] != pid or (group.visible() and group.anchor_exists()))
+            if keep:
                 return fd
             limits.append(f"pidfd-identity-not-confirmed:{info['pid']}")
-            os.close(fd)
             return None
+        finally:
+            if not keep:
+                release_handle(fd)
 
-        def discover(until):
-            index = 0
-            known = {info["pid"] for _, info in handles}
-            while index < len(handles) and len(handles) < 32 and clock() < until:
-                owner_fd, owner = handles[index]
-                index += 1
+    def discover(until):
+        index = 0
+        known = {info["pid"] for _, info in handles}
+        while index < len(handles) and len(handles) < 32 and clock_ns() < until:
+            owner_fd, owner = handles[index]
+            index += 1
+            if not same_identity(owner, owner_fd):
+                if not ready(owner_fd):
+                    limits.append("owner-discovery-incomplete")
+                continue
+            try:
+                path = Path(f"/proc/{owner['pid']}/task/{owner['pid']}/children")
+                with path.open("r") as source:
+                    children = source.read(8193)
+            except OSError as error:
+                limits.append(f"children-read:{type(error).__name__}")
+                continue
+            if len(children) > 8192:
+                limits.append("children-record-truncated")
+                continue
+            for child in children.split():
+                if len(handles) >= 32 or clock_ns() >= until:
+                    limits.append("diagnostic-discovery-budget-or-identity-cap")
+                    break
+                if not child.isascii() or not child.isdecimal():
+                    limits.append("malformed-child-inventory")
+                    continue
+                if int(child) in known:
+                    continue
+                # The parent must remain the pinned original identity on
+                # both sides of this child's read and pidfd acquisition.
                 if not same_identity(owner, owner_fd):
+                    limits.append("parent-changed-during-discovery")
+                    break
+                info = process_info(int(child))
+                if info is None:
+                    limits.append("child-discovery-incomplete")
+                    continue
+                if "error" in info:
+                    limits.append(f"child-record:{info['pid']}:{info['error']}")
+                    continue
+                if info["ppid"] != owner["pid"]:
+                    limits.append("child-parent-unconfirmed")
+                    continue
+                fd = pin(info)
+                if fd is None:
+                    continue
+                if not same_identity(owner, owner_fd):
+                    release_handle(fd)
+                    limits.append("parent-changed-during-pin")
+                    break
+                handles.append((fd, info))
+                known.add(info["pid"])
+        if index < len(handles):
+            limits.append("diagnostic-discovery-budget-or-identity-cap")
+
+    unknown_root = []
+    discovery_notes = []
+    root = process_info(pid, True)
+    root_done = False
+    expiry_reported = False
+
+    def report_expiry():
+        if not root_done and not handles:
+            unknown_root.append(dict(pid=pid, ppid=parent, start=expected_start,
+                                     state="unconfirmed"))
+            limits.append("known-root-termination-unconfirmed")
+        # Failed stat evidence belongs in the event list; the inventory identifies the root.
+        inventory = [info for _, info in handles] or (unknown_root if unknown_root and "error" in root else [root])
+        reason = ("publication-deadline-expired" if observation == "marker"
+                  else "functional-deadline-expired")
+        report(reason, inventory, [*discovery_notes, *limits])
+
+    try:
+        if missing(root):
+            try:
+                root_done = group.retired()
+            except EvidenceError as error:
+                discovery_notes.extend([root, error.details])
+                # A single lost numeric stat need not strand a known live root.
+                # Revalidate once on its launch directory. Pinning still requires
+                # a fresh matching numeric record, fdinfo and a live launch handle.
+                if (matches(current) and error.details["operation"] == "proc_directory"
+                        and error.details["record_issue"] == "process-directory-present"):
+                    anchored = process_info(pid, True, Path(f"/proc/self/fd/{group.anchor}/stat"))
+                    root_fd = pin(anchored) if matches(anchored) else None
+                    if root_fd is not None:
+                        handles.append((root_fd, anchored))
+                        discovery_notes.append("root-revalidated-on-launch-handle")
+                    elif "error" in anchored:
+                        limits.append(anchored)
+        elif matches(root) and group.visible():
+            root_fd = pin(root)
+            if root_fd is not None:
+                handles.append((root_fd, root))
+        else:
+            limits.append("root-identity-unavailable-before-cleanup")
+            if "error" in root:
+                limits.append(root)
+        discover(clock_ns() + 1_000_000_000)
+        report_expiry()
+        expiry_reported = True
+        remaining = []
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            if sig == signal.SIGKILL:
+                # Traps may fork during TERM cleanup. Discover again only
+                # through still-authenticated parents, never adopted PIDs.
+                discover(clock_ns() + 1_000_000_000)
+            for fd, info in reversed(handles):
+                seen = process_info(info["pid"])
+                if seen is None or (seen.get("state") in ("Z", "X") and ready(fd)):
+                    continue
+                if not same_identity(info, fd):
+                    limits.append(f"signal-identity-uncertain:{info['pid']}")
                     continue
                 try:
-                    path = Path(f"/proc/{owner['pid']}/task/{owner['pid']}/children")
-                    with path.open("r") as source:
-                        children = source.read(8193)
+                    signal.pidfd_send_signal(fd, sig)
                 except OSError as error:
-                    limits.append(f"children-read:{type(error).__name__}")
-                    continue
-                if len(children) > 8192:
-                    limits.append("children-record-truncated")
-                    continue
-                for child in children.split():
-                    if len(handles) >= 32 or clock() >= until:
-                        break
-                    if not child.isdecimal() or int(child) in known:
-                        continue
-                    # The parent must remain the pinned original identity on
-                    # both sides of this child's read and pidfd acquisition.
-                    if not same_identity(owner, owner_fd):
-                        break
-                    info = process_info(int(child))
-                    if info is None:
-                        continue
-                    if "error" in info:
-                        limits.append(f"child-record:{info['pid']}:{info['error']}")
-                        continue
-                    if info["ppid"] != owner["pid"]:
-                        continue
-                    fd = pin(info)
-                    if fd is None:
-                        continue
-                    if not same_identity(owner, owner_fd):
-                        os.close(fd)
-                        break
-                    handles.append((fd, info))
-                    known.add(info["pid"])
-            if index < len(handles):
-                limits.append("diagnostic-discovery-budget-or-identity-cap")
-
-        try:
-            root = process_info(pid)
-            if matches(root):
-                root_fd = pin(root)
-                if root_fd is not None:
-                    handles.append((root_fd, root))
-            if root is not None and not matches(root):
-                limits.append("root-identity-unavailable-before-cleanup")
-            discover(clock() + 1.0)
-            reason = ("publication-deadline-expired" if observation == "marker"
-                      else "functional-deadline-expired")
-            report(reason, [info for _, info in handles] or ([root] if root else []), limits)
-            remaining = []
-            for sig in (signal.SIGTERM, signal.SIGKILL):
-                if sig == signal.SIGKILL:
-                    # Traps may fork during TERM cleanup. Discover again only
-                    # through still-authenticated parents, never adopted PIDs.
-                    discover(clock() + 1.0)
-                for fd, info in reversed(handles):
+                    limits.append(f"signal-{sig.name}:{info['pid']}:{type(error).__name__}")
+            cleanup_deadline_ns = clock_ns() + (200_000_000 if sig == signal.SIGTERM else 2_000_000_000)
+            remaining = [info for _, info in handles]
+            while clock_ns() < cleanup_deadline_ns:
+                remaining = []
+                for fd, info in handles:
                     seen = process_info(info["pid"])
-                    if seen is None or seen.get("state") in ("Z", "X"):
-                        continue
-                    if not same_identity(info, fd):
-                        limits.append(f"signal-identity-uncertain:{info['pid']}")
-                        continue
-                    try:
-                        signal.pidfd_send_signal(fd, sig)
-                    except OSError as error:
-                        limits.append(f"signal-{sig.name}:{info['pid']}:{type(error).__name__}")
-                cleanup_deadline = clock() + (0.2 if sig == signal.SIGTERM else 2.0)
-                while clock() < cleanup_deadline:
-                    remaining = []
-                    for _, info in handles:
-                        seen = process_info(info["pid"])
-                        if seen is not None and ("error" in seen or
-                                (seen["start"] == info["start"] and seen["state"] not in ("Z", "X"))):
-                            remaining.append(seen)
-                    if not remaining:
-                        break
-                    time.sleep(0.01)
-            report("cleanup-incomplete-or-uncertain" if remaining or limits
-                   else "known-identities-stopped", remaining,
-                   [*limits, "adoptions-after-parent-exit-not-observable"])
-        finally:
-            for fd, _ in handles:
-                os.close(fd)
-        # The real parent may reap only after /proc confirms termination.
-        # Do not turn a timeout followed by status 130 into a passing test.
-        raise SystemExit(124)
-    time.sleep(min(0.01, max(0, deadline - clock())))
+                    # Every pinned group needs positive terminal readiness, even if
+                    # the numeric view has gone away or now belongs to someone else.
+                    if not ready(fd):
+                        remaining.append(info)
+                    if seen is not None and "error" in seen and "cleanup-record-unreadable" not in limits:
+                        limits.append("cleanup-record-unreadable")
+                if not remaining:
+                    break
+                time.sleep(0.01)
+        if remaining:
+            limits.append("cleanup-budget-expired")
+    except EvidenceError as error:
+        # A root binding failure precedes any close error recorded while pin() unwinds.
+        if not expiry_reported and not handles:
+            discovery_notes.append(error.details)
+        else:
+            limits.append(error.details)
+        if not expiry_reported:
+            report_expiry()
+        remaining = [info for _, info in handles]
+    finally:
+        for fd, _ in handles:
+            release_handle(fd)
+    report("cleanup-incomplete-or-uncertain" if remaining or limits
+           else "known-identities-stopped", remaining + unknown_root,
+           [*discovery_notes, *limits, "adoptions-after-parent-exit-not-observable"])
+    # The real parent may reap only after /proc confirms termination.
+    # Do not turn a timeout followed by status 130 into a passing test.
+    raise SystemExit(124)
 
-print(int((clock() - started) * 1000))
+
+def observe(group):
+    global current, group_done
+    if observation == "capture":
+        path = Path(f"/proc/self/fd/{group.anchor}/stat")
+        current = process_info(pid, True, path)
+        if ("error" in current or current["ppid"] != parent or current["state"] in ("Z", "X")
+                or not group.bind()):
+            raise EvidenceError("capture", "live-child-not-authenticated")
+        after = process_info(pid, True, path)
+        if ("error" in after or after["ppid"] != parent or after["start"] != current["start"]
+                or after["state"] in ("Z", "X") or not group.visible()):
+            current = after
+            raise EvidenceError("capture", "launch-identity-changed")
+        return group.key(current["start"])
+    if receipt != group.key(expected_start):
+        raise EvidenceError("launch_identity", "identity-rejected")
+    if observation.startswith("signal-"):
+        signals = {"signal-HUP": signal.SIGHUP, "signal-INT": signal.SIGINT, "signal-TERM": signal.SIGTERM}
+        current = process_info(pid, True, Path(f"/proc/self/fd/{group.anchor}/stat"))
+        if "error" in current:
+            report("signal-source-unavailable", [current])
+            raise SystemExit(65)
+        if observation not in signals or not matches(current) or not group.visible() or not group.bind():
+            raise EvidenceError("functional_signal_identity", "identity-rejected")
+        if ready(group.fd):
+            raise EvidenceError("functional_signal_identity", "group-already-exited")
+        if clock_ns() >= deadline_ns:
+            report("functional-deadline-expired-before-signal", [current])
+            raise SystemExit(124)
+        checked("functional_signal", signal.pidfd_send_signal, group.anchor, signals[observation], None, 0)
+        return
+    gap = None
+    saw_live = False
+    while True:
+        current = process_info(pid, True)
+        if (observation == "exit" and gap is None and current.get("record_issue") in ("empty", "partial")
+                and clock_ns() < deadline_ns):
+            gap = current
+            current = process_info(pid, True)
+        if gap is not None and "error" in current:
+            current["initial_record_issue"] = gap["record_issue"]
+            current["initial_gap"] = gap
+        if missing(current):
+            if gap is not None and not saw_live:
+                raise EvidenceError("stat_recheck", "no-prior-matching-child")
+            group_done = group.retired()
+        elif "error" in current:
+            report("process-record-unavailable-or-invalid", [current])
+            raise SystemExit(65)
+        elif not matches(current):
+            report("identity-rejected", [current])
+            raise SystemExit(65)
+        elif not group.visible():
+            group_done = group.retired()
+        elif current["state"] in ("Z", "X"):
+            group_done = ready(group.fd) if group.bind() else group.retired()
+        else:
+            saw_live = True
+        if group_done:
+            if observation == "marker":
+                report("engine-exited-before-marker", [current])
+                raise SystemExit(66)
+            if observation != "harvest" and clock_ns() >= deadline_ns:
+                report("functional-deadline-expired-after-exit", [current])
+                raise SystemExit(124)
+            return
+        if observation in ("reap", "harvest"):
+            raise EvidenceError("reap", "group-still-live")
+        if (observation == "marker" and current["state"] not in ("Z", "X")
+                and Path(marker_names[0]).is_file() and clock_ns() < deadline_ns):
+            if not group.anchor_exists():
+                raise EvidenceError("marker_identity", "launch-handle-retired")
+            return
+        if clock_ns() >= deadline_ns:
+            expired_cleanup(group)
+        time.sleep(min(10_000_000, max(0, deadline_ns - clock_ns())) / 1_000_000_000)
+
+
+current = None
+group_done = False
+try:
+    group = Group()
+    try:
+        group.attach()
+        result = observe(group)
+    except EvidenceError as first:
+        try:
+            group.close()
+        except EvidenceError as later:
+            first.details["secondary_close"] = later.details
+        raise
+    except BaseException:
+        try:
+            group.close()
+        except EvidenceError as later:
+            print("PRE_ENV_SECONDARY " + json.dumps(later.details), file=sys.stderr)
+        raise
+    group.close()
+except EvidenceError as failure:
+    if current is None:
+        current = dict(pid=pid)
+    current["evidence_error"] = failure.details
+    reason = ("identity-rejected" if failure.details["record_issue"] == "identity-rejected"
+              else "process-record-unavailable-or-invalid")
+    report(reason, [current])
+    if "secondary_close" in failure.details:
+        print("PRE_ENV_SECONDARY " + json.dumps(failure.details["secondary_close"]), file=sys.stderr)
+    raise SystemExit(65)
+
+finished_ns = clock_ns()
+if observation != "capture" and observation != "harvest" and finished_ns >= deadline_ns:
+    phase = ("functional-deadline-expired-after-exit" if group_done else
+             "functional-deadline-expired-after-signal" if observation.startswith("signal-") else
+             "publication-deadline-expired")
+    report(phase, [current])
+    raise SystemExit(124)
+if observation == "capture":
+    print(result)
+elif observation in ("exit", "marker"):
+    print((finished_ns - started_ns) // 1_000_000)
+
 PY_PRE_ENV_WAIT
 }
 
-# Only the launching Bash parent can recover the real wait status. A missing
-# or replaced proc entry also means that the original child cannot still run;
-# an unreadable/incomplete record does not authorize an unbounded wait.
+# Only the launching Bash owns wait's status. Independently prove that waiting
+# cannot block; keep diagnostic harvesting separate from a functional verdict.
 reap_mock_pre_env_child() {
-    local child_pid=$1 child_start=$2 result_name=$3 label=$4 observer_status=$5
-    local process_stat='' can_reap=false
-    local -a process_fields=()
-    local -n child_result="${result_name}"
-
+    local child_pid=$1 child_start=$2 label=$4 launching_parent=${BASHPID}
+    local -n child_result=$3 verdict=$5
+    local started=${6:-0} budget=${7:-0} role=harvest proof_status=0 can_reap=false
+    local measured_total=''
+    pre_env_elapsed_ns=''
     child_result=unavailable
-    if [[ ! -d /proc/${child_pid} ]]; then
-        can_reap=true
-    elif IFS= read -r process_stat <"/proc/${child_pid}/stat"; then
-        read -r -a process_fields <<<"${process_stat##*) }"
-        if ((${#process_fields[@]} >= 20)) \
-            && [[ ${process_fields[19]} =~ ^[0-9]+$ ]] \
-            && { [[ ${process_fields[19]} != "${child_start}" ]] \
-                || [[ ${process_fields[0]} == Z || ${process_fields[0]} == X ]]; }; then
-            can_reap=true
+    if ((verdict == 0)); then
+        if (($# == 8)); then
+            role=reap
+        else
+            verdict=65
         fi
     fi
-    if [[ ${can_reap} == true ]]; then
+    # shellcheck disable=SC2310 # Retain both the first failure and the child's status.
+    wait_for_mock_pre_env_exit "--${role}" "${child_pid}" "${child_start}" "${launching_parent}" \
+        "${started}" "${budget}" "${label}" /dev/null || proof_status=$?
+    if ((proof_status != 0)) && [[ ${role} == reap ]]; then
+        verdict=${proof_status}
+        role=harvest
+        proof_status=0
+        # shellcheck disable=SC2310 # A diagnostic harvest cannot clear the functional verdict.
+        wait_for_mock_pre_env_exit --harvest "${child_pid}" "${child_start}" "${launching_parent}" \
+            0 0 "${label}" /dev/null || proof_status=$?
+    fi
+    if ((proof_status == 0)); then
+        can_reap=true
         child_result=0
         wait "${child_pid}" || child_result=$?
+    elif ((verdict == 0)); then
+        verdict=${proof_status}
     fi
-    printf 'PRE_ENV_CHILD_STATUS scenario=%s pid=%s observer=%s child=%s wait_attempted=%s\n' \
-        "${label}" "${child_pid}" "${observer_status}" "${child_result}" "${can_reap}"
+    if ! close_mock_pre_env_custody; then
+        printf '%s\n' 'PRE_ENV_SECONDARY launch_custody_close' >&2
+        ((verdict != 0)) || verdict=65
+    fi
+    if [[ ${role} == reap ]] && ((verdict == 0)); then
+        local start_ns budget_ns
+        mock_pre_env_nanoseconds "${started}" start_ns && mock_pre_env_nanoseconds "${budget}" budget_ns || return 65
+        if measured_total=$(
+            python3 -I -B - "${start_ns}" "${budget_ns}" <<'PY_PRE_ENV_TOTAL'
+import sys
+import time
+
+started_ns, budget_ns = map(int, sys.argv[1:])
+finished_ns = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+if finished_ns >= started_ns + budget_ns:
+    raise SystemExit(124)
+print(finished_ns - started_ns)
+PY_PRE_ENV_TOTAL
+        ); then
+            pre_env_elapsed_ns=${measured_total}
+            printf -v "$8" '%s' "$((pre_env_elapsed_ns / 1000000))"
+        else
+            verdict=$?
+        fi
+    fi
+    if (($# == 8 && verdict != 0)); then
+        printf -v "$8" '%s' ''
+    fi
+    printf 'PRE_ENV_CHILD_STATUS scenario=%s pid=%s observer=%s child=%s wait_attempted=%s wait_role=%s\n' \
+        "${label}" "${child_pid}" "${verdict}" "${child_result}" "${can_reap}" "${role}"
+}
+
+# A kernel-accepted delivery and the child's eventual handler status are separate assertions.
+send_mock_pre_env_signal() {
+    local name=$1 target=$2 start=$3 started=$4 budget=$5 label=$6 log=$7 refusal=0 child=''
+    wait_for_mock_pre_env_exit "--signal-${name}" "${target}" "${start}" "${BASHPID}" \
+        "${started}" "${budget}" "${label}" "${log}" || refusal=$?
+    if ((refusal != 0)); then
+        reap_mock_pre_env_child "${target}" "${start}" child "${label}" refusal
+        fail "${label}: functional ${name} delivery failed with status ${refusal}; child=${child}."
+    fi
 }
 
 wait_for_mock_pre_env_marker() {
@@ -1650,19 +2331,88 @@ wait_for_mock_pre_env_marker() {
         >/dev/null || observer_status=$?
     if ((observer_status != 0)); then
         reap_mock_pre_env_child "${child_pid}" "${child_start}" child_status \
-            "${label}" "${observer_status}"
+            "${label}" observer_status
         fail "${label}: preparation observer failed with status ${observer_status}; child=${child_status}."
     fi
 }
 
+# Hold real external commands on private FIFOs so /proc is sampled during exec.
+check_mock_pre_env_descriptors() {
+    local child=$1 owner=${BASHPID} fifo="${TEST_ROOT}/observer-fd"
+    local input second grep_pid cat_pid verdict=0
+    mkfifo -m 600 -- "${fifo}" "${fifo}-cat"
+    grep -Fxq -- probe "${fifo}" &
+    grep_pid=$!
+    cat -- "${fifo}-cat" >/dev/null &
+    cat_pid=$!
+    exec {input}<>"${fifo}"
+    exec {second}<>"${fifo}-cat"
+    (
+        local probe_status=0
+        # The trailing builtin keeps this Bash subshell observable independently.
+        python3 -I -B - "${child}" "${pre_env_keeper}" "${owner}" "${BASHPID}" "${grep_pid}" "${cat_pid}" \
+            "${pre_env_writer}" "${pre_env_reader}" <<'PY_PRE_ENV_FD' || probe_status=$?
+import os
+import shutil
+import sys
+import time
+from pathlib import Path
+
+child, keeper, parent, sub, grep, cat, writer, reader = map(int, sys.argv[1:])
+def key(path):
+    st = os.stat(path)
+    return st.st_dev, st.st_ino
+
+def inventory(pid):
+    result = []
+    for entry in Path(f"/proc/{pid}/fd").iterdir():
+        try:
+            identity = key(entry)
+            info = Path(f"/proc/{pid}/fdinfo/{entry.name}").read_text().splitlines()
+        except FileNotFoundError:
+            continue
+        flags = int(next(x.split()[1] for x in info if x.startswith("flags:")), 8)
+        result.append((identity, bool(flags & os.O_CLOEXEC)))
+    return result
+
+until = time.monotonic_ns() + 1_000_000_000
+for target, name in ((grep, "grep"), (cat, "cat")):
+    while key(f"/proc/{target}/exe") != key(shutil.which(name)):
+        if time.monotonic_ns() >= until:
+            raise AssertionError("fixture exec unavailable")
+        time.sleep(.001)
+anchor = key(f"/proc/{child}")
+control = {key(f"/proc/{parent}/fd/{n}") for n in (writer, reader)}
+assert (anchor, True) in inventory(keeper), "custodian must hold the launch anchor CLOEXEC"
+for target, name in ((grep, "grep"), (cat, "cat"), (sub, "subshell"), (parent, "owner"),
+                     (child, "worker"), (os.getpid(), "external Python")):
+    table = inventory(target)
+    assert all(identity != anchor for identity, _ in table), ("anchor-inherited", name)
+    if target != parent:
+        assert all(identity not in control for identity, _ in table), ("control-pipe-inherited", name)
+print("PASS fd-isolation owner worker subshell grep cat external-python")
+PY_PRE_ENV_FD
+        exit "${probe_status}"
+    ) || verdict=$?
+    printf '%s\n' probe >&"${input}"
+    exec {input}>&-
+    exec {second}>&-
+    wait "${grep_pid}" || verdict=65
+    wait "${cat_pid}" || verdict=65
+    return "${verdict}"
+}
+
 test_mock_pre_env_observer_controls() {
+    local pre_env_proc_fd pre_env_identity pre_env_keeper pre_env_writer pre_env_reader
+    local pre_env_address pre_env_elapsed_ns pre_env_launch_budget
+    local +x pre_env_ticket
     local child_pid child_start child_status control expected_status observed_status
     local tested_start tested_parent release_status
     local ready release started unused elapsed observer_log worker_log
     local parent_pid=${BASHPID}
     local -a observer_options=()
     local -a controls=(success signal-status cached-status ordinary-error identity-rejection foreign-parent
-        no-publication marker-absent engine-exited-before-marker)
+        no-publication marker-absent engine-exited-before-marker expired-before-wait identity-rejection-130)
 
     printf '%s\n' 'Mock scenario: pre-env-observer-negative-controls'
     # Exercise this exact observer with real children while replacing only the
@@ -1673,6 +2423,7 @@ test_mock_pre_env_observer_controls() {
 import builtins
 import contextlib
 import ctypes
+import errno
 import json
 import io
 import os
@@ -1683,6 +2434,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
+import types
 from unittest.mock import patch
 
 text = Path(sys.argv[1]).read_text()
@@ -1695,7 +2448,25 @@ real_open, real_pidfd_signal = builtins.open, signal.pidfd_send_signal
 real_pidfd_open = os.pidfd_open
 worker_source = '''import os,signal,sys
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(130))
-descendant = os.fork() if len(sys.argv) > 2 else -1
+if sys.argv[2:3] == ['threads']:
+    import ctypes, threading, time
+    from pathlib import Path
+    print("ready -1", flush=True)
+    os.read(int(sys.argv[3]), 1)
+    def companion():
+        until = time.monotonic() + 3
+        while Path('/proc/self/stat').read_bytes().rsplit(b') ',1)[1].split()[0] != b'Z':
+            if time.monotonic() >= until: os._exit(91)
+            time.sleep(.001)
+        print(threading.get_native_id(), flush=True)
+        os.read(0,1)
+        os._exit(int(sys.argv[1]))
+    threading.Thread(target=companion).start()
+    ctypes.CDLL(None).pthread_exit(None)
+if sys.argv[2:3] == ['opaque']:
+    import ctypes
+    assert ctypes.CDLL(None).prctl(15, bytes([113, 255, 41, 32, 83, 32, 53, 40, 10]), 0, 0, 0) == 0
+descendant = os.fork() if len(sys.argv) > 2 and sys.argv[2] != 'opaque' else -1
 if descendant == 0:
     os.read(int(sys.argv[2]), 1)
     os._exit(0)
@@ -1706,7 +2477,7 @@ sys.exit(int(sys.argv[1]))
 
 
 def proc_fields(pid):
-    return Path('/proc/{}/stat'.format(pid)).read_text().rsplit(') ', 1)[1].split()
+    return Path('/proc/{}/stat'.format(pid)).read_bytes().rsplit(b') ', 1)[1].decode('ascii').split()
 
 
 def await_terminal(worker):
@@ -1718,19 +2489,26 @@ def await_terminal(worker):
     raise AssertionError('controlled child did not terminate within two seconds')
 
 
-def run_case(control, wanted, status=7):
+def run_case(control, wanted, status=7, stat_steps=()):
     with tempfile.TemporaryDirectory(prefix='observer-control-') as directory:
         root = Path(directory)
         log = root / 'worker.log'
         log.write_text('bounded fixture diagnostic\n')
         log.with_suffix('.trace').write_text('separate fixture trace\n')
         worker_errors = (root / 'worker.stderr').open('w+')
+        thread_pipe = os.pipe() if control.startswith('thread-') else ()
         pipe = os.pipe() if control == 'leader-exit-descendant' else ()
         command = [sys.executable, '-c', worker_source, str(status)]
+        if control == 'real-opaque-comm':
+            command.append('opaque')
+        if thread_pipe:
+            command.extend(('threads', str(thread_pipe[0])))
         if pipe:
             command.append(str(pipe[0]))
         worker = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                  stderr=worker_errors, text=True, pass_fds=pipe[:1])
+                                  stderr=worker_errors, text=True, pass_fds=pipe[:1] + thread_pipe[:1])
+        if thread_pipe:
+            os.close(thread_pipe[0])
         if pipe:
             os.close(pipe[0])
         released = False
@@ -1743,6 +2521,11 @@ def run_case(control, wanted, status=7):
         signals, reads, states = [], [], []
         before, descendant_identity, descendant_reaped = None, None, False
         cleanup_fault = None
+        anchor = None
+        last_missing = False
+        observed_fd = None
+        closes = []
+        pending_polls = []
         try:
             assert select.select([worker.stdout], [], [], 2)[0], 'child readiness absent'
             readiness = worker.stdout.readline().split()
@@ -1755,6 +2538,21 @@ def run_case(control, wanted, status=7):
             fields = proc_fields(worker.pid)
             expected_start, parent = int(fields[19]), os.getpid()
             before = expected_start
+            anchor = os.open(f'/proc/{worker.pid}', os.O_RDONLY | os.O_DIRECTORY)
+            pin_args = ['observer', 'capture', str(anchor), '', str(worker.pid), '0', str(parent),
+                        '0', '0', 'launch', str(log)]
+            capture_out = io.StringIO()
+            with patch.object(sys, 'argv', pin_args), contextlib.redirect_stdout(capture_out):
+                exec(program, {'__name__': '__main__'})
+            receipt = capture_out.getvalue().strip()
+            assert receipt.startswith(f'{before}:{worker.pid}:{parent}:')
+            if thread_pipe:
+                os.write(thread_pipe[1], b'x')
+                assert select.select([worker.stdout], [], [], 3)[0]
+                sibling = int(worker.stdout.readline())
+                assert proc_fields(worker.pid)[0] == 'Z'
+                sibling_stat = Path(f'/proc/{worker.pid}/task/{sibling}/stat')
+                assert sibling_stat.read_bytes().rsplit(b') ', 1)[1].split()[0] not in (b'Z', b'X')
             proc_path = '/proc/{}/stat'.format(worker.pid)
             if control.startswith('terminal-owner') or control in ('disappeared-reaped', 'leader-exit-descendant'):
                 release()
@@ -1766,6 +2564,21 @@ def run_case(control, wanted, status=7):
             if control == 'wrong-parent':
                 parent += 1
             def owner_stat(path, *args, **kwargs):
+                if path == Path(proc_path).parent:
+                    if control == 'cleanup-root-pin-EIO' and observed_fd is not None:
+                        raise OSError(errno.EIO, 'controlled cleanup binding failure')
+                    if last_missing:
+                        fault = {'inaccessible-child-directory': 'EACCES', 'dir-perm': 'EPERM',
+                                 'dir-io': 'EIO', 'dir-io-reaped': 'EIO', 'dir-esrch': 'ESRCH', 'dir-notdir': 'ENOTDIR',
+                                 'hidden-live': 'ENOENT', 'absence-eperm': 'ENOENT'}.get(control)
+                        if fault:
+                            raise OSError(getattr(errno, fault), 'controlled directory outcome')
+                        if control == 'late-absence':
+                            namespace['clock_ns'] = lambda: started_ns + duration_ns + 10_000_000
+                    if control == 'late-identity' and len(reads) == 2:
+                        namespace['clock_ns'] = lambda: started_ns + duration_ns + 10_000_000
+                    if control == 'replaced-directory' and len(reads) == 2:
+                        return real_path_stat(Path('/proc/self'))
                 if str(path) == proc_path and control == 'owner-metadata-error':
                     raise OSError('controlled metadata error')
                 result = real_path_stat(path, *args, **kwargs)
@@ -1775,62 +2588,223 @@ def run_case(control, wanted, status=7):
                     return os.stat_result(values)
                 return result
             def proc_open(path, *args, **kwargs):
+                nonlocal last_missing
                 if control == 'capture-error' and str(path) == str(log):
                     raise PermissionError('controlled diagnostic read denial')
+                if control == 'cleanup-partial-inventory' and str(path).endswith('/children'):
+                    raise OSError(errno.EIO, 'controlled incomplete children inventory')
                 if str(path) != proc_path:
                     return real_path_open(path, *args, **kwargs)
                 reads.append(str(path))
-                if control == 'unreadable-proc' or cleanup_fault == 'read-error':
+                if control.startswith('cleanup-root-') and len(reads) >= 2:
+                    kind = control.removeprefix('cleanup-root-')
+                    if (kind in ('missing', 'pin-EIO') and len(reads) == 2) or kind == 'persistent':
+                        raise FileNotFoundError(errno.ENOENT, 'controlled diagnostic discovery')
+                    if kind in ('EACCES', 'EIO'):
+                        raise OSError(getattr(errno, kind), 'controlled root stat')
+                if stat_steps:
+                    assert len(reads) <= len(stat_steps), (control, 'extra opening of stat')
+                step = stat_steps[len(reads) - 1] if len(reads) <= len(stat_steps) else None
+                if step in ('terminal', 'late-terminal', 'opaque-comm', 'cut-start', 'unicode-number'):
+                    release()
+                    await_terminal(worker)
+                    if step == 'late-terminal':
+                        # Model the read finishing past the original deadline without a real delay.
+                        namespace['clock_ns'] = lambda: time.clock_gettime_ns(time.CLOCK_BOOTTIME) + duration_ns + 1_000_000_000
+                if step in ('stat-missing', 'open-esrch'):
+                    last_missing = True
+                    raise OSError(errno.ENOENT if step == 'stat-missing' else errno.ESRCH, 'controlled stat open')
+                if step == 'read-and-close':
+                    class FaultedStream:
+                        def read(self, size):
+                            raise OSError(errno.ESRCH, 'controlled read')
+                        def close(self):
+                            raise OSError(errno.EIO, 'controlled close')
+                    return FaultedStream()
+                if step == 'read-esrch':
+                    last_missing = True
+                    class Unreadable(io.BytesIO):
+                        def read(self, *args):
+                            raise ProcessLookupError(errno.ESRCH, 'controlled stat read')
+                    return Unreadable()
+                if step == 'io':
+                    raise OSError(errno.EIO, 'controlled stat IO')
+                if step == 'empty-at-limit':
+                    namespace['clock_ns'] = lambda: started_ns + duration_ns
+                    return io.BytesIO(b'')
+                if step == 'denied' or control == 'unreadable-proc' or cleanup_fault == 'read-error':
                     raise PermissionError('controlled procfs read denial')
+                if control == 'real-opaque-comm':
+                    with real_path_open(path, *args, **kwargs) as stream:
+                        actual = stream.read()
+                    assert b'\xff' in actual.rsplit(b') ', 1)[0]
+                    return io.BytesIO(actual)
                 with real_path_open(path, *args, **kwargs) as handle:
-                    raw = handle.read()
+                    raw = handle.read().decode('ascii')
                 prefix, body = raw.rsplit(') ', 1)
                 fields = body.split()
                 states.append(fields[0])
-                if control == 'truncated-proc':
-                    return io.StringIO(prefix + ') ' + ' '.join(fields[:3]))
-                if control == 'reused-start' or cleanup_fault == 'changed-start':
+                if step == 'empty-at-reap':
+                    last_missing = True
+                    release()
+                    await_terminal(worker)
+                    worker.wait(timeout=1)  # Remove the proc entry independently of the observer.
+                if step in ('empty', 'empty-at-reap'):
+                    return io.BytesIO(b'')
+                if step == 'malformed':
+                    return io.BytesIO(b'not a process record')
+                if step == 'bad-header':
+                    fields[0] = 'Z'
+                    return io.BytesIO((str(worker.pid) + ') ' + ' '.join(fields)).encode())
+                if step == 'short-wrong-parent':
+                    fields[1] = str(parent + 1)
+                if step in ('short', 'short-wrong-parent') or control == 'truncated-proc':
+                    return io.BytesIO((prefix + ') ' + ' '.join(fields[:3])).encode())
+                if step == 'reused' or control == 'reused-start' or cleanup_fault == 'changed-start':
                     fields[19] = str(int(fields[19]) + 1)
-                    return io.StringIO(prefix + ') ' + ' '.join(fields) + '\n')
+                    return io.BytesIO((prefix + ') ' + ' '.join(fields) + '\n').encode())
+                if step == 'last-live':
+                    # Return this live snapshot; only the next read can see the zombie.
+                    assert fields[0] not in ('Z', 'X')
+                    release()
+                    await_terminal(worker)
                 if control in ('live-owner-change', 'termination-during-read', 'owner-metadata-error') and not released:
                     release()
                     if control == 'termination-during-read':
                         await_terminal(worker)
-                return io.StringIO(raw)
+                if step == 'cut-start':
+                    fragment = (prefix + ') ' + ' '.join(fields[:19]) + ' ' + str(expected_start)).encode()
+                    assert raw.encode().startswith(fragment)
+                    if control == 'cut-matches-expected':
+                        assert raw.encode()[len(fragment):len(fragment) + 1].isdigit()
+                    return io.BytesIO(fragment)
+                if step in ('obsolete-state', 'negative-pgid', 'nonzero-obsolete'):
+                    index, value = {'obsolete-state': (0, 'x'), 'negative-pgid': (2, '-1'),
+                                    'nonzero-obsolete': (18, '1')}[step]
+                    fields[index] = value
+                    return io.BytesIO((prefix + ') ' + ' '.join(fields) + '\n').encode())
+                if step in ('bad-number', 'bad-short'):
+                    fields[4] = 'BAD'
+                    body = ' '.join(fields[:8] if step == 'bad-short' else fields)
+                    return io.BytesIO((prefix + ') ' + body + ('' if step == 'bad-short' else '\n')).encode())
+                if step in ('wrong-ppid', 'foreign-pid', 'unicode-number', 'signed-unsigned', 'too-few',
+                            'newline-absent', 'fake-comm', 'opaque-comm', 'extra-field', 'too-large'):
+                    if step == 'foreign-pid':
+                        prefix = str(worker.pid + 1) + ' (controlled'
+                    if step == 'wrong-ppid':
+                        fields[1] = str(parent + 1)
+                    if step == 'unicode-number':
+                        fields[19] = ''.join(chr(0x660 + int(d)) for d in str(expected_start))
+                    if step == 'signed-unsigned':
+                        fields[6] = '-1'
+                    if step == 'too-few':
+                        fields = fields[:20]
+                    if step == 'extra-field':
+                        fields.append('0')
+                    if step == 'too-large':
+                        return io.BytesIO(b'x' * 4097)
+                    if step == 'fake-comm':
+                        return io.BytesIO(f'{worker.pid} (x) S {parent}'.encode())
+                    name = (f'{worker.pid} ('.encode() + b') (\xff\n) S 8' if step == 'opaque-comm' else prefix.encode())
+                    return io.BytesIO(name + b') ' + ' '.join(fields).encode() +
+                                      (b'' if step == 'newline-absent' else b'\n'))
+                return io.BytesIO(raw.encode())
             def capture_open(path, *args, **kwargs):
                 if control == 'capture-error' and str(path) == str(log):
                     raise PermissionError('controlled diagnostic read denial')
                 return real_open(path, *args, **kwargs)
             def pin_open(target, *args, **kwargs):
-                nonlocal cleanup_fault
+                nonlocal cleanup_fault, observed_fd
+                if control == 'group-open-error':
+                    raise PermissionError(errno.EACCES, 'controlled group open')
                 if control == 'pidfd-open-error':
                     raise PermissionError('controlled pidfd acquisition error')
-                fd = real_pidfd_open(target, *args, **kwargs)
+                fd = real_pidfd_open(os.getpid() if control in ('unbound-fd', 'cleanup-foreign-fd', 'cleanup-close-error') else target, *args, **kwargs)
+                observed_fd = fd
                 if control in ('cleanup-record-error', 'pidfd-pin-race'):
                     cleanup_fault = 'read-error' if control == 'cleanup-record-error' else 'changed-start'
                 return fd
             def observe_signal(fd, signum, *args, **kwargs):
+                if not signum and fd == anchor and control in ('anchor-eio', 'anchor-lost', 'absence-eperm'):
+                    number = {'anchor-eio': errno.EIO, 'anchor-lost': errno.ESRCH, 'absence-eperm': errno.EPERM}[control]
+                    raise OSError(number, 'controlled launch-handle outcome')
                 if signum:
                     fdinfo = Path('/proc/self/fdinfo/{}'.format(fd)).read_text()
                     pinned = int(next(line.split(':', 1)[1] for line in fdinfo.splitlines()
                                       if line.startswith('Pid:')))
                     if pinned == -1:
                         return real_pidfd_signal(fd, signum, *args, **kwargs)
+                    if control in ('cleanup-still-live', 'cleanup-partial-inventory'):
+                        assert pinned == worker.pid
+                        return None  # Keep the genuine group alive until its private release barrier.
                     signals.append((pinned, int(signum)))
-                    assert control in ('expired-cleanup-130', 'capture-error'), signals
+                    assert control in ('expired-cleanup-130', 'capture-error', 'cleanup-root-missing'), signals
                     assert pinned == worker.pid, 'observer signaled a foreign process'
                 return real_pidfd_signal(fd, signum, *args, **kwargs)
-            duration = .05 if control in ('expired-cleanup-130', 'capture-error',
-                'cleanup-record-error', 'pidfd-open-error', 'pidfd-pin-race') else 1
-            arguments = ['observer', 'exit', str(worker.pid), str(expected_start), str(parent),
-                         str(clock()), str(duration), control, str(log), str(root/'absent')]
+            real_poll = select.poll
+            real_close = os.close
+            class CheckedPoll:
+                def __init__(self):
+                    self.poller = real_poll()
+                def register(self, fd, events):
+                    assert events == select.POLLIN
+                    self.poller.register(fd, events)
+                def poll(self, timeout):
+                    assert timeout == 0
+                    assert control != 'unbound-fd', 'unbound handle was polled'
+                    if control in ('poll-error', 'poll-and-close'):
+                        raise OSError(errno.EIO, 'controlled group poll')
+                    if control == 'poll-unexpected':
+                        return [(observed_fd, select.POLLHUP)]
+                    if control in ('just-before', 'at-limit', 'ten-ms-late', 'late-poll', 'expiry-and-close'):
+                        drift = {'just-before': -10_000_000, 'at-limit': 0}.get(control, 10_000_000)
+                        namespace['clock_ns'] = lambda: started_ns + duration_ns + drift
+                    events = self.poller.poll(timeout)
+                    if thread_pipe:
+                        if not pending_polls:
+                            assert not events and not os.waitid(os.P_PID, worker.pid, os.WEXITED|os.WNOHANG|os.WNOWAIT)
+                            assert sibling_stat.read_bytes().rsplit(b') ', 1)[1].split()[0] not in (b'Z', b'X')
+                            pending_polls.append(False)
+                            release()
+                            await_terminal(worker)
+                        else:
+                            assert events and os.waitid(os.P_PID, worker.pid, os.WEXITED|os.WNOWAIT)
+                            pending_polls.append(True)
+                            if control == 'thread-late':
+                                namespace['clock_ns'] = lambda: started_ns + duration_ns + 10_000_000
+                    return events
+            def check_close(fd):
+                real_close(fd)
+                if fd == observed_fd:
+                    closes.append(fd)
+                    if control in ('close-error', 'poll-and-close', 'expiry-and-close', 'cleanup-close-error'):
+                        raise OSError(errno.EIO, 'controlled group close after consumption')
+            duration_ns = 50_000_000 if control in ('expired-cleanup-130', 'capture-error',
+                'cleanup-record-error', 'pidfd-open-error', 'pidfd-pin-race', 'cleanup-foreign-fd', 'cleanup-close-error') else 1_000_000_000
+            if control.startswith('cleanup-root-') or control in ('cleanup-still-live', 'cleanup-partial-inventory'):
+                duration_ns = 0
+            started_ns = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+            if control == 'cut-matches-expected':
+                expected_start //= 10   # Simulate an older identity with the same PID.
+                receipt = receipt.replace(str(before) + ':', str(expected_start) + ':', 1)
+            mode = 'marker' if control == 'marker-gap' else 'exit'
+            arguments = ['observer', mode, str(anchor), receipt, str(worker.pid), str(expected_start), str(parent),
+                         str(started_ns), str(duration_ns), control, str(log), str(root/'absent')]
             out, err = io.StringIO(), io.StringIO()
             observer_status, unexpected = 0, None
             namespace = {'__name__': '__main__'}
+            # Limit injected syscalls to the observer. Python's own Popen.wait
+            # can also use a pidfd and poll, independently of this fixture.
+            observed_os = types.SimpleNamespace(**vars(os))
+            observed_os.pidfd_open, observed_os.close = pin_open, check_close
+            observed_select = types.SimpleNamespace(**vars(select))
+            observed_select.poll = CheckedPoll
+            observed_signal = types.SimpleNamespace(**vars(signal))
+            observed_signal.pidfd_send_signal = observe_signal
+            fds_before = set(os.listdir('/proc/self/fd'))
             with patch.object(Path, 'stat', owner_stat), patch.object(Path, 'open', proc_open), \
                     patch.object(builtins, 'open', capture_open), \
-                    patch.object(signal, 'pidfd_send_signal', observe_signal), \
-                    patch.object(os, 'pidfd_open', pin_open), \
+                    patch.dict(sys.modules, dict(os=observed_os, select=observed_select, signal=observed_signal)), \
                     patch.object(sys, 'argv', arguments), \
                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 try:
@@ -1838,8 +2812,19 @@ def run_case(control, wanted, status=7):
                 except SystemExit as exc:
                     observer_status = int(exc.code or 0)
                 except Exception as exc:
-                    unexpected = repr(exc)
-            if control in ('expired-cleanup-130', 'capture-error'):
+                    unexpected = (type(exc).__name__, [(f.name, f.lineno) for f in traceback.extract_tb(exc.__traceback__)])
+            assert set(os.listdir('/proc/self/fd')) == fds_before, (control, 'observer descriptor leak')
+            if control == 'cleanup-root-pin-EIO':
+                fd = real_pidfd_open(worker.pid)
+                try:
+                    poller = real_poll()
+                    poller.register(fd, select.POLLIN)
+                    assert not poller.poll(0)
+                    assert os.waitid(os.P_PID, worker.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None
+                finally:
+                    os.close(fd)
+                assert closes == [observed_fd] and len(reads) == 3 and not signals
+            if control in ('expired-cleanup-130', 'capture-error', 'cleanup-root-missing'):
                 await_terminal(worker)
                 child_status = worker.wait(timeout=1)
                 assert child_status == 130, (control, child_status)
@@ -1852,6 +2837,18 @@ def run_case(control, wanted, status=7):
                 assert not signals, (control, signals)
             assert unexpected is None, (control, unexpected, err.getvalue())
             assert observer_status == wanted, (control, observer_status, wanted, err.getvalue())
+            if thread_pipe:
+                assert pending_polls == [False, True], (control, pending_polls)
+                assert len(closes) == 1, (control, closes)
+            if stat_steps:
+                assert len(reads) == len(stat_steps), (control, len(reads))
+                if not wanted:
+                    if stat_steps[-1] == 'absent':
+                        assert namespace['group_done'] and not Path(proc_path).parent.exists()
+                    else:
+                        seen = namespace['current']
+                        assert (seen['pid'], seen['ppid'], seen['start'], seen['state']) == (
+                            worker.pid, parent, expected_start, 'Z')
             if wanted:
                 assert not out.getvalue(), (control, 'failure emitted success duration')
                 reports = [json.loads(line.split(' ', 1)[1]) for line in err.getvalue().splitlines()
@@ -1860,13 +2857,95 @@ def run_case(control, wanted, status=7):
                 for report in reports:
                     assert {'expected', 'initial_observation', 'initial_termination', 'monotonic', 'deadline', 'kernel'} <= report.keys()
                     assert report['expected'] == dict(pid=worker.pid, start=expected_start, ppid=parent)
-                    assert report['initial_observation']['proc_owner'] == os.getuid()
+                    if control in ('wrong-start', 'wrong-parent'):
+                        assert report['phase'] == 'identity-rejected' and not reads, control
+                    elif control in ('empty-without-prior-identity', 'late-absence', 'dir-io-reaped'):
+                        row = report['initial_observation']
+                        assert row['proc_owner'] == 'unavailable' and row['initial_gap']['proc_owner'] == os.getuid()
+                    else:
+                        assert report['initial_observation']['proc_owner'] == os.getuid(), control
                 if control in ('unreadable-proc', 'truncated-proc'):
                     assert 'error' in reports[0]['initial_observation']
+                initial = reports[0]['initial_observation']
+                if control == 'unreadable-proc':
+                    assert initial['error'] == 'PermissionError' and len(reads) == 1
+                if control == 'truncated-proc':
+                    assert initial['record_issue'] == initial['initial_record_issue'] == 'partial'
+                    assert len(reads) == 2
+                if control in ('missing-stat-live-directory', 'inaccessible-child-directory',
+                               'empty-without-prior-identity'):
+                    evidence = initial['evidence_error']
+                    if control == 'inaccessible-child-directory':
+                        assert (evidence['operation'], evidence['errno']) == ('proc_directory', errno.EACCES), control
+                    else:
+                        assert evidence['record_issue'] == {
+                            'missing-stat-live-directory': 'process-directory-present',
+                            'empty-without-prior-identity': 'no-prior-matching-child'}[control]
+                if control == 'empty-then-denied':
+                    assert initial['error'] == 'PermissionError' and initial['initial_record_issue'] == 'empty'
+                if control == 'empty-then-reused':
+                    assert reports[0]['phase'] == 'identity-rejected' and initial['start'] != expected_start
+                if control == 'empty-then-bad-header':
+                    assert initial['record_issue'] == 'malformed' and initial['initial_record_issue'] == 'empty'
+                if control == 'exit-after-deadline':
+                    assert reports[0]['phase'] == 'functional-deadline-expired-after-exit'
+                if control in ('dir-perm', 'dir-io', 'dir-io-reaped', 'dir-esrch', 'dir-notdir'):
+                    number = {'dir-perm': errno.EPERM, 'dir-io': errno.EIO, 'dir-io-reaped': errno.EIO, 'dir-esrch': errno.ESRCH,
+                              'dir-notdir': errno.ENOTDIR}[control]
+                    assert (initial['evidence_error']['operation'], initial['evidence_error']['errno']) == ('proc_directory', number)
+                if control in ('direct-missing', 'direct-open-esrch', 'direct-read-esrch', 'hidden-live'):
+                    assert initial['operation'] == ('stat_read' if control == 'direct-read-esrch' else 'stat_open')
+                    assert initial['errno'] == (errno.ESRCH if 'esrch' in control else errno.ENOENT)
+                    assert initial['evidence_error']['record_issue'] == ('still-exists' if control == 'hidden-live'
+                                                                        else 'process-directory-present')
+                if control in ('group-open-error', 'poll-error', 'poll-and-close', 'close-error', 'poll-unexpected', 'unbound-fd'):
+                    wanted_op = {'group-open-error':'pidfd_open', 'poll-error':'pidfd_poll', 'poll-and-close':'pidfd_poll',
+                                 'close-error':'pidfd_close', 'poll-unexpected':'pidfd_poll', 'unbound-fd':'fdinfo_identity'}[control]
+                    assert initial['evidence_error']['operation'] == wanted_op
+                if control in ('close-error', 'poll-and-close', 'expiry-and-close'):
+                    assert len(closes) == 1
+                if control in ('poll-and-close', 'expiry-and-close'):
+                    assert 'PRE_ENV_SECONDARY ' in err.getvalue() and '"operation": "pidfd_close"' in err.getvalue()
+                if control in ('anchor-eio', 'anchor-lost', 'absence-eperm'):
+                    detail = initial['evidence_error']
+                    if control == 'anchor-lost':
+                        assert detail['record_issue'] == 'launch-handle-retired', control
+                    else:
+                        assert detail['operation'] == 'launch_signal_zero', control
+                        assert detail['errno'] == (errno.EIO if control == 'anchor-eio' else errno.EPERM), control
+                if control.startswith('cleanup-root-') and control != 'cleanup-root-missing':
+                    assert reports[-1]['phase'] == 'cleanup-incomplete-or-uncertain', (control, reports[-1]['phase'])
+                    assert 'known-root-termination-unconfirmed' in reports[-1]['limits'] and reports[-1]['process_count'] >= 1, (control, 'lost-root')
+                if control == 'cleanup-root-pin-EIO':
+                    assert [r['phase'] for r in reports] == ['functional-deadline-expired', 'cleanup-incomplete-or-uncertain']
+                    for r in reports:
+                        events = [(e['operation'], e['record_issue'], e['error'], e['errno'])
+                                  for e in r['limits'] if isinstance(e, dict)]
+                        assert events == [('stat_open', 'io', 'FileNotFoundError', errno.ENOENT),
+                                          ('proc_directory', 'process-directory-present', 'ValueError', None),
+                                          ('proc_directory', 'io', 'OSError', errno.EIO)], (control, 'revalidation-chain', events)
+                        assert [(p['pid'], p['start'], p['state']) for p in r['processes']] == [(worker.pid, before, 'unconfirmed')]
+                if control in ('cleanup-still-live', 'cleanup-partial-inventory'):
+                    assert reports[-1]['phase'] == 'cleanup-incomplete-or-uncertain', (control, 'unproved-stop')
+                    assert 'cleanup-budget-expired' in reports[-1]['limits'] and reports[-1]['process_count'] >= 1, (control, 'live handle forgotten')
+                    if control == 'cleanup-partial-inventory':
+                        assert any('children-read' in str(limit) for limit in reports[-1]['limits'])
+                if control == 'cleanup-root-missing':
+                    assert 'root-revalidated-on-launch-handle' in reports[-1]['limits']
+                    assert signals == [(worker.pid, int(signal.SIGTERM))], (control, signals)
+                    assert any(isinstance(x, dict) and x.get('operation') == 'stat_open'
+                               and x.get('errno') == errno.ENOENT for x in reports[-1]['limits'])
+                if control in ('expired-cleanup-130', 'capture-error', 'cleanup-root-missing'):
+                    assert reports[-1]['phase'] == 'known-identities-stopped', (control, reports[-1]['phase'])
+                if control == 'cleanup-close-error':
+                    assert len(closes) == 1 and 'cleanup_close' in err.getvalue()
+                if control == 'read-close-failure':
+                    assert (initial['operation'], initial['errno']) == ('stat_read', errno.ESRCH)
+                    assert (initial['secondary']['operation'], initial['secondary']['errno']) == ('stat_close', errno.EIO)
                 if control == 'capture-error':
                     assert 'PermissionError' in reports[0]['log']
                     assert reports[0]['engine_trace'] == 'separate fixture trace\n'
-                if control in ('cleanup-record-error', 'pidfd-open-error', 'pidfd-pin-race'):
+                if control in ('cleanup-record-error', 'pidfd-open-error', 'pidfd-pin-race', 'cleanup-foreign-fd', 'cleanup-close-error'):
                     assert reports[-1]['phase'] == 'cleanup-incomplete-or-uncertain'
                     assert reports[-1]['limits']
             else:
@@ -1931,11 +3010,125 @@ def run_case(control, wanted, status=7):
                         break
                     time.sleep(.005)
                 assert descendant_reaped, 'external descendant recovery not harvested'
+            if thread_pipe:
+                os.close(thread_pipe[1])
+            if anchor is not None:
+                os.close(anchor)
             if pipe:
                 os.close(pipe[1])
             worker_errors.close()
             worker.stdin.close()
             worker.stdout.close()
+
+
+def check_delivery(case):
+    # Patch only the syscall boundary. A numeric or foreign signal is intercepted
+    # before it can reach a process, including in intentionally faulty variants.
+    script = """import os,signal,sys
+for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(sig, lambda actual, _: os._exit(128 + actual))
+os.write(1,b'R')
+os.read(0,1)
+os._exit(7)
+"""
+    def start():
+        return subprocess.Popen([sys.executable, '-IB', '-c', script],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    def invoke(mode, handle, token, ticks):
+        out, err = io.StringIO(), io.StringIO()
+        args = [mode, handle, token, child.pid, ticks, os.getpid(),
+                time.clock_gettime_ns(time.CLOCK_BOOTTIME), 2_000_000_000, case, '/dev/null']
+        with patch.object(sys, 'argv', ['-', *map(str, args)]), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                exec(program, {'__name__': '__main__'})
+                code = 0
+            except SystemExit as error:
+                code = error.code
+        return code, out.getvalue().strip(), err.getvalue()
+
+    before = set(os.listdir('/proc/self/fd'))
+    with contextlib.ExitStack() as stack:
+        child, other = start(), start()
+        def finish(worker):
+            if worker.poll() is None:
+                worker.stdin.close()
+                worker.wait(timeout=2)
+            worker.stdin.close()
+            worker.stdout.close()
+        for worker in (child, other):
+            stack.callback(finish, worker)
+            assert worker.stdout.read(1) == b'R'
+        def anchor_for(worker):
+            fd = os.open(f'/proc/{worker.pid}', os.O_RDONLY | os.O_DIRECTORY)
+            stack.callback(os.close, fd)
+            return fd
+        anchor, outsider = anchor_for(child), anchor_for(other)
+        code, ticket, _ = invoke('capture', anchor, '', 0)
+        assert code == 0
+        ticks = int(ticket.split(':', 1)[0])
+        name = case.removeprefix('delivery-')
+        number = getattr(errno, name, None)
+        sig = getattr(signal, 'SIG' + name) if name in ('INT','TERM','HUP') else signal.SIGINT
+        attempted, numeric = [], []
+        def dispatch(fd, signum, *args):
+            if signum:
+                attempted.append((fd, signum))
+                assert fd == anchor and signum == sig, (case, 'foreign-or-substituted-signal', attempted)
+                if number:
+                    raise OSError(number, 'controlled signal outcome')
+                if name == 'vanish-at-send':
+                    child.stdin.close()
+                    assert child.wait(timeout=2) == 7
+            return real_pidfd_signal(fd, signum, *args)
+        def numeric_signal(*args):
+            numeric.append(True)
+            raise AssertionError((case, 'numeric-signal-fallback'))
+        if name == 'gone-after-marker':
+            child.stdin.close()
+            assert child.wait(timeout=2) == 7
+        handle = outsider if name == 'foreign' else -1 if name == 'closed' else anchor
+        if name == 'replaced':
+            ticks += 1
+        with patch.object(signal, 'pidfd_send_signal', dispatch), patch.object(os, 'kill', numeric_signal):
+            code, output, log = invoke('signal-' + sig.name[3:], handle, ticket, ticks)
+        assert not numeric and not output, (case, 'numeric-signal-fallback', numeric)
+        if name in ('HUP', 'INT', 'TERM'):
+            assert code == 0 and attempted == [(anchor, sig)] and child.wait(timeout=2) == 128 + sig, (case, code)
+        else:
+            assert code == 65 and 'PRE_ENV_DIAGNOSTIC ' in log, (case, code, log)
+            if number or name == 'vanish-at-send':
+                details = json.loads(log.split('PRE_ENV_DIAGNOSTIC ',1)[1].splitlines()[0])
+                failure = details['initial_observation']['evidence_error']
+                assert attempted == [(anchor, sig)] and failure['errno'] == (number or errno.ESRCH), (case, failure)
+            else:
+                assert not attempted, (case, 'unauthenticated-delivery', attempted)
+        assert other.poll() is None, (case, 'foreign fixture changed')
+    assert set(os.listdir('/proc/self/fd')) == before, (case, 'descriptor leak')
+    print(f'PASS {case} observer={code} anchored_attempts={len(attempted)} numeric=0')
+
+
+
+
+def check_deadline():
+    end_program = text.split("<<'PY_PRE_ENV_TOTAL'\n", 1)[1].split('\nPY_PRE_ENV_TOTAL', 1)[0]
+    end_program = compile(end_program, 'actual-post-wait', 'exec')
+    for origin, budget in ((59_020_000_000, 5_000_000_000), (16_379_010_000_000, 5_000_000_000),
+                           (33_554_427_010_000_000, 5_000_000_000), (123_456_789, 987_654_321)):
+        for offset in (-1, 0, 1, 1_000_000):
+            now = origin + budget + offset
+            args = ['-', str(origin), str(budget)]
+            out = io.StringIO()
+            with patch.object(sys, 'argv', args), contextlib.redirect_stdout(out), \
+                    patch.object(time, 'clock_gettime_ns', return_value=now), \
+                    patch.object(time, 'clock_gettime', return_value=now / 1_000_000_000):
+                try:
+                    exec(end_program, {})
+                    rc = 0
+                except SystemExit as error:
+                    rc = error.code
+            assert rc == (0 if offset < 0 else 124), ('deadline-ns', origin, budget, offset, rc)
+            assert out.getvalue().strip() == (str(budget + offset) if offset < 0 else ''), ('deadline-ns', offset)
+    print('PASS deadline-ns 4 origins and 4 boundaries')
 
 
 libc = ctypes.CDLL(None, use_errno=True)
@@ -1952,10 +3145,60 @@ try:
         ('expired-cleanup-130', 124, 7), ('capture-error', 124, 7),
         ('owner-metadata-error', 0, 7), ('cleanup-record-error', 124, 7),
         ('pidfd-open-error', 124, 7), ('pidfd-pin-race', 124, 7),
-        ('leader-exit-descendant', 0, 7))
-    for name, expected, status in cases:
+        ('cleanup-foreign-fd', 124, 7), ('cleanup-close-error', 124, 7),
+        ('read-close-failure', 65, 130, ('read-and-close',)),
+        ('anchor-eio', 65, 130, ('terminal',)), ('anchor-lost', 65, 130, ('terminal',)),
+        ('absence-eperm', 65, 130, ('stat-missing',)),
+        ('leader-exit-descendant', 0, 7),
+        ('empty-then-terminal', 0, 130, ('empty', 'terminal')),
+        ('short-then-live', 0, 130, ('short', 'last-live', 'valid')),
+        ('empty-then-reaped', 0, 130, ('valid', 'empty-at-reap', 'absent')),
+        ('empty-without-prior-identity', 65, 130, ('empty-at-reap', 'absent')),
+        ('missing-stat-live-directory', 65, 130, ('valid', 'empty', 'stat-missing')),
+        ('inaccessible-child-directory', 65, 130, ('valid', 'empty', 'stat-missing')),
+        ('empty-then-reused', 65, 130, ('empty', 'reused')),
+        ('empty-then-denied', 65, 130, ('empty', 'denied')),
+        ('empty-then-bad-header', 65, 130, ('empty', 'bad-header')),
+        ('repeated-empty', 65, 130, ('empty', 'empty')),
+        ('second-gap-after-live', 65, 130, ('empty', 'valid', 'empty')),
+        ('malformed-record', 65, 130, ('malformed',)),
+        ('short-foreign-parent', 65, 130, ('short-wrong-parent',)),
+        ('exit-after-deadline', 124, 130, ('empty', 'late-terminal')),
+        ('direct-missing', 65, 130, ('stat-missing',)), ('direct-open-esrch', 65, 130, ('open-esrch',)),
+        ('direct-read-esrch', 65, 130, ('read-esrch',)), ('hidden-live', 65, 130, ('stat-missing',)),
+        ('real-opaque-comm', 0, 130, ('terminal',)), ('marker-gap', 65, 130, ('empty',)), ('strong-io', 65, 130, ('io',)),
+        ('cut-starttime', 65, 130, ('empty', 'cut-start')), ('cut-matches-expected', 65, 130, ('empty', 'cut-start')),
+        ('comm-delimiter-in-name', 65, 130, ('fake-comm',)), ('native-byte-format', 0, 130, ('empty', 'opaque-comm')),
+        ('just-before', 0, 130, ('empty', 'terminal')), ('at-limit', 124, 130, ('empty', 'terminal')),
+        ('ten-ms-late', 124, 130, ('empty', 'terminal')), ('late-identity', 124, 130, ('empty', 'terminal')),
+        ('late-poll', 124, 130, ('empty', 'terminal')), ('expiry-and-close', 124, 130, ('empty', 'terminal')),
+        ('late-absence', 124, 130, ('valid', 'empty-at-reap', 'absent')),
+        ('dir-io-reaped', 65, 130, ('valid', 'empty-at-reap', 'absent')), ('expired-before-read', 65, 130, ('empty-at-limit',)),
+        ('group-open-error', 65, 130, ('terminal',)), ('poll-error', 65, 130, ('terminal',)),
+        ('poll-unexpected', 65, 130, ('terminal',)), ('unbound-fd', 65, 130, ('terminal',)),
+        ('close-error', 65, 130, ('terminal',)), ('poll-and-close', 65, 130, ('terminal',)),
+        ('replaced-directory', 65, 130, ('empty', 'terminal')),
+        ('thread-direct', 0, 130, ('valid', 'valid')), ('thread-gap', 0, 130, ('empty', 'valid', 'valid')),
+        ('thread-late', 124, 130, ('valid', 'valid')))
+    cases += tuple((name, 65, 130, ('valid', 'empty', 'stat-missing')) for name in
+                   ('dir-perm', 'dir-io', 'dir-esrch', 'dir-notdir'))
+    cases += tuple((name, 65, 130, ('empty', name)) for name in
+                   ('bad-number', 'foreign-pid', 'wrong-ppid', 'unicode-number', 'signed-unsigned', 'too-few',
+                    'newline-absent', 'extra-field', 'too-large', 'obsolete-state', 'negative-pgid', 'nonzero-obsolete'))
+    cases += tuple(('cleanup-root-' + fault, 124, 7) for fault in ('missing', 'persistent', 'EACCES', 'EIO', 'pin-EIO'))
+    cases += (('cleanup-partial-inventory', 124, 7), ('cleanup-still-live', 124, 7))
+    cases += (('corrupt-short-no-reopen', 65, 130, ('bad-short',)),)
+    deliveries = ('INT', 'HUP', 'TERM', 'foreign', 'closed', 'replaced', 'gone-after-marker',
+                  'vanish-at-send', 'ESRCH', 'EPERM', 'EACCES', 'EBADF', 'EINVAL', 'ENOSYS', 'EIO')
+    for name in deliveries:
+        name = 'delivery-' + name
         if not selected_controls or name in selected_controls:
-            run_case(name, expected, status)
+            check_delivery(name)
+    if not selected_controls or 'deadline-ns' in selected_controls:
+        check_deadline()
+    for case in cases:
+        if not selected_controls or case[0] in selected_controls:
+            run_case(*case)
 finally:
     assert libc.prctl(36, previous_subreaper.value, 0, 0, 0) == 0
 PY_PRE_ENV_PROCFS
@@ -1967,8 +3210,10 @@ PY_PRE_ENV_PROCFS
         worker_log="${TEST_ROOT}/observer-${control}-worker.log"
         expected_status=7
         [[ ${control} != success ]] || expected_status=0
-        [[ ${control} != signal-status && ${control} != cached-status ]] || expected_status=130
-        python3 -I -B - "${ready}" "${release}" "${expected_status}" \
+        [[ ${control} != signal-status && ${control} != cached-status && ${control} != expired-before-wait && ${control} != identity-rejection-130 ]] || expected_status=130
+        read -r started unused </proc/uptime
+        prepare_mock_pre_env_launch "${started}" 3 || fail 'Pre-env control custodian unavailable.'
+        run_mock_pre_env_program python3 -I -B - "${ready}" "${release}" "${expected_status}" \
             >"${worker_log}" 2>&1 <<'PY_PRE_ENV_CONTROL' &
 from pathlib import Path
 import signal
@@ -1983,39 +3228,42 @@ while not release.exists():
 raise SystemExit(int(sys.argv[3]))
 PY_PRE_ENV_CONTROL
         child_pid=$!
-        wait_for_file "${ready}" 3 "pre-env observer ${control} startup"
         # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
-        read_mock_process_start_time child_start "${child_pid}" \
+        capture_mock_pre_env_child child_start "${child_pid}" \
             || fail "Pre-env observer ${control}: child identity unavailable."
+        wait_for_file "${ready}" 3 "pre-env observer ${control} startup"
+        if [[ ${control} == success ]]; then
+            check_mock_pre_env_descriptors "${child_pid}" || fail 'Pre-env descriptor isolation failed.'
+        fi
         read -r started unused </proc/uptime
         observed_status=0
-        if [[ ${control} == identity-rejection || ${control} == foreign-parent ]]; then
+        if [[ ${control} == identity-rejection* || ${control} == foreign-parent ]]; then
             tested_start=${child_start}
             tested_parent=${parent_pid}
-            if [[ ${control} == identity-rejection ]]; then
+            if [[ ${control} == identity-rejection* ]]; then
                 tested_start=$((child_start + 1))
             else
                 tested_parent=$((parent_pid + 1))
             fi
             # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
-            elapsed=$(wait_for_mock_pre_env_exit \
+            read_mock_pre_env_result elapsed \
                 "${child_pid}" "${tested_start}" "${tested_parent}" \
                 "${started}" 1 "${control}" "${worker_log}" "${ready}" \
-                2>"${observer_log}") || observed_status=$?
+                2>"${observer_log}" || observed_status=$?
             assert_equals 65 "${observed_status}" 'pre-env observer rejects unauthenticated identity'
             # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
-            read_mock_process_start_time unused "${child_pid}" \
+            read_mock_pre_env_result unused --capture "${child_pid}" 0 "${parent_pid}" 0 0 verify /dev/null \
                 || fail 'Pre-env observer signaled an unauthenticated child.'
-            assert_equals "${child_start}" "${unused}" 'rejected identity remains alive'
+            assert_equals "${pre_env_identity}" "${unused}" 'rejected identity remains alive'
             : >"${release}"
         elif [[ ${control} == no-publication || ${control} == marker-absent ]]; then
             observer_options=()
             [[ ${control} != marker-absent ]] || observer_options=(--marker)
             # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
-            elapsed=$(wait_for_mock_pre_env_exit "${observer_options[@]}" \
+            read_mock_pre_env_result elapsed "${observer_options[@]}" \
                 "${child_pid}" "${child_start}" "${parent_pid}" \
                 "${started}" 0.05 "${control}" "${worker_log}" \
-                "${TEST_ROOT}/never-published" 2>"${observer_log}") || observed_status=$?
+                "${TEST_ROOT}/never-published" 2>"${observer_log}" || observed_status=$?
             assert_equals 124 "${observed_status}" 'pre-env observer preserves expiration'
             assert_file_contains "${observer_log}" deadline-expired \
                 'pre-env observer captures failure before cleanup'
@@ -2025,20 +3273,20 @@ PY_PRE_ENV_CONTROL
         elif [[ ${control} == engine-exited-before-marker ]]; then
             : >"${release}"
             # shellcheck disable=SC2310 # Premature termination must stay a failure.
-            elapsed=$(wait_for_mock_pre_env_exit --marker \
+            read_mock_pre_env_result elapsed --marker \
                 "${child_pid}" "${child_start}" "${parent_pid}" \
                 "${started}" 1 "${control}" "${worker_log}" \
-                "${TEST_ROOT}/never-published" 2>"${observer_log}") || observed_status=$?
+                "${TEST_ROOT}/never-published" 2>"${observer_log}" || observed_status=$?
             assert_equals 66 "${observed_status}" 'pre-env observer detects premature engine exit'
             assert_file_contains "${observer_log}" engine-exited-before-marker \
                 'pre-env observer diagnoses absent publication after exit'
         else
             : >"${release}"
             # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
-            elapsed=$(wait_for_mock_pre_env_exit \
+            read_mock_pre_env_result elapsed \
                 "${child_pid}" "${child_start}" "${parent_pid}" \
                 "${started}" 1 "${control}" "${worker_log}" "${ready}" \
-                2>"${observer_log}") || observed_status=$?
+                2>"${observer_log}" || observed_status=$?
             assert_equals 0 "${observed_status}" 'pre-env observer only observes termination'
         fi
         if ((observed_status == 0)); then
@@ -2047,7 +3295,7 @@ PY_PRE_ENV_CONTROL
             assert_equals '' "${elapsed}" 'failed observer never publishes a success duration'
         fi
         release_status=0
-        if [[ ${control} == identity-rejection || ${control} == foreign-parent ]]; then
+        if [[ ${control} == identity-rejection* || ${control} == foreign-parent ]]; then
             read -r started unused </proc/uptime
             # The first observer failed while leaving this child untouched.
             # Bound its independently requested release before the parent reaps.
@@ -2069,19 +3317,37 @@ PY_PRE_ENV_CONTROL
                 "${started}" 1 "${control}" "${worker_log}" \
                 >/dev/null || release_status=$?
         fi
-        reap_mock_pre_env_child "${child_pid}" "${child_start}" child_status \
-            "${control}" "${observed_status}"
+        if [[ ${control} == expired-before-wait ]]; then
+            # The child is already waitable, but the functional permission has expired.
+            reap_mock_pre_env_child "${child_pid}" "${child_start}" child_status \
+                "${control}" observed_status 0 1 elapsed >"${observer_log}"
+            assert_equals 124 "${observed_status}" 'a late parent wait remains diagnostic'
+            assert_equals '' "${elapsed}" 'expired parent publishes no functional duration'
+            assert_file_contains "${observer_log}" 'wait_attempted=true wait_role=harvest' \
+                'late child status collected only during diagnostic harvesting'
+            cat -- "${observer_log}"
+        else
+            reap_mock_pre_env_child "${child_pid}" "${child_start}" child_status \
+                "${control}" observed_status "${started}" 1 elapsed
+        fi
         assert_equals "${expected_status}" "${child_status}" \
             "pre-env observer ${control} retains the real child status"
+        if [[ ${control} == identity-rejection-130 ]]; then
+            assert_equals 65 "${observed_status}" 'a later 130 preserves the initial refusal'
+            assert_equals '' "${elapsed}" 'a refused observation has no success duration'
+        fi
         assert_equals 0 "${release_status}" \
             "pre-env observer ${control} bounded release observation"
     done
 }
 
 test_mock_signal_cli_pre_env_registration() {
+    local pre_env_proc_fd pre_env_identity pre_env_keeper pre_env_writer pre_env_reader
+    local pre_env_address pre_env_elapsed_ns pre_env_launch_budget
+    local +x pre_env_ticket
     local cli_engine_pid cli_engine_start_time cli_engine_status continue_marker delay_marker
     local elapsed_milliseconds first_handler_returned_marker mode runtime_signal_log signal_finished_at
-    local observer_status process_stat signal_started_at kernel_version
+    local observer_status _ signal_started_at kernel_version
     local parent_pid=${BASHPID}
     local -a registration_leftovers=()
     local -a session_modes=(false true)
@@ -2098,7 +3364,9 @@ test_mock_signal_cli_pre_env_registration() {
         continue_marker="${TEST_ROOT}/pre-env-${mode}-continue"
         runtime_signal_log="${TEST_ROOT}/pre-env-${mode}.log"
 
-        "${REAL_SETSID}" --wait /usr/bin/env \
+        read -r signal_finished_at _ </proc/uptime
+        prepare_mock_pre_env_launch "${signal_finished_at}" 10 || fail 'Pre-env custodian unavailable.'
+        run_mock_pre_env_program "${REAL_SETSID}" --wait /usr/bin/env \
             --default-signal=HUP \
             --default-signal=INT \
             --default-signal=TERM \
@@ -2117,34 +3385,35 @@ test_mock_signal_cli_pre_env_registration() {
         cli_engine_pid=$!
         cli_engine_start_time=''
         # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
-        read_mock_process_start_time cli_engine_start_time "${cli_engine_pid}" \
+        capture_mock_pre_env_child cli_engine_start_time "${cli_engine_pid}" \
             || fail "Pre-env ${mode}: unable to authenticate the launched engine."
         wait_for_mock_pre_env_marker "${cli_engine_pid}" "${cli_engine_start_time}" \
             "${delay_marker}" "pre-env ${mode} launch delay" "${runtime_signal_log}"
-        read -r signal_finished_at process_stat </proc/uptime
+        read -r signal_finished_at _ </proc/uptime
         printf 'Pre-env mode=%s phase=delay-observed monotonic=%s pid=%s start=%s\n' \
             "${mode}" "${signal_finished_at}" "${cli_engine_pid}" "${cli_engine_start_time}"
         read -r signal_started_at signal_finished_at </proc/uptime
-        kill -INT -- "${cli_engine_pid}"
+        send_mock_pre_env_signal INT "${cli_engine_pid}" "${cli_engine_start_time}" \
+            "${signal_started_at}" 5 "pre-env-${mode}" "${runtime_signal_log}"
         : >"${continue_marker}"
         printf 'Pre-env mode=%s phase=first-int-sent-continue-published monotonic=%s\n' \
             "${mode}" "${signal_started_at}"
         observer_status=0
         # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
-        elapsed_milliseconds=$(wait_for_mock_pre_env_exit \
+        read_mock_pre_env_result elapsed_milliseconds \
             "${cli_engine_pid}" "${cli_engine_start_time}" "${parent_pid}" \
             "${signal_started_at}" 5 "pre-env-${mode}" "${runtime_signal_log}" \
             "${delay_marker}" "${continue_marker}" \
             "${TEST_ROOT}/pre-env-${mode}-runtime-started" \
-            "${TEST_ROOT}/pre-env-${mode}-runtime-terminated") || observer_status=$?
+            "${TEST_ROOT}/pre-env-${mode}-runtime-terminated" || observer_status=$?
         reap_mock_pre_env_child "${cli_engine_pid}" "${cli_engine_start_time}" \
-            cli_engine_status "pre-env-${mode}" "${observer_status}"
+            cli_engine_status "pre-env-${mode}" observer_status "${signal_started_at}" 5 elapsed_milliseconds
         if ((observer_status != 0)); then
             fail "pre-env ${mode} observation failed with status ${observer_status}; child=${cli_engine_status}."
         fi
         assert_equals 130 "${cli_engine_status}" \
             "pre-env ${mode} SIGINT exit status"
-        ((elapsed_milliseconds < 5000)) \
+        ((pre_env_elapsed_ns < 5000000000)) \
             || fail "Pre-env ${mode} SIGINT handling took ${elapsed_milliseconds}ms."
         assert_no_test_processes \
             "pre-env ${mode} SIGINT left descendants"
@@ -2169,7 +3438,9 @@ test_mock_signal_cli_pre_env_registration() {
         first_handler_returned_marker="${TEST_ROOT}/pre-env-escalate-${mode}-first-handler-returned"
         runtime_signal_log="${TEST_ROOT}/pre-env-escalate-${mode}.log"
 
-        "${REAL_SETSID}" --wait /usr/bin/env \
+        read -r signal_finished_at _ </proc/uptime
+        prepare_mock_pre_env_launch "${signal_finished_at}" 10 || fail 'Pre-env custodian unavailable.'
+        run_mock_pre_env_program "${REAL_SETSID}" --wait /usr/bin/env \
             --default-signal=HUP \
             --default-signal=INT \
             --default-signal=TERM \
@@ -2189,14 +3460,15 @@ test_mock_signal_cli_pre_env_registration() {
         cli_engine_pid=$!
         cli_engine_start_time=''
         # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
-        read_mock_process_start_time cli_engine_start_time "${cli_engine_pid}" \
+        capture_mock_pre_env_child cli_engine_start_time "${cli_engine_pid}" \
             || fail "Pre-env ${mode}: unable to authenticate the launched engine."
         wait_for_mock_pre_env_marker "${cli_engine_pid}" "${cli_engine_start_time}" \
             "${delay_marker}" "pre-env escalation ${mode} launch delay" "${runtime_signal_log}"
-        read -r signal_finished_at process_stat </proc/uptime
+        read -r signal_finished_at _ </proc/uptime
         printf 'Pre-env mode=%s phase=escalation-delay-observed monotonic=%s pid=%s start=%s\n' \
             "${mode}" "${signal_finished_at}" "${cli_engine_pid}" "${cli_engine_start_time}"
-        kill -INT -- "${cli_engine_pid}"
+        send_mock_pre_env_signal INT "${cli_engine_pid}" "${cli_engine_start_time}" \
+            "${signal_finished_at}" 10 "pre-env-${mode}" "${runtime_signal_log}"
         # Standard signals can coalesce while pending. Confirm return from the
         # first handler before sending the second INT that requests escalation.
         wait_for_mock_pre_env_marker "${cli_engine_pid}" "${cli_engine_start_time}" \
@@ -2207,24 +3479,25 @@ test_mock_signal_cli_pre_env_registration() {
         printf 'Pre-env mode=%s phase=first-handler-return-observed\n' "${mode}"
         # Measure escalation from its trigger, after the first-handler barrier.
         read -r signal_started_at signal_finished_at </proc/uptime
-        kill -INT -- "${cli_engine_pid}"
+        send_mock_pre_env_signal INT "${cli_engine_pid}" "${cli_engine_start_time}" \
+            "${signal_started_at}" 2 "pre-env-${mode}" "${runtime_signal_log}"
         observer_status=0
         # shellcheck disable=SC2310 # Failure is explicitly preserved by this predicate.
-        elapsed_milliseconds=$(wait_for_mock_pre_env_exit \
+        read_mock_pre_env_result elapsed_milliseconds \
             "${cli_engine_pid}" "${cli_engine_start_time}" "${parent_pid}" \
             "${signal_started_at}" 2 "pre-env-escalate-${mode}" "${runtime_signal_log}" \
             "${delay_marker}" "${continue_marker}" \
             "${TEST_ROOT}/pre-env-escalate-${mode}-runtime-started" \
             "${TEST_ROOT}/pre-env-escalate-${mode}-runtime-terminated" \
-            "${first_handler_returned_marker}") || observer_status=$?
+            "${first_handler_returned_marker}" || observer_status=$?
         reap_mock_pre_env_child "${cli_engine_pid}" "${cli_engine_start_time}" \
-            cli_engine_status "pre-env-escalate-${mode}" "${observer_status}"
+            cli_engine_status "pre-env-escalate-${mode}" observer_status "${signal_started_at}" 2 elapsed_milliseconds
         if ((observer_status != 0)); then
             fail "pre-env-escalate ${mode} observation failed with status ${observer_status}; child=${cli_engine_status}."
         fi
         assert_equals 130 "${cli_engine_status}" \
             "pre-env escalation ${mode} preserves first SIGINT status"
-        ((elapsed_milliseconds < 2000)) \
+        ((pre_env_elapsed_ns < 2000000000)) \
             || fail "Pre-env escalation ${mode} took ${elapsed_milliseconds}ms."
         shopt -s nullglob
         registration_leftovers=(
@@ -2956,6 +4229,9 @@ test_mock_signal_gui_foreground_group_registration() {
 }
 
 test_mock_signal_gui_blocked_progress() {
+    local pre_env_proc_fd pre_env_identity pre_env_keeper pre_env_writer pre_env_reader
+    local pre_env_address pre_env_elapsed_ns pre_env_launch_budget
+    local +x pre_env_ticket
     local controller_pid controller_start elapsed_milliseconds expected_status gui_pid gui_status
     local index marker observer_status preparation_started signal_log signal_name signal_pid_file
     local shutdown_budget_milliseconds=6000
@@ -2986,7 +4262,8 @@ test_mock_signal_gui_blocked_progress() {
         prepare_argument_log "gui-signal-blocked-progress-${signal_name}"
 
         read -r preparation_started unused </proc/uptime
-        env TMPDIR="${signal_tmpdir}" \
+        prepare_mock_pre_env_launch "${preparation_started}" 8 || fail 'Blocked-progress custodian unavailable.'
+        run_mock_pre_env_program env TMPDIR="${signal_tmpdir}" \
             MOCK_GUI_SIGNAL_PID_FILE="${signal_pid_file}" \
             MOCK_PLAN_PROTOCOL='m3u8_native' \
             MOCK_LONG_DOWNLOAD=1 \
@@ -3001,7 +4278,7 @@ test_mock_signal_gui_blocked_progress() {
         # Pin the direct child before any foreground external command. The
         # launch fixture restores signal dispositions before it execs the GUI.
         # shellcheck disable=SC2310 # Missing identity is an explicit fixture failure.
-        read_mock_process_start_time controller_start "${controller_pid}" \
+        capture_mock_pre_env_child controller_start "${controller_pid}" \
             || fail "Blocked-progress ${signal_name}: GUI identity unavailable."
         for marker in "${signal_pid_file}" "${worker_started_marker}" "${zenity_started_marker}"; do
             observer_status=0
@@ -3014,7 +4291,7 @@ test_mock_signal_gui_blocked_progress() {
                 "${signal_log}" "${marker}" >/dev/null || observer_status=$?
             if ((observer_status != 0)); then
                 reap_mock_pre_env_child "${controller_pid}" "${controller_start}" gui_status \
-                    "blocked-progress-${signal_name}-preparation" "${observer_status}"
+                    "blocked-progress-${signal_name}-preparation" observer_status
                 fail "Blocked-progress ${signal_name} preparation observer failed with status ${observer_status}; child=${gui_status}."
             fi
         done
@@ -3025,16 +4302,17 @@ test_mock_signal_gui_blocked_progress() {
         assert_equals "${controller_pid}" "${gui_pid}" \
             "blocked-progress ${signal_name} direct GUI identity"
         read -r signal_started_at unused </proc/uptime
-        kill "-${signal_name}" -- "${gui_pid}"
+        send_mock_pre_env_signal "${signal_name}" "${gui_pid}" "${controller_start}" \
+            "${signal_started_at}" 8 "blocked-progress-${signal_name}" "${signal_log}"
         observer_status=0
         # shellcheck disable=SC2310 # Expiration remains failure after diagnostic rescue.
-        elapsed_milliseconds=$(wait_for_mock_pre_env_exit \
+        read_mock_pre_env_result elapsed_milliseconds \
             "${controller_pid}" "${controller_start}" "${parent_pid}" \
             "${signal_started_at}" 8 "blocked-progress-${signal_name}-shutdown" \
-            "${signal_log}" "${worker_termination_marker}" "${zenity_termination_marker}") \
+            "${signal_log}" "${worker_termination_marker}" "${zenity_termination_marker}" \
             || observer_status=$?
         reap_mock_pre_env_child "${controller_pid}" "${controller_start}" gui_status \
-            "blocked-progress-${signal_name}-shutdown" "${observer_status}"
+            "blocked-progress-${signal_name}-shutdown" observer_status "${signal_started_at}" 8 elapsed_milliseconds
         if ((observer_status != 0)); then
             fail "Blocked-progress ${signal_name} shutdown observer failed with status ${observer_status}; child=${gui_status}."
         fi
@@ -3045,7 +4323,7 @@ test_mock_signal_gui_blocked_progress() {
         # Worker TERM/KILL polling can consume five seconds. Leave bounded CI
         # scheduling headroom while the independent eight-second shutdown
         # watchdog continues to distinguish a stalled cleanup path.
-        ((elapsed_milliseconds < shutdown_budget_milliseconds)) \
+        ((pre_env_elapsed_ns < shutdown_budget_milliseconds * 1000000)) \
             || fail "Blocked-progress ${signal_name} handling took ${elapsed_milliseconds}ms."
         wait_for_file "${worker_termination_marker}" 5 \
             "blocked-progress ${signal_name} worker receives TERM"
