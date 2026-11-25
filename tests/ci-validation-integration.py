@@ -1418,6 +1418,20 @@ exit "${CHECK_VALIDATION_STATUS}"
                     self.assertEqual(result.stdout, "validation fixture started\n", result.stderr)
                     self.assertEqual(result.returncode, expected, result.stderr)
 
+    def assert_shared_evidence_paths(self, retain, extra_paths=()):
+        root = "${{ runner.temp }}/shared-destination-evidence/"
+        expected = (
+            "qualification.log",
+            "shared-destination-real-*/*.log",
+            "shared-destination-real-*/events.json",
+            "shared-destination-real-*/qualification-errors.json",
+            "shared-destination-real-*/*.before-rescue.json",
+            "shared-destination-real-*/*.final-before-rescue.json",
+        )
+        paths = retain.split("          path: |\n", 1)[1].splitlines()
+        self.assertCountEqual([path.strip() for path in paths if path.strip()],
+                              [root + path for path in (*expected, *extra_paths)])
+
     def test_shared_destination_uses_one_verified_tool_entry_and_retains_only_diagnostics(self):
         job = self.jobs(self.workflow("real-tools.yml"))["pinned-local-media"]
         steps = re.split(r"(?m)^      - ", job)
@@ -1441,10 +1455,7 @@ exit "${CHECK_VALIDATION_STATUS}"
         self.assertIn("if-no-files-found: error", retain)
         self.assertIn("github.sha", retain)
         self.assertIn("github.run_attempt", retain)
-        paths = [path for path in retain.split("          path: |\n", 1)[1].splitlines() if path.strip()]
-        self.assertTrue(paths)
-        for path in paths:
-            self.assertRegex(path.strip(), r"^\$\{\{ runner.temp \}\}/shared-destination-evidence/(?:qualification\.log|shared-destination-real-\*/(?:\*\.log|events\.json|\*\.(?:final-)?before-rescue\.json))$")
+        self.assert_shared_evidence_paths(retain)
 
     def assert_current_stable_shared_contract(self, text):
         jobs = self.jobs(text)
@@ -1508,10 +1519,7 @@ exit "${CHECK_VALIDATION_STATUS}"
         retain = steps["Retain current-stable shared-destination verdicts and monotonic events"]
         self.assertIn("if-no-files-found: error", retain)
         self.assertIn("name: shared-destination-current-stable-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}", retain)
-        paths = [path.strip() for path in retain.split("          path: |\n", 1)[1].splitlines() if path.strip()]
-        self.assertEqual(len(paths), 7)
-        for path in paths:
-            self.assertRegex(path, r"^\$\{\{ runner.temp \}\}/shared-destination-evidence/(?:stable-resolution\.json|tool-versions\.log|qualification\.log|shared-destination-real-\*/(?:\*\.log|events\.json|\*\.(?:final-)?before-rescue\.json))$")
+        self.assert_shared_evidence_paths(retain, ("stable-resolution.json", "tool-versions.log"))
 
     def test_current_stable_requires_shared_fixture_and_its_resolved_prerequisites(self):
         self.assert_current_stable_shared_contract(self.workflow("real-tools.yml"))
@@ -1529,6 +1537,8 @@ exit "${CHECK_VALIDATION_STATUS}"
             ('== "${CURRENT_STABLE_YTDLP_VERSION}" ]]', '== 2026.08.19 ]]'),
             ("version not in item.specifier", "False"),
             ("shared-destination-evidence/tool-versions.log", "shared-destination-evidence/private-seeds.json"),
+            ("            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/qualification-errors.json\n", ""),
+            ("shared-destination-real-*/qualification-errors.json", "shared-destination-real-*/*.json"),
         ):
             with self.subTest(mutation=old):
                 self.assertIn(old, text)

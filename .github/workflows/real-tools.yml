@@ -232,6 +232,7 @@ jobs:
             ${{ runner.temp }}/shared-destination-evidence/qualification.log
             ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.log
             ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/events.json
+            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/qualification-errors.json
             ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.before-rescue.json
             ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.final-before-rescue.json
 
@@ -426,5 +427,6 @@ jobs:
             ${{ runner.temp }}/shared-destination-evidence/qualification.log
             ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.log
             ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/events.json
+            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/qualification-errors.json
             ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.before-rescue.json
             ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.final-before-rescue.json
