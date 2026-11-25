@@ -358,10 +358,15 @@ class OfflineCoherenceTests(unittest.TestCase):
                     write_version_sources(self.root, "2.4.7", published)
                     path = self.root / name
                     valid = path.read_text(encoding="utf-8")
+                    asset = f"yt-dlp-aria2-downloader-gui-{published}-1.fc{fedora}.noarch.rpm"
+                    url = f"https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/{asset}"
+                    row = f"| Fedora {fedora} | [RPM]({url}) |"
+                    self.assertEqual(valid.splitlines().count(row), 1)
+                    self.assertEqual(valid.count(asset), 1)
                     for before, after in (
                         (f"-1.fc{fedora}.noarch.rpm", f"-1.fc{wrong}.noarch.rpm"),
-                        (f"### Fedora {fedora}\n", f"### Fedora {wrong}\n"),
                         (f"| Fedora {fedora} | [RPM]", f"| Fedora {wrong} | [RPM]"),
+                        (url, url.replace("/latest/download/", "/download/v0/")),
                     ):
                         self.assertIn(before, valid)
                         path.write_text(valid.replace(before, after, 1), encoding="utf-8")

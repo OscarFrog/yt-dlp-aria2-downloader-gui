@@ -256,14 +256,14 @@ main() {
     fi
 
     # /etc/os-release is OS-controlled metadata and is used only to scope this
-    # release gate to the two distributions covered by this qualification.
+    # release gate to the Fedora Workstation release covered by this qualification.
     # shellcheck disable=SC1091
     source /etc/os-release
     case ${ID:-}:${VERSION_ID:-} in
-        fedora:44 | fedora:45 | ubuntu:24.04) ;;
+        fedora:45) ;;
         *)
             fail_test \
-                "real Zenity qualification requires Fedora 44, Fedora 45 or Ubuntu 24.04; got ${ID:-unknown} ${VERSION_ID:-unknown}."
+                "real Zenity qualification requires Fedora 45 Workstation; got ${ID:-unknown} ${VERSION_ID:-unknown}."
             ;;
     esac
 

@@ -12,11 +12,32 @@ jobs:
   identity:
     name: Source identity ${{ github.sha }}
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      volumes:
+        - /tmp
+        - /var/tmp
     timeout-minutes: 3
     steps:
+      - name: Verify Fedora 45 userspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Trust only the checked-out workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace=$(realpath -e -- "${GITHUB_WORKSPACE:?}")
+          [[ ${workspace} == "$(pwd -P)" && ${workspace} != / && ${workspace} != */\* ]]
+          git config --global --add safe.directory "${workspace}"
       - name: Bind validation to the event source
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -34,6 +55,11 @@ jobs:
     needs: identity
     name: Mock process/cancellation stress shard ${{ matrix.shard }}/4
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      volumes:
+        - /tmp
+        - /var/tmp
     # Each shard runs five independently bounded five-minute iterations.
     # Include all iterations plus checkout and cleanup in the job budget.
     timeout-minutes: 30
@@ -43,9 +69,23 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     steps:
+      - name: Verify Fedora 45 userspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          dnf -y --setopt=install_weak_deps=False install aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file shadow-utils
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Prepare unprivileged fixture owner
+        shell: bash
+        run: |
+          useradd --create-home qualification
+          chown -R qualification:qualification -- "${GITHUB_WORKSPACE}"
       - name: Repeat race-sensitive integration scenarios with bounded jitter
         env:
           STRESS_SHARD: ${{ matrix.shard }}
@@ -83,7 +123,7 @@ jobs:
             printf '%s\n' \
               "=== mock jitter iteration ${iteration}/20: cancel=${cancel}s late=${late_cancel}s pgid=${pgid}s worker=${worker}s ffmpeg=${ffmpeg_start}s supervisor=${supervisor}s ==="
 
-            timeout --signal=TERM --kill-after=10s 5m \
+            runuser -u qualification -- timeout --signal=TERM --kill-after=10s 5m \
               env \
                 YTDLP_STRESS_FIRST_FAILURE="${first_failure}" \
                 MOCK_CANCEL_JITTER_SECONDS="${cancel}" \
@@ -141,15 +181,34 @@ jobs:
     needs: identity
     name: Runtime-manager hardening (10 rollback/contention cycles)
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      volumes:
+        - /tmp
+        - /var/tmp
     timeout-minutes: 30
     env:
       RUNTIME_HARDENING_ROLLBACK_RUNS: 10
       RUNTIME_HARDENING_CONTENTION_RUNS: 10
     steps:
+      - name: Verify Fedora 45 userspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          dnf -y --setopt=install_weak_deps=False install aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file shadow-utils
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      - name: Prepare unprivileged fixture owner
+        shell: bash
+        run: |
+          useradd --create-home qualification
+          chown -R qualification:qualification -- "${GITHUB_WORKSPACE}"
       - name: Qualify runtime-manager transactions and contention
         shell: bash
         run: |
@@ -161,7 +220,7 @@ jobs:
           for group in validation rollback-admission recovery cache-identity transactions; do
             printf '\n=== Runtime hardening: %s ===\n' "${group}"
             status=0
-            timeout --signal=TERM --kill-after=10s 2m \
+            runuser -u qualification -- timeout --signal=TERM --kill-after=10s 2m \
               bash ./tests/runtime-manager-hardening-integration.sh --group "${group}" \
               || status=$?
             printf 'Runtime hardening %s status: %s\n' "${group}" "${status}"

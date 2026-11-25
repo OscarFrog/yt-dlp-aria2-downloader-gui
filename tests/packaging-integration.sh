@@ -17,7 +17,7 @@ readonly PROJECT_DIR
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/assert.sh
 source "${SCRIPT_DIR}/lib/assert.sh"
-# Exercise the same helper contract in staging and installed RPM/DEB lifecycles.
+# Exercise the same helper contract in staging and installed RPM lifecycles.
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/package-lifecycle.sh
 source "${SCRIPT_DIR}/lib/package-lifecycle.sh"
@@ -38,95 +38,6 @@ root=$(mktemp -d)
 
 cleanup() {
     rm -rf -- "${root}"
-}
-
-test_package_apt_routing() {
-    python3 -I -B - "${PROJECT_DIR}" <<'PY_PACKAGE_APT'
-import os
-from pathlib import Path
-import shutil
-import subprocess
-import sys
-import tempfile
-
-project = Path(sys.argv[1])
-bash = shutil.which("bash")
-assert bash is not None
-available = subprocess.run(["locale", "-a"], check=True, capture_output=True,
-                           text=True, encoding="utf-8").stdout.splitlines()
-locales = ["C"]
-locales.extend(value for value in available if value.lower().replace("-", "") == "fr_fr.utf8")
-checks = 0
-with tempfile.TemporaryDirectory(prefix="package-apt-routing-") as temporary:
-    root = Path(temporary)
-    binary = root / "bin"
-    binary.mkdir()
-    log = root / "calls"
-    for command in ("apt-get", "python3"):
-        fake = binary / command
-        fake.write_text(f"#!{bash}\n" + '''printf '%s\\0' "${0##*/}" "${DEBIAN_FRONTEND:-}" "$@" >"$CHECK_APT_CALL"
-exit "$CHECK_APT_STATUS"
-''', encoding="utf-8")
-        fake.chmod(0o755)
-    for language in locales:
-        for selection in (None, "", "1", "0", "hostile"):
-            for status in (0, 23, 100):
-                log.unlink(missing_ok=True)
-                env = dict(os.environ, LC_ALL=language, PATH=str(binary) + os.pathsep + os.defpath,
-                           LIBRARY=str(project / "tests/lib/package-lifecycle.sh"),
-                           PROJECT_DIR=str(project), CHECK_APT_CALL=str(log),
-                           CHECK_APT_STATUS=str(status))
-                env.pop("YT_DLP_CI_APT", None)
-                if selection is not None:
-                    env["YT_DLP_CI_APT"] = selection
-                result = subprocess.run(
-                    [bash, "-euc", 'source "$LIBRARY"; DEBIAN_FRONTEND=noninteractive '
-                     'package_test_apt install --yes "/tmp/paquet été 日本.deb"'],
-                    env=env, capture_output=True, timeout=5)
-                valid = selection in (None, "", "1")
-                assert result.returncode == (status if valid else 65), (selection, status, result)
-                assert not result.stdout
-                if valid:
-                    expected = [b"python3" if selection == "1" else b"apt-get", b"noninteractive"]
-                    if selection == "1":
-                        expected.extend([b"-I", b"-B", os.fsencode(project / "scripts/ci-ubuntu-mirrors.py"),
-                                         b"--apt"])
-                    expected.extend([b"install", b"--yes", "/tmp/paquet été 日本.deb".encode("utf-8")])
-                    assert log.read_bytes().split(b"\0")[:-1] == expected
-                    assert not result.stderr
-                else:
-                    assert not log.exists()
-                    assert result.stderr == b"Error: invalid CI APT selection.\n"
-                checks += 1
-        for directory in (None, "relative-project"):
-            log.unlink(missing_ok=True)
-            env = dict(os.environ, LC_ALL=language, PATH=str(binary) + os.pathsep + os.defpath,
-                       LIBRARY=str(project / "tests/lib/package-lifecycle.sh"), YT_DLP_CI_APT="1",
-                       CHECK_APT_CALL=str(log), CHECK_APT_STATUS="0")
-            env.pop("PROJECT_DIR", None)
-            if directory is not None:
-                env["PROJECT_DIR"] = directory
-            result = subprocess.run([bash, "-euc", 'source "$LIBRARY"; package_test_apt update'],
-                                    env=env, capture_output=True, timeout=5)
-            assert result.returncode == 65
-            assert not log.exists()
-            assert result.stderr == b"Error: CI APT requires an absolute project directory.\n"
-            checks += 1
-
-# Both DEB jobs must carry the selection across sudo for all package transitions.
-for workflow in ("packages.yml", "release.yml"):
-    text = (project / ".github/workflows" / workflow).read_text(encoding="utf-8")
-    for kind in ("lifecycle", "upgrade"):
-        script = f"packaging/deb/test-package-{kind}.sh"
-        assert text.count(f"sudo env YT_DLP_CI_APT=1 bash {script}") == 1
-        assert f"sudo bash {script}" not in text
-for kind, expected_calls in (("lifecycle", 5), ("upgrade", 4)):
-    text = (project / f"packaging/deb/test-package-{kind}.sh").read_text(encoding="utf-8")
-    assert text.count("package_test_apt ") == expected_calls
-    for command in ("install", "remove", "purge"):
-        assert f"apt-get {command}" not in text
-print(f"Package APT routing: {checks} cases passed; locales: {', '.join(locales)}")
-PY_PACKAGE_APT
 }
 
 test_rpm_transaction_routing() {
@@ -345,7 +256,6 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
-    test_package_apt_routing
     test_rpm_build_target_refusal
     test_rpm_transaction_routing
     test_rejected_private_directories

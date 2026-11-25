@@ -40,18 +40,13 @@ RPM_FILENAME = "yt-dlp-aria2-downloader-gui-{version}-1.fc{fedora}.noarch.rpm"
 PACKAGE_REFERENCES = (
     ("| Fedora {fedora} | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/"
      + RPM_FILENAME + ") |", 1),
-    ("\n### Fedora {fedora}\n", 1),
-    ("\n" + RPM_FILENAME + "\n", 1),
-    ("bash ./install-fedora.sh ./" + RPM_FILENAME + "\n", 1),
     ("yt-dlp-aria2-downloader-gui-{version}.zip", 3),
     ("cd yt-dlp-aria2-downloader-gui-{version}\n", 1),
-    ("yt-dlp-aria2-downloader-gui_{version}-1_all.deb", 3),
 )
 README_REFERENCE_TEMPLATES = {
     Path("README.md"): (
         ("latest published package release is **{version}**.", 1),
         ("currently published v{version} release.", 1),
-        ("latest published release, {version}, provides", 1),
         *PACKAGE_REFERENCES,
         ("gh release verify v{version} -R", 1),
         ("gh release verify-asset v{version} ./ARTIFACT", 1),
@@ -59,7 +54,6 @@ README_REFERENCE_TEMPLATES = {
     Path("README.fr.md"): (
         ("dernière release de paquets publiée est la **{version}**.", 1),
         ("release v{version} actuellement publiée.", 1),
-        ("dernière release publiée, la {version}, fournit", 1),
         *PACKAGE_REFERENCES,
         ("gh release verify v{version} -R", 1),
         ("gh release verify-asset v{version} ./ARTEFACT", 1),
@@ -124,8 +118,8 @@ def validate_reference_counts(
 ) -> None:
     """Require every generated release-reference shape at its exact count."""
 
-    if (text.count(f"yt-dlp-aria2-downloader-gui-{version}") != 7 or
-            text.count(f"yt-dlp-aria2-downloader-gui_{version}") != 3):
+    if (text.count(f"yt-dlp-aria2-downloader-gui-{version}") != 5 or
+            text.count(f"yt-dlp-aria2-downloader-gui_{version}") != 0):
         raise VersionUpdateError(f"{relative_path} has an unexpected published package reference count")
     fedora = published_fedora(version)
     for template, expected_count in README_REFERENCE_TEMPLATES[relative_path]:

@@ -2211,9 +2211,9 @@ def create_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    if sys.version_info < (3, 10):
+    if sys.version_info < (3, 15):
         print(
-            "Error: private aria2 planning requires Python 3.10 or newer",
+            "Error: private aria2 planning requires Python 3.15 or newer",
             file=sys.stderr,
         )
         return EXIT_VALIDATION

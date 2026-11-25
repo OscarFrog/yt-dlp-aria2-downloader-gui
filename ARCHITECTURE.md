@@ -10,7 +10,7 @@ for user-facing behavior.
 
 The project is a GNU/Linux desktop application with a Bash CLI engine, a Zenity
 front end, private Python helpers, managed per-user runtimes, native
-RPM/DEB packages, and GitHub Actions release automation.
+RPM packages, and GitHub Actions release automation.
 
 ```mermaid
 flowchart TD
@@ -53,7 +53,7 @@ does not implement a second download pipeline.
 | Fedora bootstrap | `install-fedora.sh` | Published beside release packages | Authenticate a release RPM on Fedora 45, install dependencies and the package, then prepare managed runtimes |
 
 Native packages keep implementation files under a private libexec directory.
-`packaging/install-tree.sh` creates the shared RPM/DEB payload, public symlinks,
+`packaging/install-tree.sh` creates the shared RPM payload, public symlinks,
 desktop entry, icon, manpages, and user documentation. Python helpers remain
 mode `0644` and are invoked explicitly with `python3`; they are not public
 commands. The aria2 and timed-process helpers belong to the native package
@@ -1160,13 +1160,13 @@ The other persistent paths are:
 
 ## Packaging architecture
 
+Fedora 45 is the only officially supported distribution. The graphical reference is Fedora 45 Workstation on Wayland. Runtime binaries must match x86_64 or aarch64. The release contains a noarch RPM and portable Fedora source ZIP. All application jobs verify the Fedora userspace and record the host kernel. CodeQL and GitHub API verification use hosted infrastructure.
+
 `packaging/install-tree.sh` is the common payload assembler. The format-specific
 builders wrap that tree:
 
 - `packaging/rpm/build-rpm.sh` archives committed sources, builds the noarch RPM
   through the spec, and validates the produced payload;
-- `packaging/deb/build-deb.sh` writes Debian control/checksum metadata, builds
-  the architecture-independent DEB, and validates its payload;
 - the RPM keeps `package-user-cleanup.sh` for two allowlisted lifecycle tasks:
   its install/upgrade scriptlet retires only exact historical project desktop
   entries that used the generic icon and would mask the system entry. The
@@ -1180,10 +1180,8 @@ builders wrap that tree:
   `/sync`, `/shutdown`, or `/halt`, without imposing UID or HOME-location
   restrictions on other accounts. This filter does not apply to final-erase
   enumeration or explicitly requested single-home operations;
-- the DEB deliberately removes that helper and preserves per-user data on
-  remove and purge.
 
-Both package families test install/remove/reinstall and an upgrade from the
+The RPM jobs test install/remove/reinstall and an upgrade from the
 previous immutable release. Package assembly intentionally installs current
 user documentation but not contributor-only policy, tests, skills, or this
 architecture document. The source ZIP contains the tracked source tree.
@@ -1192,8 +1190,8 @@ architecture document. The source ZIP contains the tracked source tree.
 
 | Workflow | Responsibility |
 | --- | --- |
-| `shell.yml` | PR source identity/coherence/syntax gate, pinned workflow checks and complementary Python analysis, full local suite on Ubuntu/Fedora and paired Python 3.10/Bash 4.4.0 |
-| `packages.yml` | Git-free source archive, RPM/DEB construction, lifecycle, authentication, and previous-release upgrade |
+| `shell.yml` | Fedora 45 checkout identity, x86_64, aarch64 and non-root FULL, pinned actionlint and Ruff |
+| `packages.yml` | Git-free source archive, RPM construction, lifecycle, authentication, and previous-release upgrade |
 | `real-tools.yml` | Pinned real-tool behavior and shared-destination qualification on both the latest pin and scheduled current-stable yt-dlp |
 | `qualification.yml` | Supported FFmpeg/FFprobe generation matrix |
 | `stress.yml` | Twenty signal timing tuples and ten runtime transaction cycles; existing required check aggregates all five PR workflows |
@@ -1214,13 +1212,13 @@ qualification. Historical content proof has no arbitrary calendar expiry; change
 new failure or missing evidence invalidates reuse. Current external inputs and
 explicit requalification/recovery are described in `TESTING.md`.
 
-The Ubuntu shell job also checks every canonical Python source with hash-pinned
+The Fedora non-root shell job also checks every canonical Python source with hash-pinned
 Ruff in a disposable environment. The source-proof verifier requires that
 step explicitly; local/package archive suites remain offline, and Ruff is not
-installed with the application. Python 3.10 syntax and runtime qualification
+installed with the application. Python 3.15 syntax and runtime qualification
 and CodeQL retain their separate roles.
 
-The Ubuntu shell job can collect passive validation diagnostics through
+The Fedora non-root shell job can collect passive validation diagnostics through
 `scripts/ci-validation-diagnostics.py`. Its optional private rendezvous identifies
 only the current runner's log directory. The reader retains bounded, allowlisted
 progress from GUI-state and packaging logs, including bytes available after the
@@ -1269,92 +1267,13 @@ PR candidates. Cross-run package artifacts are not promoted; their short build
 time does not justify another provenance/retention trust boundary. The release
 workflow no longer reruns full source suites. A parallel `release-runtime` job
 retains routing and aria2 behavior for each of the two original yt-dlp versions
-against newly resolved Ubuntu distribution dependencies. FFmpeg progress and
+against newly resolved Fedora distribution dependencies. FFmpeg progress and
 HLS duration run only in the latest-version matrix entry because those fixtures
 do not depend on yt-dlp. This checks an external environment not identified by
 the PR source proof. It records resolved package versions and gates final source
 verification/publication, without delaying independent package builds.
 
-Ubuntu's pinned media matrix shares an eight-minute budget between APT update
-and installation within a ten-minute setup step. Update has a three-minute
-limit. Installation receives the time left after update, measured using Linux
-uptime. The calculation rounds the start down and the end up to whole seconds.
-Each pinned job can finish
-independently, and the qualification gate requires all three successes.
-Current-stable and release-runtime jobs budget two minutes for update and four
-for installation within an eight-minute setup step. All three paths bound
-network inactivity, retries and dpkg-lock waits and propagate APT failures.
-The media jobs have sixty-five minutes and the release-runtime job has fifty
-minutes, including their individual test deadlines. The required stress aggregate allows
-seventy-five minutes for the latest complementary cohort inside an eighty-minute
-job; longer waiting never turns missing, failed or cancelled evidence into proof.
-
-Ubuntu media, generation-qualification and source/DEB build jobs use the
-source-only `scripts/ci-ubuntu-mirrors.py --setup` boundary. It creates a
-dedicated root-owned `/run/yt-dlp-ci-apt` tree, without reading or changing the
-runner's APT sources or mirror list. Two exact deb822 `deb` stanzas select
-`https://archive.ubuntu.com/ubuntu/` for `noble noble-updates noble-backports`
-and `https://security.ubuntu.com/ubuntu/` for `noble-security`, with the four
-components main/restricted/universe/multiverse and an explicit `Signed-By`
-selecting `/etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg` with the
-Ubuntu archive fingerprint `F6ECB3762474EDA9D21B7022871920D1991BC93C`.
-Noble's `ubuntu-keyring` package supplies this separate archive key. The
-dedicated path never falls back to `/usr/share`, whose permissions runner
-provisioning may relax, and never imports the other keys in `trusted.gpg.d`.
-APT verifies the selected primary key or its authenticated signing subkeys;
-an unrelated key cannot authorize these sources. A missing or unsafe key file
-refuses preparation; an invalid signature or unavailable selected signing key
-refuses update. Key rotation requires an explicit reviewed contract change.
-
-Every related APT command uses the same helper's `--apt` boundary, including
-DEB lifecycle, reinstall, upgrade and cleanup via explicit `YT_DLP_CI_APT=1`.
-Ordinary package tests keep their native APT behavior. The closed command API
-admits only reviewed dependency names, intended lifecycle remove/purge and
-already authenticated local DEB artifacts; it rejects caller configuration,
-source, version, release, regex and authentication overrides. Local DEB
-identity and provenance remain the lifecycle caller's independent obligation.
-No candidate helper is introduced in privileged validation/signing/publication.
-
-`APT_CONFIG` is supplied in a clean subprocess environment before APT reads
-its normal main/parts files. The dedicated configuration replaces main/parts,
-source lists/parts, preferences/parts, auth files/parts and global trust paths
-with exact private files or an empty protected directory. Separate package
-lists and caches prevent stale runner indexes from reintroducing foreign
-candidates. The two signed source stanzas use the explicit Ubuntu keyring;
-HTTPS verification stays enabled and redirects are disabled. A partial update
-is an error. An update failure prevents the subsequent installation, and
-all existing media timeouts, signal escalation and exit statuses remain intact.
-
-The configuration files are bounded regular single-link root-owned 0644 files
-inside protected 0755 directories, readable by APT's sandbox user. Setup is
-exclusive; incomplete state is refused, never silently repaired. A directory
-lock serializes helper operations. Before each APT invocation, exact bytes,
-permissions, identities, the keyring and empty configuration directory are
-validated, synced and revalidated. The same identities are checked afterward;
-an original APT failure takes precedence over a secondary validation/close
-failure. No cleanup removes ambiguous state: this disposable `/run` tree is
-left for runner teardown. Repeated setup must establish durability again.
-
-This is a command-scoped source boundary, not hardening of the whole runner.
-The trusted kernel, root, system APT/dpkg binaries, Ubuntu keyring, dpkg
-configuration, installed package state and maintainer scripts remain trusted.
-Reading the one explicit archive key does not consume ambient APT sources,
-preferences, hooks or the global trust store; it is the sole required key input.
-An already installed foreign package can satisfy a dependency; the boundary
-controls repository candidates, not the provenance of every installed package.
-Concurrent changes to ambient APT source lists, preferences and hooks do not
-affect these commands. Changes to the one selected archive key remain relevant:
-its identity and metadata are revalidated, and APT must authenticate signatures
-against the explicit fingerprint.
-Root replacement at observed boundaries is refused, but this is not a kernel
-compare-and-swap against a malicious root writer during APT reads.
-
-The dedicated path deliberately has no mirror-list fallback, unlike historical
-indirection. An unavailable official source fails rather than selecting an
-unknown mirror. The no-argument legacy normalizer and its strict diagnostic
-regressions remain for compatibility; none of the nine CI consumers uses it.
-Its closed legacy acceptance rules are unchanged and do not authorize unknown
-lists. Other APT usage outside these nine job scopes is unchanged.
+The media jobs use DNF in the admitted Fedora image. The shared CI helper authenticates the RPM Fusion key, exact release package and signature using an isolated keyring before enabling the repository. Media provisioning is bounded independently of each functional scenario.
 
 Within a release run, builds, signing, package tests, publication and public
 download verification pass immutable Actions artifact IDs through job outputs.
@@ -1362,20 +1281,15 @@ Each download requests one exact ID and rejects a digest mismatch; a replacement
 artifact with the same name cannot substitute for the object already tested.
 
 Third-party Actions are pinned by full commit SHA and checkout credentials stay
-disabled. Jobs receive only the permissions they need. The Ubuntu validation
+disabled. Jobs receive only the permissions they need. The Fedora non-root validation
 job verifies the pinned actionlint archive before running the shared explicit
 workflow check; ordinary local fast/full validation does not provision this
-additional tool. A separate setup-python job exercises the complete suite with
-Python 3.10 together with authenticated GNU Bash 4.4.0, and asserts both selected
-interpreters before starting its single full run. The Bash archive must match
-its fixed SHA-256 and maintainer signature before extraction; its private build
-uses the historical C dialect. Only a GitHub-hosted disposable runner may bind
-the absolute interpreter paths after apt. User workstation interpreters stay intact.
+additional tool. Fedora supplies the Python and Bash interpreters to both root and non-root validation jobs.
 The latest pinned real-tools entry also requires the shared-destination matrix
 with digest/version-verified Deno and selectively retained pre-rescue evidence.
 A dedicated latest-only prerequisite step installs the four exact wheel/hash
 pins for the verified yt-dlp wheel's `pin-curl-cffi` dependencies into its
-Python 3.12 / Ubuntu 24.04 venv before that matrix. Production managed-runtime
+Fedora 45 / Python 3.15 venv before that matrix. Production managed-runtime
 admission still requires a usable impersonation target; a plain wheel's successful
 version/help probes are insufficient. Static checks bind those prerequisites
 to their condition, target and execution order without adding a permanent helper
@@ -1425,7 +1339,7 @@ validation requires coherent source and published-release documentation
 contracts. The candidate source version and development paragraphs must match
 the tag, while published-asset references continue to identify the latest
 immutable release until post-publication alignment. This prevents the README
-files embedded in the immutable ZIP, RPM, and DEB from advertising assets that
+files embedded in the immutable source ZIP and RPM from advertising assets that
 do not yet exist.
 
 The post-release documentation workflow is a separate `workflow_run` trust
@@ -1453,7 +1367,7 @@ secrets/environments is outside ordinary code-change authority.
 ## Validation architecture
 
 `tests/lib/project-files.sh` is the canonical source inventory. `test-static.sh`
-checks headers, Python 3.10 grammar/module identity, repository-skill file metadata,
+checks headers, Python 3.15 grammar/module identity, repository-skill file metadata,
 version coherence, workflow pins and permissions, packaging contracts, and
 exact agreement between tracked/non-ignored source paths and the file table in
 `REPOSITORY_FILES.md`.
@@ -1489,7 +1403,7 @@ mapped dialogs, delivered progress and button events to output contents,
 statuses, argument privacy and process/window quiescence before fixture
 rescue. The deliberately opened real folder viewer remains independent of GUI
 cleanup and is owned by the isolated fixture; this route currently supports
-Nautilus on Fedora 44, Fedora 45 or Ubuntu 24.04 Wayland sessions. Captures of owned
+Nautilus on Fedora 45 Workstation Wayland sessions. Captures of owned
 windows retain dimensions and SHA-256 identity under the isolated Cairo
 renderer. Nautilus's D-Bus location property binds its mapped window to the
 selected directory. Dialog arguments, real
@@ -1594,7 +1508,7 @@ not a mandatory version derived from working branches. The offline
 explicitly selected new one across seven carriers, preserving modes and
 rolling back controlled errors. Repeating the same target is a no-op.
 
-Development RPM/DEB artifact names carry the source SHA and run ID;
+Development RPM artifact names carry the source SHA and run ID;
 Actions records bind their producing attempt and digest. Their numeric package
 version and CLI output remain compatible and need no installed Git metadata. Only the
 separate release chain can publish official signed/attested immutable objects.
@@ -1726,6 +1640,6 @@ When introducing a component or changing a connection between components:
 5. add or revise a regression test for the changed contract;
 6. run the local and specialized validation required by `TESTING.md`.
 
-Avoid duplicating a responsibility across GUI and engine, RPM and DEB builders,
+Avoid duplicating a responsibility across GUI and engine, RPM building and installation,
 or policy documents. Keep one authoritative implementation and make consumers
 route through it.

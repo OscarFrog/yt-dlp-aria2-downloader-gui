@@ -3353,10 +3353,15 @@ with tempfile.TemporaryDirectory(prefix="hardening-dispatch-") as directory:
     workflow_script.write_text("\n".join(lines) + "\n")
     binaries = root / "bin"
     binaries.mkdir()
+    runuser = binaries / "runuser"
+    runuser.write_text('#!/bin/sh\n'
+                       'test "$1 $2 $3 $4" = "-u qualification -- timeout" || exit 98\n'
+                       'export HARDENING_DISPATCH_USER=$2\nshift 3\nexec "$@"\n')
+    runuser.chmod(0o700)
     timeout = binaries / "timeout"
     timeout.write_text('''#!/bin/bash
 set -euo pipefail
-[[ $# == 7 && $1 == --signal=TERM && $2 == --kill-after=10s && $3 == 2m &&
+[[ ${HARDENING_DISPATCH_USER:-} == qualification && $# == 7 && $1 == --signal=TERM && $2 == --kill-after=10s && $3 == 2m &&
    $4 == bash && $5 == ./tests/runtime-manager-hardening-integration.sh &&
    $6 == --group && ${RUNTIME_HARDENING_ROLLBACK_RUNS} == 10 &&
    ${RUNTIME_HARDENING_CONTENTION_RUNS} == 10 ]] || exit 99
@@ -3372,7 +3377,7 @@ esac
     for mode, expected_status in (("pass", 0), ("first", 23), ("timeout", 124), ("late", 17)):
         log = root / ("stress-" + mode)
         environment = dict(os.environ, PATH=f"{binaries}:{os.environ['PATH']}",
-                           HARDENING_DISPATCH_LOG=str(log), HARDENING_WORKFLOW_MODE=mode,
+                           HARDENING_DISPATCH_LOG=str(log), HARDENING_WORKFLOW_MODE=mode, HARDENING_DISPATCH_USER="",
                            RUNTIME_HARDENING_ROLLBACK_RUNS="10", RUNTIME_HARDENING_CONTENTION_RUNS="10")
         result = subprocess.run([bash, str(workflow_script)], env=environment,
                                 capture_output=True, text=True, timeout=8)
@@ -3955,7 +3960,7 @@ EOF_MOCK_GIT
     cat >"${doctor_mock_bin}/python3" <<'EOF_MOCK_PYTHON'
 #!/usr/bin/env bash
 if [[ $* == *'platform.python_version()'* ]]; then
-    printf '3.10.0\n'
+    printf '3.15.2\n'
     exit "${DOCTOR_MOCK_PYTHON_VERSION_STATUS:-0}"
 fi
 if [[ $* == *'import socket;'* ]]; then

@@ -59,7 +59,7 @@ reading the whole repository.
 | --- | --- |
 | Bash, shell libraries or shell-bearing workflows | `.agents/skills/shell-change/SKILL.md`; read `SHELL_STYLE.md` in full |
 | Python helpers or Bash/Python interfaces | `TESTING.md` → **Python changes**; inspect both ends of the interface |
-| RPM/DEB, installation, cleanup, versions or release | `.agents/skills/packaging-release/SKILL.md` and matching workflow/static contracts |
+| Fedora RPM, installation, cleanup, versions or release | `.agents/skills/packaging-release/SKILL.md` and matching workflow/static contracts |
 | GitHub Actions, pins, signatures or provenance | `.agents/skills/workflow-supply-chain/SKILL.md`; `./scripts/check-workflows.sh` for workflow changes |
 | User-facing behavior/documentation | Both READMEs; keep English/French guidance equivalent |
 | Added, removed, moved or repurposed files | `REPOSITORY_FILES.md` plus canonical source arrays in `tests/lib/project-files.sh` |
@@ -83,7 +83,7 @@ banner into every format.
   is a module docstring naming the project, repository-relative module path, and
   durable role. A deliberately non-executable Python helper has no shebang and
   is invoked explicitly with `python3`.
-- Markdown titles, workflow `name` fields, desktop-entry keys, RPM and Debian
+- Markdown titles, workflow `name` fields, desktop-entry keys, RPM
   metadata, manpage `NAME` sections, and OpenPGP packet identity are the native
   identifiers for those formats.
 - `LICENSE` and packaging copyright metadata define repository-level licensing;
@@ -141,7 +141,7 @@ changes the underlying contract:
 
 ## Validation discipline
 
-Use Fedora 45 for Fedora package builds, installation tests and Fedora CI.
+Fedora 45 is the only officially supported distribution. Use Fedora 45 Workstation for the graphical campaign and its native Bash and Python for every application qualification. Use DNF and Fedora 45 RPMs. A hosted runner may provide the kernel to a pinned Fedora container. Record both identities and verify /etc/os-release before application tests.
 Preserve the published release examples and the immutable packages used for
 upgrade testing. See `TESTING.md` for the real Zenity platform requirements.
 

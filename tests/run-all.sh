@@ -515,16 +515,29 @@ doctor_capture_shellcheck_version() {
         info version:shellcheck unavailable 'version probe failed'
 }
 
+is_fedora_45() (
+    # shellcheck source=/dev/null
+    source /etc/os-release || return 1
+    [[ ${ID:-} == fedora && ${VERSION_ID:-} == 45 ]]
+)
+
 doctor_check_language_versions() {
     local python_version=''
 
-    if ((BASH_VERSINFO[0] > 4 || (\
-        BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))); then
+    # shellcheck disable=SC2310 # The predicate explicitly returns each admission failure.
+    if is_fedora_45; then
+        record_doctor_check required fedora-release pass 'Fedora 45 userspace'
+    else
+        record_doctor_check required fedora-release fail 'Application qualification requires Fedora 45'
+    fi
+
+    if ((BASH_VERSINFO[0] > 5 || (\
+        BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 3))); then
         record_doctor_check required bash-version pass \
-            "GNU Bash ${BASH_VERSION} satisfies the 4.4 minimum"
+            "GNU Bash ${BASH_VERSION} satisfies the 5.3 minimum"
     else
         record_doctor_check required bash-version fail \
-            "GNU Bash ${BASH_VERSION} is older than the 4.4 minimum"
+            "GNU Bash ${BASH_VERSION} is older than the 5.3 minimum"
     fi
 
     if ! command -v -- python3 >/dev/null 2>&1; then
@@ -535,14 +548,14 @@ doctor_check_language_versions() {
     # The bounded probe handles every command and pipeline failure explicitly.
     # shellcheck disable=SC2310
     if doctor_capture_bounded_output python_version python3 -c \
-        'import platform, sys; print(platform.python_version()); raise SystemExit(sys.version_info < (3, 10))' \
+        'import platform, sys; print(platform.python_version()); raise SystemExit(sys.version_info < (3, 15))' \
         2>/dev/null; then
         record_doctor_check required python-version pass \
-            "Python ${python_version} satisfies the 3.10 minimum"
+            "Python ${python_version} satisfies the 3.15 minimum"
     else
         [[ -n ${python_version} ]] || python_version='<unavailable>'
         record_doctor_check required python-version fail \
-            "Python ${python_version} is unavailable or older than the 3.10 minimum"
+            "Python ${python_version} is unavailable or older than the 3.15 minimum"
     fi
 }
 
@@ -1006,7 +1019,6 @@ run_doctor() {
     local -a optional_commands=(
         appstreamcli
         deno
-        dpkg-deb
         ffmpeg
         ffprobe
         gh
@@ -1607,6 +1619,12 @@ main() {
     if [[ ${LIST_ONLY} == true ]]; then
         list_suites
         return 0
+    fi
+
+    # shellcheck disable=SC2310 # The predicate explicitly returns each admission failure.
+    if ! is_fedora_45; then
+        printf '%s\n' 'Error: application qualification requires Fedora 45.' >&2
+        return 69
     fi
 
     for command_name in bash cat mktemp python3 rm shellcheck sleep; do

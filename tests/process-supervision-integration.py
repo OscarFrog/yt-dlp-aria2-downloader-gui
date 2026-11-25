@@ -2227,10 +2227,10 @@ class TeardownRescueTests(unittest.TestCase):
                 self.assertEqual(len(fixture.close_attempts), 1)
 
 
-def report_first_failure(watcher, error, *, python310):
+def report_first_failure(watcher, error, *, fedora_native):
     """Emit only closed public metadata; recording a failure must preserve it."""
     # The public envelope name never comes from a test environment or exception.
-    key = 'python310_first_failure' if python310 else 'stress_first_failure'
+    key = 'fedora_native_first_failure' if fedora_native else 'stress_first_failure'
     fallback = '{"' + key + '":{"complete":false}}'
     limit = 16 * 1024
     line = fallback
@@ -2278,7 +2278,7 @@ class StressFirstFailureTests(unittest.TestCase):
     shard4_selection = {'STRESS_SHARD': '4', 'YTDLP_STRESS_FIRST_FAILURE': '4:12'}
 
     engine_target = 'test_engine_cli_wrapper_exit_retains_resource_and_lock'
-    engine_selection = {'YTDLP_PY310_FIRST_FAILURE': 'engine-cli-first-sample'}
+    engine_selection = {'YTDLP_FEDORA_FIRST_FAILURE': 'engine-cli-first-sample'}
 
     def capture(self, case, stream, sample):
         with redirect_stderr(stream), self.assertRaises(observer.ObservationError) as caught:
@@ -2300,13 +2300,13 @@ class StressFirstFailureTests(unittest.TestCase):
                 case = ProcessTests(method)
                 self.check_silent_scope(case, env, enabled, case.sample_before_cli_escalation)
 
-    def test_python310_scope_and_success_are_silent(self):
+    def test_fedora_native_scope_and_success_are_silent(self):
         for method, env, reuse, enabled in (
                 (self.engine_target, {}, False, False), (self.engine_target, self.selection, False, False),
-                (self.engine_target, {'YTDLP_PY310_FIRST_FAILURE': '1'}, False, False),
+                (self.engine_target, {'YTDLP_FEDORA_FIRST_FAILURE': '1'}, False, False),
                 (self.target, self.engine_selection, False, False),
                 (self.engine_target, self.engine_selection, True, False),
-                (self.engine_target, self.engine_selection, False, sys.version_info[:2] == (3, 10))):
+                (self.engine_target, self.engine_selection, False, sys.version_info[:2] == (3, 15))):
             with self.subTest(method=method, env=env, reuse=reuse):
                 case = ProcessTests(method)
                 self.check_silent_scope(case, env, enabled, lambda: case.sample_before_engine_signal(reuse))
@@ -2334,11 +2334,11 @@ class StressFirstFailureTests(unittest.TestCase):
                 self.check_private_open(case, case.sample_before_cli_escalation, selection, 'stress_first_failure',
                                         'environ', errno.EACCES, 'known_identity', True)
 
-    def test_python310_private_cmdline_error_survives_capture_and_teardown(self):
+    def test_fedora_native_private_cmdline_error_survives_capture_and_teardown(self):
         case = ProcessTests(self.engine_target)
         self.check_private_open(case, lambda: case.sample_before_engine_signal(False),
-                                self.engine_selection, 'python310_first_failure', 'cmdline', errno.EIO, 'marker',
-                                sys.version_info[:2] == (3, 10))
+                                self.engine_selection, 'fedora_native_first_failure', 'cmdline', errno.EIO, 'marker',
+                                sys.version_info[:2] == (3, 15))
 
     def check_private_open(self, case, sample, selection, label, resource, number, attribution, eligible):
         case.setUp()
@@ -5371,10 +5371,10 @@ exit "$?"
         self.assertFalse(self.observer.sample()['live'])
 
     def sample_before_engine_signal(self, reuse):
-        if (reuse is False and sys.version_info[:2] == (3, 10)
+        if (reuse is False and sys.version_info[:2] == (3, 15)
                 and self._testMethodName == 'test_engine_cli_wrapper_exit_retains_resource_and_lock'
-                and os.environ.get('YTDLP_PY310_FIRST_FAILURE') == 'engine-cli-first-sample'):
-            return self.sample_with_first_failure(python310=True)
+                and os.environ.get('YTDLP_FEDORA_FIRST_FAILURE') == 'engine-cli-first-sample'):
+            return self.sample_with_first_failure(fedora_native=True)
         return self.observer.sample()
 
     def engine_case(self, reuse):
@@ -5595,16 +5595,16 @@ exit "$DOWNLOAD_STATUS"
         if (self._testMethodName != 'test_cli_escalates_subgroup_before_retiring_sentinel'
                 or selection not in (('2', '2:18'), ('4', '4:12'))):
             return self.observer.sample()
-        return self.sample_with_first_failure(python310=False)
+        return self.sample_with_first_failure(fedora_native=False)
 
-    def sample_with_first_failure(self, *, python310):
+    def sample_with_first_failure(self, *, fedora_native):
         watcher = self.observer
         previous = watcher.diagnostics_enabled, watcher.identity_diagnostics_enabled
         watcher.diagnostics_enabled = watcher.identity_diagnostics_enabled = True
         try:
             return watcher.sample()
         except Exception as error:
-            report_first_failure(watcher, error, python310=python310)
+            report_first_failure(watcher, error, fedora_native=fedora_native)
             raise
         finally:
             watcher.diagnostics_enabled, watcher.identity_diagnostics_enabled = previous

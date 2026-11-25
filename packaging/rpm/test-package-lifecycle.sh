@@ -94,7 +94,9 @@ validate_rpm_dependencies() {
     package_requires=$(rpm -qpR -- "${PACKAGE_PATH}")
     for required_dependency in \
         'aria2 >= 1.37.0' \
-        'python3 >= 3.10' \
+        'system-release(45)' \
+        'bash >= 5.3' \
+        'python3 >= 3.15' \
         'ffmpeg' \
         'curl' \
         'gnupg2' \

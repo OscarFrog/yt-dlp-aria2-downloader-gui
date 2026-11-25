@@ -155,7 +155,7 @@ mktemp() { return 75; }
 builtin source "$1" success
 '''
         for distro, version, admitted in (
-                ('fedora', '44', True), ('fedora', '45', True), ('ubuntu', '24.04', True),
+                ('fedora', '44', False), ('fedora', '45', True), ('ubuntu', '24.04', False),
                 ('fedora', '43', False), ('fedora', '46', False), ('ubuntu', '24.10', False),
                 ('debian', '45', False), ('ubuntu', '45', False), ('fedora', '', False)):
             with self.subTest(route='autonomous', distro=distro, version=version):
@@ -1457,7 +1457,7 @@ class PrivacyAndCleanupTests(unittest.TestCase):
 
             def read(path, *args, **kwargs):
                 if path == Path('/etc/os-release'):
-                    return 'ID=fedora\nVERSION_ID=44\n'
+                    return 'ID=fedora\nVERSION_ID=45\n'
                 return real_read(path, *args, **kwargs)
 
             previous_umask = os.umask(0o077)

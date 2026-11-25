@@ -27,7 +27,6 @@ body:
       label: Installation method
       options:
         - Fedora RPM / install-fedora.sh
-        - Debian or Ubuntu DEB
         - Release ZIP
         - Git checkout
         - Other / unsure
@@ -38,7 +37,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: GNU/Linux distribution and version, desktop if relevant, GUI or terminal, and relevant tool versions if known. Omit usernames and hostnames.
+      description: Fedora 45 edition and kernel, desktop if relevant, GUI or terminal, and relevant tool versions if known. Omit usernames and hostnames.
       placeholder: Distribution; desktop; GUI or terminal; relevant dependency versions.
     validations:
       required: true

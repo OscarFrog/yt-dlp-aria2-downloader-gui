@@ -2,6 +2,9 @@
 
 ## 2.4.6 - Unreleased
 
+- Fedora 45 is the only officially supported distribution. Future releases provide a Fedora 45 RPM and a portable source ZIP. CI exercises the native Python and Bash, the RPM lifecycle and the Git-free source tree on Fedora 45.
+- Validate the diagnostic owner of a retiring thread leader against the anchored procfs entry. The process identity, exit status and deadline checks are preserved.
+
 ### Maintenance
 
 - Preserve Unicode in Zenity dialogs and make engine protocols independent of the caller locale.

@@ -21,7 +21,7 @@ project. It is intentionally independent of a particular release date.
 - [Shared-destination and process qualification](#shared-destination-and-process-qualification)
 - [Release maintainer preflight](#release-maintainer-preflight)
 - [Post-release evidence qualification](#post-release-evidence-qualification)
-- [Real-world checks on Fedora 44](#real-world-checks-on-fedora-44)
+- [Real-world checks on Fedora 45](#real-world-checks-on-fedora-45)
 - [Locale-stabilized probes](#locale-stabilized-probes)
 - [Stress validation](#stress-validation)
 - [Network destination qualification](#network-destination-regression-and-opt-in-cifs-qualification)
@@ -102,7 +102,7 @@ Delivery: local changes only / commit / push a PR / other explicit authority.
 
 ## Python changes
 
-The production minimum is Python 3.10 with standard-library dependencies. Read
+The production minimum is Fedora Python 3.15 with standard-library dependencies. Read
 the helper's entry point, imports and Bash callers; review stdout/stderr and
 exit-status contracts, bounded parsing, subprocess groups/timeouts, private
 paths, descriptor ownership and cleanup after exceptions/signals. Keep private
@@ -110,33 +110,13 @@ values out of errors, process arguments and test artifacts. Choose behavioral
 tests from the route table, including the Bash side when applicable.
 
 `test-static.sh` validates every `PYTHON_FILES` module's SPDX/docstring identity
-and parses it with Python 3.10's grammar. This detects newer syntax but does not
-prove runtime/API compatibility with Python 3.10. The existing Bash integration
+and parses it with Python 3.15's grammar. This detects newer syntax but does not
+prove runtime/API behavior under Python 3.15. The existing Bash integration
 suites and stdlib `unittest` tests are the behavioral test entry points; pytest
 and type checkers are not project requirements. Ruff provides the separate
 static check described below. Static analysis, compilation or typing alone
 cannot establish exception, subprocess or cancellation behavior.
-The `shell.yml` job **Python 3.10 / Ubuntu** selects the real minimum interpreter,
-asserts its minor version, and runs doctor plus the full contract together with
-GNU Bash 4.4.0. The Bash source archive is verified by fixed SHA-256 and the
-exact upstream maintainer signature before building. Both absolute and PATH
-lookups are bound and checked only on the disposable GitHub-hosted runner. This job is
-additional qualification; its addition does not change remote required-check
-settings.
-
-The paired minimum-interpreter job allows eight minutes for the complete
-four-worker suite, within its unchanged ten-minute job budget. This aggregate
-budget includes every static and integration task; it is separate from the
-individual signal, shutdown and fixture deadlines, which remain unchanged.
-Ubuntu and Fedora allow seven minutes for their complete suites.
-Every wrapper retains TERM followed by KILL after ten seconds. The Ubuntu
-budget includes headroom for the measured workload: a complete remote Git-free
-Ubuntu run took 299.487 seconds, while a checkout run reached the former
-300-second boundary with 35 successful verdicts and two suites still progressing.
-The complete measurement plus a 25% allowance, rounded up to whole minutes,
-gives 420 seconds. Git-free and checkout environments are distinct; this budget
-does not attribute historical delays to unmeasured load. The ten-minute job cap,
-four-worker schedule and every individual fixture deadline remain unchanged.
+The Fedora checkout jobs run the complete suite on the native interpreters. The additional aarch64 job checks the runner architecture and executes FULL with native Fedora tools. The non-root job retains the passive diagnostics for timeouts and failed children. Each checkout suite has a seven-minute command budget within the ten-minute job. The Git-free archive exercises the packaged source separately.
 
 Fedora's seven-minute command leaves 170 seconds within its ten-minute job cap
 for preparation and final cleanup after allowing the ten-second termination
@@ -148,7 +128,7 @@ event remains unqualified even when other suites have succeeded. The existing
 events identify the unfinished work and last recorded progress; they do not
 establish the cause of a timeout or an unobserved final duration.
 
-The Ubuntu `Run validation` step also records bounded passive diagnostics for
+The Fedora non-root `Run validation` step also records bounded passive diagnostics for
 its current execution. `scripts/ci-validation-diagnostics.py` reads aggregate
 resource counters and allowlisted progress from the GUI-state and packaging
 logs. The runner consumes its optional private rendezvous before starting
@@ -165,25 +145,17 @@ The diagnostic's tests run in the canonical CI-validation integration suite.
 Its reader has a separate finite 450-second, 451-sample ceiling, allowing
 collection after the seven-minute command and its termination grace period.
 
-Some Linux fixtures deliberately use `/usr/bin/python3` or a restricted system
-PATH. After installing distribution dependencies, the disposable minimum-Python
-CI runner binds that path to its selected Python 3.10 and asserts both lookup
-forms before validation. Selecting only the driver's PATH would leave those
-helpers running the distribution's newer interpreter. This adjustment belongs
-only to the disposable qualification environment; do not replace the system
-Python on a user's workstation. Equivalent local containers must expose Python
-3.10 through both paths and run as a non-root user, matching the ordinary CI
-user rather than UID 0 with its capabilities removed.
+Absolute and PATH-based interpreter lookups must reach the native Fedora RPMs. The non-root job runs the full observer and signal regressions under a separate ordinary UID.
 
 ### Reproducible Python static analysis
 
-`ruff.toml` requires Ruff **0.14.4**, targets Python 3.10 and enables only
+`ruff.toml` requires Ruff **0.14.4**, uses the Python 3.14 grammar supported by this Ruff release and enables only
 `E4`, `E7`, `E9` and `F`: import/statement errors and Pyflakes diagnostics.
-This is a contributor/CI dependency, never an application or RPM/DEB runtime
+This is a contributor/CI dependency, never an application or RPM runtime
 dependency. No automatic fixes or formatting are part of the check.
 
 Run this from the repository root in Bash. Python's `venv` module and pip are
-needed for provisioning (`python3-venv` on Ubuntu); no system Python installation
+needed for provisioning (`python3-pip` on Fedora); no system Python installation
 is changed. The reviewed requirement covers GNU/Linux glibc 2.17 or newer on
 x86_64/aarch64. Other platforms fail rather than fall back to an unpinned wheel
 or source build.
@@ -218,9 +190,9 @@ corresponding `required-version` before qualifying the changed tree.
 The check passes the canonical `PYTHON_FILES` array explicitly, so it covers
 application helpers, development tools and tests even in a Git-free source
 archive. Source inventory tests detect unlisted Python files. The existing
-**Ubuntu** job in `shell.yml` runs this additional step and the source-proof
+**Fedora 45 non-root** job in `shell.yml` runs this additional step and the source-proof
 verifier requires its success; no required-check name, permission or CodeQL
-analysis is changed. The Ubuntu job retains its ten-minute envelope and the
+analysis is changed. The Fedora non-root job retains its ten-minute envelope and the
 suite's seven-minute deadline. Ruff provisioning/analysis has a separate
 two-minute step limit; a slow installation can fail rather than consume an
 unbounded wait.
@@ -232,9 +204,7 @@ new requirement. Do not add a missing-step exception for those runs.
 
 `tests/run-all.sh`, `test-static.sh`, package builds and source-archive replays
 retain their existing offline contract and do not download Ruff. A successful
-full suite therefore does not imply a Ruff pass: record both checks separately
-for Python changes. The real Python 3.10/Bash 4.4 qualification remains necessary
-because Ruff's target setting does not verify runtime/API compatibility.
+full suite therefore does not imply a Ruff pass. Record the native runtime and pinned static analysis results separately.
 
 ### Human-readable diagnostic regressions
 
@@ -307,7 +277,7 @@ status. The check never installs or downloads tools. It validates every YAML
 workflow and its embedded shell; optional Pyflakes integration stays disabled
 because it is not a project dependency.
 
-The required Ubuntu CI job provisions the reviewed Linux archive, checks its
+The Fedora non-root CI job provisions the reviewed Linux archive, checks its
 SHA-256 before extracting the executable, and invokes this same script before
 the canonical suite. Use that bounded bootstrap procedure when preparing a
 local tool, adjusting the reviewed architecture pin if necessary. Merely
@@ -334,7 +304,7 @@ new validation. Never reuse a published tag/version/assets for different bytes.
 | `download-video.sh` → `VERSION` | Coherent source version; ordinary development may retain a published number |
 | `install-fedora.sh` → `APP_VERSION`; `test-static.sh` → `EXPECTED_VERSION` | Must equal the source version |
 | Development paragraph and manual release commands in both READMEs; leading versioned CHANGELOG and RPM `%changelog` entries | Must identify the same source version |
-| RPM `%{project_version}`, DEB/ZIP builders | Derive/validate the requested package version against the engine |
+| RPM `%{project_version}`, source ZIP builder | Derive/validate the requested package version against the engine |
 | `EXPECTED_PUBLISHED_VERSION` and README asset references | Describe the latest immutable published version; advance them only after that release exists and has passed the post-publication verification |
 | Signed `vX.Y.Z` tag and release preflight | Separately authorized identity, qualified contents and publication prerequisites |
 
@@ -413,7 +383,7 @@ the inspected setup there. This is a local guard, not a GitHub server rule;
 remote CI and branch protection remain necessary, including for concurrent
 remote changes and writes from clients without this hook.
 
-The hook requires Git, Bash and Python 3.10+, a simple configured remote name
+The hook requires Git, Bash and Python 3.15+, a simple configured remote name
 such as `origin`, one identical fetch/push URL and a remote main branch. Split
 URLs, multiple push URLs and raw-URL push invocations fail explicitly instead of
 checking another repository. The checker avoids copying remote URLs into its
@@ -433,7 +403,7 @@ data-only parsing, batch rejection, deletions, no-ops, process timeout cleanup,
 all seven source carriers, idempotent release preparation, write failures,
 interruption and rollback. `test-static.sh` includes it in
 both canonical profiles; it explicitly skips Git-dependent cases if Git is
-absent from a Git-free source-validation environment. Installed RPM/DEB payloads
+absent from a Git-free source-validation environment. Installed RPM payloads
 do not include these contributor tools; source archives contain them.
 
 The automation handoffs have separate behavioral replays, also called by static
@@ -483,7 +453,7 @@ can run the hermetic local contract before choosing a validation profile:
 
 This diagnostic does not run a validation suite, install a dependency, populate
 the managed shfmt cache, or modify the repository. It checks required commands,
-the Bash 4.4 and Python 3.10 baselines, the pinned shfmt/bootstrap contract,
+the Fedora Bash 5.3 and Python 3.15 baselines, the pinned shfmt/bootstrap contract,
 private temporary-directory semantics, IPv4 loopback binding, and readable
 Linux `/proc` process metadata. It also reports optional qualification tools,
 selected tool versions through time/output-bounded probes, Git/source-archive
@@ -925,10 +895,7 @@ done
 option models explicit. `test-static.sh` verifies that those classifications
 remain inside the canonical inventory and that every executable begins with an
 approved top-level `set` declaration. Installed production and cleanup helpers
-target GNU Bash 4.4 or newer. The **Python 3.10 / Ubuntu** job exercises the
-full contract with Bash 4.4.0 as well as Python 3.10, including absolute-path
-and restricted-PATH fixtures; Ubuntu and Fedora jobs additionally cover their
-distribution interpreters. A version string or syntax parse alone is insufficient.
+target GNU Bash 5.3 or newer. The Fedora checkout jobs exercise the native system Bash and Python, including restricted PATH and absolute-path fixtures.
 
 ## ShellCheck
 
@@ -937,7 +904,7 @@ source ./tests/lib/project-files.sh
 shellcheck -x -o all -- "${ALL_SHELL_FILES[@]}"
 ```
 
-ShellCheck is intentionally taken from the supported Ubuntu and Fedora
+ShellCheck is intentionally taken from the Fedora 45
 environments rather than pinned by the repository. The `-o all` contract means
 new optional diagnostics become enforced when those environments update; fix
 the construct or review an explicit policy change instead of silently retaining
@@ -958,7 +925,7 @@ The automated suite checks, among other things:
   permanent `PATCH`/`AUD` labels;
 - development-version coherence across active scripts, documentation and
   release-workflow surfaces, plus a separate documentation pin for the exact
-  RPM, DEB and ZIP names of the latest published release, while keeping
+  RPM and ZIP names of the latest published release, while keeping
   historical CHANGELOG entries exempt;
 - standardized Bash headers on every canonical shell script, including the canonical interpreter line, an SPDX MIT tag, project name, repository-relative file name and purpose;
 - argument validation, terminal `--`, and exactly one URL per run;
@@ -1147,8 +1114,6 @@ The automated suite checks, among other things:
   the unchanged staged bytes;
 - an independent release-CI negative test that repeats the wrong-signer attack
   against a copy of the actual signed release RPM before publication;
-- real build, APT installation, removal, and ownership validation of the DEB on
-  Ubuntu 24.04 without system yt-dlp or Deno package dependencies.
 
 - private GUI URL transfer through owner-only URL and yt-dlp batch files, with
   the requested URL absent from GUI, engine, and yt-dlp process arguments;
@@ -1250,12 +1215,12 @@ The automated suite checks, among other things:
   install recovery, and lock retention until foreground writes and GnuPG cleanup
   finish; SIGKILL and probe-capture residue collection are outside this guarantee.
 - package reinstall plus real previous-immutable-release -> current upgrade
-  validation for RPM and DEB, using the exact previously published package
+  validation for RPM, using the exact previously published package
   bytes rather than rebuilding the previous version from source;
 - preservation of a deterministic archive snapshot of the per-user
   managed-runtime tree across previous package installation and package
   upgrade, followed by allowlisted cleanup on final RPM removal and explicit
-  DEB preservation through remove and purge;
+  the allowlisted cleanup on final RPM erase;
 - package-cleanup integration coverage for a custom `XDG_DATA_HOME`, exact
   legacy `-gui` paths, preservation of unrelated similarly named files, and
   preservation of a portable ZIP/Git launcher;
@@ -1427,10 +1392,12 @@ both behavioral guarantees.
 
 ## GitHub Actions
 
+Fedora 45 is the only officially supported distribution. The standard GitHub runner hosts containers from the official Fedora registry. Check `/etc/os-release` for the userspace and `uname -r` for the shared host kernel. A container run qualifies the userspace. Only a native Fedora 45 Workstation Wayland session qualifies the graphical platform. The architecture-specific runtimes support x86_64 and aarch64 where verified upstream assets exist.
+
 The five qualification workflows run on pull requests, with manual dispatch
 available for diagnostics. Each checks event/checkout identity, version
 coherence and Bash syntax before its own qualification jobs. `shell.yml`
-qualifies Ubuntu 24.04, Fedora 45 and actual Python 3.10; package, real-tool,
+qualifies Fedora 45 with root and ordinary-user permissions. Package, real-tool,
 FFmpeg and stress work need not wait for that complete shell contract. Root
 jobs retain `needs: identity` and downstream package/shard dependencies.
 This avoids four allocated runners polling for shell completion and overlaps
@@ -1439,14 +1406,7 @@ fan-out, but a later functional failure can occur after other work has started.
 The tradeoff improves successful PR latency rather than minimizing work on
 every failing PR.
 
-The existing required check **Mock process/cancellation stress (20x deterministic
-jitter)** also waits for every complementary shell, package, real-tool and
-FFmpeg job. It excludes its own workflow from that API wait: its local `needs`
-cover its shards and runtime test, avoiding a self-dependency. Four of the nine required
-check names include the Fedora version. Verify the four Fedora 45 jobs on a
-published candidate before replacing their Fedora 44 counterparts in branch
-protection. Keep the other five required checks and strict status checks. Matrices
-cancel remaining entries after a failure, and PR concurrency cancels superseded
+The stress aggregator requires all four shards, ten runtime-manager cycles and the other qualified workflows. For a protection migration, require the new Fedora non-root and Git-free archive checks after both have actually passed on the candidate.
 revisions. Scheduled current-stable tools remain independent diagnostics.
 
 `promotion.yml` is the only source workflow triggered by `push main`. It checks
@@ -1521,7 +1481,7 @@ Manual diagnostic dispatch runs do not replace PR evidence.
 | Class | Content and place | Reuse |
 | --- | --- | --- |
 | A | Event/checkout identity, version, syntax; formatting, ShellCheck, static and workflow contracts early in shell CI | Cheap rejection before costly work |
-| B | Full hermetic functional suites on Ubuntu/Fedora/Python 3.10 | Once in each complementary environment on PR |
+| B | Full hermetic suites on Fedora 45 x86_64, non-root, aarch64 and Git-free sources | Once in each complementary environment on PR |
 | C | Git-free source, real-tool/pinned versions, FFmpeg generations, signal jitters, native package candidate qualification | Once per candidate tree; complete required gate before merge |
 | D | Tag/signer/main/version, final ZIP identity, release build/sign/install/upgrade, newly resolved distribution runtime, provenance, immutable assets and public download | At release, on final objects and current external inputs |
 
@@ -1530,7 +1490,7 @@ The full source archive is qualified once on PR without `.git`. At release,
 paths, extraction modes and bytes with the immutable Git blobs, reading members
 without extracting or executing them. Its strict Git ZIP format rejects altered
 inventory, unsupported metadata and content; a new intentional archive/export
-format needs a corresponding verifier change. RPM/DEB construction is inexpensive
+format needs a corresponding verifier change. RPM construction is inexpensive
 relative to qualification, so release builds new candidates and tests their
 final bytes. Cross-run package promotion would introduce digest/provenance and
 retention obligations for little wall-clock gain; it is not used here.
@@ -1539,7 +1499,7 @@ The PR source proof does not contain a cryptographically bound fingerprint of
 every installed distribution package and library. Even an unchanged FFmpeg
 version string can hide a changed distribution revision. Therefore release
 retains `release-runtime`: one routing and aria2 behavior pass for each original
-pinned yt-dlp version (2026.6.9 and 2026.8.19) on freshly resolved Ubuntu
+pinned yt-dlp version (2026.6.9 and 2026.8.19) on freshly resolved Fedora
 dependencies. The aria2 fixture uses native yt-dlp fallbacks, so both versions
 remain necessary, with their existing internal cycles. FFmpeg progress and HLS
 duration run once in the latest matrix entry because those fixtures are
@@ -1568,17 +1528,15 @@ anonymous `/var/tmp` disk volume for the media workspace cases; both normal and
 failure cleanup remove that volume with the verifier container. The RPM `rpm`
 job in `packages.yml` and `rpm-test` job in `release.yml` exercise installed
 helpers after installation and upgrade, including private JSON plans and engine
-workspace checks; both matrix scenarios require these volumes. RPM build-only
-and isolated signing jobs do not execute that helper contract and retain their
-existing storage setup. DEB lifecycle/upgrade and Git-free source qualification
-run directly on Ubuntu runners with their ordinary local temporary storage.
+workspace checks. Both RPM test scenarios and the Git-free Fedora source job use these volumes.
+RPM build-only and isolated signing jobs do not execute the installed helper.
 
-`.github/workflows/packages.yml` validates both package formats. Before package
+`.github/workflows/packages.yml` validates the Fedora 45 RPM. Before package
 upgrade testing, a dedicated `previous-release` job resolves the immediately
 preceding semantic-version release, requires it to be immutable, downloads its
-exact published RPM, DEB, and SHA256SUMS, and verifies release identity,
+exact published RPM and SHA256SUMS, and verifies release identity,
 checksums, release-asset identity, and SLSA provenance bound to the expected
-repository, release workflow, and exact source commit. The RPM and DEB upgrade
+repository, release workflow, and exact source commit. The RPM upgrade
 jobs consume those verified bytes through a short-lived Actions artifact and
 recheck their transferred SHA-256 digests before installation.
 
@@ -1589,12 +1547,12 @@ and requires its exact immutable assets and ancestry. This tests a real version
 upgrade rather than substituting a same-version reinstall. Missing compatible
 release evidence fails qualification. It does not authorize re-publication.
 
-The development RPM and DEB Actions artifacts include the full source SHA,
+The development RPM Actions artifacts include the full source SHA,
 and `github.run_id` in their names. Their Actions records
 also identify the producing attempt and digest. A consumer-only rerun can
 still download the successful producer artifact from the same run. Keep this identity when downloading or
 sharing a CI build: its plain package filename and numeric `--version` alone
-are not release identity. RPM/DEB version comparison and Git-free installed
+are not release identity. RPM version comparison and Git-free installed
 payloads are unchanged. Official releases remain separately signed/attested,
 immutable and bound to their authorized tag; CI packages are never promoted as
 those final objects.
@@ -1618,16 +1576,11 @@ repository checkout, uses the same private RPM 6 `fs` keyring model as the
 consumer bootstrap, removes materialized signing secrets as soon as they are no
 longer needed, and explicitly terminates its temporary `gpg-agent`. The
 identical signed RPM is then installed on Fedora 45 in `fresh` and
-`ffmpeg-free` scenarios through the supported RPM Fusion bootstrap. The
-architecture-independent DEB is built on Ubuntu 24.04 and qualified through
-install, remove, purge, remove-to-purge, reinstall, and previous-release upgrade
-paths. The DEB lifecycle deliberately preserves per-user managed runtime/state
-while still verifying the runtime manager and embedded yt-dlp signing key; it
-no longer depends on distribution yt-dlp or Deno packages.
+`ffmpeg-free` scenarios through the authenticated RPM Fusion bootstrap.
 
 
 `.github/workflows/real-tools.yml` installs actual yt-dlp, aria2c, FFmpeg, and
-FFprobe on Ubuntu. Pull-request qualification retains the pinned yt-dlp
+FFprobe on Fedora 45. Pull-request qualification retains the pinned yt-dlp
 `2026.6.9`, `2026.7.4`, and `2026.8.19` matrix for reproducibility. It generates
 tiny direct HTTP, AAC/M4A, Opus/WebM, combined-audio, HLS and DASH fixtures
 locally, serves them over loopback, proves the aria2c/native downloader boundary,
@@ -1641,9 +1594,9 @@ does not stand in for the other matrix entries. These cases extend the existing
 real-tools and private-plan suites without adding canonical tasks or changing
 concurrency, stress repetitions or process-supervision requirements.
 HLS duration mocks yt-dlp and FFmpeg progress does not use it; those fixtures
-run once on the latest Ubuntu matrix entry with FFmpeg/FFprobe 6.1.1 verified.
+run once on the latest Fedora matrix entry with FFmpeg/FFprobe 9.0.2 verified.
 Before shared-destination qualification, that latest entry has a dedicated
-Python 3.12 / Ubuntu 24.04 prerequisite step. It installs curl-cffi 0.16.0,
+Python 3.15 / Fedora 45 prerequisite step. It installs curl-cffi 0.16.0,
 cffi 2.1.1, certifi 2026.7.22 and pycparser 3.0 into its disposable yt-dlp venv
 with exact wheel SHA-256 pins, `--require-hashes` and `--only-binary=:all:`.
 These versions come from the verified yt-dlp wheel's `pin-curl-cffi` metadata;
@@ -1651,10 +1604,7 @@ the wheel hashes come from the corresponding public PyPI releases. The other
 matrix entries retain their existing environments. The static contract binds
 each version/hash, the Python target, installation flags and latest-only
 placement before the shared run, with discriminating source mutations.
-Ubuntu 24.04 verifies FFmpeg and FFprobe 6.1.1 and adds only the
-generation-specific compatibility fixtures. Fedora 45 runs the common fixtures
-with the RPM Fusion build of 9.0.2. Two upstream builds from signed sources
-retain compatibility coverage for 8.1.3 and 9.0.1. Each job checks the exact
+Fedora 45 runs the common fixtures with the RPM Fusion build of 9.0.2. Verified upstream builds of 6.1.1, 8.1.3 and 9.0.1 retain the generation-sensitive coverage on Fedora. Each job checks the exact
 version of both tools. The upstream builds enable libvpx and libopus so the
 foreign native WebM witness contains real VP9/Opus media. Missing encoders are
 qualification failures; that preservation witness is never skipped.
@@ -1689,90 +1639,7 @@ run records the PyPI source, observation time and selected package version in
 the selected yt-dlp version again before the shared fixture, and retains these
 records and allowlisted
 pre-rescue diagnostics under a source/run/attempt-specific artifact name.
-The pinned Ubuntu media jobs share eight minutes between APT update and
-installation. Update has a three-minute limit. Each runner rounds its first
-Linux uptime reading down and its second reading up to budget the remaining
-whole seconds. An exhausted budget stops provisioning before installation.
-The current-stable and release-runtime jobs allow two and four
-minutes respectively. Each command sends TERM at its deadline and KILL ten
-seconds later if needed. HTTP/HTTPS inactivity timeouts are thirty seconds,
-retries remain three and the dpkg-lock wait is at most sixty seconds. Update
-uses `APT::Update::Error-Mode=any` so partial index failures also fail. An active
-but very slow transfer cannot consume the entire qualification job. Any setup
-failure stops that step; neither stale package lists nor unchecked downloads
-substitute for a successful installation. Ubuntu package authentication and
-the wheel, Deno and impersonation-dependency pins remain mandatory.
-
-The nine media, qualification, source/DEB and release build jobs prepare an
-owned dedicated configuration with `scripts/ci-ubuntu-mirrors.py --setup` and
-route update/install through `--apt`. DEB lifecycle/upgrade invocations opt in
-with `YT_DLP_CI_APT=1`, so later dependency resolution uses the same sources.
-The two exact official HTTPS Noble stanzas and all configuration boundaries
-are specified in `ARCHITECTURE.md`. Runner `ubuntu.sources`, mirror lists,
-extra sources, APT hooks/preferences/auth and old caches are not consumed by
-this path. No runner source file is rewritten. There is no mirror fallback;
-unavailable sources and partial updates remain failures. Signatures and HTTPS
-verification are mandatory. Privileged publication jobs are unchanged.
-
-Installation, including the venv and pip, has ten minutes in the pinned
-matrix and eight minutes in the current-stable and release-runtime jobs.
-If a pinned job fails, its siblings continue collecting their own results.
-Qualification requires all three jobs to succeed in the same attempt.
-Checkout, version checks, Deno/prerequisite installation and evidence upload
-also have explicit bounds. PR and scheduled media jobs have sixty-five minutes:
-their longest route retains forty-one minutes of individual test deadlines,
-plus preparation, timeout cleanup and Actions overhead. The release-runtime
-job has fifty minutes for its thirty-three-minute test route and preparation.
-These are upper bounds, not target durations; no test deadline is extended.
-The stress aggregate gives `wait-required --timeout-minutes 75` an eighty-minute
-job envelope, covering the longest complementary job, identity and queue margin.
-The verifier's default remains forty-five minutes; its explicit wait bound must
-be an integer from one to ninety and is refused by non-wait commands. Timeout,
-failure or cancellation still refuses qualification, and a successful cohort
-must retain its exact latest run/attempt and source identities.
-
-`tests/ci-validation-integration.py` checks these envelopes and replays the
-actual provisioning blocks with inert package commands and compressed real
-timeouts. Negative controls cover failed and stalled update/installation,
-failure propagation and attempts to remove the bounds or authentication.
-After the forced kill, the fixture's PID and start time are checked until it
-disappears or reaches a terminal state, with a one-second observation deadline
-and five-millisecond polling sleeps. Kernel exit can close inherited
-pipes before exposing the terminal process state. A surviving process or a
-changed PID identity still fails; exit flags alone never satisfy the check.
-Deterministic clock tests cover both exit transitions and a process that remains
-alive beyond that deadline. This observation does not extend the APT deadlines.
-`python3 -B tests/ci-validation-integration.py DedicatedAPTTests UbuntuMirrorTests`
-checks dedicated configuration, closed arguments, clean environments, exact
-update/install consistency, links/modes/owners, incomplete reads, changed
-files/directories, failed writes/syncs, first-error preservation and legacy
-normalizer regressions. Existing workflow replay tests retain update/install
-failure, TERM, timeout and forced-kill assertions. `tests/packaging-integration.sh`
-checks explicit CI routing and unchanged native behavior, Unicode arguments
-and failure propagation under C and available French locales.
-
-The dedicated key regressions retain refusal of writable/missing/linked keys
-and verify that a writable legacy `/usr/share` keyring is neither consumed nor
-repaired. Native APT must verify the explicit Noble archive fingerprint even
-when another key exists in the selected file. Ambient-source non-reading is
-observed at Python open boundaries, including aliases and descriptor-relative
-opens; APT's own reads require the separate real-APT fixture below. The witness
-compares stable identity/security metadata in nanoseconds before its own content
-read. Access time is not proof of non-reading: the verification read can change
-it, while filesystem policies can suppress updates on an actual read. Mutations
-must detect ambient opens, changed metadata/content and misplaced observations.
-
-Real APT qualification requires a disposable Ubuntu 24.04 environment, never
-host APT. Use the exact proposed helper with private lists/cache, hostile
-ambient sources/configuration, fresh signed update, dependency resolution and
-an actual approved package installation. Record the APT version and source
-hashes. Offline URI plans alone do not prove signature verification or an
-installation. Negative fixtures must reject unsigned/tampered repository
-metadata and preserve unavailable-source/install failures. Network execution
-and native containers require their applicable environment approvals.
-A controlled source configuration is not a reproducible package-version pin:
-Ubuntu's signed repositories evolve. Local candidate DEBs retain separate
-immutable-artifact and package-identity checks.
+Fedora media jobs use the shared authenticated RPM Fusion bootstrap and DNF with a six-minute command budget. Each media test retains its own existing deadline. In the pinned job, native Python installs the exact reviewed CPython 3.15 cffi wheel. The scheduled stable job checks its own exact resolved upstream dependencies.
 
 `.github/workflows/release.yml` is triggered by tags matching `v*`. It runs
 the exact-source qualification proof and release-specific identity checks, verifies
@@ -1783,12 +1650,12 @@ candidate source version must match the tag, while README asset references
 continue to identify the latest immutable release until post-publication
 documentation alignment has completed.
 
-That previous release must be immutable. Its exact published RPM and DEB are
+That previous release must be immutable. Its exact published RPM are
 downloaded and verified with the published SHA256SUMS, `gh release verify`,
 `gh release verify-asset`, and SLSA provenance constrained to the expected
 repository, release workflow, and exact source commit.
 
-The current ZIP, RPM, and DEB are built in separate jobs. Every release checkout
+The current ZIP and RPM are built in separate jobs. Every release checkout
 uses `${{ github.sha }}` directly, making the immutable event identity explicit
 to Actions security analysis. Tag validation requires its target to equal that
 commit before checkout; job outputs remain proof data, never checkout refs.
@@ -1805,12 +1672,11 @@ requests that exact subkey, and cryptographically verifies the result before
 publication. RPM `OPENPGP:pgpsig` output is diagnostic metadata only and is not
 treated as a full-fingerprint authorization primitive.
 The resulting signed RPM bytes are the exact bytes
-requalified in Fedora `fresh` and `ffmpeg-free` and later published. RPM and DEB
+requalified in Fedora `fresh` and `ffmpeg-free` and later published. RPM
 upgrade tests use the previously published immutable package bytes and verify
 that a deterministic archive snapshot of the per-user managed-runtime tree
 remains unchanged across installation and upgrade. Final RPM erase then verifies
-allowlisted managed-runtime cleanup, while DEB remove and purge verify that the
-same per-user runtime remains unchanged.
+allowlisted managed-runtime cleanup.
 
 Build, signing and test jobs propagate immutable Actions artifact IDs in their
 outputs. Downloads request one exact ID at a time with `digest-mismatch: error`;
@@ -1906,7 +1772,7 @@ the other source, packaging and release requirements continue to apply.
 
 `tests/zenity-real-session-qualification.sh` is the interactive end-to-end
 protocol. An operator performs and confirms visible desktop interactions in a
-real Fedora 44, Fedora 45 or Ubuntu 24.04 graphical session.
+real Fedora 45 Workstation graphical session.
 
 Run one documented scenario at a time:
 
@@ -1931,7 +1797,7 @@ explicit second path when another evidence store owns the result.
 
 ### Autonomous route
 
-Use Fedora 44, Fedora 45 or Ubuntu 24.04 in a graphical Wayland session with Zenity,
+Use Fedora 45 Workstation in a graphical Wayland session with Zenity,
 Xwayland, D-Bus, `gdbus`, libX11, libXtst and Nautilus. Nautilus is currently the only
 supported autonomous folder viewer. The real tool prerequisites are usable
 yt-dlp (including its `curl_cffi` impersonation dependencies), Deno, aria2c,
@@ -2250,7 +2116,7 @@ Missing APIs, kernel
 support or permissions cause status 69 before media activity. Revocation
 following admission preserves protection; it is not a successful shutdown.
 A TGID marked Z is not quiescent while sibling threads are live. Refusal and
-post-admission failure injections complement real minimum-interpreter runs. Its safety assertions require an authenticated
+post-admission failure injections complement native Fedora interpreter runs. Its safety assertions require an authenticated
 PID/start/SID and pidfd STOP, followed by two complete inspections while frozen:
 every live thread must be in `T`/`t`, terminated threads may be `Z`/`X`,
 and the nonempty sets of task IDs/start identities must match. Every thread's children are checked; same-session children are stopped
@@ -2566,7 +2432,7 @@ or provide a production override. Schedule selection, attempts and job evidence
 retain their existing contracts; strict date parsing adds no new provenance
 claim.
 
-## Real-world checks on Fedora 44
+## Real-world checks on Fedora 45
 
 After the automated suite passes, perform lawful manual tests:
 
@@ -2717,7 +2583,7 @@ return 77 with `CIFS qualification: NOT EXECUTED`; mixed
 write. Ordinary and simulated real-tool runs explicitly report real CIFS as
 not executed. A successful real-share verdict covers only the exercised media
 flows, not server outages, quotas or mount configurations left untested below.
-An operator may prepare a Fedora 44 mount with SMB Unix extensions disabled
+An operator may prepare a Fedora 45 mount with SMB Unix extensions disabled
 and fixed `file_mode=0755,dir_mode=0755` (or an equivalent test configuration).
 A media file must be writable while `chmod 600` leaves its visible mode
 permissive. Mount credentials belong in an operator-managed private credentials

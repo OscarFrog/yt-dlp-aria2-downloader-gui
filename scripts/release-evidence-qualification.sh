@@ -200,29 +200,26 @@ assert_schedule_fresh() {
 
 assert_asset_inventory() {
     local inventory_file=$1
-    local count_zip
-    local count_rpm
-    local count_deb
-    local count_total
+    local tag=$2
+    local version=${tag#v}
+    local name='yt-dlp-aria2-downloader-gui'
+    local actual expected oldest
+    local -a assets=(SHA256SUMS install-fedora.sh RPM-GPG-KEY-OscarFrog "${name}-${version}.zip")
 
-    if ! grep -Fxq -- 'SHA256SUMS' "${inventory_file}"; then
-        fail_qualification 'release has no SHA256SUMS asset.'
+    oldest=$(printf '%s\n' "${version}" 2.4.5 | sort -V | head -n 1) || return 65
+    if [[ ${oldest} == "${version}" ]]; then
+        # Keep the historical immutable inventory readable after the format transition.
+        local rpm=''
+        rpm=$(grep -Ex "${name}-${version//./\\.}-1[.]fc[0-9]+[.]noarch[.]rpm" "${inventory_file}") || return 65
+        [[ ${rpm} != *$'\n'* ]] || return 65
+        assets+=("${rpm}" "${name}_${version}-1_all.deb")
+    else
+        assets+=("${name}-${version}-1.fc45.noarch.rpm")
     fi
-    if ! grep -Fxq -- 'install-fedora.sh' "${inventory_file}"; then
-        fail_qualification 'release has no install-fedora.sh asset.'
-    fi
-    if ! grep -Fxq -- 'RPM-GPG-KEY-OscarFrog' "${inventory_file}"; then
-        fail_qualification 'release has no pinned RPM public key asset.'
-    fi
-
-    count_zip=$(grep -Ec '\.zip$' "${inventory_file}" || true)
-    count_rpm=$(grep -Ec '\.rpm$' "${inventory_file}" || true)
-    count_deb=$(grep -Ec '\.deb$' "${inventory_file}" || true)
-    count_total=$(wc -l <"${inventory_file}")
-
-    if [[ ${count_zip} != 1 || ${count_rpm} != 1 || ${count_deb} != 1 || ${count_total} != 6 ]]; then
-        fail_qualification \
-            "release asset inventory is unexpected: total=${count_total}, zip=${count_zip}, rpm=${count_rpm}, deb=${count_deb}."
+    actual=$(LC_ALL=C sort -- "${inventory_file}") || return 65
+    expected=$(printf '%s\n' "${assets[@]}" | LC_ALL=C sort) || return 65
+    if [[ ${actual} != "${expected}" ]]; then
+        fail_qualification 'release asset inventory differs from the immutable names expected for its version.'
     fi
 }
 
@@ -353,7 +350,7 @@ download_and_verify_release_assets() {
     if [[ ! -s ${inventory_file} ]]; then
         fail_qualification 'GitHub release asset inventory is empty.'
     fi
-    assert_asset_inventory "${inventory_file}"
+    assert_asset_inventory "${inventory_file}" "${tag}"
 
     retry_qualification_command \
         'unable to download the public release assets' \

@@ -8,6 +8,8 @@ description: Review or change GitHub Actions, dependency pins, provenance, signi
 Use this skill when work touches `.github/workflows/`, action pins, workflow
 permissions, artifact provenance, signing, or publication trust zones.
 
+Fedora 45 is the only officially supported distribution. Run application validation in Fedora 45 and preserve authenticated RPM installation and upgrade coverage.
+
 ## Establish the contract
 
 1. Read `AGENTS.md`, the CI/release sections of `ARCHITECTURE.md`, and the

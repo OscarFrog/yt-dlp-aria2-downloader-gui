@@ -257,7 +257,7 @@ def run_zenity(target, case, workspace, scenario_evidence, window_event):
 
     def read(path, *args, **kwargs):
         if path == Path('/etc/os-release'):
-            return 'ID=ubuntu\nVERSION_ID=24.04\n'
+            return 'ID=fedora\nVERSION_ID=45\n'
         if str(path).startswith('/proc/'):
             if str(path) == '/proc/70000/comm':
                 return 'ffmpeg\n'

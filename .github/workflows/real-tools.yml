@@ -17,11 +17,32 @@ jobs:
   identity:
     name: Source identity ${{ github.sha }}
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      volumes:
+        - /tmp
+        - /var/tmp
     timeout-minutes: 3
     steps:
+      - name: Verify Fedora 45 userspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Trust only the checked-out workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace=$(realpath -e -- "${GITHUB_WORKSPACE:?}")
+          [[ ${workspace} == "$(pwd -P)" && ${workspace} != / && ${workspace} != */\* ]]
+          git config --global --add safe.directory "${workspace}"
       - name: Bind validation to the event source
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -40,6 +61,11 @@ jobs:
     if: github.event_name != 'schedule'
     name: Local media, pinned yt-dlp ${{ matrix.yt_dlp_version }}
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      volumes:
+        - /tmp
+        - /var/tmp
     # Include every test deadline, provisioning and diagnostic retention.
     timeout-minutes: 65
     strategy:
@@ -47,45 +73,27 @@ jobs:
       matrix:
         yt_dlp_version: ['2026.6.9', '2026.7.4', '2026.8.19']
     steps:
+      - name: Verify Fedora 45 userspace
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
           persist-credentials: false
       - name: Install real engines
-        timeout-minutes: 10
+        timeout-minutes: 8
         env:
           YT_DLP_VERSION: ${{ matrix.yt_dlp_version }}
         run: |
           set -Eeuo pipefail
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup
-          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30
-            -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
-          apt_uptime_seconds() {
-            local uptime
-            read -r uptime _ </proc/uptime || return 65
-            if [[ ! ${uptime} =~ ^([0123456789]{1,12})[.][0123456789]{2}$ ]]; then
-              printf 'Error: invalid Linux uptime for APT provisioning.\n' >&2
-              return 65
-            fi
-            printf '%d\n' "$((10#${BASH_REMATCH[1]}))"
-          }
-
-          # Share the APT deadline so time saved on indexes is available to dpkg.
-          apt_start=$(apt_uptime_seconds)
-          sudo timeout --signal=TERM --kill-after=10s 3m \
-            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update
-          apt_now=$(apt_uptime_seconds)
-          # Round elapsed time up. A zero duration would disable GNU timeout.
-          apt_remaining=$((480 - (apt_now - apt_start) - 1))
-          if (( apt_now < apt_start || apt_remaining <= 0 )); then
-            printf 'Error: shared APT provisioning deadline unavailable or exhausted.\n' >&2
-            exit 124
-          fi
-          sudo timeout --signal=TERM --kill-after=10s "${apt_remaining}s" \
-            env DEBIAN_FRONTEND=noninteractive \
-            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends \
-            aria2 curl ffmpeg python3-venv unzip
-
+          timeout --signal=TERM --kill-after=10s 6m bash ./scripts/ci-fedora-media.sh
           case ${YT_DLP_VERSION} in
             2026.6.9)
               yt_dlp_sha=442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4
@@ -141,7 +149,7 @@ jobs:
       - name: Record resolved tool versions
         timeout-minutes: 1
         env:
-          EXPECTED_FFMPEG_VERSION: 6.1.1
+          EXPECTED_FFMPEG_VERSION: 9.0.2
         run: |
           set -Eeuo pipefail
           printf 'yt-dlp: %s\n' "$(yt-dlp --version)"
@@ -192,11 +200,11 @@ jobs:
           requirements="${RUNNER_TEMP}/yt-dlp-impersonation-requirements.txt"
           cat >"${requirements}" <<'EOF_REQUIREMENTS'
           certifi==2026.7.22 --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
-          cffi==2.1.1 --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf
+          cffi==2.1.1 --hash=sha256:aeae0e330c9f6acd681f647d46cefd30c29f93e3392882e792e82080c9691399
           curl-cffi==0.16.0 --hash=sha256:182416f07d71a342240554fa62c22e591999b78c225b21d3fe27d9f807420dd6
           pycparser==3.0 --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
           EOF_REQUIREMENTS
-          "${RUNNER_TEMP}/yt-dlp-venv/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 12)'
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 15)'
           "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" --isolated install \
             --disable-pip-version-check \
             --index-url https://pypi.org/simple \
@@ -241,9 +249,24 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: Scheduled current stable yt-dlp
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      volumes:
+        - /tmp
+        - /var/tmp
     # Include every test deadline, provisioning and diagnostic retention.
     timeout-minutes: 65
     steps:
+      - name: Verify Fedora 45 userspace
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
@@ -255,15 +278,7 @@ jobs:
           umask 077
           # Bound stalled connections and the complete package transaction;
           # provisioning must leave the independently bounded media tests time.
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup
-          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30
-            -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
-          sudo timeout --signal=TERM --kill-after=10s 2m \
-            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update
-          sudo timeout --signal=TERM --kill-after=10s 4m \
-            env DEBIAN_FRONTEND=noninteractive \
-            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends \
-            aria2 curl ffmpeg python3-venv unzip
+          timeout --signal=TERM --kill-after=10s 6m bash ./scripts/ci-fedora-media.sh
           python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
           mkdir -p -- "${RUNNER_TEMP}/shared-destination-evidence"
           # Select the published stable before resolving extras. Otherwise pip

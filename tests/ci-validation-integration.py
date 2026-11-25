@@ -19,8 +19,8 @@ import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
+import textwrap
 import time
 import unittest
 from unittest.mock import patch
@@ -180,9 +180,9 @@ class ProofTests(unittest.TestCase):
 
     def test_minimum_shell_and_shared_destination_steps_cannot_be_missing_or_skipped(self):
         checks = (
-            (1, "Ubuntu", "Check Python with reviewed Ruff"),
-            (1, "Python 3.10 / Ubuntu", "Build and bind verified Bash 4.4 on the disposable runner"),
-            (1, "Python 3.10 / Ubuntu", "Bind every test interpreter to the minimum Python"),
+            (1, "Fedora 45 non-root", "Check Python with reviewed Ruff"),
+            (1, "Fedora 45 non-root", "Verify Fedora 45 userspace"),
+            (1, "Fedora 45 non-root", "Run validation"),
             (4, "Local media, pinned yt-dlp 2026.8.19", "Install verified Deno for shared-destination qualification"),
             (4, "Local media, pinned yt-dlp 2026.8.19", "Install pinned impersonation dependencies for shared qualification"),
             (4, "Local media, pinned yt-dlp 2026.8.19", "Run real shared-destination GUI and CLI qualification"),
@@ -369,7 +369,7 @@ class ProofTests(unittest.TestCase):
                 self.verify()
 
     def test_successful_job_cannot_hide_missing_failed_or_skipped_qualification_steps(self):
-        job = next(job for job in self.jobs() if job["name"] == "Ubuntu")
+        job = next(job for job in self.jobs() if job["name"] == "Fedora 45 non-root")
         original = copy.deepcopy(job["steps"])
         variants = [[], [{"name": "Set up job", "status": "completed", "conclusion": "success"}],
                     original + [original[0]]]
@@ -401,7 +401,7 @@ class ProofTests(unittest.TestCase):
         # These obligations are business contracts, not values derived from
         # REQUIRED_STEPS: removing a production requirement must fail this test.
         for index, name, obligation in (
-            (1, "Ubuntu", "Check Python with reviewed Ruff"),
+            (1, "Fedora 45 non-root", "Check Python with reviewed Ruff"),
             (2, "Fedora 45 RPM build-once", "Qualify RPM v4/v6 signature semantics"),
             (2, "Previous immutable release", "Verify exact published previous packages"),
             (2, "Fedora 45 RPM (fresh)", "Reject a different globally trusted RPM signer in PR CI"),
@@ -624,6 +624,7 @@ fi
 
 
 SCHEDULED_STEPS = {
+    "Verify Fedora 45 userspace",
     "Install real engines and current yt-dlp stable",
     "Install verified Deno for current-stable shared qualification",
     "Validate current-stable shared prerequisites",
@@ -657,7 +658,7 @@ class ScheduledProofTests(unittest.TestCase):
                       "steps": [{"name": step, "status": "completed", "conclusion": "success"}
                                 for step in sorted(steps)]}
                      for name, skipped, steps in (
-                         (CHECK.IDENTITY_PREFIX + SOURCE, False, {"Bind validation to the event source"}),
+                         (CHECK.IDENTITY_PREFIX + SOURCE, False, {"Verify Fedora 45 userspace", "Bind validation to the event source"}),
                          ("Scheduled current stable yt-dlp", False, SCHEDULED_STEPS),
                          ("Local media, pinned yt-dlp ${{ matrix.yt_dlp_version }}", True, set()),
                      )]
@@ -767,6 +768,32 @@ class ScheduledProofTests(unittest.TestCase):
                 with self.assertRaises(CHECK.Refusal):
                     self.verifier.scheduled(600, SOURCE)
                 self.assertEqual(len(reads), 2)
+
+    def test_release_asset_inventory_preserves_history_and_requires_exact_fedora_rpm(self):
+        code = (PROJECT / "scripts/release-evidence-qualification.sh").read_text(encoding="utf-8")
+        functions = []
+        for name in ("fail_qualification", "assert_asset_inventory"):
+            start = code.index(name + "() {")
+            functions.append(code[start:code.index("\n}", start) + 2])
+        script = "\n".join(functions) + '\nassert_asset_inventory "$1" "$2"'
+        project = "yt-dlp-aria2-downloader-gui"
+        for version, fedora, historical in (("2.4.5", 44, True), ("2.4.6", 45, False)):
+            rpm = f"{project}-{version}-1.fc{fedora}.noarch.rpm"
+            deb = f"{project}_{version}-1_all.deb"
+            assets = ["SHA256SUMS", "RPM-GPG-KEY-OscarFrog", "install-fedora.sh", f"{project}-{version}.zip", rpm]
+            if historical:
+                assets.append(deb)
+            cases = [(assets, 0), ([a for a in assets if a != "RPM-GPG-KEY-OscarFrog"], 65),
+                     (assets + [rpm], 65), (assets + ["unexpected"], 65)]
+            if not historical:
+                cases.extend(((assets + [deb], 65), (assets[:-1] + [rpm.replace("fc45", "fc44")], 65)))
+            for inventory, expected in cases:
+                with self.subTest(version=version, inventory=inventory), tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "inventory"
+                    path.write_text("\n".join(inventory) + "\n", encoding="ascii")
+                    result = subprocess.run(["bash", "-c", script, "bash", str(path), f"v{version}"],
+                                            capture_output=True, timeout=5)
+                    self.assertEqual(result.returncode, expected, result.stderr)
 
     def test_release_collector_propagates_refusal_and_binds_selected_schedule(self):
         text = (PROJECT / "scripts/release-evidence-qualification.sh").read_text(encoding="utf-8")
@@ -1164,9 +1191,9 @@ rpmsign() {
 class WorkflowContractTests(unittest.TestCase):
     # Workflow, job, minute limits for the job, setup, update, and the install timeout argument.
     MEDIA_BUDGETS = (
-        ("real-tools.yml", "pinned-local-media", 65, 10, 3, '"${apt_remaining}s"'),
-        ("real-tools.yml", "current-stable-local-media", 65, 8, 2, "4m"),
-        ("release.yml", "release-runtime", 50, 8, 2, "4m"),
+        ("real-tools.yml", "pinned-local-media", 65, 8),
+        ("real-tools.yml", "current-stable-local-media", 65, 8),
+        ("release.yml", "release-runtime", 50, 8),
     )
     @staticmethod
     def workflow(filename):
@@ -1193,7 +1220,7 @@ class WorkflowContractTests(unittest.TestCase):
         sequence = re.search(r"(?m)^    needs: \[([a-z0-9, -]+)\]$", job)
         return {part.strip() for part in sequence.group(1).split(",")} if sequence else set()
 
-    def assert_media_provisioning_budgets(self, text, job_name, expected_minutes, setup, update, apt_install):
+    def assert_media_provisioning_budgets(self, text, job_name, expected_minutes, setup):
         job = self.jobs(text)[job_name]
         minutes = int(re.search(r"(?m)^    timeout-minutes: (\d+)$", job).group(1))
         self.assertEqual(minutes, expected_minutes)
@@ -1213,21 +1240,13 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertGreaterEqual(minutes * 60, budget_seconds + 120)
         expected_tests = 33 * 60 + 40 if job_name == "release-runtime" else 41 * 60 + 50
         self.assertEqual(tests_seconds, expected_tests, "Test deadlines and coverage must remain unchanged")
-        install = next(step for step in steps if "apt_options=(" in step)
+        install = next(step for step in steps if "./scripts/ci-fedora-media.sh" in step)
         self.assertRegex(install, rf"(?m)^        timeout-minutes: {setup}$")
-        for option in ("Acquire::Retries=3", "Acquire::http::Timeout=30",
-                       "Acquire::https::Timeout=30", "DPkg::Lock::Timeout=60"):
-            self.assertEqual(install.count(option), 1)
-        self.assertIn(f'sudo timeout --signal=TERM --kill-after=10s {update}m '
-                      '\\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update', install)
-        self.assertIn(f'sudo timeout --signal=TERM --kill-after=10s {apt_install} '
-                      '\\\n            env DEBIAN_FRONTEND=noninteractive \\\n            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends', install)
-        for forbidden in ("continue-on-error", "|| true", "--allow-unauthenticated", "--fix-missing",
-                          "trusted=yes", "Acquire::AllowInsecureRepositories", "/etc/apt/sources"):
-            self.assertNotIn(forbidden, install)
-        self.assertLess(install.index('"${apt_options[@]}" -o APT::Update::Error-Mode=any update'),
-                        install.index('"${apt_options[@]}" install'))
-        self.assertLess(install.index('"${apt_options[@]}" install'), install.index("python3 -m venv"))
+        provision = 'timeout --signal=TERM --kill-after=10s 6m bash ./scripts/ci-fedora-media.sh'
+        self.assertEqual(install.count(provision + '\n'), 1)
+        self.assertLess(install.index(provision), install.index("python3 -m venv"))
+        self.assertNotIn("continue-on-error", install)
+        self.assertNotIn("|| true", install)
 
     def test_pinned_media_jobs_finish_independently_and_remain_required(self):
         job = self.jobs(self.workflow("real-tools.yml"))["pinned-local-media"]
@@ -1235,30 +1254,23 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", job)
 
     def test_media_provisioning_and_job_budgets_cover_all_original_tests(self):
-        for workflow, name, minutes, setup, update, apt_install in self.MEDIA_BUDGETS:
+        for workflow, name, minutes, setup in self.MEDIA_BUDGETS:
             with self.subTest(job=name):
-                self.assert_media_provisioning_budgets(self.workflow(workflow), name, minutes, setup, update, apt_install)
+                self.assert_media_provisioning_budgets(self.workflow(workflow), name, minutes, setup)
 
     def test_media_deadlines_cannot_be_removed_or_consume_the_test_budget(self):
-        for workflow, name, minutes, setup, update, apt_install in self.MEDIA_BUDGETS:
+        for workflow, name, minutes, setup in self.MEDIA_BUDGETS:
             text = self.workflow(workflow)
             job = self.jobs(text)[name]
             for old, new in ((f"    timeout-minutes: {minutes}", "    timeout-minutes: 25"),
                              (f"        timeout-minutes: {setup}", "        timeout-minutes: 30"),
-                             (f"sudo timeout --signal=TERM --kill-after=10s {update}m", "sudo"),
-                             (f"sudo timeout --signal=TERM --kill-after=10s {apt_install}", "sudo"),
-                             ("Acquire::http::Timeout=30", "Acquire::http::Timeout=0"),
-                             ("Acquire::https::Timeout=30", "Acquire::https::Timeout=0"),
-                             ("DPkg::Lock::Timeout=60", "DPkg::Lock::Timeout=-1"),
-                             ("Acquire::Retries=3", "Acquire::Retries=0"),
-                             ("-o APT::Update::Error-Mode=any", ""),
-                             ('"${apt_options[@]}" -o APT::Update::Error-Mode=any update', '"${apt_options[@]}" -o APT::Update::Error-Mode=any update || true'),
+                             ("6m bash ./scripts/ci-fedora-media.sh", "60m bash ./scripts/ci-fedora-media.sh"),
                              ("8m \\\n            bash ./tests/real-tools-integration.sh", "7m \\\n            bash ./tests/real-tools-integration.sh")):
                 with self.subTest(job=name, mutation=old):
                     self.assertIn(old, job)
                     mutated = text.replace(job, job.replace(old, new, 1), 1)
                     with self.assertRaises(AssertionError):
-                        self.assert_media_provisioning_budgets(mutated, name, minutes, setup, update, apt_install)
+                        self.assert_media_provisioning_budgets(mutated, name, minutes, setup)
 
     def assert_gate(self, jobs, job, gate, seen=None):
         seen = (seen or set()) | {job}
@@ -1321,10 +1333,58 @@ class WorkflowContractTests(unittest.TestCase):
                 self.assertEqual(len(names), len(set(names)))
                 self.assertEqual(set(names), expected)
 
+    def test_container_git_trust_covers_only_its_checked_out_workspace(self):
+        guarded = {
+            "packages.yml": {"identity", "source-archive", "previous-release", "rpm-build"},
+            "qualification.yml": {"identity"},
+            "real-tools.yml": {"identity"},
+            "release-docs.yml": {"prepare-release-docs", "verify-release-docs"},
+            "release.yml": {"validate", "previous-release", "zip", "rpm-build"},
+            "shell.yml": {"identity", "validate-fedora", "validate-fedora-arm"},
+            "stress.yml": {"identity"},
+        }
+        seen = set()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "checkout é"
+            checkout.mkdir()
+            alias = root / "mounted"
+            alias.symlink_to(checkout, target_is_directory=True)
+            for path in sorted((PROJECT / ".github/workflows").glob("*.yml")):
+                for name, job in self.jobs(self.workflow(path.name)).items():
+                    with self.subTest(workflow=path.name, job=name):
+                        steps = re.split(r"(?m)^      - ", job)[1:]
+                        scopes = [i for i, step in enumerate(steps) if "safe.directory" in step]
+                        if name not in guarded.get(path.name, ()):
+                            self.assertEqual(scopes, [])
+                            continue
+                        self.assertEqual(len(scopes), 1)
+                        index = scopes[0]
+                        self.assertGreater(index, 0)
+                        self.assertTrue(steps[index - 1].startswith("uses: actions/checkout@"))
+                        self.assertTrue(steps[index].startswith("name: Trust only the checked-out workspace\n"))
+                        self.assertNotIn("        if:", steps[index])
+                        script = textwrap.dedent(steps[index].split("        run: |\n", 1)[1])
+                        self.assertEqual([line.strip() for line in script.splitlines() if "safe.directory" in line],
+                                         ['git config --global --add safe.directory "${workspace}"'])
+                        home = root / f"{path.stem}-{name}"
+                        home.mkdir()
+                        env = {"PATH": os.environ["PATH"], "HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1",
+                               "GITHUB_WORKSPACE": str(alias)}
+                        subprocess.run(["bash", "-c", script], cwd=checkout, env=env, check=True, timeout=5)
+                        mismatch = subprocess.run(["bash", "-c", script], cwd=root, env=env, timeout=5)
+                        self.assertNotEqual(mismatch.returncode, 0)
+                        configured = subprocess.check_output(
+                            ["git", "config", "--show-scope", "--get-all", "safe.directory"],
+                            cwd=checkout, env=env, text=True, timeout=5)
+                        self.assertEqual(configured.splitlines(), [f"global\t{checkout.resolve()}"])
+                        seen.add((path.name, name))
+        self.assertEqual(seen, {(path, name) for path, names in guarded.items() for name in names})
+
     def test_each_cheap_identity_executes_source_coherence_and_syntax_guards(self):
         for filename in CHECK.WORKFLOWS:
             job = self.jobs(self.workflow(filename))["identity"]
-            body = job.split("        run: |\n", 1)[1]
+            body = job.split("      - name: Bind validation to the event source\n", 1)[1].split("        run: |\n", 1)[1]
             script = "\n".join(line[10:] for line in body.splitlines() if line.strip())
             for failure, expected in (("none", 0), ("sha", 1), ("coherence", 17), ("syntax", 23)):
                 with self.subTest(workflow=filename, failure=failure):
@@ -1351,39 +1411,51 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
                         if name.endswith(" / verified upstream source"):
                             version = name.split()[1]
                             upstream = self.jobs(text)["ffmpeg-upstream"]
-                            self.assertIn("version: ['8.1.3', '9.0.1']", upstream)
+                            self.assertIn("version: ['6.1.1', '8.1.3', '9.0.1']", upstream)
                             self.assertIn("EXPECTED_FFMPEG_VERSION: ${{ matrix.version }}", upstream)
                             self.assertIn("- name: " + step + "\n",
                                           upstream.replace("${{ matrix.version }}", version))
                         else:
                             self.assertIn("- name: " + step + "\n", text)
 
-    def test_minimum_interpreters_share_one_full_run_and_bind_absolute_fixtures(self):
-        job = self.jobs(self.workflow("shell.yml"))["validate-python-minimum"]
-        self.assertEqual(job.count("./tests/run-all.sh --full --jobs 4"), 1)
-        capture = "YTDLP_PY310_FIRST_FAILURE"
-        workflows = (PROJECT / ".github/workflows").glob("*.yml")
-        self.assertEqual(sum(path.read_text().count(capture) for path in workflows), 1)
-        self.assertIn("      - name: Exercise the complete contract under Python 3.10\n"
-                      "        env:\n"
-                      f"          {capture}: engine-cli-first-sample\n"
-                      "        run: timeout ", job)
-        self.assertIn("name: Python 3.10 / Ubuntu", job)
-        for guard in (
-            "${RUNNER_ENVIRONMENT} == github-hosted",
-            "readonly version=4.4", "readonly fingerprint=7C0135FB088AAF6C66C650B9BB5869F064EA74AB",
-            "${BASH_VERSINFO[2]} == 0", 'sudo ln -sfnT -- "${prefix}/bin/bash" /usr/bin/bash',
-            "env PATH=/usr/bin:/bin bash", 'sudo ln -sfnT -- "${python_binary}" /usr/bin/python3',
-            'printf \'%s\\n\' "${prefix}/bin" >>"${GITHUB_PATH}"',
-        ):
-            self.assertIn(guard, job)
-        self.assertLess(job.index("sha256sum --check"), job.index("tar --extract"))
-        self.assertLess(job.index('[[ ${signature_fingerprint} == "${fingerprint}" ]]'),
-                        job.index("tar --extract"))
-        self.assertLess(job.index("Confirm minimum Python and environment"),
-                        job.index("./tests/run-all.sh --full --jobs 4"))
-        self.assertIn("timeout --signal=TERM --kill-after=10s 8m", job)
-        self.assertIn("timeout-minutes: 10", job)
+    def test_fedora_userspace_and_nonroot_subject_are_required(self):
+        image = "registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5"
+        targets = {
+            "shell.yml": ("identity", "validate-fedora", "validate-fedora-arm", "validate-nonroot"),
+            "stress.yml": ("identity", "mock-stress", "runtime-hardening-stress"),
+            "real-tools.yml": ("identity", "pinned-local-media", "current-stable-local-media"),
+            "packages.yml": ("identity", "source-archive", "previous-release", "rpm", "rpm-build"),
+            "qualification.yml": ("identity", "ffmpeg-fedora-9", "ffmpeg-upstream"),
+            "release.yml": ("validate", "release-runtime", "previous-release", "zip", "rpm-build", "rpm-test", "rpm-sign"),
+            "release-docs.yml": ("prepare-release-docs", "verify-release-docs"),
+        }
+        for workflow, names in targets.items():
+            jobs = self.jobs(self.workflow(workflow))
+            for name in names:
+                with self.subTest(workflow=workflow, job=name):
+                    body = jobs[name]
+                    self.assertRegex(body, r"(?m)^    (?:  image: |container: )" + re.escape(image) + "$")
+                    steps = body.split("    steps:\n", 1)[1]
+                    self.assertTrue(steps.startswith("      - name: Verify Fedora 45 userspace\n"))
+                    self.assertIn('[[ ${ID} == fedora && ${VERSION_ID} == 45 ]]', steps.split("      - ", 2)[1])
+        nonroot = self.jobs(self.workflow("shell.yml"))["validate-nonroot"]
+        self.assertIn("runuser -u qualification -- bash -se", nonroot)
+        self.assertIn("useradd --create-home qualification", nonroot)
+        for name in ("mock-stress", "runtime-hardening-stress"):
+            self.assertIn("runuser -u qualification -- timeout", self.jobs(self.workflow("stress.yml"))[name])
+
+    def test_fedora_admission_refuses_other_userspaces_before_provisioning(self):
+        body = self.jobs(self.workflow("shell.yml"))["validate-fedora"]
+        admission = body.split("      - name: Verify Fedora 45 userspace", 1)[1].split("      - ", 1)[0]
+        probe = admission.split("        run: |\n", 1)[1]
+        fixture = 'source() { [[ "$1" == /etc/os-release ]] || exit 97; ID=$TEST_ID VERSION_ID=$TEST_VERSION PRETTY_NAME=test; }\n'
+        for distro, version, admitted in (("fedora", "45", True), ("fedora", "44", False),
+                                          ("fedora", "", False), ("ubuntu", "24.04", False)):
+            with self.subTest(distro=distro, version=version):
+                result = subprocess.run(["bash", "-c", fixture + probe], capture_output=True,
+                                        env=dict(os.environ, TEST_ID=distro, TEST_VERSION=version))
+                self.assertEqual(result.returncode, 0 if admitted else 1)
+                self.assertEqual(b"shared host kernel" in result.stdout, admitted)
 
     def test_fedora_suite_budget_preserves_workers_and_validation_status(self):
         job = self.jobs(self.workflow("shell.yml"))["validate-fedora"]
@@ -1474,11 +1546,14 @@ exit "${CHECK_VALIDATION_STATUS}"
                 self.assertIn("if: ${{ always() }}", step)
             else:
                 self.assertNotRegex(step, r"(?m)^        if:")
+        helper = (PROJECT / "scripts/ci-fedora-media.sh").read_text()
+        for package in ("curl", "unzip"):
+            self.assertIn(package, helper.split())
         install = steps["Install real engines and current yt-dlp stable"]
         for required in ("--isolated --no-cache-dir install", "--index-url https://pypi.org/simple",
                          "--only-binary=:all:", '"yt-dlp[pin-curl-cffi]==${package_version}"',
                          "https://pypi.org/pypi/yt-dlp/json", "response.read(limit + 1)",
-                         "timeout=30", "info['yanked'] is not False", "class NoRedirect", "curl", "unzip"):
+                         "timeout=30", "info['yanked'] is not False", "class NoRedirect", "./scripts/ci-fedora-media.sh"):
             self.assertIn(required, install)
         for forbidden in ("--pre", "--trusted-host", "--no-deps", "--upgrade", "2026.8.19"):
             self.assertNotIn(forbidden, install)
@@ -1554,7 +1629,7 @@ exit "${CHECK_VALIDATION_STATUS}"
                          "gh attestation verify", "gh release verify", "verify-published:"):
             self.assertIn(retained, text)
         jobs = self.jobs(text)
-        for job in ("zip", "rpm-build", "deb", "previous-release"):
+        for job in ("zip", "rpm-build", "previous-release"):
             self.assertIn(job, set(jobs))
             self.assert_gate(jobs, job, "validate")
 
@@ -1576,8 +1651,8 @@ exit "${CHECK_VALIDATION_STATUS}"
                          ["2026.6.9", "2026.8.19"])
         suites = ("tests/real-tools-integration.sh", "tests/aria2-real-behavior-integration.sh",
                   "tests/ffmpeg-real-progress-integration.sh", "tests/hls-remux-duration-integration.sh")
-        # Source identity cannot prove unchanged apt dependencies. Preserve the
-        # fresh Ubuntu behavior check while forbidding another generic suite.
+        # Source identity cannot prove unchanged distribution dependencies. Preserve the
+        # fresh Fedora behavior check while forbidding another generic suite.
         for suite in suites:
             self.assertEqual(runtime.count("bash ./" + suite), 1, suite)
             for name, job in jobs.items():
@@ -1599,7 +1674,7 @@ exit "${CHECK_VALIDATION_STATUS}"
         self.assertIn("release-runtime", self.dependencies(jobs["verify-source"]))
         self.assertIn("verify-source", self.dependencies(jobs["publish"]))
         # Package work can overlap the independent current-environment probe.
-        for build in ("zip", "rpm-build", "deb", "previous-release"):
+        for build in ("zip", "rpm-build", "previous-release"):
             pending = list(self.dependencies(jobs[build]))
             visited = set()
             while pending:
@@ -1615,8 +1690,8 @@ exit "${CHECK_VALIDATION_STATUS}"
     def test_runtime_exception_cannot_bypass_publication_or_expand_to_generic_retests(self):
         text = self.workflow("release.yml")
         mutations = (
-            ("needs: [validate, zip, rpm-test, deb, release-runtime]", "needs: [validate, zip, rpm-test, deb]"),
-            ("needs: [validate, zip, rpm-test, deb, verify-source]", "needs: [validate, zip, rpm-test, deb]"),
+            ("needs: [validate, zip, rpm-test, release-runtime]", "needs: [validate, zip, rpm-test]"),
+            ("needs: [validate, zip, rpm-test, verify-source]", "needs: [validate, zip, rpm-test]"),
             ("bash ./tests/real-tools-integration.sh", "bash ./tests/run-all.sh --full --jobs 4"),
             ("bash ./tests/real-tools-integration.sh", "bash ./tests/repeat-qualification.sh --runs 3 --jobs 3 -- bash ./tests/real-tools-integration.sh"),
             ("bash ./tests/real-tools-integration.sh", "bash ./tests/real-tools-integration.sh\n          bash ./tests/real-tools-integration.sh"),
@@ -1658,7 +1733,7 @@ exit "${CHECK_VALIDATION_STATUS}"
                 self.assertIn("validate", self.dependencies(job), name)
 
         verify = jobs["verify-source"]
-        self.assertTrue({"validate", "zip", "rpm-test", "deb", "release-runtime"} <= self.dependencies(verify))
+        self.assertTrue({"validate", "zip", "rpm-test", "release-runtime"} <= self.dependencies(verify))
         proof = 'scripts/ci-validation.py verify --commit "${GITHUB_SHA}"'
         proof_guard = '[[ ${SOURCE_COMMIT} == "${GITHUB_SHA}" ]]'
         self.assertIn(proof, verify)
@@ -1692,8 +1767,8 @@ exit "${CHECK_VALIDATION_STATUS}"
         text = self.workflow("release.yml")
         mutations = (
             ('[[ ${target_sha} == "${GITHUB_SHA}" ]]', "true"),
-            ("needs: [validate, zip, rpm-test, deb, verify-source]", "needs: [validate, zip, rpm-test, deb]"),
-            ("needs: [validate, zip, rpm-test, deb, release-runtime]", "needs: validate"),
+            ("needs: [validate, zip, rpm-test, verify-source]", "needs: [validate, zip, rpm-test]"),
+            ("needs: [validate, zip, rpm-test, release-runtime]", "needs: validate"),
             ('[[ ${current_tag_object} == "${SOURCE_TAG_OBJECT}" ]]', "true"),
             ('python3 -I scripts/ci-validation.py verify --commit "${GITHUB_SHA}"', "true"),
             ("name: Attest release artifacts", "name: Attest release artifacts\n        run: bash scripts/candidate.sh"),
@@ -1735,21 +1810,20 @@ exit "${CHECK_VALIDATION_STATUS}"
 
     def assert_release_artifact_contract(self, text):
         jobs = self.jobs(text)
-        for producer in ("previous-release", "zip", "rpm-build", "rpm-sign", "deb"):
+        for producer in ("previous-release", "zip", "rpm-build", "rpm-sign"):
             job = jobs[producer]
             self.assertIn("artifact_id: ${{ steps.artifact.outputs.artifact-id }}", job)
             self.assertEqual(job.count("id: artifact\n"), 1, producer)
             self.assertRegex(job, r"uses: actions/upload-artifact@[^\n]+\n        id: artifact\n")
         self.assertIn("artifact_id: ${{ needs.rpm-sign.outputs.artifact_id }}", jobs["rpm-test"])
-        for format_name, producer in (("zip", "zip"), ("rpm", "rpm-test"), ("deb", "deb")):
+        for format_name, producer in (("zip", "zip"), ("rpm", "rpm-test")):
             self.assertIn(format_name + "_artifact_id: ${{ needs." + producer + ".outputs.artifact_id }}",
                           jobs["publish"])
         consumers = {
             "rpm-sign": ["needs.rpm-build.outputs.artifact_id"],
             "rpm-test": ["needs.rpm-sign.outputs.artifact_id", "needs.previous-release.outputs.artifact_id"],
-            "deb": ["needs.previous-release.outputs.artifact_id"],
-            "publish": ["needs.zip.outputs.artifact_id", "needs.rpm-test.outputs.artifact_id", "needs.deb.outputs.artifact_id"],
-            "verify-published": [f"needs.publish.outputs.{kind}_artifact_id" for kind in ("zip", "rpm", "deb")],
+            "publish": ["needs.zip.outputs.artifact_id", "needs.rpm-test.outputs.artifact_id"],
+            "verify-published": [f"needs.publish.outputs.{kind}_artifact_id" for kind in ("zip", "rpm")],
         }
         self.assertEqual({name for name, job in jobs.items() if "uses: actions/download-artifact@" in job},
                          set(consumers))
@@ -1759,16 +1833,16 @@ exit "${CHECK_VALIDATION_STATUS}"
                 r"(?m)^      - uses: actions/download-artifact@[^\n]+\n(?:(?!      - ).*\n)*", job,
             ))
             self.assertEqual(len(downloads), len(sources), consumer)
-            triple = consumer in {"publish", "verify-published"}
-            guard = ('[[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}(,[1-9][0-9]{0,19}){2}$ ]]'
-                     if triple else '[[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}$ ]]')
+            combined = consumer in {"publish", "verify-published"}
+            guard = ('[[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}(,[1-9][0-9]{0,19})$ ]]'
+                     if combined else '[[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}$ ]]')
             for download, source in zip(downloads, sources):
                 block = download.group()
                 self.assertIn("artifact-ids: ${{ " + source + " }}", block)
                 self.assertIn("digest-mismatch: error", block)
                 self.assertNotRegex(block, r"(?m)^          (?:name|pattern|merge-multiple):")
                 before = job[:download.start()]
-                required_ids = sources if triple else [source]
+                required_ids = sources if combined else [source]
                 ids = ",".join("${{ " + value + " }}" for value in required_ids)
                 binding = "ARTIFACT_IDS: " + ids + "\n"
                 self.assertIn(binding, before)
@@ -1788,7 +1862,7 @@ exit "${CHECK_VALIDATION_STATUS}"
             ("artifact-ids: ${{ needs.rpm-test.outputs.artifact_id }}", "artifact-ids: ${{ needs.rpm-build.outputs.artifact_id }}"),
             ("artifact-ids: ${{ needs.publish.outputs.zip_artifact_id }}", "pattern: release-*"),
             ('[[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}$ ]]', "true"),
-            ('[[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}(,[1-9][0-9]{0,19}){2}$ ]]', "true"),
+            ('[[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}(,[1-9][0-9]{0,19})$ ]]', "true"),
         )
         for old, new in mutations:
             with self.subTest(mutation=old):
@@ -1927,1275 +2001,6 @@ class WaitBudgetTests(unittest.TestCase):
                     self.assertIn("within 75 minutes", errors.getvalue())
 
 
-class UbuntuMirrorTests(unittest.TestCase):
-    """Exercise the runner-specific change on files outside the host APT tree."""
-
-    TARGETS = {
-        "real-tools.yml": {"pinned-local-media", "current-stable-local-media"},
-        "qualification.yml": {"ffmpeg-ubuntu-6", "ffmpeg-upstream"},
-        "packages.yml": {"source-archive", "deb"},
-        "release.yml": {"release-runtime", "zip", "deb"},
-    }
-    COMMAND = "sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup"
-    ORIGINAL = ("http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n"
-                "https://archive.ubuntu.com/ubuntu/\tpriority:2\n"
-                "https://security.ubuntu.com/ubuntu/\tpriority:3\n")
-    SELECTED = ("https://archive.ubuntu.com/ubuntu/\tpriority:1\n"
-                "https://security.ubuntu.com/ubuntu/\tpriority:2\n")
-    SOURCE = ("# Hosted runner Ubuntu sources\nTypes: deb\n"
-              "URIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
-              "Suites: noble noble-updates noble-backports\n"
-              "Components: main universe restricted multiverse\n"
-              "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
-              "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
-              "Suites: noble-security\nComponents: main universe restricted multiverse\n"
-              "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n")
-
-    @classmethod
-    def setUpClass(cls):
-        spec = importlib.util.spec_from_file_location("ci_ubuntu_mirrors", PROJECT / "scripts/ci-ubuntu-mirrors.py")
-        cls.helper = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cls.helper)
-
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-        self.apt = self.root / "apt"
-        self.apt.mkdir(mode=0o755)
-        self.sources = self.apt / "sources.list.d"
-        self.sources.mkdir(mode=0o755)
-        self.source = self.sources / "ubuntu.sources"
-        self.source.write_text(self.SOURCE)
-        self.source.chmod(0o640)
-        self.mirrors = self.apt / "apt-mirrors.txt"
-        self.mirrors.write_text(self.ORIGINAL)
-        self.mirrors.chmod(0o644)
-        self.external = self.sources / "external.list"
-        self.external.write_text("external fixture retained byte for byte\n")
-
-    def configure(self):
-        return self.helper.configure(self.apt, os.geteuid())
-
-    def assert_cli_refusal(self, category, *, owner=None, detail=None):
-        """Exercise the real preparation with only its host APT path redirected."""
-        configure = self.helper.configure
-        fixture_owner = os.geteuid() if owner is None else owner
-        output, errors = io.StringIO(), io.StringIO()
-        with patch.object(sys, "argv", ["helper"]), \
-                patch.object(self.helper.os, "geteuid", return_value=0), \
-                patch.object(self.helper, "configure", side_effect=lambda _path, _owner:
-                             configure(self.apt, fixture_owner)) as redirected, \
-                contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-            self.assertEqual(self.helper.main(), 65)
-            redirected.assert_called_once_with("/etc/apt", 0)
-        self.assertEqual(output.getvalue(), "")
-        self.assertEqual(errors.getvalue(),
-                         "Error: Ubuntu CI mirror preparation failed; package setup must stop.\n"
-                         f"Category: {category}\n" + (f"{detail}\n" if detail is not None else ""))
-        self.assertFalse(list(self.apt.glob(".apt-mirrors-*")))
-
-    def assert_preserved(self):
-        self.assertEqual(self.source.read_text(), self.SOURCE)
-        self.assertEqual(self.source.stat().st_mode & 0o7777, 0o640)
-        self.assertEqual(self.external.read_text(), "external fixture retained byte for byte\n")
-        self.assertFalse(list(self.apt.glob(".apt-mirrors-*")))
-
-    def test_exact_runner_list_selected_atomically_and_repeated_without_change(self):
-        self.assertEqual(len(self.ORIGINAL.encode()), 144)
-        before = self.mirrors.stat()
-        self.assertTrue(self.configure())
-        after = self.mirrors.stat()
-        self.assertEqual(self.mirrors.read_text(), self.SELECTED)
-        self.assertNotEqual(before.st_ino, after.st_ino)
-        self.assertEqual((before.st_mode, before.st_uid, before.st_gid),
-                         (after.st_mode, after.st_uid, after.st_gid))
-        self.assertFalse(self.configure())
-        self.assertEqual(self.mirrors.stat().st_ino, after.st_ino)
-        self.assert_preserved()
-
-    def test_unknown_or_weakened_mirrors_refused_before_change(self):
-        for value in (self.ORIGINAL.replace("archive.ubuntu.com", "attacker.invalid", 1),
-                      self.ORIGINAL.replace("https://archive", "http://archive"),
-                      self.ORIGINAL.replace("priority:1", "priority:9"),
-                      self.ORIGINAL.replace("priority:3", "priority:3 trusted=yes"),
-                      self.ORIGINAL + "https://unknown.invalid/ priority:4\n",
-                      self.ORIGINAL + self.ORIGINAL, "", "x" * 16385):
-            with self.subTest(value=value[:60]):
-                self.mirrors.write_text(value)
-                with self.assertRaises(ValueError):
-                    self.configure()
-                self.assertEqual(self.mirrors.read_text(), value)
-                self.assert_preserved()
-
-    def test_unknown_sources_or_signature_configuration_refused_without_write(self):
-        for value in (self.SOURCE.replace(self.helper.MIRROR_URI, "http://azure.archive.ubuntu.com/ubuntu/", 1),
-                      self.SOURCE.replace(self.helper.KEYRING, "/tmp/untrusted.gpg", 1),
-                      self.SOURCE.replace(f"Signed-By: {self.helper.KEYRING}\n", ""),
-                      self.SOURCE + "Trusted: yes\n", self.SOURCE + "Allow-Insecure: yes\n",
-                      self.SOURCE + "URIs: https://unknown.invalid/\n", "", "x" * 16385,
-                      self.SOURCE.replace("Types: deb", " Types: deb", 1)):
-            with self.subTest(value=value[:60]):
-                self.source.write_text(value)
-                with self.assertRaises(ValueError):
-                    self.configure()
-                self.assertEqual(self.source.read_text(), value)
-                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-                self.assertFalse(list(self.apt.glob(".apt-mirrors-*")))
-
-    def test_symlinks_parent_links_hardlinks_and_fifo_refused_without_following(self):
-        for path in (self.mirrors, self.source, self.sources, self.apt):
-            with self.subTest(path=path.name):
-                saved = path.with_name(path.name + ".saved")
-                path.rename(saved)
-                path.symlink_to(saved)
-                try:
-                    with self.assertRaises(OSError):
-                        self.configure()
-                finally:
-                    path.unlink()
-                    saved.rename(path)
-        hardlink = self.root / "second-link"
-        for path in (self.mirrors, self.source):
-            with self.subTest(hardlink=path.name):
-                os.link(path, hardlink)
-                try:
-                    with self.assertRaises(ValueError):
-                        self.configure()
-                finally:
-                    hardlink.unlink()
-        self.mirrors.unlink()
-        os.mkfifo(self.mirrors, 0o600)
-        with self.assertRaises(ValueError):
-            self.configure()
-        self.mirrors.unlink()
-        self.mirrors.write_text(self.ORIGINAL)
-        self.assert_preserved()
-
-    def test_unowned_or_writable_configuration_refused(self):
-        with self.assertRaises(ValueError):
-            self.helper.configure(self.apt, os.geteuid() + 1)
-        for path in (self.apt, self.sources, self.source, self.mirrors):
-            with self.subTest(path=path.name):
-                mode = path.stat().st_mode & 0o7777
-                path.chmod(mode | 0o020)
-                try:
-                    with self.assertRaises(ValueError):
-                        self.configure()
-                finally:
-                    path.chmod(mode)
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_preserved()
-
-    def test_changed_mirror_inode_or_source_refused_and_staging_removed(self):
-        original_read = self.helper.read_file
-        for mutation in ("mirror-inode", "source"):
-            calls = []
-
-            def read_file(*args):
-                calls.append(args[1])
-                if len(calls) == 3:
-                    if mutation == "mirror-inode":
-                        replacement = self.apt / "replacement"
-                        replacement.write_text(self.ORIGINAL)
-                        replacement.replace(self.mirrors)
-                    else:
-                        self.source.write_text(self.SOURCE + "# concurrent change\n")
-                return original_read(*args)
-
-            with self.subTest(mutation=mutation), patch.object(self.helper, "read_file", read_file):
-                with self.assertRaises(self.helper.PreparationError) as caught:
-                    self.configure()
-                self.assertEqual(caught.exception.category, "concurrent-change")
-            self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-            self.source.write_text(self.SOURCE)
-            self.assert_preserved()
-
-    def test_failed_atomic_replacement_preserves_original_and_cleans_temporary(self):
-        with patch.object(self.helper.os, "replace", side_effect=OSError("fixture")):
-            with self.assertRaises(OSError):
-                self.configure()
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_preserved()
-
-    def test_cli_has_no_path_override_and_redacts_failed_configuration(self):
-        for arguments, uid in ((["helper", "/tmp/override"], 0), (["helper"], 1000)):
-            with patch.object(sys, "argv", arguments), patch.object(self.helper.os, "geteuid", return_value=uid), \
-                    patch.object(self.helper, "configure") as configure, contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(self.helper.main(), 64)
-                configure.assert_not_called()
-        output = io.StringIO()
-        with patch.object(sys, "argv", ["helper"]), patch.object(self.helper.os, "geteuid", return_value=0), \
-                patch.object(self.helper, "configure", side_effect=ValueError("secret-source-url")) as configure, \
-                contextlib.redirect_stderr(output):
-            self.assertEqual(self.helper.main(), 65)
-            configure.assert_called_once_with("/etc/apt", 0)
-        self.assertNotIn("secret-source-url", output.getvalue())
-
-    def test_cli_source_diagnostics_preserve_rejected_bytes(self):
-        cases = (
-            (b"", "source-syntax"),
-            (b"private malformed configuration", "source-syntax"),
-            (self.SOURCE.replace(self.helper.MIRROR_URI, "https://private.invalid/secret").encode(),
-             "source-uri"),
-            (self.SOURCE.replace(f"Signed-By: {self.helper.KEYRING}\n", "").encode(),
-             "source-signature"),
-            (self.SOURCE.replace(self.helper.KEYRING, "/private/secret.gpg").encode(),
-             "source-signature"),
-            ((self.SOURCE + "Trusted: yes\n").encode(), "source-fields"),
-            (self.SOURCE.replace("Types: deb", "Types: private").encode(), "source-fields"),
-            (b"x" * 16385, "size-limit"),
-            (b"\xffprivate-non-ascii-configuration", "unrecognized-configuration"),
-        )
-        for source, category in cases:
-            with self.subTest(category=category):
-                self.source.write_bytes(source)
-                before = [(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_mode)
-                          for path in (self.source, self.mirrors)]
-                self.assert_cli_refusal(category, detail=(
-                    "Source URI shape: other; stanza: 1/2" if category == "source-uri" else None))
-                self.assertEqual(self.source.read_bytes(), source)
-                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-                self.assertEqual([(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_mode)
-                                  for path in (self.source, self.mirrors)], before)
-
-    def test_cli_reports_first_rejection_without_inspecting_later_faults(self):
-        self.source.write_text("broken source without a separator\n", encoding="utf-8")
-        self.mirrors.write_text("https://private.invalid/secret priority:1\n", encoding="utf-8")
-        original_read = self.helper.read_file
-        self.apt.chmod(0o775)
-        try:
-            with patch.object(self.helper, "read_file", wraps=original_read) as read:
-                self.assert_cli_refusal("owner", owner=os.geteuid() + 1)
-                read.assert_not_called()
-                self.assert_cli_refusal("permissions")
-                read.assert_not_called()
-        finally:
-            self.apt.chmod(0o755)
-        with patch.object(self.helper, "read_file", wraps=original_read) as read:
-            self.assert_cli_refusal("source-syntax")
-            self.assertEqual([call.args[1] for call in read.call_args_list], ["ubuntu.sources"])
-        self.source.write_text(self.SOURCE, encoding="utf-8")
-        with patch.object(self.helper, "read_file", wraps=original_read) as read:
-            self.assert_cli_refusal("mirror-list", detail=(
-                "Mirror list profile: historical-indirect; entries: 1; entry-shapes: other/priority-1"))
-            self.assertEqual([call.args[1] for call in read.call_args_list],
-                             ["ubuntu.sources", "apt-mirrors.txt"])
-        self.assertEqual(self.mirrors.read_text(), "https://private.invalid/secret priority:1\n")
-        self.assert_preserved()
-
-    def test_uri_shape_exact_values_remain_refusals_without_extra_reads(self):
-        cases = (
-            (None, "missing"), ("", "empty"),
-            ("https://archive.ubuntu.com/ubuntu/", "https-archive"),
-            ("https://security.ubuntu.com/ubuntu/", "https-security"),
-            ("http://azure.archive.ubuntu.com/ubuntu/", "http-azure"),
-            ("http://azure.archive.ubuntu.com/ubuntu", "http-azure-no-slash"),
-            ("http://archive.ubuntu.com/ubuntu/", "http-archive"),
-            ("http://archive.ubuntu.com/ubuntu", "http-archive-no-slash"),
-            ("http://security.ubuntu.com/ubuntu/", "http-security"),
-            ("http://security.ubuntu.com/ubuntu", "http-security-no-slash"),
-        )
-        original_read = self.helper.read_file
-        for value, shape in cases:
-            with self.subTest(shape=shape):
-                line = f"URIs: {self.helper.MIRROR_URI}\n"
-                source = self.SOURCE.replace(line, "" if value is None else f"URIs: {value}\n", 1)
-                self.source.write_text(source, encoding="ascii")
-                before = [(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_mode)
-                          for path in (self.source, self.mirrors)]
-                with patch.object(self.helper, "read_file", wraps=original_read) as read:
-                    self.assert_cli_refusal("source-uri", detail=f"Source URI shape: {shape}; stanza: 1/2")
-                    self.assertEqual([call.args[1] for call in read.call_args_list], ["ubuntu.sources"])
-                self.assertEqual(self.source.read_text(encoding="ascii"), source)
-                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-                self.assertEqual([(path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_mode)
-                                  for path in (self.source, self.mirrors)], before)
-        self.assertEqual(self.helper.source_uri_shape(self.helper.MIRROR_URI), "expected-mirror-file")
-
-    def test_uri_shape_does_not_normalize_or_export_unknown_values(self):
-        values = (
-            "https://archive.ubuntu.com.attacker.invalid/ubuntu/",
-            "https://archive.ubuntu.com@attacker.invalid/ubuntu/",
-            "https://secret@archive.ubuntu.com/ubuntu/",
-            "https://archive.ubuntu.com/ubuntu/?token=private",
-            "https://archive.ubuntu.com/ubuntu/#private",
-            "https://archive.ubuntu.com/private/", "https://archive.ubuntu.com/ubuntu",
-            "HTTPS://archive.ubuntu.com/ubuntu/", "https://archive.ubuntu.com:443/ubuntu/",
-            "https://archive.ubuntu.com./ubuntu/", "http://private.invalid/secret",
-            "file:/private/secret", "mirror+file:/private/secret",
-            "https://archive.ubuntu.com/ubuntu/ https://security.ubuntu.com/ubuntu/",
-            "https://security.ubuntu.com/ubuntu/ https://archive.ubuntu.com/ubuntu/",
-            f"{self.helper.MIRROR_URI} {self.helper.MIRROR_URI}",
-            "private\x1b[31msecret", "private\x00secret",
-        )
-        for value in values:
-            with self.subTest(case=values.index(value)):
-                source = self.SOURCE.replace(self.helper.MIRROR_URI, value, 1)
-                self.source.write_text(source, encoding="ascii")
-                self.assert_cli_refusal("source-uri", detail="Source URI shape: other; stanza: 1/2")
-                self.assertEqual(self.source.read_text(encoding="ascii"), source)
-                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-
-    def test_uri_diagnostic_preserves_stanza_order_and_first_guard(self):
-        first, second = self.SOURCE.strip().split("\n\n")
-        bad = second.replace(self.helper.MIRROR_URI, "https://security.ubuntu.com/ubuntu/")
-        cases = (
-            (first + "\n\n" + bad, "source-uri", "Source URI shape: https-security; stanza: 2/2"),
-            (self.SOURCE + "\n" + bad, "source-uri", "Source URI shape: https-security; stanza: 3/3"),
-            (bad + "\n\n" + first, "source-uri", "Source URI shape: https-security; stanza: 1/2"),
-            (bad.replace(self.helper.KEYRING, "private") + "\n\n" + first,
-             "source-uri", "Source URI shape: https-security; stanza: 1/2"),
-            (first.replace(self.helper.KEYRING, "private") + "\n\n" + bad, "source-signature", None),
-            (first.replace(f"Signed-By: {self.helper.KEYRING}", "") + "\n\n" + bad,
-             "source-signature", None),
-            (first + "\nTrusted: yes\n\n" + bad, "source-fields", None),
-            (bad + "\n\nbroken syntax", "source-syntax", None),
-            (bad + "\nURIs: private", "source-syntax", None),
-        )
-        for source, category, detail in cases:
-            with self.subTest(category=category, detail=detail):
-                self.source.write_text(source, encoding="ascii")
-                self.assert_cli_refusal(category, detail=detail)
-                self.assertEqual(self.source.read_text(encoding="ascii"), source)
-                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-
-    def test_uri_detail_rendering_is_closed_and_bounded(self):
-        class Hostile(str):
-            def __eq__(self, _other):
-                raise AssertionError("unexpected comparison of untrusted detail")
-
-        for detail in (None, "private", [], ("private", 1, 2),
-                       (Hostile("other"), 1, 2), ("other", True, 2),
-                       ("other", 0, 2), ("other", 3, 2), ("other", 1, 16385),
-                       ("other", "private", 2), ("other", 1), ("other", 1, 2, "private")):
-            with self.subTest(case=type(detail).__name__):
-                error = self.helper.PreparationError("source-uri", source_uri_detail=detail)
-                self.assertIsNone(self.helper.source_uri_diagnostic(error))
-                with patch.object(sys, "argv", ["helper"]), \
-                        patch.object(self.helper.os, "geteuid", return_value=0), \
-                        patch.object(self.helper, "configure", side_effect=error), \
-                        contextlib.redirect_stderr(io.StringIO()) as errors:
-                    self.assertEqual(self.helper.main(), 65)
-                self.assertEqual(errors.getvalue(),
-                                 "Error: Ubuntu CI mirror preparation failed; package setup must stop.\n"
-                                 "Category: source-uri\n")
-        self.assertIsNone(self.helper.source_uri_diagnostic(self.helper.PreparationError(
-            "source-signature", source_uri_detail=("other", 1, 2))))
-
-    def test_uri_diagnostic_does_not_reread_a_replaced_source(self):
-        source = self.SOURCE.replace(self.helper.MIRROR_URI, "https://security.ubuntu.com/ubuntu/", 1)
-        self.source.write_text(source, encoding="ascii")
-        original_read = self.helper.read_file
-        calls = []
-
-        def read_file(*args):
-            calls.append(args[1])
-            data, metadata = original_read(*args)
-            replacement = self.sources / "replacement"
-            replacement.write_text(self.SOURCE, encoding="ascii")
-            replacement.replace(self.source)
-            return data, metadata
-
-        with patch.object(self.helper, "read_file", read_file):
-            self.assert_cli_refusal("source-uri", detail="Source URI shape: https-security; stanza: 1/2")
-        self.assertEqual(calls, ["ubuntu.sources"])
-        self.assertEqual(self.source.read_text(), self.SOURCE)
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-
-    def test_uri_diagnostic_success_remains_silent_and_idempotent(self):
-        configure = self.helper.configure
-        for message in ("selected.", "already selected."):
-            with patch.object(sys, "argv", ["helper"]), \
-                    patch.object(self.helper.os, "geteuid", return_value=0), \
-                    patch.object(self.helper, "configure", side_effect=lambda _path, _owner:
-                                 configure(self.apt, os.stat(self.apt).st_uid)), \
-                    contextlib.redirect_stdout(io.StringIO()) as output, \
-                    contextlib.redirect_stderr(io.StringIO()) as errors:
-                self.assertEqual(self.helper.main(), 0)
-            self.assertEqual(errors.getvalue(), "")
-            self.assertEqual(output.getvalue(), f"Ubuntu CI mirrors: official HTTPS archives {message}\n")
-        self.assert_preserved()
-
-    def test_cli_metadata_categories_keep_configuration_unchanged(self):
-        for path in (self.apt, self.sources, self.source, self.mirrors):
-            with self.subTest(path=path.name):
-                mode = path.stat().st_mode & 0o7777
-                path.chmod(mode | 0o020)
-                try:
-                    self.assert_cli_refusal("permissions")
-                finally:
-                    path.chmod(mode)
-        for path in (self.source, self.mirrors):
-            with self.subTest(hardlink=path.name):
-                linked = self.root / "second-link"
-                os.link(path, linked)
-                try:
-                    self.assert_cli_refusal("file-links")
-                finally:
-                    linked.unlink()
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_preserved()
-
-    def test_cli_missing_symlink_and_nonregular_configuration_are_distinct(self):
-        self.source.rename(self.sources / "source.saved")
-        saved = self.sources / "source.saved"
-        try:
-            self.assert_cli_refusal("missing-file")
-            self.source.symlink_to(saved)
-            try:
-                self.assert_cli_refusal("path-type")
-            finally:
-                self.source.unlink()
-            os.mkfifo(self.source, 0o600)
-            try:
-                self.assert_cli_refusal("file-type")
-            finally:
-                self.source.unlink()
-        finally:
-            saved.rename(self.source)
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_preserved()
-
-    def test_cli_io_and_unknown_errors_never_expose_exception_details(self):
-        class HostileCategory(str):
-            def __eq__(self, _other):
-                raise AssertionError("untrusted category must not be compared")
-
-        cases = [
-            (OSError(errno.ENOENT, "private reason", "/private/path"), "missing-file"),
-            (OSError(errno.EACCES, "private reason", "/private/path"), "access-denied"),
-            (OSError(errno.EPERM, "private reason", "/private/path"), "access-denied"),
-            (OSError(errno.EIO, "private reason", "/private/path"), "io-error"),
-            (OSError(errno.ELOOP, "private reason", "/private/path"), "path-type"),
-            (OSError(errno.ENOTDIR, "private reason", "/private/path"), "path-type"),
-            (OSError("private reason"), "io-error"),
-            (ValueError("https://private.invalid/secret\nCategory: success"), "unrecognized-configuration"),
-            (self.helper.PreparationError("private\nCategory: success"), "unrecognized-configuration"),
-            (self.helper.PreparationError(HostileCategory("owner")), "unrecognized-configuration"),
-            (self.helper.PreparationError({"private": "value"}), "unrecognized-configuration"),
-        ]
-        for error, category in cases:
-            with self.subTest(category=category):
-                output, errors = io.StringIO(), io.StringIO()
-                with patch.object(sys, "argv", ["helper"]), \
-                        patch.object(self.helper.os, "geteuid", return_value=0), \
-                        patch.object(self.helper, "configure", side_effect=error), \
-                        contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-                    self.assertEqual(self.helper.main(), 65)
-                self.assertEqual(output.getvalue(), "")
-                self.assertEqual(errors.getvalue(),
-                                 "Error: Ubuntu CI mirror preparation failed; package setup must stop.\n"
-                                 f"Category: {category}\n")
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_preserved()
-
-    @staticmethod
-    def apt_stat_identity(metadata):
-        # Reading can legitimately update atime; it is not a mutation guard.
-        return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid,
-                metadata.st_gid, metadata.st_nlink, metadata.st_size,
-                metadata.st_mtime_ns, metadata.st_ctime_ns)
-
-    def mixed_source(self):
-        first, second = self.SOURCE.split("\n\n", 1)
-        return first + "\n\n" + second.replace(
-            "mirror+file:/etc/apt/apt-mirrors.txt", "http://security.ubuntu.com/ubuntu", 1)
-
-    def normalized_source(self, source):
-        return source.replace("URIs: mirror+file:/etc/apt/apt-mirrors.txt",
-                              "URIs: https://archive.ubuntu.com/ubuntu/", 1).replace(
-                                  "URIs: http://security.ubuntu.com/ubuntu",
-                                  "URIs: https://security.ubuntu.com/ubuntu/", 1)
-
-    def assert_no_apt_staging(self):
-        self.assertFalse(list(self.apt.glob(".apt-mirrors-*")))
-        self.assertFalse(list(self.sources.glob(".apt-mirrors-*")))
-
-    def test_mixed_exact_layout_changes_only_source_and_is_idempotent(self):
-        for types in ("deb", "deb deb-src"):
-            for mirrors in (self.ORIGINAL, self.SELECTED):
-                with self.subTest(types=types, mirrors_selected=mirrors == self.SELECTED):
-                    source = self.mixed_source().replace("Types: deb\n", f"Types: {types}\n")
-                    self.source.write_text(source, encoding="ascii")
-                    self.mirrors.write_text(mirrors, encoding="ascii")
-                    source_before, mirror_before = self.source.stat(), self.mirrors.stat()
-                    self.assertEqual(self.configure(), "direct-selected")
-                    source_after = self.source.stat()
-                    self.assertEqual(self.source.read_text(encoding="ascii"), self.normalized_source(source))
-                    self.assertNotEqual(source_before.st_ino, source_after.st_ino)
-                    self.assertEqual((source_after.st_uid, source_after.st_gid, source_after.st_mode),
-                                     (source_before.st_uid, source_before.st_gid, source_before.st_mode))
-                    self.assertEqual(self.mirrors.read_text(encoding="ascii"), mirrors)
-                    self.assertEqual(self.apt_stat_identity(self.mirrors.stat()), self.apt_stat_identity(mirror_before))
-                    self.assertEqual(self.configure(), "direct-current")
-                    self.assertEqual(self.apt_stat_identity(self.source.stat()), self.apt_stat_identity(source_after))
-                    self.assertEqual(self.apt_stat_identity(self.mirrors.stat()), self.apt_stat_identity(mirror_before))
-                    self.assertEqual(self.external.read_text(), "external fixture retained byte for byte\n")
-                    self.assert_no_apt_staging()
-
-    def test_mixed_preserves_comments_components_order_and_line_endings(self):
-        source = (self.mixed_source().replace("main universe restricted multiverse",
-                                             "multiverse restricted main universe")
-                  .replace("\n\n", "\n\n# private fixture comment retained\n")
-                  .replace("\n", "\r\n"))
-        self.source.write_bytes(source.encode("ascii"))
-        self.assertEqual(self.configure(), "direct-selected")
-        self.assertEqual(self.source.read_bytes(), self.normalized_source(source).encode("ascii"))
-        self.assertEqual(self.configure(), "direct-current")
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_no_apt_staging()
-
-    def test_mixed_and_direct_require_every_field_in_both_stanzas(self):
-        replacements = (
-            ("Types: deb", "Types: deb-src", "source-fields"),
-            ("Types: deb", "Types: deb deb", "source-fields"),
-            ("Types: deb", "Types: deb deb-src extra", "source-fields"),
-            ("Components: main universe restricted multiverse", "Components: main universe restricted", "source-fields"),
-            ("Components: main universe restricted multiverse", "Components: main main universe restricted multiverse", "source-fields"),
-            ("Components: main universe restricted multiverse", "Components: main universe restricted private", "source-fields"),
-            ("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg",
-             "Signed-By: /tmp/private.gpg", "source-signature"),
-            ("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg", "", "source-signature"),
-        )
-        for direct in (False, True):
-            baseline = self.normalized_source(self.mixed_source()) if direct else self.mixed_source()
-            first, second = baseline.strip().split("\n\n")
-            for index in (0, 1):
-                for old, new, category in replacements:
-                    with self.subTest(direct=direct, stanza=index, category=category, field=old.split(":")[0]):
-                        stanzas = [first, second]
-                        stanzas[index] = stanzas[index].replace(old, new)
-                        source = "\n\n".join(stanzas) + "\n"
-                        self.source.write_text(source, encoding="ascii")
-                        self.assert_cli_refusal(category)
-                        self.assertEqual(self.source.read_text(encoding="ascii"), source)
-                        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-                        self.assert_no_apt_staging()
-                for extra in ("Trusted: yes", "Allow-Insecure: yes", "Enabled: no", "Private: value"):
-                    with self.subTest(direct=direct, stanza=index, extra=extra.split(":")[0]):
-                        stanzas = [first, second]
-                        stanzas[index] += "\n" + extra
-                        source = "\n\n".join(stanzas) + "\n"
-                        self.source.write_text(source, encoding="ascii")
-                        self.assert_cli_refusal("source-fields")
-                        self.assertEqual(self.source.read_text(encoding="ascii"), source)
-                        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-                        self.assert_no_apt_staging()
-
-    def test_mixed_and_direct_require_noble_suites_and_stanza_order(self):
-        for direct in (False, True):
-            source = self.normalized_source(self.mixed_source()) if direct else self.mixed_source()
-            cases = (
-                source.replace("noble noble-updates noble-backports", "noble-updates noble noble-backports"),
-                source.replace("noble noble-updates noble-backports", "noble noble-updates"),
-                source.replace("noble noble-updates noble-backports", "noble noble-updates noble-backports noble-security"),
-                source.replace("noble-security", "noble-updates"),
-                source.replace("noble-security", "noble-security noble-security"),
-                source.replace("noble", "jammy"),
-                source.replace("Suites: noble-security", "Suites:"),
-            )
-            for number, bad in enumerate(cases):
-                with self.subTest(direct=direct, case=number):
-                    self.source.write_text(bad, encoding="ascii")
-                    self.assert_cli_refusal("source-fields")
-                    self.assertEqual(self.source.read_text(encoding="ascii"), bad)
-                    self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-            first, second = source.strip().split("\n\n")
-            layouts = [second + "\n\n" + first, source + "\n" + second]
-            if direct:
-                layouts.append(first + "\n")
-            for bad in layouts:
-                with self.subTest(direct=direct, layout=bad.count("Types:")):
-                    self.source.write_text(bad, encoding="ascii")
-                    with self.assertRaises(self.helper.PreparationError):
-                        self.configure()
-                    self.assertEqual(self.source.read_text(encoding="ascii"), bad)
-                    self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-                    self.assert_no_apt_staging()
-
-    def test_mixed_rejects_uri_variants_without_broadening_endpoints(self):
-        original = self.mixed_source()
-        uris = (
-            "http://security.ubuntu.com/ubuntu/",
-            "https://security.ubuntu.com/ubuntu/",
-            "http://security.ubuntu.com:80/ubuntu",
-            "http://security.ubuntu.com./ubuntu",
-            "http://security.ubuntu.com.attacker.invalid/ubuntu",
-            "http://security.ubuntu.com@attacker.invalid/ubuntu",
-            "http://secret@security.ubuntu.com/ubuntu",
-            "http://security.ubuntu.com/ubuntu?token=private",
-            "http://security.ubuntu.com/private",
-            "HTTP://security.ubuntu.com/ubuntu",
-            "http://security.ubuntu.com/ubuntu http://security.ubuntu.com/ubuntu",
-        )
-        for number, uri in enumerate(uris):
-            with self.subTest(case=number):
-                source = original.replace("http://security.ubuntu.com/ubuntu", uri)
-                self.source.write_text(source, encoding="ascii")
-                with self.assertRaises(self.helper.PreparationError) as caught:
-                    self.configure()
-                self.assertEqual(caught.exception.category, "source-uri")
-                self.assertEqual(self.source.read_text(encoding="ascii"), source)
-                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-                self.assert_no_apt_staging()
-
-    def test_mixed_cli_reports_direct_preparation_and_idempotence(self):
-        self.source.write_text(self.mixed_source(), encoding="ascii")
-        configure = self.helper.configure
-        owner = os.geteuid()
-        for message in ("selected.", "already selected."):
-            with patch.object(sys, "argv", ["helper"]), \
-                    patch.object(self.helper.os, "geteuid", return_value=0), \
-                    patch.object(self.helper, "configure", side_effect=lambda _path, _owner:
-                                 configure(self.apt, owner)), \
-                    contextlib.redirect_stdout(io.StringIO()) as output, \
-                    contextlib.redirect_stderr(io.StringIO()) as errors:
-                self.assertEqual(self.helper.main(), 0)
-            self.assertEqual(errors.getvalue(), "")
-            self.assertEqual(output.getvalue(), f"Ubuntu CI sources: official HTTPS archive/security {message}\n")
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_no_apt_staging()
-
-    def test_mixed_requires_safe_source_mirror_and_directory_properties(self):
-        self.source.write_text(self.mixed_source(), encoding="ascii")
-        for path in (self.apt, self.sources, self.source, self.mirrors):
-            with self.subTest(permissions=path.name):
-                mode = path.stat().st_mode & 0o7777
-                path.chmod(mode | 0o020)
-                try:
-                    self.assert_cli_refusal("permissions")
-                finally:
-                    path.chmod(mode)
-            with self.subTest(symlink=path.name):
-                saved = path.with_name(path.name + ".saved")
-                path.rename(saved)
-                path.symlink_to(saved)
-                try:
-                    with self.assertRaises(OSError):
-                        self.configure()
-                finally:
-                    path.unlink()
-                    saved.rename(path)
-        for path in (self.source, self.mirrors):
-            with self.subTest(hardlink=path.name):
-                linked = self.root / "link"
-                os.link(path, linked)
-                try:
-                    self.assert_cli_refusal("file-links")
-                finally:
-                    linked.unlink()
-        with self.assertRaises(self.helper.PreparationError):
-            self.helper.configure(self.apt, os.geteuid() + 1)
-        self.assertEqual(self.source.read_text(), self.mixed_source())
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_no_apt_staging()
-
-    def test_mixed_still_validates_unused_mirror_list(self):
-        for source in (self.mixed_source(), self.normalized_source(self.mixed_source())):
-            for mirrors, shapes in (
-                    (self.ORIGINAL.replace("archive.ubuntu.com", "private.invalid", 1),
-                     "other/priority-1,https-archive/priority-2,https-security/priority-3"),
-                    (self.ORIGINAL.replace("https://archive", "http://archive"),
-                     "http-azure/priority-1,http-archive/priority-2,https-security/priority-3"),
-                    ("", "empty")):
-                with self.subTest(direct="https://archive.ubuntu.com/ubuntu/" in source, empty=not mirrors):
-                    self.source.write_text(source, encoding="ascii")
-                    self.mirrors.write_text(mirrors, encoding="ascii")
-                    profile = "direct" if "https://archive.ubuntu.com/ubuntu/" in source else "mixed"
-                    self.assert_cli_refusal("mirror-list", detail=(
-                        f"Mirror list profile: {profile}; entries: {3 if mirrors else 0}; entry-shapes: {shapes}"))
-                    self.assertEqual(self.source.read_text(), source)
-                    self.assertEqual(self.mirrors.read_text(), mirrors)
-                    self.assert_no_apt_staging()
-
-    def test_mixed_complete_read_handles_short_chunks_and_rejects_truncation(self):
-        mixed = self.mixed_source().encode("ascii")
-        self.source.write_bytes(mixed)
-        real_read = self.helper.os.read
-        calls = []
-
-        def short_read(fd, limit):
-            calls.append(limit)
-            return real_read(fd, min(limit, 11))
-
-        with patch.object(self.helper.os, "read", short_read):
-            self.assertEqual(self.configure(), "direct-selected")
-        self.assertGreater(len(calls), 30)
-        self.assertEqual(self.source.read_text(), self.normalized_source(self.mixed_source()))
-        hidden = mixed + b"\nTypes: deb\nURIs: https://private.invalid/secret\n"
-        self.source.write_bytes(hidden)
-        source_inode = self.source.stat().st_ino
-        delivered = [False]
-
-        def truncated_read(fd, limit):
-            if os.fstat(fd).st_ino == source_inode:
-                if delivered[0]:
-                    return b""
-                delivered[0] = True
-                return real_read(fd, min(limit, len(mixed)))
-            return real_read(fd, limit)
-
-        with patch.object(self.helper.os, "read", truncated_read):
-            self.assert_cli_refusal("concurrent-change")
-        self.assertEqual(self.source.read_bytes(), hidden)
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_no_apt_staging()
-
-    def test_mixed_rejects_growth_during_source_read(self):
-        self.source.write_text(self.mixed_source(), encoding="ascii")
-        source_inode = self.source.stat().st_ino
-        real_read = self.helper.os.read
-        changed = [False]
-        suffix = b"\nTypes: deb\nURIs: https://private.invalid/secret\n"
-
-        def growing_read(fd, limit):
-            data = real_read(fd, limit)
-            if not changed[0] and os.fstat(fd).st_ino == source_inode:
-                changed[0] = True
-                with self.source.open("ab") as stream:
-                    stream.write(suffix)
-            return data
-
-        with patch.object(self.helper.os, "read", growing_read):
-            self.assert_cli_refusal("concurrent-change")
-        self.assertEqual(self.source.read_bytes(), self.mixed_source().encode("ascii") + suffix)
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_no_apt_staging()
-
-    def test_mixed_source_changes_before_commit_refuse_without_overwriting_writer(self):
-        real_read = self.helper.read_file
-        for mutation in ("inode", "bytes", "mode"):
-            mixed = self.mixed_source()
-            self.source.write_text(mixed, encoding="ascii")
-            self.source.chmod(0o640)
-            calls = []
-
-            def read_file(*args):
-                calls.append(args[1])
-                if len(calls) == 3:
-                    if mutation == "inode":
-                        replacement = self.sources / "replacement"
-                        replacement.write_text(mixed, encoding="ascii")
-                        replacement.chmod(0o640)
-                        replacement.replace(self.source)
-                    elif mutation == "bytes":
-                        self.source.write_text(mixed + "# cloud-init update\n", encoding="ascii")
-                    else:
-                        self.source.chmod(0o600)
-                return real_read(*args)
-
-            with self.subTest(mutation=mutation), patch.object(self.helper, "read_file", read_file):
-                self.assert_cli_refusal("concurrent-change")
-            self.assertEqual(self.source.read_text(), mixed + ("# cloud-init update\n" if mutation == "bytes" else ""))
-            self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-            self.assert_no_apt_staging()
-
-    def test_mixed_idempotent_path_revalidates_source_and_mirrors(self):
-        source = self.normalized_source(self.mixed_source())
-        real_read = self.helper.read_file
-        for target in ("source", "mirrors"):
-            self.source.write_text(source, encoding="ascii")
-            self.mirrors.write_text(self.ORIGINAL, encoding="ascii")
-            calls = []
-
-            def read_file(*args):
-                calls.append(args[1])
-                if len(calls) == 3:
-                    path = self.source if target == "source" else self.mirrors
-                    replacement = path.with_name("replacement")
-                    replacement.write_bytes(path.read_bytes())
-                    replacement.chmod(path.stat().st_mode & 0o7777)
-                    replacement.replace(path)
-                return real_read(*args)
-
-            with self.subTest(target=target), patch.object(self.helper, "read_file", read_file):
-                self.assert_cli_refusal("concurrent-change")
-            self.assertEqual(self.source.read_text(), source)
-            self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-            self.assert_no_apt_staging()
-
-    def test_mixed_changed_directory_refuses_detached_preparation(self):
-        self.source.write_text(self.mixed_source(), encoding="ascii")
-        original_fsync = self.helper.os.fsync
-        moved = self.apt / "sources.saved"
-        replaced = [False]
-
-        def fsync(fd):
-            original_fsync(fd)
-            if not replaced[0]:
-                replaced[0] = True
-                self.sources.rename(moved)
-                self.sources.mkdir(mode=0o755)
-                self.source.write_text(self.SOURCE, encoding="ascii")
-
-        with patch.object(self.helper.os, "fsync", fsync):
-            self.assert_cli_refusal("concurrent-change")
-        self.assertEqual(self.source.read_text(), self.SOURCE)
-        self.assertEqual((moved / "ubuntu.sources").read_text(), self.mixed_source())
-        self.assertFalse(list(moved.glob(".apt-mirrors-*")))
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_no_apt_staging()
-
-    def test_mixed_fsync_failure_preserves_precommit_or_reports_committed_state(self):
-        original_fsync = self.helper.os.fsync
-        for failure in (1, 2):
-            mixed = self.mixed_source()
-            self.source.write_text(mixed, encoding="ascii")
-            before = self.source.stat()
-            mirror_before = self.mirrors.stat()
-            calls = []
-
-            def fsync(fd):
-                calls.append(fd)
-                if len(calls) == failure:
-                    raise OSError(errno.EIO, "private durability failure")
-                return original_fsync(fd)
-
-            with self.subTest(fsync_call=failure), patch.object(self.helper.os, "fsync", fsync):
-                self.assert_cli_refusal("io-error")
-            self.assertEqual(len(calls), failure)
-            self.assertEqual(self.source.read_text(), mixed if failure == 1 else self.normalized_source(mixed))
-            self.assertEqual(self.source.stat().st_ino == before.st_ino, failure == 1)
-            self.assertEqual(self.apt_stat_identity(self.mirrors.stat()), self.apt_stat_identity(mirror_before))
-            self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-            self.assert_no_apt_staging()
-
-    def test_mixed_interruption_before_commit_preserves_original_and_cleans_staging(self):
-        self.source.write_text(self.mixed_source(), encoding="ascii")
-        before = self.source.stat()
-        with patch.object(self.helper.os, "fsync", side_effect=KeyboardInterrupt):
-            with self.assertRaises(KeyboardInterrupt):
-                self.configure()
-        self.assertEqual(self.source.read_text(), self.mixed_source())
-        self.assertEqual(self.apt_stat_identity(self.source.stat()), self.apt_stat_identity(before))
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_no_apt_staging()
-
-    def test_mixed_failed_replace_and_short_write_never_commit(self):
-        mixed = self.mixed_source()
-        self.source.write_text(mixed, encoding="ascii")
-        before = self.source.stat()
-        real_fdopen = self.helper.os.fdopen
-
-        class ShortWriter:
-            def __init__(self, fd, mode):
-                self.stream = real_fdopen(fd, mode)
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return self.stream.__exit__(*args)
-
-            def __getattr__(self, name):
-                return getattr(self.stream, name)
-
-            def write(self, data):
-                return self.stream.write(data[:-1])
-
-        with patch.object(self.helper.os, "fdopen", ShortWriter):
-            self.assert_cli_refusal("io-error")
-        self.assertEqual(self.apt_stat_identity(self.source.stat()), self.apt_stat_identity(before))
-        with patch.object(self.helper.os, "replace", side_effect=OSError(errno.EIO, "private replacement failure")):
-            self.assert_cli_refusal("io-error")
-        self.assertEqual(self.apt_stat_identity(self.source.stat()), self.apt_stat_identity(before))
-        self.assertEqual(self.source.read_text(), mixed)
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_no_apt_staging()
-
-    def test_mixed_postcommit_cloud_init_changes_stay_failures_without_rollback(self):
-        real_replace = self.helper.os.replace
-        mixed = self.mixed_source()
-        for target in ("source", "mirrors"):
-            self.source.write_text(mixed, encoding="ascii")
-            self.mirrors.write_text(self.ORIGINAL, encoding="ascii")
-
-            def replace(*args, **kwargs):
-                real_replace(*args, **kwargs)
-                if target == "source":
-                    self.source.write_text(mixed + "# cloud-init writer\n", encoding="ascii")
-                else:
-                    self.mirrors.write_text(self.ORIGINAL + "# cloud-init writer\n", encoding="ascii")
-
-            with self.subTest(target=target), patch.object(self.helper.os, "replace", replace):
-                self.assert_cli_refusal("concurrent-change")
-            self.assertEqual(self.source.read_text(), mixed + "# cloud-init writer\n"
-                             if target == "source" else self.normalized_source(mixed))
-            self.assertEqual(self.mirrors.read_text(), self.ORIGINAL + ("# cloud-init writer\n"
-                                                                      if target == "mirrors" else ""))
-            self.assert_no_apt_staging()
-
-    def test_mixed_control_bytes_cannot_create_an_alternate_source_parse(self):
-        for value in (*range(9), 11, 12, *range(14, 32), 127):
-            with self.subTest(control=value):
-                source = self.mixed_source().encode("ascii") + b"# fixture" + bytes([value]) + b"\n"
-                self.source.write_bytes(source)
-                self.assert_cli_refusal("source-syntax")
-                self.assertEqual(self.source.read_bytes(), source)
-                self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-                self.assert_no_apt_staging()
-        source = self.mixed_source().encode("ascii").replace(b"\n", b"\r")
-        self.source.write_bytes(source)
-        self.assert_cli_refusal("source-syntax")
-        self.assertEqual(self.source.read_bytes(), source)
-
-    def test_mixed_postcommit_durability_failure_cannot_be_bypassed_by_idempotence(self):
-        self.source.write_text(self.mixed_source(), encoding="ascii")
-        original_fsync = self.helper.os.fsync
-        calls = []
-
-        def fail_directory(fd):
-            calls.append(fd)
-            if len(calls) == 2:
-                raise OSError(errno.EIO, "private durability failure")
-            original_fsync(fd)
-
-        with patch.object(self.helper.os, "fsync", fail_directory):
-            self.assert_cli_refusal("io-error")
-        committed = self.source.stat()
-        self.assertEqual(self.source.read_text(), self.normalized_source(self.mixed_source()))
-        for failure in (1, 2):
-            calls.clear()
-
-            def repeat_fsync(fd):
-                calls.append(fd)
-                if len(calls) == failure:
-                    raise OSError(errno.EIO, "private repeated durability failure")
-                original_fsync(fd)
-
-            with self.subTest(fsync_call=failure), patch.object(self.helper.os, "fsync", repeat_fsync), \
-                    patch.object(self.helper.os, "replace") as replace:
-                self.assert_cli_refusal("io-error")
-                replace.assert_not_called()
-            self.assertEqual(len(calls), failure)
-            self.assertEqual(self.apt_stat_identity(self.source.stat()), self.apt_stat_identity(committed))
-        with patch.object(self.helper.os, "fsync", wraps=original_fsync) as sync, \
-                patch.object(self.helper.os, "replace") as replace:
-            self.assertEqual(self.configure(), "direct-current")
-            self.assertEqual(sync.call_count, 2)
-            replace.assert_not_called()
-        self.assertEqual(self.apt_stat_identity(self.source.stat()), self.apt_stat_identity(committed))
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_no_apt_staging()
-
-    def test_mixed_cleanup_failure_keeps_primary_error_and_closes_directories(self):
-        self.source.write_text(self.mixed_source(), encoding="ascii")
-        original_close = self.helper.os.close
-        closed = []
-        primary = OSError(errno.EIO, "private primary write failure")
-
-        def close(fd):
-            inode = os.fstat(fd).st_ino
-            original_close(fd)
-            closed.append(inode)
-
-        with patch.object(self.helper.os, "fsync", side_effect=primary), \
-                patch.object(self.helper.os, "unlink", side_effect=OSError(errno.EACCES, "private cleanup failure")), \
-                patch.object(self.helper.os, "close", close):
-            with self.assertRaises(OSError) as caught:
-                self.configure()
-        self.assertIs(caught.exception, primary)
-        self.assertIn(self.apt.stat().st_ino, closed)
-        self.assertIn(self.sources.stat().st_ino, closed)
-        self.assertEqual(self.source.read_text(), self.mixed_source())
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        residue = list(self.sources.glob(".apt-mirrors-*"))
-        self.assertEqual(len(residue), 1)
-        residue[0].unlink()
-        self.assert_no_apt_staging()
-
-    def test_mixed_postcommit_permission_change_is_not_a_success(self):
-        self.source.write_text(self.mixed_source(), encoding="ascii")
-        original_replace = self.helper.os.replace
-
-        def replace(*args, **kwargs):
-            original_replace(*args, **kwargs)
-            self.source.chmod(0o600)
-
-        with patch.object(self.helper.os, "replace", replace):
-            self.assert_cli_refusal("concurrent-change")
-        self.assertEqual(self.source.read_text(), self.normalized_source(self.mixed_source()))
-        self.assertEqual(self.source.stat().st_mode & 0o7777, 0o600)
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_no_apt_staging()
-
-    def test_mixed_ambient_exception_does_not_hide_final_close_failure(self):
-        self.source.write_text(self.mixed_source(), encoding="ascii")
-        original_open = self.helper.open_directory
-        original_close = self.helper.os.close
-        parent = []
-
-        def open_directory(*args):
-            fd = original_open(*args)
-            if not parent:
-                parent.append(fd)
-            return fd
-
-        def close(fd):
-            original_close(fd)
-            if parent and fd == parent[0]:
-                raise OSError(errno.EIO, "private final close failure")
-
-        try:
-            raise ValueError("ambient caller exception")
-        except ValueError:
-            with patch.object(self.helper, "open_directory", open_directory), \
-                    patch.object(self.helper.os, "close", close):
-                with self.assertRaises(OSError) as caught:
-                    self.configure()
-        self.assertEqual(caught.exception.errno, errno.EIO)
-        self.assertEqual(self.source.read_text(), self.normalized_source(self.mixed_source()))
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assert_no_apt_staging()
-
-    def test_mirror_diagnostic_profiles_keep_unknown_lists_blocking_and_unchanged(self):
-        cases = (("historical-indirect", self.SOURCE), ("mixed", self.mixed_source()),
-                 ("direct", self.normalized_source(self.mixed_source())))
-        mirrors = "https://private.invalid/secret priority:1\n"
-        for profile, source in cases:
-            with self.subTest(profile=profile):
-                self.source.write_text(source, encoding="ascii")
-                self.mirrors.write_text(mirrors, encoding="ascii")
-                before = [self.apt_stat_identity(path.stat()) for path in (self.source, self.mirrors)]
-                self.assert_cli_refusal("mirror-list", detail=(
-                    f"Mirror list profile: {profile}; entries: 1; entry-shapes: other/priority-1"))
-                self.assertEqual(self.source.read_text(encoding="ascii"), source)
-                self.assertEqual(self.mirrors.read_text(encoding="ascii"), mirrors)
-                self.assertEqual([self.apt_stat_identity(path.stat()) for path in (self.source, self.mirrors)],
-                                 before)
-                self.assertEqual(self.external.read_text(), "external fixture retained byte for byte\n")
-                self.assert_no_apt_staging()
-
-    def test_mirror_diagnostic_keeps_known_order_priority_and_arity_distinct(self):
-        cases = (
-            ("https://security.ubuntu.com/ubuntu/ priority:3\n"
-             "https://archive.ubuntu.com/ubuntu/ priority:2\n"
-             "http://azure.archive.ubuntu.com/ubuntu/ priority:1\n", 3,
-             "https-security/priority-3,https-archive/priority-2,http-azure/priority-1"),
-            ("http://azure.archive.ubuntu.com/ubuntu priority:1\n"
-             "http://archive.ubuntu.com/ubuntu priority:2\n"
-             "http://security.ubuntu.com/ubuntu priority:3\n", 3,
-             "http-azure-no-slash/priority-1,http-archive-no-slash/priority-2,http-security-no-slash/priority-3"),
-            ("https://archive.ubuntu.com/ubuntu/ priority:1\n"
-             "https://security.ubuntu.com/ubuntu/ priority:1\n", 2,
-             "https-archive/priority-1,https-security/priority-1"),
-            ("https://archive.ubuntu.com/ubuntu/ priority:99\n", 1, "https-archive/other"),
-            ("https://archive.ubuntu.com/ubuntu/\n", 1, "invalid-entry/other"),
-            ("https://archive.ubuntu.com/ubuntu/ priority:1 private-extra\n", 1, "invalid-entry/other"),
-            ("\n", 1, "invalid-entry/other"),
-            ("", 0, "empty"),
-            (self.ORIGINAL + self.ORIGINAL, 6,
-             "http-azure/priority-1,https-archive/priority-2,https-security/priority-3,"
-             "http-azure/priority-1,https-archive/priority-2,https-security/priority-3"),
-        )
-        for mirrors, count, shapes in cases:
-            with self.subTest(entries=count, expected=shapes):
-                self.mirrors.write_text(mirrors, encoding="ascii")
-                self.assert_cli_refusal("mirror-list", detail=(
-                    f"Mirror list profile: historical-indirect; entries: {count}; entry-shapes: {shapes}"))
-                self.assertEqual(self.mirrors.read_text(encoding="ascii"), mirrors)
-                self.assert_preserved()
-
-    def test_mirror_diagnostic_bounds_without_presenting_omitted_entries_as_complete(self):
-        for count in (8, 9, 200):
-            mirrors = "https://archive.ubuntu.com/ubuntu/ priority:1\n" * count
-            self.mirrors.write_text(mirrors, encoding="ascii")
-            shapes = ",".join(["https-archive/priority-1"] * count) if count <= 8 else "omitted-limit"
-            self.assert_cli_refusal("mirror-list", detail=(
-                f"Mirror list profile: historical-indirect; entries: {count}; entry-shapes: {shapes}"))
-            self.assertEqual(self.mirrors.read_text(encoding="ascii"), mirrors)
-            self.assert_preserved()
-        self.mirrors.write_bytes(b"x" * (self.helper.MAX_BYTES + 1))
-        self.assert_cli_refusal("size-limit")
-
-    def test_mirror_diagnostic_unknown_values_are_not_normalized_or_disclosed(self):
-        values = (
-            "https://archive.ubuntu.com.attacker.invalid/ubuntu/",
-            "https://archive.ubuntu.com/ubuntu/?private=secret",
-            "https://private:secret@archive.ubuntu.com/ubuntu/",
-            "HTTPS://archive.ubuntu.com/ubuntu/",
-            "https://archive.ubuntu.com:443/ubuntu/",
-            "https://archive.ubuntu.com/ubuntu/private",
-            "file:/private/secret", "mirror+file:/private/secret",
-            "https://archive.ubuntu.com/ubuntu/#secret", "private\x1b[31msecret",
-        )
-        for value in values:
-            with self.subTest(case=values.index(value)):
-                mirrors = f"{value} priority:1\n"
-                self.mirrors.write_text(mirrors, encoding="ascii")
-                self.assert_cli_refusal("mirror-list", detail=(
-                    "Mirror list profile: historical-indirect; entries: 1; entry-shapes: other/priority-1"))
-                self.assertEqual(self.mirrors.read_text(encoding="ascii"), mirrors)
-        self.mirrors.write_bytes(b"https://private.invalid/\xff priority:1\n")
-        self.assert_cli_refusal("unrecognized-configuration")
-        self.assert_preserved()
-
-    def test_mirror_diagnostic_renderer_refuses_forged_unbounded_or_private_details(self):
-        class Hostile(str):
-            def __eq__(self, _other):
-                raise AssertionError("untrusted detail compared")
-
-        pair = (("https-archive", "priority-1"),)
-        invalid = (
-            None, [], "private", ("private", 1, pair), (Hostile("mixed"), 1, pair),
-            ("mixed", True, pair), ("mixed", -1, ()), ("mixed", 16385, None),
-            ("mixed", 1, None), ("mixed", 9, pair), ("mixed", 1, []),
-            ("mixed", 2, pair), ("mixed", 0, pair), ("mixed", 1, (("private", "priority-1"),)),
-            ("mixed", 1, (("https-archive", "private"),)),
-            ("mixed", 1, ((Hostile("other"), "other"),)),
-            ("mixed", 1, (("other", Hostile("other")),)),
-            ("mixed", 1, (("other",),)), ("mixed", 1, (["other", "other"],)),
-            ("mixed", 1), ("mixed", 1, pair, "private"),
-        )
-        for detail in invalid:
-            with self.subTest(kind=type(detail).__name__):
-                error = self.helper.PreparationError("mirror-list", mirror_list_detail=detail)
-                self.assertIsNone(self.helper.mirror_list_diagnostic(error))
-                with patch.object(sys, "argv", ["helper"]), \
-                        patch.object(self.helper.os, "geteuid", return_value=0), \
-                        patch.object(self.helper, "configure", side_effect=error), \
-                        contextlib.redirect_stderr(io.StringIO()) as errors:
-                    self.assertEqual(self.helper.main(), 65)
-                self.assertEqual(errors.getvalue(),
-                                 "Error: Ubuntu CI mirror preparation failed; package setup must stop.\n"
-                                 "Category: mirror-list\n")
-        for category in ("source-signature", "source-uri", "concurrent-change"):
-            self.assertIsNone(self.helper.mirror_list_diagnostic(self.helper.PreparationError(
-                category, mirror_list_detail=("mixed", 1, pair))))
-
-    def test_mirror_diagnostic_uses_only_secured_bytes_already_read(self):
-        self.source.write_text(self.mixed_source(), encoding="ascii")
-        self.mirrors.write_text("https://security.ubuntu.com/ubuntu/ priority:1\n", encoding="ascii")
-        original_read = self.helper.read_file
-        calls = []
-
-        def read_file(*args):
-            calls.append(args[1])
-            data, metadata = original_read(*args)
-            if args[1] == "apt-mirrors.txt":
-                replacement = self.apt / "replacement"
-                replacement.write_text(self.ORIGINAL, encoding="ascii")
-                replacement.replace(self.mirrors)
-            return data, metadata
-
-        with patch.object(self.helper, "read_file", read_file):
-            self.assert_cli_refusal("mirror-list", detail=(
-                "Mirror list profile: mixed; entries: 1; entry-shapes: https-security/priority-1"))
-        self.assertEqual(calls, ["ubuntu.sources", "apt-mirrors.txt"])
-        self.assertEqual(self.mirrors.read_text(), self.ORIGINAL)
-        self.assertEqual(self.source.read_text(), self.mixed_source())
-        self.assert_no_apt_staging()
-
-    def test_mirror_diagnostic_does_not_run_before_earlier_guards(self):
-        self.source.write_text(self.mixed_source().replace(self.helper.KEYRING, "/private/secret.gpg"),
-                               encoding="ascii")
-        self.mirrors.write_text("private unknown list\n", encoding="ascii")
-        original_read = self.helper.read_file
-        with patch.object(self.helper, "mirror_list_shape", side_effect=AssertionError("late diagnostic")), \
-                patch.object(self.helper, "read_file", wraps=original_read) as read:
-            self.assert_cli_refusal("source-signature")
-        self.assertEqual([call.args[1] for call in read.call_args_list], ["ubuntu.sources"])
-        self.source.write_text(self.mixed_source(), encoding="ascii")
-        self.mirrors.chmod(0o666)
-        with patch.object(self.helper, "mirror_list_shape", side_effect=AssertionError("late diagnostic")):
-            self.assert_cli_refusal("permissions")
-        self.assertEqual(self.mirrors.read_text(), "private unknown list\n")
-        self.assertEqual(self.source.read_text(), self.mixed_source())
-
-    def test_mirror_diagnostic_is_absent_on_all_accepted_profiles_and_repeats(self):
-        profiles = ((self.SOURCE, "mirrors", self.SOURCE),
-                    (self.mixed_source(), "sources", self.normalized_source(self.mixed_source())),
-                    (self.normalized_source(self.mixed_source()), "sources",
-                     self.normalized_source(self.mixed_source())))
-        configure = self.helper.configure
-        for source, kind, final_source in profiles:
-            for mirrors in (self.ORIGINAL, self.SELECTED):
-                with self.subTest(kind=kind, already_direct=source == final_source,
-                                  selected=mirrors == self.SELECTED):
-                    self.source.write_text(source, encoding="ascii")
-                    self.mirrors.write_text(mirrors, encoding="ascii")
-                    for repeat in (False, True):
-                        with patch.object(sys, "argv", ["helper"]), \
-                                patch.object(self.helper.os, "geteuid", return_value=0), \
-                                patch.object(self.helper, "configure", side_effect=lambda _path, _owner:
-                                             configure(self.apt, os.stat(self.apt).st_uid)), \
-                                patch.object(self.helper, "mirror_list_shape",
-                                             side_effect=AssertionError("diagnostic on success")), \
-                                contextlib.redirect_stdout(io.StringIO()) as output, \
-                                contextlib.redirect_stderr(io.StringIO()) as errors:
-                            self.assertEqual(self.helper.main(), 0)
-                        self.assertEqual(errors.getvalue(), "")
-                        already = repeat or (kind == "mirrors" and mirrors == self.SELECTED) or (
-                            kind == "sources" and source == final_source)
-                        action = "already selected." if already else "selected."
-                        label = "archives " if kind == "mirrors" else "archive/security "
-                        self.assertEqual(output.getvalue(), f"Ubuntu CI {kind}: official HTTPS {label}{action}\n")
-                        self.assertEqual(self.source.read_text(), final_source)
-                        self.assertEqual(self.mirrors.read_text(), self.SELECTED if kind == "mirrors" else mirrors)
-                        self.assert_no_apt_staging()
-
-    def assert_workflow_scope(self, filename, text):
-        jobs = WorkflowContractTests.jobs(text)
-        selected = self.TARGETS.get(filename, set())
-        for name, job in jobs.items():
-            if name not in selected:
-                self.assertNotIn("ci-ubuntu-mirrors.py", job)
-                continue
-            self.assertEqual(job.count(self.COMMAND), 1)
-            self.assertIn("runs-on: ubuntu-24.04", job)
-            self.assertLess(job.index("persist-credentials: false"), job.index(self.COMMAND))
-            self.assertLess(job.index(self.COMMAND), job.index("ci-ubuntu-mirrors.py --apt"))
-            self.assertNotIn("apt-get", job)
-            line = next(line.strip() for line in job.splitlines() if "ci-ubuntu-mirrors.py --setup" in line)
-            self.assertEqual(line, self.COMMAND)
-            self.assertNotIn("/etc/apt/", job)
-
-    def test_exact_nine_jobs_prepare_mirrors_before_apt_and_exclude_privileged_jobs(self):
-        for path in (PROJECT / ".github/workflows").glob("*.yml"):
-            with self.subTest(workflow=path.name):
-                self.assert_workflow_scope(path.name, path.read_text())
-
-    def test_missing_late_or_failure_masked_preparation_is_rejected(self):
-        for filename in self.TARGETS:
-            text = WorkflowContractTests.workflow(filename)
-            for original, replacement in ((self.COMMAND, "true"),
-                                           (self.COMMAND, self.COMMAND + " || true"),
-                                           (self.COMMAND, self.COMMAND + " /tmp/config")):
-                with self.subTest(workflow=filename, mutation=replacement), self.assertRaises(AssertionError):
-                    self.assert_workflow_scope(filename, text.replace(original, replacement, 1))
-        text = WorkflowContractTests.workflow("real-tools.yml")
-        moved = text.replace("          " + self.COMMAND + "\n", "", 1)
-        moved = moved.replace('          case ${YT_DLP_VERSION}',
-                              "          " + self.COMMAND + '\n          case ${YT_DLP_VERSION}', 1)
-        with self.assertRaises(AssertionError):
-            self.assert_workflow_scope("real-tools.yml", moved)
-
-    def test_preparation_failure_preserves_status_and_prevents_every_package_setup(self):
-        binary = self.root / "bin"
-        binary.mkdir()
-        sudo = binary / "sudo"
-        sudo.write_text('#!/bin/bash\n'
-                        'if [[ $* == "python3 -I -B scripts/ci-ubuntu-mirrors.py --setup" ]]; then exit 65; fi\n'
-                        'printf unexpected >"${CHECK_UNEXPECTED}"\nexit 99\n')
-        sudo.chmod(0o755)
-        for filename, names in self.TARGETS.items():
-            jobs = WorkflowContractTests.jobs(WorkflowContractTests.workflow(filename))
-            for name in names:
-                step = next(block for block in re.split(r"(?m)^      - ", jobs[name])
-                            if self.COMMAND in block)
-                block = step.split("run: |\n", 1)[1]
-                script = "\n".join(line[10:] for line in block.splitlines() if line.startswith("          "))
-                sentinel = self.root / "unexpected"
-                environment = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"],
-                                   CHECK_UNEXPECTED=str(sentinel))
-                with self.subTest(workflow=filename, job=name):
-                    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script],
-                                            env=environment, capture_output=True, text=True, timeout=5)
-                    self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
-                    self.assertFalse(sentinel.exists())
-
-
 def require_fixture_process_exit(pid, starttime, *, read_stat=None,
                                  monotonic=time.monotonic, sleep=time.sleep):
     """Observe asynchronous kernel exit without accepting a surviving fixture."""
@@ -3215,774 +2020,13 @@ def require_fixture_process_exit(pid, starttime, *, read_stat=None,
         except FileNotFoundError:
             return
         if fields[19] != starttime:
-            raise AssertionError("APT fixture PID identity changed before terminal observation")
+            raise AssertionError("Fixture PID identity changed before terminal observation")
         if fields[0] in ("Z", "X"):
             return
         remaining = deadline - monotonic()
         if remaining <= 0:
-            raise AssertionError("Bounded APT fixture is still executing after 1s")
+            raise AssertionError("Bounded fixture is still executing after 1s")
         sleep(min(0.005, remaining))
-
-
-class DirectoryOwnershipTests(unittest.TestCase):
-    """Observe real FD lifetimes independently of injected syscall failures."""
-
-    @classmethod
-    def setUpClass(cls):
-        spec = importlib.util.spec_from_file_location("apt_directory_ownership", PROJECT / "scripts/ci-ubuntu-mirrors.py")
-        cls.helper = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cls.helper)
-
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        self.directory = self.root / 'first' / 'second'
-        self.directory.mkdir(parents=True, mode=0o700)
-        self.sentinel = self.root / 'sentinel'
-        self.sentinel.write_bytes(b'independently owned descriptor')
-        self.owner = os.geteuid()
-
-    @contextlib.contextmanager
-    def acquisitions(self, *, open_error=None, stat_error=None, close_errors=None, reuse=False):
-        """Record generations, not reusable integers; clean only witness-owned FDs."""
-        real_open, real_close, real_stat = os.open, os.close, os.fstat
-        trace = {'events': [], 'live': {}, 'opens': 0, 'closes': 0, 'sentinel': None}
-        close_errors = close_errors or {}
-
-        def opening(path, flags, **kwargs):
-            trace['opens'] += 1
-            generation = trace['opens']
-            parent = trace['live'].get(kwargs.get('dir_fd'))
-            trace['events'].append(('open', generation, parent, flags))
-            if open_error is not None and generation == open_error[0]:
-                raise open_error[1]
-            fd = real_open(path, flags, **kwargs)
-            trace['live'][fd] = generation
-            trace['events'].append(('acquired', generation))
-            return fd
-
-        def closing(fd):
-            trace['closes'] += 1
-            generation = trace['live'].get(fd, 'foreign-or-consumed')
-            trace['events'].append(('close', generation))
-            real_close(fd)
-            trace['live'].pop(fd, None)
-            if reuse and trace['closes'] == 1:
-                sentinel = real_open(self.sentinel, os.O_RDONLY | os.O_CLOEXEC)
-                if sentinel != fd:
-                    os.dup2(sentinel, fd, inheritable=False)
-                    real_close(sentinel)
-                trace['sentinel'] = fd
-            if trace['closes'] in close_errors:
-                raise close_errors[trace['closes']]
-
-        def examining(fd):
-            trace['events'].append(('fstat', trace['live'].get(fd, 'foreign-or-consumed')))
-            if stat_error is not None:
-                raise stat_error
-            return real_stat(fd)
-
-        try:
-            with patch.object(self.helper.os, 'open', side_effect=opening), \
-                    patch.object(self.helper.os, 'close', side_effect=closing), \
-                    patch.object(self.helper.os, 'fstat', side_effect=examining):
-                yield trace
-        finally:
-            # The witness owns leaked resources for cleanup, but asserts their
-            # state before cleanup; it never turns a candidate leak into PASS.
-            for fd in tuple(trace['live']):
-                real_close(fd)
-            sentinel = trace['sentinel']
-            if sentinel is not None:
-                try:
-                    metadata = real_stat(sentinel)
-                except OSError as error:
-                    if error.errno != errno.EBADF:
-                        raise
-                else:
-                    if (metadata.st_dev, metadata.st_ino) == (self.sentinel.stat().st_dev, self.sentinel.stat().st_ino):
-                        real_close(sentinel)
-
-    def test_nominal_walk_returns_only_the_final_live_descriptor(self):
-        real_stat = os.fstat
-        for directory in (self.root, self.directory):
-            with self.subTest(components=len(directory.parts)), self.acquisitions() as trace:
-                fd = self.helper.open_directory(directory, self.owner)
-                count = len(directory.parts)
-                self.assertEqual(trace['live'], {fd: count})
-                self.assertEqual((real_stat(fd).st_dev, real_stat(fd).st_ino),
-                                 (directory.stat().st_dev, directory.stat().st_ino))
-                expected = [('open', 1, None, self.helper.OPEN_READ | os.O_DIRECTORY), ('acquired', 1)]
-                for generation in range(2, count + 1):
-                    expected += [('open', generation, generation - 1, self.helper.OPEN_READ | os.O_DIRECTORY),
-                                 ('acquired', generation), ('close', generation - 1)]
-                self.assertEqual(trace['events'], expected + [('fstat', count)])
-                self.assertEqual(trace['closes'], count - 1)
-                # Only the caller releases the successfully transferred FD.
-                self.helper.os.close(fd)
-                self.assertEqual(trace['live'], {})
-
-    def test_child_open_failure_preserves_exact_primary_and_releases_parent(self):
-        for failed_open in (2, len(self.directory.parts)):
-            primary = PermissionError(errno.EACCES, 'private opening failure')
-            with self.subTest(failed_open=failed_open), self.acquisitions(open_error=(failed_open, primary)) as trace:
-                with self.assertRaises(PermissionError) as caught:
-                    self.helper.open_directory(self.directory, self.owner)
-                self.assertIs(caught.exception, primary)
-                self.assertEqual(caught.exception.errno, errno.EACCES)
-                self.assertEqual(trace['live'], {})
-                self.assertEqual([event[1] for event in trace['events'] if event[0] == 'close'],
-                                 list(range(1, failed_open)))
-
-    def test_failed_validation_releases_final_descriptor_without_masking(self):
-        primary = OSError(errno.EIO, 'private stat failure')
-        with self.acquisitions(stat_error=primary) as trace:
-            with self.assertRaises(OSError) as caught:
-                self.helper.open_directory(self.directory, self.owner)
-            self.assertIs(caught.exception, primary)
-            self.assertEqual(trace['live'], {})
-        for category in ('owner', 'permissions'):
-            if category == 'permissions':
-                self.directory.chmod(0o777)
-            with self.subTest(category=category), self.acquisitions() as trace:
-                with self.assertRaises(self.helper.PreparationError) as caught:
-                    self.helper.open_directory(self.directory, self.owner + (category == 'owner'))
-                self.assertEqual(caught.exception.category, category)
-                self.assertEqual(trace['live'], {})
-            self.directory.chmod(0o700)
-
-    def test_parent_close_errors_never_retry_or_lose_the_child(self):
-        for error_number in (errno.EIO, errno.EINTR, errno.EBADF):
-            for failed_close in (1, len(self.directory.parts) - 1):
-                primary = OSError(error_number, 'injected after native close')
-                with self.subTest(errno=error_number, position=failed_close), \
-                        self.acquisitions(close_errors={failed_close: primary}) as trace:
-                    with self.assertRaises(OSError) as caught:
-                        self.helper.open_directory(self.directory, self.owner)
-                    self.assertIs(caught.exception, primary)
-                    self.assertEqual(caught.exception.errno, error_number)
-                    self.assertEqual(trace['live'], {})
-                    self.assertEqual([event[1] for event in trace['events'] if event[0] == 'close'],
-                                     list(range(1, failed_close + 2)))
-
-    def test_reassigned_parent_number_is_not_closed_during_cleanup(self):
-        real_stat = os.fstat
-        primary = OSError(errno.EIO, 'injected after native close and reuse')
-        with self.acquisitions(close_errors={1: primary}, reuse=True) as trace:
-            with self.assertRaises(OSError) as caught:
-                self.helper.open_directory(self.directory, self.owner)
-            self.assertIs(caught.exception, primary)
-            try:
-                metadata = real_stat(trace['sentinel'])
-            except OSError as error:
-                self.fail(f'foreign sentinel was closed: errno {error.errno}')
-            self.assertEqual((metadata.st_dev, metadata.st_ino),
-                             (self.sentinel.stat().st_dev, self.sentinel.stat().st_ino))
-            self.assertEqual(trace['live'], {})
-            self.assertEqual([event for event in trace['events'] if event[0] == 'close'],
-                             [('close', 1), ('close', 2)])
-
-    def test_open_error_precedes_cleanup_error_with_bounded_secondary(self):
-        primary = PermissionError(errno.EACCES, 'private primary')
-        secondary = OSError(errno.EIO, 'private cleanup /token')
-        with self.acquisitions(open_error=(2, primary), close_errors={1: secondary}) as trace:
-            with self.assertRaises(PermissionError) as caught:
-                self.helper.open_directory(self.directory, self.owner)
-            self.assertIs(caught.exception, primary)
-            self.assertEqual(caught.exception.errno, errno.EACCES)
-            self.assertEqual(caught.exception.directory_close_category, 'io-error')
-            self.assertEqual(trace['live'], {})
-            self.assertEqual([event for event in trace['events'] if event[0] == 'close'], [('close', 1)])
-
-    def test_two_failed_closes_keep_first_error_and_consume_each_fd_once(self):
-        primary = InterruptedError(errno.EINTR, 'private primary')
-        secondary = PermissionError(errno.EPERM, 'private secondary')
-        with self.acquisitions(close_errors={1: primary, 2: secondary}) as trace:
-            with self.assertRaises(InterruptedError) as caught:
-                self.helper.open_directory(self.directory, self.owner)
-            self.assertIs(caught.exception, primary)
-            self.assertEqual(caught.exception.directory_close_category, 'access-denied')
-            self.assertEqual(trace['live'], {})
-            self.assertEqual([event for event in trace['events'] if event[0] == 'close'],
-                             [('close', 1), ('close', 2)])
-
-    def test_validation_refusal_precedes_cleanup_failure(self):
-        count = len(self.directory.parts)
-        for primary in (None, OSError(errno.EIO, 'private stat'), KeyboardInterrupt()):
-            secondary = OSError(errno.EIO, 'private cleanup')
-            expected = type(primary) if primary is not None else self.helper.PreparationError
-            with self.subTest(primary=expected.__name__), \
-                    self.acquisitions(stat_error=primary, close_errors={count: secondary}) as trace:
-                with self.assertRaises(expected) as caught:
-                    self.helper.open_directory(self.directory, self.owner + 1)
-                if primary is None:
-                    self.assertEqual(caught.exception.category, 'owner')
-                else:
-                    self.assertIs(caught.exception, primary)
-                self.assertEqual(caught.exception.directory_close_category, 'io-error')
-                self.assertEqual(trace['live'], {})
-                self.assertEqual([event[1] for event in trace['events'] if event[0] == 'close'],
-                                 list(range(1, count + 1)))
-
-    def test_invalid_paths_and_symlink_components_remain_rejected(self):
-        for directory in ('relative/path', str(self.directory / '..')):
-            with self.subTest(directory=directory), self.acquisitions() as trace:
-                with self.assertRaises(self.helper.PreparationError) as caught:
-                    self.helper.open_directory(directory, self.owner)
-                self.assertEqual(caught.exception.category, 'directory-path')
-                self.assertEqual(trace['events'], [])
-        alias = self.root / 'alias'
-        alias.symlink_to(self.directory, target_is_directory=True)
-        with self.acquisitions() as trace:
-            with self.assertRaises(OSError) as caught:
-                self.helper.open_directory(alias, self.owner)
-            self.assertIn(caught.exception.errno, (errno.ELOOP, errno.ENOTDIR))
-            self.assertEqual(trace['live'], {})
-
-    def test_cleanup_diagnostic_rejects_unbounded_or_private_forged_details(self):
-        error = OSError(errno.EACCES, 'private primary')
-        self.assertIsNone(self.helper.directory_close_diagnostic(error))
-        for detail in (None, '', 5, True, ['io-error'], 'private/token', 'io-error\nprivate', 'x' * 20000):
-            error.directory_close_category = detail
-            with self.subTest(detail_type=type(detail).__name__):
-                self.assertIsNone(self.helper.directory_close_diagnostic(error))
-        for category in ('missing-file', 'access-denied', 'path-type', 'io-error'):
-            error.directory_close_category = category
-            self.assertEqual(self.helper.directory_close_diagnostic(error), f'Directory cleanup: {category}')
-
-    def test_cli_preserves_primary_category_secondary_and_refuses_apt(self):
-        for dedicated in (False, True):
-            primary = PermissionError(errno.EACCES, 'private primary /token')
-            secondary = OSError(errno.EIO, 'private secondary /token')
-            output, errors = io.StringIO(), io.StringIO()
-            def refused(*_):
-                return self.helper.open_directory(self.directory, self.owner)
-            with self.subTest(dedicated=dedicated), \
-                    self.acquisitions(open_error=(2, primary), close_errors={1: secondary}), \
-                    patch.object(self.helper.os, 'geteuid', return_value=0), \
-                    patch.object(sys, 'argv', ['helper']), \
-                    patch.object(Path, 'read_text', return_value='ID=ubuntu\nVERSION_ID=24.04\n'), \
-                    patch.object(self.helper, 'prepare_dedicated', side_effect=refused), \
-                    patch.object(self.helper, 'configure', side_effect=refused), \
-                    patch.object(self.helper.subprocess, 'run') as execute, \
-                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-                status = self.helper.dedicated_main(['--setup']) if dedicated else self.helper.main()
-                self.assertEqual(status, 65)
-                self.assertEqual(output.getvalue(), '')
-                expected = ('Error: Ubuntu CI APT preparation or validation failed; package setup must stop.\n'
-                            if dedicated else 'Error: Ubuntu CI mirror preparation failed; package setup must stop.\n')
-                self.assertEqual(errors.getvalue(), expected + 'Category: access-denied\nDirectory cleanup: io-error\n')
-                execute.assert_not_called()
-
-
-class DedicatedAPTTests(unittest.TestCase):
-    """Exercise the real scoped helper without invoking the host package manager."""
-
-    @classmethod
-    def setUpClass(cls):
-        UbuntuMirrorTests.setUpClass()
-        cls.helper = UbuntuMirrorTests.helper
-        cls.canonical_keyring = cls.helper.CI_KEYRING
-
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.parent = Path(self.temp.name)
-        self.root = self.parent / 'ci-apt'
-        self.owner = os.geteuid()
-        self.key = self.parent / 'keyring.gpg'
-        self.key.write_bytes(b'fixture key; cryptographic rejection is tested with actual APT')
-        self.key.chmod(0o644)
-        self.key_patch = patch.object(self.helper, 'CI_KEYRING', str(self.key))
-        self.key_patch.start()
-        self.addCleanup(self.key_patch.stop)
-
-    def setup(self):
-        self.helper.prepare_dedicated(self.root, self.owner)
-
-    def run_apt(self, arguments=None, *, action=None, status=0):
-        calls = []
-
-        def execute(command, **kwargs):
-            calls.append((command, kwargs))
-            if action:
-                action(command, kwargs)
-            return subprocess.CompletedProcess(command, status)
-
-        with patch.object(self.helper.subprocess, 'run', side_effect=execute):
-            result = self.helper.run_dedicated(self.root, self.owner, arguments or ['update'])
-        return result, calls
-
-    def test_exact_official_sources_and_no_ambient_apt_configuration(self):
-        self.setup()
-        sources = (self.root / 'ubuntu.sources').read_text(encoding='ascii')
-        self.assertEqual(sources.count('Types: deb\n'), 2)
-        self.assertEqual(self.canonical_keyring, '/etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg')
-        self.assertEqual(self.helper.CI_SIGNER, 'F6ECB3762474EDA9D21B7022871920D1991BC93C')
-        self.assertEqual(sources.count(f'Signed-By: {self.key} {self.helper.CI_SIGNER}\n'), 2)
-        self.assertIn('URIs: https://archive.ubuntu.com/ubuntu/\nSuites: noble noble-updates noble-backports\n', sources)
-        self.assertIn('URIs: https://security.ubuntu.com/ubuntu/\nSuites: noble-security\n', sources)
-        self.assertEqual(sources.count('Components: main restricted universe multiverse\n'), 2)
-        config = (self.root / 'apt.conf').read_text(encoding='ascii')
-        for setting in ('main', 'parts', 'sourcelist', 'sourceparts', 'preferences',
-                        'preferencesparts', 'trusted', 'trustedparts', 'netrc', 'netrcparts'):
-            self.assertIn(f'Dir::Etc::{setting} "{self.root}/', config)
-        for setting in ('Dir::State::lists', 'Dir::Cache'):
-            self.assertIn(f'{setting} "{self.root}/', config)
-        for setting in ('Dir::Cache::pkgcache', 'Dir::Cache::srcpkgcache'):
-            self.assertIn(f'{setting} "";', config)
-        self.assertIn('APT::Update::Error-Mode "any";', config)
-        self.assertIn('Acquire::https::AllowRedirect "false";', config)
-        for setting in ('Verify-Peer', 'Verify-Host'):
-            self.assertIn(f'Acquire::https::{setting} "true";', config)
-        for forbidden in ('trusted=yes', 'AllowUnauthenticated', 'AllowInsecureRepositories', 'mirror+file'):
-            self.assertNotIn(forbidden, sources + config)
-
-    @contextlib.contextmanager
-    def assert_ambient_unread(self, source):
-        """Observe Python opens directly; access times cannot prove non-reading."""
-        identity = source.stat()
-        opened = []
-
-        def watch(opener):
-            def observed(*args, **kwargs):
-                result = opener(*args, **kwargs)
-                descriptor = result if isinstance(result, int) else result.fileno()
-                metadata = os.fstat(descriptor)
-                if (metadata.st_dev, metadata.st_ino) == (identity.st_dev, identity.st_ino):
-                    opened.append(True)
-                return result
-            return observed
-
-        # Path.open is a separate boundary: Python 3.10 caches its io opener.
-        # Also cover direct io/builtins and dir_fd-based os.open, including aliases.
-        with patch.object(Path, 'open', watch(Path.open)), \
-                patch('builtins.open', watch(open)), patch.object(io, 'open', watch(io.open)), \
-                patch.object(os, 'open', watch(os.open)):
-            yield
-        self.assertFalse(opened, 'ambient source opened during dedicated preparation')
-
-    def assert_ambient_unchanged(self, source, before, content):
-        # Verify stable identity and nanosecond metadata before our own read.
-        # Reading to compare contents can update atime on an otherwise intact file.
-        after = source.stat()
-        for field in ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid',
-                      'st_size', 'st_mtime_ns', 'st_ctime_ns'):
-            self.assertEqual(getattr(after, field), getattr(before, field), field)
-        self.assertEqual(source.read_text(encoding='utf-8'), content)
-
-    def test_all_host_source_shapes_are_unread_and_unchanged(self):
-        ambient = self.parent / 'ambient'
-        ambient.mkdir()
-        for content in (UbuntuMirrorTests.SOURCE, 'mixed sources', 'unknown mirror secret', 'external hostile source'):
-            source = ambient / 'ubuntu.sources'
-            source.write_text(content, encoding='utf-8')
-            # Force the verification read to be eligible for a relatime update,
-            # without sleeping or depending on crossing a clock-second boundary.
-            os.utime(source, ns=(1, source.stat().st_mtime_ns))
-            before = source.stat()
-            with self.assert_ambient_unread(source), \
-                    patch.object(self.helper, 'configure', side_effect=AssertionError('legacy used')):
-                self.setup()
-                self.assertEqual(self.run_apt()[0], 0)
-            self.assert_ambient_unchanged(source, before, content)
-
-    def test_ambient_read_witness_detects_open_mutations(self):
-        source = self.parent / 'ambient.sources'
-        source.write_text('synthetic ambient source', encoding='utf-8')
-        alias = self.parent / 'ambient-alias'
-        alias.symlink_to(source)
-        self.setup()
-
-        def descriptor_read():
-            with self.helper.scoped_descriptor(os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY)) as directory:
-                with self.helper.scoped_descriptor(os.open(source.name, os.O_RDONLY, dir_fd=directory)) as descriptor:
-                    os.read(descriptor, 1)
-
-        def builtin_read():
-            with open(source, encoding='utf-8') as stream:
-                stream.read()
-
-        def io_read():
-            with io.open(source, encoding='utf-8') as stream:
-                stream.read()
-
-        for reader in (source.read_bytes, alias.read_text, io_read, builtin_read, descriptor_read):
-            with self.subTest(reader=reader.__name__), \
-                    self.assertRaisesRegex(AssertionError, 'ambient source opened'):
-                with self.assert_ambient_unread(source):
-                    self.run_apt(action=lambda *_: reader())
-
-    def test_ambient_integrity_witness_checks_metadata_before_read(self):
-        source = self.parent / 'ambient.sources'
-        source.write_text('synthetic ambient source', encoding='utf-8')
-        before = source.stat()
-        order = []
-        real_stat, real_read = Path.stat, Path.read_text
-
-        def inspect(path, *args, **kwargs):
-            order.append('stat')
-            return real_stat(path, *args, **kwargs)
-
-        def read(path, *args, **kwargs):
-            self.assertEqual(order, ['stat'])
-            order.append('read')
-            return real_read(path, *args, **kwargs)
-
-        with patch.object(Path, 'stat', inspect), patch.object(Path, 'read_text', read):
-            self.assert_ambient_unchanged(source, before, 'synthetic ambient source')
-        self.assertEqual(order, ['stat', 'read'])
-
-    def test_ambient_integrity_witness_rejects_metadata_and_content_mutations(self):
-        from types import SimpleNamespace
-
-        source = self.parent / 'ambient.sources'
-        source.write_text('synthetic ambient source', encoding='utf-8')
-        before = source.stat()
-        fields = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid',
-                  'st_size', 'st_mtime_ns', 'st_ctime_ns')
-        for field in fields:
-            changed = SimpleNamespace(**{name: getattr(before, name) for name in fields})
-            setattr(changed, field, getattr(changed, field) + 1)
-            with self.subTest(field=field), patch.object(Path, 'stat', return_value=changed), \
-                    patch.object(Path, 'read_text') as read, self.assertRaisesRegex(AssertionError, field):
-                self.assert_ambient_unchanged(source, before, 'synthetic ambient source')
-            read.assert_not_called()
-        with patch.object(Path, 'read_text', return_value='modified source'), self.assertRaises(AssertionError):
-            self.assert_ambient_unchanged(source, before, 'synthetic ambient source')
-
-    def test_update_and_install_share_exact_environment_and_protected_files(self):
-        self.setup()
-        environments = []
-        snapshots = []
-        with patch.dict(os.environ, {'APT_CONFIG': '/private/hostile', 'http_proxy': 'private',
-                                     'LANGUAGE': 'fr', 'LD_PRELOAD': '/private/secret'}):
-            for args in (['update'], ['install', '--yes', 'aria2']):
-                status, calls = self.run_apt(args)
-                self.assertEqual(status, 0)
-                self.assertEqual(calls[0][0], ['/usr/bin/apt-get', *args])
-                environments.append(calls[0][1]['env'])
-                snapshots.append(self.helper.dedicated_snapshot(self.root, self.owner))
-        self.assertEqual(environments[0], environments[1])
-        self.assertEqual(snapshots[0], snapshots[1])
-        self.assertEqual(environments[0], {
-            'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'HOME': '/root', 'LC_ALL': 'C',
-            'LANGUAGE': 'C', 'DEBIAN_FRONTEND': 'noninteractive',
-            'APT_CONFIG': str(self.root / 'apt.conf'),
-        })
-
-    def test_repeated_setup_preserves_bytes_modes_and_inodes(self):
-        self.setup()
-        before = self.helper.dedicated_snapshot(self.root, self.owner)
-        self.setup()
-        self.assertEqual(self.helper.dedicated_snapshot(self.root, self.owner), before)
-
-    def test_unknown_options_and_package_selectors_refuse_before_execution(self):
-        self.setup()
-        variants = (['-c', '/private'], ['-o', 'Dir::Etc::sourcelist=/private', 'update'],
-                    ['-o', 'APT::Get::AllowUnauthenticated=true', 'update'],
-                    ['-o', 'Acquire::Retries=0', 'update'], ['-o'], ['upgrade'],
-                    ['install', '--yes', '--allow-unauthenticated', 'aria2'],
-                    ['install', '--yes', 'aria2-'], ['install', '--yes', 'aria2+'],
-                    ['install', '--yes', 'aria2/noble'], ['install', '--yes', 'aria2=1'],
-                    ['install', '--yes', '.*'], ['install', '--yes', 'unreviewed'],
-                    ['install', '--yes', './local.deb'], ['remove', '--yes', 'aria2'],
-                    ['install', '--yes'], ['update', 'extra'], ['install', '--yes', '/x\nsecret.deb'])
-        for args in variants:
-            with self.subTest(args=args), patch.object(self.helper.subprocess, 'run') as execute:
-                with self.assertRaises(self.helper.PreparationError):
-                    self.helper.run_dedicated(self.root, self.owner, args)
-                execute.assert_not_called()
-
-    def test_existing_options_packages_and_local_artifact_boundary(self):
-        self.setup()
-        options = [part for value in sorted(self.helper.APT_OPTIONS) for part in ('-o', value)]
-        for args in (options + ['update'],
-                     ['install', '--yes', '--no-install-recommends', *sorted(self.helper.CI_PACKAGES)],
-                     ['install', '--yes', '/tmp/Téléchargements été/local.deb'],
-                     ['remove', '--yes', 'yt-dlp-aria2-downloader-gui'],
-                     ['purge', '--yes', 'yt-dlp-aria2-downloader-gui']):
-            with self.subTest(operation=args):
-                self.assertEqual(self.run_apt(args)[0], 0)
-
-    def test_missing_setup_or_partial_setup_never_executes_apt(self):
-        for partial in (False, True):
-            if partial:
-                self.root.mkdir(mode=0o700)
-                (self.root / 'apt.conf').write_text('partial', encoding='ascii')
-            with self.subTest(partial=partial), patch.object(self.helper.subprocess, 'run') as execute:
-                with self.assertRaises((OSError, self.helper.PreparationError)):
-                    self.helper.run_dedicated(self.root, self.owner, ['update'])
-                execute.assert_not_called()
-
-    def test_changed_config_sources_or_signature_refuses_without_repair(self):
-        self.setup()
-        for name in self.helper.dedicated_files(self.root):
-            path = self.root / name
-            original = path.read_bytes()
-            for replacement in (b'foreign', original + b'\n'):
-                path.write_bytes(replacement)
-                with self.subTest(name=name), patch.object(self.helper.subprocess, 'run') as execute:
-                    with self.assertRaises(self.helper.PreparationError):
-                        self.helper.run_dedicated(self.root, self.owner, ['update'])
-                    execute.assert_not_called()
-                    self.assertEqual(path.read_bytes(), replacement)
-                path.write_bytes(original)
-        self.key.write_bytes(b'')
-        with self.assertRaises(self.helper.PreparationError):
-            self.run_apt()
-
-    def test_replaced_source_between_update_and_install_refuses_install(self):
-        self.setup()
-        self.assertEqual(self.run_apt()[0], 0)
-        (self.root / 'ubuntu.sources').write_bytes(b'URIs: https://hostile.invalid/')
-        with patch.object(self.helper.subprocess, 'run') as execute:
-            with self.assertRaises(self.helper.PreparationError):
-                self.helper.run_dedicated(self.root, self.owner, ['install', '--yes', 'aria2'])
-            execute.assert_not_called()
-
-    def test_unsafe_permissions_owners_links_and_extra_config_refuse(self):
-        self.setup()
-        for name in ('apt.conf', 'ubuntu.sources', 'empty.conf'):
-            path = self.root / name
-            for mode in (0o666, 0o600, 0o664):
-                path.chmod(mode)
-                with self.subTest(name=name, mode=mode), self.assertRaises(self.helper.PreparationError):
-                    self.run_apt()
-            path.chmod(0o644)
-            backup = self.parent / 'backup'
-            path.rename(backup)
-            path.symlink_to(backup)
-            with self.assertRaises(OSError):
-                self.run_apt()
-            path.unlink()
-            os.link(backup, path)
-            with self.assertRaises(self.helper.PreparationError):
-                self.run_apt()
-            path.unlink()
-            backup.rename(path)
-        for name in ('empty', 'lists', 'cache', 'cache/archives'):
-            directory = self.root / name
-            for mode in (0o700, 0o777):
-                directory.chmod(mode)
-                with self.subTest(directory=name, mode=mode), self.assertRaises(self.helper.PreparationError):
-                    self.run_apt()
-            directory.chmod(0o755)
-        with self.assertRaises(self.helper.PreparationError):
-            self.helper.dedicated_snapshot(self.root, self.owner + 1)
-        (self.root / 'empty' / 'injected.conf').write_text('hostile', encoding='ascii')
-        with self.assertRaises(self.helper.PreparationError):
-            self.run_apt()
-
-    def test_read_error_or_short_read_never_executes(self):
-        self.setup()
-        read = self.helper.os.read
-        for error in (OSError(errno.EIO, 'secret'), PermissionError(errno.EACCES, 'private')):
-            with patch.object(self.helper.os, 'read', side_effect=error), \
-                    patch.object(self.helper.subprocess, 'run') as execute:
-                with self.assertRaises(OSError):
-                    self.helper.run_dedicated(self.root, self.owner, ['update'])
-                execute.assert_not_called()
-        with patch.object(self.helper.os, 'read', side_effect=lambda fd, size: read(fd, min(size, 3))):
-            self.assertEqual(self.run_apt()[0], 0)
-        with patch.object(self.helper.os, 'read', return_value=b''), self.assertRaises(self.helper.PreparationError):
-            self.run_apt()
-
-    def test_failed_write_and_fsync_are_blocking_and_do_not_run_apt(self):
-        with patch.object(self.helper.os, 'write', return_value=0), self.assertRaises(self.helper.PreparationError):
-            self.setup()
-        with self.assertRaises(self.helper.PreparationError):
-            self.run_apt()
-        # A separate owned fixture permits testing sync failures without fixing
-        # the deliberately incomplete previous fixture.
-        self.root = self.parent / 'sync-apt'
-        self.setup()
-        for call_number in range(1, 10):
-            fsync = self.helper.os.fsync
-            count = 0
-
-            def failing(fd):
-                nonlocal count
-                count += 1
-                if count == call_number:
-                    raise OSError(errno.EIO, 'private sync failure')
-                return fsync(fd)
-
-            with self.subTest(call=call_number), patch.object(self.helper.os, 'fsync', side_effect=failing), \
-                    patch.object(self.helper.subprocess, 'run') as execute:
-                with self.assertRaises(OSError):
-                    self.helper.run_dedicated(self.root, self.owner, ['update'])
-                execute.assert_not_called()
-
-    def test_apt_failures_signals_and_secondary_refusal_keep_original_status(self):
-        self.setup()
-        for raw, expected in ((0, 0), (23, 23), (100, 100), (-15, 143), (-9, 137)):
-            self.assertEqual(self.run_apt(status=raw)[0], expected)
-        config = self.root / 'apt.conf'
-        data = config.read_bytes()
-        self.assertEqual(self.run_apt(status=100, action=lambda *_: config.write_bytes(b'changed'))[0], 100)
-        config.write_bytes(data)
-        with self.assertRaises(self.helper.PreparationError):
-            self.run_apt(action=lambda *_: config.write_bytes(b'changed'))
-
-    def test_directory_or_keyring_replacement_during_apt_is_not_success(self):
-        self.setup()
-        for name in ('lists', 'cache/archives'):
-            path = self.root / name
-            old = self.parent / 'displaced'
-
-            def replace(*_):
-                path.rename(old)
-                path.mkdir(mode=0o755)
-
-            with self.subTest(name=name), self.assertRaises(self.helper.PreparationError):
-                self.run_apt(action=replace)
-            path.rmdir()
-            old.rename(path)
-        with self.assertRaises(self.helper.PreparationError):
-            self.run_apt(action=lambda *_: self.key.write_bytes(b'replaced'))
-
-    def test_held_directory_cannot_validate_a_replaced_path(self):
-        self.setup()
-        held = self.helper.open_directory(self.root, self.owner)
-        self.addCleanup(os.close, held)
-        self.root.rename(self.parent / 'old-root')
-        self.setup()
-        with self.assertRaises(self.helper.PreparationError):
-            self.helper.durable_snapshot(self.root, held, self.owner)
-
-    def test_primary_read_error_is_not_replaced_by_close_failure(self):
-        self.setup()
-        descriptor = self.helper.open_directory(self.root, self.owner)
-        self.addCleanup(os.close, descriptor)
-        close = self.helper.os.close
-
-        def failing_close(fd):
-            close(fd)
-            raise OSError(errno.EIO, 'secondary private close error')
-
-        with patch.object(self.helper.os, 'read', side_effect=PermissionError(errno.EACCES, 'primary')), \
-                patch.object(self.helper.os, 'close', side_effect=failing_close):
-            with self.assertRaises(PermissionError) as caught:
-                self.helper.read_file(descriptor, 'apt.conf', self.owner)
-            self.assertEqual(caught.exception.errno, errno.EACCES)
-
-    def test_scoped_close_preserves_primary_and_reports_standalone_failure(self):
-        for primary in (False, True):
-            fd = os.open(self.key, os.O_RDONLY)
-            close = self.helper.os.close
-
-            def failing_close(value):
-                close(value)
-                raise OSError(errno.EIO, 'secondary')
-
-            with self.subTest(primary=primary), patch.object(self.helper.os, 'close', side_effect=failing_close):
-                expected = self.helper.PreparationError if primary else OSError
-                with self.assertRaises(expected):
-                    with self.helper.scoped_descriptor(fd):
-                        if primary:
-                            raise self.helper.PreparationError('permissions')
-
-    def test_cli_refuses_wrong_platform_and_redacts_unknown_error(self):
-        for error in (OSError(errno.EIO, '/private/secret'), ValueError('https://private.invalid/token')):
-            with patch.object(self.helper.os, 'geteuid', return_value=0), \
-                    patch.object(Path, 'read_text', side_effect=error), \
-                    contextlib.redirect_stderr(io.StringIO()) as errors:
-                self.assertEqual(self.helper.dedicated_main(['--setup']), 65)
-                self.assertNotIn('private', errors.getvalue())
-        for platform in ('ID=fedora\nVERSION_ID=45\n', 'ID=ubuntu\nVERSION_ID=22.04\n'):
-            with patch.object(self.helper.os, 'geteuid', return_value=0), \
-                    patch.object(Path, 'read_text', return_value=platform), \
-                    patch.object(self.helper, 'prepare_dedicated') as prepare, \
-                    contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(self.helper.dedicated_main(['--setup']), 65)
-                prepare.assert_not_called()
-
-    def test_writable_legacy_keyring_is_neither_read_nor_repaired(self):
-        legacy = self.parent / 'legacy-keyrings'
-        legacy.mkdir()
-        key = legacy / 'ubuntu-archive-keyring.gpg'
-        key.write_bytes(b'untrusted legacy key')
-        legacy.chmod(0o777)
-        key.chmod(0o777)
-        before = (legacy.stat(), key.stat())
-        open_directory = self.helper.open_directory
-
-        def checked(path, owner):
-            self.assertNotEqual(Path(path), legacy, 'legacy key directory consumed')
-            return open_directory(path, owner)
-
-        with patch.object(self.helper, 'KEYRING', str(key)), \
-                patch.object(self.helper, 'open_directory', side_effect=checked):
-            self.setup()
-            self.assertEqual(self.run_apt()[0], 0)
-            self.assertEqual(self.run_apt(['install', '--yes', 'aria2'])[0], 0)
-        self.assertEqual(self.helper.file_identity(legacy.stat()), self.helper.file_identity(before[0]))
-        self.assertEqual(self.helper.file_identity(key.stat()), self.helper.file_identity(before[1]))
-        self.assertEqual(key.read_bytes(), b'untrusted legacy key')
-
-    def test_selected_keyring_permissions_are_not_relaxed(self):
-        keys = self.parent / 'selected-keys'
-        keys.mkdir(mode=0o755)
-        self.key.rename(keys / self.key.name)
-        self.key = keys / self.key.name
-        with patch.object(self.helper, 'CI_KEYRING', str(self.key)):
-            self.setup()
-            for target, mode in ((keys, 0o775), (keys, 0o777),
-                                 (self.key, 0o664), (self.key, 0o666)):
-                original_mode = target.stat().st_mode & 0o777
-                target.chmod(mode)
-                try:
-                    with self.subTest(target=target.name, mode=mode), \
-                            patch.object(self.helper.subprocess, 'run') as execute:
-                        for operation in (self.setup, self.run_apt):
-                            with self.assertRaises(self.helper.PreparationError) as error:
-                                operation()
-                            self.assertEqual(error.exception.category, 'permissions')
-                        execute.assert_not_called()
-                        self.assertEqual(target.stat().st_mode & 0o777, mode)
-                finally:
-                    target.chmod(original_mode)
-
-    def test_selected_keyring_missing_or_linked_never_falls_back(self):
-        self.setup()
-        original = self.parent / 'saved-key'
-        self.key.rename(original)
-        for variant in ('missing', 'symlink', 'hardlink'):
-            if variant == 'symlink':
-                self.key.symlink_to(original)
-            elif variant == 'hardlink':
-                os.link(original, self.key)
-            try:
-                with self.subTest(variant=variant), patch.object(self.helper.subprocess, 'run') as execute, \
-                        self.assertRaises((OSError, self.helper.PreparationError)):
-                    self.run_apt()
-                execute.assert_not_called()
-            finally:
-                if variant != 'missing':
-                    self.key.unlink()
-        original.rename(self.key)
-        self.assertEqual(self.run_apt()[0], 0)
-
-    def test_selected_keyring_directory_symlink_is_rejected(self):
-        alias = self.parent / 'key-directory-alias'
-        alias.symlink_to(self.key.parent, target_is_directory=True)
-        with patch.object(self.helper, 'CI_KEYRING', str(alias / self.key.name)), \
-                patch.object(self.helper.subprocess, 'run') as execute, self.assertRaises(OSError):
-            self.setup()
-        execute.assert_not_called()
-
-    def test_signature_fingerprint_removed_from_sources_blocks_apt(self):
-        self.setup()
-        source = self.root / 'ubuntu.sources'
-        original = source.read_bytes()
-        source.write_bytes(original.replace((' ' + self.helper.CI_SIGNER).encode('ascii'), b''))
-        with patch.object(self.helper.subprocess, 'run') as execute, \
-                self.assertRaises(self.helper.PreparationError) as error:
-            self.run_apt()
-        self.assertEqual(error.exception.category, 'source-fields')
-        execute.assert_not_called()
 
 
 class ProcessExitObservationTests(unittest.TestCase):
@@ -4004,7 +2048,7 @@ class ProcessExitObservationTests(unittest.TestCase):
             state, starttime = snapshot
             fields = ["0"] * 20
             fields[0], fields[6], fields[19] = state, "4", starttime
-            return "123 (apt fixture) " + " ".join(fields)
+            return "123 (exit fixture) " + " ".join(fields)
 
         def sleep(delay):
             sleeps.append(delay)
@@ -4114,6 +2158,17 @@ class ProcessExitObservationTests(unittest.TestCase):
 class VersionBoundaryTests(unittest.TestCase):
     """Replay real workflow scripts with inert remote-read fixtures, never GitHub."""
 
+    def test_release_rpm_inventory_preserves_and_sorts_one_nevra_per_line(self):
+        step = self.step("release.yml", "Record resolved release dependency versions")
+        lines = [line.strip() for line in step.splitlines() if "rpm -qa" in line]
+        self.assertEqual(len(lines), 1)
+        # Select two installed headers in reverse order. RPM receives the workflow's exact format.
+        selectors = 'rpm() { command rpm "$@" python3 && command rpm "$@" bash; }\n'
+        expected = [subprocess.check_output(["rpm", "-q", "--qf", "%{NEVRA}", pkg], timeout=5)
+                    for pkg in ("bash", "python3")]
+        output = subprocess.check_output(["bash", "-eo", "pipefail", "-c", selectors + lines[0]], timeout=10)
+        self.assertEqual(output, b"\n".join(expected) + b"\n")
+
     @staticmethod
     def step(workflow, name):
         text = (PROJECT / ".github/workflows" / workflow).read_text()
@@ -4125,6 +2180,9 @@ class VersionBoundaryTests(unittest.TestCase):
     def test_first_failure_capture_is_scoped_to_two_stress_invocations(self):
         step = self.step("stress.yml", "Repeat race-sensitive integration scenarios with bounded jitter")
         with tempfile.TemporaryDirectory() as temporary:
+            user = Path(temporary) / "runuser"
+            user.write_text('#!/bin/sh\ntest "$1 $2 $3" = "-u qualification --" || exit 98\nshift 3\nexec "$@"\n')
+            user.chmod(0o755)
             probe = Path(temporary) / "bash"
             probe.write_text('#!/bin/sh\n'
                              'test "$*" = "./tests/mock-integration.sh --group stress-signals" || exit 65\n'
@@ -4140,159 +2198,26 @@ class VersionBoundaryTests(unittest.TestCase):
                     expected = [selected.get((shard, n), "capture=") for n in range(shard, 21, 4)]
                     self.assertEqual(captures, expected)
 
-    def test_media_apt_blocks_preserve_errors_signals_and_stop_stalled_provisioning(self):
-        targets = (("real-tools.yml", "Install real engines"),
-                   ("real-tools.yml", "Install real engines and current yt-dlp stable"),
-                   ("release.yml", "Install current Ubuntu engines and pinned yt-dlp"))
-        expected_options = ["-o", "Acquire::Retries=3", "-o", "Acquire::http::Timeout=30",
-                            "-o", "Acquire::https::Timeout=30", "-o", "DPkg::Lock::Timeout=60"]
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            binary = root / "bin"
-            binary.mkdir()
-            sudo = binary / "sudo"
-            sudo.write_text('#!/bin/bash\n'
-                            'if [[ $* == "python3 -I -B scripts/ci-ubuntu-mirrors.py --setup" ]]; then exit 0; fi\n'
-                            'exec "$@"\n')
-            sudo.chmod(0o755)
-            proxy = binary / "python3"
-            proxy.write_text('#!/bin/bash\n'
-                             'if [[ $* == "-I -B scripts/ci-ubuntu-mirrors.py --apt "* ]]; then\n'
-                             '    shift 4; exec apt-get "$@"\n'
-                             'fi\n'
-                             f'exec "{sys.executable}" "$@"\n')
-            proxy.chmod(0o755)
-            apt = binary / "apt-get"
-            apt.write_text('''#!/usr/bin/env python3
-import json, os, signal, sys
-from pathlib import Path
-args = sys.argv[1:]
-stage = "install" if "install" in args else "update"
-with open(os.environ["CHECK_APT_LOG"], "a") as log:
-    log.write(json.dumps({"args": args, "stage": stage, "frontend": os.environ.get("DEBIAN_FRONTEND")}) + "\\n")
-if stage == os.environ["CHECK_APT_STAGE"]:
-    action = os.environ["CHECK_APT_ACTION"]
-    if action == "failure":
-        raise SystemExit(23 if stage == "update" else 27)
-    if action == "interrupt":
-        os.kill(os.getpid(), signal.SIGTERM)
-    if action in {"stall", "ignore-term"}:
-        starttime = Path("/proc/self/stat").read_text().rsplit(") ", 1)[1].split()[19]
-        Path(os.environ["CHECK_APT_PID"]).write_text(json.dumps({"pid": os.getpid(), "starttime": starttime}))
-        if action == "ignore-term":
-            signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        while True:
-            signal.pause()
-''')
-            apt.chmod(0o755)
-            for workflow, step_name in targets:
-                script = self.step(workflow, step_name)
-                # Stop at the real APT boundary; the marker represents the
-                # subsequent venv/pip work, never a substitute package command.
-                ending = "\ncase ${YT_DLP_VERSION}" if "\ncase ${YT_DLP_VERSION}" in script else "\npython3 -m venv"
-                prefix = script.split(ending, 1)[0]
-                self.assertIn("ci-ubuntu-mirrors.py --apt", prefix)
-                self.assertNotIn("python3 -m venv", prefix)
-                for stage, action, expected in (("none", "success", 0), ("update", "failure", 23),
-                                                 ("install", "failure", 27), ("update", "interrupt", 143),
-                                                 ("install", "interrupt", 143), ("update", "stall", 124),
-                                                 ("install", "stall", 124), ("install", "ignore-term", 137)):
-                    with self.subTest(workflow=workflow, step=step_name, stage=stage, action=action):
-                        run = root / f"case-{len(list(root.iterdir()))}"
-                        run.mkdir()
-                        env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"],
-                                   CHECK_APT_STAGE=stage, CHECK_APT_ACTION=action,
-                                   CHECK_APT_LOG=str(run / "calls"), CHECK_APT_PID=str(run / "pid"),
-                                   CHECK_CONTINUED=str(run / "continued"))
-                        env.pop("DEBIAN_FRONTEND", None)
-                        current = prefix
-                        if action in {"stall", "ignore-term"}:
-                            current, count = re.subn(
-                                r'(?m)^sudo timeout --signal=TERM --kill-after=10s (?:[1-9][0-9]*m|"\$\{apt_remaining\}s") ',
-                                "sudo timeout --signal=TERM --kill-after=0.1s 0.5s ", current,
-                            )
-                            self.assertEqual(count, 2)
-                        current += '\nprintf completed >"${CHECK_CONTINUED}"\n'
-                        result = subprocess.run(["bash", "-c", current], env=env, capture_output=True,
-                                                text=True, timeout=5, check=False)
-                        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
-                        self.assertEqual((run / "continued").exists(), expected == 0)
-                        calls = [json.loads(line) for line in (run / "calls").read_text().splitlines()]
-                        self.assertEqual([call["stage"] for call in calls],
-                                         ["update"] if stage == "update" else ["update", "install"])
-                        for call in calls:
-                            self.assertEqual(call["args"][:8], expected_options)
-                            if call["stage"] == "update":
-                                self.assertEqual(call["args"][8:], ["-o", "APT::Update::Error-Mode=any", "update"])
-                            else:
-                                self.assertEqual(call["args"][8:11], ["install", "--yes", "--no-install-recommends"])
-                                self.assertEqual(call["frontend"], "noninteractive")
-                        if (run / "pid").exists():
-                            identity = json.loads((run / "pid").read_text())
-                            # SIGKILL also terminates GNU timeout. Its child can
-                            # close inherited pipes before the kernel exposes a
-                            # terminal state; wait briefly for actual quiescence.
-                            require_fixture_process_exit(identity["pid"], identity["starttime"])
-
-    def test_pinned_install_uses_only_the_remaining_apt_budget(self):
-        script = self.step("real-tools.yml", "Install real engines").split("\ncase ${YT_DLP_VERSION}", 1)[0]
-        # Substitute the kernel clock and record what the unchanged shell passes
-        # to timeout. Updating the clock in the update call fixes the chronology.
-        script = script.replace("/proc/uptime", '"${CHECK_UPTIME}"')
-        stub = r'''
-sudo() {
-    case $1 in
-        python3) [[ ${!#} == --setup ]] ;;
-        timeout)
-            if [[ ${!#} == update ]]; then
-                printf 'update %s\n' "$4"
-                printf '%s' "${CHECK_AFTER}" >"${CHECK_UPTIME}"
-            else
-                printf 'install %s\n' "$4"
-            fi
-            ;;
-        *) return 64 ;;
-    esac
-}
-'''
-        def uptime_record(value):
-            return f"{value} 1234.56\n" if value else ""
-
-        with tempfile.TemporaryDirectory() as temporary:
-            clock = Path(temporary) / "uptime"
-
-            def replay(before, after, status, expected_calls):
-                with self.subTest(before=before, after=after):
-                    clock.write_text(uptime_record(before))
-                    env = dict(os.environ, CHECK_UPTIME=str(clock), CHECK_AFTER=uptime_record(after))
-                    result = subprocess.run(["bash", "-c", stub + script + "\necho continued\n"],
-                                            env=env, capture_output=True, text=True, timeout=5)
-                    self.assertEqual(result.returncode, status, result.stderr)
-                    self.assertEqual(result.stdout.splitlines(), expected_calls)
-
-            update = ["update 3m"]
-            for before, after, expected in (("1000.01", "1000.99", "479s"),
-                                            ("1000.99", "1008.01", "471s"),
-                                            ("1000.01", "1048.90", "431s"),
-                                            ("1000.01", "1144.99", "335s"),
-                                            ("1000.01", "1478.99", "1s"),
-                                            ("0008.99", "0016.01", "471s"),
-                                            ("999999999991.99", "999999999999.01", "471s")):
-                replay(before, after, 0, [*update, "install " + expected, "continued"])
-
-            for after in ("1479.00", "1480.01", "999.99"):
-                replay("1000.01", after, 124, update)
-
-            for invalid in ("", "nonsense", "1+1.00", "１.00", "1000.2", "1000.123", "1000000000000.00"):
-                replay(invalid, "1008.01", 65, [])
-                replay("1000.01", invalid, 65, update)
+    def test_failed_fedora_provision_never_starts_tool_installation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            deadline = root / 'timeout'
+            deadline.write_text('#!/bin/sh\nexit 71\n')
+            deadline.chmod(0o755)
+            for workflow, step_name in (('real-tools.yml', 'Install real engines'),
+                                        ('real-tools.yml', 'Install real engines and current yt-dlp stable'),
+                                        ('release.yml', 'Install current Fedora 45 engines and pinned yt-dlp')):
+                source = self.step(workflow, step_name)
+                p = subprocess.run(['bash', '-c', source], env=dict(os.environ, PATH=tmp + ':' + os.defpath),
+                                   capture_output=True, timeout=2)
+                self.assertEqual(p.returncode, 71, step_name)
 
     def test_pinned_engine_installation_preserves_hashes_and_pip_failure(self):
         pins = {"2026.6.9": "442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4",
                 "2026.7.4": "f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266",
                 "2026.8.19": "1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf"}
         for workflow, name, versions in (("real-tools.yml", "Install real engines", tuple(pins)),
-                                         ("release.yml", "Install current Ubuntu engines and pinned yt-dlp",
+                                         ("release.yml", "Install current Fedora 45 engines and pinned yt-dlp",
                                           ("2026.6.9", "2026.8.19"))):
             script = self.step(workflow, name)
             script = "set -Eeuo pipefail\npython3() { return 0; }\n" + script[script.index("case ${YT_DLP_VERSION}"):]
@@ -4321,62 +2246,6 @@ sudo() {
                             self.assertEqual(Path(arguments[5]).read_text(),
                                              f"yt-dlp=={version} --hash=sha256:{pins[version]}\n")
                             self.assertEqual((run / "path").exists(), status == 0)
-
-    def test_minimum_bash_bootstrap_authenticates_before_extracting_or_building(self):
-        script = self.step("shell.yml", "Build and bind verified Bash 4.4 on the disposable runner")
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            upstream = root / "upstream/bash-4.4"
-            upstream.mkdir(parents=True)
-            configure = upstream / "configure"
-            configure.write_text('#!/bin/bash\nprintf build >>"${CHECK_BUILD}"\nexit 42\n')
-            configure.chmod(0o755)
-            archive = root / "source.tar.gz"
-            with tarfile.open(archive, "w:gz") as output:
-                output.add(upstream, arcname="bash-4.4")
-            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-            script = re.sub(r"readonly source_sha=[0-9a-f]{64}", "readonly source_sha=" + digest, script)
-            fixture = r'''
-curl() {
-    local output='' url=''
-    while (($#)); do
-        case $1 in --output) output=$2; shift ;; https://*) url=$1 ;; esac
-        shift
-    done
-    printf download >>"${CHECK_DOWNLOAD}"
-    case ${url} in
-        *.tar.gz) cp -- "${CHECK_ARCHIVE}" "${output}" ;;
-        *) printf 'inert verification fixture\n' >"${output}" ;;
-    esac
-}
-gpgv() {
-    [[ ${CHECK_SIGNATURE} != failure ]] || return 23
-    local fingerprint=7C0135FB088AAF6C66C650B9BB5869F064EA74AB
-    [[ ${CHECK_SIGNATURE} != wrong ]] || fingerprint=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
-    printf '[GNUPG:] VALIDSIG %s 2016-09-14 1473863216 0 4 0 17 2 00 %s\n' \
-        "${fingerprint}" "${fingerprint}"
-}
-tar() { printf extract >>"${CHECK_EXTRACT}"; command tar "$@"; }
-sudo() { printf 'Unexpected host mutation\n' >&2; return 99; }
-'''
-            for condition, expected in (("valid", 42), ("checksum", 1), ("wrong", 1),
-                                        ("failure", 23), ("self-hosted", 1)):
-                with self.subTest(condition=condition):
-                    run = root / condition
-                    run.mkdir()
-                    current = script.replace("readonly source_sha=" + digest,
-                                             "readonly source_sha=" + "0" * 64) if condition == "checksum" else script
-                    env = dict(os.environ, RUNNER_TEMP=str(run), GITHUB_PATH=str(run / "path"),
-                               GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="self-hosted" if condition == "self-hosted" else "github-hosted",
-                               CHECK_ARCHIVE=str(archive), CHECK_SIGNATURE=condition,
-                               CHECK_BUILD=str(run / "build"), CHECK_EXTRACT=str(run / "extract"),
-                               CHECK_DOWNLOAD=str(run / "download"))
-                    result = subprocess.run(["bash", "-c", fixture + current], env=env,
-                                            capture_output=True, timeout=10, check=False)
-                    self.assertEqual(result.returncode, expected, result.stderr)
-                    self.assertEqual((run / "extract").exists(), condition == "valid")
-                    self.assertEqual((run / "build").exists(), condition == "valid")
-                    self.assertEqual((run / "download").exists(), condition != "self-hosted")
 
     def test_deno_bootstrap_refuses_bad_digest_before_extracting_or_executing(self):
         for step_name, expected_version in (
@@ -4604,7 +2473,7 @@ timeout() { printf invoked >"${CHECK_RUN}"; }
             "rpm-under-test-${{ github.sha }}-${{ github.run_id }}",
             "rpm-under-test-${{ github.sha }}-${{ github.run_id }}",
         ])
-        self.assertIn("name: deb-under-test-${{ github.sha }}-${{ github.run_id }}", text)
+        self.assertNotIn("name: deb-under-test-${{ github.sha }}-${{ github.run_id }}", text)
 
     def test_ordinary_same_version_package_candidate_keeps_real_upgrade_baseline(self):
         script = self.step("packages.yml", "Resolve previous semantic-version release")
@@ -4678,7 +2547,7 @@ gh() {
             root = Path(temporary)
             (root / "dist").mkdir()
             (root / "published").mkdir()
-            names = ("fixture.zip", "fixture.rpm", "fixture.deb", "install-fedora.sh",
+            names = ("fixture.zip", "fixture.fc45.noarch.rpm", "install-fedora.sh",
                      "RPM-GPG-KEY-OscarFrog", "SHA256SUMS")
             for name in names:
                 (root / "dist" / name).write_text("tested bytes\n")
@@ -4690,7 +2559,7 @@ gh() {
         view)
             if [[ $# == 3 ]]; then return 0; fi
             case $5 in
-                assets) printf '%s\n' fixture.zip fixture.rpm fixture.deb install-fedora.sh RPM-GPG-KEY-OscarFrog SHA256SUMS ;;
+                assets) printf '%s\n' fixture.zip fixture.fc45.noarch.rpm install-fedora.sh RPM-GPG-KEY-OscarFrog SHA256SUMS ;;
                 isImmutable) printf 'true\n' ;;
                 *) return 99 ;;
             esac ;;
@@ -4703,7 +2572,7 @@ gh() {
             for changed in (False, True):
                 with self.subTest(changed=changed):
                     if changed:
-                        (root / "dist/fixture.rpm").write_text("different source payload\n")
+                        (root / "dist/fixture.fc45.noarch.rpm").write_text("different source payload\n")
                     result = subprocess.run(["bash", "-c", fixture + script], cwd=root,
                                             env=dict(os.environ, RELEASE_TAG="v2.3.26",
                                                      GITHUB_REPOSITORY="fixture/project"),
@@ -4714,7 +2583,7 @@ gh() {
 
 
 class PassiveDiagnosticsTests(unittest.TestCase):
-    """Exercise passive reads and the real Ubuntu step without running suites."""
+    """Exercise passive reads and the real Fedora non-root step without running suites."""
 
     @classmethod
     def setUpClass(cls):
@@ -4937,7 +2806,8 @@ class PassiveDiagnosticsTests(unittest.TestCase):
 
     def test_runner_consumes_optional_variable_before_any_child(self):
         source = (PROJECT / "tests/run-all.sh").read_text()
-        main = source[source.rindex("\nmain() {\n"):]
+        admission = source.split("is_fedora_45() (", 1)[1].split("\n)\n", 1)[0]
+        main = "is_fedora_45() (" + admission + "\n)\n" + source[source.rindex("\nmain() {\n"):]
         fixture = r'''
 set -euo pipefail
 parse_arguments() { DOCTOR_ONLY=false; LIST_ONLY=false; PROFILE=full; JOBS=4; }
@@ -4971,6 +2841,11 @@ run_integration_suites() { run_static_validation; }
         self.assertIn(command, script)
         fixture = r'''
 umask "${CHECK_INCOMING_UMASK}"
+TMPDIR="${RUNNER_TEMP}"
+runuser() {
+    [[ "$*" == "-u qualification -- bash -se" ]] || return 97
+    ( source /dev/stdin )
+}
 python3() {
     if [[ ${4:-} == observe && ${CHECK_OBSERVER_FAILURE} == 1 ]]; then
         command python3 "$1" "$2" "$3" "$4" "${CHECK_INVALID_DIAGNOSTICS}"

@@ -1,6 +1,6 @@
 ---
 name: packaging-release
-description: Change or review RPM, DEB, install, cleanup, versioning, release-preflight, or publication code in this repository without weakening lifecycle or release guarantees.
+description: Change or review Fedora RPM, install, cleanup, versioning, release-preflight, or publication code in this repository without weakening lifecycle or release guarantees.
 ---
 
 # Packaging and release change
@@ -9,11 +9,13 @@ Use this skill for native packages, installation or removal behavior, package
 upgrade compatibility, version surfaces, release preparation, or publication
 automation.
 
+Fedora 45 is the only officially supported distribution. Run application validation in Fedora 45 and preserve authenticated RPM installation and upgrade coverage.
+
 ## Route the work
 
 1. Read `AGENTS.md`, the packaging/release sections of `ARCHITECTURE.md`, and
    the relevant procedures in `TESTING.md`.
-2. Inspect both package formats when changing their common payload, and inspect
+2. For changes to the Fedora RPM payload, inspect
    `packaging/install-tree.sh`, package metadata, lifecycle/upgrade tests, and
    matching workflow jobs before editing.
 3. For user-facing installation or version changes, inspect and align
@@ -22,7 +24,7 @@ automation.
 
 Preserve previous-immutable-release upgrade coverage, user runtime/config/state
 preservation, RPM signer authentication, exact package identity, noarch payload
-semantics, and the deliberate RPM/DEB cleanup difference unless the task
+semantics, and the RPM runtime-preservation contract unless the task
 explicitly changes one of those contracts.
 
 A code or documentation task does not authorize creating a tag, signing or

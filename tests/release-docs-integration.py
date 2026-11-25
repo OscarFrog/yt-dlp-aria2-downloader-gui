@@ -410,14 +410,15 @@ class ReleaseDocsReplay(unittest.TestCase):
 
     def test_rehashed_french_fedora_link_cannot_substitute_a_different_build(self):
         self.prepare()
+        asset = f"yt-dlp-aria2-downloader-gui-{RELEASE_VERSION}-1.fc45.noarch.rpm"
+        url = f"https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/{asset}"
         for name in ("README.md", "README.fr.md"):
             data = (self.handoff / name).read_text(encoding="utf-8")
-            self.assertEqual(data.count("100.0.0-1.fc45.noarch.rpm"), 3)
-            self.assertIn("### Fedora 45\n", data)
-            self.assertIn("| Fedora 45 | [RPM]", data)
+            self.assertEqual(data.splitlines().count(f"| Fedora 45 | [RPM]({url}) |"), 1)
+            self.assertEqual(data.count(asset), 1)
         french = self.handoff / "README.fr.md"
         valid = french.read_text(encoding="utf-8")
-        french.write_text(valid.replace("100.0.0-1.fc45", "100.0.0-1.fc44", 1), encoding="utf-8")
+        french.write_text(valid.replace(asset, asset.replace(".fc45.", ".fc44."), 1), encoding="utf-8")
         self.rehash()
         result, state = self.run_publisher()
         self.assertEqual(result.returncode, 65, result.stderr)
