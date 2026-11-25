@@ -15,7 +15,7 @@
 - Parse version numbers, DNS hostnames and FFprobe durations independently of
   the caller's locale. Emit UTF-8 progress records explicitly and validate
   Unicode format identifiers without depending on an installed UTF-8 locale.
-- Reject malformed ARTE subtitle references, including unexpected track
+- Reject malformed subtitle references, including unexpected track
   entries. Report an interruption received at the end of private aria2
   publication while preserving files already committed to the destination.
 
