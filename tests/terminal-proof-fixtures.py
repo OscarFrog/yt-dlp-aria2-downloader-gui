@@ -279,6 +279,8 @@ def run_zenity(target, case, workspace, scenario_evidence, window_event):
             return object
 
         def run(_args, **_kwargs):
+            if _args == ['rpm', '--eval', '%{_arch}']:
+                return subprocess.CompletedProcess(_args, 0, stdout='x86_64\n', stderr='')
             return subprocess.CompletedProcess(_args, 0, stdout='synthetic tool 1\n', stderr='')
 
         def load(name, _filename):
@@ -597,6 +599,8 @@ def run_multi(source, case, root):
 
 
     def check_output(args, **kwargs):
+        if args == ['rpm', '--eval', '%{_arch}']:
+            return 'x86_64\n'
         if args[0] == 'stat':
             return 'syntheticfs\n'
         if args[-1] == '--version':

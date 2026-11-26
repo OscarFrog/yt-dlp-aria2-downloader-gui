@@ -2351,7 +2351,8 @@ class TeardownRescueTests(unittest.TestCase):
         fake_observer = SimpleNamespace(snapshot=snapshot, current_process=current,
                                         Observer=lambda _token: terminal,
                                         ObservationError=fixture.real_observer.ObservationError)
-        with mock.patch.dict(globals(), os=fake_os, signal=fake_signal, observer=fake_observer):
+        with mock.patch.dict(globals(), os=fake_os, signal=fake_signal, observer=fake_observer), \
+                mock.patch.object(case, 'sample_consumers', new=sample):
             try:
                 case.tearDown()
             except BaseException as error:
@@ -2548,11 +2549,9 @@ class TeardownRescueTests(unittest.TestCase):
                 self.assertEqual(len(fixture.close_attempts), 1)
 
 
-def report_first_failure(watcher, error, *, fedora_native):
+def report_first_failure(watcher, error):
     """Emit only closed public metadata; recording a failure must preserve it."""
-    # The public envelope name never comes from a test environment or exception.
-    key = 'fedora_native_first_failure' if fedora_native else 'stress_first_failure'
-    fallback = '{"' + key + '":{"complete":false}}'
+    fallback = '{"process_first_failure":{"complete":false}}'
     limit = 16 * 1024
     line = fallback
     try:
@@ -2572,9 +2571,9 @@ def report_first_failure(watcher, error, *, fedora_native):
             pass
         packets = [evidence[key] for key in ('diagnostic', 'identity') if key in evidence]
         evidence['complete'] = len(packets) == 2 and all(packet['complete'] for packet in packets)
-        record = {key: evidence}
+        record = {'process_first_failure': evidence}
         line = json.dumps(record, separators=(',', ':'), ensure_ascii=True)
-        if len(line) + 1 > limit:
+        if len(line) + 2 > limit:
             # Preserve the first primitive even when the complete history is too large.
             evidence['complete'] = False
             for packet in packets:
@@ -2588,78 +2587,192 @@ def report_first_failure(watcher, error, *, fedora_native):
         line = fallback
     try:
         # unittest writes progress dots without a trailing newline.
-        sys.stderr.write('\n' + (line if len(line) + 1 <= limit else fallback) + '\n')
+        sys.stderr.write('\n' + (line if len(line) + 2 <= limit else fallback) + '\n')
     except BaseException:
         pass
 
 
 class StressFirstFailureTests(unittest.TestCase):
-    target = 'test_cli_escalates_subgroup_before_retiring_sentinel'
-    selection = {'STRESS_SHARD': '2', 'YTDLP_STRESS_FIRST_FAILURE': '2:18'}
-    shard4_selection = {'STRESS_SHARD': '4', 'YTDLP_STRESS_FIRST_FAILURE': '4:12'}
-
-    engine_target = 'test_engine_cli_wrapper_exit_retains_resource_and_lock'
-    engine_selection = {'YTDLP_FEDORA_FIRST_FAILURE': 'engine-cli-first-sample'}
-
     def capture(self, case, stream, sample):
         with redirect_stderr(stream), self.assertRaises(observer.ObservationError) as caught:
             sample()
         self.assertIs(caught.exception, case.observer.error)
         return caught.exception
 
-    def test_scope_and_success_are_silent(self):
-        other = 'test_mock_rescue_requires_token_and_current_start_identity'
-        for method, env, enabled in (
-                (self.target, {}, False), (self.target, {'STRESS_SHARD': '2'}, False),
-                (self.target, dict(self.selection, STRESS_SHARD='1'), False),
-                (self.target, dict(self.selection, YTDLP_STRESS_FIRST_FAILURE='2:19'), False),
-                (self.target, dict(self.selection, STRESS_SHARD='4'), False),
-                (self.target, dict(self.shard4_selection, STRESS_SHARD='2'), False),
-                (other, self.selection, False), (other, self.shard4_selection, False),
-                (self.target, self.selection, True), (self.target, self.shard4_selection, True)):
-            with self.subTest(method=method, env=env):
-                case = ProcessTests(method)
-                self.check_silent_scope(case, env, enabled, case.sample_before_cli_escalation)
+    def test_success_is_silent_and_restores_caller_diagnostics(self):
+        case = ProcessTests()
+        for diag, identity in ((False, False), (True, False), (True, True)):
+            with self.subTest(diagnostic=diag, identity=identity):
+                case.observer = observer.Observer('private-fixture', diagnostics=diag, identity_diagnostics=identity)
+                case.first_refusal_reported = False
+                state = object()
 
-    def test_fedora_native_scope_and_success_are_silent(self):
-        for method, env, reuse, enabled in (
-                (self.engine_target, {}, False, False), (self.engine_target, self.selection, False, False),
-                (self.engine_target, {'YTDLP_FEDORA_FIRST_FAILURE': '1'}, False, False),
-                (self.target, self.engine_selection, False, False),
-                (self.engine_target, self.engine_selection, True, False),
-                (self.engine_target, self.engine_selection, False, sys.version_info[:2] == (3, 15))):
-            with self.subTest(method=method, env=env, reuse=reuse):
-                case = ProcessTests(method)
-                self.check_silent_scope(case, env, enabled, lambda: case.sample_before_engine_signal(reuse))
+                def sample():
+                    self.assertTrue(case.observer.diagnostics_enabled)
+                    self.assertTrue(case.observer.identity_diagnostics_enabled)
+                    return state
 
-    def check_silent_scope(self, case, env, enabled, invoke):
-        case.observer = observer.Observer('private-fixture')
-        output = io.StringIO()
+                output = io.StringIO()
+                with mock.patch.object(case.observer, 'sample', side_effect=sample) as sampled, redirect_stderr(output):
+                    self.assertIs(case.sample_consumers(), state)
+                sampled.assert_called_once_with()
+                self.assertEqual((case.observer.diagnostics_enabled, case.observer.identity_diagnostics_enabled),
+                                 (diag, identity))
+                self.assertFalse(case.first_refusal_reported)
+                self.assertEqual(output.getvalue(), '')
 
-        def sample():
-            self.assertIs(case.observer.diagnostics_enabled, enabled)
-            self.assertIs(case.observer.identity_diagnostics_enabled, enabled)
-
-        with mock.patch.dict(os.environ, env, clear=True), \
-                mock.patch.object(case.observer, 'sample', side_effect=sample) as sampled, redirect_stderr(output):
-            invoke()
+    def test_export_failure_restores_options_and_preserves_the_first_error(self):
+        case = ProcessTests()
+        case.observer = observer.Observer('private-fixture', diagnostics=True)
+        case.first_refusal_reported = False
+        first = observer.ObservationError(errno.ESRCH, 'private-original')
+        with mock.patch.object(case.observer, '_sample', side_effect=first) as sampled, \
+                mock.patch(__name__ + '.report_first_failure', side_effect=OSError(errno.EIO, 'private-secondary')) as export:
+            for _ in range(2):
+                with self.assertRaises(observer.ObservationError) as caught:
+                    case.sample_consumers()
+                self.assertIs(caught.exception, first)
+                self.assertIs(case.observer.error, first)
+                self.assertEqual(first.errno, errno.ESRCH)
+                self.assertTrue(case.observer.diagnostics_enabled)
+                self.assertFalse(case.observer.identity_diagnostics_enabled)
+        export.assert_called_once_with(case.observer, first)
         sampled.assert_called_once_with()
-        self.assertFalse(case.observer.diagnostics_enabled)
-        self.assertFalse(case.observer.identity_diagnostics_enabled)
+
+    def test_intentional_negative_fixtures_remain_silent(self):
+        case = ProcessTests()
+        case.setUp()
+        self.addCleanup(case.temp.cleanup)
+        output = io.StringIO()
+        with redirect_stderr(output):
+            case.test_timeout_admission_requires_current_complete_observation()
+            case.test_observer_rejects_incomplete_procfs_inventory()
+        self.assertFalse(case.first_refusal_reported)
         self.assertEqual(output.getvalue(), '')
 
     def test_private_child_open_refusal_survives_capture_and_teardown(self):
-        for selection in (self.selection, self.shard4_selection):
-            with self.subTest(shard=selection['STRESS_SHARD']):
-                case = ProcessTests(self.target)
-                self.check_private_open(case, case.sample_before_cli_escalation, selection, 'stress_first_failure',
-                                        'environ', errno.EACCES, 'known_identity', True)
+        for number in (errno.EACCES, errno.ESRCH):
+            with self.subTest(number=number):
+                self.check_private_open('environ', number, 'known_identity')
 
-    def test_fedora_native_private_cmdline_error_survives_capture_and_teardown(self):
-        case = ProcessTests(self.engine_target)
-        self.check_private_open(case, lambda: case.sample_before_engine_signal(False),
-                                self.engine_selection, 'fedora_native_first_failure', 'cmdline', errno.EIO, 'marker',
-                                sys.version_info[:2] == (3, 15))
+    def test_gui_timeout_captures_first_descendant_open_refusal(self):
+        self.check_first_descendant_open_refusal('test_gui_stops_timeout_subgroup_after_leader_exit', errno.EACCES)
+
+    def test_first_descendant_refusal_reaches_both_engine_and_ffprobe_routes(self):
+        for method in ('test_engine_cli_wrapper_exit_retains_resource_and_lock',
+                       'test_engine_gui_wrapper_exit_retains_resource_and_lock',
+                       'test_cli_escalates_subgroup_before_retiring_sentinel',
+                       'test_cli_closes_during_engine_timed_ffprobe',
+                       'test_gui_closes_during_engine_timed_ffprobe'):
+            with self.subTest(method=method):
+                self.check_first_descendant_open_refusal(method, errno.ESRCH)
+
+    def check_first_descendant_open_refusal(self, method, number):
+        case = ProcessTests(method)
+        case.setUp()
+        self.addCleanup(case.temp.cleanup)
+        # Both FFprobe fixtures check this private artifact before their sample.
+        (case.root / 'probe.json').write_text('{}')
+        parent_code = """import subprocess, sys
+with subprocess.Popen(['cat'], env={}) as child:
+    print(child.pid, flush=True)
+    sys.exit(child.wait())
+"""
+        with subprocess.Popen([sys.executable, '-I', '-B', '-c', parent_code],
+                              env={'YTDLP_QUALIFICATION_TOKEN': case.token},
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE) as parent:
+            self.assertTrue(select.select([parent.stdout], [], [], 5)[0])
+            pid = int(parent.stdout.readline())
+            rows = {p: observer.current_process(p) for p in (parent.pid, pid)}
+            self.assertEqual(rows[pid]['parent'], parent.pid)
+            denied = Path(f'/proc/{pid}/environ')
+            original_open = Path.open
+
+            def deny(path, *args, **kwargs):
+                if path == denied:
+                    raise OSError(number, 'private-open-refusal', str(path))
+                return original_open(path, *args, **kwargs)
+
+            for enabled in (False, True):
+                with self.subTest(diagnostics=enabled):
+                    case.observer = observer.Observer(case.token)
+                    self.assertFalse(case.observer.known)
+                    output = io.StringIO()
+                    with mock.patch.object(case, 'sample_consumers',
+                                           case.sample_consumers if enabled else case.observer.sample), \
+                            mock.patch.object(observer, 'snapshot', return_value=rows), \
+                            mock.patch.object(Path, 'open', new=deny), \
+                            mock.patch.object(case, 'launch', return_value=parent), \
+                            mock.patch.object(case, 'wait_file') as barrier:
+                        refusal = self.capture(case, output, getattr(case, method))
+                    barrier.assert_called_once_with('ready', parent)
+                    self.assertEqual(refusal.errno, number)
+                    self.assertIsNone(parent.poll())
+                    self.assertTrue(observer.same_process(pid, rows[pid]))
+                    self.assertEqual(case.observer.known, {(p, row['start']) for p, row in rows.items()})
+                    if enabled:
+                        lines = output.getvalue().strip().splitlines()
+                        self.assertEqual(len(lines), 1, 'first GUI sample must emit exactly one diagnostic')
+                        line, = lines
+                        self.assertLessEqual(len(line.encode('ascii')) + 1, 16384)
+                        self.assertFalse(any(value in line for value in
+                                             (case.token, str(denied), 'private-open-refusal')))
+                        packet = json.loads(line)['process_first_failure']
+                        self.assertTrue(packet['complete'])
+                        first, *_, last = observer.copy_identity_export(packet['identity'])['events']
+                        self.assertEqual((first['operation'], first['resource_kind'], first['primitive_errno'],
+                                          first['attribution_source'], first['phase'], first['first_failure']),
+                                         ('attribute_open', 'environ', number,
+                                          'descendant', 'attribute_read', True))
+                        self.assertEqual((last['operation'], last['normalized_errno']),
+                                         ('error_normalization', number))
+                        self.assertIs(first['kernel_return_proven'], False)
+                    else:
+                        self.assertEqual(output.getvalue(), '')
+            parent.communicate(timeout=5)
+            self.assertEqual(parent.returncode, 0)
+        with self.assertRaises(observer.ObservationError) as teardown:
+            case.tearDown()
+        self.assertIs(teardown.exception, refusal)
+
+    def test_pre_rescue_sample_captures_a_first_refusal_on_an_owned_child(self):
+        case = ProcessTests()
+        case.setUp()
+        self.addCleanup(case.temp.cleanup)
+        cat = shutil.which('cat', path=os.defpath)
+        with subprocess.Popen([cat], env={'YTDLP_QUALIFICATION_TOKEN': case.token},
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
+            row = self.ready_cat_row(child, cat)
+            case.processes.append(child)
+            rows = {child.pid: row}
+            denied = Path(f'/proc/{child.pid}/cmdline')
+            original_open = Path.open
+
+            def deny(path, *args, **kwargs):
+                if path == denied:
+                    raise PermissionError(errno.EACCES, 'private-pre-rescue-error', str(path))
+                return original_open(path, *args, **kwargs)
+
+            self.assertFalse(case.observer.known)
+            output = io.StringIO()
+            with mock.patch.object(observer, 'snapshot', side_effect=(rows, rows, {})) as snapshots, \
+                    mock.patch.object(Path, 'open', new=deny):
+                first = self.capture(case, output, case.tearDown)
+            self.assertEqual(first.errno, errno.EACCES)
+            self.assertEqual(snapshots.call_count, 3)
+            self.assertEqual(child.returncode, -signal.SIGKILL)
+            self.assertTrue(case.root.exists())
+            line, = output.getvalue().strip().splitlines()
+            self.assertNotIn('private-pre-rescue-error', line)
+            packet = json.loads(line)['process_first_failure']
+            event = observer.copy_identity_export(packet['identity'])['events'][0]
+            self.assertEqual((event['operation'], event['resource_kind'], event['attribution_source']),
+                             ('attribute_open', 'cmdline', 'marker'))
+
+    def test_private_cmdline_error_survives_capture_and_teardown(self):
+        for number in (errno.EIO, None):
+            with self.subTest(number=number):
+                self.check_private_open('cmdline', number, 'marker')
 
     def test_private_child_attribution_waits_for_cat_exec(self):
         # The unmarked first image gates the marked cat's exec on the challenge
@@ -2678,10 +2791,8 @@ os.execve(sys.argv[1], [sys.argv[1]], env)
             pending['PENDING_FIXTURE'] = pending.pop('YTDLP_QUALIFICATION_TOKEN')
             return launch([sys.executable, '-I', '-B', '-c', stage, *argv], env=pending, **pipes)
 
-        case = ProcessTests(self.target)
         with mock.patch.object(subprocess, 'Popen', new=delayed_cat):
-            self.check_private_open(case, case.sample_before_cli_escalation, self.shard4_selection,
-                                    'stress_first_failure', 'environ', errno.EACCES, 'known_identity', True)
+            self.check_private_open('environ', errno.EACCES, 'known_identity')
 
     def ready_cat_row(self, child, cat):
         # Keep stdin open after the private echo so the same cat remains available
@@ -2696,8 +2807,12 @@ os.execve(sys.argv[1], [sys.argv[1]], env)
         self.assertEqual(row['parent'], os.getpid())
         return row
 
-    def check_private_open(self, case, sample, selection, label, resource, number, attribution, eligible):
+    def check_private_open(self, resource, number, attribution):
+        case = ProcessTests()
         case.setUp()
+        self.addCleanup(case.temp.cleanup)
+        label = 'process_first_failure'
+        normalized = errno.EIO if number is None else number
         private = 'private-first-failure-canary'
         environment = {'YTDLP_QUALIFICATION_TOKEN': case.token, 'PRIVATE_SAMPLE': private}
         cat = shutil.which('cat', path=os.defpath)
@@ -2719,25 +2834,29 @@ os.execve(sys.argv[1], [sys.argv[1]], env)
                         self.assertIn(str(child.pid), case.observer.sample()['live'])
                         self.assertIn((child.pid, row['start']), case.observer.known)
                         output = io.StringIO()
-                        with mock.patch.dict(os.environ, selection if enabled else {}, clear=True), \
-                                mock.patch.object(Path, 'open', new=deny):
+                        with mock.patch.object(Path, 'open', new=deny):
+                            sample = case.sample_consumers if enabled else case.observer.sample
                             refusal = self.capture(case, output, sample)
-                        self.assertEqual(refusal.errno, number)
-                        if not (enabled and eligible):
+                        self.assertEqual(refusal.errno, normalized)
+                        self.assertFalse(case.observer.diagnostics_enabled)
+                        self.assertFalse(case.observer.identity_diagnostics_enabled)
+                        if not enabled:
                             self.assertEqual(output.getvalue(), '')
+                        else:
+                            again = io.StringIO()
+                            self.assertIs(self.capture(case, again, sample), refusal)
+                            self.assertEqual(again.getvalue(), '')
             finally:
                 child.communicate(timeout=5)
         self.assertEqual(child.returncode, 0)
         teardown_output = io.StringIO()
-        with mock.patch.dict(os.environ, selection), mock.patch.object(observer, 'snapshot', return_value={}), \
+        with mock.patch.object(observer, 'snapshot', return_value={}), \
                 redirect_stderr(teardown_output), self.assertRaises(observer.ObservationError) as cleanup:
             case.tearDown()
         self.assertEqual(teardown_output.getvalue(), '')
         self.assertIs(cleanup.exception, refusal)
         self.assertTrue(case.root.exists())
         case.temp.cleanup()
-        if not eligible:
-            return
 
         line, = output.getvalue().strip().splitlines()
         self.assertLessEqual(len(line.encode('ascii')) + 1, 16384)
@@ -2751,15 +2870,16 @@ os.execve(sys.argv[1], [sys.argv[1]], env)
         self.assertIs(packet['complete'], True)
         diagnostic = observer.copy_diagnostic(packet['diagnostic'])
         identity = observer.copy_identity_export(packet['identity'])
-        expected_class = 'PermissionError' if number == errno.EACCES else 'OSError'
+        expected_class = {errno.EACCES: 'PermissionError', errno.ESRCH: 'ProcessLookupError'}.get(number, 'OSError')
         for capsule, operation in ((diagnostic, 'attribute_read'), (identity, 'attribute_open')):
             self.assertIs(capsule['complete'], True)
-            first, last = capsule['events']
+            first, *_, last = capsule['events']
             self.assertEqual((first['operation'], first['phase'], first['primitive_errno'],
                               first['exception_class'], first['attribution_source']),
                              (operation, 'attribute_read', number, expected_class, attribution))
             self.assertEqual((last['operation'], last['relation'], last['cause_sequence'], last['normalized_errno']),
-                             ('error_normalization', 'normalization', first['sequence'], number))
+                             ('error_normalization', 'normalization', first['sequence'], normalized))
+            self.assertIs(last['normalization_applied'], number is None)
             self.assertLessEqual(first['monotonic_ns'], last['monotonic_ns'])
         first = identity['events'][0]
         self.assertEqual(first['resource_kind'], resource)
@@ -2769,13 +2889,19 @@ os.execve(sys.argv[1], [sys.argv[1]], env)
         task = context['task_before']
         self.assertEqual((task['reference'], task['group_reference'], task['starttime_known']), ('t1', 'g1', True))
 
-        with mock.patch.dict(os.environ, selection):
+        # Test independent export failures against the original error's capsules.
+        def export_again():
+            report_first_failure(case.observer, refusal)
+            raise refusal
+
+        with mock.patch.object(case.observer, 'diagnostics_enabled', True), \
+                mock.patch.object(case.observer, 'identity_diagnostics_enabled', True):
             # Pad a valid public history beyond the line budget without inventing private coordinates.
             expanded = dict(identity, events=[dict(identity['events'][0], sequence=n, first_failure=n == 1)
                                               for n in range(1, 33)])
             with mock.patch.object(observer.IdentityProjection, 'project', return_value=expanded):
                 output = io.StringIO()
-                self.assertIs(self.capture(case, output, sample), refusal)
+                self.assertIs(self.capture(case, output, export_again), refusal)
                 self.assertLessEqual(len(output.getvalue().strip().encode('ascii')) + 1, 16384)
                 short = json.loads(output.getvalue())[label]
                 self.assertIs(short['complete'], False)
@@ -2785,7 +2911,7 @@ os.execve(sys.argv[1], [sys.argv[1]], env)
             for projection in ({'side_effect': ValueError(private)}, {'return_value': dict(identity, pid=child.pid)}):
                 with mock.patch.object(observer.IdentityProjection, 'project', **projection):
                     output = io.StringIO()
-                    self.assertIs(self.capture(case, output, sample), refusal)
+                    self.assertIs(self.capture(case, output, export_again), refusal)
                     partial = json.loads(output.getvalue())[label]
                     self.assertIs(partial['complete'], False)
                     self.assertEqual(observer.copy_diagnostic(partial['diagnostic']), diagnostic)
@@ -2794,7 +2920,7 @@ os.execve(sys.argv[1], [sys.argv[1]], env)
                     self.assertNotIn(private, output.getvalue())
             with mock.patch.object(case.observer, 'diagnostic_failure', side_effect=ValueError(private)):
                 output = io.StringIO()
-                self.assertIs(self.capture(case, output, sample), refusal)
+                self.assertIs(self.capture(case, output, export_again), refusal)
                 partial = json.loads(output.getvalue())[label]
                 self.assertIs(partial['complete'], False)
                 empty = observer.copy_diagnostic(partial['diagnostic'])
@@ -2805,7 +2931,7 @@ os.execve(sys.argv[1], [sys.argv[1]], env)
                 self.assertNotIn(private, output.getvalue())
             broken = mock.Mock()
             broken.write.side_effect = OSError(errno.EIO, private)
-            self.assertIs(self.capture(case, broken, sample), refusal)
+            self.assertIs(self.capture(case, broken, export_again), refusal)
             self.assertTrue(broken.write.called)
 
 
@@ -2819,13 +2945,14 @@ class ProcessTests(unittest.TestCase):
         self.token = os.urandom(24).hex()
         self.observer = observer.Observer(self.token)
         self.processes = []
+        self.first_refusal_reported = False
         ctypes.CDLL(None).prctl(36, 1, 0, 0, 0)
 
     def tearDown(self):
         # Capture the production verdict before test-only intervention.
         failures = []
         try:
-            state = self.observer.sample()
+            state = self.sample_consumers() if self.processes else self.observer.sample()
         except (OSError, ValueError, IndexError) as error:
             failures.append(error)
             state = {'live': {}}
@@ -2903,6 +3030,27 @@ class ProcessTests(unittest.TestCase):
             failures[0].teardown_secondary_errors = tuple(secondary)
             failures[0].teardown_secondary_overflow = max(0, len(failures) - 9)
             raise failures[0]
+
+    def sample_consumers(self, watcher=None):
+        """Report the first refusal of a real fixture without repeating an observation."""
+        if watcher is None:
+            watcher = self.observer
+        if self.first_refusal_reported or watcher.error is not None:
+            return watcher.sample()
+        previous = watcher.diagnostics_enabled, watcher.identity_diagnostics_enabled
+        watcher.diagnostics_enabled = watcher.identity_diagnostics_enabled = True
+        try:
+            return watcher.sample()
+        except Exception as error:
+            self.first_refusal_reported = True
+            try:
+                report_first_failure(watcher, error)
+            except BaseException:
+                # The reporting path must never replace the observer's first refusal.
+                pass
+            raise
+        finally:
+            watcher.diagnostics_enabled, watcher.identity_diagnostics_enabled = previous
 
     def launch(self, argv):
         p = subprocess.Popen(argv, env=dict(os.environ, YTDLP_QUALIFICATION_TOKEN=self.token),
@@ -3325,7 +3473,7 @@ os._exit(7)
         try:
             known = orphan(True)
             unrelated = orphan(False)
-            sample = self.observer.sample()
+            sample = self.sample_consumers()
             self.assertIn(str(known), sample['live'])
             self.assertNotIn(str(unrelated), sample['live'])
             unrelated_row = observer.process_row(Path(f'/proc/{unrelated}/stat'))
@@ -3458,7 +3606,7 @@ while Path('/proc/' + sys.argv[1]).exists():
             # No observation of the launcher, or manually seeded PID identity:
             # discovery must still come from the exact inherited launch token.
             fresh = observer.Observer(self.token)
-            verdict(fresh.sample())
+            verdict(self.sample_consumers(fresh))
             self.assertTrue(observer.token_process_is_live(consumer, fresh.marker),
                             'runner oracle lost a live thread behind a zombie leader')
             with mock.patch.object(observer, 'threads_are_quiescent',
@@ -3468,7 +3616,7 @@ while Path('/proc/' + sys.argv[1]).exists():
                 with self.assertRaisesRegex(self.failureException, 'observer lost a live sibling thread'):
                     verdict(observer.Observer(self.token).sample())
 
-            verdict(fresh.sample())
+            verdict(self.sample_consumers(fresh))
             # All positive/negative verdicts precede release and test harvesting.
             os.close(write_end)
             write_end = None
@@ -3476,7 +3624,7 @@ while Path('/proc/' + sys.argv[1]).exists():
             while os.waitid(os.P_PID, consumer, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
                 self.assertLess(time.monotonic(), deadline, 'consumer failed to exit after release')
                 time.sleep(.005)
-            stopped = fresh.sample()
+            stopped = self.sample_consumers(fresh)
             self.assertNotIn(str(consumer), stopped['live'])
             self.assertIn(consumer, stopped['zombies'])
             self.assertFalse(observer.token_process_is_live(consumer, fresh.marker))
@@ -3578,7 +3726,7 @@ while Path('/proc/' + sys.argv[1]).exists():
         child.write_text(child.read_text().replace('while True:', "while not (root / 'release').exists():"))
         process = self.launch([sys.executable, '-I', '-B', str(child)])
         self.wait_file('ready', process)
-        first = self.observer.sample()
+        first = self.sample_consumers()
         row = first['live'][str(process.pid)]
         key = (process.pid, row['start'])
         self.assertIn(key, self.observer.known)
@@ -3601,7 +3749,7 @@ while Path('/proc/' + sys.argv[1]).exists():
                     observer.Observer(self.token).sample()
                 self.assertIn(key, self.observer.known)
             self.assertIsNone(process.poll(), 'observer interfered with the fixture')
-            self.assertIn(str(process.pid), self.observer.sample()['live'])
+            self.assertIn(str(process.pid), self.sample_consumers()['live'])
         # A genuinely disappeared process is different from an unreadable one.
         (self.root / 'release').touch()
         process.communicate(timeout=3)
@@ -4420,7 +4568,7 @@ sys.exit(module.supervise([sys.executable, sys.argv[2]], 5, 1))
         self.assertEqual(process.returncode, 143, (out, err))
         self.assertTrue((self.root / 'last-access').exists())
         self.assertFalse((self.root / 'early-cleanup').exists())
-        self.assertFalse(self.observer.sample()['live'])
+        self.assertFalse(self.sample_consumers()['live'])
 
     def test_group_quiescence_rejects_fork_after_enumeration(self):
         program = '''import os, sys
@@ -5176,7 +5324,7 @@ wait "$WORKER_PID"
         (self.root / 'release').touch()
         process.communicate(timeout=5)
         self.assertEqual(process.returncode, 0)
-        self.assertFalse(self.observer.sample()['live'])
+        self.assertFalse(self.sample_consumers()['live'])
 
     @staticmethod
     def hls_witness_module():
@@ -5334,7 +5482,7 @@ while True: signal.pause()
             if restore_mutation:
                 witness.restore_fragment = lambda saved, missing: Path(saved).rename(missing)
             witness.restore_fragment(self.root / 'saved-fragment', self.root / 'restored-fragment')
-            alive = self.observer.sample()['live']
+            alive = self.sample_consumers()['live']
             preservation = (self.root / 'preserve-active-engine').exists()
             # Verdicts precede witness close, rescue, harvesting or fixture removal.
             if mode == 'normal' and corruption is None:
@@ -5498,7 +5646,7 @@ while not Path(sys.argv[1]).with_name('ready').exists(): time.sleep(.01)
         p = self.launch([sys.executable, str(launcher), str(child)])
         self.wait_file('ready', p)
         p.wait(timeout=5)
-        state = self.observer.sample()
+        state = self.sample_consumers()
         # Exercise the actual Zenity harness verdict, before any rescue. A
         # surviving new-session worker must turn the qualification red itself.
         (self.root / 'processes-current.json').write_text(json.dumps(state))
@@ -5514,7 +5662,7 @@ assert_no_residual_processes "$2" "$2/stop"
         self.assertTrue(state['live'], 'new-session orphan escaped observation before rescue')
         self.assertTrue(state['url_in_argv'], 'synthetic URL escaped the independent observer')
         self.assertNotIn(str(os.getpid()), state['live'])
-        self.assertTrue(self.observer.sample()['live'], 'harness rescued the witness before its verdict')
+        self.assertTrue(self.sample_consumers()['live'], 'harness rescued the witness before its verdict')
 
     def timeout_pidfd_terminal(self, descriptor):
         readiness = select.poll()
@@ -5535,7 +5683,7 @@ assert_no_residual_processes "$2" "$2/stop"
         for descriptor in descriptors.values():
             self.assertFalse(self.timeout_pidfd_terminal(descriptor),
                              'fixture terminated before initial observation')
-        state = self.observer.sample()
+        state = self.sample_consumers()
         self.assertFalse(state['url_in_argv'], 'initial fixture observation found a URL')
         for pid, row in identities.items():
             self.assertIn(str(pid), state['live'], 'fixture missing from initial observation')
@@ -5591,7 +5739,7 @@ assert_no_residual_processes "$2" "$2/stop"
 
                 try:
                     with mock.patch.object(self, 'timeout_pidfd_terminal', side_effect=terminal), \
-                            mock.patch.object(self.observer, 'sample', side_effect=sample), \
+                            mock.patch.object(self, 'sample_consumers', side_effect=sample), \
                             mock.patch.object(os, 'write', side_effect=write):
                         if case == 'valid':
                             self.admit_timeout_launcher(identities, descriptors, writes)
@@ -5678,13 +5826,13 @@ if os.read(int(sys.argv[2]), 1) != b'R': raise SystemExit(70)
                         'supervisor returned before last FD holder stopped')
         p.communicate(timeout=5)
         self.assertTrue((self.root / 'term').exists())
-        self.assertFalse(self.observer.sample()['live'], 'timeout returned before last FD holder stopped')
+        self.assertFalse(self.sample_consumers()['live'], 'timeout returned before last FD holder stopped')
 
     def test_observer_intentionally_opened_external_application(self):
         child = self.child()
         p = self.launch(['env', 'YTDLP_QUALIFICATION_EXTERNAL=1', sys.executable, str(child)])
         self.wait_file('ready', p)
-        self.assertFalse(self.observer.sample()['live'])
+        self.assertFalse(self.sample_consumers()['live'])
         self.assertIsNone(p.poll(), 'observation must not signal the opened application')
 
     def test_runtime_probe_keeps_its_temporary_and_update_lock(self):
@@ -5726,14 +5874,7 @@ exit "$?"
         self.assertTrue((self.root / 'last-access').exists())
         self.assertFalse((self.root / 'early-cleanup').exists())
         self.assertFalse((self.root / 'work').exists())
-        self.assertFalse(self.observer.sample()['live'])
-
-    def sample_before_engine_signal(self, reuse):
-        if (reuse is False and sys.version_info[:2] == (3, 15)
-                and self._testMethodName == 'test_engine_cli_wrapper_exit_retains_resource_and_lock'
-                and os.environ.get('YTDLP_FEDORA_FIRST_FAILURE') == 'engine-cli-first-sample'):
-            return self.sample_with_first_failure(fedora_native=True)
-        return self.observer.sample()
+        self.assertFalse(self.sample_consumers()['live'])
 
     def engine_case(self, reuse):
         self.child(slow=True)
@@ -5757,7 +5898,7 @@ exit "$status"
 ''')
         p = self.launch(['bash', str(wrapper), str(source), str(self.root), str(reuse).lower()])
         self.wait_file('ready', p)
-        self.sample_before_engine_signal(reuse)
+        self.sample_consumers()
         # The producer wrapper exited; the consumer still owns its descriptor.
         time.sleep(.15)
         self.assertIsNone(p.poll(), 'wrapper exit incorrectly authorized engine cleanup')
@@ -5773,7 +5914,7 @@ exit "$status"
         self.assertEqual(p.returncode, 143)
         self.assertFalse((self.root / 'early-cleanup').exists())
         self.assertTrue((self.root / 'last-access').exists())
-        self.assertFalse(self.observer.sample()['live'])
+        self.assertFalse(self.sample_consumers()['live'])
 
     def probe_case(self, gui):
         self.child(resistant=True, new_group=True)
@@ -5848,12 +5989,12 @@ wait "$WORKER_PID"
         p = self.launch(arguments)
         self.wait_file('ready', p)
         self.assertTrue((self.root / 'probe.json').exists())
-        self.observer.sample()
+        self.sample_consumers()
         p.send_signal(signal.SIGTERM)
         p.communicate(timeout=8)
         self.assertEqual(p.returncode, 143)
         self.assertTrue((self.root / 'term').exists())
-        self.assertFalse(self.observer.sample()['live'], 'timed FFprobe survived announced closure')
+        self.assertFalse(self.sample_consumers()['live'], 'timed FFprobe survived announced closure')
         self.assertFalse((self.root / 'probe.json').exists())
         if gui:
             self.assertTrue((self.root / 'gui-force').exists(), 'GUI did not delegate escalation')
@@ -5946,26 +6087,7 @@ exit "$DOWNLOAD_STATUS"
         self.assertFalse((self.root / 'resource').exists())
         with (self.root / 'lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        self.assertFalse(self.observer.sample()['live'])
-
-    def sample_before_cli_escalation(self):
-        selection = (os.environ.get('STRESS_SHARD'), os.environ.get('YTDLP_STRESS_FIRST_FAILURE'))
-        if (self._testMethodName != 'test_cli_escalates_subgroup_before_retiring_sentinel'
-                or selection not in (('2', '2:18'), ('4', '4:12'))):
-            return self.observer.sample()
-        return self.sample_with_first_failure(fedora_native=False)
-
-    def sample_with_first_failure(self, *, fedora_native):
-        watcher = self.observer
-        previous = watcher.diagnostics_enabled, watcher.identity_diagnostics_enabled
-        watcher.diagnostics_enabled = watcher.identity_diagnostics_enabled = True
-        try:
-            return watcher.sample()
-        except Exception as error:
-            report_first_failure(watcher, error, fedora_native=fedora_native)
-            raise
-        finally:
-            watcher.diagnostics_enabled, watcher.identity_diagnostics_enabled = previous
+        self.assertFalse(self.sample_consumers()['live'])
 
     def test_cli_escalates_subgroup_before_retiring_sentinel(self):
         self.child(resistant=True)
@@ -5993,13 +6115,13 @@ exit "$DOWNLOAD_STATUS"
         p = self.launch(['bash', str(wrapper), str(source), str(self.root),
                          str(PROJECT / 'private-process-supervisor.py')])
         self.wait_file('ready', p)
-        self.sample_before_cli_escalation()
+        self.sample_consumers()
         p.send_signal(signal.SIGTERM)
         self.wait_file('term', p)
         p.send_signal(signal.SIGUSR1)
         out, err = self.finish(p)
         self.assertEqual(p.returncode, 143, (out, err))
-        self.assertFalse(self.observer.sample()['live'], 'CLI lost subgroup authority before escalation')
+        self.assertFalse(self.sample_consumers()['live'], 'CLI lost subgroup authority before escalation')
 
     def test_gui_stops_timeout_subgroup_after_leader_exit(self):
         self.child(resistant=True)
@@ -6025,10 +6147,10 @@ printf stopped >"$2/stopped"
 ''')
         p = self.launch(['bash', str(wrapper), str(source), str(self.root)])
         self.wait_file('ready', p)
-        self.observer.sample()
+        self.sample_consumers()
         out, err = self.finish(p, 10)
         self.assertEqual(p.returncode, 0, (out, err))
-        self.assertFalse(self.observer.sample()['live'], 'GUI claimed complete closure with a live timed probe')
+        self.assertFalse(self.sample_consumers()['live'], 'GUI claimed complete closure with a live timed probe')
         self.assertTrue((self.root / 'term').exists())
 
 

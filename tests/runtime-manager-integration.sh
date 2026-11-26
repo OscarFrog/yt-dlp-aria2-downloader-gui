@@ -147,7 +147,7 @@ EOF_DENO
 }
 
 prepare_runtime_manager_fixture() {
-    local command_name
+    local command_name machine_arch
 
     for command_name in bash chmod env flock grep ln mkdir mktemp python3 readlink rm stat timeout uname; do
         command -v "${command_name}" >/dev/null 2>&1 || {
@@ -156,11 +156,9 @@ prepare_runtime_manager_fixture() {
         }
     done
     [[ -x ${RUNTIME_MANAGER} ]] || fail "runtime manager is not executable: ${RUNTIME_MANAGER}"
-    case $(uname -m) in
-        x86_64) HOST_YTDLP_ASSET='yt-dlp_linux' ;;
-        aarch64) HOST_YTDLP_ASSET='yt-dlp_linux_aarch64' ;;
-        *) test_error 'unsupported runtime-manager test architecture' ;;
-    esac
+    machine_arch=$(uname -m) || fail 'unable to determine architecture'
+    [[ ${machine_arch} == x86_64 ]] || fail 'runtime-manager tests require x86_64'
+    HOST_YTDLP_ASSET='yt-dlp_linux'
 
     TEST_ROOT=$(mktemp -d)
     readonly TEST_ROOT
@@ -628,7 +626,8 @@ test_runtime_offline_and_rollback() {
 }
 
 test_runtime_bootstrap_and_architecture() {
-    local aarch_bin aarch_data aarch_path empty_data
+    local unsupported_bin empty_data
+    local status=0
 
     # First bootstrap without a network and without existing runtimes must fail
     # rather than creating or activating an unverified placeholder.
@@ -648,28 +647,22 @@ test_runtime_bootstrap_and_architecture() {
     [[ ! -L ${empty_data}/yt-dlp-aria2-downloader/runtime/deno/current ]] \
         || fail 'initial offline bootstrap published an unverified Deno runtime'
 
-    # Architecture mapping is tested hermetically for aarch64 without requiring an
-    # ARM runner.
-    aarch_data="${TEST_ROOT}/aarch-data"
-    aarch_bin="${TEST_ROOT}/aarch-bin"
-    mkdir -p -- "${aarch_data}/yt-dlp-aria2-downloader/runtime/yt-dlp/2026.07.04" \
-        "${aarch_data}/yt-dlp-aria2-downloader/runtime/deno/2.9.5" "${aarch_bin}"
-    make_ytdlp "${aarch_data}/yt-dlp-aria2-downloader/runtime/yt-dlp/2026.07.04/yt-dlp_linux_aarch64" '2026.07.04'
-    make_deno "${aarch_data}/yt-dlp-aria2-downloader/runtime/deno/2.9.5/deno" '2.9.5'
-    ln -s -- '2026.07.04' "${aarch_data}/yt-dlp-aria2-downloader/runtime/yt-dlp/current"
-    ln -s -- '2.9.5' "${aarch_data}/yt-dlp-aria2-downloader/runtime/deno/current"
-    cat >"${aarch_bin}/uname" <<'EOF_UNAME'
+    unsupported_bin="${TEST_ROOT}/unsupported-bin"
+    mkdir -- "${unsupported_bin}"
+    cat >"${unsupported_bin}/uname" <<'EOF_UNAME'
 #!/usr/bin/env bash
 [[ ${1:-} == '-m' ]] || exit 64
-printf '%s\n' aarch64
+printf '%s\n' unsupported
 EOF_UNAME
-    chmod 0755 -- "${aarch_bin}/uname"
-    aarch_path=$(env HOME="${HOME_DIR}" XDG_DATA_HOME="${aarch_data}" \
-        PATH="${aarch_bin}:${MOCK_BIN}:${PATH}" MOCK_CURL_LOG="${CURL_LOG}" \
-        MOCK_LOCK_LEAK_MARKER="${LOCK_LEAK_MARKER}" \
-        "${RUNTIME_MANAGER}" path yt-dlp)
-    [[ ${aarch_path} == */2026.07.04/yt-dlp_linux_aarch64 ]] \
-        || fail 'aarch64 yt-dlp asset mapping is incorrect'
+    chmod 0755 -- "${unsupported_bin}/uname"
+    : >"${CURL_LOG}"
+    env HOME="${HOME_DIR}" XDG_DATA_HOME="${TEST_ROOT}/unsupported-data" \
+        PATH="${unsupported_bin}:${MOCK_BIN}:${PATH}" MOCK_CURL_LOG="${CURL_LOG}" \
+        "${RUNTIME_MANAGER}" update >"${TEST_ROOT}/unsupported.log" 2>&1 || status=$?
+    [[ ${status} == 69 && ! -s ${CURL_LOG} && ! -e ${TEST_ROOT}/unsupported-data ]] \
+        || fail 'unsupported platform reached runtime provisioning'
+    grep -Fq 'require Fedora 45 x86_64' "${TEST_ROOT}/unsupported.log" \
+        || fail 'unsupported runtime platform was not diagnosed'
 
 }
 

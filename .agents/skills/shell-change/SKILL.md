@@ -8,7 +8,7 @@ description: Modify or review Bash code and shell-bearing workflow blocks in thi
 Use this skill for a change that creates, modifies, refactors, formats, or
 reviews shell code in this repository.
 
-Fedora 45 is the only officially supported distribution. Run application validation in Fedora 45 and preserve authenticated RPM installation and upgrade coverage.
+Fedora 45 x86_64 is the only officially supported platform. Verify the userspace, machine and RPM architecture before application validation and preserve authenticated RPM installation and upgrade coverage.
 
 ## Route the work
 

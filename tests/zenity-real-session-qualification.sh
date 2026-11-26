@@ -259,13 +259,12 @@ main() {
     # release gate to the Fedora Workstation release covered by this qualification.
     # shellcheck disable=SC1091
     source /etc/os-release
-    case ${ID:-}:${VERSION_ID:-} in
-        fedora:45) ;;
-        *)
-            fail_test \
-                "real Zenity qualification requires Fedora 45 Workstation; got ${ID:-unknown} ${VERSION_ID:-unknown}."
-            ;;
-    esac
+    local machine='' rpm_arch=''
+    if ! machine=$(uname -m) || ! rpm_arch=$(rpm --eval '%{_arch}') \
+        || [[ ${ID:-} != fedora || ${VERSION_ID:-} != 45 ||
+            ${machine} != x86_64 || ${rpm_arch} != x86_64 ]]; then
+        fail_test 'real Zenity qualification requires Fedora 45 x86_64 Workstation.'
+    fi
 
     trap cleanup EXIT
     trap 'record_harness_signal HUP 129' HUP

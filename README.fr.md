@@ -4,7 +4,7 @@
 
 [English version](README.md)
 
-Téléchargez une vidéo ou sa piste audio sous **Fedora 45 Workstation**, avec une interface
+Téléchargez une vidéo ou sa piste audio sous **Fedora 45 Workstation x86_64**, avec une interface
 Zenity simple ou depuis le terminal. Collez une URL, choisissez les pistes et
 le dossier de destination, puis suivez le téléchargement et le traitement.
 
@@ -47,7 +47,7 @@ Le journal illustre une erreur d'espace disque simulée.
 
 Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
 Les noms ci-dessous correspondent à la release v2.4.5 actuellement publiée.
-Fedora 45 est la seule distribution officiellement prise en charge. Seul un RPM portant la mention `.fc45` convient à ce système. Si le RPM publié ci-dessous cible une version antérieure de Fedora, utilisez ce dépôt source sous Fedora 45 en attendant la publication du RPM Fedora 45.
+Fedora 45 x86_64 est la seule plateforme officiellement prise en charge. Seul un RPM portant la mention `.fc45.x86_64` convient à ce système. Si le RPM publié ci-dessous cible une version antérieure de Fedora, utilisez ce dépôt source sous Fedora 45 en attendant la publication du RPM Fedora 45.
 
 | Système | Application à télécharger |
 | --- | --- |
@@ -60,7 +60,7 @@ Pour installer un RPM Fedora 45 publié, placez le RPM, `install-fedora.sh`, `SH
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-packages=(./*-1.fc45.noarch.rpm)
+packages=(./*-1.fc45.x86_64.rpm)
 (( ${#packages[@]} == 1 )) && [[ -f ${packages[0]} ]] && bash ./install-fedora.sh "${packages[0]}"
 ```
 
@@ -117,7 +117,7 @@ Après un déplacement, relancez `./install-gui.sh install`.
 
 ### Prérequis
 
-Fedora 45 sur `x86_64` ou `aarch64` pour les runtimes gérés, avec :
+Fedora 45 x86_64 pour les runtimes gérés, avec :
 
 - Bash **5.3 ou plus récent**, Python **3.15 ou plus récent**, aria2 **1.37.0 ou plus récent** ;
 - FFmpeg et `ffprobe`, Zenity, certificats CA, curl, GnuPG et unzip ;

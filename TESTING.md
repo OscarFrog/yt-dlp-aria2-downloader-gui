@@ -116,7 +116,7 @@ suites and stdlib `unittest` tests are the behavioral test entry points; pytest
 and type checkers are not project requirements. Ruff provides the separate
 static check described below. Static analysis, compilation or typing alone
 cannot establish exception, subprocess or cancellation behavior.
-The Fedora checkout jobs run the complete suite on the native interpreters. The additional aarch64 job checks the runner architecture and executes FULL with native Fedora tools. The non-root job retains the passive diagnostics for timeouts and failed children. Each checkout suite has a seven-minute command budget within the ten-minute job. The Git-free archive exercises the packaged source separately.
+The Fedora checkout jobs run the complete suite on the native interpreters. The non-root job retains the passive diagnostics for timeouts and failed children. Each checkout suite has a seven-minute command budget within the ten-minute job. The Git-free archive exercises the packaged source separately.
 
 Fedora's seven-minute command leaves 170 seconds within its ten-minute job cap
 for preparation and final cleanup after allowing the ten-second termination
@@ -157,7 +157,7 @@ dependency. No automatic fixes or formatting are part of the check.
 Run this from the repository root in Bash. Python's `venv` module and pip are
 needed for provisioning (`python3-pip` on Fedora); no system Python installation
 is changed. The reviewed requirement covers GNU/Linux glibc 2.17 or newer on
-x86_64/aarch64. Other platforms fail rather than fall back to an unpinned wheel
+x86_64. Other platforms fail rather than fall back to an unpinned wheel
 or source build.
 
 ```bash
@@ -177,14 +177,14 @@ or source build.
 )
 ```
 
-The two wheel SHA-256 values are pinned in
+The x86_64 wheel SHA-256 is pinned in
 `scripts/dev-tools/ruff-requirements.txt`, obtained from the official PyPI
 release metadata over HTTPS and reviewed with the version/configuration.
-They bind installation to those approved bytes; a newly discovered checksum
+It binds installation to those approved bytes; a newly discovered checksum
 alone is not an independent publisher-authentication proof. Provisioning uses
 an isolated pip configuration with configuration files disabled, the explicit
 public PyPI index and no package cache. Download, hash, installation, version or analysis failures remain
-failures. Updating the pin requires reviewing both platform hashes and the
+failures. Updating the pin requires reviewing the x86_64 wheel hash and the
 corresponding `required-version` before qualifying the changed tree.
 
 The check passes the canonical `PYTHON_FILES` array explicitly, so it covers
@@ -848,7 +848,7 @@ sequential internally.
 ## Shell formatting
 
 The project pins the upstream `mvdan/sh` `shfmt` release and its Linux
-amd64/arm64 SHA-256 digests in `scripts/dev-tools/shfmt-pin.env`.
+amd64 SHA-256 digest in `scripts/dev-tools/shfmt-pin.env`.
 
 Check formatting without modifying files:
 
@@ -1218,7 +1218,7 @@ The automated suite checks, among other things:
   lock-descriptor isolation, repeated contention/double-rollback coverage
   (three cycles in ordinary validation and ten per dedicated stress run),
   interrupted-activation journal recovery, explicit/automatic rollback, and
-  x86_64/aarch64 asset mapping.
+  x86_64 asset names and refusal before provisioning on unsupported platforms.
 - runtime bootstrap cleanup on HUP/INT/TERM, including creation/registration
   windows, preservation of the first signal status and replaced inodes, partial
   install recovery, and lock retention until foreground writes and GnuPG cleanup
@@ -1401,7 +1401,7 @@ both behavioral guarantees.
 
 ## GitHub Actions
 
-Fedora 45 is the only officially supported distribution. The standard GitHub runner hosts containers from the official Fedora registry. Check `/etc/os-release` for the userspace and `uname -r` for the shared host kernel. A container run qualifies the userspace. Only a native Fedora 45 Workstation Wayland session qualifies the graphical platform. The architecture-specific runtimes support x86_64 and aarch64 where verified upstream assets exist.
+Fedora 45 x86_64 is the only officially supported platform. The standard GitHub runner hosts containers from the official Fedora registry. Check `/etc/os-release` for the userspace and `uname -r` for the shared host kernel. A container run qualifies the userspace. Only a native Fedora 45 Workstation Wayland session qualifies the graphical platform. The runner checks `uname -m` and the RPM architecture before qualification. All three FULL runs use x86_64. The current matrix exercises 123 tasks with 186 Zenity headless tests across those runs.
 
 The five qualification workflows run on pull requests, with manual dispatch
 available for diagnostics. Each checks event/checkout identity, version
@@ -1490,7 +1490,7 @@ Manual diagnostic dispatch runs do not replace PR evidence.
 | Class | Content and place | Reuse |
 | --- | --- | --- |
 | A | Event/checkout identity, version, syntax; formatting, ShellCheck, static and workflow contracts early in shell CI | Cheap rejection before costly work |
-| B | Full hermetic suites on Fedora 45 x86_64, non-root, aarch64 and Git-free sources | Once in each complementary environment on PR |
+| B | Three Fedora 45 x86_64 FULL runs (checkout, non-root checkout and Git-free source ZIP) | Once in each complementary environment on PR |
 | C | Git-free source, real-tool/pinned versions, FFmpeg generations, signal jitters, native package candidate qualification | Once per candidate tree; complete required gate before merge |
 | D | Tag/signer/main/version, final ZIP identity, release build/sign/install/upgrade, newly resolved distribution runtime, provenance, immutable assets and public download | At release, on final objects and current external inputs |
 
@@ -1566,7 +1566,7 @@ payloads are unchanged. Official releases remain separately signed/attested,
 immutable and bound to their authorized tag; CI packages are never promoted as
 those final objects.
 
-Pull-request CI builds one unsigned noarch RPM and proves that the production
+Pull-request CI builds one unsigned x86_64 RPM and proves that the production
 bootstrap rejects it unless `--allow-unsigned-dev` is explicitly selected.
 The separate Fedora RPM Fusion dependency bootstrap never admits an unsigned
 package: its signature must verify against the exact pinned public certificate
@@ -2382,7 +2382,7 @@ After the final `publish` job succeeds, download the release RPM and independent
 confirm its signer and isolated trust binding on Fedora 45:
 
 ```bash
-rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc45.noarch.rpm
+rpm -qp --qf '[%{OPENPGP:pgpsig}\n]' ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc45.x86_64.rpm
 
 VERIFY_ROOT=$(mktemp -d)
 VERIFY_KEYRING="${VERIFY_ROOT}/keyring"
@@ -2392,13 +2392,13 @@ chmod 700 "$VERIFY_ROOT" "$VERIFY_KEYRING"
 
 rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --import ./RPM-GPG-KEY-OscarFrog
 
-rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --checksig ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc45.noarch.rpm
+rpmkeys   --define "_keyring fs"   --define "_keyringpath ${VERIFY_KEYRING}"   --define "_keyring_lockpath ${VERIFY_KEYRING}/.keyring.lock"   --define "_rpmlock_path ${VERIFY_KEYRING}/.rpm.lock"   --checksig ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc45.x86_64.rpm
 
 rm -rf -- "$VERIFY_ROOT"
 
 gh release verify vX.Y.Z -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset vX.Y.Z   ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc45.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh attestation verify   ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc45.noarch.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset vX.Y.Z   ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc45.x86_64.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh attestation verify   ./yt-dlp-aria2-downloader-gui-X.Y.Z-1.fc45.x86_64.rpm   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 A specific release is considered qualified only after its final `publish` job
@@ -2487,6 +2487,34 @@ startup delay does not change the tested state; they remain in the full suite.
 The unrelated engine, GUI configuration, installer and static scenarios remain in
 the full suite and are not repeated for each timing tuple. Each shard retains
 five bounded five-minute iterations and ten-second termination grace periods.
+A failed iteration stops its shard. The other shards finish independently,
+and the aggregate requires every shard to succeed.
+
+The FULL and every stress iteration use the same diagnostic policy in
+`ProcessTests`. Observations of real fixture consumers use
+`sample_consumers()`. This includes the GUI and CLI engine-wrapper and timed
+FFprobe cases immediately after readiness, and the first observation used to
+admit the timeout launcher or inspect a subgroup before escalation. The
+existing pre-rescue observation in teardown is covered when the fixture has
+registered child processes. The final independent rescue check retains its
+ordinary observer settings. The
+consumer's ready marker establishes its own progress. Helpers and descendants
+can still exit or change parent while procfs is sampled.
+
+A successful observation emits nothing. On the first refusal at a covered
+boundary, the test writes one `process_first_failure` JSON record to stderr.
+It contains the available operation, phase, primitive and normalized errno,
+attribution source, and bounded identity and quiescence evidence. Group and
+task identities use local aliases. The observer's normalized failure still
+propagates through the test and teardown. The traceback can therefore report
+the same exception twice. Read the single packet alongside the method name and
+the runner's iteration header. Tests that deliberately inject errors use
+explicit diagnostic settings to exercise enabled, disabled and silent paths.
+
+Capturing the two diagnostic records can alter scheduling around procfs reads.
+Synthetic faults and application guards exercise the same reporting path.
+A recorded errno alone does not establish a kernel return or identify the
+cause of a previous incident.
 
 The runtime-manager job runs each hardening group once: `validation`,
 `rollback-admission`, `recovery`, `cache-identity` and `transactions`. Each group

@@ -88,7 +88,8 @@ if args[:2] == ["release", "verify"]:
     sys.exit(0)
 if args[:2] == ["release", "view"]:
     fedora = 44 if state["scenario"] == "wrong-release-rpm" else 45
-    asset = {"name": f"yt-dlp-aria2-downloader-gui-100.0.0-1.fc{fedora}.noarch.rpm", "size": 1024}
+    arch = "noarch" if state["scenario"] == "wrong-release-arch" else "x86_64"
+    asset = {"name": f"yt-dlp-aria2-downloader-gui-100.0.0-1.fc{fedora}.{arch}.rpm", "size": 1024}
     emit({"isImmutable": True, "assets": [asset]})
     sys.exit(0)
 path = next(arg for arg in args if arg.startswith("repos/"))
@@ -411,15 +412,17 @@ class ReleaseDocsReplay(unittest.TestCase):
                 self.assertNotIn("Prepared exact", result.stdout)
 
     def test_release_platform_links_match_the_immutable_rpm_before_any_write(self):
-        self.prepare(scenario="wrong-release-rpm")
-        result, state = self.run_publisher()
-        self.assertEqual(result.returncode, 65, result.stderr)
-        self.assertIn("immutable release does not contain the expected Fedora RPM", result.stderr)
-        self.assertEqual(state["writes"], [])
+        for scenario in ("wrong-release-rpm", "wrong-release-arch"):
+            with self.subTest(scenario=scenario):
+                self.prepare(scenario=scenario)
+                result, state = self.run_publisher()
+                self.assertEqual(result.returncode, 65, result.stderr)
+                self.assertIn("immutable release does not contain the expected Fedora RPM", result.stderr)
+                self.assertEqual(state["writes"], [])
 
     def test_rehashed_french_fedora_link_cannot_substitute_a_different_build(self):
         self.prepare()
-        asset = f"yt-dlp-aria2-downloader-gui-{RELEASE_VERSION}-1.fc45.noarch.rpm"
+        asset = f"yt-dlp-aria2-downloader-gui-{RELEASE_VERSION}-1.fc45.x86_64.rpm"
         url = f"https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/{asset}"
         for name in ("README.md", "README.fr.md"):
             data = (self.handoff / name).read_text(encoding="utf-8")

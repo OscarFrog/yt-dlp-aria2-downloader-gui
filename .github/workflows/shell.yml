@@ -15,7 +15,7 @@ jobs:
     name: Source identity ${{ github.sha }}
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -28,7 +28,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
           dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -57,7 +61,7 @@ jobs:
     name: Fedora 45 non-root
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -70,7 +74,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
           dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -140,8 +148,7 @@ jobs:
           trap 'finish_diagnostics "$?"' EXIT
           validation_status=0
           umask "${validation_umask}"
-          YTDLP_FEDORA_FIRST_FAILURE=engine-cli-first-sample \
-            YTDLP_ARIA2_CI_DIAGNOSTICS_DIR=${diagnostic_dir} \
+          YTDLP_ARIA2_CI_DIAGNOSTICS_DIR=${diagnostic_dir} \
             timeout --signal=TERM --kill-after=10s 7m bash ./tests/run-all.sh --jobs 4 \
             || validation_status=$?
           finish_diagnostics "${validation_status}"
@@ -151,7 +158,7 @@ jobs:
     name: Fedora 45
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -169,50 +176,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
-      - name: Install validation tools
-        run: |
-          dnf install --assumeyes --no-docs --setopt=install_weak_deps=False \
-            aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 \
-            grep jq procps-ng python3 sed ShellCheck unzip util-linux
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Trust only the checked-out workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          workspace=$(realpath -e -- "${GITHUB_WORKSPACE:?}")
-          [[ ${workspace} == "$(pwd -P)" && ${workspace} != / && ${workspace} != */\* ]]
-          git config --global --add safe.directory "${workspace}"
-      - name: Run validation
-        run: timeout --signal=TERM --kill-after=10s 7m bash ./tests/run-all.sh --jobs 4
-  validate-fedora-arm:
-    needs: identity
-    name: Fedora 45 aarch64
-    runs-on: ubuntu-24.04-arm
-    container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
-      volumes:
-        - /tmp
-        - /var/tmp
-    env:
-      TMPDIR: /var/tmp
-    timeout-minutes: 10
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Verify Fedora 45 userspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          # shellcheck source=/dev/null
-          source /etc/os-release
-          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
-      - name: Verify native target architecture
-        run: test "$(uname -m)" = aarch64 && test "$(rpm --eval '%{_arch}')" = aarch64
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
       - name: Install validation tools
         run: |
           dnf install --assumeyes --no-docs --setopt=install_weak_deps=False \

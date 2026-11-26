@@ -36,15 +36,23 @@ parse_rpm_build_arguments() {
 require_rpm_build_commands() {
     local command_name=''
     local build_target=''
+    local kernel_arch=''
+
+    if ! grep -Eqx 'ID=(fedora|"fedora")' /etc/os-release \
+        || ! grep -Eqx 'VERSION_ID=(45|"45")' /etc/os-release \
+        || ! kernel_arch=$(uname -m) || [[ ${kernel_arch} != x86_64 ]]; then
+        printf '%s\n' 'Error: builds require Fedora 45 x86_64.' >&2
+        exit 69
+    fi
 
     command -v rpm >/dev/null 2>&1 || {
         printf '%s\n' 'Error: required command is absent: rpm' >&2
         exit 127
     }
     # The spec derives its Release suffix from the actual RPM buildroot.
-    build_target=$(LC_ALL=C rpm --eval '%{?fedora} %{?dist}')
-    if [[ ${build_target} != '45 .fc45' ]]; then
-        printf '%s\n' 'Error: the RPM build requires a Fedora 45 buildroot.' >&2
+    if ! build_target=$(LC_ALL=C rpm --eval '%{?fedora} %{?dist} %{_arch} %{_target_cpu}') \
+        || [[ ${build_target} != '45 .fc45 x86_64 x86_64' ]]; then
+        printf '%s\n' 'Error: the RPM build requires a native Fedora 45 x86_64 buildroot.' >&2
         exit 69
     fi
 
@@ -188,9 +196,9 @@ validate_rpm_artifact() {
         exit 65
     fi
 
-    package_name=$(LC_ALL=C rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}.rpm' -- "${rpm_path}")
-    if [[ ${package_name} != "${PACKAGE_NAME}-${VERSION}-"*.fc45.noarch.rpm ||
-        ${package_name} != "${rpm_path##*/}" ]]; then
+    package_name=$(LC_ALL=C rpm -qp --qf '%{NEVRA}.rpm' -- "${rpm_path}")
+    if [[ ${package_name} != "${PACKAGE_NAME}-${VERSION}-1.fc45.x86_64.rpm" ||
+        ${rpm_path##*/} != "${package_name}" ]]; then
         printf 'Error: unexpected Fedora 45 RPM identity: %s\n' "${package_name}" >&2
         exit 65
     fi

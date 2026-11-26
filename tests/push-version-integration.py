@@ -45,10 +45,11 @@ def write_version_sources(root, version, published="2.3.11"):
         "README.md": f"The current development version is **{version}**.\n",
         "README.fr.md": f"La version de développement actuelle est la **{version}**.\n",
     }
+    fedora, arch = CHECK.PUBLISHED.published_platform(published)
     for name, marker in markers.items():
         text = marker + f"gh workflow run release.yml --ref v{version} -f tag=v{version}\n"
         for template, count in CHECK.PUBLISHED.README_REFERENCE_TEMPLATES[Path(name)]:
-            text += (template.format(version=published, fedora=CHECK.PUBLISHED.published_fedora(published)) + "\n") * count
+            text += (template.format(version=published, fedora=fedora, arch=arch) + "\n") * count
         (root / name).write_text(text, encoding="utf-8")
     spec = root / PREPARE.RPM_PATH
     spec.parent.mkdir(parents=True, exist_ok=True)
@@ -353,18 +354,21 @@ class OfflineCoherenceTests(unittest.TestCase):
 
     def test_published_rpm_distribution_and_unpublished_references(self):
         for name in ("README.md", "README.fr.md"):
-            for published, fedora, wrong in (("2.4.5", 44, 45), ("2.4.6", 45, 44)):
+            for published, fedora, wrong, arch, wrong_arch in (
+                ("2.4.5", 44, 45, "noarch", "x86_64"), ("2.4.6", 45, 44, "x86_64", "noarch"),
+            ):
                 with self.subTest(name=name, published=published):
                     write_version_sources(self.root, "2.4.7", published)
                     path = self.root / name
                     valid = path.read_text(encoding="utf-8")
-                    asset = f"yt-dlp-aria2-downloader-gui-{published}-1.fc{fedora}.noarch.rpm"
+                    asset = f"yt-dlp-aria2-downloader-gui-{published}-1.fc{fedora}.{arch}.rpm"
                     url = f"https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/{asset}"
                     row = f"| Fedora {fedora} | [RPM]({url}) |"
                     self.assertEqual(valid.splitlines().count(row), 1)
                     self.assertEqual(valid.count(asset), 1)
                     for before, after in (
-                        (f"-1.fc{fedora}.noarch.rpm", f"-1.fc{wrong}.noarch.rpm"),
+                        (f"-1.fc{fedora}.{arch}.rpm", f"-1.fc{wrong}.{arch}.rpm"),
+                        (f".{arch}.rpm", f".{wrong_arch}.rpm"),
                         (f"| Fedora {fedora} | [RPM]", f"| Fedora {wrong} | [RPM]"),
                         (url, url.replace("/latest/download/", "/download/v0/")),
                     ):
@@ -372,8 +376,8 @@ class OfflineCoherenceTests(unittest.TestCase):
                         path.write_text(valid.replace(before, after, 1), encoding="utf-8")
                         with self.assertRaisesRegex(CHECK.CheckError, "published references"):
                             CHECK.worktree_version(self.root)
-                    for suffix in ("fc44", "fc45"):
-                        path.write_text(valid + f"yt-dlp-aria2-downloader-gui-2.4.7-1.{suffix}.noarch.rpm\n",
+                    for suffix in ("fc44.noarch", "fc45.x86_64"):
+                        path.write_text(valid + f"yt-dlp-aria2-downloader-gui-2.4.7-1.{suffix}.rpm\n",
                                         encoding="utf-8")
                         with self.assertRaisesRegex(CHECK.CheckError, "unpublished"):
                             CHECK.worktree_version(self.root)

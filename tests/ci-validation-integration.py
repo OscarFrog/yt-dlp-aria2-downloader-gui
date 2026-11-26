@@ -780,7 +780,8 @@ class ScheduledProofTests(unittest.TestCase):
         script = "\n".join(functions) + '\nassert_asset_inventory "$1" "$2"'
         project = "yt-dlp-aria2-downloader-gui"
         for version, fedora, historical in (("2.4.5", 44, True), ("2.4.6", 45, False)):
-            rpm = f"{project}-{version}-1.fc{fedora}.noarch.rpm"
+            arch = "noarch" if historical else "x86_64"
+            rpm = f"{project}-{version}-1.fc{fedora}.{arch}.rpm"
             deb = f"{project}_{version}-1_all.deb"
             assets = ["SHA256SUMS", "RPM-GPG-KEY-OscarFrog", "install-fedora.sh", f"{project}-{version}.zip", rpm]
             if historical:
@@ -788,7 +789,8 @@ class ScheduledProofTests(unittest.TestCase):
             cases = [(assets, 0), ([a for a in assets if a != "RPM-GPG-KEY-OscarFrog"], 65),
                      (assets + [rpm], 65), (assets + ["unexpected"], 65)]
             if not historical:
-                cases.extend(((assets + [deb], 65), (assets[:-1] + [rpm.replace("fc45", "fc44")], 65)))
+                cases.extend(((assets + [deb], 65), (assets[:-1] + [rpm.replace("fc45", "fc44")], 65),
+                              (assets[:-1] + [rpm.replace("x86_64", "noarch")], 65)))
             for inventory, expected in cases:
                 with self.subTest(version=version, inventory=inventory), tempfile.TemporaryDirectory() as tmp:
                     path = Path(tmp) / "inventory"
@@ -1133,7 +1135,9 @@ class SigningSecretReplayTests(unittest.TestCase):
         block = VersionBoundaryTests.step("release.yml", "Sign exact release RPM with OpenPGP")
         tools = r'''
 rpm() {
-    if [[ $* == *'%{rpmformat}'* ]]; then
+    if [[ $* == *'%{NEVRA}'* ]]; then
+        printf '%s\n' "${TEST_PACKAGE_NEVRA}"
+    elif [[ $* == *'%{rpmformat}'* ]]; then
         printf '4\n'
     elif [[ ${@: -1} == dist/* && -f ${SIGNER_CALL_LOG} ]]; then
         printf 'signed\n'
@@ -1154,12 +1158,19 @@ rpmsign() {
     printf '%s\n' "$*" >>"${SIGNER_CALL_LOG}"
 }
 '''
-        for state in ("#", "+", "D2760001240102000005000012340000", "", "malformed"):
-            with self.subTest(primary_secret_state=state), tempfile.TemporaryDirectory() as temporary:
+        expected_nevra = "yt-dlp-aria2-downloader-gui-2.4.6-1.fc45.x86_64"
+        wrong_nevra = expected_nevra.replace("x86_64", "noarch")
+        cases = [(state, expected_nevra, expected_nevra) for state in
+                 ("#", "+", "D2760001240102000005000012340000", "", "malformed")]
+        wrong_epoch = expected_nevra.replace("-2.4.6-", "-1:2.4.6-")
+        cases += [("#", wrong_nevra, expected_nevra), ("#", expected_nevra, wrong_nevra),
+                  ("#", wrong_epoch, expected_nevra)]
+        for state, header, filename in cases:
+            with self.subTest(primary_secret_state=state, header=header, filename=filename), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 unsigned = root / "unsigned"
                 unsigned.mkdir()
-                (unsigned / "fixture.rpm").write_bytes(b"inert package; never processed by real RPM tools\n")
+                (unsigned / f"{filename}.rpm").write_bytes(b"inert package; never processed by real RPM tools\n")
                 scratch = root / "scratch"
                 scratch.mkdir()
                 calls = root / "signer-calls"
@@ -1171,20 +1182,23 @@ rpmsign() {
                 )) if state != "malformed" else "not:a:secret:key:listing"
                 environment = dict(
                     os.environ, TMPDIR=str(scratch), SIGNER_LISTING=listing, SIGNER_CALL_LOG=str(calls),
+                    TEST_PACKAGE_NEVRA=header, RELEASE_TAG="v2.4.6",
                     RPM_SIGNING_FINGERPRINT=self.PRIMARY, RPM_SIGNING_SUBKEY_FINGERPRINT=self.SUBKEY,
                     RPM_SIGNING_PRIVATE_KEY_B64="aW5lcnQgZml4dHVyZQ==",
                     RPM_SIGNING_PASSPHRASE="inert fixture passphrase",
                 )
                 result = subprocess.run(["bash", "-c", tools + block], cwd=root, env=environment,
                                         text=True, capture_output=True, timeout=15)
-                if state == "#":
+                if state == "#" and header == filename == expected_nevra:
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertEqual(len(calls.read_text().splitlines()), 1)
                     self.assertIn("--key-id " + self.SUBKEY, calls.read_text())
-                    self.assertEqual((root / "dist/fixture.rpm").read_bytes(),
-                                     (unsigned / "fixture.rpm").read_bytes())
+                    self.assertEqual((root / "dist" / f"{filename}.rpm").read_bytes(),
+                                     (unsigned / f"{filename}.rpm").read_bytes())
                 else:
-                    self.assertFalse(calls.exists(), "rejected private-primary state reached rpmsign")
+                    self.assertFalse(calls.exists(), "refused input reached rpmsign")
+                    if header != expected_nevra or filename != expected_nevra:
+                        self.assertIn("release RPM filename or header differs", result.stderr)
                     self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
                     self.assertFalse((root / "dist").exists(), "rejected state prepared a signed publication")
                 self.assertEqual(list(scratch.iterdir()), [], "signing temporary state survived cleanup")
@@ -1342,7 +1356,7 @@ class WorkflowContractTests(unittest.TestCase):
             "real-tools.yml": {"identity"},
             "release-docs.yml": {"prepare-release-docs", "verify-release-docs"},
             "release.yml": {"validate", "previous-release", "zip", "rpm-build"},
-            "shell.yml": {"identity", "validate-fedora", "validate-fedora-arm"},
+            "shell.yml": {"identity", "validate-fedora"},
             "stress.yml": {"identity"},
         }
         seen = set()
@@ -1421,9 +1435,9 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
                             self.assertIn("- name: " + step + "\n", text)
 
     def test_fedora_userspace_and_nonroot_subject_are_required(self):
-        image = "registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5"
+        image = "registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b"
         targets = {
-            "shell.yml": ("identity", "validate-fedora", "validate-fedora-arm", "validate-nonroot"),
+            "shell.yml": ("identity", "validate-fedora", "validate-nonroot"),
             "stress.yml": ("identity", "mock-stress", "runtime-hardening-stress"),
             "real-tools.yml": ("identity", "pinned-local-media", "current-stable-local-media"),
             "packages.yml": ("identity", "source-archive", "previous-release", "rpm", "rpm-build"),
@@ -1439,7 +1453,12 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
                     self.assertRegex(body, r"(?m)^    (?:  image: |container: )" + re.escape(image) + "$")
                     steps = body.split("    steps:\n", 1)[1]
                     self.assertTrue(steps.startswith("      - name: Verify Fedora 45 userspace\n"))
-                    self.assertIn('[[ ${ID} == fedora && ${VERSION_ID} == 45 ]]', steps.split("      - ", 2)[1])
+                    admission = steps.split("      - ", 2)[1]
+                    self.assertIn('[[ ${ID} == fedora && ${VERSION_ID} == 45 ]]', admission)
+                    self.assertIn('kernel_arch=$(uname -m)', admission)
+                    self.assertIn("rpm_arch=$(rpm --eval '%{_arch}')", admission)
+                    self.assertIn('[[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]', admission)
+                    self.assertIn("runs-on: ubuntu-24.04\n", body)
         nonroot = self.jobs(self.workflow("shell.yml"))["validate-nonroot"]
         self.assertIn("runuser -u qualification -- bash -se", nonroot)
         self.assertIn("useradd --create-home qualification", nonroot)
@@ -1450,14 +1469,24 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
         body = self.jobs(self.workflow("shell.yml"))["validate-fedora"]
         admission = body.split("      - name: Verify Fedora 45 userspace", 1)[1].split("      - ", 1)[0]
         probe = admission.split("        run: |\n", 1)[1]
-        fixture = 'source() { [[ "$1" == /etc/os-release ]] || exit 97; ID=$TEST_ID VERSION_ID=$TEST_VERSION PRETTY_NAME=test; }\n'
-        for distro, version, admitted in (("fedora", "45", True), ("fedora", "44", False),
-                                          ("fedora", "", False), ("ubuntu", "24.04", False)):
-            with self.subTest(distro=distro, version=version):
+        fixture = (
+            'source() { [[ "$1" == /etc/os-release ]] || exit 97; ID=$TEST_ID VERSION_ID=$TEST_VERSION PRETTY_NAME=test; }\n'
+            'uname() { case "$1" in -m) echo "$TEST_MACHINE";; -r) echo kernel;; *) return 97;; esac; }\n'
+            'rpm() { [[ "$*" == "--eval %{_arch}" ]] || exit 97; echo "$TEST_RPM"; }\n'
+        )
+        for distro, version, machine, rpm_arch, expected in (
+            ("fedora", "45", "x86_64", "x86_64", 0),
+            ("fedora", "44", "x86_64", "x86_64", 1),
+            ("fedora", "", "x86_64", "x86_64", 1),
+            ("ubuntu", "24.04", "x86_64", "x86_64", 1),
+            ("fedora", "45", "other", "x86_64", 1),
+            ("fedora", "45", "x86_64", "other", 1),
+        ):
+            with self.subTest(distro=distro, version=version, machine=machine, rpm_arch=rpm_arch):
                 result = subprocess.run(["bash", "-c", fixture + probe], capture_output=True,
-                                        env=dict(os.environ, TEST_ID=distro, TEST_VERSION=version))
-                self.assertEqual(result.returncode, 0 if admitted else 1)
-                self.assertEqual(b"shared host kernel" in result.stdout, admitted)
+                                        env=dict(os.environ, TEST_ID=distro, TEST_VERSION=version,
+                                                 TEST_MACHINE=machine, TEST_RPM=rpm_arch))
+                self.assertEqual(result.returncode, expected, result.stderr)
 
     def test_fedora_suite_budget_preserves_workers_and_validation_status(self):
         job = self.jobs(self.workflow("shell.yml"))["validate-fedora"]
@@ -1922,6 +1951,10 @@ exit "${CHECK_VALIDATION_STATUS}"
 
     def assert_required_stress_gate(self, text):
         jobs = self.jobs(text)
+        shards = jobs["mock-stress"]
+        self.assertIn("      fail-fast: false\n", shards)
+        self.assertIn("        shard: [1, 2, 3, 4]\n", shards)
+        self.assertNotIn("continue-on-error:", shards)
         gate = jobs["mock-stress-gate"]
         self.assertIn("scripts/ci-validation.py wait-required --commit", gate)
         self.assertIn("Mock process/cancellation stress (20x deterministic jitter)", gate)
@@ -1948,6 +1981,7 @@ exit "${CHECK_VALIDATION_STATUS}"
     def test_parallel_graph_cannot_remove_or_skip_the_complete_final_gate(self):
         text = self.workflow("stress.yml")
         mutations = (
+            ("      fail-fast: false", "      fail-fast: true"),
             ("      - runtime-hardening-stress\n", ""),
             ("if: ${{ always() }}", "if: false"),
             ("if: github.event_name == 'pull_request'", "if: false"),
@@ -2219,7 +2253,7 @@ class VersionBoundaryTests(unittest.TestCase):
         return "\n".join(line[10:] for line in block.splitlines()
                          if line.startswith("          ")) + "\n"
 
-    def test_first_failure_capture_is_scoped_to_two_stress_invocations(self):
+    def test_each_stress_iteration_runs_without_a_diagnostic_selector(self):
         step = self.step("stress.yml", "Repeat race-sensitive integration scenarios with bounded jitter")
         with tempfile.TemporaryDirectory() as temporary:
             user = Path(temporary) / "runuser"
@@ -2228,17 +2262,20 @@ class VersionBoundaryTests(unittest.TestCase):
             probe = Path(temporary) / "bash"
             probe.write_text('#!/bin/sh\n'
                              'test "$*" = "./tests/mock-integration.sh --group stress-signals" || exit 65\n'
-                             'printf "capture=%s\\n" "$YTDLP_STRESS_FIRST_FAILURE"\n')
+                             'test -z "${YTDLP_STRESS_FIRST_FAILURE+x}" || exit 66\n'
+                             'echo stress-signals\n')
             probe.chmod(0o755)
             for shard in range(1, 5):
                 with self.subTest(shard=shard):
-                    env = dict(os.environ, STRESS_SHARD=str(shard), YTDLP_STRESS_FIRST_FAILURE="2:18",
-                               PATH=temporary + os.pathsep + os.environ["PATH"])
+                    env = dict(os.environ, STRESS_SHARD=str(shard), PATH=temporary + os.pathsep + os.environ["PATH"])
+                    env.pop("YTDLP_STRESS_FIRST_FAILURE", None)
                     output = subprocess.check_output(["/bin/bash", "-c", step], env=env, text=True)
-                    captures = [line for line in output.splitlines() if line.startswith("capture=")]
-                    selected = {(2, 18): "capture=2:18", (4, 12): "capture=4:12"}
-                    expected = [selected.get((shard, n), "capture=") for n in range(shard, 21, 4)]
-                    self.assertEqual(captures, expected)
+                    lines = output.splitlines()
+                    expected = list(range(shard, 21, 4))
+                    self.assertEqual(len(lines), 2 * len(expected))
+                    for n, header, result in zip(expected, lines[::2], lines[1::2], strict=True):
+                        self.assertTrue(header.startswith(f"=== mock jitter iteration {n}/20: "), header)
+                        self.assertEqual(result, "stress-signals")
 
     def test_failed_fedora_provision_never_starts_tool_installation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2583,13 +2620,43 @@ gh() {
                     if expected:
                         self.assertIn(b"release executable version mismatch", result.stderr)
 
+    def test_release_payloads_require_the_exact_fedora_package_before_attestation(self):
+        script = self.step("release.yml", "Verify payloads and checksums")
+        name = "yt-dlp-aria2-downloader-gui-2.4.6"
+        for arch, extra, success in (("x86_64", False, True), ("noarch", False, False),
+                                     ("x86_64", True, False)):
+            with self.subTest(arch=arch, extra=extra), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                dist = root / "dist"
+                dist.mkdir()
+                (root / "packaging/keys").mkdir(parents=True)
+                (root / "packaging/keys/RPM-GPG-KEY-OscarFrog").write_bytes(b"public test key")
+                (root / "install-fedora.sh").write_bytes(b"test installer")
+                (dist / f"{name}.zip").write_bytes(b"test archive")
+                (dist / f"{name}-1.fc45.{arch}.rpm").write_bytes(b"test package")
+                if extra:
+                    (dist / ".unexpected").write_bytes(b"foreign data")
+                result = subprocess.run(["bash", "-c", script], cwd=root, capture_output=True,
+                                        env=dict(os.environ, RELEASE_TAG="v2.4.6"), timeout=5)
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+                sums = dist / "SHA256SUMS"
+                self.assertEqual(sums.exists(), success)
+                if success:
+                    expected = {f"{name}.zip", f"{name}-1.fc45.x86_64.rpm", "install-fedora.sh", "RPM-GPG-KEY-OscarFrog"}
+                    self.assertEqual({path.name for path in dist.iterdir()}, expected | {"SHA256SUMS"})
+                    for row in sums.read_text().splitlines():
+                        digest, filename = row.split("  ")
+                        self.assertEqual(hashlib.sha256((dist / filename).read_bytes()).hexdigest(), digest)
+                        expected.remove(filename)
+                    self.assertFalse(expected)
+
     def test_existing_publication_accepts_only_identical_bytes(self):
         script = self.step("release.yml", "Publish and verify immutable release")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "dist").mkdir()
             (root / "published").mkdir()
-            names = ("fixture.zip", "fixture.fc45.noarch.rpm", "install-fedora.sh",
+            names = ("fixture.zip", "fixture.fc45.x86_64.rpm", "install-fedora.sh",
                      "RPM-GPG-KEY-OscarFrog", "SHA256SUMS")
             for name in names:
                 (root / "dist" / name).write_text("tested bytes\n")
@@ -2601,7 +2668,7 @@ gh() {
         view)
             if [[ $# == 3 ]]; then return 0; fi
             case $5 in
-                assets) printf '%s\n' fixture.zip fixture.fc45.noarch.rpm install-fedora.sh RPM-GPG-KEY-OscarFrog SHA256SUMS ;;
+                assets) printf '%s\n' fixture.zip fixture.fc45.x86_64.rpm install-fedora.sh RPM-GPG-KEY-OscarFrog SHA256SUMS ;;
                 isImmutable) printf 'true\n' ;;
                 *) return 99 ;;
             esac ;;
@@ -2614,7 +2681,7 @@ gh() {
             for changed in (False, True):
                 with self.subTest(changed=changed):
                     if changed:
-                        (root / "dist/fixture.fc45.noarch.rpm").write_text("different source payload\n")
+                        (root / "dist/fixture.fc45.x86_64.rpm").write_text("different source payload\n")
                     result = subprocess.run(["bash", "-c", fixture + script], cwd=root,
                                             env=dict(os.environ, RELEASE_TAG="v2.3.26",
                                                      GITHUB_REPOSITORY="fixture/project"),
@@ -2848,8 +2915,8 @@ class PassiveDiagnosticsTests(unittest.TestCase):
 
     def test_runner_consumes_optional_variable_before_any_child(self):
         source = (PROJECT / "tests/run-all.sh").read_text()
-        admission = source.split("is_fedora_45() (", 1)[1].split("\n)\n", 1)[0]
-        main = "is_fedora_45() (" + admission + "\n)\n" + source[source.rindex("\nmain() {\n"):]
+        admission = source.split("is_fedora_45_x86_64() (", 1)[1].split("\n)\n", 1)[0]
+        main = "is_fedora_45_x86_64() (" + admission + "\n)\n" + source[source.rindex("\nmain() {\n"):]
         fixture = r'''
 set -euo pipefail
 parse_arguments() { DOCTOR_ONLY=false; LIST_ONLY=false; PROFILE=full; JOBS=4; }

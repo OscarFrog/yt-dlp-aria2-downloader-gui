@@ -1160,12 +1160,12 @@ The other persistent paths are:
 
 ## Packaging architecture
 
-Fedora 45 is the only officially supported distribution. The graphical reference is Fedora 45 Workstation on Wayland. Runtime binaries must match x86_64 or aarch64. The release contains a noarch RPM and portable Fedora source ZIP. All application jobs verify the Fedora userspace and record the host kernel. CodeQL and GitHub API verification use hosted infrastructure.
+Fedora 45 x86_64 is the only officially supported platform. The graphical reference is Fedora 45 Workstation on Wayland. The managed runtime assets are `yt-dlp_linux` and `deno-x86_64-unknown-linux-gnu.zip`. The release contains a x86_64 RPM and portable Fedora source ZIP. Application jobs use the pinned Fedora amd64 image manifest, verify Fedora 45 in `/etc/os-release`, check `uname -m` and the RPM architecture, and record the host kernel. CodeQL and GitHub API verification use hosted infrastructure.
 
 `packaging/install-tree.sh` is the common payload assembler. The format-specific
 builders wrap that tree:
 
-- `packaging/rpm/build-rpm.sh` archives committed sources, builds the noarch RPM
+- `packaging/rpm/build-rpm.sh` archives committed sources, builds the x86_64 RPM
   through the spec, and validates the produced payload;
 - the RPM keeps `package-user-cleanup.sh` for two allowlisted lifecycle tasks:
   its install/upgrade scriptlet retires only exact historical project desktop
@@ -1190,7 +1190,7 @@ architecture document. The source ZIP contains the tracked source tree.
 
 | Workflow | Responsibility |
 | --- | --- |
-| `shell.yml` | Fedora 45 checkout identity, x86_64, aarch64 and non-root FULL, pinned actionlint and Ruff |
+| `shell.yml` | Fedora 45 checkout identity, x86_64 root and non-root FULL, pinned actionlint and Ruff |
 | `packages.yml` | Git-free source archive, RPM construction, lifecycle, authentication, and previous-release upgrade |
 | `real-tools.yml` | Pinned real-tool behavior and shared-destination qualification on both the latest pin and scheduled current-stable yt-dlp |
 | `qualification.yml` | Supported FFmpeg/FFprobe generation matrix |
@@ -1485,6 +1485,15 @@ Unsupported reader or context protocols retain their original execution with
 an explicitly incomplete diagnostic. Task-to-group bindings describe the
 expected group rather than an atomic membership proof; a replacement group
 does not acquire an attributed public identity merely through revalidation.
+
+The process-supervision integration harness scopes both diagnostic modes to
+observations of real fixture consumers. It restores their caller settings on
+return or failure. The first refusal at a covered boundary uses the existing
+primitive schema and public identity projection. Each schema retains up to 32
+events. A single JSON record is limited to 16 KiB and marks incomplete
+evidence when truncation is required. The pre-rescue verdict uses this same
+boundary for registered children. Teardown propagates any saved error. Only the observer's ordinary identity, privacy and group-exit
+checks determine its verdict and cleanup authority.
 
 Contributor control is layered around that runner. Repository skills route a
 task to the relevant policy; issue and pull-request templates make scope,

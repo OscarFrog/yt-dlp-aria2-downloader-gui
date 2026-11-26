@@ -3878,6 +3878,7 @@ test_run_all_doctor_contract() {
         realpath
         rm
         rmdir
+        rpm
         sed
         setsid
         sha256sum

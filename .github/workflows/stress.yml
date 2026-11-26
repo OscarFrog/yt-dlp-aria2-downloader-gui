@@ -13,7 +13,7 @@ jobs:
     name: Source identity ${{ github.sha }}
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -26,7 +26,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
           dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -56,7 +60,7 @@ jobs:
     name: Mock process/cancellation stress shard ${{ matrix.shard }}/4
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -64,7 +68,7 @@ jobs:
     # Include all iterations plus checkout and cleanup in the job budget.
     timeout-minutes: 30
     strategy:
-      fail-fast: true
+      fail-fast: false
       max-parallel: 4
       matrix:
         shard: [1, 2, 3, 4]
@@ -76,7 +80,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
           dnf -y --setopt=install_weak_deps=False install aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file shadow-utils
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -115,17 +123,12 @@ jobs:
             worker=${worker_timings[index % ${#worker_timings[@]}]}
             ffmpeg_start=${ffmpeg_timings[index % ${#ffmpeg_timings[@]}]}
             supervisor=${supervisor_timings[index % ${#supervisor_timings[@]}]}
-            case ${shard}:${iteration} in
-              2:18 | 4:12) first_failure="${shard}:${iteration}" ;;
-              *) first_failure='' ;;
-            esac
 
             printf '%s\n' \
               "=== mock jitter iteration ${iteration}/20: cancel=${cancel}s late=${late_cancel}s pgid=${pgid}s worker=${worker}s ffmpeg=${ffmpeg_start}s supervisor=${supervisor}s ==="
 
             runuser -u qualification -- timeout --signal=TERM --kill-after=10s 5m \
               env \
-                YTDLP_STRESS_FIRST_FAILURE="${first_failure}" \
                 MOCK_CANCEL_JITTER_SECONDS="${cancel}" \
                 MOCK_CANCEL_AFTER_EOF_JITTER_SECONDS="${late_cancel}" \
                 MOCK_PGID_PUBLISH_DELAY_SECONDS="${pgid}" \
@@ -182,7 +185,7 @@ jobs:
     name: Runtime-manager hardening (10 rollback/contention cycles)
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -198,7 +201,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
           dnf -y --setopt=install_weak_deps=False install aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file shadow-utils
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

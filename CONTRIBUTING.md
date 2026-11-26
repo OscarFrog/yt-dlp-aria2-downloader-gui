@@ -10,7 +10,7 @@ first, then use the [bug report](https://github.com/OscarFrog/yt-dlp-aria2-downl
 or [feature request](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/issues/new?template=feature-request.yml)
 form. Describe the outcome you need and a small reproducible example where
 possible. For a bug, include the application version, installation method,
-GNU/Linux distribution, expected behavior and actual result.
+Fedora 45 x86_64 environment, expected behavior and actual result.
 Use [Discussions](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/discussions)
 for usage questions and open-ended ideas.
 

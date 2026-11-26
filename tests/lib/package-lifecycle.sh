@@ -52,6 +52,19 @@ package_test_install_rpm() (
         "--setopt=localpkg_gpgcheck=${local_check}" "${stage}/package.rpm"
 )
 
+# Query the installed RPM database independently of the artifact filename.
+assert_current_rpm_installed() {
+    local package_name=$1
+    local version=$2
+    local nevra=''
+
+    nevra=$(rpm -q --qf '%{NEVRA}\n' -- "${package_name}") || return 65
+    if [[ ${nevra} != "${package_name}-${version}-1.fc45.x86_64" ]]; then
+        printf 'Error: unexpected installed Fedora 45 x86_64 RPM: %s\n' "${nevra}" >&2
+        return 65
+    fi
+}
+
 # Require the installed command to report the expected package version.
 assert_package_cli_version() {
     local package_kind=$1
@@ -263,8 +276,8 @@ list-impersonate-targets load-info-json merge-output-format no-clean-info-json n
 no-playlist no-plugin-dirs no-post-overwrites no-update newline output parse-metadata print
 print-to-file progress progress-delta progress-template remux-video retries retry-sleep
 skip-download socket-timeout'''.split()
-    yt_name = 'yt-dlp_linux_aarch64' if os.uname().machine == 'aarch64' else 'yt-dlp_linux'
-    executable(yt_dir / yt_name, f'#!{sys.executable}\n' + f'''import sys
+    require(os.uname().machine == 'x86_64', 'installed helpers require native x86_64')
+    executable(yt_dir / 'yt-dlp_linux', f'#!{sys.executable}\n' + f'''import sys
 args = sys.argv[1:]
 if '--version' in args: print('2026.08.19')
 elif '--help' in args: print({chr(10).join('--' + option for option in options)!r})

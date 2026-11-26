@@ -94,7 +94,7 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
         for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_COUNT"):
             self.env.pop(key, None)
         self.env["PATH"] = str(self.bin) + os.pathsep + os.environ["PATH"]
-        for relative in (*VERSION_PATHS, PIN_PATH, "scripts/check-push-version.py",
+        for relative in (*VERSION_PATHS, PIN_PATH, "scripts/dev-tools/ensure-shfmt.sh", "scripts/check-push-version.py",
                          "scripts/update-published-version.py"):
             path = self.seed / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,10 +104,9 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
         inventory.write_text("PRODUCTION_SHELL_FILES=(\n" + "\n".join(SHELL_PATHS) +
                              "\n)\nPACKAGING_SHELL_FILES=(\n)\nTEST_SHELL_FILES=(\n)\n"
                              "DEVELOPMENT_SHELL_FILES=(\n)\n", encoding="utf-8")
-        resolver = self.seed / "scripts/dev-tools/ensure-shfmt.sh"
-        resolver.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$TEST_TRUSTED_SHFMT\"\n",
-                            encoding="utf-8")
-        self.env["TEST_TRUSTED_SHFMT"] = self.formatter
+        prior = self.runtime / "shfmt-prior"
+        prior.mkdir()
+        shutil.copy2(self.formatter, prior / "shfmt")
         self.install_stubs()
         self.git(self.seed, "init", "--initial-branch=main")
         self.git(self.seed, "config", "user.name", "Test")
@@ -193,8 +192,7 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
         (self.seed / PIN_PATH).write_text(
             "# Managed by .github/workflows/shfmt-update.yml.\n"
             "# Do not change a checksum without changing/reviewing the corresponding asset.\n"
-            f"SHFMT_VERSION={UPSTREAM}\nSHFMT_LINUX_AMD64_SHA256={ASSET_SHA}\n"
-            f"SHFMT_LINUX_ARM64_SHA256={ASSET_SHA}\n", encoding="utf-8")
+            f"SHFMT_VERSION={UPSTREAM}\nSHFMT_LINUX_AMD64_SHA256={ASSET_SHA}\n", encoding="utf-8")
         subprocess.run([self.formatter, "-w", "-i", "4", "-ci", "-bn", "--", *SHELL_PATHS],
                        cwd=self.seed, check=True, capture_output=True, timeout=20)
 
@@ -215,6 +213,29 @@ class ShfmtVersionHandoffTests(unittest.TestCase):
         publisher = self.clone("publisher")
         self.run_step("Verify base and apply allowlisted patch", publisher, success=success)
         return publisher
+
+    def test_prior_resolver_build_receives_only_immutable_x86_64_inputs(self):
+        name = "Resolve the prior formatter from the immutable Fedora base"
+        # Leave dirty working copies: the build must consume immutable Git objects.
+        inputs = ("shfmt-pin.env", "ensure-shfmt.sh")
+        files = {item: self.git(self.seed, "show", "HEAD:scripts/dev-tools/" + item).stdout for item in inputs}
+        for item in inputs:
+            (self.seed / "scripts/dev-tools" / item).write_text("untrusted workspace bytes")
+        shim = self.bin / "docker"
+        shim.write_text("#!/usr/bin/env bash\nset -euo pipefail\n"
+                        '[[ $1 == build && $2 == --output && $3 == "type=local,dest=${RUNNER_TEMP}/shfmt-prior" && $# == 4 ]]\n'
+                        'cp -a -- "$4" "${RUNNER_TEMP}/observed-context"\n')
+        # The fixture normally provides the already resolved prior formatter.
+        shutil.rmtree(self.runtime / "shfmt-prior")
+        self.run_step(name, self.seed)
+        observed = self.runtime / "observed-context"
+        self.assertEqual({p.name for p in observed.iterdir()}, {*inputs, "Dockerfile"})
+        for item in inputs:
+            self.assertEqual((observed / item).read_text(), files[item])
+        recipe = (observed / "Dockerfile").read_text()
+        self.assertIn("FROM registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b AS prior", recipe)
+        self.assertIn("RUN prior=$(bash /resolver/ensure-shfmt.sh)", recipe)
+        self.assertIn("COPY --from=prior /prior-shfmt /shfmt", recipe)
 
     def test_unchanged_published_version_handoff_and_actual_local_branch_push(self):
         originals = {path: (self.seed / path).read_bytes() for path in VERSION_PATHS}

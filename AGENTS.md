@@ -141,7 +141,7 @@ changes the underlying contract:
 
 ## Validation discipline
 
-Fedora 45 is the only officially supported distribution. Use Fedora 45 Workstation for the graphical campaign and its native Bash and Python for every application qualification. Use DNF and Fedora 45 RPMs. A hosted runner may provide the kernel to a pinned Fedora container. Record both identities and verify /etc/os-release before application tests.
+Fedora 45 x86_64 is the only officially supported platform. Use Fedora 45 Workstation for the graphical campaign and its native Bash and Python for every application qualification. Use DNF and Fedora 45 RPMs. A hosted runner may provide the kernel to a pinned Fedora container. Record the host kernel and check /etc/os-release, uname -m and the RPM architecture before application tests.
 Preserve the published release examples and the immutable packages used for
 upgrade testing. See `TESTING.md` for the real Zenity platform requirements.
 

@@ -21,7 +21,7 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -41,7 +41,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
           dnf -y --setopt=install_weak_deps=False install aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file gh
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -225,7 +229,7 @@ jobs:
     if: needs.prepare-release-docs.outputs.update == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -243,7 +247,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
           dnf -y --setopt=install_weak_deps=False install git python3 gh jq
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -568,10 +576,12 @@ jobs:
                       "a no-op, downgrade or future release must not create a source push")
               old_fedora = 44 if version(published) <= (2, 4, 5) else 45
               new_fedora = 44 if version(release) <= (2, 4, 5) else 45
-              rpm_filename = "yt-dlp-aria2-downloader-gui-{version}-1.fc{fedora}.noarch.rpm"
+              old_arch = "noarch" if old_fedora == 44 else "x86_64"
+              new_arch = "noarch" if new_fedora == 44 else "x86_64"
+              rpm_filename = "yt-dlp-aria2-downloader-gui-{version}-1.fc{fedora}.{arch}.rpm"
               asset_names = json.loads(read(base, "release-asset-names.json"))
               require(isinstance(asset_names, list) and
-                      asset_names.count(rpm_filename.format(version=release, fedora=new_fedora)) == 1,
+                      asset_names.count(rpm_filename.format(version=release, fedora=new_fedora, arch=new_arch)) == 1,
                       "immutable release does not contain the expected Fedora RPM")
               package_references = (
                   ("| Fedora {fedora} | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/"
@@ -601,8 +611,8 @@ jobs:
                           old[path].count(f"yt-dlp-aria2-downloader-gui_{published}") == 0,
                           "unexpected prior package reference count")
                   for template, count in rules:
-                      expected[path] = replace(expected[path], template.format(version=published, fedora=old_fedora),
-                                               template.format(version=release, fedora=new_fedora), count)
+                      expected[path] = replace(expected[path], template.format(version=published, fedora=old_fedora, arch=old_arch),
+                                               template.format(version=release, fedora=new_fedora, arch=new_arch), count)
                   require(expected[path].count(f"yt-dlp-aria2-downloader-gui-{release}") == 5 and
                           expected[path].count(f"yt-dlp-aria2-downloader-gui_{release}") == 0,
                           "unexpected published package reference count")

@@ -224,21 +224,16 @@ initialize_fedora_paths() {
 
 validate_rpm_identity() {
     local rpm_path=$1
-    local rpm_identity_output=''
-    local -a rpm_identity=()
+    local rpm_identity=''
 
     # shellcheck disable=SC2310 # Failure is converted to an identity diagnostic.
-    if ! rpm_identity_output=$(LC_ALL=C run_root \
-        rpm -qp --qf '%{NAME}\n%{VERSION}\n%{ARCH}\n' -- "${rpm_path}"); then
+    if ! rpm_identity=$(LC_ALL=C run_root \
+        rpm -qp --qf '%{NEVRA}\n' -- "${rpm_path}"); then
         error 'unable to inspect the RPM metadata.'
         exit 65
     fi
-    mapfile -t rpm_identity <<<"${rpm_identity_output}"
-    if ((${#rpm_identity[@]} != 3)) \
-        || [[ ${rpm_identity[0]} != "${PACKAGE_NAME}" ||
-            ${rpm_identity[1]} != "${APP_VERSION}" ||
-            ${rpm_identity[2]} != 'noarch' ]]; then
-        error "unexpected RPM identity: name=${rpm_identity[0]:-unknown} version=${rpm_identity[1]:-unknown} arch=${rpm_identity[2]:-unknown}"
+    if [[ ${rpm_identity} != "${PACKAGE_NAME}-${APP_VERSION}-1.fc45.x86_64" ]]; then
+        error 'unexpected Fedora 45 x86_64 application RPM identity.'
         exit 65
     fi
 }
@@ -305,18 +300,16 @@ resolve_rpm_signing_key() {
 
 detect_supported_fedora() {
     local output_variable=$1
-    local detected_version=''
+    local kernel_arch='' rpm_target=''
 
-    detected_version=$(rpm -E %fedora)
-    [[ ${detected_version} =~ ^[0-9]+$ ]] || {
-        error 'unable to determine the Fedora release.'
-        exit 69
-    }
-    if [[ ${detected_version} != "${RPM_FUSION_SUPPORTED_FEDORA}" ]]; then
-        error "Fedora ${RPM_FUSION_SUPPORTED_FEDORA} is the only qualified release; found Fedora ${detected_version}."
+    if ! grep -Eqx 'ID=(fedora|"fedora")' /etc/os-release \
+        || ! grep -Eqx 'VERSION_ID=(45|"45")' /etc/os-release \
+        || ! kernel_arch=$(uname -m) || ! rpm_target=$(rpm -E '%{?fedora} %{_arch}') \
+        || [[ ${kernel_arch} != x86_64 || ${rpm_target} != "${RPM_FUSION_SUPPORTED_FEDORA} x86_64" ]]; then
+        error 'installation requires Fedora 45 x86_64.'
         exit 69
     fi
-    printf -v "${output_variable}" '%s' "${detected_version}"
+    printf -v "${output_variable}" '%s' "${RPM_FUSION_SUPPORTED_FEDORA}"
 }
 
 ensure_rpm_verification_gpg() {
@@ -838,12 +831,12 @@ main() {
     trap 'request_shutdown 143' TERM
 
     parse_fedora_arguments allow_unsigned_dev rpm_argument "$@"
+    detect_supported_fedora fedora_version
     require_fedora_installer_commands
     initialize_fedora_paths "${rpm_argument}" rpm_path
     inspect_rpm_signature \
         "${rpm_path}" "${allow_unsigned_dev}" signature_state user false
     resolve_rpm_signing_key "${signature_state}" key_path
-    detect_supported_fedora fedora_version
     prepare_application_rpm \
         "${rpm_path}" "${key_path}" "${signature_state}" "${allow_unsigned_dev}"
     enable_rpm_fusion "${fedora_version}"

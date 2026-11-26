@@ -25,7 +25,7 @@ MAX_BYTES = 8 * 1024 * 1024
 MAX_PAGES = 10
 WORKFLOWS = {
     "shell.yml": {
-        "Fedora 45 non-root", "Fedora 45", "Fedora 45 aarch64",
+        "Fedora 45 non-root", "Fedora 45",
     },
     "packages.yml": {
         "Fedora 45 Git-free source archive", "Previous immutable release",
@@ -64,7 +64,6 @@ REQUIRED_STEPS = {
     },
     "Fedora 45 non-root": {"Check workflow syntax and embedded shell", "Check Python with reviewed Ruff", "Run validation"},
     "Fedora 45": {"Run validation"},
-    "Fedora 45 aarch64": {"Verify native target architecture", "Run validation"},
     "Fedora 45 Git-free source archive": {"Build and retest Git-free source archive"},
     "Previous immutable release": {"Resolve previous semantic-version release", "Verify exact published previous packages"},
     "Fedora 45 RPM build-once": {"Build RPM once", "Qualify RPM v4/v6 signature semantics"},

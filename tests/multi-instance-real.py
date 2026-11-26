@@ -14,6 +14,7 @@ import http.server
 import importlib.util
 import json
 import os
+import platform
 from pathlib import Path
 import re
 import shutil
@@ -570,6 +571,11 @@ sys.exit(status)
 
 
 def main():
+    release = platform.freedesktop_os_release()
+    require((release.get('ID'), release.get('VERSION_ID'), os.uname().machine) ==
+            ('fedora', '45', 'x86_64') and
+            subprocess.check_output(['rpm', '--eval', '%{_arch}'], text=True).strip() == 'x86_64',
+            'Shared-destination qualification requires Fedora 45 x86_64')
     root, evidence = fixture_roots()
     print(f'Evidence: {evidence}', flush=True)
     if root != evidence:
@@ -659,7 +665,7 @@ def main():
         shutil.copy2(real_deno, deno_dir / 'deno')
         (yt_dir.parent / 'current').symlink_to(version)
         (deno_dir.parent / 'current').symlink_to(deno_version)
-        shim = yt_dir / ('yt-dlp_linux_aarch64' if os.uname().machine == 'aarch64' else 'yt-dlp_linux')
+        shim = yt_dir / 'yt-dlp_linux'
         shim.write_text('''#!/usr/bin/python3
 import os, subprocess, sys, time
 from pathlib import Path

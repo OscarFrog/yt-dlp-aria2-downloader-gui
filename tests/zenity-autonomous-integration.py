@@ -145,6 +145,10 @@ class PlatformAdmissionTests(unittest.TestCase):
         probe = '''
 release_id=$2
 release_version=$3
+probe_machine=$4
+probe_rpm_arch=$5
+uname() { [[ $1 == -m ]] && printf '%s\n' "${probe_machine}"; }
+rpm() { [[ $* == '--eval %{_arch}' ]] && printf '%s\n' "${probe_rpm_arch}"; }
 source() {
     [[ $1 == /etc/os-release ]] || return 1
     ID=$release_id
@@ -154,17 +158,20 @@ zenity() { return 1; }
 mktemp() { return 75; }
 builtin source "$1" success
 '''
-        for distro, version, admitted in (
-                ('fedora', '44', False), ('fedora', '45', True), ('ubuntu', '24.04', False),
-                ('fedora', '43', False), ('fedora', '46', False), ('ubuntu', '24.10', False),
-                ('debian', '45', False), ('ubuntu', '45', False), ('fedora', '', False)):
-            with self.subTest(route='autonomous', distro=distro, version=version):
+        for distro, version, machine, rpm_arch, admitted in (
+                ('fedora', '44', 'x86_64', 'x86_64', False), ('fedora', '45', 'x86_64', 'x86_64', True), ('ubuntu', '24.04', 'x86_64', 'x86_64', False),
+                ('fedora', '43', 'x86_64', 'x86_64', False), ('fedora', '46', 'x86_64', 'x86_64', False), ('ubuntu', '24.10', 'x86_64', 'x86_64', False),
+                ('debian', '45', 'x86_64', 'x86_64', False), ('ubuntu', '45', 'x86_64', 'x86_64', False), ('fedora', '', 'x86_64', 'x86_64', False),
+                ('fedora', '45', 'unsupported', 'x86_64', False), ('fedora', '45', 'x86_64', 'unsupported', False)):
+            with self.subTest(route='autonomous', distro=distro, version=version, machine=machine, rpm_arch=rpm_arch):
                 metadata = f'ID={distro}\nVERSION_ID="{version}"\n'
                 # Stop at source identity, immediately after platform admission.
                 with tempfile.TemporaryDirectory() as root, \
                         mock.patch.object(sys, 'argv', [str(DRIVER)]), \
                         mock.patch.object(CHECK.tempfile, 'mkdtemp', return_value=root), \
                         mock.patch.object(Path, 'read_text', autospec=True, return_value=metadata) as read, \
+                        mock.patch.object(CHECK.os, 'uname', return_value=mock.Mock(machine=machine)), \
+                        mock.patch.object(CHECK.subprocess, 'run', return_value=mock.Mock(stdout=rpm_arch)), \
                         mock.patch.object(CHECK, 'source_identity', side_effect=RuntimeError) as identity, \
                         redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                     umask = os.umask(0o077)
@@ -174,8 +181,8 @@ builtin source "$1" success
                         os.umask(umask)
                     read.assert_called_once_with(Path('/etc/os-release'))
                     self.assertEqual(identity.call_count, int(admitted))
-            with self.subTest(route='manual', distro=distro, version=version):
-                result = subprocess.run(['bash', '-c', probe, 'bash', str(manual), distro, version],
+            with self.subTest(route='manual', distro=distro, version=version, machine=machine, rpm_arch=rpm_arch):
+                result = subprocess.run(['bash', '-c', probe, 'bash', str(manual), distro, version, machine, rpm_arch],
                                         env={'PATH': os.defpath, 'DISPLAY': ':fixture'}, capture_output=True,
                                         text=True, timeout=5)
                 self.assertEqual(result.returncode, 75 if admitted else 65, result.stderr)
@@ -1460,6 +1467,11 @@ class PrivacyAndCleanupTests(unittest.TestCase):
                     return 'ID=fedora\nVERSION_ID=45\n'
                 return real_read(path, *args, **kwargs)
 
+            def run(command, **_kwargs):
+                if command == ['rpm', '--eval', '%{_arch}']:
+                    return subprocess.CompletedProcess(command, 0, stdout='x86_64\n')
+                raise RuntimeError('injected tool failure')
+
             previous_umask = os.umask(0o077)
             try:
                 with mock.patch.object(sys, 'argv', [str(DRIVER)]), \
@@ -1470,7 +1482,7 @@ class PrivacyAndCleanupTests(unittest.TestCase):
                         mock.patch.object(CHECK, 'write_json', side_effect=write), \
                         mock.patch.object(Path, 'read_text', read), \
                         mock.patch.object(CHECK.shutil, 'which', return_value='/unused/tool'), \
-                        mock.patch.object(CHECK.subprocess, 'run', side_effect=RuntimeError('injected tool failure')), \
+                        mock.patch.object(CHECK.subprocess, 'run', side_effect=run), \
                         redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                     self.assertEqual(CHECK.main(), 1)
             finally:

@@ -100,6 +100,15 @@ validate_install_tree_arguments() {
 
 require_install_tree_commands() {
     local command_name=''
+    local kernel_arch='' rpm_arch=''
+
+    if ! grep -Eqx 'ID=(fedora|"fedora")' /etc/os-release \
+        || ! grep -Eqx 'VERSION_ID=(45|"45")' /etc/os-release \
+        || ! kernel_arch=$(uname -m) || ! rpm_arch=$(rpm -E '%{_arch}') \
+        || [[ ${kernel_arch} != x86_64 || ${rpm_arch} != x86_64 ]]; then
+        printf '%s\n' 'Error: staging requires Fedora 45 x86_64.' >&2
+        exit 69
+    fi
 
     for command_name in dirname install ln pwd; do
         command -v "${command_name}" >/dev/null 2>&1 || {

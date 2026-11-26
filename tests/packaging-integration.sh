@@ -63,16 +63,22 @@ test_rpm_build_target_refusal() {
     mkdir -p -- "${probe_dir}"
     cat >"${probe_dir}/rpm" <<'RPM_PROBE'
 #!/usr/bin/env bash
-[[ $# == 2 && $1 == --eval && $2 == '%{?fedora} %{?dist}' ]] || exit 99
+[[ $# == 2 && $1 == --eval && $2 == '%{?fedora} %{?dist} %{_arch} %{_target_cpu}' ]] || exit 99
 printf '%s\n' "${FIXTURE_RPM_TARGET}"
+exit "${FIXTURE_RPM_STATUS:-0}"
 RPM_PROBE
     chmod 700 -- "${probe_dir}/rpm"
-    for target in '44 .fc44' '44 .fc45' '45 .fc44'; do
+    for target in '44 .fc44 x86_64 x86_64' '44 .fc45 x86_64 x86_64' '45 .fc44 x86_64 x86_64' \
+        '45 .fc45 other x86_64' '45 .fc45 x86_64 other'; do
         assert_status 69 "RPM builder rejects target ${target}" \
             env PATH="${probe_dir}:${PATH}" FIXTURE_RPM_TARGET="${target}" \
             bash "${PROJECT_DIR}/packaging/rpm/build-rpm.sh" "${version}" "${probe_dir}/dist"
         [[ ! -e ${probe_dir}/dist ]] || fail 'Rejected buildroot produced an output directory'
     done
+    assert_status 69 'failed native RPM probe cannot admit a matching target' \
+        env PATH="${probe_dir}:${PATH}" FIXTURE_RPM_TARGET='45 .fc45 x86_64 x86_64' FIXTURE_RPM_STATUS=1 \
+        bash "${PROJECT_DIR}/packaging/rpm/build-rpm.sh" "${version}" "${probe_dir}/dist"
+    [[ ! -e ${probe_dir}/dist ]] || fail 'Failed buildroot probe produced an output directory'
 }
 
 test_rejected_private_directories() {

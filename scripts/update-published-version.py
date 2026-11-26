@@ -36,7 +36,7 @@ PUBLISHED_VERSION_RE = re.compile(
     re.MULTILINE,
 )
 STATIC_CONTRACT_PATH = Path("test-static.sh")
-RPM_FILENAME = "yt-dlp-aria2-downloader-gui-{version}-1.fc{fedora}.noarch.rpm"
+RPM_FILENAME = "yt-dlp-aria2-downloader-gui-{version}-1.fc{fedora}.{arch}.rpm"
 PACKAGE_REFERENCES = (
     ("| Fedora {fedora} | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/"
      + RPM_FILENAME + ") |", 1),
@@ -108,9 +108,9 @@ def require_single_version(
     return matches[0].group("version")
 
 
-def published_fedora(version: str) -> int:
+def published_platform(version: str) -> tuple[int, str]:
     """v2.4.5 was the final immutable Fedora 44 RPM release."""
-    return 44 if parse_version(version) <= (2, 4, 5) else 45
+    return (44, "noarch") if parse_version(version) <= (2, 4, 5) else (45, "x86_64")
 
 
 def validate_reference_counts(
@@ -121,9 +121,9 @@ def validate_reference_counts(
     if (text.count(f"yt-dlp-aria2-downloader-gui-{version}") != 5 or
             text.count(f"yt-dlp-aria2-downloader-gui_{version}") != 0):
         raise VersionUpdateError(f"{relative_path} has an unexpected published package reference count")
-    fedora = published_fedora(version)
+    fedora, arch = published_platform(version)
     for template, expected_count in README_REFERENCE_TEMPLATES[relative_path]:
-        reference = template.format(version=version, fedora=fedora)
+        reference = template.format(version=version, fedora=fedora, arch=arch)
         actual_count = text.count(reference)
         if actual_count != expected_count:
             raise VersionUpdateError(
@@ -139,10 +139,11 @@ def replace_reference_set(
 
     validate_reference_counts(relative_path, text, old_version)
     updated = text
-    old_fedora, new_fedora = published_fedora(old_version), published_fedora(new_version)
+    old_fedora, old_arch = published_platform(old_version)
+    new_fedora, new_arch = published_platform(new_version)
     for template, _expected_count in README_REFERENCE_TEMPLATES[relative_path]:
-        old_reference = template.format(version=old_version, fedora=old_fedora)
-        new_reference = template.format(version=new_version, fedora=new_fedora)
+        old_reference = template.format(version=old_version, fedora=old_fedora, arch=old_arch)
+        new_reference = template.format(version=new_version, fedora=new_fedora, arch=new_arch)
         updated = updated.replace(old_reference, new_reference)
     validate_reference_counts(relative_path, updated, new_version)
     return updated

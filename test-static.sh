@@ -1604,7 +1604,7 @@ def validate_prerequisites(text):
         raise AssertionError(prerequisite_diagnostic)
     pinned_job = text.split("  pinned-local-media:\n", 1)[1].split("  current-stable-local-media:\n", 1)[0]
     conditions = [line + '\n' for line in step.splitlines() if line.startswith('        if:')]
-    if (step not in pinned_job or "      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5\n" not in pinned_job or
+    if (step not in pinned_job or "      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b\n" not in pinned_job or
             text.index(prerequisite_marker) >= text.index(marker) or
             conditions != [prerequisite_condition]):
         raise AssertionError(prerequisite_diagnostic)
@@ -2093,7 +2093,11 @@ shfmt_verifier_job_policy() {
     [[ ${job_block} == *'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3'* ]] || return 65
     # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
     [[ ${job_block} == *'shfmt-candidate-${{ github.run_id }}-${{ github.run_attempt }}'* ]] || return 65
-    [[ ${job_block} == *"trusted_shfmt=\$(bash ./scripts/dev-tools/ensure-shfmt.sh)"* ]] || return 65
+    # shellcheck disable=SC2016 # The policy matches the trusted container instruction.
+    [[ ${job_block} == *'RUN prior=$(bash /resolver/ensure-shfmt.sh) && install -m 0555 "$prior" /prior-shfmt'* ]] || return 65
+    [[ ${job_block} == *'COPY --from=prior /prior-shfmt /shfmt'* ]] || return 65
+    # shellcheck disable=SC2016 # The trusted formatter path is a literal workflow boundary.
+    [[ ${job_block} == *'trusted_shfmt="${RUNNER_TEMP}/shfmt-prior/shfmt"'* ]] || return 65
     [[ ${job_block} == *"canonical_manifest \"\${baseline}\""* ]] || return 65
     [[ ${job_block} == *"canonical_manifest \"\${after}\""* ]] || return 65
     [[ ${job_block} == *"cmp -s -- \"\${baseline}\" \"\${after}\""* ]] || return 65
@@ -2881,7 +2885,7 @@ test_static_tooling_contracts() {
     local mock_gui_group mock_gui_suite mock_phase
     local mock_runtime_group mock_runtime_suite
     local runtime_phase scheduler_phase shfmt_phase signal_phase static_phase static_phase_file
-    local hardening_suite python_suite workflow_file
+    local hardening_suite python_suite shfmt_main workflow_file
 
     assert_source_inventory_is_canonical
     assert_repository_file_inventory_is_canonical
@@ -2941,7 +2945,6 @@ test_static_tooling_contracts() {
     for shfmt_phase in \
         require_shfmt_commands \
         load_shfmt_pin \
-        select_shfmt_platform \
         resolve_shfmt_cache \
         prepare_shfmt_cache \
         download_shfmt_asset \
@@ -2950,6 +2953,12 @@ test_static_tooling_contracts() {
             "${shfmt_phase}() {" \
             "shfmt bootstrap phase ${shfmt_phase}"
     done
+    assert_file_contains "${SCRIPT_DIR}/scripts/dev-tools/ensure-shfmt.sh" \
+        'is_supported_shfmt_platform() (' \
+        'shfmt isolates Fedora platform detection'
+    shfmt_main=$(sed -n '/^main() {/,$p' "${SCRIPT_DIR}/scripts/dev-tools/ensure-shfmt.sh")
+    [[ ${shfmt_main} == *'if ! is_supported_shfmt_platform; then'*'resolve_shfmt_cache '*'download_shfmt_asset '* ]] \
+        || fail 'shfmt must admit the platform before resolving the cache or downloading'
     assert_file_contains "${SCRIPT_DIR}/scripts/dev-tools/ensure-shfmt.sh" \
         "local resolved_version_dir=''" \
         'shfmt cache directory does not shadow its caller output variable'
@@ -3825,10 +3834,10 @@ test_static_release_contracts() {
         'cancel-in-progress: true' \
         'outdated validation runs are cancelled'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/shell.yml" \
-        $'      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
+        $'      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
         'Fedora validation uses isolated local volumes for temporary fixtures'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
-        $'      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
+        $'      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
         'Fedora media qualification uses isolated local volumes'
 
     local package_storage_workflow package_storage_job package_storage_block
@@ -3842,7 +3851,7 @@ test_static_release_contracts() {
             "${SCRIPT_DIR}/.github/workflows/${package_storage_workflow}.yml" \
             "${package_storage_job}")
         assert_text_contains "${package_storage_block}" \
-            $'    container:\n      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5\n      volumes:\n        - /tmp\n        - /var/tmp' \
+            $'    container:\n      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b\n      volumes:\n        - /tmp\n        - /var/tmp' \
             "${package_storage_workflow} RPM lifecycle has private local volumes"
         assert_text_contains "${package_storage_block}" \
             $'    env:\n      TMPDIR: /var/tmp\n      PACKAGE_TEST_HOME: /root' \
@@ -5016,8 +5025,12 @@ test_static_runtime_regression_contracts() {
         "ffmpeg_vendor" \
         'Fedora bootstrap validates the FFmpeg vendor'
     assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
-        "rpm -qp --qf '%{NAME}\n%{VERSION}\n%{ARCH}\n'" \
-        'Fedora bootstrap validates RPM identity before installation'
+        "rpm -qp --qf '%{NEVRA}\n'" \
+        'Fedora bootstrap queries the complete application RPM identity'
+    # shellcheck disable=SC2016 # Literal RPM admission expression.
+    assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
+        '${rpm_identity} != "${PACKAGE_NAME}-${APP_VERSION}-1.fc45.x86_64"' \
+        'Fedora bootstrap rejects a different application NEVRA before installation'
     assert_file_contains "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
         'Requires:       gnupg2' \
         'RPM installs signature-verification tooling'

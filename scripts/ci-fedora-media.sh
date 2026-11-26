@@ -9,9 +9,15 @@
 set -Eeuo pipefail
 
 provision_media() (
+    local kernel_arch='' rpm_arch=''
     # shellcheck source=/dev/null
     source /etc/os-release
-    [[ ${ID:-} == fedora && ${VERSION_ID:-} == 45 ]]
+    if [[ ${ID:-} != fedora || ${VERSION_ID:-} != 45 ]] \
+        || ! kernel_arch=$(uname -m) || ! rpm_arch=$(rpm -E '%{_arch}') \
+        || [[ ${kernel_arch} != x86_64 || ${rpm_arch} != x86_64 ]]; then
+        printf '%s\n' 'Error: media provisioning requires Fedora 45 x86_64.' >&2
+        exit 69
+    fi
     umask 077
 
     readonly rpmfusion_fingerprint=E9A491A3DE247814E7E067EAE06F8ECDD651FF2E

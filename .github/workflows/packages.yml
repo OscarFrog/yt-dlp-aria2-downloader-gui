@@ -12,7 +12,7 @@ jobs:
     name: Source identity ${{ github.sha }}
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -25,7 +25,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
           dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,7 +59,7 @@ jobs:
     name: Fedora 45 Git-free source archive
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -68,7 +72,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
           dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -122,7 +130,7 @@ jobs:
     name: Previous immutable release
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -142,7 +150,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
           dnf -y --setopt=install_weak_deps=False install git python3 gh jq gnupg2
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -353,7 +365,7 @@ jobs:
     needs: identity
     name: Fedora 45 RPM build-once
     runs-on: ubuntu-24.04
-    container: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+    container: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
     timeout-minutes: 20
     steps:
       - name: Verify Fedora 45 userspace
@@ -363,7 +375,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
       - name: Install RPM build tools
         run: dnf install --assumeyes cpio desktop-file-utils findutils gawk git gnupg2 gzip python3 rpm-build rpm-sign tar
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -416,7 +432,7 @@ jobs:
       - previous-release
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -436,7 +452,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
       - name: Install test tools
         env:
           PACKAGE_SCENARIO: ${{ matrix.scenario }}

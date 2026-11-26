@@ -1,4 +1,6 @@
 %{!?project_version:%global project_version 0}
+# The native package contains only scripts and data, with no ELF debug sources.
+%global debug_package %{nil}
 Name:           yt-dlp-aria2-downloader-gui
 Version:        %{project_version}
 Release:        1%{?dist}
@@ -6,7 +8,7 @@ Summary:        Zenity interface and Bash engine for yt-dlp and aria2
 License:        MIT
 URL:            https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui
 Source0:        %{name}-%{version}.tar.gz
-BuildArch:      noarch
+ExclusiveArch:  x86_64
 Requires:       system-release(45)
 BuildRequires:  bash
 BuildRequires:  coreutils

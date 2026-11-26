@@ -318,7 +318,7 @@ test_installer_failure_modes() {
     # The validator is optional at runtime, but skipping it must be explicit.
     no_validator_bin="${TEST_ROOT}/no-validator-bin"
     mkdir -p -- "${no_validator_bin}"
-    for required_command in bash cat dirname python3 realpath; do
+    for required_command in bash cat dirname grep python3 realpath rpm uname; do
         required_command_path=$(command -v "${required_command}") \
             || fail "Required host command was not found: ${required_command}"
         ln -s -- "${required_command_path}" \

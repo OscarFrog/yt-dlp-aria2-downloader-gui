@@ -455,7 +455,7 @@ name, version = subprocess.check_output(
     ['rpm', '-qp', '--qf', '%{NEVRA}.rpm\\n%{VERSION}', '--', source],
     text=True, encoding='ascii',
 ).splitlines()
-if Path(name).name != name or not name.endswith('.fc45.noarch.rpm'):
+if Path(name).name != name or not name.endswith('.fc45.x86_64.rpm'):
     raise AssertionError('unexpected RPM fixture identity')
 package = fixture / name
 shutil.copyfile(source, package)

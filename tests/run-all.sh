@@ -515,20 +515,23 @@ doctor_capture_shellcheck_version() {
         info version:shellcheck unavailable 'version probe failed'
 }
 
-is_fedora_45() (
-    # shellcheck source=/dev/null
-    source /etc/os-release || return 1
-    [[ ${ID:-} == fedora && ${VERSION_ID:-} == 45 ]]
+is_fedora_45_x86_64() (
+    local machine='' rpm_arch=''
+    grep -Eqx 'ID=(fedora|"fedora")' /etc/os-release || return 1
+    grep -Eqx 'VERSION_ID=(45|"45")' /etc/os-release || return 1
+    machine=$(uname -m) || return 1
+    rpm_arch=$(rpm --eval '%{_arch}') || return 1
+    [[ ${machine} == x86_64 && ${rpm_arch} == x86_64 ]]
 )
 
 doctor_check_language_versions() {
     local python_version=''
 
     # shellcheck disable=SC2310 # The predicate explicitly returns each admission failure.
-    if is_fedora_45; then
-        record_doctor_check required fedora-release pass 'Fedora 45 userspace'
+    if is_fedora_45_x86_64; then
+        record_doctor_check required fedora-release pass 'Fedora 45 x86_64 userspace'
     else
-        record_doctor_check required fedora-release fail 'Application qualification requires Fedora 45'
+        record_doctor_check required fedora-release fail 'Application qualification requires Fedora 45 x86_64'
     fi
 
     if ((BASH_VERSINFO[0] > 5 || (\
@@ -589,12 +592,10 @@ doctor_check_shfmt_contract() {
     local value=''
     local pinned_version=''
     local pinned_amd64_sha=''
-    local pinned_arm64_sha=''
     local machine=''
     local version_dir=''
     local version_count=0
     local amd64_count=0
-    local arm64_count=0
 
     if [[ ! -f ${pin_file} || -L ${pin_file} || ! -r ${pin_file} ||
         ! -f ${bootstrap} || -L ${bootstrap} || ! -x ${bootstrap} ]]; then
@@ -614,10 +615,6 @@ doctor_check_shfmt_contract() {
                 pinned_amd64_sha=${value}
                 amd64_count=$((amd64_count + 1))
                 ;;
-            SHFMT_LINUX_ARM64_SHA256)
-                pinned_arm64_sha=${value}
-                arm64_count=$((arm64_count + 1))
-                ;;
             *)
                 record_doctor_check required shfmt-contract fail \
                     "unknown key in shfmt pin: ${key}"
@@ -625,10 +622,9 @@ doctor_check_shfmt_contract() {
                 ;;
         esac
     done <"${pin_file}"
-    if ((version_count != 1 || amd64_count != 1 || arm64_count != 1)) \
+    if ((version_count != 1 || amd64_count != 1)) \
         || [[ ! ${pinned_version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ||
-            ! ${pinned_amd64_sha} =~ ^[0-9a-f]{64}$ ||
-            ! ${pinned_arm64_sha} =~ ^[0-9a-f]{64}$ ]]; then
+            ! ${pinned_amd64_sha} =~ ^[0-9a-f]{64}$ ]]; then
         record_doctor_check required shfmt-contract fail \
             'shfmt version or platform digest is absent, duplicated, or invalid'
         return 0
@@ -641,8 +637,7 @@ doctor_check_shfmt_contract() {
         return 0
     fi
     case ${machine} in
-        x86_64 | amd64) expected_sha=${pinned_amd64_sha} ;;
-        aarch64 | arm64) expected_sha=${pinned_arm64_sha} ;;
+        x86_64) expected_sha=${pinned_amd64_sha} ;;
         *)
             record_doctor_check required shfmt-contract fail \
                 "unsupported shfmt host architecture: ${machine}"
@@ -1001,6 +996,7 @@ run_doctor() {
         realpath
         rm
         rmdir
+        rpm
         sed
         setsid
         sha256sum
@@ -1024,7 +1020,6 @@ run_doctor() {
         gh
         gpg
         jq
-        rpm
         rpmbuild
         rpmkeys
         rpmsign
@@ -1622,8 +1617,8 @@ main() {
     fi
 
     # shellcheck disable=SC2310 # The predicate explicitly returns each admission failure.
-    if ! is_fedora_45; then
-        printf '%s\n' 'Error: application qualification requires Fedora 45.' >&2
+    if ! is_fedora_45_x86_64; then
+        printf '%s\n' 'Error: application qualification requires Fedora 45 x86_64.' >&2
         return 69
     fi
 

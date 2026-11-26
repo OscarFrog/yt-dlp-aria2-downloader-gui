@@ -214,7 +214,7 @@ assert_asset_inventory() {
         [[ ${rpm} != *$'\n'* ]] || return 65
         assets+=("${rpm}" "${name}_${version}-1_all.deb")
     else
-        assets+=("${name}-${version}-1.fc45.noarch.rpm")
+        assets+=("${name}-${version}-1.fc45.x86_64.rpm")
     fi
     actual=$(LC_ALL=C sort -- "${inventory_file}") || return 65
     expected=$(printf '%s\n' "${assets[@]}" | LC_ALL=C sort) || return 65

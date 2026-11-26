@@ -4,7 +4,7 @@
 
 [Version française](README.fr.md)
 
-Download a video or its audio track on **Fedora 45 Workstation**, through a small Zenity
+Download a video or its audio track on **Fedora 45 Workstation x86_64**, through a small Zenity
 interface or the terminal. Paste a URL, choose your tracks and destination,
 then follow the download and processing progress.
 
@@ -47,7 +47,7 @@ The error log illustrates a simulated out-of-space diagnostic.
 
 Use the [latest GitHub release](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
 The filenames below match the currently published v2.4.5 release.
-Fedora 45 is the only officially supported distribution. Only an RPM marked `.fc45` is suitable for this system. When the published RPM below targets an earlier Fedora, use this checkout on Fedora 45 until the Fedora 45 RPM is published.
+Fedora 45 x86_64 is the only officially supported platform. Only an RPM marked `.fc45.x86_64` is suitable for this system. When the published RPM below targets an earlier Fedora, use this checkout on Fedora 45 until the Fedora 45 RPM is published.
 
 | Platform | Application download |
 | --- | --- |
@@ -60,7 +60,7 @@ For a published Fedora 45 RPM, download the RPM, `install-fedora.sh`, `SHA256SUM
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-packages=(./*-1.fc45.noarch.rpm)
+packages=(./*-1.fc45.x86_64.rpm)
 (( ${#packages[@]} == 1 )) && [[ -f ${packages[0]} ]] && bash ./install-fedora.sh "${packages[0]}"
 ```
 
@@ -117,7 +117,7 @@ For ZIP/Git, keep the source directory: the launcher points to it. Run
 
 ### Requirements
 
-Fedora 45 on `x86_64` or `aarch64` for the managed runtimes, with:
+Fedora 45 x86_64 for the managed runtimes, with:
 
 - Bash **5.3 or newer**, Python **3.15 or newer**, aria2 **1.37.0 or newer**;
 - FFmpeg and `ffprobe`, Zenity, CA certificates, curl, GnuPG and unzip;

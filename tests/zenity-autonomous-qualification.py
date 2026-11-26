@@ -880,7 +880,7 @@ def decoded_hash(path, ffmpeg):
 
 def prepare_runtime(root, shared):
     real = os.environ.get('YTDLP_REAL_BINARY')
-    asset = 'yt-dlp_linux_aarch64' if os.uname().machine == 'aarch64' else 'yt-dlp_linux'
+    asset = 'yt-dlp_linux'
     installed = Path.home() / '.local/share/yt-dlp-aria2-downloader/runtime/yt-dlp/current' / asset
     if not real:
         real = str(installed.resolve()) if installed.is_file() else shutil.which('yt-dlp')
@@ -1037,8 +1037,10 @@ def main():
         os_release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
                           if '=' in line)
         distro = tuple(os_release.get(key, '').strip('"') for key in ('ID', 'VERSION_ID'))
-        require(distro == ('fedora', '45'),
-                'Real Zenity qualification requires Fedora 45 Workstation')
+        require(distro == ('fedora', '45') and os.uname().machine == 'x86_64' and
+                subprocess.run(['rpm', '--eval', '%{_arch}'], capture_output=True,
+                               text=True, check=True).stdout.strip() == 'x86_64',
+                'Real Zenity qualification requires Fedora 45 x86_64 Workstation')
         identity = source_identity()
         write_json(root / 'source-identity.json', identity)
         for name in ('home', 'config', 'state', 'data', 'cache', 'runtime', 'bin',

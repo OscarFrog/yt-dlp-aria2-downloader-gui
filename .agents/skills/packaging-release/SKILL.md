@@ -9,7 +9,7 @@ Use this skill for native packages, installation or removal behavior, package
 upgrade compatibility, version surfaces, release preparation, or publication
 automation.
 
-Fedora 45 is the only officially supported distribution. Run application validation in Fedora 45 and preserve authenticated RPM installation and upgrade coverage.
+Fedora 45 x86_64 is the only officially supported platform. Verify the userspace, machine and RPM architecture before application validation and preserve authenticated RPM installation and upgrade coverage.
 
 ## Route the work
 
@@ -23,7 +23,7 @@ Fedora 45 is the only officially supported distribution. Run application validat
    version assertions.
 
 Preserve previous-immutable-release upgrade coverage, user runtime/config/state
-preservation, RPM signer authentication, exact package identity, noarch payload
+preservation, RPM signer authentication, exact package identity, x86_64 package
 semantics, and the RPM runtime-preservation contract unless the task
 explicitly changes one of those contracts.
 

@@ -26,7 +26,7 @@ jobs:
       pull-requests: read
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -39,7 +39,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
           dnf -y --setopt=install_weak_deps=False install git python3 gh jq gnupg2
       - name: Validate release tag identity before checkout
         id: source
@@ -279,7 +283,7 @@ jobs:
       contents: read
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -300,7 +304,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
           dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
@@ -380,7 +388,7 @@ jobs:
     needs: validate
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -401,7 +409,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
           dnf -y --setopt=install_weak_deps=False install git python3 gh jq gnupg2
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -608,7 +620,7 @@ jobs:
     needs: validate
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -621,7 +633,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
           dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -660,7 +676,7 @@ jobs:
       artifact_id: ${{ steps.artifact.outputs.artifact-id }}
     needs: validate
     runs-on: ubuntu-24.04
-    container: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+    container: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
     timeout-minutes: 20
     steps:
       - name: Verify Fedora 45 userspace
@@ -670,7 +686,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
       - name: Install RPM build tools
         run: dnf install --assumeyes cpio desktop-file-utils findutils gawk git gnupg2 gzip python3 rpm-build rpm-sign tar
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -704,7 +724,7 @@ jobs:
       artifact_id: ${{ steps.artifact.outputs.artifact-id }}
     needs: [validate, rpm-build]
     runs-on: ubuntu-24.04
-    container: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+    container: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
     timeout-minutes: 10
     environment: rpm-signing
     env:
@@ -718,7 +738,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
       - name: Install isolated RPM signing tools
         run: dnf install --assumeyes coreutils gawk gh gnupg2 rpm rpm-sign
       - name: Require immutable artifact identity
@@ -773,6 +797,13 @@ jobs:
           unsigned=(unsigned/*.rpm)
           shopt -u nullglob
           ((${#unsigned[@]} == 1))
+
+          expected_nevra="yt-dlp-aria2-downloader-gui-${RELEASE_TAG#v}-1.fc45.x86_64"
+          package_nevra=$(LC_ALL=C rpm -qp --qf '%{NEVRA}' -- "${unsigned[0]}")
+          if [[ ${package_nevra} != "${expected_nevra}" || ${unsigned[0]##*/} != "${expected_nevra}.rpm" ]]; then
+            printf 'Error: release RPM filename or header differs from the expected Fedora 45 x86_64 package.\n' >&2
+            exit 65
+          fi
 
           initial_format=$(LC_ALL=C rpm -qp --qf '%{rpmformat}\n' -- "${unsigned[0]}")
           [[ ${initial_format} == 4 ]] || {
@@ -952,7 +983,7 @@ jobs:
     needs: [validate, rpm-sign, previous-release]
     runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -972,7 +1003,11 @@ jobs:
           # shellcheck source=/dev/null
           source /etc/os-release
           [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
-          printf 'Userspace %s; shared host kernel %s\n' "${PRETTY_NAME}" "$(uname -r)"
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
       - name: Install RPM test tools
         env:
           PACKAGE_SCENARIO: ${{ matrix.scenario }}
@@ -1260,9 +1295,18 @@ jobs:
           set -Eeuo pipefail
           install -m 0755 -- install-fedora.sh dist/install-fedora.sh
           install -m 0644 -- packaging/keys/RPM-GPG-KEY-OscarFrog dist/RPM-GPG-KEY-OscarFrog
-          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/install-fedora.sh dist/RPM-GPG-KEY-OscarFrog); shopt -u nullglob
-          ((${#payloads[@]} == 4))
-          (cd dist && sha256sum -- *.zip *.rpm install-fedora.sh RPM-GPG-KEY-OscarFrog > SHA256SUMS && sha256sum --check SHA256SUMS)
+          cd dist
+          payloads=(
+            "yt-dlp-aria2-downloader-gui-${RELEASE_TAG#v}.zip"
+            "yt-dlp-aria2-downloader-gui-${RELEASE_TAG#v}-1.fc45.x86_64.rpm"
+            install-fedora.sh RPM-GPG-KEY-OscarFrog
+          )
+          shopt -s dotglob nullglob
+          entries=(*)
+          ((${#entries[@]} == ${#payloads[@]}))
+          for payload in "${payloads[@]}"; do [[ -f ${payload} && ! -L ${payload} ]]; done
+          sha256sum -- "${payloads[@]}" >SHA256SUMS
+          sha256sum --check SHA256SUMS
       - name: Require unchanged qualified release tag
         env:
           GH_TOKEN: ${{ github.token }}
