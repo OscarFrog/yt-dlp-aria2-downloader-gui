@@ -2950,6 +2950,19 @@ exit "${CHECK_COMMAND_STATUS}"
 
 
 class SharedDestinationPublicEvidenceTests(unittest.TestCase):
+    # Public examples of inputs that must stay out of exported evidence.
+    # Check the values independently so a leak with its field label removed still fails.
+    EXAMPLE_FIELDS = (
+        ('argv[1]=', 'fixture-only-argument'),
+        ('url=https://example.invalid/', 'fixture-only-path'),
+        ('Cookie: session=', 'fixture-only-session'),
+        ('QUALIFICATION_TOKEN=', 'fixture-only-identifier'),
+    )
+
+    def assert_examples_absent(self, data):
+        for _, marker in self.EXAMPLE_FIELDS:
+            self.assertNotIn(marker.encode('ascii'), data)
+
     def setUp(self):
         spec = importlib.util.spec_from_file_location('shared_destination', PROJECT / 'tests/multi-instance-real.py')
         self.driver = importlib.util.module_from_spec(spec)
@@ -2962,12 +2975,12 @@ class SharedDestinationPublicEvidenceTests(unittest.TestCase):
         self.fixture.mkdir(parents=True)
         self.output = self.root / 'workspace' / 'public'
         self.output.parent.mkdir()
-        self.secret = 'sensitive-argument-and-cookie-canary'
+        self.raw_lines = '\n'.join(prefix + value for prefix, value in self.EXAMPLE_FIELDS)
         self.log = '\n'.join(
             (
                 '=== Shared-destination real tools 1/1 ===',
                 'Evidence: ' + str(self.fixture),
-                self.secret,
+                self.raw_lines,
                 self.driver.PASS_LINE,
                 'Qualification passed.',
                 'Shared-destination real tools 1/1: PASS (60.000s)',
@@ -3001,7 +3014,7 @@ class SharedDestinationPublicEvidenceTests(unittest.TestCase):
             ],
             143: ['cycle0-A', 'cycle1-A', 'cycle2-A', 'conflict-owner', 'stopping-owner', 'truncated-owner'],
         }
-        self.write_fixture('fixture-environment.log', {'private': self.secret})
+        self.write_fixture('fixture-environment.log', {'private': self.raw_lines})
         self.write_fixture('qualification-errors.json', [])
         self.write_fixture(
             'fixture-tools.log', dict(yt_dlp_version='2026.08.19', yt_dlp_kind='ELF', deno_version='2.9.4')
@@ -3023,7 +3036,7 @@ class SharedDestinationPublicEvidenceTests(unittest.TestCase):
                         )
                     )
                 events.extend((t, label, event) for t, event in sorted(labels_events))
-                self.write_fixture(label + '.log', self.secret)
+                self.write_fixture(label + '.log', self.raw_lines)
                 self.write_fixture(
                     label + '.status.log',
                     dict(monotonic_ns=15, label=label, parent_status=status, event='parent-status-before-rescue'),
@@ -3053,7 +3066,8 @@ class SharedDestinationPublicEvidenceTests(unittest.TestCase):
         self.driver.stage_evidence(self.private, self.output)
         files = [f for f in self.output.rglob('*') if f.is_file()]
         self.assertEqual(len(files), 88)
-        self.assertFalse(any(self.secret.encode() in f.read_bytes() for f in files))
+        for path in files:
+            self.assert_examples_absent(path.read_bytes())
         self.assertEqual(
             json.loads((self.output / self.fixture.name / 'cycle0-A.final-before-rescue.json').read_bytes())['zombies'],
             [101],
@@ -3066,7 +3080,8 @@ class SharedDestinationPublicEvidenceTests(unittest.TestCase):
             capture_output=True,
         )
         self.assertEqual(result.returncode, 65)
-        self.assertNotIn(self.secret.encode(), result.stderr)
+        self.assert_examples_absent(result.stderr)
+        self.assert_examples_absent(result.stdout)
         self.assertFalse(self.output.exists())
 
     def test_summary_or_incomplete_bundle_never_proves_success(self):
@@ -3115,13 +3130,16 @@ class SharedDestinationPublicEvidenceTests(unittest.TestCase):
     def test_foreign_link_special_files_and_old_host_paths_are_refused(self):
         self.fill()
         name = self.fixture / 'foreign.json'
-        name.write_text(self.secret)
+        name.write_text(self.raw_lines)
         self.require_rejection()
         name.unlink()
         status = self.fixture / 'after-conflict.status.log'
         original = self.root / 'other'
         status.rename(original)
         status.symlink_to(original)
+        self.require_rejection()
+        status.unlink()
+        os.link(original, status)
         self.require_rejection()
         status.unlink()
         os.mkfifo(status)
@@ -3159,10 +3177,10 @@ class SharedDestinationPublicEvidenceTests(unittest.TestCase):
                 }
             ],
         )
-        self.write_fixture('cycle0-A.log', self.secret)
-        (self.fixture / 'events.json').write_text(self.secret)
+        self.write_fixture('cycle0-A.log', self.raw_lines)
+        (self.fixture / 'events.json').write_text(self.raw_lines)
         (self.private / 'qualification.log').write_text(
-            'Evidence: ' + str(self.fixture) + '\n' + self.secret
+            'Evidence: ' + str(self.fixture) + '\n' + self.raw_lines
             + '\nQualification FAILED; evidence preserved.\nShared-destination real tools 1/1: FAIL (status 1, 2.124s)\n'
         )
         self.driver.stage_evidence(self.private, self.output, partial=True)
@@ -3171,7 +3189,9 @@ class SharedDestinationPublicEvidenceTests(unittest.TestCase):
         self.assertFalse((public / 'events.json').exists())
         self.assertFalse((public / 'cycle0-A.log').exists())
         self.assertIn('FAIL (status 1', (self.output / 'qualification.log').read_text())
-        self.assertNotIn(self.secret, (self.output / 'qualification.log').read_text())
+        for path in self.output.rglob('*'):
+            if path.is_file():
+                self.assert_examples_absent(path.read_bytes())
 
     def test_partial_without_a_unique_matching_receipt_retains_only_safe_failure_summary(self):
         self.fill()
@@ -3180,7 +3200,7 @@ class SharedDestinationPublicEvidenceTests(unittest.TestCase):
                                  ('ambiguous', ('Evidence: ' + str(self.fixture) + '\n') * 2)):
             with self.subTest(variant=variant):
                 output = self.output.parent / variant
-                (self.private / 'qualification.log').write_text(receipt + self.secret + '\n' + failure)
+                (self.private / 'qualification.log').write_text(receipt + self.raw_lines + '\n' + failure)
                 self.driver.stage_evidence(self.private, output, partial=True)
                 self.assertEqual([f.name for f in output.iterdir()], ['qualification.log'])
                 self.assertEqual((output / 'qualification.log').read_text(), failure)

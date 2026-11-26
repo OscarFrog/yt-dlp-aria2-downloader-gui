@@ -643,7 +643,8 @@ def run_multi(source, case, root):
 
     # All substituted identities/events are inert data. Any unexpected process I/O
     # raises, rather than falling through to the host.
-    with mock.patch.dict(os.environ, {'YTDLP_REAL_BINARY': str(binary), 'YTDLP_QUALIFY_ZENITY_EVENTS': '0'}, clear=False), \
+    with mock.patch.object(sys, 'argv', [str(source)]), \
+         mock.patch.dict(os.environ, {'YTDLP_REAL_BINARY': str(binary), 'YTDLP_QUALIFY_ZENITY_EVENTS': '0'}, clear=False), \
          mock.patch('http.server.ThreadingHTTPServer', Server), \
          mock.patch('threading.Thread', Thread), mock.patch('threading.Event', Event), \
          mock.patch('subprocess.Popen', Process), mock.patch('subprocess.run', run), \
@@ -656,10 +657,12 @@ def run_multi(source, case, root):
          mock.patch('signal.pidfd_send_signal', pidfd_signal):
         (root / 'deno').write_bytes(b'synthetic deno')
         os.environ.pop('YTDLP_LEGACY_ENGINE', None)
-        sys.settrace(trace)
-        sys.setprofile(returned)
+        caller_trace = sys.gettrace()
+        caller_profile = sys.getprofile()
         try:
+            sys.settrace(trace)
+            sys.setprofile(returned)
             runpy.run_path(str(source), run_name='__main__')
         finally:
-            sys.settrace(None)
-            sys.setprofile(None)
+            sys.setprofile(caller_profile)
+            sys.settrace(caller_trace)

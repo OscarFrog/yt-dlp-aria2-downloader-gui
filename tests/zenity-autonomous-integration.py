@@ -1580,6 +1580,46 @@ class TerminalVerdictTests(unittest.TestCase):
                     self.assertEqual(summary['failure'], summary['errors'][0]['phase'])
                     self.assertGreaterEqual(len(summary['errors']), 2)
 
+    def test_multi_worker_restores_its_callers_arguments_and_environment(self):
+        fixtures = load_module('terminal_proof_fixtures', PROJECT / 'tests/terminal-proof-fixtures.py')
+        source = PROJECT / 'tests/multi-instance-real.py'
+        def trace_hook(_frame, _event, _arg):
+            return None
+        def profile_hook(_frame, _event, _arg):
+            return None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            error_source = Path(temporary) / 'raise.py'
+            error_source.write_text("raise RuntimeError('entry failure')\n")
+            for target, error in ((source, SystemExit), (error_source, RuntimeError)):
+                with self.subTest(target=target.name):
+                    root = Path(temporary) / target.stem
+                    args = ['--terminal-proof-worker', 'multi', str(target), 'clean', str(root)]
+                    worker_argv = [__file__, *args]
+                    original_env = os.environ.copy()
+                    original_dir = Path.cwd()
+                    caller_trace = sys.gettrace()
+                    caller_profile = sys.getprofile()
+                    try:
+                        sys.settrace(trace_hook)
+                        sys.setprofile(profile_hook)
+                        with mock.patch.object(sys, 'argv', worker_argv), redirect_stdout(io.StringIO()):
+                            with self.assertRaises(error) as done:
+                                fixtures.run_multi(target, 'clean', root)
+                            if error is SystemExit:
+                                self.assertEqual(done.exception.code, 0)
+                            else:
+                                self.assertEqual(str(done.exception), 'entry failure')
+                            self.assertIs(sys.argv, worker_argv)
+                            self.assertEqual(sys.argv[1:], args)
+                        self.assertIs(sys.gettrace(), trace_hook)
+                        self.assertIs(sys.getprofile(), profile_hook)
+                    finally:
+                        sys.setprofile(caller_profile)
+                        sys.settrace(caller_trace)
+                    self.assertTrue(os.environ == original_env, 'Worker environment changed')
+                    self.assertEqual(Path.cwd(), original_dir)
+
     def test_multi_complete_program_terminal_matrix(self):
         for case in ('clean', 'final-live', 'final-url', 'previous-url', 'eacces', 'eio',
                      'missing', 'empty', 'identity-mismatch', 'initial-error',
@@ -1684,7 +1724,8 @@ class TerminalVerdictTests(unittest.TestCase):
             ('miss-system-exit', "except BaseException as error:\n            qualification_failure(failures, 'terminal-observation', label, error)",
              "except Exception as error:\n            qualification_failure(failures, 'terminal-observation', label, error)",
              'systemexit-observation', 'returncode'),
-            ('force-zero', '    sys.exit(main())', '    main()', 'final-url', 'returncode'),
+            ('force-zero', '        sys.exit(main())', '        main()\n        sys.exit(0)',
+             'final-url', 'returncode'),
             ('missing-as-empty', observed,
              "            state = terminal_observation(obs.sample() or dict(monotonic_ns=1, live={}, zombies=[], url_in_argv=[]))\n"
              '        except BaseException as error:', 'missing', 'returncode'),
