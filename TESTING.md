@@ -56,10 +56,12 @@ tests a supplied policy without executing ARGV; it does not prove automatic
 loading. Static validation parses the repository's literal `prefix_rule` subset
 without executing it, including when the Codex CLI is absent; the optional CLI
 check additionally validates actual Codex matching semantics. Include active
-global rules when auditing combined decisions. A `prompt` decision requests
-approval through the session's active reviewer, which may be human or automatic;
-it does not grant task authority. Never dump configuration, historical rules or
-session logs without redaction.
+global rules when auditing combined decisions. For delegated maintainer work,
+set `approval_policy = "on-request"` and `approvals_reviewer = "auto_review"`
+in the dedicated Codex profile. Keep its existing sandbox, network policy and
+test-process credential exclusions. A `prompt` sends the specific action to
+the configured reviewer. A denial remains binding. Never dump configuration,
+historical rules or session logs without redaction. [Codex Auto-review](https://learn.chatgpt.com/docs/sandboxing/auto-review)
 
 Choose focused tests from this table; `tests/run-all.sh --list` and
 `tests/mock-integration.sh --list-groups` are the authoritative accepted names.
@@ -89,16 +91,34 @@ their own authorized network access; a hermetic full pass does not check live
 release-tag availability.
 
 A task prompt only needs the problem, current/expected behavior, observable
-acceptance criteria, task-specific constraints and the requested delivery
-authority. Repository conventions and normal tests need not be repeated:
+acceptance criteria, task-specific constraints and any limit on the standing
+delivery authority in `AGENTS.md`.
 
 ```text
 Problem: ...
 Current behavior / reproduction: ...
 Expected result and acceptance criteria: ...
 Task-specific constraints: ... (or none)
-Delivery: local changes only / commit / push a PR / other explicit authority.
+Delivery: standing delegation, or a narrower limit such as local-only or stop at PR.
 ```
+
+### Verifying a delegated squash merge
+
+Inspect the final diff and all review threads on the canonical PR. Paginate
+the threads and check the review decision and merge state. Query the effective
+rules for `main` and compare their nine required context names with
+`gh pr checks <PR> --required`. GitHub can report success for the visible
+subset while a dependent job is still waiting to be created. Require the
+complete set, the CodeQL gate and analyses, and the latest required complementary
+workflow attempts. Apply the job inventories and conditional skips in
+**Content qualification and promotion**. Check the source-identity jobs against
+the virtual merge SHA and read its tree and both parents from GitHub.
+
+Re-read the live base, head and virtual merge before the exact-HEAD squash
+specified in `AGENTS.md`. Repository auto-merge availability does not satisfy
+these gates. Retain the source branch and verify its SHA after the merge.
+Check the squash commit on `main` and the successful source-identity job of
+`promotion.yml` for that exact commit.
 
 ## Python changes
 
@@ -549,9 +569,8 @@ and `inventory`. `summary` reports branch/commit/tree identity; `log` reports at
 most five commit/parent identities and dates without author or message data.
 It accepts no caller-provided Git option, revision, path, helper, or output
 filename. The helper has no explicit Codex `allow` rule: it runs under the
-ordinary sandbox or baseline policy. Direct Git requested outside the sandbox
-remains subject to the repository execution policy and the session's configured
-approval reviewer.
+ordinary sandbox or baseline policy. Direct Git commands that match a prompt
+rule go to the session's configured approval reviewer.
 
 Every static step and integration suite reports its elapsed time. The read-only
 shfmt check, static behavioral validation, and four ShellCheck inventories
@@ -2318,6 +2337,20 @@ Before approving the `rpm-sign` environment deployment, also verify the
 6. a temporary import of the environment private bundle shows the primary as
    an offline `sec#` stub and the dedicated signing subkey as usable secret
    material; the primary private key itself must not be present in CI.
+
+For a maintainer-requested publication of a named version, use the authenticated
+GitHub deployment review. Re-read the canonical repository's `release.yml` run
+and current attempt, its event and tag ref, the signed tag object's ID and its
+peeled commit. They must match the authorized release and preflight. Confirm
+that the validated build succeeded and that `rpm-sign` is waiting in this run.
+Read `actions/runs/{run_id}/pending_deployments` and match the environment ID
+to the live `rpm-signing` environment. Require `current_user_can_approve: true`
+and the authenticated maintainer as the configured reviewer. Recheck the
+identities immediately before submitting `state: approved`, a release-specific
+comment and only that environment ID to the same endpoint. Verify the recorded
+review and follow the signing, publication and public verification jobs. A
+changed attempt or mismatched identity requires fresh evidence. An ineligible
+account must leave the review pending for the authorized reviewer. [GitHub deployment review API](https://docs.github.com/en/rest/actions/workflow-runs#review-pending-deployments-for-a-workflow-run)
 
 After the final `publish` job succeeds, download the release RPM and independently
 confirm its signer and isolated trust binding on Fedora 45:

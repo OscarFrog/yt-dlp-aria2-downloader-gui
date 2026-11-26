@@ -27,9 +27,12 @@ preservation, RPM signer authentication, exact package identity, x86_64 package
 semantics, and the RPM runtime-preservation contract unless the task
 explicitly changes one of those contracts.
 
-A code or documentation task does not authorize creating a tag, signing or
-publishing packages, publishing a release, or changing secrets, environments,
-or repository rules. Stop for explicit authorization at that boundary.
+Apply the standing delegation in `AGENTS.md` to ordinary delivery and
+post-publication documentation. Start publication only on a maintainer request
+for a named version. That request covers its signed tag, official preflight,
+tag push and eligible `rpm-signing` review. Follow the identity and environment
+checks in `TESTING.md`. Changes to protections, keys or secrets require
+specific authorization.
 
 For an authorized source push, follow the release-preparation version policy in
 `AGENTS.md`: preserve coherent versions without an automatic increment. Use

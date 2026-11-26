@@ -3,13 +3,13 @@
 # AGENTS.md; they do not grant permission for an external mutation.
 
 # Prefix rules cannot express an end-of-argv constraint, and the strictest
-# matching decision wins. Keep direct Git interactive. The tracked inspection
+# matching decision wins. Review direct Git commands. The tracked inspection
 # helper uses the ordinary sandbox/baseline policy instead of receiving an
 # execution-policy exemption.
 prefix_rule(
     pattern = [["git", "/usr/bin/git", "/bin/git"]],
     decision = "prompt",
-    justification = "Every direct Git command remains interactive; use the fixed tracked helper for unattended read-only inspection.",
+    justification = "Review direct Git commands. Use the fixed tracked helper for unattended read-only inspection.",
     match = [
         "git status --short --branch",
         "git diff --check",
@@ -27,7 +27,7 @@ prefix_rule(
 )
 
 # Global Git options can change command resolution or target another worktree.
-# Keep those forms interactive instead of trying to infer a later subcommand.
+# Review those forms because the subcommand alone cannot identify the target.
 prefix_rule(
     pattern = [
         ["git", "/usr/bin/git", "/bin/git"],
@@ -43,7 +43,7 @@ prefix_rule(
         ],
     ],
     decision = "prompt",
-    justification = "Git global options can redirect repository state or command resolution and remain interactive.",
+    justification = "Review Git global options that can redirect repository state or command resolution.",
     match = [
         "git -C . status",
         "git --git-dir .git status",
@@ -59,7 +59,7 @@ prefix_rule(
 prefix_rule(
     pattern = [["gh", "/usr/bin/gh", "/bin/gh"]],
     decision = "prompt",
-    justification = "GitHub CLI commands requested outside the sandbox require confirmation; remote mutations still require explicit task authority.",
+    justification = "Review the GitHub repository, operation and delegated task scope.",
     match = [
         "gh pr view 56",
         "gh --repo owner/repository pr merge 56",
@@ -72,12 +72,11 @@ prefix_rule(
 )
 
 # Environment wrappers obscure the executable position from exact-prefix rules.
-# Prompting for them outside the sandbox keeps common Git/GitHub wrappers from
-# silently weakening the direct-command policy.
+# Route wrapped commands to the reviewer as well.
 prefix_rule(
     pattern = [["env", "/usr/bin/env"]],
     decision = "prompt",
-    justification = "Environment-wrapped commands requested outside the sandbox require confirmation because the wrapped executable is not at argv[0].",
+    justification = "Review environment-wrapped commands because the wrapped executable is not at argv[0].",
     match = [
         "env git push origin feature-branch",
         "env GH_HOST=github.com gh pr merge 56",
@@ -91,7 +90,7 @@ prefix_rule(
 prefix_rule(
     pattern = ["git", "push"],
     decision = "prompt",
-    justification = "Pushing mutates the remote repository and requires explicit task authority.",
+    justification = "Review the named remote, destination ref and pre-push hook under the assigned delivery or release scope.",
     match = [
         "git push",
         "git push origin feature-branch",
@@ -108,11 +107,11 @@ prefix_rule(
 prefix_rule(
     pattern = ["git", "tag"],
     decision = "prompt",
-    justification = "Tag commands can mutate release identity and require confirmation outside the sandbox.",
+    justification = "Review tag operations. Creating a release tag requires the requested version and authorized signing identity.",
     match = [
         "git tag v9.9.9",
         "git tag -s v9.9.9",
-        "git tag --delete local-test-tag",
+        "git tag --list",
     ],
     not_match = [
         "git show v9.9.9",
@@ -123,7 +122,7 @@ prefix_rule(
 prefix_rule(
     pattern = ["git", "merge"],
     decision = "prompt",
-    justification = "Merging changes delivery state and requires confirmation.",
+    justification = "Review the target and respect the protected pull-request delivery path.",
     match = [
         "git merge --ff-only feature-branch",
         "git merge --abort",
@@ -137,9 +136,9 @@ prefix_rule(
 prefix_rule(
     pattern = ["gh", "pr", "merge"],
     decision = "prompt",
-    justification = "Merging a pull request changes the protected delivery state and requires confirmation.",
+    justification = "Review the qualified PR head, squash method, required checks and source-branch retention.",
     match = [
-        "gh pr merge 56 --squash --delete-branch",
+        "gh pr merge 56 --squash --match-head-commit 0123456789abcdef0123456789abcdef01234567",
     ],
     not_match = [
         "gh pr view 56",
@@ -164,7 +163,7 @@ prefix_rule(
 prefix_rule(
     pattern = ["gh", "workflow", "run"],
     decision = "prompt",
-    justification = "Dispatching a workflow changes remote CI or release state and requires confirmation.",
+    justification = "Review the workflow, ref and assigned CI scope. Publication requires a request for the named version.",
     match = [
         "gh workflow run qualification.yml",
     ],
@@ -186,6 +185,39 @@ prefix_rule(
         "gh run view 123456",
         "gh run watch 123456",
     ],
+)
+
+# The reviewer also checks deletion refspecs and options appearing later in argv.
+prefix_rule(
+    pattern = [["git", "/usr/bin/git", "/bin/git"], ["branch", "tag"], ["-d", "-D", "--delete"]],
+    decision = "forbidden",
+    justification = "Preserve local branches and tags.",
+    match = ["git branch -D feature", "git tag --delete v1.2.3"],
+    not_match = ["git branch --list", "git tag -s v1.2.3"],
+)
+
+prefix_rule(
+    pattern = [["git", "/usr/bin/git", "/bin/git"], "push", ["-d", "--delete"]],
+    decision = "forbidden",
+    justification = "Preserve remote branches and tags.",
+    match = ["git push --delete origin feature", "git push -d origin refs/tags/v1.2.3"],
+    not_match = ["git push --set-upstream origin feature"],
+)
+
+prefix_rule(
+    pattern = [["git", "/usr/bin/git", "/bin/git"], "push", "origin", ["-d", "--delete"]],
+    decision = "forbidden",
+    justification = "Preserve remote branches and tags when origin precedes the deletion flag.",
+    match = ["git push origin --delete feature"],
+    not_match = ["git push origin feature"],
+)
+
+prefix_rule(
+    pattern = [["gh", "/usr/bin/gh", "/bin/gh"], "pr", "merge", ["--admin", "--delete-branch", "-d"]],
+    decision = "forbidden",
+    justification = "Keep branch protections and retain the PR source branch.",
+    match = ["gh pr merge --admin 56", "gh pr merge --delete-branch 56"],
+    not_match = ["gh pr merge --squash 56"],
 )
 
 # Forbid common direct force-push spellings that name main or an equivalent

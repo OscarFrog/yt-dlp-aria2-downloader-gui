@@ -27,9 +27,10 @@ review form is in `AGENTS.md`.
 For `shfmt-update.yml`, also read the shfmt-update section of `SHELL_STYLE.md`.
 For release or packaging paths, use the `packaging-release` skill as well.
 
-Ordinary workflow editing does not authorize triggering publication, changing
-repository settings or secrets, creating tags, or retrying a privileged job.
-Obtain explicit authority for those external mutations.
+Follow the standing delegation in `AGENTS.md` for maintainer-assigned CI,
+technical review, qualified squash merges and source promotion. A request to
+publish a named version covers the official tag and eligible deployment review.
+Changes to protections, keys or secrets require specific authorization.
 
 ## Validate
 
