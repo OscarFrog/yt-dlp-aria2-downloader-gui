@@ -179,7 +179,7 @@ EOF_DENO
 }
 
 initialize_runtime_hardening_workspace() {
-    local command_name=''
+    local command_name='' machine_arch
 
     validate_hardening_run_count \
         ROLLBACK_RUNS RUNTIME_HARDENING_ROLLBACK_RUNS
@@ -192,6 +192,9 @@ initialize_runtime_hardening_workspace() {
             exit 127
         }
     done
+
+    machine_arch=$(uname -m) || fail 'unable to determine architecture'
+    [[ ${machine_arch} == x86_64 ]] || fail 'runtime-manager hardening requires x86_64'
 
     TEST_ROOT=$(mktemp -d)
     readonly TEST_ROOT
@@ -210,14 +213,7 @@ initialize_runtime_hardening_workspace() {
     readonly YTDLP_EXEC_PATH_LOG="${TEST_ROOT}/ytdlp-exec-paths.log"
     mkdir -p -- "${HOME_DIR}" "${DATA_HOME}" "${MOCK_BIN}"
 
-    case $(uname -m) in
-        x86_64) YTDLP_ASSET='yt-dlp_linux' ;;
-        aarch64) YTDLP_ASSET='yt-dlp_linux_aarch64' ;;
-        *)
-            printf 'SKIP: unsupported test architecture.\n'
-            exit 0
-            ;;
-    esac
+    YTDLP_ASSET='yt-dlp_linux'
     readonly YTDLP_ASSET
 }
 
@@ -343,7 +339,7 @@ case ${url} in
 */yt-dlp/yt-dlp/releases/download/*/*|*/yt-dlp/yt-dlp-nightly-builds/releases/download/*/*)
     version=${url#*/releases/download/}; version=${version%%/*}; name=${url##*/}
     case ${name} in
-    yt-dlp_linux|yt-dlp_linux_aarch64)
+    yt-dlp_linux)
         candidate_version=${MOCK_YTDLP_ASSET_VERSION_OVERRIDE:-${version}}
         cat >"${output}" <<EOF_YTDLP
 #!/usr/bin/env bash

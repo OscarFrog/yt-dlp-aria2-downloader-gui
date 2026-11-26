@@ -25,15 +25,15 @@ MAX_BYTES = 8 * 1024 * 1024
 MAX_PAGES = 10
 WORKFLOWS = {
     "shell.yml": {
-        "Ubuntu", "Fedora 45", "Python 3.10 / Ubuntu",
+        "Fedora 45 non-root", "Fedora 45",
     },
     "packages.yml": {
-        "Git-free source archive", "Previous immutable release",
+        "Fedora 45 Git-free source archive", "Previous immutable release",
         "Fedora 45 RPM build-once", "Fedora 45 RPM (fresh)",
-        "Fedora 45 RPM (ffmpeg-free)", "Ubuntu 24.04 DEB",
+        "Fedora 45 RPM (ffmpeg-free)",
     },
     "qualification.yml": {
-        "FFmpeg 6.1.1 / Ubuntu 24.04", "FFmpeg 9.0.2 / Fedora 45",
+        "FFmpeg 6.1.1 / verified upstream source", "FFmpeg 9.0.2 / Fedora 45",
         "FFmpeg 8.1.3 / verified upstream source", "FFmpeg 9.0.1 / verified upstream source",
     },
     "real-tools.yml": {
@@ -59,20 +59,14 @@ REQUIRED_STEPS = {
         "Run current-stable real FFmpeg progress qualification",
         "Run current-stable HLS duration validation",
         "Run current-stable shared-destination GUI and CLI qualification",
+        "Validate and stage current-stable shared-destination evidence",
         "Retain current-stable shared-destination verdicts and monotonic events",
     },
-    "Ubuntu": {"Check workflow syntax and embedded shell", "Check Python with reviewed Ruff", "Run validation"},
+    "Fedora 45 non-root": {"Check workflow syntax and embedded shell", "Check Python with reviewed Ruff", "Run validation"},
     "Fedora 45": {"Run validation"},
-    "Python 3.10 / Ubuntu": {
-        "Build and bind verified Bash 4.4 on the disposable runner",
-        "Bind every test interpreter to the minimum Python",
-        "Confirm minimum Python and environment",
-        "Exercise the complete contract under Python 3.10",
-    },
-    "Git-free source archive": {"Build and retest Git-free source archive"},
+    "Fedora 45 Git-free source archive": {"Build and retest Git-free source archive"},
     "Previous immutable release": {"Resolve previous semantic-version release", "Verify exact published previous packages"},
     "Fedora 45 RPM build-once": {"Build RPM once", "Qualify RPM v4/v6 signature semantics"},
-    "Ubuntu 24.04 DEB": {"Build, lifecycle, reinstall, and upgrade DEB"},
     **{f"Fedora 45 RPM ({scenario})": {
         "Reject a different globally trusted RPM signer in PR CI",
         "Confirm unsigned PR RPM is rejected by release bootstrap",
@@ -81,7 +75,7 @@ REQUIRED_STEPS = {
         "Test previous immutable release -> current RPM upgrade",
     } for scenario in ("fresh", "ffmpeg-free")},
     **{name: {f"Qualify FFmpeg {version} generation"} for name, version in (
-        ("FFmpeg 6.1.1 / Ubuntu 24.04", "6.1.1"),
+        ("FFmpeg 6.1.1 / verified upstream source", "6.1.1"),
         ("FFmpeg 9.0.2 / Fedora 45", "9.0.2"),
         ("FFmpeg 8.1.3 / verified upstream source", "8.1.3"),
         ("FFmpeg 9.0.1 / verified upstream source", "9.0.1"),
@@ -93,6 +87,7 @@ REQUIRED_STEPS = {
         "Install verified Deno for shared-destination qualification",
         "Install pinned impersonation dependencies for shared qualification",
         "Run real shared-destination GUI and CLI qualification",
+        "Validate and stage shared-destination evidence",
         "Retain shared-destination verdicts and monotonic events",
     } for version in ("2026.6.9", "2026.7.4", "2026.8.19")},
     **{f"Mock process/cancellation stress shard {shard}/4": {
@@ -105,6 +100,13 @@ REQUIRED_STEPS = {
         "Qualify runtime-manager transactions and contention",
     },
 }
+for fedora_job in WORKFLOWS["shell.yml"] | WORKFLOWS["qualification.yml"] | WORKFLOWS["real-tools.yml"] | {
+    SCHEDULED_JOB, "Previous immutable release", "Fedora 45 Git-free source archive", "Fedora 45 RPM build-once",
+    "Fedora 45 RPM (fresh)", "Fedora 45 RPM (ffmpeg-free)",
+    *(f"Mock process/cancellation stress shard {shard}/4" for shard in range(1, 5)),
+    "Runtime-manager hardening (10 rollback/contention cycles)",
+}:
+    REQUIRED_STEPS[fedora_job].add("Verify Fedora 45 userspace")
 ALLOWED_SKIPS = {
     ("Fedora 45 RPM (ffmpeg-free)", "Test previous immutable release -> current RPM upgrade"),
     *((f"Local media, pinned yt-dlp {version}", step)
@@ -113,13 +115,14 @@ ALLOWED_SKIPS = {
                    "Install verified Deno for shared-destination qualification",
                    "Install pinned impersonation dependencies for shared qualification",
                    "Run real shared-destination GUI and CLI qualification",
+                   "Validate and stage shared-destination evidence",
                    "Retain shared-destination verdicts and monotonic events")),
 }
 
 
 def required_steps(job_name):
     if job_name.startswith(IDENTITY_PREFIX):
-        return {"Bind validation to the event source"}
+        return {"Verify Fedora 45 userspace", "Bind validation to the event source"}
     return REQUIRED_STEPS[job_name]
 
 

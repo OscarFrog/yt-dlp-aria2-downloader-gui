@@ -158,6 +158,7 @@ install_previous_rpm() {
 
 upgrade_rpm_package() {
     package_test_install_rpm "${NEW_PACKAGE}" "${ALLOW_UNSIGNED_DEV}"
+    assert_current_rpm_installed "${PACKAGE_NAME}" "${NEW_VERSION}"
     assert_installed_rpm_version "${NEW_VERSION}" 'package upgrade'
     assert_runtime_preserved 'package upgrade'
     assert_common_package_payload RPM

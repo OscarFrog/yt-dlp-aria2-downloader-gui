@@ -17,11 +17,36 @@ jobs:
   identity:
     name: Source identity ${{ github.sha }}
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
+      volumes:
+        - /tmp
+        - /var/tmp
     timeout-minutes: 3
     steps:
+      - name: Verify Fedora 45 userspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
+          dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Trust only the checked-out workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace=$(realpath -e -- "${GITHUB_WORKSPACE:?}")
+          [[ ${workspace} == "$(pwd -P)" && ${workspace} != / && ${workspace} != */\* ]]
+          git config --global --add safe.directory "${workspace}"
       - name: Bind validation to the event source
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -40,6 +65,11 @@ jobs:
     if: github.event_name != 'schedule'
     name: Local media, pinned yt-dlp ${{ matrix.yt_dlp_version }}
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
+      volumes:
+        - /tmp
+        - /var/tmp
     # Include every test deadline, provisioning and diagnostic retention.
     timeout-minutes: 65
     strategy:
@@ -47,45 +77,31 @@ jobs:
       matrix:
         yt_dlp_version: ['2026.6.9', '2026.7.4', '2026.8.19']
     steps:
+      - name: Verify Fedora 45 userspace
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
+          dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
           persist-credentials: false
       - name: Install real engines
-        timeout-minutes: 10
+        timeout-minutes: 8
         env:
           YT_DLP_VERSION: ${{ matrix.yt_dlp_version }}
         run: |
           set -Eeuo pipefail
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup
-          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30
-            -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
-          apt_uptime_seconds() {
-            local uptime
-            read -r uptime _ </proc/uptime || return 65
-            if [[ ! ${uptime} =~ ^([0123456789]{1,12})[.][0123456789]{2}$ ]]; then
-              printf 'Error: invalid Linux uptime for APT provisioning.\n' >&2
-              return 65
-            fi
-            printf '%d\n' "$((10#${BASH_REMATCH[1]}))"
-          }
-
-          # Share the APT deadline so time saved on indexes is available to dpkg.
-          apt_start=$(apt_uptime_seconds)
-          sudo timeout --signal=TERM --kill-after=10s 3m \
-            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update
-          apt_now=$(apt_uptime_seconds)
-          # Round elapsed time up. A zero duration would disable GNU timeout.
-          apt_remaining=$((480 - (apt_now - apt_start) - 1))
-          if (( apt_now < apt_start || apt_remaining <= 0 )); then
-            printf 'Error: shared APT provisioning deadline unavailable or exhausted.\n' >&2
-            exit 124
-          fi
-          sudo timeout --signal=TERM --kill-after=10s "${apt_remaining}s" \
-            env DEBIAN_FRONTEND=noninteractive \
-            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends \
-            aria2 curl ffmpeg python3-venv unzip
-
+          timeout --signal=TERM --kill-after=10s 6m bash ./scripts/ci-fedora-media.sh
           case ${YT_DLP_VERSION} in
             2026.6.9)
               yt_dlp_sha=442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4
@@ -141,7 +157,7 @@ jobs:
       - name: Record resolved tool versions
         timeout-minutes: 1
         env:
-          EXPECTED_FFMPEG_VERSION: 6.1.1
+          EXPECTED_FFMPEG_VERSION: 9.0.2
         run: |
           set -Eeuo pipefail
           printf 'yt-dlp: %s\n' "$(yt-dlp --version)"
@@ -192,11 +208,11 @@ jobs:
           requirements="${RUNNER_TEMP}/yt-dlp-impersonation-requirements.txt"
           cat >"${requirements}" <<'EOF_REQUIREMENTS'
           certifi==2026.7.22 --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
-          cffi==2.1.1 --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf
+          cffi==2.1.1 --hash=sha256:aeae0e330c9f6acd681f647d46cefd30c29f93e3392882e792e82080c9691399
           curl-cffi==0.16.0 --hash=sha256:182416f07d71a342240554fa62c22e591999b78c225b21d3fe27d9f807420dd6
           pycparser==3.0 --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
           EOF_REQUIREMENTS
-          "${RUNNER_TEMP}/yt-dlp-venv/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 12)'
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 15)'
           "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" --isolated install \
             --disable-pip-version-check \
             --index-url https://pypi.org/simple \
@@ -205,11 +221,11 @@ jobs:
             --requirement "${requirements}"
       - name: Run real shared-destination GUI and CLI qualification
         if: matrix.yt_dlp_version == '2026.8.19'
-        env:
-          TMPDIR: ${{ runner.temp }}/shared-destination-evidence
+        id: shared_run
         run: |
           set -Eeuo pipefail
           umask 077
+          export TMPDIR="${RUNNER_TEMP:?}/shared-destination-evidence"
           mkdir -p -- "${TMPDIR}"
           # All instances share the fixture's HOME/XDG; select only this job's
           # verified executable, never a pre-existing personal runtime.
@@ -220,30 +236,66 @@ jobs:
               --label 'Shared-destination real tools' -- \
               python3 -B ./tests/multi-instance-real.py \
             2>&1 | tee "${TMPDIR}/qualification.log"
-      - name: Retain shared-destination verdicts and monotonic events
-        timeout-minutes: 2
+      - name: Validate and stage shared-destination evidence
+        id: evidence
         if: ${{ always() && matrix.yt_dlp_version == '2026.8.19' }}
+        timeout-minutes: 1
+        env:
+          SHARED_OUTCOME: ${{ steps.shared_run.outcome }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          options=()
+          if [[ ${SHARED_OUTCOME} != success ]]; then
+            [[ ${JOB_STATUS} == failure || ${JOB_STATUS} == cancelled ]] || exit 65
+            options+=(--partial)
+          fi
+          python3 -IB tests/multi-instance-real.py --stage-evidence \
+            "${RUNNER_TEMP:?}/shared-destination-evidence" shared-destination-public "${options[@]}"
+      - name: Retain shared-destination verdicts and monotonic events
+        timeout-minutes: 1
+        if: ${{ always() && matrix.yt_dlp_version == '2026.8.19' && steps.evidence.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: shared-destination-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 14
           path: |
-            ${{ runner.temp }}/shared-destination-evidence/qualification.log
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.log
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/events.json
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/qualification-errors.json
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.before-rescue.json
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.final-before-rescue.json
+            shared-destination-public/qualification.log
+            shared-destination-public/shared-destination-real-*/*.log
+            shared-destination-public/shared-destination-real-*/events.json
+            shared-destination-public/shared-destination-real-*/qualification-errors.json
+            shared-destination-public/shared-destination-real-*/*.before-rescue.json
+            shared-destination-public/shared-destination-real-*/*.final-before-rescue.json
 
   current-stable-local-media:
     needs: identity
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: Scheduled current stable yt-dlp
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
+      volumes:
+        - /tmp
+        - /var/tmp
     # Include every test deadline, provisioning and diagnostic retention.
     timeout-minutes: 65
     steps:
+      - name: Verify Fedora 45 userspace
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
+          dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
@@ -255,15 +307,7 @@ jobs:
           umask 077
           # Bound stalled connections and the complete package transaction;
           # provisioning must leave the independently bounded media tests time.
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup
-          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30
-            -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
-          sudo timeout --signal=TERM --kill-after=10s 2m \
-            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update
-          sudo timeout --signal=TERM --kill-after=10s 4m \
-            env DEBIAN_FRONTEND=noninteractive \
-            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends \
-            aria2 curl ffmpeg python3-venv unzip
+          timeout --signal=TERM --kill-after=10s 6m bash ./scripts/ci-fedora-media.sh
           python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
           mkdir -p -- "${RUNNER_TEMP}/shared-destination-evidence"
           # Select the published stable before resolving extras. Otherwise pip
@@ -398,11 +442,11 @@ jobs:
           timeout --signal=TERM --kill-after=10s 5m \
             bash ./tests/hls-remux-duration-integration.sh
       - name: Run current-stable shared-destination GUI and CLI qualification
-        env:
-          TMPDIR: ${{ runner.temp }}/shared-destination-evidence
+        id: shared_run
         run: |
           set -Eeuo pipefail
           umask 077
+          export TMPDIR="${RUNNER_TEMP:?}/shared-destination-evidence"
           mkdir -p -- "${TMPDIR}"
           # All instances share the fixture's HOME/XDG; select only this job's
           # verified executable, never a pre-existing personal runtime.
@@ -413,20 +457,37 @@ jobs:
               --label 'Shared-destination real tools' -- \
               python3 -B ./tests/multi-instance-real.py \
             2>&1 | tee "${TMPDIR}/qualification.log"
-      - name: Retain current-stable shared-destination verdicts and monotonic events
-        timeout-minutes: 2
+      - name: Validate and stage current-stable shared-destination evidence
+        id: evidence
         if: ${{ always() }}
+        timeout-minutes: 1
+        env:
+          SHARED_OUTCOME: ${{ steps.shared_run.outcome }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          options=(--current-stable)
+          if [[ ${SHARED_OUTCOME} != success ]]; then
+            [[ ${JOB_STATUS} == failure || ${JOB_STATUS} == cancelled ]] || exit 65
+            options+=(--partial)
+          fi
+          python3 -IB tests/multi-instance-real.py --stage-evidence \
+            "${RUNNER_TEMP:?}/shared-destination-evidence" shared-destination-public "${options[@]}"
+      - name: Retain current-stable shared-destination verdicts and monotonic events
+        timeout-minutes: 1
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: shared-destination-current-stable-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 14
           path: |
-            ${{ runner.temp }}/shared-destination-evidence/stable-resolution.json
-            ${{ runner.temp }}/shared-destination-evidence/tool-versions.log
-            ${{ runner.temp }}/shared-destination-evidence/qualification.log
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.log
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/events.json
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/qualification-errors.json
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.before-rescue.json
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.final-before-rescue.json
+            shared-destination-public/stable-resolution.json
+            shared-destination-public/tool-versions.log
+            shared-destination-public/qualification.log
+            shared-destination-public/shared-destination-real-*/*.log
+            shared-destination-public/shared-destination-real-*/events.json
+            shared-destination-public/shared-destination-real-*/qualification-errors.json
+            shared-destination-public/shared-destination-real-*/*.before-rescue.json
+            shared-destination-public/shared-destination-real-*/*.final-before-rescue.json

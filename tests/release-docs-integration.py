@@ -88,7 +88,8 @@ if args[:2] == ["release", "verify"]:
     sys.exit(0)
 if args[:2] == ["release", "view"]:
     fedora = 44 if state["scenario"] == "wrong-release-rpm" else 45
-    asset = {"name": f"yt-dlp-aria2-downloader-gui-100.0.0-1.fc{fedora}.noarch.rpm", "size": 1024}
+    arch = "noarch" if state["scenario"] == "wrong-release-arch" else "x86_64"
+    asset = {"name": f"yt-dlp-aria2-downloader-gui-100.0.0-1.fc{fedora}.{arch}.rpm", "size": 1024}
     emit({"isImmutable": True, "assets": [asset]})
     sys.exit(0)
 path = next(arg for arg in args if arg.startswith("repos/"))
@@ -225,12 +226,21 @@ class ReleaseDocsReplay(unittest.TestCase):
     def run_preparation(self, sha):
         script = self.root / "prepare.sh"
         script.write_text(workflow_step("Prepare allowlisted documentation patch"))
+        (self.root / "prepare-runtime").mkdir(mode=0o700, exist_ok=True)
         environment = dict(os.environ, RELEASE_TAG="v" + RELEASE_VERSION, RELEASE_SHA=sha,
                            RUNNER_TEMP=str(self.root / "prepare-runtime"),
                            GITHUB_OUTPUT=str(self.root / "prepare-output"),
                            GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
         return subprocess.run(["bash", str(script)], cwd=self.base, env=environment,
                               capture_output=True, text=True, timeout=20)
+
+    def run_upload_check(self, runtime, context, handoff_id):
+        return subprocess.run(
+            ["bash", "-c", workflow_step("Validate data-only documentation candidate for upload")],
+            cwd=self.base, env=dict(os.environ, RUNNER_TEMP=str(runtime), VERSION_CONTEXT=context,
+                                    HANDOFF_ID=handoff_id, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1"),
+            capture_output=True, text=True, timeout=10,
+        )
 
     def run_verifier(self, context, suffix):
         checkout = self.root / ("verify-" + suffix)
@@ -402,22 +412,25 @@ class ReleaseDocsReplay(unittest.TestCase):
                 self.assertNotIn("Prepared exact", result.stdout)
 
     def test_release_platform_links_match_the_immutable_rpm_before_any_write(self):
-        self.prepare(scenario="wrong-release-rpm")
-        result, state = self.run_publisher()
-        self.assertEqual(result.returncode, 65, result.stderr)
-        self.assertIn("immutable release does not contain the expected Fedora RPM", result.stderr)
-        self.assertEqual(state["writes"], [])
+        for scenario in ("wrong-release-rpm", "wrong-release-arch"):
+            with self.subTest(scenario=scenario):
+                self.prepare(scenario=scenario)
+                result, state = self.run_publisher()
+                self.assertEqual(result.returncode, 65, result.stderr)
+                self.assertIn("immutable release does not contain the expected Fedora RPM", result.stderr)
+                self.assertEqual(state["writes"], [])
 
     def test_rehashed_french_fedora_link_cannot_substitute_a_different_build(self):
         self.prepare()
+        asset = f"yt-dlp-aria2-downloader-gui-{RELEASE_VERSION}-1.fc45.x86_64.rpm"
+        url = f"https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/{asset}"
         for name in ("README.md", "README.fr.md"):
             data = (self.handoff / name).read_text(encoding="utf-8")
-            self.assertEqual(data.count("100.0.0-1.fc45.noarch.rpm"), 3)
-            self.assertIn("### Fedora 45\n", data)
-            self.assertIn("| Fedora 45 | [RPM]", data)
+            self.assertEqual(data.splitlines().count(f"| Fedora 45 | [RPM]({url}) |"), 1)
+            self.assertEqual(data.count(asset), 1)
         french = self.handoff / "README.fr.md"
         valid = french.read_text(encoding="utf-8")
-        french.write_text(valid.replace("100.0.0-1.fc45", "100.0.0-1.fc44", 1), encoding="utf-8")
+        french.write_text(valid.replace(asset, asset.replace(".fc45.", ".fc44."), 1), encoding="utf-8")
         self.rehash()
         result, state = self.run_publisher()
         self.assertEqual(result.returncode, 65, result.stderr)
@@ -476,6 +489,76 @@ class ReleaseDocsReplay(unittest.TestCase):
         self.assertEqual(self.git("diff", "--name-only").stdout, "")
         self.assertIn("update=false\n", (self.root / "prepare-output").read_text())
         self.assertFalse((self.root / "prepare-runtime/release-docs-candidate").exists())
+        workflow = (PROJECT / ".github/workflows/release-docs.yml").read_text()
+        gate = "if: steps.prepare.outputs.update == 'true'"
+        validation = "Validate data-only documentation candidate for upload"
+        transfer = "Upload data-only documentation candidate"
+        for step in (validation, transfer):
+            self.assertIn(f"      - name: {step}\n        {gate}\n", workflow)
+        preparation = workflow.split("\n  verify-release-docs:")[0]
+        self.assertLess(preparation.index(validation), preparation.index(transfer))
+        self.assertNotIn("continue-on-error", preparation)
+        upload = preparation.split("      - name: " + transfer + "\n")[1]
+        self.assertEqual([line.strip() for line in upload.splitlines() if line.lstrip().startswith("path:")],
+                         ["path: ${{ runner.temp }}/release-docs-candidate/"])
+
+    def test_candidate_upload_refuses_incomplete_substituted_and_unsafe_inputs(self):
+        self.initialize_git_source()
+        with (self.base / "README.md").open("a") as readme:
+            readme.write("\nUpdated fixture documentation.\n")
+        patch = self.git("diff", "--binary", "--", *PATHS).stdout.encode()
+        context = '{"release_version":"100.0.0"}'
+        for case in ("complete", "patch-only", "missing-patch", "missing-metadata", "missing-manifest", "short-manifest",
+                     "corrupt-manifest", "extra-hidden", "extra-newline", "symlink", "hardlink", "fifo", "wrong-context",
+                     "rehashed-patch", "different-directory", "symlink-directory"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(dir=self.root) as tmp:
+                runtime = Path(tmp)
+                directory = runtime / "release-docs-candidate"
+                directory.mkdir(mode=0o700)
+                identity = directory.stat()
+                payload = directory / "release-docs.patch"
+                metadata = directory / "release-docs-metadata.json"
+                manifest = directory / "release-docs-handoff.sha256"
+                payload.write_bytes(patch)
+                metadata.write_text(context + "\n")
+                self.manifest(directory, manifest.name, (payload.name, metadata.name))
+                if case in ("missing-manifest", "patch-only"):
+                    manifest.unlink()
+                if case in ("missing-metadata", "patch-only"):
+                    metadata.unlink()
+                if case == "missing-patch":
+                    payload.unlink()
+                if case == "short-manifest":
+                    self.manifest(directory, manifest.name, (payload.name,))
+                elif case == "corrupt-manifest":
+                    manifest.write_text("0" * 64 + manifest.read_text()[64:])
+                elif case in ("extra-hidden", "extra-newline"):
+                    (directory / (".private" if case == "extra-hidden" else "\n")).touch()
+                elif case in ("symlink", "hardlink", "fifo"):
+                    other = payload.rename(runtime / "original-patch")
+                    if case == "symlink":
+                        payload.symlink_to(other)
+                    elif case == "hardlink":
+                        os.link(other, payload)
+                    else:
+                        os.mkfifo(payload)
+                elif case in ("wrong-context", "rehashed-patch"):
+                    if case == "wrong-context":
+                        metadata.write_text('{"release_version":"100.0.1"}\n')
+                    else:
+                        payload.write_bytes(patch + b"\n")
+                    self.manifest(directory, manifest.name, (payload.name, metadata.name))
+                elif case in ("different-directory", "symlink-directory"):
+                    old = directory.rename(runtime / "original-directory")
+                    if case == "different-directory":
+                        shutil.copytree(old, directory)
+                    else:
+                        directory.symlink_to(old, target_is_directory=True)
+                result = self.run_upload_check(runtime, context, f"{identity.st_dev}:{identity.st_ino}")
+                if case == "complete":
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
 
     def test_preparation_uses_target_descendant_without_source_bump(self):
         # This fixture qualifies preparation and object binding. Its static
@@ -507,6 +590,9 @@ class ReleaseDocsReplay(unittest.TestCase):
         for path in set(SOURCE_PATHS) - set(PATHS):
             self.assertEqual((self.base / path).read_bytes(),
                              self.git("show", target_sha + ":" + path).stdout.encode())
+        outputs = dict(line.split("=", 1) for line in (self.root / "prepare-output").read_text().splitlines())
+        admitted = self.run_upload_check(candidate.parent, outputs["context"], outputs["handoff_id"])
+        self.assertEqual(admitted.returncode, 0, admitted.stderr)
         verified = self.run_verifier(context, "valid")
         self.assertEqual(verified.returncode, 0, verified.stderr)
         # Digests alone do not authenticate an allowed path's contents: the

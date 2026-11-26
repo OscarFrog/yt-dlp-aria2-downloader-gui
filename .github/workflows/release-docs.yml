@@ -20,6 +20,11 @@ jobs:
   prepare-release-docs:
     if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
+      volumes:
+        - /tmp
+        - /var/tmp
     timeout-minutes: 10
     permissions:
       contents: read
@@ -29,11 +34,31 @@ jobs:
       context: ${{ steps.prepare.outputs.context }}
 
     steps:
+      - name: Verify Fedora 45 userspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
+          dnf -y --setopt=install_weak_deps=False install cargo clippy gcc rust rustfmt aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file gh
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
           persist-credentials: false
+      - name: Trust only the checked-out workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace=$(realpath -e -- "${GITHUB_WORKSPACE:?}")
+          [[ ${workspace} == "$(pwd -P)" && ${workspace} != / && ${workspace} != */\* ]]
+          git config --global --add safe.directory "${workspace}"
 
       - name: Validate successful immutable release source
         env:
@@ -154,25 +179,47 @@ jobs:
           python3 -B scripts/check-push-version.py coherence
           git diff --check
           bash ./test-static.sh
-          handoff_dir="${RUNNER_TEMP}/release-docs-candidate"
-          mkdir -p -- "${handoff_dir}"
+          handoff_dir="${RUNNER_TEMP:?}/release-docs-candidate"
+          mkdir -m 700 -- "${handoff_dir}"
+          handoff_id=$(stat --format='%d:%i' -- "${handoff_dir}")
           git diff --binary -- "${paths[@]}" >"${handoff_dir}/release-docs.patch"
           printf '%s\n' "${context}" >"${handoff_dir}/release-docs-metadata.json"
           (
             cd -- "${handoff_dir}"
             sha256sum release-docs.patch release-docs-metadata.json >release-docs-handoff.sha256
           )
-          printf 'update=true\ncontext=%s\n' "${context}" >>"${GITHUB_OUTPUT}"
+          printf 'update=true\ncontext=%s\nhandoff_id=%s\n' "${context}" "${handoff_id}" >>"${GITHUB_OUTPUT}"
+
+      - name: Validate data-only documentation candidate for upload
+        if: steps.prepare.outputs.update == 'true'
+        shell: bash
+        env:
+          HANDOFF_ID: ${{ steps.prepare.outputs.handoff_id }}
+          VERSION_CONTEXT: ${{ steps.prepare.outputs.context }}
+        run: |
+          set -Eeuo pipefail
+          handoff_dir="${RUNNER_TEMP:?}/release-docs-candidate"
+          [[ -d ${handoff_dir} && ! -L ${handoff_dir} && -O ${handoff_dir} ]]
+          [[ $(stat --format='%d:%i:%a' -- "${handoff_dir}") == "${HANDOFF_ID:?}:700" ]]
+          (
+            cd -- "${handoff_dir}"
+            shopt -s dotglob nullglob
+            entries=(*)
+            ((${#entries[@]} == 3))
+            for file in release-docs.patch release-docs-metadata.json release-docs-handoff.sha256; do
+              [[ -f ${file} && ! -L ${file} && -O ${file} && $(stat --format='%h' -- "${file}") == 1 ]]
+            done
+            printf '%s\n' "${VERSION_CONTEXT:?}" | cmp -s -- - release-docs-metadata.json
+            sha256sum -- release-docs.patch release-docs-metadata.json | cmp -s -- - release-docs-handoff.sha256
+          )
+          git diff --binary -- README.fr.md README.md test-static.sh | cmp -s -- - "${handoff_dir}/release-docs.patch"
 
       - name: Upload data-only documentation candidate
         if: steps.prepare.outputs.update == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-docs-candidate-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/release-docs-candidate/release-docs.patch
-            ${{ runner.temp }}/release-docs-candidate/release-docs-metadata.json
-            ${{ runner.temp }}/release-docs-candidate/release-docs-handoff.sha256
+          path: ${{ runner.temp }}/release-docs-candidate/
           if-no-files-found: error
           retention-days: 1
           overwrite: true
@@ -181,6 +228,11 @@ jobs:
     needs: prepare-release-docs
     if: needs.prepare-release-docs.outputs.update == 'true'
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
+      volumes:
+        - /tmp
+        - /var/tmp
     timeout-minutes: 20
     permissions:
       contents: read
@@ -188,11 +240,31 @@ jobs:
       VERSION_CONTEXT: ${{ needs.prepare-release-docs.outputs.context }}
       RELEASE_VERSION: ${{ needs.prepare-release-docs.outputs.version }}
     steps:
+      - name: Verify Fedora 45 userspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
+          dnf -y --setopt=install_weak_deps=False install git python3 gh jq
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ fromJSON(needs.prepare-release-docs.outputs.context).base_sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Trust only the checked-out workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace=$(realpath -e -- "${GITHUB_WORKSPACE:?}")
+          [[ ${workspace} == "$(pwd -P)" && ${workspace} != / && ${workspace} != */\* ]]
+          git config --global --add safe.directory "${workspace}"
 
       - name: Download data-only documentation candidate
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
@@ -250,9 +322,7 @@ jobs:
 
       - name: Install complete-validation dependencies
         run: |
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes \
-            aria2 curl desktop-file-utils gnupg shellcheck unzip
+          dnf -y install cargo clippy gcc rust rustfmt aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file
 
       - name: Validate exact updated documentation tree
         shell: bash
@@ -506,27 +576,24 @@ jobs:
                       "a no-op, downgrade or future release must not create a source push")
               old_fedora = 44 if version(published) <= (2, 4, 5) else 45
               new_fedora = 44 if version(release) <= (2, 4, 5) else 45
-              rpm_filename = "yt-dlp-aria2-downloader-gui-{version}-1.fc{fedora}.noarch.rpm"
+              old_arch = "noarch" if old_fedora == 44 else "x86_64"
+              new_arch = "noarch" if new_fedora == 44 else "x86_64"
+              rpm_filename = "yt-dlp-aria2-downloader-gui-{version}-1.fc{fedora}.{arch}.rpm"
               asset_names = json.loads(read(base, "release-asset-names.json"))
               require(isinstance(asset_names, list) and
-                      asset_names.count(rpm_filename.format(version=release, fedora=new_fedora)) == 1,
+                      asset_names.count(rpm_filename.format(version=release, fedora=new_fedora, arch=new_arch)) == 1,
                       "immutable release does not contain the expected Fedora RPM")
               package_references = (
                   ("| Fedora {fedora} | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/"
                    + rpm_filename + ") |", 1),
-                  ("\n### Fedora {fedora}\n", 1),
-                  ("\n" + rpm_filename + "\n", 1),
-                  ("bash ./install-fedora.sh ./" + rpm_filename + "\n", 1),
                   ("yt-dlp-aria2-downloader-gui-{version}.zip", 3),
                   ("cd yt-dlp-aria2-downloader-gui-{version}\n", 1),
-                  ("yt-dlp-aria2-downloader-gui_{version}-1_all.deb", 3),
               )
               expected = dict(old)
               templates = {
                   "README.md": (
                       ("latest published package release is **{version}**.", 1),
                       ("currently published v{version} release.", 1),
-                      ("latest published release, {version}, provides", 1),
                       *package_references,
                       ("gh release verify v{version} -R", 1),
                       ("gh release verify-asset v{version} ./ARTIFACT", 1),
@@ -534,21 +601,20 @@ jobs:
                   "README.fr.md": (
                       ("dernière release de paquets publiée est la **{version}**.", 1),
                       ("release v{version} actuellement publiée.", 1),
-                      ("dernière release publiée, la {version}, fournit", 1),
                       *package_references,
                       ("gh release verify v{version} -R", 1),
                       ("gh release verify-asset v{version} ./ARTEFACT", 1),
                   ),
               }
               for path, rules in templates.items():
-                  require(old[path].count(f"yt-dlp-aria2-downloader-gui-{published}") == 7 and
-                          old[path].count(f"yt-dlp-aria2-downloader-gui_{published}") == 3,
+                  require(old[path].count(f"yt-dlp-aria2-downloader-gui-{published}") == 5 and
+                          old[path].count(f"yt-dlp-aria2-downloader-gui_{published}") == 0,
                           "unexpected prior package reference count")
                   for template, count in rules:
-                      expected[path] = replace(expected[path], template.format(version=published, fedora=old_fedora),
-                                               template.format(version=release, fedora=new_fedora), count)
-                  require(expected[path].count(f"yt-dlp-aria2-downloader-gui-{release}") == 7 and
-                          expected[path].count(f"yt-dlp-aria2-downloader-gui_{release}") == 3,
+                      expected[path] = replace(expected[path], template.format(version=published, fedora=old_fedora, arch=old_arch),
+                                               template.format(version=release, fedora=new_fedora, arch=new_arch), count)
+                  require(expected[path].count(f"yt-dlp-aria2-downloader-gui-{release}") == 5 and
+                          expected[path].count(f"yt-dlp-aria2-downloader-gui_{release}") == 0,
                           "unexpected published package reference count")
               expected["test-static.sh"] = replace(expected["test-static.sh"],
                   f"readonly EXPECTED_PUBLISHED_VERSION='{published}'", f"readonly EXPECTED_PUBLISHED_VERSION='{release}'")

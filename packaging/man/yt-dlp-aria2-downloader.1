@@ -107,7 +107,7 @@ Do not delete old-looking lock files. The shared legacy lock excludes an older
 not cover arbitrary external writers.
 .SH PROCESS SUPERVISION
 Linux pidfds, WNOWAIT and readable process/thread inventories in procfs are
-required in addition to Bash 4.4 and Python 3.10. The application checks their
+required in addition to Fedora 45 x86_64 with Bash 5.3 and Python 3.15. The application checks their
 operation on a private disposable child before media work; unavailable
 capabilities cause an early refusal with status 69. A later observation or
 permission failure preserves resources and does not establish complete shutdown.

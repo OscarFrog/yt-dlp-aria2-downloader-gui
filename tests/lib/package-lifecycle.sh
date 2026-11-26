@@ -3,34 +3,11 @@
 # ==============================================================================
 # Project     : yt-dlp-aria2-downloader-gui
 # File        : tests/lib/package-lifecycle.sh
-# Purpose     : Share package lifecycle assertions and scoped CI APT routing.
+# Purpose     : Share Fedora RPM installation and lifecycle assertions.
 # ==============================================================================
 
 readonly PACKAGE_DESKTOP_FILE='/usr/share/applications/yt-dlp-aria2-downloader.desktop'
 readonly PACKAGE_ICON_FILE='/usr/share/icons/hicolor/scalable/apps/yt-dlp-aria2-downloader.svg'
-
-# CI callers opt in explicitly; ordinary package tests retain native APT.
-# PROJECT_DIR is the caller's resolved absolute checkout path, established
-# before this library is sourced. The Python boundary validates its private
-# configuration again for every operation, including best-effort removal.
-package_test_apt() {
-    case ${YT_DLP_CI_APT:-} in
-        '')
-            apt-get "$@"
-            ;;
-        1)
-            [[ ${PROJECT_DIR:-} == /* ]] || {
-                printf '%s\n' 'Error: CI APT requires an absolute project directory.' >&2
-                return 65
-            }
-            python3 -I -B "${PROJECT_DIR}/scripts/ci-ubuntu-mirrors.py" --apt "$@"
-            ;;
-        *)
-            printf '%s\n' 'Error: invalid CI APT selection.' >&2
-            return 65
-            ;;
-    esac
-}
 
 # Test-only transaction on a private copy. Signed inputs are authenticated
 # against the checkout's release certificate before DNF rechecks that copy.
@@ -49,6 +26,10 @@ package_test_install_rpm() (
     state=$(LC_ALL=C rpm -qp --qf '%|OPENPGP?{signed}:{unsigned}|\n' -- "${stage}/package.rpm") || exit 65
     case "${state}:${allow_unsigned}" in
         signed:false | signed:true)
+            [[ ${PROJECT_DIR:-} == /* ]] || {
+                printf '%s\n' 'Error: an absolute checkout path is required for the RPM key.' >&2
+                exit 65
+            }
             install -m 600 -- "${PROJECT_DIR}/packaging/keys/RPM-GPG-KEY-OscarFrog" "${stage}/cert" || exit 65
             mkdir -m 700 -- "${stage}/keyring" || exit 73
             verifier=(rpmkeys --define '_keyring fs'
@@ -70,6 +51,19 @@ package_test_install_rpm() (
     dnf install --assumeyes --allowerasing --setopt=install_weak_deps=False \
         "--setopt=localpkg_gpgcheck=${local_check}" "${stage}/package.rpm"
 )
+
+# Query the installed RPM database independently of the artifact filename.
+assert_current_rpm_installed() {
+    local package_name=$1
+    local version=$2
+    local nevra=''
+
+    nevra=$(rpm -q --qf '%{NEVRA}\n' -- "${package_name}") || return 65
+    if [[ ${nevra} != "${package_name}-${version}-1.fc45.x86_64" ]]; then
+        printf 'Error: unexpected installed Fedora 45 x86_64 RPM: %s\n' "${nevra}" >&2
+        return 65
+    fi
+}
 
 # Require the installed command to report the expected package version.
 assert_package_cli_version() {
@@ -282,8 +276,8 @@ list-impersonate-targets load-info-json merge-output-format no-clean-info-json n
 no-playlist no-plugin-dirs no-post-overwrites no-update newline output parse-metadata print
 print-to-file progress progress-delta progress-template remux-video retries retry-sleep
 skip-download socket-timeout'''.split()
-    yt_name = 'yt-dlp_linux_aarch64' if os.uname().machine == 'aarch64' else 'yt-dlp_linux'
-    executable(yt_dir / yt_name, f'#!{sys.executable}\n' + f'''import sys
+    require(os.uname().machine == 'x86_64', 'installed helpers require native x86_64')
+    executable(yt_dir / 'yt-dlp_linux', f'#!{sys.executable}\n' + f'''import sys
 args = sys.argv[1:]
 if '--version' in args: print('2026.08.19')
 elif '--help' in args: print({chr(10).join('--' + option for option in options)!r})

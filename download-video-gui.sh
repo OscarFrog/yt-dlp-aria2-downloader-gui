@@ -3727,12 +3727,26 @@ handle_worker_result() {
     exit "${WORKER_STATUS}"
 }
 
+is_supported_gui_platform() (
+    local machine='' rpm_arch=''
+    grep -Eqx 'ID=(fedora|"fedora")' /etc/os-release || return 1
+    grep -Eqx 'VERSION_ID=(45|"45")' /etc/os-release || return 1
+    machine=$(uname -m) || return 1
+    rpm_arch=$(rpm --eval '%{_arch}') || return 1
+    [[ ${machine} == x86_64 && ${rpm_arch} == x86_64 ]]
+)
+
 main() {
     trap cleanup EXIT
     trap 'handle_gui_signal 129' HUP
     trap 'handle_gui_signal 130' INT
     trap 'handle_gui_signal 143' TERM
 
+    # shellcheck disable=SC2310 # Refuse before opening any dialog or storing preferences.
+    if ! is_supported_gui_platform; then
+        printf '%s\n' 'Error: the GUI requires Fedora 45 x86_64.' >&2
+        return 69
+    fi
     initialize_gui_environment
     collect_download_request
     prepare_gui_session

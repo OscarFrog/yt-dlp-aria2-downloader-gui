@@ -29,6 +29,7 @@ def run_zenity(target, case, workspace, scenario_evidence, window_event):
     behavior. Validators, main, export, and the actual CLI exit remain real.
     """
     import types
+    from contextlib import nullcontext
 
     root = workspace / 'private'
     root.mkdir(mode=0o700)
@@ -158,7 +159,8 @@ def run_zenity(target, case, workspace, scenario_evidence, window_event):
             note('result-closed', label=self.label)
 
     class Watch:
-        def __init__(self, _observer, path, result):
+        def __init__(self, observer, path, result):
+            self.observer = observer
             self.label = current['label']
             self.result = result
             self.path = path
@@ -168,6 +170,7 @@ def run_zenity(target, case, workspace, scenario_evidence, window_event):
 
         def sample(self):
             label = self.label
+            assert current['label'] == label, "Retired watcher observed another trial"
             process = processes[label]
             live = {}
             scenario = process.env['FIXTURE_SCENARIO']
@@ -176,7 +179,7 @@ def run_zenity(target, case, workspace, scenario_evidence, window_event):
                 live['70000'] = dict(snapshot)
             if label == 'open-folder' and not (root / (label + '.viewer-release')).exists():
                 live['70000'] = dict(snapshot)
-            value = dict(monotonic_ns=6_000_000_000, live=live, zombies=[], url_in_argv=[])
+            value = dict(monotonic_ns=6_000_000_000, live=live, zombies=[], url_in_argv=[], argv_exit_gaps=0)
             value.update(self.result.refresh())
             self.last = value
             return copy.deepcopy(value)
@@ -193,6 +196,8 @@ def run_zenity(target, case, workspace, scenario_evidence, window_event):
             value = self.sample()
             value['live'] = {}
             label = self.label
+            if label == 'error' and case == 'second-trial-eio' and self.finished == 2:
+                raise OSError(errno.EIO, 'synthetic second trial refusal')
             first = label == 'success'
             note('finish', label=label, number=self.finished)
             if first and self.finished == 1 and case in ('earlier-url', 'earlier-and-cleanup'):
@@ -257,7 +262,7 @@ def run_zenity(target, case, workspace, scenario_evidence, window_event):
 
     def read(path, *args, **kwargs):
         if path == Path('/etc/os-release'):
-            return 'ID=ubuntu\nVERSION_ID=24.04\n'
+            return 'ID=fedora\nVERSION_ID=45\n'
         if str(path).startswith('/proc/'):
             if str(path) == '/proc/70000/comm':
                 return 'ffmpeg\n'
@@ -279,11 +284,15 @@ def run_zenity(target, case, workspace, scenario_evidence, window_event):
             return object
 
         def run(_args, **_kwargs):
+            if _args == ['rpm', '--eval', '%{_arch}']:
+                return subprocess.CompletedProcess(_args, 0, stdout='x86_64\n', stderr='')
             return subprocess.CompletedProcess(_args, 0, stdout='synthetic tool 1\n', stderr='')
 
         def load(name, _filename):
             if name == 'autonomous_observer':
-                return types.SimpleNamespace(Observer=lambda _token: None,
+                return types.SimpleNamespace(Observer=lambda _token: types.SimpleNamespace(close=lambda: None,
+                                             use_leaf=lambda label: None, child=lambda proc: None),
+                                             observer_binary=lambda: None, close_utilities=lambda: None,
                                              process_row=lambda _path: dict(snapshot))
             return types.SimpleNamespace(Session=Session)
 
@@ -328,7 +337,20 @@ def run_zenity(target, case, workspace, scenario_evidence, window_event):
             if handle != 70000:
                 os.close(handle)
 
+        def launch_fixture(env, _log, label):
+            assert label == env['FIXTURE_LABEL']
+            previous = current['label']
+            if previous is not None:
+                assert any(event == dict(kind='result-closed', label=previous) for event in notices)
+                saved = json.loads((root / (previous + '.final-before-rescue.json')).read_bytes())
+                if case == 'second-trial-eio':
+                    assert saved['scope_label'] == previous
+            return Process([], env=env)
+
         namespace.update(
+            trial_admissions=lambda labels, _resources: {label: nullcontext(label) for label in labels},
+            launch_gui=launch_fixture,
+            application_leaf_populated=lambda _label: False,
             source_identity=lambda: {'source': 'synthetic fixture'},
             prepare_runtime=prepare, load_module=load,
             ResultWitness=Result, Watch=Watch, read_events=events,
@@ -499,6 +521,11 @@ def run_multi(source, case, root):
             self.error = None
             self.leaks = set()
             self.finished_samples = 0
+        def child(self, process):
+            if process is not self.process:
+                raise AssertionError('Wrong fixture child')
+        def close(self):
+            pass
         def sample(self):
             p = self.process
             # Normal scenario state is deterministic; no OS process is represented.
@@ -597,6 +624,8 @@ def run_multi(source, case, root):
 
 
     def check_output(args, **kwargs):
+        if args == ['rpm', '--eval', '%{_arch}']:
+            return 'x86_64\n'
         if args[0] == 'stat':
             return 'syntheticfs\n'
         if args[-1] == '--version':
@@ -623,7 +652,7 @@ def run_multi(source, case, root):
             values['fixture_roots'] = lambda: (root, evidence)
             values['wait_until'] = lambda predicate, message, timeout=20: values['require'](predicate(), message)
             values['observer_module'].Observer = Observer
-            values['observer_module'].snapshot = snapshot
+            values['observer_module'].current_process = lambda pid: snapshot().get(pid)
             if case in ('initial-error', 'initial-and-cleanup'):
                 values['record_fixture_environment'] = lambda *args: (_ for _ in ()).throw(OSError(errno.EIO, 'synthetic initial'))
             if case == 'export-error':
@@ -643,7 +672,8 @@ def run_multi(source, case, root):
 
     # All substituted identities/events are inert data. Any unexpected process I/O
     # raises, rather than falling through to the host.
-    with mock.patch.dict(os.environ, {'YTDLP_REAL_BINARY': str(binary), 'YTDLP_QUALIFY_ZENITY_EVENTS': '0'}, clear=False), \
+    with mock.patch.object(sys, 'argv', [str(source)]), \
+         mock.patch.dict(os.environ, {'YTDLP_REAL_BINARY': str(binary), 'YTDLP_QUALIFY_ZENITY_EVENTS': '0'}, clear=False), \
          mock.patch('http.server.ThreadingHTTPServer', Server), \
          mock.patch('threading.Thread', Thread), mock.patch('threading.Event', Event), \
          mock.patch('subprocess.Popen', Process), mock.patch('subprocess.run', run), \
@@ -656,10 +686,12 @@ def run_multi(source, case, root):
          mock.patch('signal.pidfd_send_signal', pidfd_signal):
         (root / 'deno').write_bytes(b'synthetic deno')
         os.environ.pop('YTDLP_LEGACY_ENGINE', None)
-        sys.settrace(trace)
-        sys.setprofile(returned)
+        caller_trace = sys.gettrace()
+        caller_profile = sys.getprofile()
         try:
+            sys.settrace(trace)
+            sys.setprofile(returned)
             runpy.run_path(str(source), run_name='__main__')
         finally:
-            sys.settrace(None)
-            sys.setprofile(None)
+            sys.setprofile(caller_profile)
+            sys.settrace(caller_trace)

@@ -4,7 +4,7 @@
 
 [English version](README.md)
 
-Téléchargez une vidéo ou sa piste audio sous **GNU/Linux**, avec une interface
+Téléchargez une vidéo ou sa piste audio sous **Fedora 45 Workstation x86_64**, avec une interface
 Zenity simple ou depuis le terminal. Collez une URL, choisissez les pistes et
 le dossier de destination, puis suivez le téléchargement et le traitement.
 
@@ -47,31 +47,21 @@ Le journal illustre une erreur d'espace disque simulée.
 
 Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
 Les noms ci-dessous correspondent à la release v2.4.5 actuellement publiée.
-Les prochaines constructions RPM à partir de ces sources ciblent Fedora 45.
-Pour un RPM publié, utilisez la version de Fedora du tableau et l’installateur
-de la même release.
-Téléchargez les fichiers adaptés à votre système dans un même dossier, puis ouvrez-y un terminal.
+Fedora 45 x86_64 est la seule plateforme officiellement prise en charge. Seul un RPM portant la mention `.fc45.x86_64` convient à ce système. Si le RPM publié ci-dessous cible une version antérieure de Fedora, utilisez ce dépôt source sous Fedora 45 en attendant la publication du RPM Fedora 45.
 
 | Système | Application à télécharger |
 | --- | --- |
 | Fedora 44 | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.5-1.fc44.noarch.rpm) |
-| Debian / Ubuntu | [DEB](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui_2.4.5-1_all.deb) |
-| Autres GNU/Linux / utilisation portable | [ZIP](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.5.zip) |
+| Sources portables | [ZIP](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.5.zip) |
 
-### Fedora 44
+### Fedora 45
 
-Téléchargez ces quatre fichiers depuis cette release :
-
-```text
-install-fedora.sh
-RPM-GPG-KEY-OscarFrog
-yt-dlp-aria2-downloader-gui-2.4.5-1.fc44.noarch.rpm
-SHA256SUMS
-```
+Pour installer un RPM Fedora 45 publié, placez le RPM, `install-fedora.sh`, `SHA256SUMS` et `RPM-GPG-KEY-OscarFrog` de la même release immuable dans un répertoire vide.
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-bash ./install-fedora.sh ./yt-dlp-aria2-downloader-gui-2.4.5-1.fc44.noarch.rpm
+packages=(./*-1.fc45.x86_64.rpm)
+(( ${#packages[@]} == 1 )) && [[ -f ${packages[0]} ]] && bash ./install-fedora.sh "${packages[0]}"
 ```
 
 Utilisez le bootstrap plutôt qu'une installation directe du RPM sur une Fedora
@@ -79,25 +69,7 @@ fraîche. Il vérifie les signatures, active RPM Fusion Free si nécessaire,
 remplace `ffmpeg-free` par le `ffmpeg` complet, installe les dépendances et
 prépare les runtimes yt-dlp et Deno vérifiés propres à l'utilisateur.
 
-### Debian et Ubuntu
-
-La dernière release publiée, la 2.4.5, fournit le DEB. Téléchargez :
-
-```text
-yt-dlp-aria2-downloader-gui_2.4.5-1_all.deb
-SHA256SUMS
-```
-
-```bash
-sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./yt-dlp-aria2-downloader-gui_2.4.5-1_all.deb
-```
-
-Le paquet installe les dépendances système. Les runtimes yt-dlp et Deno vérifiés
-sont préparés pour votre utilisateur au premier lancement ; les paquets de la
-distribution pour ces deux outils ne sont pas nécessaires.
-
-Avec le RPM et le DEB, le lanceur et son icône sont installés automatiquement dans le menu des applications.
+Avec le RPM, le lanceur et son icône sont installés automatiquement dans le menu des applications.
 **Ne lancez pas `install-gui.sh` après l’installation d’un paquet.**
 Pour remplacer une installation ZIP/Git, retirez d'abord son ancien lanceur
 depuis le dossier source avec `./install-gui.sh uninstall`.
@@ -145,9 +117,9 @@ Après un déplacement, relancez `./install-gui.sh install`.
 
 ### Prérequis
 
-GNU/Linux sur `x86_64` ou `aarch64` pour les runtimes gérés, avec :
+Fedora 45 x86_64 pour les runtimes gérés, avec :
 
-- Bash **4.4 ou plus récent**, Python **3.10 ou plus récent**, aria2 **1.37.0 ou plus récent** ;
+- Bash **5.3 ou plus récent**, Python **3.15 ou plus récent**, aria2 **1.37.0 ou plus récent** ;
 - FFmpeg et `ffprobe`, Zenity, certificats CA, curl, GnuPG et unzip ;
 - GNU coreutils/grep, findutils et util-linux (`setsid`, `flock`) ;
 - pidfds Linux et WNOWAIT utilisables, informations procfs des processus/threads lisibles.
@@ -256,7 +228,7 @@ manquante produit une erreur explicite.
 
 ## Utilisation en ligne de commande
 
-Les exemples suivants s'exécutent depuis un dossier ZIP/Git. Pour un RPM/DEB,
+Les exemples suivants s'exécutent depuis un dossier ZIP/Git. Pour un RPM,
 remplacez `./download-video.sh` par `yt-dlp-aria2-downloader`.
 Remplacez l'adresse d'exemple par votre URL et conservez les guillemets.
 
@@ -408,15 +380,8 @@ Fedora :
 sudo dnf remove yt-dlp-aria2-downloader-gui
 ```
 
-Debian/Ubuntu :
-
-```bash
-sudo apt remove yt-dlp-aria2-downloader-gui
-```
-
 La désinstallation finale du RPM tente de nettoyer les runtimes gérés vérifiés
 et les anciens artefacts utilisateur reconnus ; les mises à niveau les préservent.
-Le retrait/purge du DEB conserve les données propres aux utilisateurs.
 Le nettoyage des paquets conserve les liens des lanceurs portables.
 
 Pour un lanceur installé depuis une archive ZIP portable ou un checkout Git, exécutez depuis son dossier source :

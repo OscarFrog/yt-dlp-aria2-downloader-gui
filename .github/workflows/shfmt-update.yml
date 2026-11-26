@@ -34,9 +34,8 @@ jobs:
 
       - name: Install validation dependencies
         run: |
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes \
-            aria2 curl desktop-file-utils gnupg procps shellcheck unzip
+          set -euo pipefail
+          for tool in git gh jq python3 curl gpg docker tar sha256sum; do command -v "$tool" >/dev/null; done
 
       - name: Detect latest stable shfmt release
         id: detect
@@ -133,26 +132,22 @@ jobs:
               exit 65
             fi
             amd64_digest=$(gh api "repos/mvdan/sh/releases/tags/${latest_tag}" \
-              --jq '.assets[] | select(.name | endswith("_linux_amd64")) | .digest')
-            arm64_digest=$(gh api "repos/mvdan/sh/releases/tags/${latest_tag}" \
-              --jq '.assets[] | select(.name | endswith("_linux_arm64")) | .digest')
+              --jq ".assets[] | select(.name == \"shfmt_${latest_tag}_linux_amd64\") | .digest")
             [[ ${amd64_digest} =~ ^sha256:[0-9a-f]{64}$ ]]
-            [[ ${arm64_digest} =~ ^sha256:[0-9a-f]{64}$ ]]
             python3 - "${branch_sha}" "${latest_version}" \
-              "${amd64_digest#sha256:}" "${arm64_digest#sha256:}" <<'PYCODE'
+              "${amd64_digest#sha256:}" <<'PYCODE'
           import importlib.util
           import sys
 
           spec = importlib.util.spec_from_file_location("push_version", "scripts/check-push-version.py")
           checker = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(checker)
-          oid, version, amd64, arm64 = sys.argv[1:]
+          oid, version, amd64 = sys.argv[1:]
           checker.coherent_version(lambda path: checker.object_source(oid, path))
           expected = (
               "# Managed by .github/workflows/shfmt-update.yml.\n"
               "# Do not change a checksum without changing/reviewing the corresponding asset.\n"
               f"SHFMT_VERSION={version}\nSHFMT_LINUX_AMD64_SHA256={amd64}\n"
-              f"SHFMT_LINUX_ARM64_SHA256={arm64}\n"
           )
           if checker.object_source(oid, "scripts/dev-tools/shfmt-pin.env").decode("utf-8") != expected:
               raise SystemExit("Error: existing shfmt branch differs from the expected upstream pin; preserve and review it.")
@@ -222,91 +217,67 @@ jobs:
           umask 077
 
           [[ ${SHFMT_VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          amd64_sha=''
-          arm64_sha=''
+          kernel_arch=$(uname -m) || exit 69
+          [[ ${kernel_arch} == x86_64 ]] || { printf 'Error: shfmt requires x86_64.\n' >&2; exit 69; }
           work_dir=$(mktemp -d)
           trap 'rm -rf -- "${work_dir}"' EXIT
 
-          for arch in amd64 arm64; do
-            asset="shfmt_v${SHFMT_VERSION}_linux_${arch}"
-            url="https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/${asset}"
-            expected_digest=$(
-              gh api "repos/mvdan/sh/releases/tags/v${SHFMT_VERSION}" \
-                --jq ".assets[] | select(.name == \"${asset}\") | .digest"
-            )
-            if [[ ! ${expected_digest} =~ ^sha256:([0-9a-f]{64})$ ]]; then
-              printf 'Error: missing or invalid GitHub release digest for %s: %s\n' \
-                "${asset}" "${expected_digest:-<missing>}" >&2
-              exit 65
-            fi
-            expected_sha=${BASH_REMATCH[1]}
+          asset="shfmt_v${SHFMT_VERSION}_linux_amd64"
+          url="https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/${asset}"
+          expected_digest=$(
+            gh api "repos/mvdan/sh/releases/tags/v${SHFMT_VERSION}" \
+              --jq ".assets[] | select(.name == \"${asset}\") | .digest"
+          )
+          if [[ ! ${expected_digest} =~ ^sha256:([0-9a-f]{64})$ ]]; then
+            printf 'Error: missing or invalid GitHub release digest for %s: %s\n' \
+              "${asset}" "${expected_digest:-<missing>}" >&2
+            exit 65
+          fi
+          expected_sha=${BASH_REMATCH[1]}
 
-            curl \
-              --fail \
-              --location \
-              --proto '=https' \
-              --tlsv1.2 \
-              --retry 3 \
-              --retry-delay 1 \
-              --silent \
-              --show-error \
-              --output "${work_dir}/${asset}" \
-              "${url}"
+          curl \
+            --fail \
+            --location \
+            --proto '=https' \
+            --tlsv1.2 \
+            --retry 3 \
+            --retry-delay 1 \
+            --silent \
+            --show-error \
+            --output "${work_dir}/${asset}" \
+            "${url}"
 
-            downloaded_sha=$(sha256sum "${work_dir}/${asset}")
-            downloaded_sha=${downloaded_sha%% *}
-            if [[ ${downloaded_sha} != "${expected_sha}" ]]; then
-              printf 'Error: downloaded shfmt digest mismatch for %s.\n' \
-                "${asset}" >&2
-              exit 65
-            fi
-            printf -v "${arch}_sha" '%s' "${downloaded_sha}"
-          done
-
-          [[ ${amd64_sha} =~ ^[0-9a-f]{64}$ ]]
-          [[ ${arm64_sha} =~ ^[0-9a-f]{64}$ ]]
-
-          case $(uname -m) in
-            x86_64 | amd64)
-              native_arch='amd64'
-              native_sha=${amd64_sha}
-              ;;
-            aarch64 | arm64)
-              native_arch='arm64'
-              native_sha=${arm64_sha}
-              ;;
-            *)
-              printf 'Error: unsupported runner architecture for shfmt sandbox: %s\n' \
-                "$(uname -m)" >&2
-              exit 69
-              ;;
-          esac
+          downloaded_sha=$(sha256sum "${work_dir}/${asset}")
+          downloaded_sha=${downloaded_sha%% *}
+          if [[ ${downloaded_sha} != "${expected_sha}" ]]; then
+            printf 'Error: downloaded shfmt digest mismatch for %s.\n' \
+              "${asset}" >&2
+            exit 65
+          fi
 
           candidate_dir="${RUNNER_TEMP}/shfmt-candidate-binary"
           mkdir -p -- "${candidate_dir}"
           cp -- \
-            "${work_dir}/shfmt_v${SHFMT_VERSION}_linux_${native_arch}" \
+            "${work_dir}/${asset}" \
             "${candidate_dir}/shfmt"
           chmod 0555 -- "${candidate_dir}/shfmt"
-          printf '%s  shfmt\n' "${native_sha}" \
+          printf '%s  shfmt\n' "${expected_sha}" \
             >"${candidate_dir}/shfmt.sha256"
 
           python3 - \
             "${SHFMT_VERSION}" \
-            "${amd64_sha}" \
-            "${arm64_sha}" <<'PY'
+            "${expected_sha}" <<'PY'
           from pathlib import Path
           import re
           import sys
 
           path = Path("scripts/dev-tools/shfmt-pin.env")
-          version, amd64_sha, arm64_sha = sys.argv[1:]
+          version, amd64_sha = sys.argv[1:]
           text = path.read_text(encoding="utf-8")
 
           replacements = {
               "SHFMT_VERSION": version,
               "SHFMT_LINUX_AMD64_SHA256": amd64_sha,
-              "SHFMT_LINUX_ARM64_SHA256": arm64_sha,
           }
 
           for key, value in replacements.items():
@@ -522,10 +493,34 @@ jobs:
           persist-credentials: false
       - name: Install verifier dependencies
         run: |
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo env DEBIAN_FRONTEND=noninteractive \
-            apt-get -o Acquire::Retries=3 install --yes --no-install-recommends \
-            aria2 curl desktop-file-utils findutils gnupg procps python3 shellcheck unzip
+          set -euo pipefail
+          for tool in git gh jq python3 curl gpg docker tar sha256sum; do command -v "$tool" >/dev/null; done
+      - name: Resolve the prior formatter from the immutable Fedora base
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          base_sha=$(git rev-parse HEAD)
+          kernel_arch=$(uname -m)
+          [[ ${base_sha} == "${EXPECTED_BASE_SHA}" && ${kernel_arch} == x86_64 ]]
+          context=$(mktemp -d)
+          trap 'rm -rf -- "${context}"' EXIT
+          for name in ensure-shfmt.sh shfmt-pin.env; do
+            git show "${EXPECTED_BASE_SHA}:scripts/dev-tools/${name}" >"${context}/${name}"
+          done
+          cat >"${context}/Dockerfile" <<'DOCKERFILE'
+          FROM registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b AS prior
+          RUN . /etc/os-release && test "$ID:$VERSION_ID" = fedora:45 && \
+              kernel_arch=$(uname -m) && rpm_arch=$(rpm --eval '%{_arch}') && \
+              test "$kernel_arch" = x86_64 && test "$rpm_arch" = x86_64 && \
+              dnf -y --setopt=install_weak_deps=False install coreutils curl util-linux
+          COPY ensure-shfmt.sh shfmt-pin.env /resolver/
+          RUN prior=$(bash /resolver/ensure-shfmt.sh) && install -m 0555 "$prior" /prior-shfmt
+          FROM scratch
+          COPY --from=prior /prior-shfmt /shfmt
+          DOCKERFILE
+          mkdir -m 700 -- "${RUNNER_TEMP}/shfmt-prior"
+          docker build --output "type=local,dest=${RUNNER_TEMP}/shfmt-prior" "${context}"
       - name: Download untrusted candidate handoff
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
@@ -670,7 +665,10 @@ jobs:
             cat -- "${shell_file}"
           } | LC_ALL=C sort -u >"${allowed_file}"
 
-          trusted_shfmt=$(bash ./scripts/dev-tools/ensure-shfmt.sh)
+          trusted_shfmt="${RUNNER_TEMP}/shfmt-prior/shfmt"
+          prior_digest=$(awk -F= '$1 == "SHFMT_LINUX_AMD64_SHA256" { print $2 }' scripts/dev-tools/shfmt-pin.env)
+          [[ ${prior_digest} =~ ^[0-9a-f]{64}$ ]]
+          printf '%s  %s\n' "${prior_digest}" "${trusted_shfmt}" | sha256sum --check
           [[ -x ${trusted_shfmt} && ! -L ${trusted_shfmt} ]] || {
             printf 'Error: trusted prior shfmt could not be resolved.\n' >&2
             exit 65
@@ -737,17 +735,14 @@ jobs:
 
           pin_version=$(awk -F= '$1 == "SHFMT_VERSION" { print $2 }' scripts/dev-tools/shfmt-pin.env)
           pin_amd64=$(awk -F= '$1 == "SHFMT_LINUX_AMD64_SHA256" { print $2 }' scripts/dev-tools/shfmt-pin.env)
-          pin_arm64=$(awk -F= '$1 == "SHFMT_LINUX_ARM64_SHA256" { print $2 }' scripts/dev-tools/shfmt-pin.env)
           [[ ${pin_version} == "${SHFMT_VERSION}" ]]
           [[ ${pin_amd64} =~ ^[0-9a-f]{64}$ ]]
-          [[ ${pin_arm64} =~ ^[0-9a-f]{64}$ ]]
 
           {
             printf '%s\n'               '# Managed by .github/workflows/shfmt-update.yml.'
             printf '%s\n'               '# Do not change a checksum without changing/reviewing the corresponding asset.'
             printf 'SHFMT_VERSION=%s\n' "${pin_version}"
             printf 'SHFMT_LINUX_AMD64_SHA256=%s\n' "${pin_amd64}"
-            printf 'SHFMT_LINUX_ARM64_SHA256=%s\n' "${pin_arm64}"
           } >"${expected_pin}"
 
           if ! cmp -s -- scripts/dev-tools/shfmt-pin.env "${expected_pin}"; then
@@ -775,29 +770,24 @@ jobs:
             exit 65
           fi
 
-          for arch in amd64 arm64; do
-            asset="shfmt_v${pin_version}_linux_${arch}"
-            release_digest=$(
-              gh api "repos/mvdan/sh/releases/tags/${upstream_tag}" \
-                --jq ".assets[] | select(.name == \"${asset}\") | .digest"
-            )
-            [[ ${release_digest} =~ ^sha256:([0-9a-f]{64})$ ]] || {
-              printf 'Error: verifier could not resolve upstream digest for %s.\n' \
-                "${asset}" >&2
-              exit 65
-            }
-            expected_sha=${BASH_REMATCH[1]}
-            if [[ ${arch} == amd64 ]]; then
-              pinned_sha=${pin_amd64}
-            else
-              pinned_sha=${pin_arm64}
-            fi
-            [[ ${pinned_sha} == "${expected_sha}" ]] || {
-              printf 'Error: candidate pin does not match GitHub release digest for %s.\n' \
-                "${asset}" >&2
-              exit 65
-            }
-          done
+          kernel_arch=$(uname -m) || exit 69
+          [[ ${kernel_arch} == x86_64 ]] || { printf 'Error: shfmt requires x86_64.\n' >&2; exit 69; }
+          asset="shfmt_v${pin_version}_linux_amd64"
+          release_digest=$(
+            gh api "repos/mvdan/sh/releases/tags/${upstream_tag}" \
+              --jq ".assets[] | select(.name == \"${asset}\") | .digest"
+          )
+          [[ ${release_digest} =~ ^sha256:([0-9a-f]{64})$ ]] || {
+            printf 'Error: verifier could not resolve upstream digest for %s.\n' \
+              "${asset}" >&2
+            exit 65
+          }
+          expected_sha=${BASH_REMATCH[1]}
+          [[ ${pin_amd64} == "${expected_sha}" ]] || {
+            printf 'Error: candidate pin does not match GitHub release digest for %s.\n' \
+              "${asset}" >&2
+            exit 65
+          }
 
           # Validate verified formatter and project without exposing the host
           # checkout, handoff files, runtime token, or network to the candidate.
@@ -813,26 +803,19 @@ jobs:
           }
           trap cleanup_verifier_sandbox EXIT
 
-          case $(uname -m) in
-            x86_64 | amd64) native_arch=amd64; native_sha=${pin_amd64} ;;
-            aarch64 | arm64) native_arch=arm64; native_sha=${pin_arm64} ;;
-            *) printf 'Error: unsupported verifier architecture.\n' >&2; exit 69 ;;
-          esac
           curl --fail --location --proto '=https' --tlsv1.2 \
             --connect-timeout 15 --max-time 120 --retry 3 \
             --output "${docker_context}/shfmt" \
-            "https://github.com/mvdan/sh/releases/download/v${pin_version}/shfmt_v${pin_version}_linux_${native_arch}"
-          printf '%s  %s\n' "${native_sha}" "${docker_context}/shfmt" \
+            "https://github.com/mvdan/sh/releases/download/v${pin_version}/${asset}"
+          printf '%s  %s\n' "${pin_amd64}" "${docker_context}/shfmt" \
             | sha256sum --check
           chmod 0555 -- "${docker_context}/shfmt"
           cat >"${docker_context}/Dockerfile" <<'DOCKERFILE'
-          FROM ubuntu:24.04
-          RUN apt-get -o Acquire::Retries=3 update && \
-              DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install \
-              --yes --no-install-recommends aria2 bash ca-certificates coreutils \
-              curl desktop-file-utils diffutils findutils git gnupg grep jq procps \
-              python3 sed shellcheck unzip util-linux && \
-              rm -rf /var/lib/apt/lists/*
+          FROM registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
+          RUN . /etc/os-release && test "$ID:$VERSION_ID" = fedora:45 && \
+              kernel_arch=$(uname -m) && rpm_arch=$(rpm --eval '%{_arch}') && \
+              test "$kernel_arch" = x86_64 && test "$rpm_arch" = x86_64 && \
+              dnf -y --setopt=install_weak_deps=False install cargo clippy gcc rust rustfmt aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file && dnf clean all
           ARG SHFMT_VERSION
           COPY --chmod=0555 shfmt /opt/shfmt/v${SHFMT_VERSION}/shfmt
           DOCKERFILE
@@ -859,7 +842,12 @@ jobs:
               --env HOME=/tmp/validation-home \
               --env SHFMT_TOOL_ROOT=/opt/shfmt \
               "${image}" \
-              bash -c 'mkdir -m 700 -- "$HOME"; bash ./tests/run-all.sh --jobs 4 --full'
+              bash -c 'set -e; source /etc/os-release
+                kernel_arch=$(uname -m)
+                rpm_arch=$(rpm --eval "%{_arch}")
+                [[ ${ID} == fedora && ${VERSION_ID} == 45 && ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
+                mkdir -m 700 -- "$HOME"
+                bash ./tests/run-all.sh --jobs 4 --full'
           # Remove the whole container before trusting any resulting status.
           docker rm -f --volumes "${container}" >/dev/null
           canonical_manifest "${after}"

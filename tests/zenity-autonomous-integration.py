@@ -53,6 +53,7 @@ def evidence(scenario='success', label=None, race_side='after-publication'):
         'output_present': True, 'output_verified': True,
         'result_discovered': True, 'result_published': True, 'partial_retained': False,
         'diagnostics_clean': True, 'state_clean': True,
+        'process_scope': 'native-application-cgroup', 'terminal_populated': False,
         'observer_error': False, 'final_live': {}, 'final_windows': [],
         'url_in_argv': [], 'stage': {'transfer_active': True, 'ffmpeg_active': False},
         'closure_ns': 5_000_000_000, 'exit_ns': 6_000_000_000,
@@ -137,6 +138,60 @@ def complete_evidence():
     return {'schema': 1, 'scenarios': rows}
 
 
+class PlatformAdmissionTests(unittest.TestCase):
+    def test_graphical_protocol_platforms(self):
+        manual = PROJECT / 'tests/zenity-real-session-qualification.sh'
+        # Supply OS metadata only at the manual harness's trusted read. Stop at
+        # its first fixture allocation so an admitted case cannot open a dialog.
+        probe = '''
+release_id=$2
+release_version=$3
+probe_machine=$4
+probe_rpm_arch=$5
+uname() { [[ $1 == -m ]] && printf '%s\n' "${probe_machine}"; }
+rpm() { [[ $* == '--eval %{_arch}' ]] && printf '%s\n' "${probe_rpm_arch}"; }
+source() {
+    [[ $1 == /etc/os-release ]] || return 1
+    ID=$release_id
+    VERSION_ID=$release_version
+}
+zenity() { return 1; }
+mktemp() { return 75; }
+builtin source "$1" success
+'''
+        for distro, version, machine, rpm_arch, admitted in (
+                ('fedora', '44', 'x86_64', 'x86_64', False), ('fedora', '45', 'x86_64', 'x86_64', True), ('ubuntu', '24.04', 'x86_64', 'x86_64', False),
+                ('fedora', '43', 'x86_64', 'x86_64', False), ('fedora', '46', 'x86_64', 'x86_64', False), ('ubuntu', '24.10', 'x86_64', 'x86_64', False),
+                ('debian', '45', 'x86_64', 'x86_64', False), ('ubuntu', '45', 'x86_64', 'x86_64', False), ('fedora', '', 'x86_64', 'x86_64', False),
+                ('fedora', '45', 'unsupported', 'x86_64', False), ('fedora', '45', 'x86_64', 'unsupported', False)):
+            with self.subTest(route='autonomous', distro=distro, version=version, machine=machine, rpm_arch=rpm_arch):
+                metadata = f'ID={distro}\nVERSION_ID="{version}"\n'
+                # Stop at source identity, immediately after platform admission.
+                with tempfile.TemporaryDirectory() as root, \
+                        mock.patch.object(sys, 'argv', [str(DRIVER)]), \
+                        mock.patch.object(CHECK.tempfile, 'mkdtemp', return_value=root), \
+                        mock.patch.object(CHECK, 'trial_admissions', return_value={}), \
+                        mock.patch.object(Path, 'read_text', autospec=True, return_value=metadata) as read, \
+                        mock.patch.object(CHECK.os, 'uname', return_value=mock.Mock(machine=machine)), \
+                        mock.patch.object(CHECK.subprocess, 'run', return_value=mock.Mock(stdout=rpm_arch)), \
+                        mock.patch.object(CHECK, 'source_identity', side_effect=RuntimeError) as identity, \
+                        redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    umask = os.umask(0o077)
+                    try:
+                        self.assertEqual(CHECK.main(), 1)
+                    finally:
+                        os.umask(umask)
+                    read.assert_called_once_with(Path('/etc/os-release'))
+                    self.assertEqual(identity.call_count, int(admitted))
+            with self.subTest(route='manual', distro=distro, version=version, machine=machine, rpm_arch=rpm_arch):
+                result = subprocess.run(['bash', '-c', probe, 'bash', str(manual), distro, version, machine, rpm_arch],
+                                        env={'PATH': os.defpath, 'DISPLAY': ':fixture'}, capture_output=True,
+                                        text=True, timeout=5)
+                self.assertEqual(result.returncode, 75 if admitted else 65, result.stderr)
+                if not admitted:
+                    self.assertIn('real Zenity qualification requires Fedora', result.stderr)
+
+
 class EvidenceTests(unittest.TestCase):
     def reject(self, row):
         with self.assertRaises(ValueError):
@@ -160,6 +215,7 @@ class EvidenceTests(unittest.TestCase):
     def test_terminal_observer_refuses_live_process_windows_and_privacy(self):
         witnesses = {
             'observer_error': True,
+            'terminal_populated': True,
             'final_live': {'456': {'start': 12345, 'state': 'S'}},
             'final_windows': [{'window': 101, 'title': 'qualification:success:progress'}],
             'url_in_argv': [{'pid': 456, 'url': 'https://secret.invalid/private-token'}],
@@ -1025,6 +1081,7 @@ class PublicationWitnessTests(unittest.TestCase):
         self.final = self.root / 'native-remux.mkv'
         self.final.write_bytes(b'unconfirmed native remux bytes')
         self.observer = load_module('result_observer', PROJECT / 'tests/process-observer.py')
+        self.addCleanup(self.observer.close_utilities)
         self.child = subprocess.Popen(
             self.child_command(),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -1411,20 +1468,26 @@ class PrivacyAndCleanupTests(unittest.TestCase):
 
             def read(path, *args, **kwargs):
                 if path == Path('/etc/os-release'):
-                    return 'ID=fedora\nVERSION_ID=44\n'
+                    return 'ID=fedora\nVERSION_ID=45\n'
                 return real_read(path, *args, **kwargs)
+
+            def run(command, **_kwargs):
+                if command == ['rpm', '--eval', '%{_arch}']:
+                    return subprocess.CompletedProcess(command, 0, stdout='x86_64\n')
+                raise RuntimeError('injected tool failure')
 
             previous_umask = os.umask(0o077)
             try:
                 with mock.patch.object(sys, 'argv', [str(DRIVER)]), \
                         mock.patch.object(CHECK.tempfile, 'mkdtemp', return_value=str(root)), \
+                        mock.patch.object(CHECK, 'trial_admissions', return_value={}), \
                         mock.patch.object(CHECK, 'load_module', return_value=module), \
                         mock.patch.object(CHECK, 'source_identity', return_value={}), \
                         mock.patch.object(CHECK, 'prepare_runtime', side_effect=prepare), \
                         mock.patch.object(CHECK, 'write_json', side_effect=write), \
                         mock.patch.object(Path, 'read_text', read), \
                         mock.patch.object(CHECK.shutil, 'which', return_value='/unused/tool'), \
-                        mock.patch.object(CHECK.subprocess, 'run', side_effect=RuntimeError('injected tool failure')), \
+                        mock.patch.object(CHECK.subprocess, 'run', side_effect=run), \
                         redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                     self.assertEqual(CHECK.main(), 1)
             finally:
@@ -1497,20 +1560,24 @@ class TerminalVerdictTests(unittest.TestCase):
                      'missing', 'empty', 'null-fields', 'invalid-identity', 'identity-error',
                      'export-error', 'export-final-write', 'cleanup-error', 'url-and-cleanup',
                      'earlier-and-cleanup', 'final-url-write', 'final-live-write',
-                     'systemexit-observation', 'url-and-systemexit-cleanup'):
+                     'systemexit-observation', 'url-and-systemexit-cleanup', 'second-trial-eio'):
             with self.subTest(case=case):
                 result = self.run_terminal('zenity', case)
                 self.assert_terminal_verdict(result, case == 'clean')
                 if case == 'clean':
                     self.assertIn('private/summary.json', result['artifacts'])
                     self.assertIn('exported/summary.json', result['artifacts'])
-                if case not in ('earlier-url', 'earlier-and-cleanup'):
-                    # All 18 scenarios completed the real validator before the
-                    # final observation/cleanup injection; none is skipped.
-                    summary = result['artifacts']['private/summary.json']
-                    self.assertEqual(len(summary['scenarios']), 18)
-                    self.assertEqual(sum(event['kind'] == 'result-closed'
-                                         for event in result['events']), 18)
+                summary = result['artifacts']['private/summary.json']
+                expected = (18 if case in ('clean', 'export-error', 'export-final-write', 'cleanup-error')
+                            else 2 if case == 'second-trial-eio' else 1)
+                self.assertEqual(len(summary['scenarios']), expected)
+                self.assertEqual(sum(event['kind'] == 'result-closed' for event in result['events']), expected)
+                if case == 'second-trial-eio':
+                    saved = result['artifacts']['private/success.final-before-rescue.json']
+                    self.assertEqual((saved['scope_label'], saved['live'], saved['terminal_populated']),
+                                     ('success', {}, False))
+                    self.assertIs(result['artifacts']['private/error.final-before-rescue.json']
+                                  ['observation_complete'], False)
                 if case == 'final-url':
                     final = result['artifacts']['private/success.final-before-rescue.json']
                     self.assertEqual(final['url_in_argv'], [[70000, 41]])
@@ -1533,6 +1600,46 @@ class TerminalVerdictTests(unittest.TestCase):
                     summary = result['artifacts']['private/summary.json']
                     self.assertEqual(summary['failure'], summary['errors'][0]['phase'])
                     self.assertGreaterEqual(len(summary['errors']), 2)
+
+    def test_multi_worker_restores_its_callers_arguments_and_environment(self):
+        fixtures = load_module('terminal_proof_fixtures', PROJECT / 'tests/terminal-proof-fixtures.py')
+        source = PROJECT / 'tests/multi-instance-real.py'
+        def trace_hook(_frame, _event, _arg):
+            return None
+        def profile_hook(_frame, _event, _arg):
+            return None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            error_source = Path(temporary) / 'raise.py'
+            error_source.write_text("raise RuntimeError('entry failure')\n")
+            for target, error in ((source, SystemExit), (error_source, RuntimeError)):
+                with self.subTest(target=target.name):
+                    root = Path(temporary) / target.stem
+                    args = ['--terminal-proof-worker', 'multi', str(target), 'clean', str(root)]
+                    worker_argv = [__file__, *args]
+                    original_env = os.environ.copy()
+                    original_dir = Path.cwd()
+                    caller_trace = sys.gettrace()
+                    caller_profile = sys.getprofile()
+                    try:
+                        sys.settrace(trace_hook)
+                        sys.setprofile(profile_hook)
+                        with mock.patch.object(sys, 'argv', worker_argv), redirect_stdout(io.StringIO()):
+                            with self.assertRaises(error) as done:
+                                fixtures.run_multi(target, 'clean', root)
+                            if error is SystemExit:
+                                self.assertEqual(done.exception.code, 0)
+                            else:
+                                self.assertEqual(str(done.exception), 'entry failure')
+                            self.assertIs(sys.argv, worker_argv)
+                            self.assertEqual(sys.argv[1:], args)
+                        self.assertIs(sys.gettrace(), trace_hook)
+                        self.assertIs(sys.getprofile(), profile_hook)
+                    finally:
+                        sys.setprofile(caller_profile)
+                        sys.settrace(caller_trace)
+                    self.assertTrue(os.environ == original_env, 'Worker environment changed')
+                    self.assertEqual(Path.cwd(), original_dir)
 
     def test_multi_complete_program_terminal_matrix(self):
         for case in ('clean', 'final-live', 'final-url', 'previous-url', 'eacces', 'eio',
@@ -1598,9 +1705,9 @@ class TerminalVerdictTests(unittest.TestCase):
              'missing', 'returncode'),
             ('cleanup-rehabilitates', '    if passed:\n        for row in rows:',
              '    passed = True\n    if passed:\n        for row in rows:', 'earlier-url', 'returncode'),
-            ('early-pass', '        passed = True\n    except BaseException as error:',
-             "        passed = True\n        print('PASS: premature fixture verdict', flush=True)\n"
-             '    except BaseException as error:', 'final-url', 'message'),
+            ('early-pass', '            finalize_trial(*trial)',
+             "            print('PASS: premature fixture verdict', flush=True)\n            finalize_trial(*trial)",
+             'final-url', 'message'),
         )
         for name, before, after, case, oracle in changes:
             with self.subTest(mutation=name), tempfile.TemporaryDirectory(prefix='terminal-mutant-') as temporary:
@@ -1610,6 +1717,13 @@ class TerminalVerdictTests(unittest.TestCase):
                 target = Path(temporary) / DRIVER.name
                 target.write_text(mutant)
                 result = self.run_terminal('zenity', case, target)
+                if name in ('omit-live', 'omit-url', 'error-as-success', 'missing-as-empty'):
+                    # The missing local veto is caught by the independently reread saved evidence.
+                    self.assertEqual(result['returncode'], 1)
+                    self.assertEqual(result['artifacts']['private/summary.json']['failure'],
+                                     'Scenario qualification failed.')
+                    self.assert_terminal_verdict(result, False)
+                    continue
                 if oracle == 'returncode':
                     self.assertEqual(result['returncode'], 0,
                                      'Mutation did not reach its intended false-success path: ' +
@@ -1638,7 +1752,8 @@ class TerminalVerdictTests(unittest.TestCase):
             ('miss-system-exit', "except BaseException as error:\n            qualification_failure(failures, 'terminal-observation', label, error)",
              "except Exception as error:\n            qualification_failure(failures, 'terminal-observation', label, error)",
              'systemexit-observation', 'returncode'),
-            ('force-zero', '    sys.exit(main())', '    main()', 'final-url', 'returncode'),
+            ('force-zero', '        sys.exit(main())', '        main()\n        sys.exit(0)',
+             'final-url', 'returncode'),
             ('missing-as-empty', observed,
              "            state = terminal_observation(obs.sample() or dict(monotonic_ns=1, live={}, zombies=[], url_in_argv=[]))\n"
              '        except BaseException as error:', 'missing', 'returncode'),

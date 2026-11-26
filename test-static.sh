@@ -159,7 +159,7 @@ relative_path = sys.argv[3]
 
 try:
     source = path.read_text(encoding="utf-8")
-    module = ast.parse(source, filename=relative_path, feature_version=(3, 10))
+    module = ast.parse(source, filename=relative_path, feature_version=(3, 15))
 except (OSError, SyntaxError, UnicodeError) as error:
     print(f"invalid Python source {relative_path}: {error}", file=sys.stderr)
     raise SystemExit(65) from error
@@ -1428,17 +1428,10 @@ with tempfile.TemporaryDirectory(prefix="static-harness-") as temporary:
     module.write_text(header + "match 1:\n    case 1:\n        pass\n", encoding="utf-8")
     validate(python_root, "assert_standard_python_header", 0, module.name)
     module.write_text(header + "type Name = str\n", encoding="utf-8")
+    validate(python_root, "assert_standard_python_header", 0, module.name)
+    module.write_text(header + "type Name =\n", encoding="utf-8")
     validate(python_root, "assert_standard_python_header", 65, module.name)
-    if sys.version_info >= (3, 12):
-        original = functions["assert_standard_python_header"]
-        mutant = original.replace(", feature_version=(3, 10)", "", 1)
-        if mutant == original:
-            raise AssertionError("Python grammar negative control did not mutate")
-        validate(
-            python_root, "assert_standard_python_header", 0, module.name,
-            overrides={"assert_standard_python_header": mutant},
-        )
-    print("Static Python grammar: 3.10 accepted; newer syntax rejected.")
+    print("Static Python grammar: native Fedora syntax accepted; malformed source rejected.")
 
     if shutil.which("git", path=environment.get("PATH")) is None:
         print("SKIP: Git inventory fixtures require Git; Python/link checks still run.")
@@ -1580,7 +1573,7 @@ prerequisite_condition = "        if: matrix.yt_dlp_version == '2026.8.19'\n"
 prerequisite_diagnostic = "shared qualification requires the pinned/hash-verified latest-only impersonation step before its run"
 pins = (
     "certifi==2026.7.22 --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
-    "cffi==2.1.1 --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf",
+    "cffi==2.1.1 --hash=sha256:aeae0e330c9f6acd681f647d46cefd30c29f93e3392882e792e82080c9691399",
     "curl-cffi==0.16.0 --hash=sha256:182416f07d71a342240554fa62c22e591999b78c225b21d3fe27d9f807420dd6",
     "pycparser==3.0 --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
 )
@@ -1588,7 +1581,7 @@ requirements_assignment = '          requirements="${RUNNER_TEMP}/yt-dlp-imperso
 requirements_payload = '          cat >"${requirements}" <<\'EOF_REQUIREMENTS\'\n'
 requirements_payload += ''.join('          ' + pin + '\n' for pin in pins)
 requirements_payload += '          EOF_REQUIREMENTS\n'
-python_target = '          "${RUNNER_TEMP}/yt-dlp-venv/bin/python" -c \'import sys; assert sys.version_info[:2] == (3, 12)\'\n'
+python_target = '          "${RUNNER_TEMP}/yt-dlp-venv/bin/python" -c \'import sys; assert sys.version_info[:2] == (3, 15)\'\n'
 install = r"""          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" --isolated install \
             --disable-pip-version-check \
             --index-url https://pypi.org/simple \
@@ -1611,7 +1604,7 @@ def validate_prerequisites(text):
         raise AssertionError(prerequisite_diagnostic)
     pinned_job = text.split("  pinned-local-media:\n", 1)[1].split("  current-stable-local-media:\n", 1)[0]
     conditions = [line + '\n' for line in step.splitlines() if line.startswith('        if:')]
-    if (step not in pinned_job or "    runs-on: ubuntu-24.04\n" not in pinned_job or
+    if (step not in pinned_job or "      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b\n" not in pinned_job or
             text.index(prerequisite_marker) >= text.index(marker) or
             conditions != [prerequisite_condition]):
         raise AssertionError(prerequisite_diagnostic)
@@ -1643,7 +1636,7 @@ prerequisite_mutations.extend((
         prerequisite + '      - name: Retain shared-destination verdicts and monotonic events\n', 1)),
     ('no hash enforcement', source.replace(prerequisite, prerequisite.replace('            --require-hashes \\\n', '', 1), 1)),
     ('source builds allowed', source.replace(prerequisite, prerequisite.replace('            --only-binary=:all: \\\n', '', 1), 1)),
-    ('different Python target', source.replace(prerequisite, prerequisite.replace('(3, 12)', '(3, 13)', 1), 1)),
+    ('different Python target', source.replace(prerequisite, prerequisite.replace('(3, 15)', '(3, 13)', 1), 1)),
 ))
 for name, mutated in prerequisite_mutations:
     if mutated == source:
@@ -2100,7 +2093,11 @@ shfmt_verifier_job_policy() {
     [[ ${job_block} == *'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3'* ]] || return 65
     # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
     [[ ${job_block} == *'shfmt-candidate-${{ github.run_id }}-${{ github.run_attempt }}'* ]] || return 65
-    [[ ${job_block} == *"trusted_shfmt=\$(bash ./scripts/dev-tools/ensure-shfmt.sh)"* ]] || return 65
+    # shellcheck disable=SC2016 # The policy matches the trusted container instruction.
+    [[ ${job_block} == *'RUN prior=$(bash /resolver/ensure-shfmt.sh) && install -m 0555 "$prior" /prior-shfmt'* ]] || return 65
+    [[ ${job_block} == *'COPY --from=prior /prior-shfmt /shfmt'* ]] || return 65
+    # shellcheck disable=SC2016 # The trusted formatter path is a literal workflow boundary.
+    [[ ${job_block} == *'trusted_shfmt="${RUNNER_TEMP}/shfmt-prior/shfmt"'* ]] || return 65
     [[ ${job_block} == *"canonical_manifest \"\${baseline}\""* ]] || return 65
     [[ ${job_block} == *"canonical_manifest \"\${after}\""* ]] || return 65
     [[ ${job_block} == *"cmp -s -- \"\${baseline}\" \"\${after}\""* ]] || return 65
@@ -2460,10 +2457,6 @@ assert_package_development_policy() {
     assert_file_contains "${workflow}" \
         'rpm-under-test-${{ github.sha }}-${{ github.run_id }}' \
         'development RPM artifact binds source and build identity'
-    # shellcheck disable=SC2016 # Literal workflow build identities.
-    assert_file_contains "${workflow}" \
-        'deb-under-test-${{ github.sha }}-${{ github.run_id }}' \
-        'development DEB artifact binds source and build identity'
 }
 
 release_docs_prepare_job_policy() {
@@ -2892,7 +2885,7 @@ test_static_tooling_contracts() {
     local mock_gui_group mock_gui_suite mock_phase
     local mock_runtime_group mock_runtime_suite
     local runtime_phase scheduler_phase shfmt_phase signal_phase static_phase static_phase_file
-    local hardening_suite python_suite workflow_file
+    local hardening_suite python_suite shfmt_main workflow_file
 
     assert_source_inventory_is_canonical
     assert_repository_file_inventory_is_canonical
@@ -2918,7 +2911,7 @@ test_static_tooling_contracts() {
         '`NO_ERREXIT_SHELL_FILES`' \
         'shell policy documents the no-errexit inventory'
     assert_file_contains "${SCRIPT_DIR}/SHELL_STYLE.md" \
-        'GNU Bash 4.4 or' \
+        'GNU Bash 5.3 or' \
         'shell policy documents the supported Bash baseline'
     assert_file_contains "${SCRIPT_DIR}/tests/lib/assert.sh" \
         'assert_path_mode() {' \
@@ -2952,7 +2945,6 @@ test_static_tooling_contracts() {
     for shfmt_phase in \
         require_shfmt_commands \
         load_shfmt_pin \
-        select_shfmt_platform \
         resolve_shfmt_cache \
         prepare_shfmt_cache \
         download_shfmt_asset \
@@ -2961,6 +2953,12 @@ test_static_tooling_contracts() {
             "${shfmt_phase}() {" \
             "shfmt bootstrap phase ${shfmt_phase}"
     done
+    assert_file_contains "${SCRIPT_DIR}/scripts/dev-tools/ensure-shfmt.sh" \
+        'is_supported_shfmt_platform() (' \
+        'shfmt isolates Fedora platform detection'
+    shfmt_main=$(sed -n '/^main() {/,$p' "${SCRIPT_DIR}/scripts/dev-tools/ensure-shfmt.sh")
+    [[ ${shfmt_main} == *'if ! is_supported_shfmt_platform; then'*'resolve_shfmt_cache '*'download_shfmt_asset '* ]] \
+        || fail 'shfmt must admit the platform before resolving the cache or downloading'
     assert_file_contains "${SCRIPT_DIR}/scripts/dev-tools/ensure-shfmt.sh" \
         "local resolved_version_dir=''" \
         'shfmt cache directory does not shadow its caller output variable'
@@ -3273,6 +3271,7 @@ test_static_python_interface_contracts() {
     local updated_readme_mode=''
     local updated_static_mode=''
 
+    python3 -IB "${SCRIPT_DIR}/tests/observer_build.py" --check
     for file in "${PYTHON_FILES[@]}"; do
         assert_standard_python_header "${file}"
     done
@@ -3627,12 +3626,6 @@ test_static_release_contracts() {
         python3 -B "${SCRIPT_DIR}/scripts/update-published-version.py" \
         --check "${EXPECTED_PUBLISHED_VERSION}"
     assert_file_contains "${SCRIPT_DIR}/README.md" \
-        "yt-dlp-aria2-downloader-gui_${EXPECTED_PUBLISHED_VERSION}-1_all.deb" \
-        'English README published DEB asset'
-    assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
-        "yt-dlp-aria2-downloader-gui_${EXPECTED_PUBLISHED_VERSION}-1_all.deb" \
-        'French README published DEB asset'
-    assert_file_contains "${SCRIPT_DIR}/README.md" \
         "cd yt-dlp-aria2-downloader-gui-${EXPECTED_PUBLISHED_VERSION}" \
         'English README published portable archive directory'
     assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
@@ -3842,10 +3835,10 @@ test_static_release_contracts() {
         'cancel-in-progress: true' \
         'outdated validation runs are cancelled'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/shell.yml" \
-        $'      image: registry.fedoraproject.org/fedora:45\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
+        $'      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
         'Fedora validation uses isolated local volumes for temporary fixtures'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
-        $'      image: fedora:45\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
+        $'      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b\n      volumes:\n        - /tmp\n        - /var/tmp\n    env:\n      TMPDIR: /var/tmp' \
         'Fedora media qualification uses isolated local volumes'
 
     local package_storage_workflow package_storage_job package_storage_block
@@ -3859,7 +3852,7 @@ test_static_release_contracts() {
             "${SCRIPT_DIR}/.github/workflows/${package_storage_workflow}.yml" \
             "${package_storage_job}")
         assert_text_contains "${package_storage_block}" \
-            $'    container:\n      image: fedora:45\n      volumes:\n        - /tmp\n        - /var/tmp' \
+            $'    container:\n      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b\n      volumes:\n        - /tmp\n        - /var/tmp' \
             "${package_storage_workflow} RPM lifecycle has private local volumes"
         assert_text_contains "${package_storage_block}" \
             $'    env:\n      TMPDIR: /var/tmp\n      PACKAGE_TEST_HOME: /root' \
@@ -3873,14 +3866,14 @@ test_static_release_contracts() {
     assert_file_not_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
         'package-cleanup-stress' \
         'stress does not duplicate the deterministic cleanup suite in full validation'
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
+    assert_file_contains "${SCRIPT_DIR}/scripts/ci-fedora-media.sh" \
         'readonly rpmfusion_fingerprint=E9A491A3DE247814E7E067EAE06F8ECDD651FF2E' \
         'Fedora qualification pins the RPM Fusion bootstrap signer'
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
+    assert_file_contains "${SCRIPT_DIR}/scripts/ci-fedora-media.sh" \
         'rpmfusion-free-release-45-2.noarch' \
         'Fedora qualification pins the reviewed RPM Fusion bootstrap NEVRA'
     # shellcheck disable=SC2016 # Literal workflow authentication contract.
-    assert_file_fragments_ordered "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
+    assert_file_fragments_ordered "${SCRIPT_DIR}/scripts/ci-fedora-media.sh" \
         'RPM Fusion bootstrap requires its authorized signature before installation' \
         'if [[ ${primary_count} != 1 ||' \
         "'%|OPENPGP?{signed}:{unsigned}|\\n'" \
@@ -4212,8 +4205,8 @@ test_static_cleanup_and_qualification_contracts() {
         $'name: Run HLS post-remux duration validation\n        if: matrix.yt_dlp_version == \'2026.8.19\'' \
         'HLS fixtures with mock yt-dlp run once across the yt-dlp matrix'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/real-tools.yml" \
-        'EXPECTED_FFMPEG_VERSION: 6.1.1' \
-        'shared real-tool fixtures bind to the qualified Ubuntu FFmpeg generation'
+        'EXPECTED_FFMPEG_VERSION: 9.0.2' \
+        'shared real-tool fixtures bind to the qualified Fedora FFmpeg generation'
 }
 
 test_static_packaging_signing_contracts() {
@@ -4289,10 +4282,7 @@ test_static_packaging_signing_contracts() {
         "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
         '"${helper}" --all-users-migrate-launcher || :' \
         'RPM install and upgrade retire only the recognized legacy launcher override'
-    [[ ! -e ${SCRIPT_DIR}/packaging/deb/postinst &&
-        ! -e ${SCRIPT_DIR}/packaging/deb/prerm &&
-        ! -e ${SCRIPT_DIR}/packaging/deb/postrm ]] \
-        || fail 'DEB package source still contains unnecessary maintainer scripts.'
+    [[ ! -e ${SCRIPT_DIR}/packaging/deb ]] || fail 'Fedora-only source contains a DEB builder.'
     assert_file_contains "${SCRIPT_DIR}/packaging/install-tree.sh" \
         'packaging/package-user-cleanup.sh' \
         'package tree ships user cleanup helper'
@@ -4533,7 +4523,7 @@ test_static_packaging_signing_contracts() {
 }
 
 test_static_package_contracts() {
-    local deb_build_phase deb_lifecycle_phase install_tree_phase
+    local install_tree_phase
     local lifecycle_assertion packaging_test_phase rpm_build_phase rpm_lifecycle_phase
 
     python3 -B - "${SCRIPT_DIR}" <<'PY_README_SCREENSHOTS'
@@ -4650,14 +4640,9 @@ for name in inventory:
     if name.endswith(".md") and name not in {*documents, *historical}:
         check_neutral_document(name, (project / name).read_text(encoding="utf-8"))
 for name in ("packaging/rpm/yt-dlp-aria2-downloader-gui.spec",
-             "packaging/yt-dlp-aria2-downloader.desktop", "packaging/deb/copyright"):
+             "packaging/yt-dlp-aria2-downloader.desktop"):
     text = (project / name).read_text(encoding="utf-8").split("%changelog", 1)[0]
     check_neutral_document(name, text)
-deb_builder = (project / "packaging/deb/build-deb.sh").read_text(encoding="utf-8")
-deb_control = re.search(r"<<EOF_CONTROL\n(.*?)\nEOF_CONTROL", deb_builder, re.S)
-if not deb_control:
-    raise AssertionError("DEB public metadata template is missing")
-check_neutral_document("DEB public metadata", deb_control[1])
 for name in ("download-video.sh", "download-video-gui.sh"):
     text = (project / name).read_text(encoding="utf-8")
     help_text = re.search(r"cat <<EOF_USAGE\n(.*?)\nEOF_USAGE", text, re.S)
@@ -4749,11 +4734,7 @@ print("Public track documentation: generic choices and equivalent language contr
 PY_PUBLIC_TRACK_DOCUMENTATION
 
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
-        'name: Ubuntu 24.04 DEB' 'DEB package validation job'
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
         'name: Fedora 45 RPM' 'RPM package validation job'
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        'dist/*.deb' 'release publishes a DEB payload'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'dist/*.rpm' 'release publishes an RPM payload'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
@@ -4774,37 +4755,7 @@ PY_PUBLIC_TRACK_DOCUMENTATION
             "${packaging_test_phase}() {" \
             "packaging integration phase ${packaging_test_phase}"
     done
-    assert_file_contains "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
-        'dpkg-deb --root-owner-group --build' 'native DEB construction'
-    assert_file_contains "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
-        'local built_package_path=' \
-        'DEB output path does not shadow its caller output variable'
     # shellcheck disable=SC2016 # Literal shadowed output-path declaration.
-    assert_file_not_contains "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
-        'local package_path="${RESOLVED_OUTPUT_DIR}/' \
-        'DEB builder does not shadow its caller package path'
-    assert_status 2 'DEB builder requires a semantic version' \
-        "${SCRIPT_DIR}/packaging/deb/build-deb.sh"
-    assert_status 2 'DEB builder rejects a malformed version' \
-        "${SCRIPT_DIR}/packaging/deb/build-deb.sh" malformed-version
-    for deb_build_phase in \
-        parse_deb_build_arguments \
-        require_deb_build_commands \
-        initialize_deb_build_paths \
-        validate_deb_source_tree \
-        initialize_deb_output_directory \
-        initialize_deb_workspace \
-        resolve_deb_build_timestamp \
-        stage_deb_payload \
-        write_deb_documentation \
-        write_deb_control_metadata \
-        write_deb_checksums \
-        build_deb_package \
-        validate_deb_package; do
-        assert_file_contains "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
-            "${deb_build_phase}() {" \
-            "DEB build phase ${deb_build_phase}"
-    done
     assert_file_contains "${SCRIPT_DIR}/packaging/rpm/build-rpm.sh" \
         'rpmbuild -bb' 'native RPM construction'
     assert_status 2 'RPM builder requires a semantic version' \
@@ -4828,11 +4779,11 @@ PY_PUBLIC_TRACK_DOCUMENTATION
     done
     # shellcheck disable=SC2016 # Literal workflow-source assertions.
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
-        'git config --global --add safe.directory "${GITHUB_WORKSPACE}"' \
+        'git config --global --add safe.directory "${workspace}"' \
         'Fedora package-validation container trusts only its checked-out workspace'
     # shellcheck disable=SC2016
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        'git config --global --add safe.directory "${GITHUB_WORKSPACE}"' \
+        'git config --global --add safe.directory "${workspace}"' \
         'Fedora release container trusts only its checked-out workspace'
 
     assert_file_contains "${SCRIPT_DIR}/README.md" \
@@ -4885,27 +4836,6 @@ PY_PUBLIC_TRACK_DOCUMENTATION
             "${lifecycle_assertion}() {" \
             "shared package lifecycle assertion ${lifecycle_assertion}"
     done
-    assert_status 2 'DEB lifecycle test requires package and version' \
-        "${SCRIPT_DIR}/packaging/deb/test-package-lifecycle.sh"
-    assert_status 2 'DEB lifecycle test rejects a malformed version' \
-        "${SCRIPT_DIR}/packaging/deb/test-package-lifecycle.sh" \
-        missing.deb malformed-version
-    for deb_lifecycle_phase in \
-        parse_deb_lifecycle_arguments \
-        require_deb_lifecycle_environment \
-        initialize_deb_lifecycle_paths \
-        validate_deb_dependencies \
-        validate_deb_initial_state \
-        initialize_deb_lifecycle_workspace \
-        inspect_deb_payload \
-        install_initial_deb \
-        remove_and_purge_deb \
-        reinstall_and_purge_deb; do
-        assert_file_contains \
-            "${SCRIPT_DIR}/packaging/deb/test-package-lifecycle.sh" \
-            "${deb_lifecycle_phase}() {" \
-            "DEB lifecycle phase ${deb_lifecycle_phase}"
-    done
     assert_status 2 'RPM lifecycle test requires package and version' \
         "${SCRIPT_DIR}/packaging/rpm/test-package-lifecycle.sh"
     assert_status 2 'RPM lifecycle test rejects a malformed version' \
@@ -4928,19 +4858,11 @@ PY_PUBLIC_TRACK_DOCUMENTATION
             "RPM lifecycle phase ${rpm_lifecycle_phase}"
     done
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
-        'packaging/deb/test-package-lifecycle.sh' \
-        'DEB installation and removal validation'
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
         'packaging/rpm/test-package-lifecycle.sh' \
         'RPM installation and removal validation'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        'packaging/deb/test-package-lifecycle.sh' \
-        'release DEB installation and removal validation'
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'packaging/rpm/test-package-lifecycle.sh' \
         'release RPM installation and removal validation'
-    assert_file_not_contains "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
-        'install-gui.sh' 'DEB does not run the per-user launcher installer'
     assert_file_not_contains "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
         'install-gui.sh' 'RPM does not run the per-user launcher installer'
 }
@@ -4975,21 +4897,15 @@ test_static_runtime_regression_contracts() {
         'FFMPEG_PROGRESS_DURATION' 'measured FFmpeg progress parsing'
     assert_file_contains "${SCRIPT_DIR}/progress-monitor.sh" \
         'MAX_SAFE_COUNTER=9000000000000000' 'bounded progress arithmetic'
-    assert_file_contains "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
-        'ca-certificates, curl, aria2 (>= 1.37.0), python3 (>= 3.10), ffmpeg, gnupg, unzip, zenity' \
-        'DEB managed-runtime system dependencies'
     assert_file_not_contains "${SCRIPT_DIR}/download-video.sh" \
         '--downloader-args' \
         'obsolete yt-dlp external-downloader capability is not required'
     assert_file_contains "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
-        'Requires:       python3 >= 3.10' 'RPM private-helper Python minimum'
+        'Requires:       python3 >= 3.15' 'RPM private-helper Python minimum'
     assert_file_contains "${SCRIPT_DIR}/README.md" \
-        'Python **3.10 or newer**' 'English private-helper Python minimum'
+        'Python **3.15 or newer**' 'English private-helper Python minimum'
     assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
-        'Python **3.10 ou plus récent**' 'French private-helper Python minimum'
-    assert_file_not_contains "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
-        'yt-dlp (>= 2026.06.09)' \
-        'DEB does not depend on distribution yt-dlp'
+        'Python **3.15 ou plus récent**' 'French private-helper Python minimum'
     assert_file_contains "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
         'Requires:       aria2 >= 1.37.0' 'RPM minimum aria2 dependency'
     assert_file_contains "${SCRIPT_DIR}/install-gui.sh" \
@@ -5110,8 +5026,12 @@ test_static_runtime_regression_contracts() {
         "ffmpeg_vendor" \
         'Fedora bootstrap validates the FFmpeg vendor'
     assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
-        "rpm -qp --qf '%{NAME}\n%{VERSION}\n%{ARCH}\n'" \
-        'Fedora bootstrap validates RPM identity before installation'
+        "rpm -qp --qf '%{NEVRA}\n'" \
+        'Fedora bootstrap queries the complete application RPM identity'
+    # shellcheck disable=SC2016 # Literal RPM admission expression.
+    assert_file_contains "${SCRIPT_DIR}/install-fedora.sh" \
+        '${rpm_identity} != "${PACKAGE_NAME}-${APP_VERSION}-1.fc45.x86_64"' \
+        'Fedora bootstrap rejects a different application NEVRA before installation'
     assert_file_contains "${SCRIPT_DIR}/packaging/rpm/yt-dlp-aria2-downloader-gui.spec" \
         'Requires:       gnupg2' \
         'RPM installs signature-verification tooling'
@@ -5235,33 +5155,10 @@ test_static_runtime_regression_contracts() {
 }
 
 test_static_upgrade_and_supply_chain_contracts() {
-    local deb_upgrade_phase rpm_upgrade_phase
+    local rpm_upgrade_phase
 
     assert_file_contains "${SCRIPT_DIR}/packaging/rpm/test-package-upgrade.sh" \
         'RPM upgrade passed:' 'RPM previous-to-current upgrade test'
-    assert_file_contains "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
-        'DEB upgrade passed with user-runtime preservation:' \
-        'DEB previous-to-current upgrade test'
-    assert_status 2 'DEB upgrade test requires two packages and two versions' \
-        "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh"
-    assert_status 2 'DEB upgrade test rejects a malformed version' \
-        "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
-        missing-old.deb missing-new.deb malformed-version "${EXPECTED_VERSION}"
-    for deb_upgrade_phase in \
-        parse_deb_upgrade_arguments \
-        require_deb_upgrade_environment \
-        initialize_deb_upgrade_paths \
-        validate_deb_upgrade_initial_state \
-        initialize_deb_upgrade_cleanup \
-        assert_installed_deb_version \
-        install_previous_deb \
-        upgrade_deb_package \
-        remove_upgraded_deb; do
-        assert_file_contains \
-            "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
-            "${deb_upgrade_phase}() {" \
-            "DEB upgrade phase ${deb_upgrade_phase}"
-    done
     assert_status 2 'RPM upgrade test requires two packages and two versions' \
         "${SCRIPT_DIR}/packaging/rpm/test-package-upgrade.sh"
     assert_status 2 'RPM upgrade test rejects a malformed version' \
@@ -5288,17 +5185,9 @@ test_static_upgrade_and_supply_chain_contracts() {
         'status --porcelain=v1 --untracked-files=normal' \
         'RPM build rejects a dirty package source tree'
     assert_file_contains \
-        "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
-        'status --porcelain=v1 --untracked-files=normal' \
-        'DEB build rejects a dirty package source tree'
-    assert_file_contains \
         "${SCRIPT_DIR}/packaging/rpm/build-rpm.sh" \
         'source version does not match requested package version' \
         'RPM build validates its requested source version'
-    assert_file_contains \
-        "${SCRIPT_DIR}/packaging/deb/build-deb.sh" \
-        'source version does not match requested package version' \
-        'DEB build validates its requested source version'
 
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'previous-release:' \
@@ -5349,9 +5238,6 @@ test_static_upgrade_and_supply_chain_contracts() {
     assert_file_contains "${SCRIPT_DIR}/packaging/rpm/test-package-upgrade.sh" \
         "source \"\${PROJECT_DIR}/tests/lib/package-runtime-preservation.sh\"" \
         'RPM upgrade reuses the shared runtime-preservation helper'
-    assert_file_contains "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
-        "source \"\${PROJECT_DIR}/tests/lib/package-runtime-preservation.sh\"" \
-        'DEB upgrade reuses the shared runtime-preservation helper'
 
     assert_file_contains "${SCRIPT_DIR}/packaging/rpm/test-package-upgrade.sh" \
         "assert_runtime_preserved 'installation of previous package'" \
@@ -5364,21 +5250,6 @@ test_static_upgrade_and_supply_chain_contracts() {
     assert_file_contains "${SCRIPT_DIR}/packaging/rpm/test-package-upgrade.sh" \
         "assert_runtime_removed 'final package removal'" \
         'RPM final package removal cleans managed user runtime data'
-
-    assert_file_contains "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
-        "assert_runtime_preserved 'installation of previous package'" \
-        'DEB previous package installation preserves user runtime data'
-
-    assert_file_contains "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
-        "assert_runtime_preserved 'package upgrade'" \
-        'DEB package upgrade preserves user runtime data'
-
-    assert_file_contains "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
-        "assert_runtime_preserved 'final DEB package removal'" \
-        'DEB final package removal preserves managed user runtime data'
-    assert_file_contains "${SCRIPT_DIR}/packaging/deb/test-package-upgrade.sh" \
-        "assert_runtime_preserved 'DEB remove-to-purge transition'" \
-        'DEB remove-to-purge transition preserves managed user runtime data'
 
     assert_file_contains "${SCRIPT_DIR}/README.fr.md" \
         '### Vidéo YouTube HLS authentifiée' \
@@ -5454,17 +5325,10 @@ test_static_upgrade_and_supply_chain_contracts() {
         'RPM package CI depends on previous release verification'
 
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
-        '    needs: previous-release' \
-        'DEB package CI depends on previous release verification'
-
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
         'previous/*.rpm' \
         'RPM upgrade consumes the published previous RPM'
 
     # shellcheck disable=SC2016 # Literal GitHub Actions runner-temp expression.
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
-        'PREVIOUS_DIR: ${{ runner.temp }}/previous-release' \
-        'DEB upgrade keeps the published previous DEB outside the source worktree'
 
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
         'sha256sum --check PREVIOUS_SHA256SUMS' \

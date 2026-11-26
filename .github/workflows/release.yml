@@ -25,8 +25,26 @@ jobs:
       actions: read
       pull-requests: read
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
+      volumes:
+        - /tmp
+        - /var/tmp
     timeout-minutes: 20
     steps:
+      - name: Verify Fedora 45 userspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
+          dnf -y --setopt=install_weak_deps=False install git python3 gh jq gnupg2
       - name: Validate release tag identity before checkout
         id: source
         env:
@@ -91,10 +109,16 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Trust only the checked-out workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace=$(realpath -e -- "${GITHUB_WORKSPACE:?}")
+          [[ ${workspace} == "$(pwd -P)" && ${workspace} != / && ${workspace} != */\* ]]
+          git config --global --add safe.directory "${workspace}"
       - name: Install validation dependencies
         run: |
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install --yes gnupg
+          gpg --version
       - name: Verify the exact authorized release-tag signer
         env:
           GH_TOKEN: ${{ github.token }}
@@ -253,11 +277,16 @@ jobs:
 
 
   release-runtime:
-    name: Current Ubuntu dependencies / yt-dlp ${{ matrix.yt_dlp_version }}
+    name: Current Fedora 45 dependencies / yt-dlp ${{ matrix.yt_dlp_version }}
     needs: validate
     permissions:
       contents: read
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
+      volumes:
+        - /tmp
+        - /var/tmp
     timeout-minutes: 50
     # Distribution dependencies are resolved anew for publication. Source-tree
     # proof does not identify that environment, so exercise current media tools
@@ -267,30 +296,33 @@ jobs:
       matrix:
         yt_dlp_version: ['2026.6.9', '2026.8.19']
     steps:
+      - name: Verify Fedora 45 userspace
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
+          dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Install current Ubuntu engines and pinned yt-dlp
+      - name: Install current Fedora 45 engines and pinned yt-dlp
         timeout-minutes: 8
         env:
           YT_DLP_VERSION: ${{ matrix.yt_dlp_version }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          # Bound stalled connections and the complete package transaction;
-          # provisioning must leave the independently bounded media tests time.
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup
-          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30
-            -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
-          sudo timeout --signal=TERM --kill-after=10s 2m \
-            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" -o APT::Update::Error-Mode=any update
-          sudo timeout --signal=TERM --kill-after=10s 4m \
-            env DEBIAN_FRONTEND=noninteractive \
-            python3 -I -B scripts/ci-ubuntu-mirrors.py --apt "${apt_options[@]}" install --yes --no-install-recommends \
-            aria2 ffmpeg python3-venv
-
+          timeout --signal=TERM --kill-after=10s 6m bash ./scripts/ci-fedora-media.sh
           case ${YT_DLP_VERSION} in
             2026.6.9)
               yt_dlp_sha=442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4
@@ -325,9 +357,7 @@ jobs:
           aria2c --version | awk 'NR == 1 { first = $0 } END { print first }'
           ffmpeg -hide_banner -version | awk 'NR == 1 { first = $0 } END { print first }'
           ffprobe -hide_banner -version | awk 'NR == 1 { first = $0 } END { print first }'
-          # shellcheck disable=SC2016 # dpkg-query expands these package fields.
-          dpkg-query --show --showformat='${db:Status-Status}\t${binary:Package}\t${Version}\t${Architecture}\n' \
-            | LC_ALL=C sort
+          rpm -qa --qf '%{NEVRA}\n' | LC_ALL=C sort
       - name: Qualify routing with current release dependencies
         shell: bash
         run: |
@@ -357,6 +387,11 @@ jobs:
   previous-release:
     needs: validate
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
+      volumes:
+        - /tmp
+        - /var/tmp
     timeout-minutes: 10
     permissions:
       contents: read
@@ -367,11 +402,31 @@ jobs:
       version: ${{ steps.previous.outputs.version }}
       commit: ${{ steps.previous.outputs.commit }}
     steps:
+      - name: Verify Fedora 45 userspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
+          dnf -y --setopt=install_weak_deps=False install git python3 gh jq gnupg2
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Trust only the checked-out workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace=$(realpath -e -- "${GITHUB_WORKSPACE:?}")
+          [[ ${workspace} == "$(pwd -P)" && ${workspace} != / && ${workspace} != */\* ]]
+          git config --global --add safe.directory "${workspace}"
 
       - name: Resolve previous versioned release
         id: previous
@@ -481,27 +536,15 @@ jobs:
           gh release download "${PREVIOUS_TAG}" \
             -R "${GITHUB_REPOSITORY}" \
             --dir previous \
-            --pattern '*.deb'
-
-          gh release download "${PREVIOUS_TAG}" \
-            -R "${GITHUB_REPOSITORY}" \
-            --dir previous \
             --pattern 'SHA256SUMS'
 
           shopt -s nullglob
           rpms=(previous/*.rpm)
-          debs=(previous/*.deb)
           shopt -u nullglob
 
           if ((${#rpms[@]} != 1)); then
             printf 'Error: expected exactly one RPM in previous release; found %d.\n' \
               "${#rpms[@]}" >&2
-            exit 65
-          fi
-
-          if ((${#debs[@]} != 1)); then
-            printf 'Error: expected exactly one DEB in previous release; found %d.\n' \
-              "${#debs[@]}" >&2
             exit 65
           fi
 
@@ -529,7 +572,6 @@ jobs:
           }
 
           require_checksum_entry previous/SHA256SUMS "${rpms[0]##*/}"
-          require_checksum_entry previous/SHA256SUMS "${debs[0]##*/}"
 
           (
             cd previous
@@ -540,7 +582,6 @@ jobs:
 
           for asset in \
             "${rpms[0]}" \
-            "${debs[0]}" \
             previous/SHA256SUMS; do
 
             gh release verify-asset \
@@ -558,7 +599,7 @@ jobs:
 
           (
             cd previous
-            sha256sum -- *.rpm *.deb > PREVIOUS_SHA256SUMS
+            sha256sum -- *.rpm > PREVIOUS_SHA256SUMS
             sha256sum --check PREVIOUS_SHA256SUMS
           )
 
@@ -568,7 +609,6 @@ jobs:
           name: previous-release-packages
           path: |
             previous/*.rpm
-            previous/*.deb
             previous/PREVIOUS_SHA256SUMS
           if-no-files-found: error
           retention-days: 1
@@ -579,17 +619,40 @@ jobs:
       artifact_id: ${{ steps.artifact.outputs.artifact-id }}
     needs: validate
     runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
+      volumes:
+        - /tmp
+        - /var/tmp
     timeout-minutes: 15
     steps:
+      - name: Verify Fedora 45 userspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
+          dnf -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Trust only the checked-out workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace=$(realpath -e -- "${GITHUB_WORKSPACE:?}")
+          [[ ${workspace} == "$(pwd -P)" && ${workspace} != / && ${workspace} != */\* ]]
+          git config --global --add safe.directory "${workspace}"
       - run: |
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --apt update
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --apt install --yes unzip
+          dnf -y install unzip
       - name: Build and verify exact source ZIP
         shell: bash
         run: |
@@ -613,9 +676,21 @@ jobs:
       artifact_id: ${{ steps.artifact.outputs.artifact-id }}
     needs: validate
     runs-on: ubuntu-24.04
-    container: fedora:45
+    container: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
     timeout-minutes: 20
     steps:
+      - name: Verify Fedora 45 userspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
       - name: Install RPM build tools
         run: dnf install --assumeyes cpio desktop-file-utils findutils gawk git gnupg2 gzip python3 rpm-build rpm-sign tar
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -623,11 +698,17 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Trust only the checked-out workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace=$(realpath -e -- "${GITHUB_WORKSPACE:?}")
+          [[ ${workspace} == "$(pwd -P)" && ${workspace} != / && ${workspace} != */\* ]]
+          git config --global --add safe.directory "${workspace}"
       - name: Build release RPM once
         shell: bash
         run: |
           set -Eeuo pipefail
-          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           bash packaging/rpm/build-rpm.sh "${RELEASE_TAG#v}" dist
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         id: artifact
@@ -643,13 +724,25 @@ jobs:
       artifact_id: ${{ steps.artifact.outputs.artifact-id }}
     needs: [validate, rpm-build]
     runs-on: ubuntu-24.04
-    container: fedora:45
+    container: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
     timeout-minutes: 10
     environment: rpm-signing
     env:
       RPM_SIGNING_FINGERPRINT: 7B54065FE061E78ED2C96252E3BE996196ABEA7F
       RPM_SIGNING_SUBKEY_FINGERPRINT: 1F5B769CE48A08AAC0A7D9DDECC9894B41830245
     steps:
+      - name: Verify Fedora 45 userspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
       - name: Install isolated RPM signing tools
         run: dnf install --assumeyes coreutils gawk gh gnupg2 rpm rpm-sign
       - name: Require immutable artifact identity
@@ -704,6 +797,13 @@ jobs:
           unsigned=(unsigned/*.rpm)
           shopt -u nullglob
           ((${#unsigned[@]} == 1))
+
+          expected_nevra="yt-dlp-aria2-downloader-gui-${RELEASE_TAG#v}-1.fc45.x86_64"
+          package_nevra=$(LC_ALL=C rpm -qp --qf '%{NEVRA}' -- "${unsigned[0]}")
+          if [[ ${package_nevra} != "${expected_nevra}" || ${unsigned[0]##*/} != "${expected_nevra}.rpm" ]]; then
+            printf 'Error: release RPM filename or header differs from the expected Fedora 45 x86_64 package.\n' >&2
+            exit 65
+          fi
 
           initial_format=$(LC_ALL=C rpm -qp --qf '%{rpmformat}\n' -- "${unsigned[0]}")
           [[ ${initial_format} == 4 ]] || {
@@ -883,7 +983,7 @@ jobs:
     needs: [validate, rpm-sign, previous-release]
     runs-on: ubuntu-24.04
     container:
-      image: fedora:45
+      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
       volumes:
         - /tmp
         - /var/tmp
@@ -896,6 +996,18 @@ jobs:
       matrix:
         scenario: [fresh, ffmpeg-free]
     steps:
+      - name: Verify Fedora 45 userspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /etc/os-release
+          [[ ${ID} == fedora && ${VERSION_ID} == 45 ]]
+          kernel_arch=$(uname -m)
+          rpm_arch=$(rpm --eval '%{_arch}')
+          printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
+            "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
+          [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
       - name: Install RPM test tools
         env:
           PACKAGE_SCENARIO: ${{ matrix.scenario }}
@@ -1114,73 +1226,9 @@ jobs:
 
           HOME="${PACKAGE_TEST_HOME}" bash packaging/rpm/test-package-upgrade.sh             "${old[0]}"             "${current[0]}"             "${{ needs.previous-release.outputs.version }}"             "${RELEASE_TAG#v}"
 
-  deb:
-    outputs:
-      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
-    needs: [validate, previous-release]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Install DEB build tools
-        run: |
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --setup
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --apt -o Acquire::Retries=3 update
-          sudo python3 -I -B scripts/ci-ubuntu-mirrors.py --apt -o Acquire::Retries=3 install --yes desktop-file-utils
-      - name: Require immutable artifact identity
-        env:
-          ARTIFACT_IDS: ${{ needs.previous-release.outputs.artifact_id }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          [[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}$ ]] || {
-            printf '%s\n' 'Error: required immutable artifact identities are missing or malformed.' >&2
-            exit 65
-          }
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
-        with:
-          artifact-ids: ${{ needs.previous-release.outputs.artifact_id }}
-          path: ${{ runner.temp }}/previous-release
-          digest-mismatch: error
-      - name: Build, lifecycle, reinstall, and upgrade DEB
-        env:
-          PREVIOUS_DIR: ${{ runner.temp }}/previous-release
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          bash packaging/deb/build-deb.sh "${RELEASE_TAG#v}" dist
-          shopt -s nullglob; packages=(dist/*.deb); shopt -u nullglob
-          ((${#packages[@]} == 1))
-          sudo env YT_DLP_CI_APT=1 bash packaging/deb/test-package-lifecycle.sh "${packages[0]}" "${RELEASE_TAG#v}"
-
-          (
-            cd "${PREVIOUS_DIR}"
-            sha256sum --check PREVIOUS_SHA256SUMS
-          )
-
-          shopt -s nullglob
-          old=("${PREVIOUS_DIR}"/*.deb)
-          shopt -u nullglob
-
-          ((${#old[@]} == 1))
-
-          sudo env YT_DLP_CI_APT=1 bash packaging/deb/test-package-upgrade.sh             "${old[0]}"             "${packages[0]}"             "${{ needs.previous-release.outputs.version }}"             "${RELEASE_TAG#v}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        id: artifact
-        with:
-          name: release-deb
-          path: dist/*.deb
-          if-no-files-found: error
-          retention-days: 7
-          overwrite: true
-
   verify-source:
     name: Revalidate qualified source before publication
-    needs: [validate, zip, rpm-test, deb, release-runtime]
+    needs: [validate, zip, rpm-test, release-runtime]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -1209,8 +1257,7 @@ jobs:
     outputs:
       zip_artifact_id: ${{ needs.zip.outputs.artifact_id }}
       rpm_artifact_id: ${{ needs.rpm-test.outputs.artifact_id }}
-      deb_artifact_id: ${{ needs.deb.outputs.artifact_id }}
-    needs: [validate, zip, rpm-test, deb, verify-source]
+    needs: [validate, zip, rpm-test, verify-source]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -1224,11 +1271,11 @@ jobs:
           persist-credentials: false
       - name: Require exact tested artifact identities
         env:
-          ARTIFACT_IDS: ${{ needs.zip.outputs.artifact_id }},${{ needs.rpm-test.outputs.artifact_id }},${{ needs.deb.outputs.artifact_id }}
+          ARTIFACT_IDS: ${{ needs.zip.outputs.artifact_id }},${{ needs.rpm-test.outputs.artifact_id }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          [[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}(,[1-9][0-9]{0,19}){2}$ ]] || {
+          [[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}(,[1-9][0-9]{0,19})$ ]] || {
             printf '%s\n' 'Error: required immutable artifact identities are missing or malformed.' >&2
             exit 65
           }
@@ -1242,20 +1289,24 @@ jobs:
           artifact-ids: ${{ needs.rpm-test.outputs.artifact_id }}
           path: dist
           digest-mismatch: error
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
-        with:
-          artifact-ids: ${{ needs.deb.outputs.artifact_id }}
-          path: dist
-          digest-mismatch: error
       - name: Verify payloads and checksums
         shell: bash
         run: |
           set -Eeuo pipefail
           install -m 0755 -- install-fedora.sh dist/install-fedora.sh
           install -m 0644 -- packaging/keys/RPM-GPG-KEY-OscarFrog dist/RPM-GPG-KEY-OscarFrog
-          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/*.deb dist/install-fedora.sh dist/RPM-GPG-KEY-OscarFrog); shopt -u nullglob
-          ((${#payloads[@]} == 5))
-          (cd dist && sha256sum -- *.zip *.rpm *.deb install-fedora.sh RPM-GPG-KEY-OscarFrog > SHA256SUMS && sha256sum --check SHA256SUMS)
+          cd dist
+          payloads=(
+            "yt-dlp-aria2-downloader-gui-${RELEASE_TAG#v}.zip"
+            "yt-dlp-aria2-downloader-gui-${RELEASE_TAG#v}-1.fc45.x86_64.rpm"
+            install-fedora.sh RPM-GPG-KEY-OscarFrog
+          )
+          shopt -s dotglob nullglob
+          entries=(*)
+          ((${#entries[@]} == ${#payloads[@]}))
+          for payload in "${payloads[@]}"; do [[ -f ${payload} && ! -L ${payload} ]]; done
+          sha256sum -- "${payloads[@]}" >SHA256SUMS
+          sha256sum --check SHA256SUMS
       - name: Require unchanged qualified release tag
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1281,7 +1332,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/*.deb dist/install-fedora.sh dist/RPM-GPG-KEY-OscarFrog); shopt -u nullglob
+          shopt -s nullglob; payloads=(dist/*.zip dist/*.rpm dist/install-fedora.sh dist/RPM-GPG-KEY-OscarFrog); shopt -u nullglob
           expected=$(mktemp); actual=$(mktemp); existing=$(mktemp -d)
           trap 'rm -f -- "${expected}" "${actual}"; rm -rf -- "${existing}"' EXIT
           for payload in "${payloads[@]}" dist/SHA256SUMS; do
@@ -1378,11 +1429,11 @@ jobs:
 
       - name: Require exact tested artifact identities
         env:
-          ARTIFACT_IDS: ${{ needs.publish.outputs.zip_artifact_id }},${{ needs.publish.outputs.rpm_artifact_id }},${{ needs.publish.outputs.deb_artifact_id }}
+          ARTIFACT_IDS: ${{ needs.publish.outputs.zip_artifact_id }},${{ needs.publish.outputs.rpm_artifact_id }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          [[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}(,[1-9][0-9]{0,19}){2}$ ]] || {
+          [[ ${ARTIFACT_IDS} =~ ^[1-9][0-9]{0,19}(,[1-9][0-9]{0,19})$ ]] || {
             printf '%s\n' 'Error: required immutable artifact identities are missing or malformed.' >&2
             exit 65
           }
@@ -1394,11 +1445,6 @@ jobs:
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           artifact-ids: ${{ needs.publish.outputs.rpm_artifact_id }}
-          path: expected
-          digest-mismatch: error
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
-        with:
-          artifact-ids: ${{ needs.publish.outputs.deb_artifact_id }}
           path: expected
           digest-mismatch: error
 
@@ -1416,18 +1462,17 @@ jobs:
           payloads=(
             expected/*.zip
             expected/*.rpm
-            expected/*.deb
             expected/install-fedora.sh
             expected/RPM-GPG-KEY-OscarFrog
           )
           shopt -u nullglob
 
-          ((${#payloads[@]} == 5))
+          ((${#payloads[@]} == 4))
 
           (
             cd expected
             sha256sum -- \
-              *.zip *.rpm *.deb \
+              *.zip *.rpm \
               install-fedora.sh RPM-GPG-KEY-OscarFrog \
               > SHA256SUMS
             sha256sum --check SHA256SUMS

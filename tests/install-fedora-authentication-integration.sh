@@ -90,11 +90,24 @@ printf 'pub:%s:4096:1:0000000000000000:0:0:::::scESC:\n' "${validity}"
 printf 'fpr:::::::::%s:\n' "${fingerprint}"
 EOF_GPG
 
+    cat >"${mock_bin}/uname" <<'EOF_UNAME'
+#!/usr/bin/env bash
+if [[ ${1:-} == -m && -n ${MOCK_KERNEL_ARCH:-} ]]; then
+    printf '%s\n' "${MOCK_KERNEL_ARCH}"
+else
+    exec /usr/bin/uname "$@"
+fi
+EOF_UNAME
+
     cat >"${mock_bin}/rpm" <<'EOF_RPM'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ ${1:-} == -E && ${2:-} == %fedora ]]; then
-    printf '%s\n' "${MOCK_FEDORA_VERSION:?}"
+if [[ ${1:-} == -E && ${2:-} == '%{?fedora} %{_arch}' ]]; then
+    printf '%s %s\n' "${MOCK_FEDORA_VERSION:?}" "${MOCK_RPM_ARCH:-x86_64}"
+    exit 0
+fi
+if [[ ${1:-} == -E && ${2:-} == '%{_arch}' ]]; then
+    printf '%s\n' "${MOCK_RPM_ARCH:-x86_64}"
     exit 0
 fi
 if [[ ${1:-} == -q ]]; then
@@ -121,16 +134,12 @@ if [[ ${1:-} == -qp ]]; then
         printf '%s\n' signed
         exit 0
     fi
-    if [[ ${query_format} == *'%{NAME}'* &&
-        ${query_format} == *'%{VERSION}'* &&
-        ${query_format} == *'%{ARCH}'* &&
-        ${query_format} != *'%{RELEASE}'* ]]; then
+    if [[ ${*: -1} == */application.rpm ]]; then
+        [[ ${query_format} == '%{NEVRA}\n' ]] || exit 64
         rpm_path=${*: -1}
         [[ $(<"${rpm_path}") == verified-rpm ]] || exit 1
-        printf '%s\n' \
-            yt-dlp-aria2-downloader-gui \
-            "${MOCK_APPLICATION_VERSION:?}" \
-            noarch
+        printf 'yt-dlp-aria2-downloader-gui-%s-1.fc45.%s\n' \
+            "${MOCK_APPLICATION_VERSION:?}" "${MOCK_PACKAGE_ARCH:-x86_64}"
         exit 0
     fi
     [[ ${query_format} == '%{NEVRA}\n' ]] || exit 64
@@ -528,6 +537,27 @@ main() {
     assert_status 69 'Fedora 44 is outside the installation contract' \
         env PATH="${mock_bin}:/usr/bin:/bin" MOCK_FEDORA_VERSION=44 \
         bash -c 'source "$1"; detect_supported_fedora version' bash "${library_copy}"
+    # shellcheck disable=SC2016 # Positional parameters belong to bash -c.
+    assert_status 69 'Fedora 45 with a non-x86_64 RPM architecture is refused' \
+        env PATH="${mock_bin}:/usr/bin:/bin" MOCK_FEDORA_VERSION=45 MOCK_RPM_ARCH=other \
+        bash -c 'source "$1"; detect_supported_fedora version' bash "${library_copy}"
+    # shellcheck disable=SC2016 # Positional parameters belong to bash -c.
+    assert_status 69 'a non-x86_64 kernel is refused before opening the requested package' \
+        env PATH="${mock_bin}:/usr/bin:/bin" MOCK_FEDORA_VERSION=45 MOCK_KERNEL_ARCH=other \
+        bash "${PROJECT_DIR}/install-fedora.sh" "${TEST_ROOT}/absent.rpm"
+    assert_status 69 'media provisioning rejects a different kernel architecture before download' \
+        env PATH="${mock_bin}:/usr/bin:/bin" MOCK_KERNEL_ARCH=other \
+        bash "${PROJECT_DIR}/scripts/ci-fedora-media.sh"
+    assert_status 69 'media provisioning rejects an incompatible RPM architecture before download' \
+        env PATH="${mock_bin}:/usr/bin:/bin" MOCK_RPM_ARCH=other \
+        bash "${PROJECT_DIR}/scripts/ci-fedora-media.sh"
+    mkdir -m 700 -- "${TEST_ROOT}/wrong-architecture"
+    printf '%s\n' verified-rpm >"${TEST_ROOT}/wrong-architecture/application.rpm"
+    # shellcheck disable=SC2016 # Positional parameters belong to bash -c.
+    assert_status 65 'the staged application RPM must actually identify as x86_64' \
+        env PATH="${mock_bin}:/usr/bin:/bin" MOCK_PACKAGE_ARCH=noarch \
+        bash -c 'source "$1"; run_root() { "$@"; }; export MOCK_APPLICATION_VERSION=$APP_VERSION; validate_rpm_identity "$2"' \
+        bash "${library_copy}" "${TEST_ROOT}/wrong-architecture/application.rpm"
     # shellcheck disable=SC2016 # Positional parameters belong to bash -c.
     assert_status 69 'a preinstalled repository cannot admit an unqualified Fedora release' \
         env PATH="${mock_bin}:/usr/bin:/bin" MOCK_RPM_FUSION_INSTALLED=1 \

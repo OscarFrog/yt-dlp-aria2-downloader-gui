@@ -46,7 +46,7 @@ class ShfmtBootstrapTests(unittest.TestCase):
         digest = hashlib.sha256(self.asset.read_bytes()).hexdigest()
         (self.base / "shfmt-pin.env").write_text(
             "SHFMT_VERSION=9.8.7\n" +
-            f"SHFMT_LINUX_AMD64_SHA256={digest}\nSHFMT_LINUX_ARM64_SHA256={digest}\n",
+            f"SHFMT_LINUX_AMD64_SHA256={digest}\n",
             encoding="utf-8",
         )
         self.cache = self.base / "cache"
@@ -207,6 +207,20 @@ class ShfmtBootstrapTests(unittest.TestCase):
         self.assertEqual(self.binary.stat().st_ino, before.st_ino)
         self.assertEqual(self.download_count(), 1, "stale miss downloaded the same verified asset twice")
 
+    def test_unsupported_machine_or_rpm_architecture_refuses_before_download(self):
+        for command, output, code in (("uname", "unsupported", 0), ("rpm", "unsupported", 0),
+                                      ("uname", "x86_64", 1), ("rpm", "x86_64", 1)):
+            with self.subTest(command=command, output=output, code=code):
+                stub = self.bin / command
+                stub.write_text(f"#!/bin/sh\nprintf '%s\\n' {output}\nexit {code}\n", encoding="utf-8")
+                stub.chmod(0o700)
+                try:
+                    self.finish(self.start(), 69)
+                    self.assertEqual(self.download_count(), 0)
+                    self.assertFalse(self.cache.exists())
+                finally:
+                    stub.unlink()
+
     def test_concurrent_consumers_share_one_download(self):
         children = [self.start() for _ in range(6)]
         for child in children:
@@ -324,7 +338,7 @@ class ShfmtBootstrapTests(unittest.TestCase):
         digest = hashlib.sha256(self.asset.read_bytes()).hexdigest()
         (self.base / "shfmt-pin.env").write_text(
             "SHFMT_VERSION=9.8.7\n" +
-            f"SHFMT_LINUX_AMD64_SHA256={digest}\nSHFMT_LINUX_ARM64_SHA256={digest}\n",
+            f"SHFMT_LINUX_AMD64_SHA256={digest}\n",
             encoding="utf-8",
         )
         self.finish(self.start(), 65)

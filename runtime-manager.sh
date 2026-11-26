@@ -1798,11 +1798,24 @@ initialize_runtime_policy() {
     readonly RUNTIME_VALIDATE_TIMEOUT_SECONDS
 }
 
+is_supported_runtime_platform() (
+    local machine='' rpm_arch=''
+    grep -Eqx 'ID=(fedora|"fedora")' /etc/os-release || return 1
+    grep -Eqx 'VERSION_ID=(45|"45")' /etc/os-release || return 1
+    machine=$(uname -m) || return 1
+    rpm_arch=$(rpm --eval '%{_arch}') || return 1
+    [[ ${machine} == x86_64 && ${rpm_arch} == x86_64 ]]
+)
+
 initialize_runtime_platform() {
     local script_path=''
-    local machine_arch=''
     local command_name=''
 
+    # shellcheck disable=SC2310 # Platform admission is a read-only predicate.
+    if ! is_supported_runtime_platform; then
+        error 'managed runtimes require Fedora 45 x86_64.'
+        return 69
+    fi
     script_path=$(realpath -e -- "${BASH_SOURCE[0]}") || {
         error 'unable to resolve runtime manager path.'
         return 66
@@ -1829,22 +1842,8 @@ initialize_runtime_platform() {
     fi
     readonly YTDLP_PUBLIC_KEY
 
-    machine_arch=$(uname -m)
-    case ${machine_arch} in
-        x86_64)
-            readonly YTDLP_ASSET='yt-dlp_linux'
-            readonly DENO_TARGET='x86_64-unknown-linux-gnu'
-            ;;
-        aarch64)
-            readonly YTDLP_ASSET='yt-dlp_linux_aarch64'
-            readonly DENO_TARGET='aarch64-unknown-linux-gnu'
-            ;;
-        *)
-            error "unsupported architecture: ${machine_arch}"
-            return 69
-            ;;
-    esac
-    readonly DENO_ASSET="deno-${DENO_TARGET}.zip"
+    readonly YTDLP_ASSET='yt-dlp_linux'
+    readonly DENO_ASSET='deno-x86_64-unknown-linux-gnu.zip'
 
     for command_name in \
         bash cmp curl flock gpg gpgconf grep head install ln mkdir mktemp mv readlink realpath rm \

@@ -23,7 +23,7 @@ canonical header, filename, top-level layout, inventory membership, and final
 `main "$@"` do not apply until that shell is extracted into a standalone file.
 
 The supported production environment is GNU/Linux. Installed production shell
-files and installed cleanup helpers must remain compatible with GNU Bash 4.4 or
+files and installed cleanup helpers must remain compatible with GNU Bash 5.3 or
 newer. Do not introduce a newer Bash requirement without updating application
 requirements, packaging metadata, tests, and this policy in the same change.
 
@@ -233,7 +233,7 @@ The canonical invocation is equivalent to:
 shellcheck -x -o all -- "${ALL_SHELL_FILES[@]}"
 ```
 
-ShellCheck is intentionally supplied by the supported Ubuntu and Fedora
+ShellCheck is intentionally supplied by the Fedora 45
 validation environments rather than pinned as a repository-managed binary.
 `-o all` opts into every optional diagnostic provided by the installed version,
 so a newly available diagnostic becomes part of validation when those
@@ -384,7 +384,7 @@ is not confused with commands executed when the library is loaded. Positive
 and negative controls cover that distinction and actual state changes.
 
 Review remains responsible for semantic naming, function cohesion, comment and
-API accuracy, Bash 4.4 compatibility, locale boundaries, diagnostic secrecy,
+API accuracy, Fedora Bash 5.3 compatibility, locale boundaries, diagnostic secrecy,
 safe path ownership, cleanup scope, and whether an exception is genuinely
 necessary. Passing automation does not make those review-only requirements
 optional.

@@ -455,7 +455,7 @@ name, version = subprocess.check_output(
     ['rpm', '-qp', '--qf', '%{NEVRA}.rpm\\n%{VERSION}', '--', source],
     text=True, encoding='ascii',
 ).splitlines()
-if Path(name).name != name or not name.endswith('.fc45.noarch.rpm'):
+if Path(name).name != name or not name.endswith('.fc45.x86_64.rpm'):
     raise AssertionError('unexpected RPM fixture identity')
 package = fixture / name
 shutil.copyfile(source, package)
@@ -569,7 +569,7 @@ test_rpm_fusion_bootstrap_authentication() {
     local good_rpm="${root}/bootstrap-good.rpm"
     local wrong_rpm="${root}/bootstrap-wrong.rpm"
     local corrupt_rpm="${root}/bootstrap-corrupt.rpm"
-    local workflow="${BASH_SOURCE[0]%/*}/../.github/workflows/qualification.yml"
+    local helper="${BASH_SOURCE[0]%/*}/../scripts/ci-fedora-media.sh"
     local signature=''
 
     cp -- "${source_rpm}" "${good_rpm}"
@@ -584,7 +584,7 @@ test_rpm_fusion_bootstrap_authentication() {
 
     test_package_transaction_policy "${source_rpm}" "${good_rpm}" "${wrong_rpm}"
 
-    python3 -I -B - "${workflow}" "${root}" \
+    python3 -I -B - "${helper}" "${root}" \
         "${source_rpm}" "${good_rpm}" "${wrong_rpm}" "${corrupt_rpm}" \
         "${pub_a}" "${pub_b}" "${fingerprint_a}" <<'PY_BOOTSTRAP_AUTHENTICATION'
 from pathlib import Path
@@ -593,34 +593,42 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import textwrap
 
-workflow, root, unsigned, good, wrong, corrupt, key_a, key_b = map(Path, sys.argv[1:9])
+helper, root, unsigned, good, wrong, corrupt, key_a, key_b = map(Path, sys.argv[1:9])
 fingerprint = sys.argv[9]
-source = workflow.read_text()
-start = '\n          gpg --homedir "${gpg_home}" --batch --no-options \\\n'
-end = '          dnf install --assumeyes aria2 ffmpeg\n'
-if source.count(start) != 1 or source.count(end) != 1:
-    raise AssertionError('RPM Fusion authentication block is not uniquely located')
-body = textwrap.dedent(source[source.index(start):source.index(end)])
+# Run the complete checked-in helper. Only its two reviewed trust pins are
+# replaced in this private copy, with the identities of the synthetic fixtures.
+body = helper.read_text()
+for name, pin, fixture in (
+        ('rpmfusion_fingerprint', 'E9A491A3DE247814E7E067EAE06F8ECDD651FF2E', 'fixture_fingerprint'),
+        ('rpmfusion_nevra', 'rpmfusion-free-release-45-2.noarch', 'fixture_nevra')):
+    declaration = f'readonly {name}={pin}\n'
+    if body.count(declaration) != 1:
+        raise AssertionError(f'expected a unique pinned {name}')
+    body = body.replace(declaration, f'readonly {name}="${{{fixture}}}"\n')
 nevra = subprocess.check_output(
     ['rpm', '-qp', '--qf', '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}', '--', str(unsigned)],
     text=True,
 )
 
-# Exercise the workflow's actual verifier with fixture trust roots. The original
-# workflow retains its pinned RPM Fusion certificate and NEVRA. Both RPM trust
-# domains here are private; DNF is observed, never executed or installed on host.
+# Supply downloads locally, intercept DNF and keep both RPM trust stores private.
 prefix = r'''set -Eeuo pipefail
 umask 077
-bootstrap_dir=$1
-readonly rpmfusion_fingerprint=$2
-readonly rpmfusion_nevra=$3
-gpg_home=${bootstrap_dir}/gpg
-key_listing=${bootstrap_dir}/key-listing
-rpm_keyring=${bootstrap_dir}/isolated-keyring
-system_keyring=${bootstrap_dir}/system-keyring
-events=${bootstrap_dir}/events
+readonly fixture_dir=$1 fixture_fingerprint=$2 fixture_nevra=$3
+export TMPDIR=${fixture_dir}
+system_keyring=${fixture_dir}/system-keyring
+events=${fixture_dir}/events
+curl() {
+    local file=${!#}
+    file=${file##*/}
+    case ${file} in
+        RPM-GPG-KEY-rpmfusion-free-fedora-2020 | rpmfusion-free-release-45.noarch.rpm) ;;
+        *) exit 88 ;;
+    esac
+    [[ ${!#} == "https://download1.rpmfusion.org/free/fedora/${file}" &&
+       ${*: -3:1} == --output && ${*: -2:1} == "${bootstrap_dir}/${file}" ]] || exit 88
+    ln -- "${fixture_dir}/${file}" "${bootstrap_dir}/${file}"
+}
 rpmkeys() {
     if [[ $# == 2 && $1 == --import ]]; then
         printf 'system-import\n' >>"${events}"
@@ -629,6 +637,8 @@ rpmkeys() {
             --define "_keyring_lockpath ${system_keyring}/.keyring.lock" \
             --define "_rpmlock_path ${system_keyring}/.rpm.lock" "$@"
     else
+        [[ $1 == --define && $2 == '_keyring fs' &&
+           $3 == --define && $4 == "_keyringpath ${rpm_keyring}" ]] || exit 88
         if [[ " $* " == *' --checksig '* ]]; then
             printf 'verify\n' >>"${events}"
         fi
@@ -636,6 +646,10 @@ rpmkeys() {
     fi
 }
 dnf() {
+    # Repository tool installation is outside the fixture's bootstrap transaction.
+    if [[ $1 == install && $2 == --assumeyes && ${*:3} =~ ^[[:alnum:]][[:alnum:].+[:space:]-]*$ ]]; then
+        return 0
+    fi
     printf 'dnf\n' >>"${events}"
     [[ $# == 4 && $1 == install && $2 == --assumeyes &&
        $3 == --setopt=localpkg_gpgcheck=True &&
@@ -647,14 +661,13 @@ dnf() {
 def run(label, package, key=key_a, expected_nevra=nevra, implementation=body):
     with tempfile.TemporaryDirectory(prefix='bootstrap-' + label + '-', dir=root) as directory:
         case = Path(directory)
-        for name in ('gpg', 'isolated-keyring', 'system-keyring'):
-            (case / name).mkdir(mode=0o700)
+        (case / 'system-keyring').mkdir(mode=0o700)
         staged = case / 'rpmfusion-free-release-45.noarch.rpm'
         shutil.copyfile(package, staged)
         shutil.copyfile(key, case / 'RPM-GPG-KEY-rpmfusion-free-fedora-2020')
         before = hashlib.sha256(staged.read_bytes()).hexdigest()
         # Model global trust of the foreign signer without importing anything
-        # into the host RPM database. The workflow's private verifier must not
+        # into the host RPM database. The helper's private verifier must not
         # acquire this authority from the separate transaction trust domain.
         subprocess.run(['rpmkeys', '--define', '_keyring fs',
                         '--define', f'_keyringpath {case / "system-keyring"}',
@@ -667,31 +680,40 @@ def run(label, package, key=key_a, expected_nevra=nevra, implementation=body):
         events = (case / 'events').read_text().splitlines() if (case / 'events').exists() else []
         if hashlib.sha256(staged.read_bytes()).hexdigest() != before:
             raise AssertionError('bootstrap verification changed its RPM input')
+        print(f'Bootstrap fixture {label}: exit={result.returncode} events={events}')
         return result, events
 
 
-def require_refusal(observed, expected_events, reason):
+def require_refusal(observed, expected_events, reason, diagnostic=None):
     result, events = observed
     if result.returncode == 0 or events != expected_events:
         raise AssertionError(reason)
+    if diagnostic is not None and (result.returncode != 65 or diagnostic not in result.stderr):
+        raise AssertionError('unexpected bootstrap refusal: ' + reason)
 
 
 for label, package in (('signed-v6', good), ('signed-legacy', root / 'project-v4-one-signer.rpm')):
     passed, events = run(label, package)
     if passed.returncode or events != ['verify', 'system-import', 'dnf']:
         raise AssertionError('valid signed fixture failed the complete authentication order: ' + passed.stderr)
-require_refusal(run('unsigned', unsigned), [], 'unsigned RPM reached installation')
+require_refusal(run('unsigned', unsigned), [], 'unsigned RPM reached installation',
+                'bootstrap package has no OpenPGP signature')
 require_refusal(run('foreign-signer', wrong), ['verify'], 'foreign signer reached installation')
 require_refusal(run('corrupt-signature', corrupt), ['verify'], 'corrupt signature reached installation')
-require_refusal(run('foreign-certificate', good, key_b), [], 'foreign certificate reached verification')
+require_refusal(run('foreign-certificate', good, key_b), [], 'foreign certificate reached verification',
+                'unexpected RPM Fusion bootstrap key: count=1 ')
+multiple_keys = root / 'two-bootstrap-certificates.asc'
+multiple_keys.write_bytes(key_a.read_bytes() + key_b.read_bytes())
+require_refusal(run('multiple-certificates', good, multiple_keys), [], 'multiple primary keys reached verification',
+                'unexpected RPM Fusion bootstrap key: count=2 ')
 require_refusal(run('wrong-nevra', good, expected_nevra=nevra + '-different'),
-                ['verify'], 'wrong NEVRA reached installation')
+                ['verify'], 'wrong NEVRA reached installation', 'unexpected RPM Fusion bootstrap package:')
 
 # Keep the real native verification policy. RPM 6.1's all/signature policy
 # independently refuses unsigned payloads even after the explicit presence
 # guard is deleted; that defense is not evidence that the deleted guard ran.
 presence_start = body.index('signature_state=$(\n')
-presence_end = body.index('\nrpmkeys \\\n', presence_start)
+presence_end = body.index('\n    rpmkeys \\\n', presence_start)
 without_presence = body[:presence_start] + body[presence_end:]
 native_policy = subprocess.check_output(
     ['rpm', '--eval', '%{_pkgverify_level}'], text=True, encoding='ascii',
@@ -724,7 +746,7 @@ else:
     raise AssertionError('signature-presence deletion escaped the refusal oracle')
 
 verify_start = body.index('rpmkeys \\\n', body.index('rpmkeys \\\n') + 1)
-verify_end = body.index('\nresolved_nevra=', verify_start)
+verify_end = body.index('\n    resolved_nevra=', verify_start)
 without_verification = body[:verify_start] + body[verify_end:]
 observed = run('mutant-verifier', wrong, implementation=without_verification)
 if observed[0].returncode or observed[1] != ['system-import', 'dnf']:

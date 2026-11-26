@@ -24,9 +24,6 @@ PACKAGING_SHELL_FILES=(
     scripts/release-preflight.sh
     packaging/install-tree.sh
     packaging/package-user-cleanup.sh
-    packaging/deb/build-deb.sh
-    packaging/deb/test-package-lifecycle.sh
-    packaging/deb/test-package-upgrade.sh
     packaging/rpm/build-rpm.sh
     packaging/rpm/test-package-lifecycle.sh
     packaging/rpm/test-package-upgrade.sh
@@ -79,6 +76,7 @@ DEVELOPMENT_SHELL_FILES=(
     scripts/dev-tools/ensure-shfmt.sh
     scripts/check-shell-format.sh
     scripts/check-workflows.sh
+    scripts/ci-fedora-media.sh
     scripts/format-shell.sh
     scripts/git-inspect.sh
     scripts/release-evidence-qualification.sh
@@ -138,6 +136,7 @@ PYTHON_FILES=(
     private-process-supervisor.py
     tests/hls-cancellation-witness.py
     tests/lib/run-all-hup-observer.py
+    tests/observer_build.py
     tests/process-observer.py
     tests/multi-instance-real.py
     tests/zenity-x11-events.py
@@ -152,7 +151,6 @@ PYTHON_FILES=(
     scripts/check-push-version.py
     scripts/prepare-source-version.py
     scripts/ci-validation.py
-    scripts/ci-ubuntu-mirrors.py
     scripts/ci-validation-diagnostics.py
     scripts/verify-source-archive.py
     tests/ci-validation-integration.py

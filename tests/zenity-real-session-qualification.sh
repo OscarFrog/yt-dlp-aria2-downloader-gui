@@ -256,16 +256,15 @@ main() {
     fi
 
     # /etc/os-release is OS-controlled metadata and is used only to scope this
-    # release gate to the two distributions covered by this qualification.
+    # release gate to the Fedora Workstation release covered by this qualification.
     # shellcheck disable=SC1091
     source /etc/os-release
-    case ${ID:-}:${VERSION_ID:-} in
-        fedora:44 | ubuntu:24.04) ;;
-        *)
-            fail_test \
-                "real Zenity qualification requires Fedora 44 or Ubuntu 24.04; got ${ID:-unknown} ${VERSION_ID:-unknown}."
-            ;;
-    esac
+    local machine='' rpm_arch=''
+    if ! machine=$(uname -m) || ! rpm_arch=$(rpm --eval '%{_arch}') \
+        || [[ ${ID:-} != fedora || ${VERSION_ID:-} != 45 ||
+            ${machine} != x86_64 || ${rpm_arch} != x86_64 ]]; then
+        fail_test 'real Zenity qualification requires Fedora 45 x86_64 Workstation.'
+    fi
 
     trap cleanup EXIT
     trap 'record_harness_signal HUP 129' HUP
@@ -307,17 +306,22 @@ main() {
         # other users' processes or weakening worker-session observation.
         YTDLP_QUALIFICATION_XDG_OPEN=$(command -v xdg-open)
         export YTDLP_QUALIFICATION_XDG_OPEN
+        export YTDLP_QUALIFICATION_VIEWER_PID="${SESSION_ROOT}/viewer.pid"
         mkdir -- "${SESSION_ROOT}/bin"
         cat >"${SESSION_ROOT}/bin/xdg-open" <<'EOF_EXTERNAL_VIEWER'
 #!/usr/bin/env bash
-exec env YTDLP_QUALIFICATION_EXTERNAL=1 "${YTDLP_QUALIFICATION_XDG_OPEN}" "$@"
+exec env YTDLP_QUALIFICATION_EXTERNAL=1 bash -c '
+    printf "%s\n" "$$" >"${YTDLP_QUALIFICATION_VIEWER_PID}.new" || exit 1
+    mv -- "${YTDLP_QUALIFICATION_VIEWER_PID}.new" "${YTDLP_QUALIFICATION_VIEWER_PID}" || exit 1
+    exec "${YTDLP_QUALIFICATION_XDG_OPEN}" "$@"
+' bash "$@"
 EOF_EXTERNAL_VIEWER
         chmod 700 -- "${SESSION_ROOT}/bin/xdg-open"
         export PATH="${SESSION_ROOT}/bin:${PATH}"
     fi
 
     python3 -I -B "${PROJECT_DIR}/tests/process-observer.py" \
-        "${observer_token}" "${evidence_dir}" "${observer_stop}" &
+        "${evidence_dir}" "${observer_stop}" "${session_id_file}" "${SESSION_ROOT}/viewer.pid" <<<"${observer_token}" &
     WATCHER_PID=$!
 
     HARNESS_PHASE='launching-gui'

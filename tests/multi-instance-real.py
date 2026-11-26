@@ -6,13 +6,17 @@ barriers. Zenity responses are scripted unless the optional isolated X11 event
 adapter is selected; neither mode claims human gestures.
 """
 
+from contextlib import ExitStack
+from datetime import datetime, timedelta
 import fcntl
 import hashlib
 import http.server
 import importlib.util
 import json
 import os
+import platform
 from pathlib import Path
+import re
 import shutil
 import signal
 import stat
@@ -174,7 +178,7 @@ def finalize_fixture(root, evidence, processes, gates, server, dialogs, events, 
         if state is not None:
             for pid, row in state['live'].items():
                 try:
-                    current = observer_module.snapshot().get(int(pid))
+                    current = observer_module.current_process(int(pid))
                     if current and current['start'] == row['start']:
                         try:
                             os.kill(int(pid), signal.SIGKILL)
@@ -189,6 +193,8 @@ def finalize_fixture(root, evidence, processes, gates, server, dialogs, events, 
                 process.wait(timeout=10)
         except BaseException as error:
             qualification_failure(failures, 'parent-wait', label, error)
+        attempt('observer-close', obs.close, label)
+    attempt('observer-utilities-close', observer_module.close_utilities)
     for gate in gates.values():
         attempt('gate-release', gate.set)
     attempt('server-shutdown', server.shutdown)
@@ -203,6 +209,295 @@ def finalize_fixture(root, evidence, processes, gates, server, dialogs, events, 
     if failures:
         attempt('failure-evidence', lambda: (root / 'qualification-errors.json').write_text(
             json.dumps(failures, indent=2) + '\n'))
+
+
+
+# The CI fixture has two coordination roots and the scripted-dialog matrix.
+# Enumerate the expected children independently of whichever files survived.
+CI_CHILDREN = {
+    **{f'cycle{cycle}-{letter}': 143 if letter == 'A' else 0
+       for cycle in range(3) for letter in 'ABCD'},
+    'native-resumed': 0, 'conflict-owner': 143, 'conflict-other-url': 75,
+    'conflict-other-profile': 75, 'after-conflict': 0, 'stopping-owner': 143,
+    'stopping-independent': 0, 'stopping-contender': 75, 'stopping-relaunch': 0,
+    'old-before-new-0': 75, 'old-before-new-1': 75, 'new-before-old': 0,
+    'truncated-owner': 143, 'truncated-other': 75,
+}
+CI_DIALOGS = {'cycle0-A', 'cycle0-B', 'cycle0-C', 'cycle1-A', 'cycle1-C', 'stopping-owner'}
+CI_PHASES = {
+    'scenario', 'events-write', 'terminal-observation', 'terminal-live', 'terminal-url',
+    'terminal-evidence', 'parent-evidence', 'parent-evidence-mode', 'terminal-parent',
+    'parent-rescue', 'rescue-identity-changed', 'descendant-rescue', 'parent-wait',
+    'gate-release', 'server-shutdown', 'server-close', 'dialogs-close', 'failure-evidence', 'evidence-export',
+}
+VERSION = r'[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(?:\.[0-9]+)?'
+PASS_LINE = 'PASS: real shared-destination GUI/GUI, GUI/CLI, CLI conflicts, transfer/remux cancellation, D relaunch and decoded contents.'
+
+
+def public_json(data):
+    def unique(pairs):
+        record = dict(pairs)
+        require(len(record) == len(pairs), 'Duplicate evidence key')
+        return record
+    return json.loads(data, object_pairs_hook=unique)
+
+
+def observed_time(value):
+    return type(value) is int and 0 <= value < 2 ** 64
+
+
+def public_events(rows, partial):
+    kinds = {'launched', 'parent-exited', 'consumers-observed-quiescent', 'bytes-served-barrier',
+             'closure-request', 'barrier-timeout', 'transfer-released', 'connection-closed',
+             'consumer-stopped-with-open-fd', 'reservation-refused-before-last-access', 'staging-cleaned'}
+    require(type(rows) is list, 'Invalid event list')
+    by_label = {label: {} for label in CI_CHILDREN}
+    for entry in rows:
+        require(isinstance(entry, list) and len(entry) == 3, 'Invalid event record')
+        ts, label, event = entry
+        require(observed_time(ts) and isinstance(label, str) and label in CI_CHILDREN and
+                isinstance(event, str) and event in kinds, 'Foreign event')
+        by_label[label].setdefault(event, []).append(ts)
+    if not partial:
+        for label, status in CI_CHILDREN.items():
+            events = by_label[label]
+            required = ['launched', 'parent-exited', 'consumers-observed-quiescent']
+            if status != 75:
+                required.insert(1, 'bytes-served-barrier')
+            if label.startswith('cycle') and label.endswith('-A'):
+                required.insert(2, 'closure-request')
+            if label == 'stopping-owner':
+                required[2:2] = ['consumer-stopped-with-open-fd', 'closure-request',
+                                 'reservation-refused-before-last-access']
+                required.append('staging-cleaned')
+            allowed = set(required)
+            if status != 75:
+                allowed.update(('transfer-released', 'connection-closed'))
+            require(set(events) <= allowed, 'Contradictory scenario event')
+            require(all(len(events.get(name, ())) == 1 for name in required if name != 'bytes-served-barrier') and
+                    all(events.get(name) for name in required), 'Missing scenario or barrier evidence')
+            times = [events[name][0] for name in required]
+            require(times == sorted(times), 'Inconsistent scenario event order')
+    return by_label
+
+
+def public_dialogs(data, label, partial):
+    rows = [public_json(line) for line in data.splitlines()]
+    for row in rows:
+        keys = {'monotonic_ns', 'label', 'event', 'dialog', 'status', 'dialog_error'}
+        require(isinstance(row, dict) and set(row) in (keys, keys | {'dialog_error_sha256'}) and
+                observed_time(row['monotonic_ns']) and row['label'] == label and
+                row['event'] in ('dialog-opened', 'dialog-result', 'fixture-adapter-failed') and
+                row['dialog'] in ('version', 'entry', 'file-selection', 'list', 'progress', 'question',
+                                  'error', 'info', 'text-info', 'unknown') and
+                (row['status'] is None if row['event'] == 'dialog-opened' else
+                 type(row['status']) is int and 0 <= row['status'] <= 255), 'Invalid dialog evidence')
+        if not partial:
+            require(row['dialog_error'] is None and row['event'] != 'fixture-adapter-failed',
+                    'Failed dialog in successful evidence')
+        if row['dialog_error'] is not None:
+            # Never publish free text. The original diagnostic remains private.
+            row['dialog_error'] = '[REDACTED]'
+        if 'dialog_error_sha256' in row:
+            require(re.fullmatch('[0-9a-f]{64}', row['dialog_error_sha256']), 'Invalid dialog digest')
+    if not partial:
+        require(all(any(r['dialog'] == kind and r['event'] == 'dialog-result' and r['status'] == 0
+                        for r in rows) for kind in ('entry', 'list', 'file-selection')) and
+                any(r['dialog'] == 'progress' and r['event'] == 'dialog-opened' for r in rows),
+                'Missing successful scripted dialog')
+    return ''.join(json.dumps(row) + '\n' for row in rows)
+
+
+def release_metadata(data):
+    row = public_json(data)
+    require(isinstance(row, dict) and set(row) == {'source', 'package_version', 'observed_at', 'requires_python'}
+            and row['source'] == 'https://pypi.org/pypi/yt-dlp/json' and re.fullmatch(VERSION, row['package_version'])
+            and re.fullmatch(r'[0-9T:.+-]{20,40}', row['observed_at'])
+            and datetime.fromisoformat(row['observed_at']).utcoffset() == timedelta(0)
+            and (row['requires_python'] is None or re.fullmatch(r'[0-9 .<>=!,~*]+', row['requires_python'])),
+            'Unexpected stable release metadata')
+    return row
+
+
+def public_versions(text, stable, fixture):
+    lines = text.splitlines()
+    require(lines and release_metadata(lines[0]) == stable, 'Inconsistent tool metadata')
+    # Publish parsed identities only; banners, compiler strings and arbitrary pip output stay private.
+    number = r'[0-9]+(?:\.[0-9]+)*'
+    ffversion = number + r'(?:-[0-9]+(?:\.fc[0-9]+)?)?'
+    patterns = {'yt-dlp': 'yt-dlp: (' + VERSION + ')', 'deno': 'deno (' + number + r')(?: .*)?',
+                'v8': 'v8 (' + number + '(?:-rusty)?)', 'typescript': 'typescript (' + number + ')',
+                'aria2': 'aria2 version (' + number + ')', 'ffmpeg': 'ffmpeg version (' + ffversion + r')(?: .*)?',
+                'ffprobe': 'ffprobe version (' + ffversion + r')(?: .*)?', 'curl_cffi': 'curl[-_]cffi==(' + number + ')',
+                'yt-dlp-package': 'yt[-_]dlp==(' + VERSION + ')'}
+    versions = {}
+    for name, pattern in patterns.items():
+        hits = [match[1] for line in lines[1:] if (match := re.fullmatch(pattern, line, flags=re.ASCII))]
+        require(len(hits) == 1, 'Missing or ambiguous stable tool version')
+        versions[name] = hits[0]
+    # These transitive dependencies can change with the future stable wheel.
+    # Preserve their numeric versions whenever present, without permitting arbitrary package text.
+    for package in ('certifi', 'cffi', 'pycparser', 'pip'):
+        rows = [line for line in lines[1:] if line.startswith(package + '==')]
+        if rows:
+            require(len(rows) == 1 and re.fullmatch(number, rows[0].removeprefix(package + '==')), 'Invalid package version')
+            versions[package] = rows[0].removeprefix(package + '==')
+    require(versions['yt-dlp-package'] == stable['package_version'] and
+            tuple(map(int, versions['yt-dlp'].split('.'))) == tuple(map(int, stable['package_version'].split('.'))) and
+            (fixture is None or (versions['yt-dlp'] == fixture['yt_dlp_version'] and
+                                 versions['deno'] == fixture['deno_version'])), 'Stable runtime identity mismatch')
+    return ''.join(f'{k}: {v}\n' for k, v in versions.items())
+
+
+def read_public_input(directory, name):
+    # Reject symlinks, devices, hard links and non-regular inputs before consuming bytes.
+    st = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    require(stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.geteuid(),
+            'Unsafe evidence file')
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    with os.fdopen(os.open(name, flags, dir_fd=directory), 'rb') as f:
+        opened = os.fstat(f.fileno())
+        require((opened.st_dev, opened.st_ino) == (st.st_dev, st.st_ino) and
+                stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1, 'Evidence file replaced')
+        data = f.read(1024 * 1024 + 1)
+        require(len(data) <= 1024 * 1024, 'Oversize evidence')
+    return data
+
+
+def stage_evidence(source, output, *, partial=False, current_stable=False):
+    """Build a fresh CI-only public bundle from typed evidence in a private completed job."""
+    public = {}
+    chronology = {}
+    bound_fixture = False
+    suffixes = ('.before-rescue.json', '.final-before-rescue.json', '.status.log')
+    names = {label + suffix for label in CI_CHILDREN for suffix in suffixes}
+    names.update(label + '.dialogs.log' for label in CI_DIALOGS)
+    names.update(('events.json', 'qualification-errors.json', 'fixture-tools.log'))
+    # Raw application output and filesystem/environment metadata never enter the public bundle.
+    private_names = {'fixture-environment.log'} | {label + '.log' for label in CI_CHILDREN}
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    failures = (AssertionError, ValueError, OSError, TypeError, KeyError, RecursionError, OverflowError)
+
+    def collect(directory, name, transform, key):
+        try:
+            result = transform(read_public_input(directory, name))
+        except failures:
+            if not partial:
+                raise
+            return None
+        public[key] = result if isinstance(result, str) else json.dumps(result) + '\n'
+        return result
+
+    def qualification_log(raw, folders):
+        nonlocal bound_fixture
+        lines = raw.decode().splitlines()
+        start = '=== Shared-destination real tools 1/1 ==='
+        finish = r'Shared-destination real tools 1/1: (?:PASS \([0-9]+\.[0-9]{3}s\)|FAIL \(status [0-9]+, [0-9]+\.[0-9]{3}s\))'
+        selected = [line for line in lines if line in (start, PASS_LINE, 'Qualification passed.',
+                    'Qualification FAILED; evidence preserved.') or re.fullmatch(finish, line)]
+        reported = [Path(line.removeprefix('Evidence: ')) for line in lines if line.startswith('Evidence: ')]
+        bound_fixture = len(reported) == 1 and reported[0].is_absolute() and [reported[0].name] == folders
+        if partial:
+            # A failed job may leave multiple/stale or incomplete directories. A recognizable
+            # filename or valid JSON cannot bind any such directory to the failed invocation.
+            selected = [line for line in selected if line == start or 'FAIL' in line]
+        else:
+            require(bound_fixture, 'Summary belongs to a different fixture')
+            require(len(selected) == 4 and selected[:3] == [start, PASS_LINE, 'Qualification passed.'] and
+                    selected[-1].startswith('Shared-destination real tools 1/1: PASS (') and
+                    selected[-1] == lines[-1], 'Missing qualification verdict')
+        require(selected, 'No public qualification verdict')
+        if bound_fixture:
+            selected.insert(1, 'Evidence: ' + folders[0])
+        return '\n'.join(selected) + '\n'
+
+    def verify_piece(name, raw):
+        if name.endswith('.dialogs.log'):
+            return public_dialogs(raw, name.removesuffix('.dialogs.log'), partial)
+        row = public_json(raw)
+        if name == 'events.json':
+            chronology.update(public_events(row, partial))
+        elif name == 'fixture-tools.log':
+            require(isinstance(row, dict) and set(row) == {'yt_dlp_version', 'yt_dlp_kind', 'deno_version', 'process_scope'} and
+                    row['process_scope'] == 'authenticated-consumers' and
+                    re.fullmatch(VERSION, row['yt_dlp_version']) and row['yt_dlp_kind'] in ('ELF', 'script-or-other')
+                    and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', row['deno_version']) and
+                    (current_stable or row['yt_dlp_version'] == '2026.08.19' and row['deno_version'] == '2.9.4'),
+                    'Unexpected runtime identity')
+        elif name == 'qualification-errors.json':
+            require(isinstance(row, list) and (partial or not row), 'Fixture recorded qualification errors')
+            for error in row:
+                require(isinstance(error, dict) and {'phase','label'} <= set(error) <= {'phase','label','category','errno'}
+                        and error['phase'] in CI_PHASES and error['label'] in (None, *CI_CHILDREN)
+                        and error.get('category') in (None, 'operating-system-error', 'assertion', 'interrupt',
+                                                      'system-exit', 'exception') and
+                        ('errno' not in error or type(error['errno']) is int and 0 < error['errno'] < 4096),
+                        'Invalid diagnostic record')
+        elif name.endswith('.status.log'):
+            label = name.removesuffix('.status.log')
+            require(isinstance(row, dict) and set(row) == {'monotonic_ns', 'label', 'parent_status', 'event'}
+                    and observed_time(row['monotonic_ns']) and row['label'] == label
+                    and row['event'] == 'parent-status-before-rescue' and
+                    ((partial and row['parent_status'] is None) or type(row['parent_status']) is int and
+                     (row['parent_status'] == CI_CHILDREN[label] or partial and -255 <= row['parent_status'] <= 255)),
+                    'Invalid process exit evidence')
+        else:
+            terminal_observation(row)
+            require(partial or (not row['live'] and not row['url_in_argv']), 'Adverse process observation')
+        return row
+
+    with ExitStack() as stack:
+        root = os.open(source, directory_flags)
+        stack.callback(os.close, root)
+        entries = set(os.listdir(root))
+        directories = [n for n in entries if re.fullmatch(r'shared-destination-real-[a-z0-9_]{8}', n)]
+        root_files = {'qualification.log'} | ({'stable-resolution.json', 'tool-versions.log'} if current_stable else set())
+        if not partial:
+            require(len(directories) == 1 and entries == root_files | set(directories), 'Missing or foreign CI evidence')
+        collect(root, 'qualification.log', lambda b: qualification_log(b, directories), 'qualification.log')
+        fixture = None
+        if bound_fixture:
+            folder = directories[0]
+            try:
+                fd = os.open(folder, directory_flags, dir_fd=root)
+            except OSError:
+                if not partial:
+                    raise
+            else:
+                stack.callback(os.close, fd)
+                files = set(os.listdir(fd))
+                if not partial:
+                    require(files == names | private_names, 'Incomplete or foreign fixture evidence')
+                    for name in private_names:
+                        st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                        require(stat.S_ISREG(st.st_mode) and st.st_nlink == 1, 'Unsafe private diagnostic')
+                for name in sorted(names & files):
+                    value = collect(fd, name, lambda b: verify_piece(name, b), folder + '/' + name)
+                    if name == 'fixture-tools.log':
+                        fixture = value
+                if not partial:
+                    require(fixture is not None, 'Missing fixture version evidence')
+                    for label in CI_CHILDREN:
+                        before, final, status = (json.loads(public[folder + '/' + label + suffix])
+                                                 for suffix in suffixes)
+                        require(chronology[label]['parent-exited'][0] <= before['monotonic_ns'] <=
+                                chronology[label]['consumers-observed-quiescent'][0] <= final['monotonic_ns'] <=
+                                status['monotonic_ns'],
+                                'Inconsistent process observation chronology')
+        if current_stable:
+            stable = collect(root, 'stable-resolution.json', release_metadata, 'stable-resolution.json')
+            if stable is not None:
+                collect(root, 'tool-versions.log', lambda b: public_versions(b.decode(), stable, fixture),
+                        'tool-versions.log')
+    require(public, 'No safe evidence available')
+    output.mkdir(mode=0o700)
+    for key, value in public.items():
+        path = output / key
+        if path.parent != output:
+            path.parent.mkdir(mode=0o700, exist_ok=True)
+        with path.open('x', encoding='utf-8') as target:
+            target.write(value)
+
 
 
 def write_scripted_zenity(path):
@@ -279,6 +574,11 @@ sys.exit(status)
 
 
 def main():
+    release = platform.freedesktop_os_release()
+    require((release.get('ID'), release.get('VERSION_ID'), os.uname().machine) ==
+            ('fedora', '45', 'x86_64') and
+            subprocess.check_output(['rpm', '--eval', '%{_arch}'], text=True).strip() == 'x86_64',
+            'Shared-destination qualification requires Fedora 45 x86_64')
     root, evidence = fixture_roots()
     print(f'Evidence: {evidence}', flush=True)
     if root != evidence:
@@ -358,7 +658,7 @@ def main():
         with Path(real_ytdlp).open('rb') as binary:
             kind = 'ELF' if binary.read(4) == b'\x7fELF' else 'script-or-other'
         (root / 'fixture-tools.log').write_text(json.dumps(dict(
-            yt_dlp_version=version, yt_dlp_kind=kind, deno_version=deno_version)) + '\n')
+            process_scope='authenticated-consumers', yt_dlp_version=version, yt_dlp_kind=kind, deno_version=deno_version)) + '\n')
         (root / 'fixture-tools.log').chmod(0o600)
         runtime = root / 'data/yt-dlp-aria2-downloader/runtime'
         yt_dir = runtime / 'yt-dlp' / version
@@ -368,7 +668,7 @@ def main():
         shutil.copy2(real_deno, deno_dir / 'deno')
         (yt_dir.parent / 'current').symlink_to(version)
         (deno_dir.parent / 'current').symlink_to(deno_version)
-        shim = yt_dir / ('yt-dlp_linux_aarch64' if os.uname().machine == 'aarch64' else 'yt-dlp_linux')
+        shim = yt_dir / 'yt-dlp_linux'
         shim.write_text('''#!/usr/bin/python3
 import os, subprocess, sys, time
 from pathlib import Path
@@ -480,6 +780,7 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
             obs = observer_module.Observer(token)
             entry = (label, process, obs, index)
             processes.append(entry)
+            obs.child(process)
             expected_final[process.pid] = output / f'{title or label} [{ident or label}].mkv'
             events.append((time.monotonic_ns(), label, 'launched'))
             return entry
@@ -620,25 +921,25 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         require(staging, 'aria2 did not retain an open staging media descriptor')
         consumer_handle = os.pidfd_open(pid)
         try:
-            require(observer_module.snapshot().get(pid, {}).get('start') == identity['start'],
+            require((observer_module.current_process(pid) or {}).get('start') == identity['start'],
                     'aria2 identity changed before the cancellation barrier')
             signal.pidfd_send_signal(consumer_handle, signal.SIGSTOP)
         finally:
             os.close(consumer_handle)
-        wait_until(lambda: observer_module.snapshot().get(pid, {}).get('state') == 'T', 'aria2 did not stop at barrier')
+        wait_until(lambda: (observer_module.current_process(pid) or {}).get('state') == 'T', 'aria2 did not stop at barrier')
         events.append((time.monotonic_ns(), owner[0], 'consumer-stopped-with-open-fd'))
         owner[1].send_signal(signal.SIGTERM)
         events.append((time.monotonic_ns(), owner[0], 'closure-request'))
         gate.touch()
         finish(contender, 75)
-        require(observer_module.snapshot().get(pid, {}).get('start') == identity['start'], 'consumer escaped the cancellation barrier')
+        require((observer_module.current_process(pid) or {}).get('start') == identity['start'], 'consumer escaped the cancellation barrier')
         require(all(path.is_dir() for path in staging), 'staging removed while real aria2 still holds its media FD')
         require(owner[1].poll() is None, 'GUI reported closure with a stopped live consumer')
         require(independent[1].poll() is None, 'independent request was interrupted')
         events.append((time.monotonic_ns(), owner[0], 'reservation-refused-before-last-access'))
         consumer_handle = os.pidfd_open(pid)
         try:
-            require(observer_module.snapshot().get(pid, {}).get('start') == identity['start'],
+            require((observer_module.current_process(pid) or {}).get('start') == identity['start'],
                     'aria2 identity changed before releasing the cancellation barrier')
             signal.pidfd_send_signal(consumer_handle, signal.SIGCONT)
         finally:
@@ -742,4 +1043,18 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    if len(sys.argv) == 1:
+        sys.exit(main())
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--stage-evidence', nargs=2, type=Path, required=True, metavar=('SOURCE', 'OUTPUT'))
+    parser.add_argument('--current-stable', action='store_true')
+    parser.add_argument('--partial', action='store_true')
+    args = parser.parse_args()
+    os.umask(0o077)
+    try:
+        stage_evidence(*args.stage_evidence, partial=args.partial, current_stable=args.current_stable)
+    except (OSError, ValueError, AssertionError, KeyError, TypeError, RecursionError, OverflowError):
+        # Parser/library errors can echo candidate-controlled text or paths.
+        print('Shared-destination public evidence validation failed.', file=sys.stderr)
+        sys.exit(65)

@@ -207,7 +207,21 @@ run_private_launcher_helper() {
     return 0
 }
 
+is_supported_install_platform() (
+    local machine='' rpm_arch=''
+    grep -Eqx 'ID=(fedora|"fedora")' /etc/os-release || return 1
+    grep -Eqx 'VERSION_ID=(45|"45")' /etc/os-release || return 1
+    machine=$(uname -m) || return 1
+    rpm_arch=$(rpm --eval '%{_arch}') || return 1
+    [[ ${machine} == x86_64 && ${rpm_arch} == x86_64 ]]
+)
+
 install_launcher() {
+    # shellcheck disable=SC2310 # Check before creating the launcher or its directories.
+    if ! is_supported_install_platform; then
+        printf '%s\n' 'Error: launcher installation requires Fedora 45 x86_64.' >&2
+        return 69
+    fi
     validate_launcher_target
     validate_private_launcher_helper
     run_private_launcher_helper install \

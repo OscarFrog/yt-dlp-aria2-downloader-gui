@@ -79,9 +79,8 @@ main() {
     printf 'yt-dlp: %s\n' "${ytdlp_version}"
     printf '%s\n' "${aria2_line}"
 
-    # The Ubuntu generation shares these exact tools and fixtures with the
-    # latest pinned real-tools job. Its caller requests compatibility-only;
-    # other generations must exercise every common fixture with their tools.
+    # An explicit compatibility-only invocation may reuse common fixtures
+    # already qualified with these exact tools. The CI matrix runs both.
     if [[ ${compatibility_only} == false ]]; then
         timeout --signal=TERM --kill-after=10s 8m \
             bash "${PROJECT_DIR}/tests/real-tools-integration.sh"

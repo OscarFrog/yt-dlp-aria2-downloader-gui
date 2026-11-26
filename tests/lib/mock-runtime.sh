@@ -765,7 +765,7 @@ test_mock_runtime_missing_zenity() {
     mkdir -p -- "${no_zenity_bin}"
     for required_command in \
         bash chmod date dirname grep mkdir mkfifo mktemp mv python3 realpath rm sed setsid sleep \
-        stat tail timeout flock sha256sum; do
+        stat tail timeout flock sha256sum rpm uname; do
         required_command_path=$(command -v "${required_command}") \
             || fail "Required host command was not found: ${required_command}"
         ln -s -- "${required_command_path}" \

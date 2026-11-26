@@ -57,7 +57,7 @@ The complete graphical validation procedure remains in
 
 ## Storage and references
 
-These are source documentation assets, not installed RPM/DEB payloads. The
+These are source documentation assets, not installed RPM payloads. The
 READMEs use absolute raw GitHub URLs on the permanent `main` branch, so they
 also work from installed documentation after squash and source-branch deletion.
 Keep these six paths stable when refreshing captures: installed README copies
@@ -78,7 +78,7 @@ a screenshot is faithful to the interface.
 
 `social-preview.png` is the opaque 1280 × 640 GitHub sharing card, kept below
 1,000,000 bytes. It is a source-only asset for the repository's Social preview
-setting and is not installed in RPM/DEB packages.
+setting and is not installed in RPM packages.
 
 The decorative navy background was generated with the built-in imagegen tool.
 Exact typography and the real `readme-url.png` and `readme-progress.png`

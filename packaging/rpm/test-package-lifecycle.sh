@@ -94,7 +94,9 @@ validate_rpm_dependencies() {
     package_requires=$(rpm -qpR -- "${PACKAGE_PATH}")
     for required_dependency in \
         'aria2 >= 1.37.0' \
-        'python3 >= 3.10' \
+        'system-release(45)' \
+        'bash >= 5.3' \
+        'python3 >= 3.15' \
         'ffmpeg' \
         'curl' \
         'gnupg2' \
@@ -147,10 +149,7 @@ inspect_rpm_payload() {
 assert_installed_rpm() {
     local stage=$1
 
-    if ! rpm -q "${PACKAGE_NAME}" >/dev/null; then
-        printf 'Error: RPM is not installed during %s.\n' "${stage}" >&2
-        return 65
-    fi
+    assert_current_rpm_installed "${PACKAGE_NAME}" "${VERSION}"
     assert_package_cli_version RPM "${VERSION}" "${stage}"
 }
 

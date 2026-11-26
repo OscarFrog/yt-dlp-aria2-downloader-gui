@@ -3208,6 +3208,15 @@ validate_mode_selection() {
     fi
 }
 
+is_supported_download_platform() (
+    local machine='' rpm_arch=''
+    grep -Eqx 'ID=(fedora|"fedora")' /etc/os-release || return 1
+    grep -Eqx 'VERSION_ID=(45|"45")' /etc/os-release || return 1
+    machine=$(uname -m) || return 1
+    rpm_arch=$(rpm --eval '%{_arch}') || return 1
+    [[ ${machine} == x86_64 && ${rpm_arch} == x86_64 ]]
+)
+
 # Resolve required commands, adjacent helpers, and managed runtime executables.
 initialize_runtime_dependencies() {
     local command_name
@@ -3217,6 +3226,12 @@ initialize_runtime_dependencies() {
     local runtime_action
     local runtime_attestation=''
     local runtime_status=0
+
+    # shellcheck disable=SC2310 # Both managed and external runtimes require this platform.
+    if ! is_supported_download_platform; then
+        error 'downloads require Fedora 45 x86_64.'
+        exit 69
+    fi
 
     for command_name in aria2c env ffmpeg ffprobe python3 sed stdbuf tr realpath grep ln mktemp mv rm rmdir chmod flock mkdir sha256sum stat setsid sleep timeout find; do
         if ! command -v "${command_name}" >/dev/null 2>&1; then

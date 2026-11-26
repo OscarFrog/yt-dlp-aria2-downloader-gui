@@ -515,16 +515,32 @@ doctor_capture_shellcheck_version() {
         info version:shellcheck unavailable 'version probe failed'
 }
 
+is_fedora_45_x86_64() (
+    local machine='' rpm_arch=''
+    grep -Eqx 'ID=(fedora|"fedora")' /etc/os-release || return 1
+    grep -Eqx 'VERSION_ID=(45|"45")' /etc/os-release || return 1
+    machine=$(uname -m) || return 1
+    rpm_arch=$(rpm --eval '%{_arch}') || return 1
+    [[ ${machine} == x86_64 && ${rpm_arch} == x86_64 ]]
+)
+
 doctor_check_language_versions() {
     local python_version=''
 
-    if ((BASH_VERSINFO[0] > 4 || (\
-        BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))); then
+    # shellcheck disable=SC2310 # The predicate explicitly returns each admission failure.
+    if is_fedora_45_x86_64; then
+        record_doctor_check required fedora-release pass 'Fedora 45 x86_64 userspace'
+    else
+        record_doctor_check required fedora-release fail 'Application qualification requires Fedora 45 x86_64'
+    fi
+
+    if ((BASH_VERSINFO[0] > 5 || (\
+        BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 3))); then
         record_doctor_check required bash-version pass \
-            "GNU Bash ${BASH_VERSION} satisfies the 4.4 minimum"
+            "GNU Bash ${BASH_VERSION} satisfies the 5.3 minimum"
     else
         record_doctor_check required bash-version fail \
-            "GNU Bash ${BASH_VERSION} is older than the 4.4 minimum"
+            "GNU Bash ${BASH_VERSION} is older than the 5.3 minimum"
     fi
 
     if ! command -v -- python3 >/dev/null 2>&1; then
@@ -535,14 +551,14 @@ doctor_check_language_versions() {
     # The bounded probe handles every command and pipeline failure explicitly.
     # shellcheck disable=SC2310
     if doctor_capture_bounded_output python_version python3 -c \
-        'import platform, sys; print(platform.python_version()); raise SystemExit(sys.version_info < (3, 10))' \
+        'import platform, sys; print(platform.python_version()); raise SystemExit(sys.version_info < (3, 15))' \
         2>/dev/null; then
         record_doctor_check required python-version pass \
-            "Python ${python_version} satisfies the 3.10 minimum"
+            "Python ${python_version} satisfies the 3.15 minimum"
     else
         [[ -n ${python_version} ]] || python_version='<unavailable>'
         record_doctor_check required python-version fail \
-            "Python ${python_version} is unavailable or older than the 3.10 minimum"
+            "Python ${python_version} is unavailable or older than the 3.15 minimum"
     fi
 }
 
@@ -576,12 +592,10 @@ doctor_check_shfmt_contract() {
     local value=''
     local pinned_version=''
     local pinned_amd64_sha=''
-    local pinned_arm64_sha=''
     local machine=''
     local version_dir=''
     local version_count=0
     local amd64_count=0
-    local arm64_count=0
 
     if [[ ! -f ${pin_file} || -L ${pin_file} || ! -r ${pin_file} ||
         ! -f ${bootstrap} || -L ${bootstrap} || ! -x ${bootstrap} ]]; then
@@ -601,10 +615,6 @@ doctor_check_shfmt_contract() {
                 pinned_amd64_sha=${value}
                 amd64_count=$((amd64_count + 1))
                 ;;
-            SHFMT_LINUX_ARM64_SHA256)
-                pinned_arm64_sha=${value}
-                arm64_count=$((arm64_count + 1))
-                ;;
             *)
                 record_doctor_check required shfmt-contract fail \
                     "unknown key in shfmt pin: ${key}"
@@ -612,10 +622,9 @@ doctor_check_shfmt_contract() {
                 ;;
         esac
     done <"${pin_file}"
-    if ((version_count != 1 || amd64_count != 1 || arm64_count != 1)) \
+    if ((version_count != 1 || amd64_count != 1)) \
         || [[ ! ${pinned_version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ||
-            ! ${pinned_amd64_sha} =~ ^[0-9a-f]{64}$ ||
-            ! ${pinned_arm64_sha} =~ ^[0-9a-f]{64}$ ]]; then
+            ! ${pinned_amd64_sha} =~ ^[0-9a-f]{64}$ ]]; then
         record_doctor_check required shfmt-contract fail \
             'shfmt version or platform digest is absent, duplicated, or invalid'
         return 0
@@ -628,8 +637,7 @@ doctor_check_shfmt_contract() {
         return 0
     fi
     case ${machine} in
-        x86_64 | amd64) expected_sha=${pinned_amd64_sha} ;;
-        aarch64 | arm64) expected_sha=${pinned_arm64_sha} ;;
+        x86_64) expected_sha=${pinned_amd64_sha} ;;
         *)
             record_doctor_check required shfmt-contract fail \
                 "unsupported shfmt host architecture: ${machine}"
@@ -963,7 +971,10 @@ run_doctor() {
         aria2c
         awk
         bash
+        cargo
+        cargo-clippy
         cat
+        cc
         chmod
         cmp
         cp
@@ -988,6 +999,9 @@ run_doctor() {
         realpath
         rm
         rmdir
+        rpm
+        rustc
+        rustfmt
         sed
         setsid
         sha256sum
@@ -1006,13 +1020,11 @@ run_doctor() {
     local -a optional_commands=(
         appstreamcli
         deno
-        dpkg-deb
         ffmpeg
         ffprobe
         gh
         gpg
         jq
-        rpm
         rpmbuild
         rpmkeys
         rpmsign
@@ -1607,6 +1619,12 @@ main() {
     if [[ ${LIST_ONLY} == true ]]; then
         list_suites
         return 0
+    fi
+
+    # shellcheck disable=SC2310 # The predicate explicitly returns each admission failure.
+    if ! is_fedora_45_x86_64; then
+        printf '%s\n' 'Error: application qualification requires Fedora 45 x86_64.' >&2
+        return 69
     fi
 
     for command_name in bash cat mktemp python3 rm shellcheck sleep; do
