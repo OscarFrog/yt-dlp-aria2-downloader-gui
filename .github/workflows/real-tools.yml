@@ -213,11 +213,11 @@ jobs:
             --requirement "${requirements}"
       - name: Run real shared-destination GUI and CLI qualification
         if: matrix.yt_dlp_version == '2026.8.19'
-        env:
-          TMPDIR: ${{ runner.temp }}/shared-destination-evidence
+        id: shared_run
         run: |
           set -Eeuo pipefail
           umask 077
+          export TMPDIR="${RUNNER_TEMP:?}/shared-destination-evidence"
           mkdir -p -- "${TMPDIR}"
           # All instances share the fixture's HOME/XDG; select only this job's
           # verified executable, never a pre-existing personal runtime.
@@ -228,21 +228,38 @@ jobs:
               --label 'Shared-destination real tools' -- \
               python3 -B ./tests/multi-instance-real.py \
             2>&1 | tee "${TMPDIR}/qualification.log"
-      - name: Retain shared-destination verdicts and monotonic events
-        timeout-minutes: 2
+      - name: Validate and stage shared-destination evidence
+        id: evidence
         if: ${{ always() && matrix.yt_dlp_version == '2026.8.19' }}
+        timeout-minutes: 1
+        env:
+          SHARED_OUTCOME: ${{ steps.shared_run.outcome }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          options=()
+          if [[ ${SHARED_OUTCOME} != success ]]; then
+            [[ ${JOB_STATUS} == failure || ${JOB_STATUS} == cancelled ]] || exit 65
+            options+=(--partial)
+          fi
+          python3 -IB tests/multi-instance-real.py --stage-evidence \
+            "${RUNNER_TEMP:?}/shared-destination-evidence" shared-destination-public "${options[@]}"
+      - name: Retain shared-destination verdicts and monotonic events
+        timeout-minutes: 1
+        if: ${{ always() && matrix.yt_dlp_version == '2026.8.19' && steps.evidence.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: shared-destination-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 14
           path: |
-            ${{ runner.temp }}/shared-destination-evidence/qualification.log
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.log
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/events.json
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/qualification-errors.json
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.before-rescue.json
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.final-before-rescue.json
+            shared-destination-public/qualification.log
+            shared-destination-public/shared-destination-real-*/*.log
+            shared-destination-public/shared-destination-real-*/events.json
+            shared-destination-public/shared-destination-real-*/qualification-errors.json
+            shared-destination-public/shared-destination-real-*/*.before-rescue.json
+            shared-destination-public/shared-destination-real-*/*.final-before-rescue.json
 
   current-stable-local-media:
     needs: identity
@@ -413,11 +430,11 @@ jobs:
           timeout --signal=TERM --kill-after=10s 5m \
             bash ./tests/hls-remux-duration-integration.sh
       - name: Run current-stable shared-destination GUI and CLI qualification
-        env:
-          TMPDIR: ${{ runner.temp }}/shared-destination-evidence
+        id: shared_run
         run: |
           set -Eeuo pipefail
           umask 077
+          export TMPDIR="${RUNNER_TEMP:?}/shared-destination-evidence"
           mkdir -p -- "${TMPDIR}"
           # All instances share the fixture's HOME/XDG; select only this job's
           # verified executable, never a pre-existing personal runtime.
@@ -428,20 +445,37 @@ jobs:
               --label 'Shared-destination real tools' -- \
               python3 -B ./tests/multi-instance-real.py \
             2>&1 | tee "${TMPDIR}/qualification.log"
-      - name: Retain current-stable shared-destination verdicts and monotonic events
-        timeout-minutes: 2
+      - name: Validate and stage current-stable shared-destination evidence
+        id: evidence
         if: ${{ always() }}
+        timeout-minutes: 1
+        env:
+          SHARED_OUTCOME: ${{ steps.shared_run.outcome }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          options=(--current-stable)
+          if [[ ${SHARED_OUTCOME} != success ]]; then
+            [[ ${JOB_STATUS} == failure || ${JOB_STATUS} == cancelled ]] || exit 65
+            options+=(--partial)
+          fi
+          python3 -IB tests/multi-instance-real.py --stage-evidence \
+            "${RUNNER_TEMP:?}/shared-destination-evidence" shared-destination-public "${options[@]}"
+      - name: Retain current-stable shared-destination verdicts and monotonic events
+        timeout-minutes: 1
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: shared-destination-current-stable-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 14
           path: |
-            ${{ runner.temp }}/shared-destination-evidence/stable-resolution.json
-            ${{ runner.temp }}/shared-destination-evidence/tool-versions.log
-            ${{ runner.temp }}/shared-destination-evidence/qualification.log
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.log
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/events.json
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/qualification-errors.json
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.before-rescue.json
-            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/*.final-before-rescue.json
+            shared-destination-public/stable-resolution.json
+            shared-destination-public/tool-versions.log
+            shared-destination-public/qualification.log
+            shared-destination-public/shared-destination-real-*/*.log
+            shared-destination-public/shared-destination-real-*/events.json
+            shared-destination-public/shared-destination-real-*/qualification-errors.json
+            shared-destination-public/shared-destination-real-*/*.before-rescue.json
+            shared-destination-public/shared-destination-real-*/*.final-before-rescue.json

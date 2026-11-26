@@ -186,6 +186,7 @@ class ProofTests(unittest.TestCase):
             (4, "Local media, pinned yt-dlp 2026.8.19", "Install verified Deno for shared-destination qualification"),
             (4, "Local media, pinned yt-dlp 2026.8.19", "Install pinned impersonation dependencies for shared qualification"),
             (4, "Local media, pinned yt-dlp 2026.8.19", "Run real shared-destination GUI and CLI qualification"),
+            (4, "Local media, pinned yt-dlp 2026.8.19", "Validate and stage shared-destination evidence"),
             (4, "Local media, pinned yt-dlp 2026.8.19", "Retain shared-destination verdicts and monotonic events"),
         )
         for index, name, step in checks:
@@ -634,6 +635,7 @@ SCHEDULED_STEPS = {
     "Run current-stable real FFmpeg progress qualification",
     "Run current-stable HLS duration validation",
     "Run current-stable shared-destination GUI and CLI qualification",
+    "Validate and stage current-stable shared-destination evidence",
     "Retain current-stable shared-destination verdicts and monotonic events",
 }
 
@@ -1491,7 +1493,7 @@ exit "${CHECK_VALIDATION_STATUS}"
                     self.assertEqual(result.returncode, expected, result.stderr)
 
     def assert_shared_evidence_paths(self, retain, extra_paths=()):
-        root = "${{ runner.temp }}/shared-destination-evidence/"
+        root = "shared-destination-public/"
         expected = (
             "qualification.log",
             "shared-destination-real-*/*.log",
@@ -1503,6 +1505,44 @@ exit "${CHECK_VALIDATION_STATUS}"
         paths = retain.split("          path: |\n", 1)[1].splitlines()
         self.assertCountEqual([path.strip() for path in paths if path.strip()],
                               [root + path for path in (*expected, *extra_paths)])
+
+    def test_shared_evidence_upload_depends_on_successful_staging_in_both_jobs(self):
+        for job_name, job in self.jobs(self.workflow("real-tools.yml")).items():
+            if job_name == "identity":
+                continue
+            scheduled = job_name == "current-stable-local-media"
+            steps = re.split(r"(?m)^      - ", job)
+            run, stage, upload = steps[-3:]
+            with self.subTest(job=job_name):
+                self.assertIn("id: shared_run", run)
+                self.assertIn('export TMPDIR="${RUNNER_TEMP:?}/shared-destination-evidence"', run)
+                self.assertNotIn("${{ runner.temp }}", run + stage + upload)
+                self.assertIn("id: evidence", stage)
+                self.assertIn("SHARED_OUTCOME: ${{ steps.shared_run.outcome }}", stage)
+                self.assertIn("JOB_STATUS: ${{ job.status }}", stage)
+                self.assertIn("steps.evidence.outcome == 'success'", upload)
+                self.assertIn("python3 -IB tests/multi-instance-real.py --stage-evidence", stage)
+                script = textwrap.dedent(stage.split("        run: |\n", 1)[1])
+                # Capture the exact call from the workflow with distinct host and container paths.
+                with tempfile.TemporaryDirectory() as tmp:
+                    workspace = Path(tmp) / "work"
+                    workspace.mkdir()
+                    for result, prior, code, partial in (("success", "success", 0, False),
+                                                          ("failure", "failure", 0, True),
+                                                          ("skipped", "failure", 0, True),
+                                                          ("skipped", "success", 65, False)):
+                        proc = subprocess.run(["bash", "-c", 'python3() { printf "%s\\n" "$@"; }\n' + script],
+                                              cwd=workspace, env={"RUNNER_TEMP": "/__w/_temp",
+                                                                  "SHARED_OUTCOME": result, "JOB_STATUS": prior},
+                                              capture_output=True, text=True, timeout=5, check=False)
+                        self.assertEqual(proc.returncode, code, proc.stderr)
+                        expected = ["-IB", "tests/multi-instance-real.py", "--stage-evidence",
+                                    "/__w/_temp/shared-destination-evidence", "shared-destination-public"]
+                        if scheduled:
+                            expected.append("--current-stable")
+                        if partial:
+                            expected.append("--partial")
+                        self.assertEqual(proc.stdout.splitlines(), [] if code else expected)
 
     def test_shared_destination_uses_one_verified_tool_entry_and_retains_only_diagnostics(self):
         job = self.jobs(self.workflow("real-tools.yml"))["pinned-local-media"]
@@ -1543,6 +1583,8 @@ exit "${CHECK_VALIDATION_STATUS}"
         self.assertEqual(set(steps), SCHEDULED_STEPS)
         for name, step in steps.items():
             if name.startswith("Retain "):
+                self.assertIn("if: ${{ always() && steps.evidence.outcome == 'success' }}", step)
+            elif name.startswith("Validate and stage "):
                 self.assertIn("if: ${{ always() }}", step)
             else:
                 self.assertNotRegex(step, r"(?m)^        if:")
@@ -1611,8 +1653,8 @@ exit "${CHECK_VALIDATION_STATUS}"
             ('"yt-dlp[pin-curl-cffi]==${package_version}"', "--upgrade 'yt-dlp[pin-curl-cffi]'"),
             ('== "${CURRENT_STABLE_YTDLP_VERSION}" ]]', '== 2026.08.19 ]]'),
             ("version not in item.specifier", "False"),
-            ("shared-destination-evidence/tool-versions.log", "shared-destination-evidence/private-seeds.json"),
-            ("            ${{ runner.temp }}/shared-destination-evidence/shared-destination-real-*/qualification-errors.json\n", ""),
+            ("shared-destination-public/tool-versions.log", "shared-destination-public/private-seeds.json"),
+            ("            shared-destination-public/shared-destination-real-*/qualification-errors.json\n", ""),
             ("shared-destination-real-*/qualification-errors.json", "shared-destination-real-*/*.json"),
         ):
             with self.subTest(mutation=old):
@@ -2905,6 +2947,290 @@ exit "${CHECK_COMMAND_STATUS}"
                     rows = [json.loads(line) for line in records[0].read_text().splitlines()]
                     self.assertTrue(rows[-1]["done"])
                 self.assertIn(f"Validation status: {124 if expired else command_status};", result.stdout)
+
+
+class SharedDestinationPublicEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('shared_destination', PROJECT / 'tests/multi-instance-real.py')
+        self.driver = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.driver)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.private = self.root / 'container' / 'private'
+        self.fixture = self.private / 'shared-destination-real-fixture0'
+        self.fixture.mkdir(parents=True)
+        self.output = self.root / 'workspace' / 'public'
+        self.output.parent.mkdir()
+        self.secret = 'sensitive-argument-and-cookie-canary'
+        self.log = '\n'.join(
+            (
+                '=== Shared-destination real tools 1/1 ===',
+                'Evidence: ' + str(self.fixture),
+                self.secret,
+                self.driver.PASS_LINE,
+                'Qualification passed.',
+                'Shared-destination real tools 1/1: PASS (60.000s)',
+                '',
+            )
+        )
+        (self.private / 'qualification.log').write_text(self.log)
+
+    def write_fixture(self, name, value):
+        (self.fixture / name).write_text(json.dumps(value) + '\n')
+
+    def fill(self):
+        # Construct the simulated transcript from the scenario contract, independently of
+        # the validator’s expected-files set. This fixture is only a unit-test input.
+        groups = {
+            0: [
+                'native-resumed',
+                'after-conflict',
+                'stopping-independent',
+                'stopping-relaunch',
+                'new-before-old',
+                *[f'cycle{i}-{c}' for i in range(3) for c in 'BCD'],
+            ],
+            75: [
+                'conflict-other-url',
+                'conflict-other-profile',
+                'stopping-contender',
+                'truncated-other',
+                'old-before-new-0',
+                'old-before-new-1',
+            ],
+            143: ['cycle0-A', 'cycle1-A', 'cycle2-A', 'conflict-owner', 'stopping-owner', 'truncated-owner'],
+        }
+        self.write_fixture('fixture-environment.log', {'private': self.secret})
+        self.write_fixture('qualification-errors.json', [])
+        self.write_fixture(
+            'fixture-tools.log', dict(yt_dlp_version='2026.08.19', yt_dlp_kind='ELF', deno_version='2.9.4')
+        )
+        events = []
+        for status, labels in groups.items():
+            for label in labels:
+                labels_events = [(1, 'launched'), (9, 'parent-exited'), (11, 'consumers-observed-quiescent')]
+                if status != 75:
+                    labels_events.append((2, 'bytes-served-barrier'))
+                if status == 143 and (label.startswith('cycle') or label == 'stopping-owner'):
+                    labels_events.append((4, 'closure-request'))
+                if label == 'stopping-owner':
+                    labels_events.extend(
+                        (
+                            (3, 'consumer-stopped-with-open-fd'),
+                            (5, 'reservation-refused-before-last-access'),
+                            (12, 'staging-cleaned'),
+                        )
+                    )
+                events.extend((t, label, event) for t, event in sorted(labels_events))
+                self.write_fixture(label + '.log', self.secret)
+                self.write_fixture(
+                    label + '.status.log',
+                    dict(monotonic_ns=15, label=label, parent_status=status, event='parent-status-before-rescue'),
+                )
+                for suffix, ts in (('.before-rescue.json', 10), ('.final-before-rescue.json', 14)):
+                    self.write_fixture(label + suffix, dict(monotonic_ns=ts, live={}, zombies=[101], url_in_argv=[]))
+        self.write_fixture('events.json', events)
+        for label in ('cycle0-A', 'cycle0-B', 'cycle0-C', 'cycle1-A', 'cycle1-C', 'stopping-owner'):
+            rows = [
+                dict(monotonic_ns=i, label=label, event='dialog-result', dialog=kind, status=0, dialog_error=None)
+                for i, kind in enumerate(('entry', 'list', 'file-selection'), 1)
+            ]
+            rows.append(
+                dict(
+                    monotonic_ns=4,
+                    label=label,
+                    event='dialog-opened',
+                    dialog='progress',
+                    status=None,
+                    dialog_error=None,
+                )
+            )
+            (self.fixture / (label + '.dialogs.log')).write_text(''.join(json.dumps(r) + '\n' for r in rows))
+
+    def test_real_files_staged_without_free_text_or_private_sources(self):
+        self.fill()
+        self.driver.stage_evidence(self.private, self.output)
+        files = [f for f in self.output.rglob('*') if f.is_file()]
+        self.assertEqual(len(files), 88)
+        self.assertFalse(any(self.secret.encode() in f.read_bytes() for f in files))
+        self.assertEqual(
+            json.loads((self.output / self.fixture.name / 'cycle0-A.final-before-rescue.json').read_bytes())['zombies'],
+            [101],
+        )
+        self.assertTrue((self.output / self.fixture.name / 'stopping-owner.status.log').is_file())
+
+    def require_rejection(self):
+        result = subprocess.run(
+            [sys.executable, '-IB', self.driver.__file__, '--stage-evidence', self.private, self.output],
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 65)
+        self.assertNotIn(self.secret.encode(), result.stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_summary_or_incomplete_bundle_never_proves_success(self):
+        self.require_rejection()
+        self.fill()
+        for name in (
+            'qualification-errors.json',
+            'events.json',
+            'truncated-other.status.log',
+            'cycle0-C.before-rescue.json',
+            'stopping-owner.final-before-rescue.json',
+            'fixture-tools.log',
+        ):
+            with self.subTest(name=name):
+                p = self.fixture / name
+                valid = p.read_bytes()
+                p.unlink()
+                self.require_rejection()
+                p.write_bytes(valid)
+        for name, corrupt in (
+            ('events.json', '{'),
+            (
+                'events.json',
+                json.dumps(
+                    [r for r in json.loads((self.fixture / 'events.json').read_bytes()) if r[1] != 'truncated-owner']
+                ),
+            ),
+            (
+                'stopping-owner.status.log',
+                json.dumps(
+                    dict(monotonic_ns=15, label='cycle0-A', parent_status=143, event='parent-status-before-rescue')
+                ),
+            ),
+            (
+                'cycle0-A.final-before-rescue.json',
+                json.dumps(dict(monotonic_ns=14, live={}, zombies=[], url_in_argv=[[1, 1]])),
+            ),
+        ):
+            with self.subTest(file=name):
+                p = self.fixture / name
+                valid = p.read_bytes()
+                p.write_text(corrupt)
+                self.require_rejection()
+                p.write_bytes(valid)
+
+    def test_foreign_link_special_files_and_old_host_paths_are_refused(self):
+        self.fill()
+        name = self.fixture / 'foreign.json'
+        name.write_text(self.secret)
+        self.require_rejection()
+        name.unlink()
+        status = self.fixture / 'after-conflict.status.log'
+        original = self.root / 'other'
+        status.rename(original)
+        status.symlink_to(original)
+        self.require_rejection()
+        status.unlink()
+        os.mkfifo(status)
+        self.require_rejection()
+        status.unlink()
+        original.rename(status)
+        host = self.root / 'host'
+        host.mkdir()
+        (host / 'qualification.log').write_text(self.log)
+        with self.assertRaises(AssertionError):
+            self.driver.stage_evidence(host, self.output)
+        self.driver.stage_evidence(self.private, self.output)
+        self.assertTrue((self.output / self.fixture.name / 'events.json').is_file())
+
+    def test_summary_for_another_fixture_and_impossible_conflict_transfer_are_rejected(self):
+        self.fill()
+        summary = self.private / 'qualification.log'
+        summary.write_text(self.log.replace(self.fixture.name, 'shared-destination-real-foreign0'))
+        self.require_rejection()
+        summary.write_text(self.log)
+        events = self.fixture / 'events.json'
+        rows = json.loads(events.read_bytes())
+        self.write_fixture('events.json', [*rows, [5, 'truncated-other', 'bytes-served-barrier']])
+        self.require_rejection()
+
+    def test_partial_export_keeps_actual_failure_and_excludes_invalid_bytes(self):
+        self.write_fixture(
+            'qualification-errors.json',
+            [
+                {
+                    'phase': 'terminal-observation',
+                    'label': 'stopping-owner',
+                    'category': 'operating-system-error',
+                    'errno': 5,
+                }
+            ],
+        )
+        self.write_fixture('cycle0-A.log', self.secret)
+        (self.fixture / 'events.json').write_text(self.secret)
+        (self.private / 'qualification.log').write_text(
+            'Evidence: ' + str(self.fixture) + '\n' + self.secret
+            + '\nQualification FAILED; evidence preserved.\nShared-destination real tools 1/1: FAIL (status 1, 2.124s)\n'
+        )
+        self.driver.stage_evidence(self.private, self.output, partial=True)
+        public = self.output / self.fixture.name
+        self.assertEqual(json.loads((public / 'qualification-errors.json').read_bytes())[0]['errno'], 5)
+        self.assertFalse((public / 'events.json').exists())
+        self.assertFalse((public / 'cycle0-A.log').exists())
+        self.assertIn('FAIL (status 1', (self.output / 'qualification.log').read_text())
+        self.assertNotIn(self.secret, (self.output / 'qualification.log').read_text())
+
+    def test_partial_without_a_unique_matching_receipt_retains_only_safe_failure_summary(self):
+        self.fill()
+        failure = 'Qualification FAILED; evidence preserved.\nShared-destination real tools 1/1: FAIL (status 13, 1.000s)\n'
+        for variant, receipt in (('absent', ''), ('contradictory', 'Evidence: /tmp/shared-destination-real-foreign0\n'),
+                                 ('ambiguous', ('Evidence: ' + str(self.fixture) + '\n') * 2)):
+            with self.subTest(variant=variant):
+                output = self.output.parent / variant
+                (self.private / 'qualification.log').write_text(receipt + self.secret + '\n' + failure)
+                self.driver.stage_evidence(self.private, output, partial=True)
+                self.assertEqual([f.name for f in output.iterdir()], ['qualification.log'])
+                self.assertEqual((output / 'qualification.log').read_text(), failure)
+                self.assertTrue((self.fixture / 'cycle0-A.status.log').is_file())
+
+    def test_stable_requires_selected_and_executed_versions(self):
+        self.fill()
+        tools = self.fixture / 'fixture-tools.log'
+        tools.write_text(tools.read_text().replace('2.9.4', '2.9.8'))
+        meta = dict(
+            source='https://pypi.org/pypi/yt-dlp/json',
+            package_version='2026.8.19',
+            observed_at='2026-11-25T12:00:00+00:00',
+            requires_python='>=3.10',
+        )
+        (self.private / 'stable-resolution.json').write_text(json.dumps(meta))
+        with self.assertRaises(AssertionError):
+            self.driver.stage_evidence(self.private, self.output, current_stable=True)
+        lines = [
+            json.dumps(meta),
+            'yt-dlp: 2026.08.19',
+            'deno 2.9.8 (stable, release, x86_64-unknown-linux-gnu)',
+            'v8 15.0.245.2-rusty',
+            'typescript 6.0.3',
+            'certifi==2026.7.22',
+            'cffi==2.1.1',
+            'pycparser==3.0',
+            'aria2 version 1.37.0',
+            'ffmpeg version 9.0.2-4.fc45 Fedora',
+            'ffprobe version 9.0.2 Fedora',
+            'curl_cffi==0.16.0',
+            'yt-dlp==2026.8.19',
+        ]
+        versions = self.private / 'tool-versions.log'
+        versions.write_text('\n'.join(lines).replace('deno 2.9.8', 'deno 2.9.4'))
+        with self.assertRaises(AssertionError):
+            self.driver.stage_evidence(self.private, self.output, current_stable=True)
+        versions.write_text('\n'.join(lines))
+        self.driver.stage_evidence(self.private, self.output, current_stable=True)
+        record = (self.output / 'tool-versions.log').read_text().splitlines()
+        for expected in (
+            'deno: 2.9.8',
+            'certifi: 2026.7.22',
+            'cffi: 2.1.1',
+            'pycparser: 3.0',
+            'v8: 15.0.245.2-rusty',
+            'typescript: 6.0.3',
+            'ffmpeg: 9.0.2-4.fc45',
+        ):
+            self.assertIn(expected, record)
 
 
 if __name__ == "__main__":

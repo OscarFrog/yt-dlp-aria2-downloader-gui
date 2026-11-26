@@ -2340,13 +2340,50 @@ class StressFirstFailureTests(unittest.TestCase):
                                 self.engine_selection, 'fedora_native_first_failure', 'cmdline', errno.EIO, 'marker',
                                 sys.version_info[:2] == (3, 15))
 
+    def test_private_child_attribution_waits_for_cat_exec(self):
+        # The unmarked first image gates the marked cat's exec on the challenge
+        # becoming readable. Its PID, parent and starttime survive that exec.
+        stage = """import os, select, sys
+if not select.select([0], [], [], 5)[0]:
+    sys.exit(1)
+env = dict(os.environ)
+env['YTDLP_QUALIFICATION_TOKEN'] = env.pop('PENDING_FIXTURE')
+os.execve(sys.argv[1], [sys.argv[1]], env)
+"""
+        launch = subprocess.Popen
+
+        def delayed_cat(argv, *, env, **pipes):
+            pending = env.copy()
+            pending['PENDING_FIXTURE'] = pending.pop('YTDLP_QUALIFICATION_TOKEN')
+            return launch([sys.executable, '-I', '-B', '-c', stage, *argv], env=pending, **pipes)
+
+        case = ProcessTests(self.target)
+        with mock.patch.object(subprocess, 'Popen', new=delayed_cat):
+            self.check_private_open(case, case.sample_before_cli_escalation, self.shard4_selection,
+                                    'stress_first_failure', 'environ', errno.EACCES, 'known_identity', True)
+
+    def ready_cat_row(self, child, cat):
+        # Keep stdin open after the private echo so the same cat remains available
+        # for both the independent marker observation and the later injected fault.
+        self.assertEqual(os.write(child.stdin.fileno(), b'.'), 1)
+        self.assertTrue(select.select([child.stdout], [], [], 5)[0], 'fixture cat did not echo')
+        self.assertTrue(os.read(child.stdout.fileno(), 1) == b'.', 'fixture cat echo did not match')
+        self.assertIsNone(child.poll())
+        self.assertTrue(Path(f'/proc/{child.pid}/exe').samefile(cat))
+        row = observer.current_process(child.pid)
+        self.assertIsNotNone(row)
+        self.assertEqual(row['parent'], os.getpid())
+        return row
+
     def check_private_open(self, case, sample, selection, label, resource, number, attribution, eligible):
         case.setUp()
         private = 'private-first-failure-canary'
         environment = {'YTDLP_QUALIFICATION_TOKEN': case.token, 'PRIVATE_SAMPLE': private}
-        with subprocess.Popen(['cat'], env=environment, stdin=subprocess.PIPE) as child:
+        cat = shutil.which('cat', path=os.defpath)
+        self.assertIsNotNone(cat)
+        with subprocess.Popen([cat], env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
             try:
-                row = observer.current_process(child.pid)
+                row = self.ready_cat_row(child, cat)
                 denied = Path(f'/proc/{child.pid}/{resource}')
                 original_open = Path.open
 

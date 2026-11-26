@@ -59,6 +59,7 @@ REQUIRED_STEPS = {
         "Run current-stable real FFmpeg progress qualification",
         "Run current-stable HLS duration validation",
         "Run current-stable shared-destination GUI and CLI qualification",
+        "Validate and stage current-stable shared-destination evidence",
         "Retain current-stable shared-destination verdicts and monotonic events",
     },
     "Fedora 45 non-root": {"Check workflow syntax and embedded shell", "Check Python with reviewed Ruff", "Run validation"},
@@ -87,6 +88,7 @@ REQUIRED_STEPS = {
         "Install verified Deno for shared-destination qualification",
         "Install pinned impersonation dependencies for shared qualification",
         "Run real shared-destination GUI and CLI qualification",
+        "Validate and stage shared-destination evidence",
         "Retain shared-destination verdicts and monotonic events",
     } for version in ("2026.6.9", "2026.7.4", "2026.8.19")},
     **{f"Mock process/cancellation stress shard {shard}/4": {
@@ -114,6 +116,7 @@ ALLOWED_SKIPS = {
                    "Install verified Deno for shared-destination qualification",
                    "Install pinned impersonation dependencies for shared qualification",
                    "Run real shared-destination GUI and CLI qualification",
+                   "Validate and stage shared-destination evidence",
                    "Retain shared-destination verdicts and monotonic events")),
 }
 

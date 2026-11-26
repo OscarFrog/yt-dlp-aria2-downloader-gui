@@ -2186,6 +2186,14 @@ logs, statuses, pre-rescue inventories and fixture metadata/events are copied
 there. Media, seeds, configuration and runtimes are never exported. The printed
 evidence directory retains ancestor modes/filesystem metadata and redacted
 scripted-dialog diagnostics so a startup refusal cannot become an empty log.
+For both real-tools CI jobs, the container's `RUNNER_TEMP` holds that private
+evidence store. After the run, `--stage-evidence` checks the expected scenario
+labels, process statuses, observations, events and versions before writing
+validated records to a fresh `shared-destination-public` directory in the
+checkout. The upload action uses paths relative to that checkout. A failed
+run retains its verdict and can export the available validated records with
+`--partial`. Raw application logs and filesystem metadata stay private.
+
 Scripted answers do not qualify visible desktop gestures; complete real Zenity
 qualification, through either route above, remains separate. No network outage
 or actual CIFS qualification is implied.
