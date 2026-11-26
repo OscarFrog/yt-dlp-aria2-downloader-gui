@@ -815,7 +815,7 @@ jobs:
           RUN . /etc/os-release && test "$ID:$VERSION_ID" = fedora:45 && \
               kernel_arch=$(uname -m) && rpm_arch=$(rpm --eval '%{_arch}') && \
               test "$kernel_arch" = x86_64 && test "$rpm_arch" = x86_64 && \
-              dnf -y --setopt=install_weak_deps=False install aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file && dnf clean all
+              dnf -y --setopt=install_weak_deps=False install cargo clippy gcc rust rustfmt aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file && dnf clean all
           ARG SHFMT_VERSION
           COPY --chmod=0555 shfmt /opt/shfmt/v${SHFMT_VERSION}/shfmt
           DOCKERFILE

@@ -53,6 +53,7 @@ def evidence(scenario='success', label=None, race_side='after-publication'):
         'output_present': True, 'output_verified': True,
         'result_discovered': True, 'result_published': True, 'partial_retained': False,
         'diagnostics_clean': True, 'state_clean': True,
+        'process_scope': 'native-application-cgroup', 'terminal_populated': False,
         'observer_error': False, 'final_live': {}, 'final_windows': [],
         'url_in_argv': [], 'stage': {'transfer_active': True, 'ffmpeg_active': False},
         'closure_ns': 5_000_000_000, 'exit_ns': 6_000_000_000,
@@ -169,6 +170,7 @@ builtin source "$1" success
                 with tempfile.TemporaryDirectory() as root, \
                         mock.patch.object(sys, 'argv', [str(DRIVER)]), \
                         mock.patch.object(CHECK.tempfile, 'mkdtemp', return_value=root), \
+                        mock.patch.object(CHECK, 'trial_admissions', return_value={}), \
                         mock.patch.object(Path, 'read_text', autospec=True, return_value=metadata) as read, \
                         mock.patch.object(CHECK.os, 'uname', return_value=mock.Mock(machine=machine)), \
                         mock.patch.object(CHECK.subprocess, 'run', return_value=mock.Mock(stdout=rpm_arch)), \
@@ -213,6 +215,7 @@ class EvidenceTests(unittest.TestCase):
     def test_terminal_observer_refuses_live_process_windows_and_privacy(self):
         witnesses = {
             'observer_error': True,
+            'terminal_populated': True,
             'final_live': {'456': {'start': 12345, 'state': 'S'}},
             'final_windows': [{'window': 101, 'title': 'qualification:success:progress'}],
             'url_in_argv': [{'pid': 456, 'url': 'https://secret.invalid/private-token'}],
@@ -1078,6 +1081,7 @@ class PublicationWitnessTests(unittest.TestCase):
         self.final = self.root / 'native-remux.mkv'
         self.final.write_bytes(b'unconfirmed native remux bytes')
         self.observer = load_module('result_observer', PROJECT / 'tests/process-observer.py')
+        self.addCleanup(self.observer.close_utilities)
         self.child = subprocess.Popen(
             self.child_command(),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -1476,6 +1480,7 @@ class PrivacyAndCleanupTests(unittest.TestCase):
             try:
                 with mock.patch.object(sys, 'argv', [str(DRIVER)]), \
                         mock.patch.object(CHECK.tempfile, 'mkdtemp', return_value=str(root)), \
+                        mock.patch.object(CHECK, 'trial_admissions', return_value={}), \
                         mock.patch.object(CHECK, 'load_module', return_value=module), \
                         mock.patch.object(CHECK, 'source_identity', return_value={}), \
                         mock.patch.object(CHECK, 'prepare_runtime', side_effect=prepare), \
@@ -1555,20 +1560,24 @@ class TerminalVerdictTests(unittest.TestCase):
                      'missing', 'empty', 'null-fields', 'invalid-identity', 'identity-error',
                      'export-error', 'export-final-write', 'cleanup-error', 'url-and-cleanup',
                      'earlier-and-cleanup', 'final-url-write', 'final-live-write',
-                     'systemexit-observation', 'url-and-systemexit-cleanup'):
+                     'systemexit-observation', 'url-and-systemexit-cleanup', 'second-trial-eio'):
             with self.subTest(case=case):
                 result = self.run_terminal('zenity', case)
                 self.assert_terminal_verdict(result, case == 'clean')
                 if case == 'clean':
                     self.assertIn('private/summary.json', result['artifacts'])
                     self.assertIn('exported/summary.json', result['artifacts'])
-                if case not in ('earlier-url', 'earlier-and-cleanup'):
-                    # All 18 scenarios completed the real validator before the
-                    # final observation/cleanup injection; none is skipped.
-                    summary = result['artifacts']['private/summary.json']
-                    self.assertEqual(len(summary['scenarios']), 18)
-                    self.assertEqual(sum(event['kind'] == 'result-closed'
-                                         for event in result['events']), 18)
+                summary = result['artifacts']['private/summary.json']
+                expected = (18 if case in ('clean', 'export-error', 'export-final-write', 'cleanup-error')
+                            else 2 if case == 'second-trial-eio' else 1)
+                self.assertEqual(len(summary['scenarios']), expected)
+                self.assertEqual(sum(event['kind'] == 'result-closed' for event in result['events']), expected)
+                if case == 'second-trial-eio':
+                    saved = result['artifacts']['private/success.final-before-rescue.json']
+                    self.assertEqual((saved['scope_label'], saved['live'], saved['terminal_populated']),
+                                     ('success', {}, False))
+                    self.assertIs(result['artifacts']['private/error.final-before-rescue.json']
+                                  ['observation_complete'], False)
                 if case == 'final-url':
                     final = result['artifacts']['private/success.final-before-rescue.json']
                     self.assertEqual(final['url_in_argv'], [[70000, 41]])
@@ -1696,9 +1705,9 @@ class TerminalVerdictTests(unittest.TestCase):
              'missing', 'returncode'),
             ('cleanup-rehabilitates', '    if passed:\n        for row in rows:',
              '    passed = True\n    if passed:\n        for row in rows:', 'earlier-url', 'returncode'),
-            ('early-pass', '        passed = True\n    except BaseException as error:',
-             "        passed = True\n        print('PASS: premature fixture verdict', flush=True)\n"
-             '    except BaseException as error:', 'final-url', 'message'),
+            ('early-pass', '            finalize_trial(*trial)',
+             "            print('PASS: premature fixture verdict', flush=True)\n            finalize_trial(*trial)",
+             'final-url', 'message'),
         )
         for name, before, after, case, oracle in changes:
             with self.subTest(mutation=name), tempfile.TemporaryDirectory(prefix='terminal-mutant-') as temporary:
@@ -1708,6 +1717,13 @@ class TerminalVerdictTests(unittest.TestCase):
                 target = Path(temporary) / DRIVER.name
                 target.write_text(mutant)
                 result = self.run_terminal('zenity', case, target)
+                if name in ('omit-live', 'omit-url', 'error-as-success', 'missing-as-empty'):
+                    # The missing local veto is caught by the independently reread saved evidence.
+                    self.assertEqual(result['returncode'], 1)
+                    self.assertEqual(result['artifacts']['private/summary.json']['failure'],
+                                     'Scenario qualification failed.')
+                    self.assert_terminal_verdict(result, False)
+                    continue
                 if oracle == 'returncode':
                     self.assertEqual(result['returncode'], 0,
                                      'Mutation did not reach its intended false-success path: ' +

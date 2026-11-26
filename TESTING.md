@@ -453,7 +453,8 @@ can run the hermetic local contract before choosing a validation profile:
 
 This diagnostic does not run a validation suite, install a dependency, populate
 the managed shfmt cache, or modify the repository. It checks required commands,
-the Fedora Bash 5.3 and Python 3.15 baselines, the pinned shfmt/bootstrap contract,
+the Fedora Bash 5.3 and Python 3.15 baselines, the Rust qualification tools,
+the pinned shfmt/bootstrap contract,
 private temporary-directory semantics, IPv4 loopback binding, and readable
 Linux `/proc` process metadata. It also reports optional qualification tools,
 selected tool versions through time/output-bounded probes, Git/source-archive
@@ -721,47 +722,40 @@ supplies test-only token predicates to runner cancellation fixtures; production
 supervision does not import this test module. A never-observed orphan that has
 removed its token remains outside this attribution guarantee.
 
-An unavailable `/proc/PID/task` inventory is not evidence that every thread has
-exited. During one `Observer.sample()`, an already attributed Z/X identity can
-be bound to a whole-group pidfd before task enumeration, with the same
-PID/start-time checked before and after opening it. An ENOENT from that
-enumeration may use immediate readiness of the authenticated pidfd as
-independent group-exit evidence. If opening a selected nonleader's environment
-returns ESRCH, the two quiescence inventories can also use that proof when
-only that thread retires between them or its stat disappears. Its observed
-start time must match, the leader must retain its identity, and the final
-inventory must contain no observed live thread. A live sibling, an unbound or
-unreadable descriptor, an ambiguous poll result, or a failed close cannot establish this
-proof. The descriptor is closed within the sample and grants no signal, wait,
-reaping or fixture-cleanup authority. Earlier privacy failures, EACCES/EIO and
-recorded argument leaks retain their refusal. Deterministic observer retirement
-regressions model these boundaries in all diagnostic modes, including a stale
-live snapshot followed by a zombie leader and a missing task inventory.
-If opening a new leader's environment returns ENOENT or ESRCH and the first
-task inventory completes without a live sibling, the observer can defer the
-final quiescence inventory until marker discovery and external exclusions are
-complete. A direct child of a marked or previously known parent can use the
-same exit proof when fresh parent identity checks bracket a matching child
-PID, start time and PPID. An identity-check failure, an error after the
-attribute was opened, or an opaque memory reader cannot enable this path.
-An unavailable auxiliary pidfd does not replace a complete procfs inventory;
-the existing two-inventory proof remains usable. The group-exit guarantee uses
-`pidfd_open(..., 0)`, without `PIDFD_THREAD`, as documented in
-[pidfd_open(2)](https://man7.org/linux/man-pages/man2/pidfd_open.2.html).
-Binding also requires the descriptor's unique positive `fdinfo/Pid` to match
-the PID in this procfs instance. This prevents a numerically identical PID in
-another namespace from supplying an unrelated exit proof. The metadata read is
-bounded and never exported. Failure to close its stream remains a refusal;
-an auxiliary open/read failure cannot provide evidence of group exit.
+CI records the generations authenticated at launch, at private consumer
+barriers and through observed child links. The terminal record's live and URL
+fields cover this measured set. They are not an exhaustive history of forks
+or arguments. The shared-destination artifact records this scope as
+`authenticated-consumers` in its closed `fixture-tools.log` record. Owners verify wait statuses and resource release separately.
 
-A known leader can still appear runnable after releasing its memory during
-exit. The observer keeps that group in the live inventory when the leader's
-environment open returns ESRCH and an authenticated read of its command line
-returns EOF. This exception requires PF_EXITING, a single matching task in
-the group inventories bracketing the observations, and an authenticated group
-pidfd with no poll event on either side of the command-line read. The pidfd
-belongs to this sample and confers no authority to certify group exit. The
-observer continues checking descendants and retains previously observed URLs.
+For the native autonomous campaign the launcher creates 18 fresh delegated
+cgroup v2 leaves named for the trial labels, including the two-digit race
+suffixes 00 through 09. It binds each leaf's cgroup.procs and cgroup.events
+read-only at /qualification/trials/LABEL/members and /qualification/trials/LABEL/events.
+On standard input it passes one Unix SOCK_SEQPACKET message containing the
+space-separated ASCII labels in matrix order and their write-only cgroup.procs
+descriptors via SCM_RIGHTS. The harness checks descriptor identities, protects
+them from same-user inspection, and passes only the current admission to
+the pre-exec GUI wrapper. The wrapper closes the descriptor before acknowledging
+enrollment. Every trial records its own final inventory and populated flag
+before rescue and closes its observer before the next launch. The global
+verdict rereads the saved records. The cumulative argv_exit_gaps count records
+argument reads lost to authenticated exits. Command-interface privacy tests
+and actual URL observations remain independent of that count.
+
+Build or check the observer on Fedora 45 x86_64 with the distribution's
+`rust`, `cargo`, `gcc`, `rustfmt` and `clippy` packages:
+
+```bash
+python3 -IB tests/observer_build.py --check
+```
+
+The helper builds from the checkout or extracted source ZIP. Cargo uses the
+tracked lockfile, offline mode and the distribution toolchain. There are no
+third-party crates. The executable lives in a per-user private temporary
+cache keyed by Rust sources and toolchain identity. Fixture sessions reuse
+it across private HOME directories. The check also runs rustfmt, Clippy and
+Cargo tests. Rust is a development and qualification dependency.
 
 The complete mock contract is divided into nine isolated scheduler suites
 (`engine-core`, `engine-hls`, `engine-staging`, `engine-network`, `gui-progress`, `gui-state`,
@@ -1934,57 +1928,13 @@ cannot qualify an unsuccessful export. Multi-instance records ordered, controlle
 failure categories in `qualification-errors.json` and preserves its private
 fixture when observation or cleanup is uncertain.
 
-The optional `--watch-diagnostics` switch records closed first-failure metadata.
-The separate `--observer-diagnostics` switch requires it and adds the primitive
-exception chain only to a failed observer sample. Both are disabled by default.
-Primitive operation identifiers, exception categories and safe errno values are
-separate from the final `ObservationError` errno. An EIO selected by application
-normalization or an explicit inventory guard is not evidence of a Linux EIO.
-Recovered retries and unselected process errors do not create Watch failures.
-No process arguments, environment contents, exception text, raw traceback or
-frame locals enter this diagnostic. Its memory records are bounded; export uses
-the existing private Watch journal. Missing or failed diagnostic collection is
-explicitly incomplete and cannot replace the application exception or authorize
-PASS. Enabling a diagnostic grants no authority to run graphical qualification.
-Synthetic tests of the actual observer and Watch, including their Python entry
-point with inert dependencies, remain distinct from a real graphical attempt.
-
-The separate `--observer-identity-diagnostics` option requires both diagnostic
-options above. Its additional identity record distinguishes the selected group
-and task, their separate start times, and identity information before and after
-an access. It consumes existing observations only; an unavailable identity or
-namespace remains unknown. The `group` field of the observer's stat rows is a
-process-group ID (PGID), not a thread-group ID (TGID). Descendant attribution is
-a correlation through the sampled PPID and does not establish an atomic parent
-relationship or grant signaling authority.
-
-Only this additional mode separates the attribute open, read and close stages.
-It must preserve the buffering policy of the supported Python implementation,
-the existing retry policy and the final exception selected when both a read and
-its close fail. Recording the first error does not change which exception the
-application propagates. A system-operation category names the instrumented I/O
-boundary; an exception injected into a deterministic fixture is synthetic, not
-evidence of a kernel response. Diagnostic work has a timing cost and is not an
-identical scheduling replay.
-
-The detailed I/O path is limited to the inspected CPython 3.10–3.15
-`Path.read_bytes` implementations. A customized reader or unsupported context
-protocol keeps its original execution and marks the diagnostic incomplete;
-an already opened stream is never reopened to obtain more detail. A task's
-group binding denotes the expected group, not a new atomic membership proof.
-Replaced, unattributed group identities stay out of the public correlation
-graph; the observed comparison remains available without assigning them an
-attributed-process alias.
-
-Numerical identity evidence is confined to the private fixture's mode-0600
-`observer-identities.private` file. This suffix is outside the ordinary evidence
-export. Public Watch records contain only validated, qualification-scoped
-pseudonyms and closed identity metadata; the private mapping must be written
-before these references are published. Missing or failed diagnostic storage
-cannot authorize PASS. Never include the private identity file in a shared
-archive. Normal successful observations do not create error events in Watch.
-Neither identity correlation nor any diagnostic option authorizes another real
-Zenity run, a process signal, an additional procfs read or a functional change.
+The optional `--watch-diagnostics` records the first failure. Add
+`--observer-diagnostics` for the native operation, phase, attribution and
+errno. The additional `--observer-identity-diagnostics` option requires
+both switches and permits fixture-local identity correlation. Public
+records use bounded aliases. Keep numerical mappings in the private fixture.
+These options affect diagnostic output and may affect timing. The verdict
+still depends on the same observation and cleanup checks.
 
 ## Shared-destination and process qualification
 
@@ -2005,12 +1955,12 @@ controlled consumers; real-media cycles are qualified separately:
 | GUI shutdown after worker leader exit | A token-bearing GNU-timeout subgroup remains observable and is stopped before the GUI reports completion |
 | Zombie leader with surviving threads | Real orphan and direct-child witnesses retain a pipe after pthread_exit; observer, GUI/CLI predicates and timed supervisor must still detect and stop the live thread before return. A revalidated consumer pidfd must be readable immediately after helper wait, before pipe draining; a premature-return mutant fails this assertion before rescue |
 | Capability admission and degraded observation | Actual private-child pidfd/WNOWAIT probe, refusals injected before launch and waitid/procfs failures after admission; errors never become absence or cleanup authority |
-| Observer procfs failure | Root/stat failures reject the real Zenity harness even when a previous empty success JSON exists; an ESRCH stat read is reopened once, and only a confirmed vanished pathname is skipped. A fresh live identity is retained; repeated ESRCH, permission and I/O errors still fail observation |
+| Observer procfs failure | The real Zenity harness rejects an incomplete observation, including when an older success file exists. Native tests exercise identity binding, permission and I/O errors, and distinct thread and group readiness. |
 | Bash quiescence decisions | A private procfs model changes an enumerated parent to a zombie and adds a live child before its stat is read; GUI session reuse, GUI observation and the CLI sentinel retain supervision. Removing the second inventory fails each oracle without creating or signaling the modeled processes |
 
 The orphan control starts a marked worker in another session, waits for its
 parent to exit, and requires the real Zenity harness verdict to fail before
-rescue. The observer follows the launch marker and recorded PID/start identity,
+rescue. The observer follows the enrolled generations and current child links,
 not all processes of the user. It neither ptraces nor reaps the application.
 The open-folder scenario marks the deliberately launched external viewer via
 its fixture launcher; the observer excludes that application and its children.
@@ -2018,7 +1968,7 @@ An independent positive control verifies this exception without signaling it.
 Polling cannot prove absence of a process that erased its marker and escaped
 before any observation. Test-only subreaping changes reparenting and collects
 already stopped zombies; it is never counted as application wait-status proof.
-The terminal observer sample starts after the harness's stop request is observed.
+The manual route registers the GUI session PID and any viewer PID published by the private launch wrappers. Its inventory covers authenticated consumers. The terminal observer sample starts after the harness's stop request is observed.
 A real-process gate holds a pre-exit sample until the child has exited and been
 reaped and the harness has requested stop. The final sample must refresh that
 state; a still-live orphan or a final procfs observation failure remains a refusal.
@@ -2102,20 +2052,11 @@ A named-thread witness covers ASCII, valid UTF-8 and kernel truncation inside a
 multibyte name. Readiness precedes the real stat read; an independent byte oracle
 checks SID/start while admission, presence and quiescence ignore name encoding,
 including the actual Python predicates extracted from the GUI and engine.
-The independent test observer rejects unreadable command/environment data for
-an attributed live identity. ENOENT/ESRCH require fresh identity evidence;
-permission/I/O errors, persistent interruptions and partial identity records
-cannot produce a successful empty observation. Bounded retries do not erase
-failure evidence: a later disappearance, identity replacement or quiescence,
-even within the same sample, cannot restore a lost privacy interval. The token
-predicate checks only current presence and may accept those freshly confirmed
-terminal transitions after a read error. Dedicated cases cover identity recycling,
-known zombie threads and all five runner-oracle call sites.
-The independent test observer reads that same real task, including its root
-procfs alias in a controlled inventory with an unrelated marker. Synthetic
-stat fixtures additionally cover arbitrary name bytes and invalid identity
-fields: neither malformed identities nor incomplete or denied inventories may
-become successful empty observations. The observer retains its own parser.
+The independent Rust observer parses identity fields separately from arbitrary
+process-name bytes. Incomplete memory observations for an attributed live
+group block qualification. A thread pidfd can establish the end of one task.
+A separate group reference is required to distinguish that exit from an
+active sibling. Failure of an earlier required privacy check remains latched.
 Only a non-leader thread is renamed, keeping other parallel suites' root procfs
 inventories unaffected. Its private barrier is released after the verdict.
 Refusal diagnostics retain status 69 and expose only a bounded category/errno;
@@ -2503,18 +2444,11 @@ can still exit or change parent while procfs is sampled.
 
 A successful observation emits nothing. On the first refusal at a covered
 boundary, the test writes one `process_first_failure` JSON record to stderr.
-It contains the available operation, phase, primitive and normalized errno,
-attribution source, and bounded identity and quiescence evidence. Group and
-task identities use local aliases. The observer's normalized failure still
-propagates through the test and teardown. The traceback can therefore report
-the same exception twice. Read the single packet alongside the method name and
-the runner's iteration header. Tests that deliberately inject errors use
-explicit diagnostic settings to exercise enabled, disabled and silent paths.
-
-Capturing the two diagnostic records can alter scheduling around procfs reads.
-Synthetic faults and application guards exercise the same reporting path.
-A recorded errno alone does not establish a kernel return or identify the
-cause of a previous incident.
+It identifies the native operation, phase, attribution and available errno.
+Public correlation uses fixture-local aliases. Teardown propagates the saved
+error. A traceback may therefore report the same refusal again. Read the
+packet alongside the method name and the runner's iteration header. The
+diagnostic path also accepts synthetic errors in closed test fixtures.
 
 The runtime-manager job runs each hardening group once: `validation`,
 `rollback-admission`, `recovery`, `cache-identity` and `transactions`. Each group

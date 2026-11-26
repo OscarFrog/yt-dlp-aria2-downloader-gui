@@ -178,7 +178,7 @@ def finalize_fixture(root, evidence, processes, gates, server, dialogs, events, 
         if state is not None:
             for pid, row in state['live'].items():
                 try:
-                    current = observer_module.snapshot().get(int(pid))
+                    current = observer_module.current_process(int(pid))
                     if current and current['start'] == row['start']:
                         try:
                             os.kill(int(pid), signal.SIGKILL)
@@ -193,6 +193,8 @@ def finalize_fixture(root, evidence, processes, gates, server, dialogs, events, 
                 process.wait(timeout=10)
         except BaseException as error:
             qualification_failure(failures, 'parent-wait', label, error)
+        attempt('observer-close', obs.close, label)
+    attempt('observer-utilities-close', observer_module.close_utilities)
     for gate in gates.values():
         attempt('gate-release', gate.set)
     attempt('server-shutdown', server.shutdown)
@@ -416,7 +418,8 @@ def stage_evidence(source, output, *, partial=False, current_stable=False):
         if name == 'events.json':
             chronology.update(public_events(row, partial))
         elif name == 'fixture-tools.log':
-            require(isinstance(row, dict) and set(row) == {'yt_dlp_version', 'yt_dlp_kind', 'deno_version'} and
+            require(isinstance(row, dict) and set(row) == {'yt_dlp_version', 'yt_dlp_kind', 'deno_version', 'process_scope'} and
+                    row['process_scope'] == 'authenticated-consumers' and
                     re.fullmatch(VERSION, row['yt_dlp_version']) and row['yt_dlp_kind'] in ('ELF', 'script-or-other')
                     and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', row['deno_version']) and
                     (current_stable or row['yt_dlp_version'] == '2026.08.19' and row['deno_version'] == '2.9.4'),
@@ -655,7 +658,7 @@ def main():
         with Path(real_ytdlp).open('rb') as binary:
             kind = 'ELF' if binary.read(4) == b'\x7fELF' else 'script-or-other'
         (root / 'fixture-tools.log').write_text(json.dumps(dict(
-            yt_dlp_version=version, yt_dlp_kind=kind, deno_version=deno_version)) + '\n')
+            process_scope='authenticated-consumers', yt_dlp_version=version, yt_dlp_kind=kind, deno_version=deno_version)) + '\n')
         (root / 'fixture-tools.log').chmod(0o600)
         runtime = root / 'data/yt-dlp-aria2-downloader/runtime'
         yt_dir = runtime / 'yt-dlp' / version
@@ -777,6 +780,7 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
             obs = observer_module.Observer(token)
             entry = (label, process, obs, index)
             processes.append(entry)
+            obs.child(process)
             expected_final[process.pid] = output / f'{title or label} [{ident or label}].mkv'
             events.append((time.monotonic_ns(), label, 'launched'))
             return entry
@@ -917,25 +921,25 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         require(staging, 'aria2 did not retain an open staging media descriptor')
         consumer_handle = os.pidfd_open(pid)
         try:
-            require(observer_module.snapshot().get(pid, {}).get('start') == identity['start'],
+            require((observer_module.current_process(pid) or {}).get('start') == identity['start'],
                     'aria2 identity changed before the cancellation barrier')
             signal.pidfd_send_signal(consumer_handle, signal.SIGSTOP)
         finally:
             os.close(consumer_handle)
-        wait_until(lambda: observer_module.snapshot().get(pid, {}).get('state') == 'T', 'aria2 did not stop at barrier')
+        wait_until(lambda: (observer_module.current_process(pid) or {}).get('state') == 'T', 'aria2 did not stop at barrier')
         events.append((time.monotonic_ns(), owner[0], 'consumer-stopped-with-open-fd'))
         owner[1].send_signal(signal.SIGTERM)
         events.append((time.monotonic_ns(), owner[0], 'closure-request'))
         gate.touch()
         finish(contender, 75)
-        require(observer_module.snapshot().get(pid, {}).get('start') == identity['start'], 'consumer escaped the cancellation barrier')
+        require((observer_module.current_process(pid) or {}).get('start') == identity['start'], 'consumer escaped the cancellation barrier')
         require(all(path.is_dir() for path in staging), 'staging removed while real aria2 still holds its media FD')
         require(owner[1].poll() is None, 'GUI reported closure with a stopped live consumer')
         require(independent[1].poll() is None, 'independent request was interrupted')
         events.append((time.monotonic_ns(), owner[0], 'reservation-refused-before-last-access'))
         consumer_handle = os.pidfd_open(pid)
         try:
-            require(observer_module.snapshot().get(pid, {}).get('start') == identity['start'],
+            require((observer_module.current_process(pid) or {}).get('start') == identity['start'],
                     'aria2 identity changed before releasing the cancellation barrier')
             signal.pidfd_send_signal(consumer_handle, signal.SIGCONT)
         finally:

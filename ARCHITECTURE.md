@@ -1432,68 +1432,38 @@ non-passing until export succeeds. Headless terminal regressions run the actual
 Python entry points with inert dependency models; they qualify this verdict
 composition, not real media, desktop behavior or continuous procfs coverage.
 
-The independent test observer can resolve a disappearing task inventory only
-with separate evidence that the attributed thread group has exited. A
-whole-group pidfd is acquired before enumeration for a Z/X leader, with the
-same PID/start-time revalidated around acquisition. Nonblocking readiness may
-resolve that inventory's ENOENT, including a stale live row from the sample's
-initial snapshot. If the open of a selected nonleader's environment returns
-ESRCH, the same proof can resolve a change confined to that thread across the two
-quiescence inventories, including ENOENT on its stat. Other live tasks, identity
-changes and strong read errors still prevent this inference. The proof and
-descriptor ownership end with that sample.
-The descriptor's bounded `fdinfo/Pid` observation must agree in the procfs
-namespace; matching numeric PID arguments across namespaces alone is insufficient.
-When the inventory is incomplete, a zombie leader with surviving tasks or an
-uncertain pidfd result cannot prove termination. A complete procfs inventory
-remains usable when auxiliary pidfd acquisition is unavailable. This proof
-neither signals nor reaps processes and cannot erase earlier privacy failures
-or extend fixture cleanup authority. Errors in this additional proof use the same bounded diagnostic and
-latched-refusal contracts.
+### Native qualification observer
 
-An already attributed running leader can lose access to its environment after
-Linux sets PF_EXITING and releases its memory. For this transition the
-observer authenticates a separate whole-group pidfd within the current sample.
-An ESRCH from opening the environment can be accounted for only while task
-inventories still identify the exiting leader as the sole thread, the pidfd
-remains nonready, and an independently identity-checked read of its arguments
-returns EOF. The sample keeps the group live and checks its descendants as
-usual. A later pidfd close error retains the original open error in diagnostics.
+Each fixture opens a private pipe session to the Rust executable built from
+`tests/process-observer-rs`. The harness sends its marker over stdin. The
+Python client serializes requests and returns the existing topology and
+privacy records. The executable owns the sampling state and kernel
+descriptors. Production process supervision and fixture rescue remain
+separate owners of their respective signal and wait operations.
 
-The observer's optional primitive diagnostic is metadata only. Exception-local
-capsules preserve the operation and safe original errno before normalization,
-including a distinct secondary revalidation error. Only a propagated failure
-is attached to the existing Watch refusal; a recovered read or an unselected
-process does not acquire a new veto. The diagnostic adds no procfs reads,
-threads, signals, retry attempts or admission criteria. Its bounded closed
-schema contains no process contents or exception text. An absent primitive
-errno remains distinct from the final normalized EIO, and incomplete diagnostic
-collection never rehabilitates an incomplete observation.
+The fixture enrolls its own unreaped child at launch. A detached worker can
+announce its PID at a private barrier. The native helper authenticates its
+marker and generation there. It pins accepted groups across reparenting and
+can follow current kernel child links. CI terminal inventories cover these
+authenticated consumers. An unobserved historical fork is outside that scope.
+The HLS retry barrier, owner wait statuses, lock contention, private command
+plans, decoded output and cancellation tests supply independent functional evidence.
 
-A separately enabled identity diagnostic correlates existing group and task
-observations without using those records as a new attribution or cleanup input.
-Leader and task start times remain distinct. Snapshot parentage is not a fresh,
-atomic parent-child proof, and procfs namespace identity remains unknown when it
-has not been observed. This mode separates attribute open/read/close boundaries
-while retaining the supported interpreter's buffering, retry and exception
-selection semantics; it does not claim unchanged real-world timing. Numerical
-records remain in a private, bounded sink outside the public export inventory.
-Only qualification-local pseudonyms enter the existing first-failure registry,
-after their private correspondence has been stored. The original primitive
-diagnostic and the disabled path retain their independent contracts.
-Unsupported reader or context protocols retain their original execution with
-an explicitly incomplete diagnostic. Task-to-group bindings describe the
-expected group rather than an atomic membership proof; a replacement group
-does not acquire an attributed public identity merely through revalidation.
+For desktop qualification the launcher creates a separate delegated leaf for
+each trial. Only the harness receives admission descriptors. The GUI joins its
+trial before exec and closes its descriptor. Descendants inherit membership
+through exec, reparenting and setsid. All exposed cgroup mounts are read-only.
+Xwayland, the bus and the harness stay outside. Nautilus must survive GUI exit
+and then be closed and reaped by its fixture. Each observer finalizes its own
+result and terminal evidence before rescue or the next launch. Global validation
+reads those records. A nonempty leaf or incomplete required observation fails.
 
-The process-supervision integration harness scopes both diagnostic modes to
-observations of real fixture consumers. It restores their caller settings on
-return or failure. The first refusal at a covered boundary uses the existing
-primitive schema and public identity projection. Each schema retains up to 32
-events. A single JSON record is limited to 16 KiB and marks incomplete
-evidence when truncation is required. The pre-rescue verdict uses this same
-boundary for registered children. Teardown propagates any saved error. Only the observer's ordinary identity, privacy and group-exit
-checks determine its verdict and cleanup authority.
+The group pidfd measures group exit. A live sibling behind a zombie leader
+can still hold files. Owner waits provide the collected status. The Rust
+observer reads argument vectors at checkpoints and exports only URL findings.
+Command-construction tests exercise private arguments and inputs directly.
+Sampling gives no continuous privacy guarantee. Native refusals retain their
+first operation and errno; later emptiness cannot repair a missing verdict.
 
 Contributor control is layered around that runner. Repository skills route a
 task to the relevant policy; issue and pull-request templates make scope,

@@ -3271,6 +3271,7 @@ test_static_python_interface_contracts() {
     local updated_readme_mode=''
     local updated_static_mode=''
 
+    python3 -IB "${SCRIPT_DIR}/tests/observer_build.py" --check
     for file in "${PYTHON_FILES[@]}"; do
         assert_standard_python_header "${file}"
     done

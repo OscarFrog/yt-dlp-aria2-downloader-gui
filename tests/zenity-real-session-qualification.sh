@@ -306,17 +306,22 @@ main() {
         # other users' processes or weakening worker-session observation.
         YTDLP_QUALIFICATION_XDG_OPEN=$(command -v xdg-open)
         export YTDLP_QUALIFICATION_XDG_OPEN
+        export YTDLP_QUALIFICATION_VIEWER_PID="${SESSION_ROOT}/viewer.pid"
         mkdir -- "${SESSION_ROOT}/bin"
         cat >"${SESSION_ROOT}/bin/xdg-open" <<'EOF_EXTERNAL_VIEWER'
 #!/usr/bin/env bash
-exec env YTDLP_QUALIFICATION_EXTERNAL=1 "${YTDLP_QUALIFICATION_XDG_OPEN}" "$@"
+exec env YTDLP_QUALIFICATION_EXTERNAL=1 bash -c '
+    printf "%s\n" "$$" >"${YTDLP_QUALIFICATION_VIEWER_PID}.new" || exit 1
+    mv -- "${YTDLP_QUALIFICATION_VIEWER_PID}.new" "${YTDLP_QUALIFICATION_VIEWER_PID}" || exit 1
+    exec "${YTDLP_QUALIFICATION_XDG_OPEN}" "$@"
+' bash "$@"
 EOF_EXTERNAL_VIEWER
         chmod 700 -- "${SESSION_ROOT}/bin/xdg-open"
         export PATH="${SESSION_ROOT}/bin:${PATH}"
     fi
 
     python3 -I -B "${PROJECT_DIR}/tests/process-observer.py" \
-        "${observer_token}" "${evidence_dir}" "${observer_stop}" &
+        "${evidence_dir}" "${observer_stop}" "${session_id_file}" "${SESSION_ROOT}/viewer.pid" <<<"${observer_token}" &
     WATCHER_PID=$!
 
     HARNESS_PHASE='launching-gui'

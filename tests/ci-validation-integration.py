@@ -3084,7 +3084,8 @@ class SharedDestinationPublicEvidenceTests(unittest.TestCase):
         self.write_fixture('fixture-environment.log', {'private': self.raw_lines})
         self.write_fixture('qualification-errors.json', [])
         self.write_fixture(
-            'fixture-tools.log', dict(yt_dlp_version='2026.08.19', yt_dlp_kind='ELF', deno_version='2.9.4')
+            'fixture-tools.log', dict(process_scope='authenticated-consumers', yt_dlp_version='2026.08.19',
+                                      yt_dlp_kind='ELF', deno_version='2.9.4')
         )
         events = []
         for status, labels in groups.items():

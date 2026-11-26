@@ -1,0 +1,9 @@
+[package]
+name = "qualification-observer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "Private process observation for the Fedora qualification harnesses"
+
+[dependencies]

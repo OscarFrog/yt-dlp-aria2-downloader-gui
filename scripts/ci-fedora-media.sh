@@ -33,8 +33,8 @@ provision_media() (
     chmod 700 -- "${rpm_keyring}"
 
     dnf install --assumeyes \
-        ca-certificates curl findutils gawk git gnupg2 grep gzip procps-ng \
-        python3 python3-pip rpm sed tar unzip util-linux xz
+        ca-certificates cargo curl findutils gawk gcc git gnupg2 grep gzip procps-ng \
+        python3 python3-pip rpm rust sed tar unzip util-linux xz
 
     curl --fail --location --proto '=https' --tlsv1.2 \
         --retry 3 --retry-all-errors \

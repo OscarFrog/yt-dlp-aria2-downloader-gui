@@ -2926,18 +2926,19 @@ if match is None:
 function = match.group()
 
 
-def scan(token, fixture_project=project, prefix="", *, check=True, fault=""):
+def scan(token, fixture_project=project, prefix="", *, check=True, fault="", announced=()):
     command = "set -euo pipefail\n" + function + prefix + '''
-TEST_ROOT=$1
-PROJECT_DIR=$2
-export YTDLP_ARIA2_MOCK_PROCESS_TOKEN=$1
+TEST_ROOT=${YTDLP_ARIA2_MOCK_PROCESS_TOKEN}
+PROJECT_DIR=$1
+shift
+TEST_ANNOUNCED_CONSUMERS=("$@")
 find_test_processes
 if ((${#TEST_PROCESS_PIDS[@]})); then
     printf '%s\\n' "${TEST_PROCESS_PIDS[@]}"
 fi
 '''
-    result = subprocess.run(["bash", "-c", command, "scan-fixture", token, str(fixture_project)],
-                            env=dict(os.environ, MOCK_OBSERVATION_FAULT=fault),
+    result = subprocess.run(["bash", "-c", command, "scan-fixture", str(fixture_project), *map(str, announced)],
+                            env=dict(os.environ, MOCK_OBSERVATION_FAULT=fault, YTDLP_ARIA2_MOCK_PROCESS_TOKEN=token),
                             capture_output=True, text=True, timeout=10, check=check)
     return set(result.stdout.splitlines()) if check else result
 
@@ -2945,56 +2946,18 @@ fi
 with tempfile.TemporaryDirectory(prefix="mock-process-scan-") as directory:
     root = Path(directory)
     token = str(root / "needle space é\nend")
-    marker = b"YTDLP_ARIA2_MOCK_PROCESS_TOKEN=" + os.fsencode(token)
-    proc = root / "proc"
-    proc.mkdir()
     fake_project = root / "project"
     (fake_project / "tests").mkdir(parents=True)
-    # Redirect only the observer's filesystem reads; parsing, token matching,
-    # identity checks and the actual Bash scanner remain the implementations.
-    (fake_project / "tests/process-observer.py").write_text('''import importlib.util
-import os
-from pathlib import Path
-spec = importlib.util.spec_from_file_location('actual_observer', REAL_HELPER)
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-root = Path(PROC_ROOT)
-
-def mapped(path):
-    value = str(path)
-    return root / value[6:] if value.startswith('/proc/') else Path(value)
-
-module.Path = mapped
-module.snapshot = lambda: {int(path.name): module.process_row(path / 'stat') for path in root.iterdir()}
-read = module.read_observation
-
-def injected(path):
-    fault = os.environ.get('MOCK_OBSERVATION_FAULT', '')
-    if fault and path.parent.name == '9900000101' and path.name == 'cmdline':
-        raise OSError(int(fault), 'synthetic observation failure')
-    return read(path)
-
-module.read_observation = injected
-Observer = module.Observer
-snapshot = module.snapshot
-'''.replace('REAL_HELPER', repr(str(project / 'tests/process-observer.py')))
-       .replace('PROC_ROOT', repr(str(proc))))
-    payloads = {
-        "9900000101": marker + b"\0YTDLP_QUALIFICATION_EXTERNAL=1\0",
-        "9900000102": marker + b"suffix\0",
-        "9900000103": b"YTDLP_ARIA2_MOCK_PROCESS_TOKEN=prefix" + os.fsencode(token) + b"\0",
-        "9900000104": b"FOREIGN=1\0",
-        "9900000105": b"",
-    }
-    for pid, payload in payloads.items():
-        (proc / pid).mkdir()
-        (proc / pid / "stat").write_text(pid + " (name ) with spaces) S 1 1 1 " + " ".join(["123"] * 20))
-        (proc / pid / "environ").write_bytes(payload)
-        (proc / pid / "cmdline").write_bytes(b"sleep\00030\0")
-    if scan(token, fake_project) != {"9900000101"}:
-        raise AssertionError("mock scanner lost exact NUL/space/newline token matching")
-    if scan(token + "foreign", fake_project):
-        raise AssertionError("foreign process was selected")
+    # Inject a native observer refusal at the adapter boundary. Kernel and
+    # attribution behavior are exercised separately with the real helper.
+    (fake_project / "tests/process-observer.py").write_text("""import os
+class Observer:
+    def __init__(self, *args, **kwargs): pass
+    def stat(self, pid): return {'start': 1}
+    def register_root(self, pid, start): return True
+    def close(self): pass
+    def sample(self): raise OSError(int(os.environ['MOCK_OBSERVATION_FAULT']), 'fixture refusal')
+""")
     for number in (errno.EACCES, errno.EIO):
         refused = scan(token, fake_project, check=False, fault=str(number))
         if refused.returncode != 70 or refused.stdout or 'observation is incomplete' not in refused.stderr:
@@ -3004,11 +2967,17 @@ snapshot = module.snapshot
     children = []
     try:
         # The token is deliberately absent from argv, including after exec.
-        child = subprocess.Popen(["sleep", "60"], env=environment)
+        child = subprocess.Popen(["sleep", "60"], env=dict(environment, YTDLP_QUALIFICATION_EXTERNAL='1'))
         children.append(child)
         foreign = subprocess.Popen(["sleep", "60"])
         children.append(foreign)
-        if scan(token) != {str(child.pid)}:
+        for value in (token + 'suffix', 'prefix' + token, ''):
+            children.append(subprocess.Popen(["sleep", "60"],
+                            env=dict(environment, YTDLP_ARIA2_MOCK_PROCESS_TOKEN=value)))
+        announced = tuple(p.pid for p in children)
+        if scan(token + 'foreign', announced=announced):
+            raise AssertionError("foreign process was selected")
+        if scan(token, announced=announced) != {str(child.pid)}:
             raise AssertionError("argv-free live witness missing or unrelated process selected")
         if child.poll() is not None or foreign.poll() is not None:
             raise AssertionError("the observation-only scanner signaled a witness")
@@ -3038,7 +3007,7 @@ else:
         result = subprocess.run([sys.executable, "-I", "-B", "-c", launcher], env=environment,
                                 capture_output=True, text=True, timeout=5, check=True)
         orphan = int(result.stdout)
-        if scan(token) != {str(orphan)}:
+        if scan(token, announced=(orphan,)) != {str(orphan)}:
             raise AssertionError("token scanner lost an exec/new-session orphan")
     finally:
         if orphan:
@@ -3132,7 +3101,13 @@ with tempfile.TemporaryDirectory(prefix="mock-dispatch-") as directory:
     for name in ("download-video.sh", "private-aria2-plan.py", "private-process-supervisor.py"):
         shutil.copy2(tests.parent / name, project / name)
     shutil.copy2(tests / "lib/assert.sh", library_root / "assert.sh")
-    shutil.copy2(tests / "process-observer.py", project / "tests/process-observer.py")
+    for name in ("process-observer.py", "observer_build.py"):
+        shutil.copy2(tests / name, project / "tests" / name)
+    crate = "process-observer-rs"
+    (project / "tests" / crate).mkdir()
+    for name in ("Cargo.toml", "Cargo.lock"):
+        shutil.copy2(tests / crate / name, project / "tests" / crate / name)
+    shutil.copytree(tests / crate / "src", project / "tests" / crate / "src")
     for name in libraries:
         shutil.copy2(tests / f"lib/mock-{name}.sh", library_root / f"mock-{name}.sh")
     specimen = project / "tests/mock-integration.sh"
@@ -3855,7 +3830,10 @@ test_run_all_doctor_contract() {
         aria2c
         awk
         bash
+        cargo
+        cargo-clippy
         cat
+        cc
         chmod
         cmp
         cp
@@ -3879,6 +3857,8 @@ test_run_all_doctor_contract() {
         rm
         rmdir
         rpm
+        rustc
+        rustfmt
         sed
         setsid
         sha256sum

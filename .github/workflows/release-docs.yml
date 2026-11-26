@@ -46,7 +46,7 @@ jobs:
           printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
             "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
           [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
-          dnf -y --setopt=install_weak_deps=False install aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file gh
+          dnf -y --setopt=install_weak_deps=False install cargo clippy gcc rust rustfmt aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file gh
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
@@ -322,7 +322,7 @@ jobs:
 
       - name: Install complete-validation dependencies
         run: |
-          dnf -y install aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file
+          dnf -y install cargo clippy gcc rust rustfmt aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file
 
       - name: Validate exact updated documentation tree
         shell: bash

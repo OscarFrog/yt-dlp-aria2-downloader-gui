@@ -971,7 +971,10 @@ run_doctor() {
         aria2c
         awk
         bash
+        cargo
+        cargo-clippy
         cat
+        cc
         chmod
         cmp
         cp
@@ -997,6 +1000,8 @@ run_doctor() {
         rm
         rmdir
         rpm
+        rustc
+        rustfmt
         sed
         setsid
         sha256sum

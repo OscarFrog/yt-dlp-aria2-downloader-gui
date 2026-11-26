@@ -42,6 +42,8 @@ def direct_children():
     children = set()
     for task in Path('/proc/self/task').iterdir():
         children.update(map(int, (task / 'children').read_text().split()))
+    # This one child is owned by the identity client and has no fixture marker.
+    children.discard(observer.utility_pid())
     return children
 
 
@@ -313,3 +315,4 @@ class CancellationWitness:
                 raise OSError('HLS witness cannot restore subreaper state')
         for descriptor in self.descriptors.values():
             os.close(descriptor)
+        observer.close_utilities()

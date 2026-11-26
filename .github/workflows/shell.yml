@@ -85,7 +85,7 @@ jobs:
           persist-credentials: false
       - name: Install validation tools
         run: |
-          dnf -y install aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file shadow-utils
+          dnf -y install cargo clippy gcc rust rustfmt aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file shadow-utils
           useradd --create-home qualification
           chown -R qualification:qualification -- "${GITHUB_WORKSPACE}"
       - name: Install reviewed workflow linter
@@ -184,7 +184,7 @@ jobs:
       - name: Install validation tools
         run: |
           dnf install --assumeyes --no-docs --setopt=install_weak_deps=False \
-            aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 \
+            cargo clippy gcc rust rustfmt aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 \
             grep jq procps-ng python3 sed ShellCheck unzip util-linux
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

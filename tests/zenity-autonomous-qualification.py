@@ -6,6 +6,9 @@ events and process identities; reject missing evidence before any fixture rescue
 """
 
 import argparse
+from contextlib import ExitStack
+import ctypes
+import fcntl
 import hashlib
 import http.server
 import importlib.util
@@ -15,6 +18,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -41,6 +45,68 @@ def load_module(name, filename):
     return module
 
 
+def trial_admissions(labels, resources):
+    """Receive one write-only admission per trial from the native launcher."""
+    # Other same-UID processes must not reopen the unused capabilities via procfs.
+    require(ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0, 'Cannot protect admission descriptors')
+    with socket.socket(fileno=os.dup(0)) as incoming:
+        data, fds, flags, _ = socket.recv_fds(incoming, 1024, len(labels))
+    handles = [resources.enter_context(os.fdopen(fd, 'wb', buffering=0)) for fd in fds]
+    with open(os.devnull, 'rb') as empty:
+        os.dup2(empty.fileno(), 0)
+    require(not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) and
+            data == ' '.join(labels).encode('ascii') and len(handles) == len(labels),
+            'Incomplete native cgroup admissions')
+    admissions = dict(zip(labels, handles, strict=True))
+    identities = set()
+    for label, handle in admissions.items():
+        fd = handle.fileno()
+        os.set_inheritable(fd, False)
+        expected = (Path('/qualification/trials') / label / 'members').stat()
+        require(fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_WRONLY and
+                os.path.samestat(os.fstat(fd), expected), 'Wrong native cgroup admission')
+        identities.add((expected.st_dev, expected.st_ino))
+    require(len(identities) == len(labels), 'Reused native cgroup admission')
+    return admissions
+
+
+def launch_gui(env, log, admission):
+    import select
+    reader, writer = os.pipe()
+    try:
+        command = ['bash', '-c',
+                   'ready=$1; member=$2; shift 2; printf 0 >&"$member" || exit 125; '
+                   'exec {member}>&-; printf R >&"$ready" || exit 125; exec {ready}>&-; exec "$@"',
+                   'qualification', str(writer), str(admission.fileno()),
+                   'bash', str(PROJECT / 'download-video-gui.sh')]
+        process = subprocess.Popen(command, pass_fds=(writer, admission.fileno()), env=env, stdout=log, stderr=subprocess.STDOUT)
+    except BaseException:
+        os.close(reader)
+        raise
+    finally:
+        os.close(writer)
+    try:
+        require(select.select([reader], [], [], 5)[0] and os.read(reader, 1) == b'R',
+                'GUI did not acknowledge cgroup admission')
+        return process
+    except BaseException as first:
+        try:
+            process.kill()
+            process.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired) as secondary:
+            raise first from secondary
+        raise
+    finally:
+        os.close(reader)
+
+
+def application_leaf_populated(label):
+    path = Path('/qualification/trials') / label / 'events'
+    events = dict(line.split() for line in path.read_text().splitlines())
+    require(events.get('populated') in ('0', '1'), 'Invalid application cgroup event')
+    return events['populated'] == '1'
+
+
 def validate_scenario(row):
     """Check only explicit observations; absent data never means quiescence."""
     required = {'scenario', 'label', 'status', 'events', 'output_present', 'output_verified',
@@ -48,6 +114,8 @@ def validate_scenario(row):
                 'closure_ns', 'exit_ns', 'diagnostics_clean', 'state_clean',
                 'result_discovered', 'result_published', 'partial_retained'}
     require(isinstance(row, dict) and required <= row.keys(), 'Incomplete scenario evidence')
+    require(row.get('process_scope') == 'native-application-cgroup'
+            and row.get('terminal_populated') is False, 'Missing empty native application scope')
     scenario, events = row['scenario'], row['events']
     require(scenario in SCENARIOS, 'Unknown scenario')
     require(isinstance(row['label'], str) and bool(row['label']), 'Missing scenario label')
@@ -518,12 +586,9 @@ class FailureDiagnostics:
     def register_observer(self, module):
         # Only reviewed code objects are named. No frame values are inspected.
         self.observer_copy = getattr(module, 'copy_diagnostic', None)
-        for name in ('current_process', 'read_observation', 'read_process_observation',
-                     'observation_failure', 'process_row', 'snapshot', 'observation_paths',
-                     'threads_are_quiescent'):
+        for name in ('current_process', 'process_row', 'snapshot', 'threads_are_quiescent'):
             self.sites[getattr(module, name).__code__] = 'observer.' + name
-        for name in ('sample', '_sample'):
-            self.sites[getattr(module.Observer, name).__code__] = 'observer.' + name
+        self.sites[module.Observer.sample.__code__] = 'observer.sample'
 
     def register_identity_observer(self, module):
         """Keep numerical identity evidence private before publishing its aliases."""
@@ -991,7 +1056,9 @@ def main():
     print(f'Evidence: {evidence}\nPrivate fixture: {root}', flush=True)
     observer_module = load_module('autonomous_observer', 'process-observer.py')
     events_module = load_module('autonomous_events', 'zenity-x11-events.py')
-    rows, children, gates, active, routes = [], [], {}, set(), {}
+    rows, gates, active, routes = [], {}, set(), {}
+    in_flight = None
+    resources = ExitStack()
     session = None
     server = None
     passed = False
@@ -1022,6 +1089,106 @@ def main():
             failure = phase
         print('FAIL: ' + phase, file=sys.stderr, flush=True)
 
+    def record_cleanup(path, value):
+        try:
+            write_json(path, value)
+        except BaseException as error:
+            record_failure('Cleanup evidence write failed.', error)
+
+    def save_terminal(label, state):
+        proof = dict(state) if state is not None else {'observation_complete': False}
+        proof['scope_label'] = label
+        try:
+            proof['terminal_populated'] = application_leaf_populated(label)
+            if proof['terminal_populated']:
+                record_failure('Application cgroup occupied before rescue.')
+        except BaseException as error:
+            proof['observation_complete'] = False
+            record_failure('Terminal cgroup observation failed.', error)
+        record_cleanup(root / (label + '.final-before-rescue.json'), proof)
+
+    def finalize_trial(label, process, watch):
+        nonlocal diagnostic_label
+        diagnostic_label = label
+        try:
+            state = None
+            try:
+                observed = watch.finish()
+                validate_process_observation(observed)
+                state = observed
+            except BaseException as error:
+                record_failure('Terminal process observation failed.', error)
+                record_cleanup(root / (label + '.observer-error.json'), {'category': type(error).__name__})
+            if state is not None and state['url_in_argv']:
+                record_failure('Terminal URL argument exposure.')
+            # An older sample is only a rescue hint, never a replacement
+            # for missing terminal evidence. Identity checks still precede
+            # each signal below, and the private fixture is retained.
+            rescue = state
+            if rescue is None and watch.last is not None:
+                try:
+                    validate_process_observation(watch.last)
+                    rescue = watch.last
+                except BaseException as error:
+                    record_failure('Rescue observation is incomplete.', error)
+            live_residue = (rescue is not None and bool(rescue['live'])) or process.poll() is None
+            if live_residue:
+                record_failure('Live process residue before rescue.')
+            save_terminal(label, state)
+            if live_residue:
+                record_cleanup(root / (label + '.rescue.json'), dict(label=label,
+                               monotonic_ns=time.monotonic_ns(), event='failure-before-rescue'))
+                if process.poll() is None:
+                    process.terminate()
+                for pid, identity in (rescue['live'].items() if rescue is not None else ()):
+                    handle = None
+                    try:
+                        handle = os.pidfd_open(int(pid))
+                        current = observer_module.process_row(Path(f'/proc/{pid}/stat'))
+                        if current and current['start'] == identity['start']:
+                            signal.pidfd_send_signal(handle, signal.SIGKILL)
+                    except (ProcessLookupError, FileNotFoundError):
+                        pass
+                    except BaseException as error:
+                        record_failure('Process identity cleanup failed.', error)
+                        record_cleanup(root / (label + '.identity-cleanup-error.json'),
+                                       {'category': type(error).__name__})
+                    finally:
+                        if handle is not None:
+                            os.close(handle)
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    # Popen still owns this unreaped direct child; it is
+                    # safe to rescue even if no observer sample succeeded.
+                    process.kill()
+                    process.wait(timeout=10)
+        except BaseException as error:
+            record_failure('Process cleanup failed.', error)
+            record_cleanup(root / (label + '.cleanup-error.json'), {'category': type(error).__name__})
+        finally:
+            # Rescue remains possible even if a malformed snapshot or a
+            # failed pidfd interrupted the per-identity rescue above.
+            if process.poll() is None:
+                record_failure('Direct child remained alive before rescue.')
+                try:
+                    process.kill()
+                    process.wait(timeout=10)
+                except BaseException as error:
+                    record_failure('Direct child cleanup failed.', error)
+                    record_cleanup(root / (label + '.parent-cleanup-error.json'),
+                                   {'category': type(error).__name__})
+            try:
+                watch.observer.close()
+            except BaseException as error:
+                record_failure('Native observer cleanup failed.', error)
+            try:
+                watch.result.close()
+            except BaseException as error:
+                record_failure('Result witness cleanup failed.', error)
+                record_cleanup(root / (label + '.result-cleanup-error.json'),
+                               {'category': type(error).__name__})
+
     def interrupted(number, _frame):
         raise InterruptedError(f'Qualification interrupted by signal {number}')
 
@@ -1029,6 +1196,9 @@ def main():
                     for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
 
     try:
+        matrix = [(name, name) for name in ORDINARY]
+        matrix += [('cancel-success-race', f'cancel-success-race-{index:02}') for index in range(10)]
+        admissions = trial_admissions([label for _, label in matrix], resources)
         if args.watch_diagnostics:
             DIAGNOSTICS = FailureDiagnostics(root)
             DIAGNOSTICS.register_observer(observer_module)
@@ -1042,6 +1212,7 @@ def main():
                                text=True, check=True).stdout.strip() == 'x86_64',
                 'Real Zenity qualification requires Fedora 45 x86_64 Workstation')
         identity = source_identity()
+        observer_module.observer_binary()
         write_json(root / 'source-identity.json', identity)
         for name in ('home', 'config', 'state', 'data', 'cache', 'runtime', 'bin',
                      'private-diagnostics', 'output 100% $ é'):
@@ -1108,8 +1279,6 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
         server.daemon_threads = True
         threading.Thread(target=server.serve_forever, daemon=True).start()
         base = f'http://127.0.0.1:{server.server_port}'
-        matrix = [(name, name) for name in ORDINARY]
-        matrix += [('cancel-success-race', f'cancel-success-race-{index:02}') for index in range(10)]
         for scenario, label in matrix:
             diagnostic_label = label
             print(f'Running {label}', flush=True)
@@ -1133,16 +1302,30 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
             if scenario in ('cancel-ffmpeg', 'cancel-success-race'):
                 env['FIXTURE_SLOW_REMUX'] = str(root / (label + '.remux'))
             raw = root / 'private-diagnostics' / (label + '.raw')
-            with raw.open('wb') as log:
-                process = subprocess.Popen(['bash', str(PROJECT / 'download-video-gui.sh')],
-                                           env=env, stdout=log, stderr=subprocess.STDOUT)
-            observer = (observer_module.Observer(token, diagnostics=True, identity_diagnostics=True)
-                        if args.observer_identity_diagnostics else
-                        observer_module.Observer(token, diagnostics=True) if args.observer_diagnostics else
-                        observer_module.Observer(token))
-            watch = Watch(observer, root / (label + '.topology.jsonl'),
-                          ResultWitness(final, observer_module))
-            children.append((label, process, watch))
+            require(not application_leaf_populated(label), 'Application cgroup occupied before launch')
+            with ExitStack() as starting:
+                observer = (observer_module.Observer(token, diagnostics=True, identity_diagnostics=True)
+                            if args.observer_identity_diagnostics else
+                            observer_module.Observer(token, diagnostics=True) if args.observer_diagnostics else
+                            observer_module.Observer(token))
+                starting.callback(observer.close)
+                observer.use_leaf(label)
+                with raw.open('wb') as log, admissions.pop(label) as admission:
+                    process = launch_gui(env, log, admission)
+                try:
+                    observer.child(process)
+                    result = ResultWitness(final, observer_module)
+                    starting.callback(result.close)
+                    watch = Watch(observer, root / (label + '.topology.jsonl'), result)
+                except BaseException as first:
+                    record_failure('Scenario qualification failed.', first)
+                    save_terminal(label, None)
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=5)
+                    raise
+                in_flight = (label, process, watch)
+                starting.pop_all()
             stage = dict(transfer_active=False, ffmpeg_active=False)
             closure = None
             dialog_file = root / 'dialog-events.jsonl'
@@ -1251,7 +1434,9 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
             state = watch.finish()
             validate_process_observation(state)
             diagnostics_clean, state_clean = privacy_evidence(root, raw)
-            row = dict(scenario=scenario, label=label, status=process.returncode, events=observed(complete=True),
+            populated = application_leaf_populated(label)
+            row = dict(process_scope='native-application-cgroup', terminal_populated=populated,
+                       scenario=scenario, label=label, status=process.returncode, events=observed(complete=True),
                        output_present=present, output_verified=verified, observer_error=watch.error is not None,
                        final_live=state['live'], final_windows=session.mapped_windows(),
                        url_in_argv=state['url_in_argv'], stage=stage, closure_ns=closure, exit_ns=exited,
@@ -1269,7 +1454,22 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
                             'Captured pixel evidence changed or is absent')
             require(not (root / (label + '.barrier-failed.json')).exists(), 'Transfer barrier expired')
             gates[label].set()
+            trial, in_flight = in_flight, None
+            finalize_trial(*trial)
+            if errors:
+                break
+        if errors:
+            raise ValueError('Individual trial finalization failed')
         validate_evidence(dict(schema=1, scenarios=rows))
+        for row in rows:
+            label = row['label']
+            saved = json.loads((root / (label + '.final-before-rescue.json')).read_bytes())
+            validate_process_observation(saved)
+            require(saved['scope_label'] == label and saved['terminal_populated'] is False and
+                    saved['live'] == {} and not saved['url_in_argv'] and
+                    type(saved['argv_exit_gaps']) is int and saved['argv_exit_gaps'] >= 0 and
+                    all(saved[key] == row[key] for key in ('result_published', 'result_discovered')),
+                    'Invalid saved terminal evidence')
         require(source_identity() == identity, 'Candidate source changed during qualification')
         passed = True
     except BaseException as error:
@@ -1277,13 +1477,6 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
     finally:
         # Preserve the application verdict before rescue. Cleanup may turn PASS
         # into FAIL, but can never erase an earlier observation failure.
-        def record_cleanup(path, value):
-            nonlocal passed
-            try:
-                write_json(path, value)
-            except BaseException as error:
-                record_failure('Cleanup evidence write failed.', error)
-
         for number in old_handlers:
             try:
                 signal.signal(number, signal.SIG_IGN)
@@ -1291,83 +1484,16 @@ os.execv(os.environ['FIXTURE_REAL_FFMPEG'], [os.environ['FIXTURE_REAL_FFMPEG'], 
                 record_failure('Cleanup signal handler setup failed.', error)
         record_cleanup(root / 'summary.json', dict(schema=1, passed=False, failure=failure,
                                                   errors=errors, scenarios=rows))
-        for label, process, watch in children:
-            diagnostic_label = label
-            try:
-                state = None
-                try:
-                    observed = watch.finish()
-                    validate_process_observation(observed)
-                    state = observed
-                except BaseException as error:
-                    record_failure('Terminal process observation failed.', error)
-                    record_cleanup(root / (label + '.observer-error.json'), {'category': type(error).__name__})
-                if state is not None and state['url_in_argv']:
-                    record_failure('Terminal URL argument exposure.')
-                # An older sample is only a rescue hint, never a replacement
-                # for missing terminal evidence. Identity checks still precede
-                # each signal below, and the private fixture is retained.
-                rescue = state
-                if rescue is None and watch.last is not None:
-                    try:
-                        validate_process_observation(watch.last)
-                        rescue = watch.last
-                    except BaseException as error:
-                        record_failure('Rescue observation is incomplete.', error)
-                live_residue = (rescue is not None and bool(rescue['live'])) or process.poll() is None
-                if live_residue:
-                    record_failure('Live process residue before rescue.')
-                record_cleanup(root / (label + '.final-before-rescue.json'),
-                               state if state is not None else {'observation_complete': False})
-                if live_residue:
-                    record_cleanup(root / (label + '.rescue.json'), dict(label=label,
-                                   monotonic_ns=time.monotonic_ns(), event='failure-before-rescue'))
-                    if process.poll() is None:
-                        process.terminate()
-                    for pid, identity in (rescue['live'].items() if rescue is not None else ()):
-                        handle = None
-                        try:
-                            handle = os.pidfd_open(int(pid))
-                            current = observer_module.process_row(Path(f'/proc/{pid}/stat'))
-                            if current and current['start'] == identity['start']:
-                                signal.pidfd_send_signal(handle, signal.SIGKILL)
-                        except (ProcessLookupError, FileNotFoundError):
-                            pass
-                        except BaseException as error:
-                            record_failure('Process identity cleanup failed.', error)
-                            record_cleanup(root / (label + '.identity-cleanup-error.json'),
-                                           {'category': type(error).__name__})
-                        finally:
-                            if handle is not None:
-                                os.close(handle)
-                    try:
-                        process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        # Popen still owns this unreaped direct child; it is
-                        # safe to rescue even if no observer sample succeeded.
-                        process.kill()
-                        process.wait(timeout=10)
-            except BaseException as error:
-                record_failure('Process cleanup failed.', error)
-                record_cleanup(root / (label + '.cleanup-error.json'), {'category': type(error).__name__})
-            finally:
-                # Rescue remains possible even if a malformed snapshot or a
-                # failed pidfd interrupted the per-identity rescue above.
-                if process.poll() is None:
-                    record_failure('Direct child remained alive before rescue.')
-                    try:
-                        process.kill()
-                        process.wait(timeout=10)
-                    except BaseException as error:
-                        record_failure('Direct child cleanup failed.', error)
-                        record_cleanup(root / (label + '.parent-cleanup-error.json'),
-                                       {'category': type(error).__name__})
-                try:
-                    watch.result.close()
-                except BaseException as error:
-                    record_failure('Result witness cleanup failed.', error)
-                    record_cleanup(root / (label + '.result-cleanup-error.json'),
-                                   {'category': type(error).__name__})
+        if in_flight is not None:
+            finalize_trial(*in_flight)
+        try:
+            resources.close()
+        except OSError as error:
+            record_failure('Cgroup admission cleanup failed.', error)
+        try:
+            observer_module.close_utilities()
+        except BaseException as error:
+            record_failure('Native identity helper cleanup failed.', error)
         for gate in gates.values():
             try:
                 gate.set()

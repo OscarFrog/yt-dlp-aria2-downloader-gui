@@ -136,6 +136,7 @@ PYTHON_FILES=(
     private-process-supervisor.py
     tests/hls-cancellation-witness.py
     tests/lib/run-all-hup-observer.py
+    tests/observer_build.py
     tests/process-observer.py
     tests/multi-instance-real.py
     tests/zenity-x11-events.py

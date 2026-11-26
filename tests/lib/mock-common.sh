@@ -469,6 +469,7 @@ proc_children_fallback_is_observable() {
 }
 
 find_test_processes() {
+    local -x YTDLP_ARIA2_MOCK_PROCESS_TOKEN="${YTDLP_ARIA2_MOCK_PROCESS_TOKEN:?mock process token is absent}"
     local observations=''
     local pid start_time
     local -a previous_identities=("${TEST_PROCESS_IDENTITIES[@]:-}")
@@ -476,35 +477,48 @@ find_test_processes() {
     if ! observations=$(
         python3 -I -B - \
             "${PROJECT_DIR}/tests/process-observer.py" \
-            "${YTDLP_ARIA2_MOCK_PROCESS_TOKEN:?mock process token is absent}" \
             "${TEST_OWNER_BASHPID:-$$}" "${BASHPID}" \
-            "${previous_identities[@]}" <<'PY_MOCK_OBSERVATION'
+            "${previous_identities[@]}" -- "${TEST_ANNOUNCED_CONSUMERS[@]:-}" <<'PY_MOCK_OBSERVATION'
 import importlib.util
 import os
 import sys
 
-helper, token, owner, caller, *previous = sys.argv[1:]
+helper, owner, caller, *previous = sys.argv[1:]
+token = os.environ['YTDLP_ARIA2_MOCK_PROCESS_TOKEN']
 spec = importlib.util.spec_from_file_location('mock_process_observer', helper)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+observed = module.Observer(token, marker_name='YTDLP_ARIA2_MOCK_PROCESS_TOKEN', allow_external=False)
 try:
-    observed = module.Observer(token, marker_name='YTDLP_ARIA2_MOCK_PROCESS_TOKEN', allow_external=False)
-    rows = module.snapshot()
     excluded = {int(owner), int(caller), os.getpid()}
     for pid in excluded:
-        if pid in rows:
-            observed.known.add((pid, rows[pid]['start']))
-    for identity in previous:
-        if identity:
-            pid, start = identity.split(':')
-            observed.known.add((int(pid), int(start)))
-    state = observed.sample()
-    for pid, row in state['live'].items():
-        if int(pid) not in excluded:
-            print(pid, row['start'])
+        row = observed.stat(pid)
+        if row is None or not observed.register_root(pid, row['start']):
+            raise ValueError('Unable to authenticate fixture owner')
+    detached = {}
+    divider = previous.index('--')
+    for value in filter(None, previous[divider + 1:]):
+        pid = int(value)
+        row = observed.stat(pid)
+        if row:
+            observed.register(pid, row['start'])
+    for identity in filter(None, previous[:divider]):
+        pid, start = map(int, identity.split(':'))
+        if not observed.register(pid, start):
+            # A previous, still-live identity with no fresh attribution remains
+            # a cleanup blocker. Its numerical PID grants no signal authority.
+            row = observed.stat(pid)
+            if row and row['start'] == start and not observed.quiescent(pid, start):
+                detached[pid] = start
+    live = {int(pid): row['start'] for pid, row in observed.sample()['live'].items()}
+    for pid, start in (detached | live).items():
+        if pid not in excluded:
+            print(pid, start)
 except (OSError, ValueError, IndexError):
     print('FAIL: mock process observation is incomplete.', file=sys.stderr)
     sys.exit(70)
+finally:
+    observed.close()
 PY_MOCK_OBSERVATION
     ); then
         return 70
@@ -520,10 +534,10 @@ PY_MOCK_OBSERVATION
 }
 
 signal_test_processes() {
+    local -x YTDLP_ARIA2_MOCK_PROCESS_TOKEN="${YTDLP_ARIA2_MOCK_PROCESS_TOKEN:?mock process token is absent}"
     local requested_signal=$1
     python3 -I -B - \
         "${PROJECT_DIR}/tests/process-observer.py" \
-        "${YTDLP_ARIA2_MOCK_PROCESS_TOKEN:?mock process token is absent}" \
         "${requested_signal}" "${TEST_PROCESS_IDENTITIES[@]:-}" <<'PY_MOCK_SIGNAL'
 import importlib.util
 import os
@@ -531,7 +545,8 @@ from pathlib import Path
 import signal
 import sys
 
-helper, token, requested, *identities = sys.argv[1:]
+helper, requested, *identities = sys.argv[1:]
+token = os.environ['YTDLP_ARIA2_MOCK_PROCESS_TOKEN']
 spec = importlib.util.spec_from_file_location('mock_signal_observer', helper)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
