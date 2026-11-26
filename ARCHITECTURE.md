@@ -1451,6 +1451,15 @@ neither signals nor reaps processes and cannot erase earlier privacy failures
 or extend fixture cleanup authority. Errors in this additional proof use the same bounded diagnostic and
 latched-refusal contracts.
 
+An already attributed running leader can lose access to its environment after
+Linux sets PF_EXITING and releases its memory. For this transition the
+observer authenticates a separate whole-group pidfd within the current sample.
+An ESRCH from opening the environment can be accounted for only while task
+inventories still identify the exiting leader as the sole thread, the pidfd
+remains nonready, and an independently identity-checked read of its arguments
+returns EOF. The sample keeps the group live and checks its descendants as
+usual. A later pidfd close error retains the original open error in diagnostics.
+
 The observer's optional primitive diagnostic is metadata only. Exception-local
 capsules preserve the operation and safe original errno before normalization,
 including a distinct secondary revalidation error. Only a propagated failure

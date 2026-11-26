@@ -754,6 +754,15 @@ another namespace from supplying an unrelated exit proof. The metadata read is
 bounded and never exported. Failure to close its stream remains a refusal;
 an auxiliary open/read failure cannot provide evidence of group exit.
 
+A known leader can still appear runnable after releasing its memory during
+exit. The observer keeps that group in the live inventory when the leader's
+environment open returns ESRCH and an authenticated read of its command line
+returns EOF. This exception requires PF_EXITING, a single matching task in
+the group inventories bracketing the observations, and an authenticated group
+pidfd with no poll event on either side of the command-line read. The pidfd
+belongs to this sample and confers no authority to certify group exit. The
+observer continues checking descendants and retains previously observed URLs.
+
 The complete mock contract is divided into nine isolated scheduler suites
 (`engine-core`, `engine-hls`, `engine-staging`, `engine-network`, `gui-progress`, `gui-state`,
 `signals`, `runtime-compat`, and `runtime-validation`) so `run-all.sh --jobs N`

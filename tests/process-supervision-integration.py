@@ -675,6 +675,328 @@ class ObservationMemoryTests(unittest.TestCase):
                 observed.sample()
 
 
+class ExitingSingletonTests(unittest.TestCase):
+    """Exercise strict memory failure boundaries using two private processes and real pidfds."""
+
+    def setUp(self):
+        # The leader holds a real unmarked child and waits for the test to close stdin.
+        helper = (
+            "import os, subprocess, sys\n"
+            "with subprocess.Popen(['/usr/bin/cat'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env={}) as child:\n"
+            "    child.stdin.write(b'x'); child.stdin.flush()\n"
+            "    if child.stdout.read(1) != b'x': sys.exit(9)\n"
+            "    print(child.pid, flush=True)\n"
+            "    sys.stdin.buffer.read(1)\n"
+            "    child.stdin.close()\n"
+            "    sys.exit(child.wait(timeout=3))\n"
+        )
+        self.token = 'owned-singleton-fixture'
+        self.leader = subprocess.Popen([sys.executable, '-IB', '-c', helper],
+                                       env={'YTDLP_QUALIFICATION_TOKEN': self.token},
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.addCleanup(self.release)
+        self.assertTrue(select.select([self.leader.stdout], [], [], 3)[0])
+        self.child = int(self.leader.stdout.readline())
+        self.root = Path('/proc') / str(self.leader.pid)
+        self.child_root = Path('/proc') / str(self.child)
+        self.key = (self.leader.pid, observer.process_row(self.root / 'stat')['start'])
+
+    def release(self):
+        self.leader.stdin.close()
+        try:
+            self.assertEqual(self.leader.wait(timeout=5), 0)
+        finally:
+            self.leader.stdout.close()
+
+    @contextmanager
+    def transition(self, diagnostics, *, fault='open', number=errno.ESRCH, arguments=b'',
+                   flags=4, threads=1, sibling_at=0, inventory_errno=0, leak_before=False):
+        # The two known PIDs, their parentage and pidfd/fdinfo are genuine. Only the
+        # irreversible exit window and its I/O faults are modelled at procfs boundaries.
+        def snapshot():
+            return {int(p.name): observer.process_row(p / 'stat') for p in (self.root, self.child_root)}
+
+        task_dir = self.root / 'task'
+        leader_task = task_dir / str(self.leader.pid)
+        real_open, real_iterdir = Path.open, Path.iterdir
+        evidence = {'inventories': 0, 'cmdline_reads': 0}
+        exiting = False
+        canary = b'synthetic\0https://fixture.invalid/observable\0'
+
+        class Memory(io.BytesIO):
+            def __init__(inner, kind, data):
+                super().__init__(data)
+                inner.kind = kind
+
+            def read(inner, *args):
+                if inner.kind == 'environ' and fault == 'read':
+                    raise OSError(number, 'fixture read refusal')
+                if inner.kind == 'cmdline':
+                    evidence['cmdline_reads'] += 1
+                return super().read(*args)
+
+            def close(inner):
+                super().close()
+                if inner.kind == 'environ' and fault == 'close':
+                    raise OSError(number, 'fixture close refusal')
+
+        def opened(path, mode='r', *args, **kwargs):
+            if exiting and path.name == 'stat' and path.parent in (self.root, leader_task):
+                with real_open(path, 'rb') as stream:
+                    prefix, sep, suffix = stream.read().rpartition(b') ')
+                fields = suffix.split()
+                fields[0] = b'R'
+                fields[6] = str(int(fields[6]) | flags).encode()
+                fields[17] = str(threads).encode()
+                raw = prefix + sep + b' '.join(fields) + b'\n'
+                return io.BytesIO(raw) if 'b' in mode else io.StringIO(os.fsdecode(raw))
+            if path.parent in (self.root, leader_task):
+                if path.name == 'environ' and exiting:
+                    if fault in ('open', 'cmdline-missing'):
+                        raise OSError(number, 'fixture open refusal')
+                    return Memory('environ', b'')
+                if path.name == 'cmdline':
+                    if exiting:
+                        if fault == 'cmdline-missing':
+                            raise FileNotFoundError(errno.ENOENT, 'fixture arguments unavailable')
+                        return Memory('cmdline', arguments)
+                    if leak_before:
+                        return io.BytesIO(canary)
+            return real_open(path, mode, *args, **kwargs)
+
+        def inventory(path):
+            if exiting and path == task_dir:
+                evidence['inventories'] += 1
+                if inventory_errno:
+                    raise OSError(inventory_errno, 'fixture task inventory refusal')
+                if evidence['inventories'] == sibling_at:
+                    # An unexpected entry inside this child's task directory; no
+                    # lookup or signal may target an unrelated system process.
+                    return iter([leader_task, task_dir / str(self.child)])
+            return real_iterdir(path)
+
+        observed = observer.Observer(self.token, diagnostics=diagnostics, identity_diagnostics=diagnostics)
+        with mock.patch.object(observer, 'snapshot', snapshot), mock.patch.object(Path, 'open', opened), \
+                mock.patch.object(Path, 'iterdir', inventory):
+            initial = observed.sample()
+            self.assertIn(str(self.leader.pid), initial['live'])
+            self.assertIn(str(self.child), initial['live'])
+            self.assertIn(self.key, observed.known)
+            self.assertEqual(self.key in initial['url_in_argv'], leak_before)
+            exiting = True
+            yield observed, evidence
+
+    def test_exiting_singleton_keeps_group_descendant_and_previous_leak(self):
+        for diagnostics in (False, True):
+            with self.subTest(diagnostics=diagnostics), self.transition(diagnostics, leak_before=True) as (obs, evidence):
+                result = obs.sample()
+                self.assertEqual(set(result['live']), {str(self.leader.pid), str(self.child)})
+                self.assertNotIn(self.leader.pid, result['zombies'])
+                self.assertIn(self.key, result['url_in_argv'])
+                self.assertIsNone(obs.error)
+                self.assertFalse(obs.diagnostics_incomplete)
+                self.assertGreaterEqual(evidence['inventories'], 3)
+                self.assertGreaterEqual(evidence['cmdline_reads'], 1)
+
+    def test_exiting_singleton_rejects_uncertain_identity_memory_and_inventory(self):
+        cases = [
+            {'flags': 0}, {'threads': 2}, {'sibling_at': 1}, {'sibling_at': 2}, {'sibling_at': 3},
+            {'inventory_errno': errno.EIO}, {'inventory_errno': errno.EACCES},
+            {'number': errno.EACCES}, {'number': errno.EPERM}, {'number': errno.EIO},
+            {'number': errno.ENOENT}, {'fault': 'read'}, {'fault': 'close'},
+            {'fault': 'cmdline-missing'}, {'arguments': b'fixture\0'},
+        ]
+        for diagnostics in (False, True):
+            for options in cases:
+                with self.subTest(diagnostics=diagnostics, options=options), self.transition(diagnostics, **options) as (obs, _):
+                    with self.assertRaises(observer.ObservationError) as initial:
+                        obs.sample()
+                    number = options.get('inventory_errno', options.get('number', errno.ESRCH))
+                    self.assertEqual(initial.exception.errno, number)
+                    if diagnostics:
+                        packet = obs.identity_failure(initial.exception)
+                        self.assertTrue(packet['complete'])
+                        first, = [e for e in packet['events'] if e['first_failure']]
+                        operation = {'read': 'attribute_read', 'close': 'attribute_close'}.get(
+                            options.get('fault'), 'attribute_open')
+                        if 'inventory_errno' in options:
+                            operation = 'task_inventory'
+                        self.assertEqual((first['operation'], first['primitive_errno']), (operation, number))
+                        self.assertEqual(packet['events'][-1]['normalized_errno'], number)
+                        if options.get('fault') == 'cmdline-missing':
+                            self.assertTrue(any(e['operation'] == 'attribute_open' and e['primitive_errno'] == errno.ENOENT
+                                                for e in packet['events'][1:]))
+                    self.assertIs(obs.error, initial.exception)
+                    with mock.patch.object(observer, 'snapshot', return_value={}), self.assertRaises(observer.ObservationError) as later:
+                        obs.sample()
+                    self.assertIs(later.exception, initial.exception)
+
+    def test_exiting_singleton_rejects_and_records_nonempty_private_arguments(self):
+        for diagnostics in (False, True):
+            with self.subTest(diagnostics=diagnostics), self.transition(
+                    diagnostics, arguments=b'https://fixture.invalid/synthetic\0') as (obs, evidence):
+                with self.assertRaises(observer.ObservationError) as failure:
+                    obs.sample()
+                self.assertIs(obs.error, failure.exception)
+                self.assertIn(self.key, obs.leaks)
+                self.assertGreaterEqual(evidence['cmdline_reads'], 1)
+
+    def test_exiting_singleton_rejects_unbound_ready_or_unobservable_pidfd(self):
+        real_pidfd_open = os.pidfd_open
+        for diagnostics in (False, True):
+            for fault in ('foreign-fd', 'ready-before-argv', 'ready-after-argv', 'poll-error', 'pollnval'):
+                with self.subTest(diagnostics=diagnostics, fault=fault), self.transition(diagnostics) as (obs, _):
+                    descriptors = []
+                    polls = []
+
+                    def open_group(pid, flags=0):
+                        self.assertEqual((pid, flags), (self.leader.pid, 0))
+                        fd = real_pidfd_open(self.child if fault == 'foreign-fd' else pid, flags)
+                        descriptors.append(fd)
+                        return fd
+
+                    def injected_poll(timeout):
+                        self.assertEqual(timeout, 0)
+                        self.assertEqual(len(descriptors), 1)
+                        polls.append(timeout)
+                        if fault == 'poll-error':
+                            raise OSError(errno.EIO, 'fixture poll failure')
+                        if fault == 'ready-after-argv' and len(polls) == 1:
+                            return []
+                        return [(descriptors[0], select.POLLNVAL if fault == 'pollnval' else select.POLLIN)]
+
+                    poller = mock.Mock()
+                    poller.poll.side_effect = injected_poll
+                    with mock.patch.object(os, 'pidfd_open', new=open_group), \
+                            mock.patch.object(select, 'poll', return_value=poller), \
+                            self.assertRaises(observer.ObservationError) as failure:
+                        obs.sample()
+                    self.assertIs(obs.error, failure.exception)
+                    self.assertEqual(len(descriptors), 1)
+                    with self.assertRaises(OSError) as closed:
+                        os.fstat(descriptors[0])
+                    self.assertEqual(closed.exception.errno, errno.EBADF)
+                    self.assertEqual(len(polls), {'foreign-fd': 0, 'ready-after-argv': 2}.get(fault, 1))
+
+    def test_exiting_singleton_close_retains_initial_open_and_never_retries(self):
+        real_open, real_close = os.pidfd_open, os.close
+        for diagnostics in (False, True):
+            with self.subTest(diagnostics=diagnostics), self.transition(diagnostics) as (obs, evidence):
+                owned, closed = [], []
+
+                def open_group(pid, flags):
+                    self.assertEqual((pid, flags), (self.leader.pid, 0))
+                    fd = real_open(pid, flags)
+                    owned.append(fd)
+                    return fd
+
+                def close(fd):
+                    if fd not in owned:
+                        return real_close(fd)
+                    closed.append(fd)
+                    real_close(fd)
+                    raise OSError(errno.EIO, 'fixture close after retiring memory')
+
+                with mock.patch.object(os, 'pidfd_open', open_group), mock.patch.object(os, 'close', close):
+                    with self.assertRaises(observer.ObservationError) as failure:
+                        obs.sample()
+                    self.assertIs(obs.error, failure.exception)
+                    self.assertEqual(failure.exception.errno, errno.EIO)
+                    with self.assertRaises(observer.ObservationError) as later:
+                        obs.sample()
+                    self.assertIs(later.exception, failure.exception)
+                descriptor, = owned
+                self.assertEqual(closed, [descriptor])
+                self.assertGreaterEqual(evidence['inventories'], 3)
+                self.assertGreaterEqual(evidence['cmdline_reads'], 1)
+                with self.assertRaises(OSError) as invalid:
+                    os.fstat(descriptor)
+                self.assertEqual(invalid.exception.errno, errno.EBADF)
+                if diagnostics:
+                    packet = obs.identity_failure(failure.exception)
+                    self.assertTrue(packet['complete'])
+                    events = packet['events']
+                    self.assertEqual([(e['operation'], e['primitive_errno']) for e in events if e['primitive_errno']],
+                                     [('attribute_open', errno.ESRCH), ('pidfd_close', errno.EIO)])
+                    self.assertEqual((events[-1]['operation'], events[-1]['normalized_errno']),
+                                     ('error_normalization', errno.EIO))
+
+    def test_only_separately_bound_zombie_group_can_certify_a_missing_inventory(self):
+        real_pidfd_open = os.pidfd_open
+        for early_succeeds in (True, False):
+            with self.subTest(early_succeeds=early_succeeds), self.transition(False):
+                early = observer.process_row(self.root / 'stat')
+                zombie = dict(early, state='Z')
+                attempts = []
+                handles = []
+
+                def bind(pid, flags):
+                    self.assertEqual((pid, flags), (self.leader.pid, 0))
+                    attempts.append(pid)
+                    if early_succeeds != (len(attempts) == 1):
+                        raise OSError(errno.EPERM, 'fixture binding unavailable')
+                    descriptor = real_pidfd_open(pid, flags)
+                    handles.append(descriptor)
+                    return descriptor
+
+                def poll_ready(timeout):
+                    self.assertEqual(timeout, 0)
+                    return [(handles[0], select.POLLIN)]
+
+                poller = mock.Mock()
+                poller.poll.side_effect = poll_ready
+                with observer._GroupExitProofs({self.key}) as proofs, mock.patch.object(os, 'pidfd_open', bind):
+                    proofs.pin(self.leader.pid, early, exiting_singleton=True)
+                    with mock.patch.object(observer, 'current_process', return_value=zombie), \
+                            mock.patch.object(Path, 'iterdir', side_effect=FileNotFoundError(errno.ENOENT, 'fixture retired')), \
+                            mock.patch.object(select, 'poll', return_value=poller):
+                        self.assertEqual(observer.threads_are_quiescent(self.leader.pid, zombie), not early_succeeds)
+                self.assertEqual(attempts, [self.leader.pid, self.leader.pid])
+                self.assertEqual(poller.poll.call_count, int(not early_succeeds))
+                descriptor, = handles
+                with self.assertRaises(OSError) as closed:
+                    os.fstat(descriptor)
+                self.assertEqual(closed.exception.errno, errno.EBADF)
+
+    def test_earlier_known_error_precedes_exiting_singleton_fdinfo_close(self):
+        with self.transition(True) as (obs, _):
+            snapshot, opened = observer.snapshot, Path.open
+            closed = []
+
+            def fail(path, *args, **kwargs):
+                if path == self.child_root / 'environ':
+                    raise PermissionError(errno.EACCES, 'fixture preceding group access refusal')
+                stream = opened(path, *args, **kwargs)
+                if path.parent != Path('/proc/self/fdinfo'):
+                    return stream
+
+                def close():
+                    stream.close()
+                    closed.append(int(path.name))
+                    raise OSError(errno.EIO, 'fixture descriptor identity close refusal')
+
+                return mock.Mock(read=stream.read, close=close)
+
+            with mock.patch.object(observer, 'snapshot', lambda: dict(reversed(snapshot().items()))), \
+                    mock.patch.object(Path, 'open', fail), self.assertRaises(observer.ObservationError) as failure:
+                obs.sample()
+            self.assertEqual(failure.exception.errno, errno.EACCES)
+            self.assertIs(obs.error, failure.exception)
+            packet = obs.identity_failure(failure.exception)
+            self.assertTrue(packet['complete'])
+            first, = [event for event in packet['events'] if event['first_failure']]
+            self.assertEqual((first['operation'], first['primitive_errno'], first['context']['group_expected']['pid']),
+                             ('attribute_open', errno.EACCES, self.child))
+            secondary, = [event for event in packet['events'] if event['operation'] == 'pidfd_fdinfo_close']
+            self.assertEqual((secondary['primitive_errno'], secondary['context']['group_expected']['pid']),
+                             (errno.EIO, self.leader.pid))
+            self.assertEqual(packet['events'][-1]['normalized_errno'], errno.EACCES)
+            descriptor, = closed
+            with self.assertRaises(OSError) as invalid:
+                os.fstat(descriptor)
+            self.assertEqual(invalid.exception.errno, errno.EBADF)
+
+
 class ObservationRetirementTests(unittest.TestCase):
     """Model group retirement without reading procfs or opening a real pidfd."""
 
@@ -1789,8 +2111,7 @@ class ObservationRetirementTests(unittest.TestCase):
         readiness = (
             "            if (len(events) != 1 or events[0][0] != descriptor\n"
             "                    or not events[0][1] & allowed or events[0][1] & ~allowed):")
-        binding = ("            if (not matches or after is None or after['start'] != row['start']\n"
-                   "                    or after['state'] not in ('Z', 'X')):")
+        binding = '            if not matches or not admissible(after):'
         inventory = (
             "    except FileNotFoundError as error:\n"
             "        proofs = _GROUP_EXIT_PROOFS.get()\n"

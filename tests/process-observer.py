@@ -479,6 +479,8 @@ def _identity_repeated_close(error):
 def _identity_row(pid, tid, row, group_start, kind):
     _closed_integer(pid, 1, 2147483647)
     _closed_integer(tid, 1, 2147483647)
+    if type(row) is _ExitingSingletonStat:
+        row = dict(row)
     if row is not None:
         _closed_keys(row, {'start', 'state', 'parent', 'group', 'session'})
     result = dict(kind=kind, pid=pid, tgid=pid, tid=tid,
@@ -1027,6 +1029,13 @@ def _identity_read_bytes(path, proofs=None):
         if scope is not None:
             scope.failed()
         return _identity_opaque_read(reader)
+    singleton = False
+    if proofs is not None and path == proofs.known_leader_environ and proofs.known_leader_row is not None:
+        pid, row = proofs.known_leader_row
+        current = _call('stat_read', 'identity_before', current_process, pid)
+        if isinstance(current, _ExitingSingletonStat) and current['start'] == row['start']:
+            proofs.pin(pid, current, exiting_singleton=True)
+            singleton = (pid, row['start'], 'exiting') in proofs.bound and _single_exiting_task(pid, row)
     try:
         stream = path.open(mode='rb', buffering=0) if sys.version_info.minor >= 14 else path.open(mode='rb')
     except BaseException as error:
@@ -1035,6 +1044,8 @@ def _identity_read_bytes(path, proofs=None):
                 and error.errno in (errno.ENOENT, errno.ESRCH) and error.__context__ is None
                 and error.__cause__ is None):
             proofs.open_gap = error
+            if singleton and error.errno == errno.ESRCH:
+                proofs.exiting_leader_gap = error
         raise
     if scope is None:
         with stream as opened:
@@ -1092,6 +1103,9 @@ class _GroupExitProofs:
         self.selected_thread = None
         self.thread_gaps = {}
         self.open_gap = None
+        self.exiting_leader_gap = None
+        self.known_leader_environ = None
+        self.known_leader_row = None
         self.allowed = set(known)
         self.attributions = {key: 'known_identity' for key in self.allowed}
         self.handles = {}
@@ -1134,8 +1148,8 @@ class _GroupExitProofs:
                     try:
                         scope = _DIAGNOSTIC_SCOPE.get()
                         if scope is not None:
-                            scope.attribution = self.attributions[key]
-                        _identity_attribution(pid, row, self.attributions[key], {})
+                            scope.attribution = self.attributions[pid, row['start']]
+                        _identity_attribution(pid, row, self.attributions[pid, row['start']], {})
                         _note(error, 'pidfd_close', 'quiescence_check')
                         if previous is not None:
                             _link(previous, error, 'quiescence', retain_initial=True)
@@ -1156,6 +1170,9 @@ class _GroupExitProofs:
             # an earlier refusal. The fallback only restores the previous
             # lexical scope.
             self.open_gap = None
+            self.exiting_leader_gap = None
+            self.known_leader_environ = None
+            self.known_leader_row = None
             self.selected_thread = None
             self.thread_gaps.clear()
             self.handles.clear()
@@ -1265,9 +1282,11 @@ class _GroupExitProofs:
         return (len(values) == 1 and 0 < len(values[0]) <= 10 and values[0].isascii()
                 and values[0].isdigit() and int(values[0]) == pid and pid > 0)
 
-    def pin(self, pid, row):
-        key = pid, row['start']
-        if key not in self.allowed or key in self.attempted:
+    def pin(self, pid, row, *, exiting_singleton=False):
+        identity = pid, row['start']
+        # A nonterminal witness cannot certify exit or consume the later Z/X attempt.
+        key = (*identity, 'exiting') if exiting_singleton else identity
+        if identity not in self.allowed or key in self.attempted:
             return
         self.attempted.add(key)
         opener = getattr(os, 'pidfd_open', None)
@@ -1277,7 +1296,11 @@ class _GroupExitProofs:
             return
         try:
             before = _call('stat_read', 'quiescence_check', current_process, pid)
-            if before is None or before['start'] != row['start'] or before['state'] not in ('Z', 'X'):
+            def admissible(current):
+                return (current is not None and current['start'] == row['start'] and
+                        (isinstance(current, _ExitingSingletonStat) if exiting_singleton
+                         else current['state'] in ('Z', 'X')))
+            if not admissible(before):
                 return
             descriptor = _call('pidfd_open', 'quiescence_check', opener, pid, 0)
             if type(descriptor) is not int or not 0 <= descriptor <= 2147483647:
@@ -1287,8 +1310,7 @@ class _GroupExitProofs:
             matches = self._pidfd_identity(pid, descriptor)
             after = _call('stat_read', 'quiescence_check', current_process, pid)
             _identity_group_result(pid, row, after, 'group_quiescence')
-            if (not matches or after is None or after['start'] != row['start']
-                    or after['state'] not in ('Z', 'X')):
+            if not matches or not admissible(after):
                 raise _guard(ProcessLookupError(errno.ESRCH, 'pidfd identity could not be bound'),
                              'pidfd_guard', 'quiescence_check')
             self.bound.add(key)
@@ -1298,6 +1320,11 @@ class _GroupExitProofs:
             self.unavailable[key] = error
         if self.cleanup_error is not None:
             self._raise_cleanup()
+
+    def poll_events(self, descriptor):
+        poller = _call('pidfd_poll', 'quiescence_check', select.poll)
+        _call('pidfd_poll', 'quiescence_check', poller.register, descriptor, select.POLLIN)
+        return _call('pidfd_poll', 'quiescence_check', poller.poll, 0)
 
     def resolve_inventory(self, pid, row, initial, *, final_check=False):
         key = pid, row['start']
@@ -1310,9 +1337,7 @@ class _GroupExitProofs:
             return False
         descriptor = handle[2]
         try:
-            poller = _call('pidfd_poll', 'quiescence_check', select.poll)
-            _call('pidfd_poll', 'quiescence_check', poller.register, descriptor, select.POLLIN)
-            events = _call('pidfd_poll', 'quiescence_check', poller.poll, 0)
+            events = self.poll_events(descriptor)
             allowed = select.POLLIN | select.POLLHUP
             if (len(events) != 1 or events[0][0] != descriptor
                     or not events[0][1] & allowed or events[0][1] & ~allowed):
@@ -1410,14 +1435,25 @@ def read_process_observation(pid, row, path):
     if before['state'] in ('Z', 'X'):
         raise _guard(ProcessLookupError(errno.ESRCH, 'observation task has terminated'),
                      'identity_guard', 'task_stat_before', identity_origin='application_state_check')
+    proofs = _GROUP_EXIT_PROOFS.get()
+    known_leader = (proofs is not None and path == proofs.known_leader_environ
+                    and before['start'] == row['start'])
+    previous_path = proofs.leader_environ if known_leader else None
+    if known_leader:
+        proofs.leader_environ = path
+        proofs.open_gap = None
+        proofs.known_leader_row = (pid, row)
     try:
         data = read_observation(path)
     except ProcessLookupError as error:
-        proofs = _GROUP_EXIT_PROOFS.get()
         if (proofs is not None and proofs.open_gap is error and error.errno == errno.ESRCH
                 and proofs.selected_thread == (path, before['start'])):
             proofs.thread_gaps[pid, row['start']] = (error, (path.parent.name, before['start']))
         raise
+    finally:
+        if known_leader:
+            proofs.leader_environ = previous_path
+            proofs.known_leader_row = None
     after = _call('stat_read', 'task_stat_after', process_row, path.with_name('stat'))
     _identity_task_result(pid, tid, after, 'task_after')
     if after['start'] != before['start'] or after['state'] in ('Z', 'X'):
@@ -1523,16 +1559,36 @@ def token_process_is_live(pid, marker):
     return False
 
 
+class _ExitingSingletonStat(dict):
+    """A private stat hint. Its public fields and JSON representation stay unchanged."""
+
+
 def process_row(path):
     # comm is an arbitrary byte string, possibly truncated inside UTF-8.
     # Keep identity parsing independent and let malformed fields/read errors fail.
     content = _call('stat_read', None, path.read_text, encoding='ascii', errors='surrogateescape')
     fields = _call('stat_fields', None, lambda: content.rsplit(') ', 1)[1].split())
-    return {'start': _call('stat_start', None, lambda: int(fields[19])),
+    row = {'start': _call('stat_start', None, lambda: int(fields[19])),
             'state': _call('stat_state', None, lambda: fields[0]),
             'parent': _call('stat_parent', None, lambda: int(fields[1])),
             'group': _call('stat_group', None, lambda: int(fields[2])),
             'session': _call('stat_session', None, lambda: int(fields[3]))}
+    flags = fields[6]
+    if (row['state'] == 'R' and fields[17] == '1' and 0 < len(flags) <= 10
+            and flags.isascii() and flags.isdecimal()
+            and int(flags) <= 0xffffffff and int(flags) & 0x4):  # Linux PF_EXITING
+        return _ExitingSingletonStat(row)
+    return row
+
+
+def _single_exiting_task(pid, row):
+    # Flags and thread count in stat are not an atomic census. Also require the
+    # complete task directory to contain precisely the authenticated leader.
+    root = Path(f'/proc/{pid}/task')
+    if list(_inventory(root, 'task_inventory', 'quiescence_check')) != [root / str(pid)]:
+        return False
+    task = _call('stat_read', 'quiescence_check', process_row, root / str(pid) / 'stat')
+    return isinstance(task, _ExitingSingletonStat) and task['start'] == row['start']
 
 
 def snapshot():
@@ -1801,6 +1857,8 @@ class Observer:
         environment_errors = {}
         attribution_sources = {}
         deferred = {}
+        exiting_live = set()
+        exiting_argv_leaks = set()
         proofs = _GROUP_EXIT_PROOFS.get()
 
         def defer_quiescence(pid, current):
@@ -1830,6 +1888,10 @@ class Observer:
                 if proofs is not None:
                     proofs.open_gap = None
                     proofs.leader_environ = None
+                    proofs.exiting_leader_gap = None
+                    proofs.known_leader_environ = (Path(f'/proc/{pid}/environ')
+                                                   if key in self.known and key not in self.external
+                                                   and row['state'] not in ('Z', 'X') else None)
                     if key not in self.known and row['parent'] in rows:
                         proofs.leader_environ = Path(f'/proc/{pid}/environ')
                         defer = defer_quiescence
@@ -1837,6 +1899,27 @@ class Observer:
                     try:
                         environment = read_process_observation(pid, row, path).split(b'\0')
                     except OSError as error:
+                        if proofs is not None and error is proofs.cleanup_error:
+                            raise
+                        if (proofs is not None and proofs.exiting_leader_gap is error
+                                and pid not in environment_errors):
+                            # The missing launch marker cannot remove a known identity.
+                            # Observe its actual argv and retain it as live. A later
+                            # disappearance or ready pidfd cannot supply that observation.
+                            descriptor = proofs.handles[(*key, 'exiting')][2]
+                            try:
+                                if proofs.poll_events(descriptor) == [] and _single_exiting_task(pid, row):
+                                    argv = read_process_observation(pid, row, path.with_name('cmdline'))
+                                    if b'http://' in argv.lower() or b'https://' in argv.lower():
+                                        exiting_argv_leaks.add(key)
+                                    if (argv == b'' and _single_exiting_task(pid, row)
+                                            and proofs.poll_events(descriptor) == []):
+                                        proofs.resolved[(*key, 'exiting')] = error
+                                        exiting_live.add(key)
+                                        continue
+                            except (OSError, ValueError, IndexError) as secondary:
+                                _link(error, secondary, 'revalidation', retain_initial=True)
+                            _raise_incomplete_observation(error)
                         if pid not in environment_errors or isinstance(environment_errors[pid],
                                                                        (FileNotFoundError, ProcessLookupError)):
                             if pid in environment_errors:
@@ -1891,6 +1974,7 @@ class Observer:
                 attribution_sources[pid] = 'marker' if marked else 'known_identity'
         if proofs is not None:
             proofs.leader_environ = None
+            proofs.known_leader_environ = None
             proofs.open_gap = None
         changed = True
         while changed:
@@ -1912,6 +1996,7 @@ class Observer:
                     self.external.add((pid, row['start']))
                     changed = True
         selected = {pid: row for pid, row in selected.items() if pid not in excluded}
+        self.leaks.update(key for key in exiting_argv_leaks if key[0] in selected)
         for pid, row in selected.items():
             scope = _DIAGNOSTIC_SCOPE.get()
             if scope is not None:
@@ -1975,10 +2060,11 @@ class Observer:
                 if pending is not None and not inspected:
                     _link(pending, error, 'retry')
                 observation_failure(pid, row, error)
-        quiescent = {pid for pid, row in selected.items() if threads_are_quiescent(pid, row)}
+        quiescent = {pid for pid, row in selected.items()
+                     if (pid, row['start']) not in exiting_live and threads_are_quiescent(pid, row)}
         return {
             'monotonic_ns': time.monotonic_ns(),
-            'live': {str(pid): row for pid, row in selected.items() if pid not in quiescent},
+            'live': {str(pid): dict(row) for pid, row in selected.items() if pid not in quiescent},
             'zombies': [pid for pid, row in selected.items() if pid in quiescent and row['state'] == 'Z'],
             'url_in_argv': sorted(self.leaks),
         }
