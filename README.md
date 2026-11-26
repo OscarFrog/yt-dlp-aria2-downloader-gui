@@ -213,6 +213,7 @@ Subtitles for deaf or hard-of-hearing viewers and explicitly identified comfort 
 on the programme, territory and rights.
 
 The MKV contains exactly the chosen tracks, without re-encoding video or audio.
+For audio selected as **Undetermined language**, the MKV may omit the language tag. The track title and default disposition are still verified.
 Subtitles use UTF-8 SRT with text, line breaks and timing preserved.
 Source positioning is not retained; appearance depends on your player.
 Unsupported formatting/timing or missing tracks causes an explicit error.

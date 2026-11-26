@@ -221,6 +221,7 @@ identifiées comme confort audio sont exclus. L'audiodescription reste disponibl
 La disponibilité dépend du programme, du territoire et des droits.
 
 Le MKV contient exactement les pistes choisies, sans réencodage vidéo ou audio.
+Pour une piste audio sélectionnée comme **Undetermined language** (langue indéterminée), le MKV peut omettre la balise de langue. Le titre de la piste et son statut de piste par défaut sont toujours vérifiés.
 Les sous-titres utilisent le SRT UTF-8 en conservant le texte, les retours à la ligne
 et les horaires. Les positions de la source ne sont pas conservées ; la présentation
 dépend du lecteur. Une mise en forme/horloge non prise en charge ou une piste
