@@ -193,6 +193,80 @@ class MediaValidationTests(unittest.TestCase):
     def test_complete_selected_streams_accept_long_subtitle_container(self) -> None:
         MEDIA.validate_media(self.probe, self.expected, {})
 
+    def test_final_und_audio_accepts_only_absence_or_an_und_tag(self) -> None:
+        self.expected["audio"][0]["language"] = "und"
+        tags = self.probe["streams"][1]["tags"]
+        del tags["language"]
+        MEDIA.validate_media(self.probe, self.expected, {})
+        tags["language"] = "und"
+        MEDIA.validate_media(self.probe, self.expected, {})
+        for value in ("fra", "", None, "und-!", False, []):
+            tags["language"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(MEDIA.MediaError, "audio language"):
+                MEDIA.validate_media(self.probe, self.expected, {})
+
+    def test_helper_errors_report_the_failure_without_provider_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            invalid = str(Path(directory) / "invalid.json")
+            write_json(Path(invalid), {})
+            commands = (
+                ("private-art-tracks.py", ["catalogue", "--plan", invalid, "--output", invalid],
+                 "[TRACK_SELECTION]", "extractor"),
+                ("private-art-media.py", ["validate", "--expected", invalid, "--plan", invalid, "--probe", invalid],
+                 "Error [MEDIA_VALIDATION]", "Selection policy changed"),
+                ("private-art-subtitle.py", ["build", "--expected", invalid, "--plan", invalid,
+                                             "--directory", directory, "--output", invalid],
+                 "[SUBTITLE_VALIDATION]", "executed plan does not match"),
+            )
+            for helper, arguments, prefix, cause in commands:
+                with self.subTest(helper=helper):
+                    failed = subprocess.run([sys.executable, "-B", str(PROJECT / helper), *arguments],
+                                            capture_output=True, text=True, check=False)
+                    self.assertEqual(failed.returncode, 65)
+                    self.assertIn(prefix, failed.stderr)
+                    self.assertIn(cause.casefold(), failed.stderr.casefold())
+                    self.assertNotIn("arte", failed.stderr.casefold())
+
+    def test_missing_language_requires_exact_und_audio_selection(self) -> None:
+        for index, kind, expected_language in ((1, "audio", "fra"), (2, "subtitles", "und")):
+            probe = copy.deepcopy(self.probe)
+            del probe["streams"][index]["tags"]["language"]
+            self.expected[kind][0]["language"] = expected_language
+            with self.subTest(kind=kind), self.assertRaisesRegex(MEDIA.MediaError, "Track language is missing"):
+                MEDIA.validate_media(probe, self.expected, {})
+            self.expected = expected_fixture()
+
+    def test_und_audio_still_requires_title_dispositions_duration_and_packets(self) -> None:
+        self.expected["audio"][0]["language"] = "und"
+        del self.probe["streams"][1]["tags"]["language"]
+        for field, value, reason in (("title", "other", "title"), ("default", 0, "default"),
+                                     ("visual_impaired", 1, "disposition"), ("duration", "4", "duration"),
+                                     ("end", "2", "packets end"), ("tail_complete", False, "packet evidence")):
+            probe = copy.deepcopy(self.probe)
+            audio = probe["streams"][1]
+            if field == "title":
+                audio["tags"][field] = value
+            elif field in ("default", "visual_impaired"):
+                audio["disposition"][field] = value
+            else:
+                probe["packet_evidence"]["1"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(MEDIA.MediaError, reason):
+                MEDIA.validate_media(probe, self.expected, {})
+
+    def test_copyts_progress_offset_cannot_hide_a_truncated_packet_tail(self) -> None:
+        duration = Decimal("4881.527")
+        last_report = Decimal("4721.727")
+        # FFmpeg -copyts makes out_time relative to the first report. The
+        # verifier uses the independently observed media clock through EOF.
+        for i, selected in enumerate((self.expected["video"], self.expected["audio"][0])):
+            selected["duration"] = str(duration)
+            self.probe["packet_evidence"][str(i)].update(
+                duration=str(duration), end=str(duration), target=str(duration - MEDIA.tolerance(duration)))
+        MEDIA.validate_media(self.probe, self.expected, {})
+        self.probe["packet_evidence"]["1"]["end"] = str(last_report)
+        with self.assertRaisesRegex(MEDIA.MediaError, "packets end"):
+            MEDIA.validate_media(self.probe, self.expected, {})
+
     def test_each_audio_tail_is_required(self) -> None:
         self.expected["audio"].append(dict(self.expected["audio"][0], id="fr", default=False, language="fr"))
         self.probe["streams"].insert(2, {"index": 3, "codec_type": "audio", "tags": {"language": "fra"}})
@@ -331,7 +405,7 @@ class MediaValidationTests(unittest.TestCase):
         before = {"0": {"first_pts_time": "5", "end": "96", "tail_complete": True,
                         "terminal_packet": {"pts": "95.98", "dts": "95.98"}}}
         after = {"0": dict(before["0"], end="84.7")}
-        with self.assertRaisesRegex(MEDIA.MediaError, "ARTE audio timestamps changed at the end \\(11300.000 ms"):
+        with self.assertRaisesRegex(MEDIA.MediaError, "Output audio timestamps changed at the end \\(11300.000 ms"):
             MEDIA.compare_clocks([stream], after, [stream], before)
 
     def test_aac_partial_terminal_frame_requires_identity_and_bounded_duration(self) -> None:
@@ -675,7 +749,7 @@ if REAL_TOOLS:
             for name in ("ffmpeg", "ffprobe", "yt-dlp", "aria2c"):
                 if shutil.which(name) is None:
                     raise RuntimeError(f"Required ARTE real-media qualification tool is unavailable: {name}")
-            cls.root = Path(tempfile.mkdtemp(prefix="arte-media-qualification-"))
+            cls.root = Path(tempfile.mkdtemp(prefix="media-qualification-"))
             cls.addClassCleanup(cls.cleanup_fixture)
             cls.web = cls.root / "web"
             cls.web.mkdir(mode=0o700)
@@ -838,7 +912,7 @@ if REAL_TOOLS:
                     "/program_st_VA-MAL_fixture.m3u8", "/ja-alias.m3u8"} for path in requests), requests)
                 output = completed.stdout + completed.stderr
                 for forbidden in (b"YTDLP_PREPARE|subtitles", b"Downloading subtitles:",
-                                  b"[ARTE_SUBTITLES]", b"arte-subtitles/", b"SubtitleConvertor"):
+                                  b"[SUBTITLE_VALIDATION]", b"selected-subtitles/", b"SubtitleConvertor"):
                     self.assertNotIn(forbidden, output)
             prefix = getattr(self, "source_prefix", "")
             self.assertFalse(any(path.startswith(prefix + "/comfort/") for path in requests), requests)
@@ -859,6 +933,45 @@ if REAL_TOOLS:
                                           "-show_entries", "packet=pts_time,duration_time", "-of", "json", str(path)]).stdout)["packets"]
             return max(MEDIA.Decimal(packet["pts_time"]) + MEDIA.Decimal(packet.get("duration_time", "0"))
                        for packet in packets)
+
+        def test_und_original_audio_published_without_subtitles(self) -> None:
+            seed = json.loads(self.seed.read_bytes())
+            master = self.web / "flow.m3u8"
+            master.write_text(
+                '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="vo",NAME="muet (VO)",'
+                'LANGUAGE="und",DEFAULT=YES,AUTOSELECT=YES,URI="ja/index.m3u8"\n'
+                '#EXT-X-STREAM-INF:BANDWIDTH=250000,RESOLUTION=160x90,AUDIO="vo"\nvideo/index.m3u8\n',
+                encoding="utf-8")
+            audio, video = seed["formats"][0], seed["formats"][-1]
+            audio.update(format_id="VO-audio_0-muet__VO_", language="und", format_note="VO")
+            video["format_id"] = "VO-2887"
+            for stream in (audio, video):
+                stream["manifest_url"] = self.base + "/flow.m3u8"
+            seed.update(title="Flow", formats=[audio, video], subtitles={})
+            flow_seed = self.root / "flow.json"
+            write_json(flow_seed, seed)
+            output = self.root / "flow-output"
+            output.mkdir(mode=0o700)
+            result = self.root / "flow.result"
+            completed = capture_engine([
+                "bash", str(PROJECT / "download-video.sh"), "--mode", "video", "--tracks-auto",
+                "--output-dir", str(output), "--result-file", str(result), "--machine-progress",
+                seed["webpage_url"]], dict(self.environment, ARTE_FIXTURE_SEED=str(flow_seed)), self.root)
+            messages = (completed.stdout + completed.stderr).decode(errors="replace")
+            self.assertEqual(completed.returncode, 0, messages[-10000:])
+            self.assertIn("YTDLP_PLAN_V2|2|VO-2887|VO-audio_0-muet__VO_", messages)
+            self.assertNotRegex(messages, r"(?i)(?<![a-z])arte(?:tv)?(?![a-z])")
+            final = Path(result.read_text().strip())
+            self.assertEqual(list(output.iterdir()), [final])
+            self.assertEqual(final.suffix, ".mkv")
+            self.assertIn("Flow", final.name)
+            probe = json.loads(command(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(final)]).stdout)
+            videos, audios, subs = MEDIA.content_streams(probe)
+            self.assertEqual((len(videos), len(audios), len(subs)), (1, 1, 0))
+            self.assertNotIn("language", audios[0]["tags"])
+            self.assertEqual(audios[0]["tags"]["title"], "Undetermined language — original audio")
+            self.assertEqual(audios[0]["disposition"]["default"], 1)
+            self.assertEqual(self.full_video_end(final), self.full_video_end(self.web / "video" / "index.m3u8"))
 
         def test_long_gop_native_engine_reaches_the_real_end(self) -> None:
             original_seed = self.seed.read_bytes()

@@ -251,7 +251,7 @@ cleanup() {
         fi
     fi
     if [[ -n ${MEDIA_WORKSPACE} && ${ARTE_MEDIA_VALIDATION_PENDING} == true ]]; then
-        printf 'Warning: ARTE media validation or publication did not finish; preserving local media for inspection: %s\n' \
+        printf 'Warning: Media validation or publication did not finish; preserving local media for inspection: %s\n' \
             "${MEDIA_WORKSPACE}" >&2
         printf '%s\n' 'These files are not a validated final result and will not be resumed or published automatically.' >&2
     elif [[ -n ${MEDIA_WORKSPACE} && ${active_media_staging_safe} == true &&
@@ -2801,7 +2801,7 @@ validate_arte_media_file() {
             probe_options+=(--reference "${ARTE_SUBTITLE_REFERENCE}")
         fi
     fi
-    FINAL_MEDIA_VALIDATION_REASON=arte-track-validation
+    FINAL_MEDIA_VALIDATION_REASON=track-validation
     run_supervised_command python3 "${PROCESS_SUPERVISOR}" \
         --timeout 2400 --grace 2 -- python3 "${ARTE_MEDIA_HELPER}" probe \
         --expected "${ARTE_EXPECTATION}" --input "${media_path}" --output "${probe_file}" \
@@ -3257,7 +3257,7 @@ initialize_runtime_dependencies() {
     if [[ ${ARTE_ENABLED} == true ]]; then
         for command_name in "${ARTE_TRACKS_HELPER}" "${ARTE_MEDIA_HELPER}" "${ARTE_SUBTITLES_HELPER}"; do
             if [[ ! -f ${command_name} || -L ${command_name} || ! -r ${command_name} ]]; then
-                error 'an ARTE track helper is missing or unsafe.'
+                error 'a track helper is missing or unsafe.'
                 exit 66
             fi
         done
@@ -3826,7 +3826,7 @@ prepare_arte_selection() {
     python3 "${ARTE_TRACKS_HELPER}" options --options "${options}" >"${arguments}"
     mapfile -d '' -t arte_options <"${arguments}"
     if ((${#arte_options[@]} == 0 || ${#arte_options[@]} > 32)); then
-        error 'invalid ARTE transfer options.'
+        error 'invalid transfer options.'
         exit 65
     fi
     # Preserve the shared source timeline during the native merger. Metadata
@@ -3839,7 +3839,7 @@ prepare_arte_selection() {
     PRIVATE_ARIA2_PLAN=${selected_plan}
     # shellcheck disable=SC2310 # Register the newly created selected plan for cleanup.
     if ! get_path_identity PRIVATE_ARIA2_PLAN_IDENTITY "${PRIVATE_ARIA2_PLAN}" regular-file; then
-        error 'unable to authenticate the ARTE transfer plan.'
+        error 'unable to authenticate the transfer plan.'
         exit 65
     fi
 }
@@ -3849,7 +3849,7 @@ prepare_arte_selection() {
 # and media transfer; neither FFmpeg's exit status nor nonempty output proves
 # subtitle completeness.
 prepare_arte_subtitles() {
-    local subtitle_directory="${PRIVATE_ARIA2_METADATA}/arte-subtitles"
+    local subtitle_directory="${PRIVATE_ARIA2_METADATA}/selected-subtitles"
     local subtitle_languages=''
     local subtitle_template=''
 
@@ -3872,13 +3872,13 @@ prepare_arte_subtitles() {
         printf '%s\n' 'YTDLP_PREPARE|subtitles'
     fi
     if ! mkdir -m 700 -- "${subtitle_directory}"; then
-        error 'unable to create the private ARTE subtitle workspace.'
+        error 'unable to create the private subtitle workspace.'
         exit 73
     fi
     ARTE_SUBTITLE_REFERENCE="${subtitle_directory}/reference.json"
     if [[ -n ${subtitle_languages} ]]; then
         if [[ ${subtitle_languages} == *$'\n'* || ${#subtitle_languages} -gt 3104 ]]; then
-            error 'invalid ARTE subtitle language selection.'
+            error 'invalid subtitle language selection.'
             exit 65
         fi
         # Metadata paths may contain literal template/environment metacharacters.
@@ -4274,7 +4274,7 @@ execute_selected_transport() {
             --expected "${ARTE_EXPECTATION}" --plan "${PRIVATE_ARIA2_PLAN}" \
             --output "${ARTE_COMPONENT_RECORDS}"
         if ((DOWNLOAD_STATUS != 0)); then
-            error 'ARTE source component timing could not be verified; refusing publication.'
+            error 'Source component timing could not be verified; refusing publication.'
             exit "${DOWNLOAD_STATUS}"
         fi
     fi
@@ -4627,7 +4627,7 @@ remux_hls_result() {
             "${reference_options[@]}" >"${remux_arguments}"
         mapfile -d '' -t remux_options <"${remux_arguments}"
         if ((${#remux_options[@]} == 0 || ${#remux_options[@]} > 512)); then
-            error 'invalid ARTE remux arguments.'
+            error 'invalid remux arguments.'
             exit 65
         fi
     fi
@@ -4732,7 +4732,7 @@ remux_hls_result() {
         # shellcheck disable=SC2310 # Failure preserves the unconfirmed source.
         validate_arte_media_file "${HLS_REMUX_TMP}" remux || {
             emit_machine_postprocess error FFmpegVideoRemuxer
-            error 'the ARTE MKV failed track validation; no final file was published.'
+            error 'The MKV failed track validation; no final file was published.'
             exit 65
         }
     fi

@@ -903,7 +903,9 @@ native A/V components supply independent packet-clock evidence for each
 merged stream. FFmpeg copies the A/V streams and adds only the selected,
 verified SRT inputs, then explicitly sets language, title and
 default/forced/audio-description dispositions while stripping extraction
-metadata and chapters. The engine reuses its authenticated temporary inode,
+metadata and chapters. FFprobe omits the Matroska stream language for `und`.
+Final validation accepts its absence only for audio bound to that exact language
+by the authenticated selection. The engine reuses its authenticated temporary inode,
 remux supervision and no-overwrite publication machinery. The distinct final
 name is `basename.tracks.mkv`; the whole `basename.*` family remains reserved,
 including subtitle downloads and conversions. A failed check retains the

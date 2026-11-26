@@ -1350,12 +1350,12 @@ def native_final_template(args: argparse.Namespace) -> str:
         state = read_json(ownership_path, 'resource admission')
         try:
             if resource_snapshot(state) != state.get('owned'):
-                raise DestinationExistsError('ARTE resource family changed after admission; preserved')
+                raise DestinationExistsError('Resource family changed after admission; preserved')
             if state['output'] != state['final']:
                 local_state = {**state, 'final': state['output'],
                                'identity': list(directory_identity(Path(state['output'])))}
                 if resource_snapshot(local_state):
-                    raise DestinationExistsError('ARTE local workspace contains an unowned resource; preserved')
+                    raise DestinationExistsError('Local workspace contains an unowned resource; preserved')
         except DestinationExistsError:
             # Cleanup must not turn a refused foreign subtitle/conversion file
             # into an owned resume merely by recording the current directory.

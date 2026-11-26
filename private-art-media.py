@@ -57,20 +57,20 @@ def read_private_json(path: Path) -> dict:
         if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid()
                 or stat.S_IMODE(metadata.st_mode) & 0o077
                 or metadata.st_size > MAX_JSON_BYTES):
-            raise MediaError("ARTE validation input is not a bounded private regular file")
+            raise MediaError("Validation input is not a bounded private regular file")
         raw = handle.read(MAX_JSON_BYTES + 1)
     if len(raw) > MAX_JSON_BYTES:
-        raise MediaError("ARTE validation input exceeds the size limit")
+        raise MediaError("Validation input exceeds the size limit")
     value = json.loads(raw)
     if not isinstance(value, dict):
-        raise MediaError("ARTE validation input must be a JSON object")
+        raise MediaError("Validation input must be a JSON object")
     return value
 
 
 def write_private_json(path: Path, value: dict) -> None:
     data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
     if len(data) > MAX_JSON_BYTES:
-        raise MediaError("ARTE probe result exceeds the size limit")
+        raise MediaError("Probe result exceeds the size limit")
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "wb") as handle:
         handle.write(data)
@@ -92,45 +92,45 @@ def decimal_value(value: object, *, positive: bool = False) -> Decimal | None:
 
 def language(value: object) -> str:
     if not isinstance(value, str) or not 2 <= len(value) <= 32:
-        raise MediaError("ARTE track language is missing or invalid")
+        raise MediaError("Track language is missing or invalid")
     normalized = value.lower().split("-", 1)[0]
     if not normalized.isascii() or not normalized.isalpha():
-        raise MediaError("ARTE track language is invalid")
+        raise MediaError("Track language is invalid")
     # Keep an unrecognized language literal. Never silently label it undetermined.
     return LANGUAGES.get(normalized, normalized)
 
 
 def checked_expected(expected: dict) -> None:
     if expected.get("version") != 1 or expected.get("policy") != POLICY:
-        raise MediaError("ARTE selection policy changed; select the tracks again")
+        raise MediaError("Selection policy changed; select the tracks again")
     video = expected.get("video")
     audio = expected.get("audio")
     subtitles = expected.get("subtitles")
     if (not isinstance(video, dict) or not isinstance(audio, list)
             or not 1 <= len(audio) <= 15 or not isinstance(subtitles, list)
             or len(subtitles) > 32):
-        raise MediaError("ARTE expected track inventory is invalid")
+        raise MediaError("Expected track inventory is invalid")
     for kind, tracks in (("audio", audio), ("subtitle", subtitles)):
         for track in tracks:
             if not isinstance(track, dict):
-                raise MediaError("ARTE expected track is invalid")
+                raise MediaError("Expected track is invalid")
             language(track.get("language"))
             title = track.get("title")
             if (not isinstance(title, str) or not 1 <= len(title) <= 256
                     or any(ord(char) < 32 or ord(char) == 127 for char in title)):
-                raise MediaError("ARTE track title is invalid")
+                raise MediaError("Track title is invalid")
             if type(track.get("default")) is not bool:
-                raise MediaError("ARTE default disposition is invalid")
+                raise MediaError("Default disposition is invalid")
             allowed_roles = {"main", "description"} if kind == "audio" else {"full", "forced"}
             if track.get("role") not in allowed_roles:
-                raise MediaError("ARTE excluded or unknown track role; select the tracks again")
+                raise MediaError("Selection contains an excluded or unknown track role; select the tracks again")
             if kind == "subtitle" and (type(track.get("forced")) is not bool
                                        or track["forced"] != (track["role"] == "forced")):
-                raise MediaError("ARTE forced subtitle disposition is invalid")
+                raise MediaError("Forced subtitle disposition is invalid")
     if sum(track["default"] for track in audio) != 1:
-        raise MediaError("ARTE selection requires exactly one default audio")
+        raise MediaError("Selection requires exactly one default audio")
     if sum(track["default"] for track in subtitles) > 1:
-        raise MediaError("ARTE selection contains several default subtitles")
+        raise MediaError("Selection contains several default subtitles")
 
 
 def validate_provenance(plan: dict, expected: dict) -> None:
@@ -138,21 +138,21 @@ def validate_provenance(plan: dict, expected: dict) -> None:
     source = Path(__file__).with_name("private-art-tracks.py")
     spec = importlib.util.spec_from_file_location("art_tracks_validation", source)
     if spec is None or spec.loader is None:
-        raise MediaError("ARTE provenance validator is unavailable")
+        raise MediaError("Provenance validator is unavailable")
     sys.dont_write_bytecode = True
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     try:
         module.validate_plan_provenance(plan, expected)
     except module.ArteError as exc:
-        raise MediaError("ARTE executed plan no longer matches the admissible selection") from exc
+        raise MediaError("Executed plan no longer matches the admissible selection") from exc
 
 
 def subtitle_parser():
     source = Path(__file__).with_name("private-art-subtitle.py")
     spec = importlib.util.spec_from_file_location("art_subtitle_validation", source)
     if spec is None or spec.loader is None:
-        raise MediaError("ARTE subtitle reference parser is unavailable")
+        raise MediaError("Subtitle reference parser is unavailable")
     sys.dont_write_bytecode = True
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -169,7 +169,7 @@ def parse_subtitle_cues(parser, payload: bytes) -> list[dict]:
 def read_subtitle_reference(path: Path | None, expected: dict) -> dict:
     if path is None:
         if expected["subtitles"]:
-            raise MediaError("ARTE selected subtitles have no independent source reference")
+            raise MediaError("Selected subtitles have no independent source reference")
         return {"tracks": []}
     reference = read_private_json(path)
     tracks = reference.get("tracks")
@@ -179,24 +179,24 @@ def read_subtitle_reference(path: Path | None, expected: dict) -> dict:
             or any(not isinstance(entry, dict) for entry in tracks)
             or [entry.get("id") for entry in tracks]
             != [entry["id"] for entry in expected["subtitles"]]):
-        raise MediaError("ARTE subtitle reference does not match the executed selection")
+        raise MediaError("Subtitle reference does not match the executed selection")
     parser = subtitle_parser()
     for entry, selected in zip(tracks, expected["subtitles"]):
         subtitle_path = entry.get("path")
         if (not isinstance(subtitle_path, str) or not Path(subtitle_path).is_absolute()
                 or Path(subtitle_path) != path.parent / f"prepared.{selected['id']}.srt"
                 or entry.get("source_identity") != selected.get("source_identity")):
-            raise MediaError("ARTE prepared subtitle path is invalid")
+            raise MediaError("Prepared subtitle path is invalid")
         descriptor = os.open(subtitle_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
         with os.fdopen(descriptor, "rb") as handle:
             metadata = os.fstat(handle.fileno())
             if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid()
                     or stat.S_IMODE(metadata.st_mode) & 0o077 or metadata.st_size > MAX_JSON_BYTES):
-                raise MediaError("ARTE prepared subtitle is not a bounded private file")
+                raise MediaError("Prepared subtitle is not a bounded private file")
             payload = handle.read(MAX_JSON_BYTES + 1)
         if (len(payload) > MAX_JSON_BYTES or hashlib.sha256(payload).hexdigest() != entry.get("sha256")
                 or not entry.get("cues") or parse_subtitle_cues(parser, payload) != entry["cues"]):
-            raise MediaError("ARTE prepared subtitle differs from its independent source reference")
+            raise MediaError("Prepared subtitle differs from its independent source reference")
     return reference
 
 
@@ -251,21 +251,21 @@ def run_media_tool(executable: str, arguments: list[str], *, limit: int = MAX_PR
             for output in watched_outputs:
                 metadata = output.lstat()
                 if not stat.S_ISREG(metadata.st_mode):
-                    raise MediaError("ARTE subtitle extraction output changed unexpectedly")
+                    raise MediaError("Subtitle extraction output changed unexpectedly")
                 total += metadata.st_size
             if total > 64 * 1024 * 1024:
-                raise MediaError("ARTE extracted subtitles exceed the total size limit")
+                raise MediaError("Extracted subtitles exceed the total size limit")
 
     try:
         if process.stdout is None:
-            raise MediaError("ARTE media probe could not be opened")
+            raise MediaError("Media probe could not be opened")
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
             while selector.get_map():
                 check_output_files()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise MediaError("ARTE media probe timed out")
+                    raise MediaError("Media probe timed out")
                 events = selector.select(min(remaining, 0.5))
                 for key, _ in events:
                     chunk = os.read(key.fd, 65536)
@@ -274,13 +274,13 @@ def run_media_tool(executable: str, arguments: list[str], *, limit: int = MAX_PR
                         continue
                     data.extend(chunk)
                     if len(data) > limit:
-                        raise MediaError("ARTE media probe exceeds the size limit")
+                        raise MediaError("Media probe exceeds the size limit")
         try:
             status = process.wait(timeout=max(0.01, deadline - time.monotonic()))
         except subprocess.TimeoutExpired as exc:
-            raise MediaError("ARTE media probe timed out") from exc
+            raise MediaError("Media probe timed out") from exc
         if status != 0:
-            raise MediaError("ARTE media probe failed")
+            raise MediaError("Media probe failed")
         check_output_files()
     finally:
         if process.poll() is None:
@@ -294,7 +294,7 @@ def run_media_tool(executable: str, arguments: list[str], *, limit: int = MAX_PR
 def run_probe(arguments: list[str]) -> dict:
     value = json.loads(run_media_tool("ffprobe", [*arguments, "-of", "json"]))
     if not isinstance(value, dict):
-        raise MediaError("ARTE media probe returned an invalid object")
+        raise MediaError("Media probe returned an invalid object")
     return value
 
 
@@ -323,22 +323,22 @@ def tolerance(duration: Decimal) -> Decimal:
 def content_streams(probe: dict) -> tuple[list[dict], list[dict], list[dict]]:
     streams = probe.get("streams")
     if not isinstance(streams, list) or not 2 <= len(streams) <= MAX_STREAMS:
-        raise MediaError("ARTE output has an invalid stream inventory")
+        raise MediaError("Output has an invalid stream inventory")
     categories: dict[str, list[dict]] = {"video": [], "audio": [], "subtitle": []}
     indices = set()
     for stream in streams:
         if not isinstance(stream, dict) or type(stream.get("index")) is not int:
-            raise MediaError("ARTE output contains an invalid stream")
+            raise MediaError("Output contains an invalid stream")
         index = stream["index"]
         if not 0 <= index < MAX_STREAMS or index in indices:
-            raise MediaError("ARTE output contains duplicate or invalid stream indices")
+            raise MediaError("Output contains duplicate or invalid stream indices")
         indices.add(index)
         kind = stream.get("codec_type")
         disposition = stream.get("disposition") or {}
         if not isinstance(disposition, dict):
-            raise MediaError("ARTE output contains an invalid disposition")
+            raise MediaError("Output contains an invalid disposition")
         if kind not in categories or disposition.get("attached_pic", 0):
-            raise MediaError("ARTE output contains an unexpected stream or attachment")
+            raise MediaError("Output contains an unexpected stream or attachment")
         categories[kind].append(stream)
     return categories["video"], categories["audio"], categories["subtitle"]
 
@@ -346,7 +346,7 @@ def content_streams(probe: dict) -> tuple[list[dict], list[dict], list[dict]]:
 def check_counts(probe: dict, expected: dict, *, source: bool = False) -> tuple[list[dict], list[dict], list[dict]]:
     video, audio, subtitles = content_streams(probe)
     if len(video) != 1 or len(audio) != len(expected["audio"]) or len(subtitles) != (0 if source else len(expected["subtitles"])):
-        raise MediaError("ARTE output track count differs from the selected tracks")
+        raise MediaError("Output track count differs from the selected tracks")
     return video, audio, subtitles
 
 
@@ -372,7 +372,7 @@ def stream_evidence(path: Path, stream: dict, selected: dict, video_duration: De
     count = 0
     for packet in packets:
         if not isinstance(packet, dict):
-            raise MediaError("ARTE packet probe returned an invalid packet")
+            raise MediaError("Packet probe returned an invalid packet")
         timestamp = decimal_value(packet.get("pts_time"))
         if timestamp is None:
             timestamp = decimal_value(packet.get("dts_time"))
@@ -406,7 +406,7 @@ def stream_evidence(path: Path, stream: dict, selected: dict, video_duration: De
                   and decimal_value(packet.get("size"), positive=True) is not None]
         values = [value for value in values if value is not None]
         if not values and field == "pts_time":
-            raise MediaError("ARTE stream has no initial packet timestamp")
+            raise MediaError("Stream has no initial packet timestamp")
         evidence["first_" + field] = str(min(values)) if values else None
     evidence["head_timestamps"] = [
         {"pts": str(decimal_value(packet.get("pts_time"))),
@@ -421,20 +421,20 @@ def component_paths(plan: dict, expected: dict) -> list[Path]:
     module_path = Path(__file__).with_name("private-aria2-plan.py")
     spec = importlib.util.spec_from_file_location("arte_component_paths", module_path)
     if spec is None or spec.loader is None:
-        raise MediaError("ARTE component path validator is unavailable")
+        raise MediaError("Component path validator is unavailable")
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     try:
         selected = helper.selected_download(plan)
         destination = Path(selected.get("filename") or selected.get("_filename"))
         if not destination.is_absolute() or destination.parent.resolve(strict=True) != destination.parent:
-            raise MediaError("ARTE component directory is not canonical")
+            raise MediaError("Component directory is not canonical")
         paths = [helper.component_destination(destination, item) for item in selected["requested_formats"]]
         if len(paths) != len(expected["audio"]) + 1 or any(path.parent != destination.parent for path in paths):
-            raise MediaError("ARTE component paths do not match the executed plan")
+            raise MediaError("Component paths do not match the executed plan")
         return paths
     except helper.PlanError as exc:
-        raise MediaError("ARTE component paths failed the engine ownership contract") from exc
+        raise MediaError("Component paths failed the engine ownership contract") from exc
 
 
 def file_identity(metadata: os.stat_result) -> list[int]:
@@ -449,24 +449,24 @@ def probe_components(plan: dict, expected: dict) -> dict:
         metadata = path.lstat()
         parent = path.parent.stat()
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_size <= 0:
-            raise MediaError("ARTE retained source component is missing or unsafe")
+            raise MediaError("Retained source component is missing or unsafe")
         identity = file_identity(metadata)
         probe = run_probe(["-show_streams", "-show_entries",
                            "stream=index,codec_type,codec_name,start_time,duration,time_base,sample_rate:stream_tags:stream_disposition", str(path)])
         streams = probe.get("streams")
         kind = "video" if index == 0 else "audio"
         if not isinstance(streams, list) or len(streams) != 1 or streams[0].get("codec_type") != kind:
-            raise MediaError("ARTE source component contains unexpected streams")
+            raise MediaError("Source component contains unexpected streams")
         stream = streams[0]
         duration = duration_from_stream(stream) or decimal_value(selected.get("duration"), positive=True)
         if duration is None:
-            raise MediaError("ARTE source component duration is unavailable")
+            raise MediaError("Source component duration is unavailable")
         evidence = stream_evidence(path, stream, selected, duration)
         stream["index"] = index
         result["streams"].append(stream)
         result["packet_evidence"][str(index)] = evidence
         if file_identity(path.lstat()) != identity:
-            raise MediaError("ARTE source component changed during the timing probe")
+            raise MediaError("Source component changed during the timing probe")
         result["files"].append({"path": str(path), "identity": identity,
                                 "parent_identity": [parent.st_dev, parent.st_ino],
                                 "source_identity": selected["source_identity"]})
@@ -478,10 +478,10 @@ def validate_component_records(records: dict, expected: dict, plan: dict) -> lis
     if (records.get("version") != 1 or records.get("plan_digest") != expected["plan_digest"]
             or records.get("selection_digest") != expected["selection_digest"]
             or not isinstance(records.get("files"), list) or len(records["files"]) != len(paths)):
-        raise MediaError("ARTE source timing evidence does not match the executed plan")
+        raise MediaError("Source timing evidence does not match the executed plan")
     for path, entry, selected in zip(paths, records["files"], [expected["video"], *expected["audio"]]):
         if entry.get("path") != str(path) or entry.get("source_identity") != selected["source_identity"]:
-            raise MediaError("ARTE source timing provenance changed")
+            raise MediaError("Source timing provenance changed")
     check_counts(records, expected, source=True)
     return paths
 
@@ -498,11 +498,11 @@ def cleanup_components(records: dict, expected: dict, plan: dict) -> None:
             if (path.parent != parent or parent_identity != entry.get("parent_identity")
                     or not stat.S_ISREG(current.st_mode) or current.st_uid != os.geteuid()
                     or file_identity(current) != entry.get("identity")):
-                raise MediaError("ARTE source component identity changed; retained for inspection")
+                raise MediaError("Source component identity changed; retained for inspection")
         for path, entry in zip(paths, records["files"]):
             current = os.stat(path.name, dir_fd=descriptor, follow_symlinks=False)
             if not stat.S_ISREG(current.st_mode) or file_identity(current) != entry["identity"]:
-                raise MediaError("ARTE source component changed during cleanup; retained for inspection")
+                raise MediaError("Source component changed during cleanup; retained for inspection")
             os.unlink(path.name, dir_fd=descriptor)
     finally:
         os.close(descriptor)
@@ -512,7 +512,7 @@ def probe_media(path: Path, expected: dict, *, source: bool = False, reference: 
     checked_expected(expected)
     metadata = path.lstat()
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_size <= 0:
-        raise MediaError("ARTE output must be a nonempty regular media file")
+        raise MediaError("Output must be a nonempty regular media file")
     identity = [metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns]
     result = run_probe([
         "-show_streams", "-show_format", "-show_entries",
@@ -524,7 +524,7 @@ def probe_media(path: Path, expected: dict, *, source: bool = False, reference: 
     if video_duration is None:
         video_duration = decimal_value(expected["video"].get("duration"), positive=True)
     if video_duration is None:
-        raise MediaError("ARTE video duration is unavailable for per-stream validation")
+        raise MediaError("Video duration is unavailable for per-stream validation")
     result["packet_evidence"] = {}
     for stream, selected in zip([*video, *audio], [expected["video"], *expected["audio"]]):
         result["packet_evidence"][str(stream["index"])] = stream_evidence(path, stream, selected, video_duration)
@@ -542,7 +542,7 @@ def probe_media(path: Path, expected: dict, *, source: bool = False, reference: 
         result["subtitle_cues"] = {}
         if subtitles:
             if any(stream.get("codec_name") != "subrip" for stream in subtitles):
-                raise MediaError("ARTE final subtitle is not the verified SubRip stream")
+                raise MediaError("Final subtitle is not the verified SubRip stream")
             # Read a feature-length container once for all subtitles. The input
             # size budgets a conservative local scan without a short-clip-only
             # deadline; output files remain bounded by the kernel and parser.
@@ -563,15 +563,15 @@ def probe_media(path: Path, expected: dict, *, source: bool = False, reference: 
                         observed = os.fstat(handle.fileno())
                         if (not stat.S_ISREG(observed.st_mode) or observed.st_uid != os.geteuid()
                                 or stat.S_IMODE(observed.st_mode) & 0o077 or observed.st_size > MAX_SUBTITLE_BYTES):
-                            raise MediaError("ARTE extracted subtitle is not a bounded private file")
+                            raise MediaError("Extracted subtitle is not a bounded private file")
                         payload = handle.read(MAX_SUBTITLE_BYTES + 1)
                     total += len(payload)
                     if len(payload) > MAX_SUBTITLE_BYTES or total > 64 * 1024 * 1024:
-                        raise MediaError("ARTE extracted subtitles exceed the size limit")
+                        raise MediaError("Extracted subtitles exceed the size limit")
                     result["subtitle_cues"][track["id"]] = parse_subtitle_cues(parser, payload)
     observed = path.lstat()
     if identity != [observed.st_dev, observed.st_ino, observed.st_size, observed.st_mtime_ns]:
-        raise MediaError("ARTE output changed during validation")
+        raise MediaError("Output changed during validation")
     result["media_identity"] = identity
     return result
 
@@ -583,116 +583,123 @@ def validate_media(probe: dict, expected: dict, plan: dict, *, source: bool = Fa
     video, audio, subtitles = check_counts(probe, expected, source=source)
     evidence = probe.get("packet_evidence")
     if not isinstance(evidence, dict):
-        raise MediaError("ARTE output has no per-stream packet evidence")
+        raise MediaError("Output has no per-stream packet evidence")
     if components is not None:
         validate_component_records(components, expected, plan)
         original_video, original_audio, _ = check_counts(components, expected, source=True)
         compare_clocks([*video, *audio], evidence, [*original_video, *original_audio], components["packet_evidence"])
     video_duration = decimal_value(evidence.get(str(video[0]["index"]), {}).get("duration"), positive=True)
     if video_duration is None:
-        raise MediaError("ARTE output has no usable video duration")
+        raise MediaError("Output has no usable video duration")
     for stream, selected in zip([*video, *audio], [expected["video"], *expected["audio"]]):
         packet = evidence.get(str(stream["index"]), {})
         if packet.get("tail_complete") is not True:
-            raise MediaError("ARTE stream has no complete end-of-stream packet evidence")
+            raise MediaError("Stream has no complete end-of-stream packet evidence")
         actual = decimal_value(packet.get("duration"), positive=True)
         requested = decimal_value(selected.get("duration"), positive=True) or video_duration
         if actual is None or abs(actual - requested) > tolerance(requested):
-            raise MediaError("ARTE video or audio duration differs from its selected source")
+            raise MediaError("Video or audio duration differs from its selected source")
         if abs(actual - video_duration) > tolerance(video_duration):
-            raise MediaError("ARTE audio and video durations are inconsistent")
+            raise MediaError("Audio and video durations are inconsistent")
         end = decimal_value(packet.get("end"))
         target = decimal_value(packet.get("target"))
         start = decimal_value(stream.get("start_time")) or Decimal(0)
         target_duration = max(actual, requested)
         required_target = start + target_duration - tolerance(target_duration)
         if target != required_target:
-            raise MediaError("ARTE packet evidence does not match the requested stream duration")
+            raise MediaError("Packet evidence does not match the requested stream duration")
         if type(packet.get("count")) is not int or packet["count"] <= 0 or end is None or target is None or end < target:
-            raise MediaError("ARTE video or audio packets end before the required duration")
+            raise MediaError("Video or audio packets end before the required duration")
     for kind, streams, selected in (("audio", audio, expected["audio"]),
                                     ("subtitle", subtitles, expected["subtitles"])):
         for stream, track in zip(streams, selected):
             disposition = stream.get("disposition") or {}
             if not isinstance(disposition, dict) or disposition.get("hearing_impaired", 0):
-                raise MediaError("ARTE output contains an excluded hearing-impaired track")
+                raise MediaError("Output contains an excluded hearing-impaired track")
             tags = stream.get("tags") or {}
             if not isinstance(tags, dict):
-                raise MediaError("ARTE output contains invalid track metadata")
+                raise MediaError("Output contains invalid track metadata")
             actual_language = tags.get("language")
-            if source and actual_language in (None, "und"):
+            if not source and kind == "audio" and track["language"] == "und":
+                # Matroska omits the stream language tag for und. Only the
+                # authenticated audio selection can supply that missing value.
+                reported = [value for key, value in tags.items() if key.lower() == "language"]
+                if reported and (len(reported) != 1 or not isinstance(reported[0], str)
+                                 or reported[0].lower() != "und"):
+                    raise MediaError("Output audio language differs from the selected undetermined language")
+            elif source and actual_language in (None, "und"):
                 pass
             elif language(actual_language) != language(track["language"]):
-                raise MediaError("ARTE output language differs from the selected source")
+                raise MediaError("Output language differs from the selected source")
             if kind == "subtitle" and evidence.get(str(stream["index"]), {}).get("count", 0) <= 0:
-                raise MediaError("ARTE selected subtitle contains no packets")
+                raise MediaError("Selected subtitle contains no packets")
             if source:
                 continue
             if tags.get("title") != track["title"]:
-                raise MediaError("ARTE output track title differs from the selection")
+                raise MediaError("Output track title differs from the selection")
             if disposition.get("default", 0) != int(track["default"]):
-                raise MediaError("ARTE output default track disposition differs from the selection")
+                raise MediaError("Output default track disposition differs from the selection")
             forced = track.get("forced", False)
             if disposition.get("forced", 0) != int(forced):
-                raise MediaError("ARTE output forced subtitle disposition differs from the selection")
+                raise MediaError("Output forced subtitle disposition differs from the selection")
             if disposition.get("visual_impaired", 0) != int(track["role"] == "description"):
-                raise MediaError("ARTE audio-description disposition differs from the selection")
+                raise MediaError("Audio-description disposition differs from the selection")
     if not source:
         prepared = read_subtitle_reference(reference, expected)
         cues = probe.get("subtitle_cues") or {}
         if set(cues) != {track["id"] for track in prepared["tracks"]}:
-            raise MediaError("ARTE final subtitle reference inventory changed")
+            raise MediaError("Final subtitle reference inventory changed")
         for track in prepared["tracks"]:
             if not cues.get(track["id"]) or cues[track["id"]] != track["cues"]:
-                raise MediaError("ARTE final subtitle cues differ in count, text or exact millisecond timing")
+                raise MediaError("Final subtitle cues differ in count, text or exact millisecond timing")
         if baseline is not None:
             source_video, source_audio, _ = check_counts(baseline, expected, source=True)
             source_evidence = baseline.get("packet_evidence") or {}
             compare_clocks([*video, *audio], evidence, [*source_video, *source_audio], source_evidence)
         if (video[0].get("disposition") or {}).get("default", 0) != 1:
-            raise MediaError("ARTE output video default disposition is invalid")
+            raise MediaError("Output video default disposition is invalid")
         format_tags = (probe.get("format") or {}).get("tags") or {}
         if not isinstance(format_tags, dict) or set(key.lower() for key in format_tags) - {"encoder"}:
-            raise MediaError("ARTE output retains unexpected extraction metadata")
+            raise MediaError("Output retains unexpected extraction metadata")
         for stream in [*video, *audio, *subtitles]:
             tags = stream.get("tags") or {}
             if set(key.lower() for key in tags) - {"language", "title", "duration", "encoder"}:
-                raise MediaError("ARTE output retains unexpected stream metadata")
+                raise MediaError("Output retains unexpected stream metadata")
 
 
 def compare_clocks(streams: list[dict], evidence: dict, originals: list[dict], source_evidence: dict) -> None:
     for stream, previous in zip(streams, originals):
         if stream.get("codec_name") != previous.get("codec_name"):
-            raise MediaError("ARTE codec changed during the copy-only assembly")
+            raise MediaError("Codec changed during the copy-only assembly")
         before = source_evidence.get(str(previous["index"]), {})
         after = evidence.get(str(stream["index"]), {})
         if before.get("tail_complete") is not True or after.get("tail_complete") is not True:
-            raise MediaError("ARTE source or output has no complete end-of-stream packet evidence")
+            raise MediaError("Source or output has no complete end-of-stream packet evidence")
         allowance = clock_tolerance(stream, previous)
         old_terminal = before.get("terminal_packet") or {}
         new_terminal = after.get("terminal_packet") or {}
         old_pts, new_pts = decimal_value(old_terminal.get("pts")), decimal_value(new_terminal.get("pts"))
         if old_pts is None or new_pts is None or abs(old_pts - new_pts) > allowance:
-            raise MediaError("ARTE terminal packet presentation timestamps changed or are unavailable")
+            raise MediaError("The terminal packet presentation timestamps changed or are unavailable")
         old_dts, new_dts = decimal_value(old_terminal.get("dts")), decimal_value(new_terminal.get("dts"))
         if old_dts is not None and new_dts is not None and abs(old_dts - new_dts) > allowance:
-            raise MediaError("ARTE terminal packet decode timestamps changed")
+            raise MediaError("The terminal packet decode timestamps changed")
         for key in ("first_pts_time", "end"):
             left, right = decimal_value(before.get(key)), decimal_value(after.get(key))
             kind = stream.get("codec_type") if stream.get("codec_type") in ("video", "audio") else "media"
             boundary = "beginning" if key == "first_pts_time" else "end"
             if left is None or right is None:
-                raise MediaError(f"ARTE {kind} {boundary} timestamp is unavailable")
+                raise MediaError(f"Output {kind} {boundary} timestamp is unavailable")
             if abs(left - right) > allowance:
                 if key == "end" and aac_partial_terminal_frame(previous, stream, before, after, allowance):
                     continue
                 delta = abs(left - right) * 1000
                 difference = f"{delta:.3f}" if delta <= 1000000 else "more than 1000000"
-                raise MediaError(f"ARTE {kind} timestamps changed at the {boundary} ({difference} ms difference from the source clock)")
+                raise MediaError(f"Output {kind} timestamps changed at the {boundary} ({difference} ms difference from the source clock)")
         old = sorted(before.get("head_timestamps") or [], key=lambda item: Decimal(item["pts"]))
         new = sorted(after.get("head_timestamps") or [], key=lambda item: Decimal(item["pts"]))
         if not old or not new:
-            raise MediaError("ARTE initial packet clock evidence is unavailable")
+            raise MediaError("Initial packet clock evidence is unavailable")
         position = 0
         matches = set()
         dts_comparisons = 0
@@ -704,7 +711,7 @@ def compare_clocks(streams: list[dict], evidence: dict, originals: list[dict], s
                 position += 1
             if position >= len(old) or abs(Decimal(old[position]["pts"]) - pts) > allowance:
                 if common_start + allowance < pts < common_end - allowance:
-                    raise MediaError("ARTE presentation timestamps changed within the initial packet window")
+                    raise MediaError("Presentation timestamps changed within the initial packet window")
                 continue
             matches.add(position)
             # Matroska can omit initial DTS for reordered B-frames. Compare
@@ -713,13 +720,13 @@ def compare_clocks(streams: list[dict], evidence: dict, originals: list[dict], s
             if left is not None and right is not None:
                 dts_comparisons += 1
                 if abs(left - right) > allowance:
-                    raise MediaError("ARTE decode timestamps changed for corresponding packets")
+                    raise MediaError("Packet decode timestamps changed for corresponding packets")
         if not matches or any(index not in matches and common_start + allowance < Decimal(packet["pts"]) < common_end - allowance
                               for index, packet in enumerate(old)):
-            raise MediaError("ARTE source packet timestamps have no complete corresponding window")
+            raise MediaError("Source packet timestamps have no complete corresponding window")
         if (any(packet.get("dts") is not None for packet in old)
                 and any(packet.get("dts") is not None for packet in new) and dts_comparisons == 0):
-            raise MediaError("ARTE known decode timestamps could not be compared")
+            raise MediaError("Known decode timestamps could not be compared")
 
 
 def aac_partial_terminal_frame(original: dict, current: dict, before: dict, after: dict, allowance: Decimal) -> bool:
@@ -777,10 +784,10 @@ def clock_tolerance(current: dict, original: dict) -> Decimal:
         value = stream.get("time_base")
         fields = value.split("/") if isinstance(value, str) else []
         if len(fields) != 2 or any(not part.isdigit() or len(part) > 12 for part in fields):
-            raise MediaError("ARTE stream time base is unavailable")
+            raise MediaError("Stream time base is unavailable")
         numerator, denominator = map(Decimal, fields)
         if numerator <= 0 or denominator <= 0 or numerator / denominator > Decimal("0.001"):
-            raise MediaError("ARTE stream time base is too coarse for millisecond verification")
+            raise MediaError("Stream time base is too coarse for millisecond verification")
         ticks.append(numerator / denominator)
     # Endpoint calculation can quantize PTS and packet duration separately.
     # One tick of the coarser clock bounds their combined rounding error.
@@ -789,7 +796,7 @@ def clock_tolerance(current: dict, original: dict) -> Decimal:
 
 def main() -> int:
     os.umask(0o077)
-    parser = argparse.ArgumentParser(description="Validate private ARTE media assembly")
+    parser = argparse.ArgumentParser(description="Validate private media assembly")
     commands = parser.add_subparsers(dest="command", required=True)
     options = commands.add_parser("remux-arguments")
     options.add_argument("--expected", type=Path, required=True)
@@ -834,8 +841,8 @@ def main() -> int:
                            baseline=read_private_json(args.baseline) if args.baseline else None, reference=args.reference,
                            components=read_private_json(args.components) if args.components else None)
     except (MediaError, OSError, ValueError, RecursionError, KeyError, TypeError, AttributeError, IndexError) as exc:
-        message = str(exc) if isinstance(exc, MediaError) else "ARTE media validation could not read valid private data"
-        print(f"Error [ARTE_MEDIA]: {message}.", file=sys.stderr)
+        message = str(exc) if isinstance(exc, MediaError) else "Media validation could not read valid private data"
+        print(f"Error [MEDIA_VALIDATION]: {message}.", file=sys.stderr)
         return 65
     return 0
 

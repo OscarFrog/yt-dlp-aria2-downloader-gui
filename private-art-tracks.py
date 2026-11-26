@@ -84,11 +84,11 @@ def private_parent(path: Path) -> int:
                 descriptor = child
             metadata = os.fstat(descriptor)
             if metadata.st_uid not in (0, os.getuid()):
-                raise ArteError("ARTE private file directory is unsafe")
+                raise ArteError("Private file directory is unsafe")
             if metadata.st_mode & 0o022 and not metadata.st_mode & stat.S_ISVTX:
-                raise ArteError("ARTE private file directory is writable by another user")
+                raise ArteError("Private file directory is writable by another user")
             if index == len(parent.parts) - 1 and (metadata.st_uid != os.getuid() or metadata.st_mode & 0o077):
-                raise ArteError("ARTE files require an owner-only directory")
+                raise ArteError("Files require an owner-only directory")
         return descriptor
     except BaseException:
         os.close(descriptor)
@@ -107,27 +107,27 @@ def read_json(path: str | Path) -> dict:
         if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
                 or metadata.st_mode & 0o077 or metadata.st_nlink != 1
                 or metadata.st_size > MAX_JSON):
-            raise ArteError("ARTE input must be a bounded private regular file")
+            raise ArteError("Input must be a bounded private regular file")
         with os.fdopen(descriptor, "rb", closefd=False) as source:
             payload = source.read(MAX_JSON + 1)
         if len(payload) > MAX_JSON:
-            raise ArteError("ARTE input exceeds the size limit")
+            raise ArteError("Input exceeds the size limit")
     finally:
         os.close(descriptor)
     def pairs(items):
         result = {}
         for key, value in items:
             if key in result:
-                raise ArteError("ARTE input contains duplicate object keys")
+                raise ArteError("Input contains duplicate object keys")
             result[key] = value
         return result
     try:
         value = json.loads(payload, object_pairs_hook=pairs,
-                           parse_constant=lambda _value: (_ for _ in ()).throw(ArteError("ARTE input contains a nonfinite number")))
+                           parse_constant=lambda _value: (_ for _ in ()).throw(ArteError("Input contains a nonfinite number")))
     except (UnicodeError, ValueError, RecursionError) as error:
-        raise ArteError("ARTE input is not valid bounded JSON") from error
+        raise ArteError("Input is not valid bounded JSON") from error
     if not isinstance(value, dict):
-        raise ArteError("ARTE input must be a JSON object")
+        raise ArteError("Input must be a JSON object")
     return value
 
 
@@ -135,7 +135,7 @@ def write_json(path: str | Path, value: dict | list) -> None:
     path = Path(path)
     payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode() + b"\n"
     if len(payload) > MAX_JSON:
-        raise ArteError("ARTE output exceeds the size limit")
+        raise ArteError("Output exceeds the size limit")
     parent = private_parent(path)
     stage = ".arte-state-" + secrets.token_hex(16)
     created = False
@@ -150,11 +150,11 @@ def write_json(path: str | Path, value: dict | list) -> None:
         # rename publishes one complete inode without a transient second link.
         rename = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
         if rename is None:
-            raise ArteError("ARTE private state requires atomic no-overwrite publication")
+            raise ArteError("Private state requires atomic no-overwrite publication")
         rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
         rename.restype = ctypes.c_int
         if rename(parent, os.fsencode(stage), parent, os.fsencode(path.name), 1) != 0:
-            raise OSError(ctypes.get_errno(), "ARTE private state publication failed")
+            raise OSError(ctypes.get_errno(), "Private state publication failed")
         created = False
     finally:
         if created:
@@ -164,7 +164,7 @@ def write_json(path: str | Path, value: dict | list) -> None:
 
 def text_value(value: object, *, limit: int = 512) -> str:
     if not isinstance(value, str) or len(value) > limit or any(unicodedata.category(c).startswith("C") for c in value):
-        raise ArteError("ARTE track metadata contains invalid text")
+        raise ArteError("Track metadata contains invalid text")
     return value
 
 
@@ -172,7 +172,7 @@ def source_url(value: object) -> str:
     value = text_value(value, limit=8192)
     parsed = urllib.parse.urlsplit(value)
     if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
-        raise ArteError("ARTE source requires an HTTP(S) URL without user information")
+        raise ArteError("Source requires an HTTP(S) URL without user information")
     return value
 
 
@@ -180,12 +180,12 @@ def headers(value: object) -> dict:
     if value is None:
         return {}
     if not isinstance(value, dict) or len(value) > 64:
-        raise ArteError("ARTE request headers are invalid")
+        raise ArteError("Request headers are invalid")
     result = {}
     for key, item in value.items():
         key = text_value(key, limit=128)
         if not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key):
-            raise ArteError("ARTE request header name is invalid")
+            raise ArteError("Request header name is invalid")
         result[key] = text_value(item, limit=8192)
     return result
 
@@ -197,7 +197,7 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
         new = urllib.parse.urlsplit(newurl)
         safe = {"user-agent", "accept", "accept-language", "sec-fetch-mode"}
         if (old.scheme, old.netloc) != (new.scheme, new.netloc) and any(key.lower() not in safe for key, _value in request.header_items()):
-            raise ArteError("ARTE refused a cross-origin redirect carrying private headers")
+            raise ArteError("Refused a cross-origin redirect carrying private headers")
         return super().redirect_request(request, response, code, message, response_headers, newurl)
 
 
@@ -216,16 +216,16 @@ class Fetcher:
             return self.cache[key]
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
-            raise ArteError("ARTE manifest analysis exceeded its deadline; retry the analysis")
+            raise ArteError("Manifest analysis exceeded its deadline; retry the analysis")
         try:
             request = urllib.request.Request(url, headers=request_headers)
             with self.opener.open(request, timeout=min(20, remaining)) as response:
                 payload = response.read(limit + 1)
         except (OSError, ValueError, urllib.error.URLError) as error:
-            raise ArteError("ARTE rendition is unavailable during analysis; retry or select again") from error
+            raise ArteError("Rendition is unavailable during analysis; retry or select again") from error
         self.total += len(payload)
         if len(payload) > limit or self.total > MAX_NETWORK:
-            raise ArteError("ARTE manifest or subtitle identity proof exceeds the size limit")
+            raise ArteError("Manifest or subtitle identity proof exceeds the size limit")
         self.cache[key] = payload
         return payload
 
@@ -234,9 +234,9 @@ def hls_text(payload: bytes) -> str:
     try:
         value = payload.decode("utf-8-sig")
     except UnicodeError as error:
-        raise ArteError("ARTE manifest is not UTF-8") from error
+        raise ArteError("Manifest is not UTF-8") from error
     if not value.startswith("#EXTM3U") or len(value.splitlines()) > 32768:
-        raise ArteError("ARTE source is not a bounded HLS manifest")
+        raise ArteError("Source is not a bounded HLS manifest")
     return value
 
 
@@ -244,11 +244,11 @@ def attributes(line: str) -> dict:
     result = {}
     position = 0
     if len(line) > 16384:
-        raise ArteError("ARTE rendition metadata exceeds the line limit")
+        raise ArteError("Rendition metadata exceeds the line limit")
     while position < len(line):
         match = ATTR_RE.match(line, position)
         if match is None or match[1] in result:
-            raise ArteError("ARTE rendition attributes are malformed")
+            raise ArteError("Rendition attributes are malformed")
         result[match[1]] = match[2].strip('"')
         position = match.end()
     return result
@@ -258,7 +258,7 @@ def language(value: object) -> str:
     value = text_value(value or "und", limit=32).lower().replace("_", "-")
     value = LANG_CODES.get(value, value)
     if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]{2,8})?", value):
-        raise ArteError("ARTE track language is invalid")
+        raise ArteError("Track language is invalid")
     return value
 
 
@@ -276,7 +276,7 @@ def role_of(evidence: dict, kind: str) -> tuple[str, bool]:
     hls = evidence.get("hls") or {}
     own = evidence.get("audio_track") or {}
     if not isinstance(hls, dict) or not isinstance(own, dict):
-        raise ArteError("ARTE track role metadata is invalid")
+        raise ArteError("Track role metadata is invalid")
     name = " ".join(str(item) for item in (hls.get("NAME", ""), evidence.get("name", ""), own.get("name", "")))
     role_values = []
     for value in (evidence.get("role", ""), evidence.get("roles", ""), own.get("role", ""), own.get("roles", "")):
@@ -366,12 +366,12 @@ def audio_language_reliable(lang: str, evidence: dict) -> bool:
 def quarantine_diagnostic(entries: list) -> str:
     """Expose only bounded counts and fixed reason codes, never source data."""
     if not isinstance(entries, list) or not 1 <= len(entries) <= MAX_TRACKS * (MAX_TRACKS + 4):
-        raise ArteError("ARTE quarantine diagnostic requires a bounded source count")
+        raise ArteError("Quarantine diagnostic requires a bounded source count")
     counts = {reason: 0 for reason in QUARANTINE_REASONS}
     for entry in entries:
         reason = entry.get("quarantine_reason") if isinstance(entry, dict) else None
         if not isinstance(reason, str) or reason not in counts:
-            raise ArteError("ARTE quarantine diagnostic contains an invalid reason")
+            raise ArteError("Quarantine diagnostic contains an invalid reason")
         counts[reason] += 1
     reasons = "; ".join(f"{reason}={count}" for reason, count in counts.items() if count)
     return (f"[TRACK_CATALOGUE] Withheld {len(entries)} subtitle source(s): {reasons}; "
@@ -385,21 +385,21 @@ def subtitle_content(source: dict, fetch) -> str:
     payload = frozen.encode() if isinstance(frozen, str) else fetch(url, request_headers, MAX_SUBTITLE)
     if not payload.startswith(b"#EXTM3U"):
         if not payload.lstrip(b"\xef\xbb\xbf").startswith(b"WEBVTT"):
-            raise ArteError("ARTE subtitle alias identity is not a WebVTT resource")
+            raise ArteError("Subtitle alias identity is not a WebVTT resource")
         return hashlib.sha256(payload).hexdigest()
     manifest = hls_text(payload)
     if "#EXT-X-ENDLIST" not in manifest or "#EXT-X-KEY" in manifest:
-        raise ArteError("ARTE subtitle alias requires a finite unencrypted rendition")
+        raise ArteError("Subtitle alias requires a finite unencrypted rendition")
     segments = [line.strip() for line in manifest.splitlines() if line.strip() and not line.startswith("#")]
     if not 1 <= len(segments) <= 128:
-        raise ArteError("ARTE subtitle alias has an unsupported segment count")
+        raise ArteError("Subtitle alias has an unsupported segment count")
     digest = hashlib.sha256()
     size = 0
     for segment in segments:
         payload = fetch(urllib.parse.urljoin(url, segment), request_headers, MAX_SUBTITLE)
         size += len(payload)
         if size > MAX_SUBTITLE or not payload.lstrip(b"\xef\xbb\xbf").startswith(b"WEBVTT"):
-            raise ArteError("ARTE subtitle alias identity cannot be established")
+            raise ArteError("Subtitle alias identity cannot be established")
         digest.update(len(payload).to_bytes(8, "big"))
         digest.update(payload)
     return digest.hexdigest()
@@ -408,7 +408,7 @@ def subtitle_content(source: dict, fetch) -> str:
 def selected_root(plan: dict) -> dict:
     downloads = plan.get("requested_downloads")
     if not isinstance(downloads, list) or len(downloads) != 1 or not isinstance(downloads[0], dict):
-        raise ArteError("ARTE planning requires exactly one selected download")
+        raise ArteError("Planning requires exactly one selected download")
     root = {key: value for key, value in plan.items() if key not in ("formats", "requested_downloads")}
     root.update(downloads[0])
     return root
@@ -416,15 +416,15 @@ def selected_root(plan: dict) -> dict:
 
 def build_catalogue(plan: dict, fetch=None) -> dict:
     if plan.get("extractor_key") not in ("ArteTV", "ArteTVEmbed") and plan.get("extractor") not in ("ArteTV", "arte:tv", "arte"):
-        raise ArteError("ARTE track selection requires an ARTE video")
+        raise ArteError("Track selection requires a supported video extractor")
     formats = plan.get("formats")
     if not isinstance(formats, list) or not 1 <= len(formats) <= 512 or any(not isinstance(item, dict) for item in formats):
-        raise ArteError("ARTE format inventory is invalid")
+        raise ArteError("Format inventory is invalid")
     fetch = fetch or Fetcher()
     request_headers = headers(plan.get("http_headers"))
     manifest_urls = list(dict.fromkeys(source_url(item["manifest_url"]) for item in formats if item.get("manifest_url")))
     if len(manifest_urls) > 16:
-        raise ArteError("ARTE has too many master manifests")
+        raise ArteError("The track inventory contains too many master manifests")
     renditions = {"audio": [], "subtitle": []}
     for url in manifest_urls:
         for line in hls_text(fetch(url, request_headers, MAX_MANIFEST)).splitlines():
@@ -437,7 +437,7 @@ def build_catalogue(plan: dict, fetch=None) -> dict:
                 if attrs not in renditions[kind]:
                     renditions[kind].append(attrs)
     if any(len(items) > MAX_TRACKS * 4 for items in renditions.values()):
-        raise ArteError("ARTE rendition inventory exceeds its limit")
+        raise ArteError("Rendition inventory exceeds its limit")
 
     audio = []
     excluded = []
@@ -447,7 +447,7 @@ def build_catalogue(plan: dict, fetch=None) -> dict:
             continue
         fmt_id = item.get("format_id")
         if not isinstance(fmt_id, str) or not FORMAT_RE.fullmatch(fmt_id):
-            raise ArteError("ARTE audio format identifier is not representable")
+            raise ArteError("Audio format identifier is not representable")
         source = copy.deepcopy(item)
         source["http_headers"] = headers(source.get("http_headers") or request_headers)
         matches = [entry for entry in renditions["audio"] if entry["URI"] == source.get("url")]
@@ -456,7 +456,7 @@ def build_catalogue(plan: dict, fetch=None) -> dict:
             # on one exact source must not be guessed away.
             identities = {canonical_digest({k: v for k, v in entry.items() if k != "GROUP-ID"}) for entry in matches}
             if len(identities) != 1:
-                raise ArteError("ARTE audio has conflicting rendition metadata")
+                raise ArteError("Audio has conflicting rendition metadata")
         rendition = matches[0] if matches else None
         evidence = own_evidence(source, rendition)
         role, original = role_of(evidence, "audio")
@@ -481,15 +481,15 @@ def build_catalogue(plan: dict, fetch=None) -> dict:
 
     raw_subtitles = plan.get("subtitles") or {}
     if not isinstance(raw_subtitles, dict) or len(raw_subtitles) > MAX_TRACKS:
-        raise ArteError("ARTE subtitle inventory is invalid")
+        raise ArteError("Subtitle inventory is invalid")
     raw_sources = []
     for raw_key, entries in raw_subtitles.items():
         text_value(raw_key, limit=96)
         if not isinstance(entries, list) or len(entries) > MAX_TRACKS:
-            raise ArteError("ARTE subtitle variants are invalid")
+            raise ArteError("Subtitle variants are invalid")
         for entry in entries:
             if not isinstance(entry, dict):
-                raise ArteError("ARTE subtitle variant is invalid")
+                raise ArteError("Subtitle variant is invalid")
             raw_sources.append((raw_key, entry))
     subtitle_entries = []
     if renditions["subtitle"]:
@@ -565,7 +565,7 @@ def build_catalogue(plan: dict, fetch=None) -> dict:
             quarantined.append(item)
     subtitles = [item for item in subtitles if not item.get("quarantine_reason")]
     if not 1 <= len(audio) <= 15 or len(subtitles) > MAX_TRACKS:
-        raise ArteError("ARTE requires between one and fifteen admissible audios and bounded subtitles")
+        raise ArteError("Track selection requires between one and fifteen admissible audios and bounded subtitles")
     private = {"audio": {}, "subtitles": {}, "excluded": excluded, "quarantined": quarantined,
                "catalogue_policy": CATALOGUE_POLICY, "raw_plan_digest": canonical_digest(plan)}
     public = {"version": 1, "policy": POLICY, "audio": [], "subtitles": []}
@@ -587,7 +587,7 @@ def build_catalogue(plan: dict, fetch=None) -> dict:
                 key += "-" + suffix
                 title += f" (variant {suffix})"
             if not KEY_RE.fullmatch(key):
-                raise ArteError("ARTE normalized track identifier is invalid")
+                raise ArteError("Normalized track identifier is invalid")
             item["id"] = key
             item["label"] = title
             private[kind][key] = item
@@ -609,28 +609,28 @@ def public_catalogue(catalogue: dict) -> dict:
 
 def validate_catalogue(catalogue: dict) -> None:
     if catalogue.get("version") != 1 or catalogue.get("policy") != POLICY or not re.fullmatch(r"[0-9a-f]{64}", str(catalogue.get("id", ""))):
-        raise ArteError("ARTE catalogue is obsolete or invalid; analyse the URL again")
+        raise ArteError("Catalogue is obsolete or invalid; analyse the URL again")
     for kind in ("audio", "subtitles"):
         entries = catalogue.get(kind)
         if not isinstance(entries, list) or len(entries) > MAX_TRACKS:
-            raise ArteError("ARTE catalogue has invalid track arrays")
+            raise ArteError("Catalogue has invalid track arrays")
         seen = set()
         for item in entries:
             if not isinstance(item, dict) or not KEY_RE.fullmatch(str(item.get("id", ""))) or item["id"] in seen:
-                raise ArteError("ARTE catalogue has invalid track identifiers")
+                raise ArteError("Catalogue has invalid track identifiers")
             seen.add(item["id"])
             if item.get("role") not in (("main", "description") if kind == "audio" else ("full", "forced")):
-                raise ArteError("ARTE hearing-impaired tracks are excluded; analyse and select again")
+                raise ArteError("Hearing-impaired tracks are excluded; analyse and select again")
             language(item.get("language"))
             text_value(item.get("label"), limit=256)
             if any(field in item for field in ("language_uncertain", "possible_alias", "alias_group", "quarantined", "quarantine_reason")):
-                raise ArteError("ARTE catalogue contains obsolete or unreliable subtitle choices; analyse again")
+                raise ArteError("Catalogue contains obsolete or unreliable subtitle choices; analyse again")
             if kind == "subtitles" and subtitle_language_issue(item):
-                raise ArteError("ARTE subtitle language is not reliably identified; analyse and select again")
+                raise ArteError("Subtitle language is not reliably identified; analyse and select again")
             if any(field in item and not isinstance(item[field], bool) for field in ("original", "forced", "default", "language_reliable")):
-                raise ArteError("ARTE catalogue track flags are invalid")
+                raise ArteError("Catalogue track flags are invalid")
     if not catalogue["audio"]:
-        raise ArteError("ARTE has no admissible audio")
+        raise ArteError("Has no admissible audio")
 
 
 def preferred_audio(entries: list[dict]) -> dict:
@@ -648,11 +648,11 @@ def choose(catalogue: dict, preset: str | None = None, audios=None, subtitles=No
     validate_catalogue(catalogue)
     if default_audio is not None and (not isinstance(default_audio, str)
                                       or default_audio not in {item["id"] for item in catalogue["audio"]}):
-        raise ArteError("ARTE requested default audio is unavailable or excluded; select again")
+        raise ArteError("Requested default audio is unavailable or excluded; select again")
     if preset is not None and (audio_mode is not None or subtitle_mode is not None):
-        raise ArteError("ARTE presets and independent selection modes cannot be combined")
+        raise ArteError("Presets and independent selection modes cannot be combined")
     if preset is not None and preset != "custom" and (audios or subtitles):
-        raise ArteError("ARTE explicit track choices cannot be combined with a preset")
+        raise ArteError("Explicit track choices cannot be combined with a preset")
     messages = []
     if preset == "all":
         audio_mode, subtitle_mode = "all", "all"
@@ -661,16 +661,16 @@ def choose(catalogue: dict, preset: str | None = None, audios=None, subtitles=No
         audios = [item["id"] for item in catalogue["audio"] if item.get("original") is True and item["role"] == "main"]
         subtitles = [item["id"] for item in catalogue["subtitles"] if item["language"].partition("-")[0] == "fr" and item["role"] == "full"]
         if len(audios) != 1 or len(subtitles) != 1:
-            raise ArteError("ARTE original audio and full French subtitles are unavailable or ambiguous; forced subtitles are not a replacement")
+            raise ArteError("Original audio and full French subtitles are unavailable or ambiguous; forced subtitles are not a replacement")
     elif preset == "custom":
         audio_mode, subtitle_mode = "custom", "custom"
     elif preset is not None:
-        raise ArteError("ARTE selection preset is invalid")
+        raise ArteError("Selection preset is invalid")
     audio_mode, subtitle_mode = audio_mode or "auto", subtitle_mode or "auto"
     if audio_mode not in ("auto", "all", "custom") or subtitle_mode not in ("auto", "none", "all", "custom"):
-        raise ArteError("ARTE independent selection mode is invalid")
+        raise ArteError("Independent selection mode is invalid")
     if (audio_mode != "custom" and audios) or (subtitle_mode != "custom" and subtitles):
-        raise ArteError("ARTE explicit track choices require custom selection mode")
+        raise ArteError("Explicit track choices require custom selection mode")
     if audio_mode == "all":
         audios = [item["id"] for item in catalogue["audio"]]
     elif audio_mode == "auto":
@@ -714,30 +714,30 @@ def choose(catalogue: dict, preset: str | None = None, audios=None, subtitles=No
 def validate_selection(catalogue: dict, selection: dict) -> None:
     validate_catalogue(catalogue)
     if set(selection) != {"version", "catalogue_id", "audio_mode", "subtitle_mode", "audio", "subtitles", "default_audio", "default_subtitle", "messages"} or selection.get("version") != 2:
-        raise ArteError("ARTE selection schema is invalid or obsolete; select the tracks again")
+        raise ArteError("Selection schema is invalid or obsolete; select the tracks again")
     if selection["audio_mode"] not in ("auto", "all", "custom") or selection["subtitle_mode"] not in ("auto", "none", "all", "custom"):
-        raise ArteError("ARTE independent selection mode is invalid")
+        raise ArteError("Independent selection mode is invalid")
     messages = selection["messages"]
     if (not isinstance(messages, list) or len(messages) > len(SELECTION_MESSAGES)
             or any(not isinstance(item, str) or item not in SELECTION_MESSAGES for item in messages)
             or len(messages) != len(set(messages))):
-        raise ArteError("ARTE selection messages are invalid")
+        raise ArteError("Selection messages are invalid")
     if selection.get("catalogue_id") != catalogue["id"]:
-        raise ArteError("ARTE inventory changed; analyse and select the tracks again")
+        raise ArteError("Track inventory changed; analyse and select the tracks again")
     for kind in ("audio", "subtitles"):
         choices = selection.get(kind)
         available = {item["id"] for item in catalogue[kind]}
         if not isinstance(choices, list) or len(choices) > MAX_TRACKS or any(not isinstance(item, str) for item in choices) or len(choices) != len(set(choices)):
-            raise ArteError("ARTE selection must contain distinct track identifiers")
+            raise ArteError("Selection must contain distinct track identifiers")
         if any(item not in available for item in choices):
-            raise ArteError("ARTE requested track is unavailable or excluded, or its language could not be reliably identified; select again")
+            raise ArteError("Requested track is unavailable or excluded, or its language could not be reliably identified; select again")
     if not 1 <= len(selection["audio"]) <= 15 or selection["default_audio"] not in selection["audio"]:
-        raise ArteError("ARTE requires an admissible audio and a selected default audio")
+        raise ArteError("Track selection requires an admissible audio and a selected default audio")
     default = selection["default_subtitle"]
     if default is not None and default not in selection["subtitles"]:
-        raise ArteError("ARTE default subtitle must belong to the selection")
+        raise ArteError("Default subtitle must belong to the selection")
     if selection["subtitle_mode"] == "none" and (selection["subtitles"] or default is not None):
-        raise ArteError("ARTE disabled subtitles must have an empty selection")
+        raise ArteError("The selection must be empty for disabled subtitles")
 
 
 def duration(value: object) -> float | None:
@@ -752,11 +752,11 @@ def resolve_subtitles(private: dict, selection: dict, fetch) -> tuple[dict, dict
     for key in selection["subtitles"]:
         entry = copy.deepcopy(private["subtitles"][key])
         if subtitle_language_issue(entry):
-            raise ArteError("ARTE subtitle language is not reliably identified; analyse and select again")
+            raise ArteError("Subtitle language is not reliably identified; analyse and select again")
         source = entry["source"]
         role, _original = role_of(entry["evidence"], "subtitle")
         if role == "hearing_impaired" or role != entry["role"] or source_identity(source, entry["evidence"]) != entry["source_identity"]:
-            raise ArteError("ARTE selected source is excluded or changed; analyse and select again")
+            raise ArteError("Selected source is excluded or changed; analyse and select again")
         if source.get("protocol") in ("m3u8", "m3u8_native"):
             # Native HlsFD later consumes this frozen playlist. In particular,
             # none/empty selections never enter this branch or fetch a body.
@@ -792,30 +792,30 @@ def apply_selection(plan: dict, catalogue: dict, selection: dict, fetch=None) ->
     validate_selection(catalogue, selection)
     private = catalogue.get("_private")
     if not isinstance(private, dict) or private.get("raw_plan_digest") != canonical_digest(plan):
-        raise ArteError("ARTE source plan changed after discovery; analyse and select again")
+        raise ArteError("The source plan changed after discovery; analyse and select again")
     if private.get("catalogue_policy") != CATALOGUE_POLICY:
-        raise ArteError("ARTE catalogue admission policy is obsolete; analyse and select again")
+        raise ArteError("Catalogue admission policy is obsolete; analyse and select again")
     requested_selection = copy.deepcopy(selection)
     private = copy.deepcopy(private)
     for kind in ("audio", "subtitles"):
         for key in selection[kind]:
             entry = private[kind][key]
             if kind == "subtitles" and subtitle_language_issue(entry):
-                raise ArteError("ARTE subtitle language is not reliably identified; analyse and select again")
+                raise ArteError("Subtitle language is not reliably identified; analyse and select again")
             role, _original = role_of(entry["evidence"], "audio" if kind == "audio" else "subtitle")
             if (role == "hearing_impaired" or role != entry["role"]
                     or source_identity(entry["source"], entry["evidence"]) != entry["source_identity"]):
-                raise ArteError("ARTE selected source is excluded or changed; analyse and select again")
+                raise ArteError("Selected source is excluded or changed; analyse and select again")
     resolved, selection, removed, aliases = resolve_subtitles(private, selection, fetch or Fetcher())
     private["subtitles"] = resolved
     root = selected_root(plan)
     original_formats = root.get("requested_formats") or [root]
     videos = [item for item in original_formats if item.get("vcodec") not in (None, "none")]
     if len(videos) != 1 or videos[0].get("acodec") not in (None, "none"):
-        raise ArteError("ARTE selection requires one separately selectable main video")
+        raise ArteError("Selection requires one separately selectable main video")
     video = copy.deepcopy(videos[0])
     if not FORMAT_RE.fullmatch(str(video.get("format_id", ""))):
-        raise ArteError("ARTE video format identifier is not representable")
+        raise ArteError("Video format identifier is not representable")
     video_evidence = own_evidence(video)
     selected_formats = [video]
     selected_subs = {}
@@ -829,7 +829,7 @@ def apply_selection(plan: dict, catalogue: dict, selection: dict, fetch=None) ->
             source = entry["source"]
             role, original = role_of(entry["evidence"], "audio" if kind == "audio" else "subtitle")
             if role == "hearing_impaired" or role != entry["role"] or source_identity(source, entry["evidence"]) != entry["source_identity"]:
-                raise ArteError("ARTE selected source is excluded or changed; analyse and select again")
+                raise ArteError("Selected source is excluded or changed; analyse and select again")
             target = {"id": key, "language": entry["language"], "role": role, "title": entry["label"],
                       "default": selection["default_audio" if kind == "audio" else "default_subtitle"] == key,
                       "source_identity": entry["source_identity"]}
@@ -844,7 +844,7 @@ def apply_selection(plan: dict, catalogue: dict, selection: dict, fetch=None) ->
             expected[kind].append(target)
             sources[kind].append(entry)
     if len({item["format_id"] for item in selected_formats}) != len(selected_formats):
-        raise ArteError("ARTE selected formats do not have distinct identifiers")
+        raise ArteError("Selected formats do not have distinct identifiers")
     # Build one complete root: stale selected-download delta fields must not
     # override this selection during replay. The video remains exactly the
     # extractor's original best-video choice, without a codec/resolution cap.
@@ -885,96 +885,96 @@ def apply_selection(plan: dict, catalogue: dict, selection: dict, fetch=None) ->
 def validate_plan_provenance(plan: dict, expected: dict) -> None:
     clean = {key: value for key, value in plan.items() if key != "_arte_expected"}
     if expected.get("policy") != POLICY or expected.get("plan_digest") != canonical_digest(clean):
-        raise ArteError("ARTE executed plan does not match the validation expectation")
+        raise ArteError("Executed plan does not match the validation expectation")
     binding = plan.get("arte_selection") or {}
     sources = plan.get("_arte_sources") or {}
     if (binding.get("version") != 2 or binding.get("policy") != POLICY
             or canonical_digest(binding.get("selection")) != expected.get("selection_digest")
             or canonical_digest(binding.get("requested_selection")) != expected.get("requested_selection_digest")):
-        raise ArteError("ARTE selection provenance is obsolete or invalid")
+        raise ArteError("Selection provenance is obsolete or invalid")
     if binding.get("catalogue_policy") != CATALOGUE_POLICY:
-        raise ArteError("ARTE catalogue admission policy is obsolete; analyse and select again")
+        raise ArteError("Catalogue admission policy is obsolete; analyse and select again")
     if binding.get("postprocess") != "srt-reference-copyts-mkv-v2" or binding.get("subtitle_policy") != "webvtt-source-cues-mpegts-v1":
-        raise ArteError("ARTE postprocessing provenance is obsolete; analyse and select again")
+        raise ArteError("Postprocessing provenance is obsolete; analyse and select again")
     selection = binding["selection"]
     requested = binding["requested_selection"]
     if not isinstance(selection, dict) or not isinstance(requested, dict):
-        raise ArteError("ARTE selection provenance is invalid")
+        raise ArteError("Selection provenance is invalid")
     aliases = binding.get("subtitle_aliases")
     removed = sources.get("subtitle_aliases")
     if (not isinstance(aliases, dict) or not isinstance(removed, list)
             or len(aliases) != len(removed) or len(aliases) > MAX_TRACKS):
-        raise ArteError("ARTE subtitle alias proof is invalid")
+        raise ArteError("Subtitle alias proof is invalid")
     preserved = ("version", "catalogue_id", "audio_mode", "subtitle_mode", "audio", "default_audio")
     if any(selection.get(key) != requested.get(key) for key in preserved):
-        raise ArteError("ARTE resolved selection changed the requested audio or intent")
+        raise ArteError("Resolved selection changed the requested audio or intent")
     requested_subtitles = requested.get("subtitles")
     if (not isinstance(requested_subtitles, list) or len(requested_subtitles) > MAX_TRACKS
             or any(key not in requested_subtitles for key in aliases)
             or selection.get("subtitles") != [key for key in requested_subtitles if key not in aliases]
             or selection.get("default_subtitle") != aliases.get(requested.get("default_subtitle"), requested.get("default_subtitle"))):
-        raise ArteError("ARTE resolved subtitles differ from the requested selection")
+        raise ArteError("The resolved subtitles differ from the requested selection")
     retained = {item.get("id"): item for item in sources.get("subtitles", [])}
     if {item.get("id") for item in removed} != set(aliases):
-        raise ArteError("ARTE subtitle aliases lack exact removed-source evidence")
+        raise ArteError("Subtitle aliases lack exact removed-source evidence")
     for entry in removed:
         if subtitle_language_issue(entry):
-            raise ArteError("ARTE subtitle alias language is not reliably identified; analyse and select again")
+            raise ArteError("Subtitle alias language is not reliably identified; analyse and select again")
         target = retained.get(aliases.get(entry.get("id")))
         role, _original = role_of(entry.get("evidence") or {}, "subtitle")
         if role == "hearing_impaired":
-            raise ArteError("ARTE hearing-impaired track is forbidden by engine policy")
+            raise ArteError("A hearing-impaired track is forbidden by engine policy")
         if (not target or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("content_identity", "")))
                 or entry["content_identity"] != target.get("content_identity")
                 or source_identity(entry["source"], entry["evidence"]) != entry.get("source_identity")):
-            raise ArteError("ARTE subtitle alias identity proof changed")
+            raise ArteError("Subtitle alias identity proof changed")
     # Revalidate both intent and resolved data even when a checkpoint has
     # internally consistent digests. In particular, none must never acquire a
     # nonempty track list, and an obsolete selection schema cannot be revived.
     selected_audio = sources.get("audio")
     selected_subtitles = sources.get("subtitles")
     if not isinstance(selected_audio, list) or not isinstance(selected_subtitles, list):
-        raise ArteError("ARTE selected track provenance is invalid")
+        raise ArteError("Selected track provenance is invalid")
     projection = {"version": 1, "policy": POLICY, "id": selection.get("catalogue_id"),
                   "audio": selected_audio, "subtitles": selected_subtitles + removed}
     identities = {"video": expected.get("video", {}).get("source_identity")}
     for kind in ("audio", "subtitles"):
         targets = expected.get(kind)
         if not isinstance(targets, list) or [item.get("id") for item in targets] != selection.get(kind):
-            raise ArteError("ARTE expected tracks differ from the explicit selection")
+            raise ArteError("Expected tracks differ from the explicit selection")
         default = selection.get("default_audio" if kind == "audio" else "default_subtitle")
         if any(item.get("default") is not (item.get("id") == default) for item in targets):
-            raise ArteError("ARTE expected defaults differ from the explicit selection")
+            raise ArteError("Expected defaults differ from the explicit selection")
         identities[kind] = [item.get("source_identity") for item in targets]
     if binding.get("sources") != identities:
-        raise ArteError("ARTE source identity binding differs from the expected tracks")
+        raise ArteError("Source identity binding differs from the expected tracks")
     validate_selection(projection, requested)
     validate_selection(projection, selection)
     selected = selected_root(plan)
     formats = selected.get("requested_formats") or []
     if len(formats) != len(expected.get("audio", [])) + 1:
-        raise ArteError("ARTE executed component count changed")
+        raise ArteError("Executed component count changed")
     video_source = sources.get("video") or {}
     if source_identity(formats[0], video_source.get("evidence") or {}) != expected["video"]["source_identity"]:
-        raise ArteError("ARTE video provenance changed")
+        raise ArteError("Video provenance changed")
     for kind in ("audio", "subtitles"):
         originals = sources.get(kind)
         targets = expected.get(kind)
         if not isinstance(originals, list) or not isinstance(targets, list) or len(originals) != len(targets):
-            raise ArteError("ARTE track provenance count changed")
+            raise ArteError("Track provenance count changed")
         for index, (entry, target) in enumerate(zip(originals, targets)):
             if kind == "subtitles" and subtitle_language_issue(entry):
-                raise ArteError("ARTE subtitle language is not reliably identified; analyse and select again")
+                raise ArteError("Subtitle language is not reliably identified; analyse and select again")
             role, _original = role_of(entry["evidence"], "audio" if kind == "audio" else "subtitle")
             if role == "hearing_impaired" or role != target.get("role"):
-                raise ArteError("ARTE hearing-impaired track is forbidden by engine policy")
+                raise ArteError("A hearing-impaired track is forbidden by engine policy")
             # Expectations are a separate private file. Their source digest
             # alone cannot authorize changing a frozen track's public labels.
             if target.get("language") != entry.get("language") or target.get("title") != entry.get("label"):
-                raise ArteError("ARTE expected track labels differ from frozen source metadata")
+                raise ArteError("Expected track labels differ from frozen source metadata")
             source = formats[index + 1] if kind == "audio" else selected.get("requested_subtitles", {}).get(target["id"], {})
             if source_identity(source, entry["evidence"]) != target.get("source_identity"):
-                raise ArteError("ARTE requested track provenance changed")
+                raise ArteError("Requested track provenance changed")
 
 
 def check_replay(plan: dict, replay: dict, expected: dict) -> None:
@@ -984,22 +984,22 @@ def check_replay(plan: dict, replay: dict, expected: dict) -> None:
     executed = selected_root(replay)
     forbidden = ("webpage_url", "original_url")
     if any(key in replay for key in forbidden):
-        raise ArteError("ARTE native replay must not re-extract an unavailable source")
+        raise ArteError("Native replay must not re-extract an unavailable source")
     clean_formats = [{key: value for key, value in item.items() if key not in forbidden}
                      for item in original.get("requested_formats", [])]
     if replay.get("formats") != clean_formats:
-        raise ArteError("ARTE native replay format inventory differs from the selected plan")
+        raise ArteError("Native replay format inventory differs from the selected plan")
     executed_formats = [{key: value for key, value in item.items() if key not in forbidden}
                         for item in executed.get("requested_formats", [])]
     if executed_formats != clean_formats:
-        raise ArteError("ARTE native replay components differ from the selected plan")
+        raise ArteError("Native replay components differ from the selected plan")
     for key in ("subtitles", "requested_subtitles", "automatic_captions", "arte_selection", "_arte_sources"):
         if executed.get(key) != original.get(key):
-            raise ArteError("ARTE native replay subtitle or selection provenance changed")
+            raise ArteError("Native replay subtitle or selection provenance changed")
 
 
 def create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Private ARTE track discovery and selection")
+    parser = argparse.ArgumentParser(description="Private track discovery and selection")
     commands = parser.add_subparsers(dest="command", required=True)
     catalogue = commands.add_parser("catalogue")
     catalogue.add_argument("--plan", required=True)
@@ -1062,27 +1062,27 @@ def main() -> int:
             expected = read_json(args.expected)
             subtitles = expected.get("subtitles")
             if expected.get("policy") != POLICY or not isinstance(subtitles, list) or len(subtitles) > MAX_TRACKS:
-                raise ArteError("ARTE subtitle expectation is invalid")
+                raise ArteError("Subtitle expectation is invalid")
             identifiers = [item.get("id") for item in subtitles if isinstance(item, dict)]
             if len(identifiers) != len(subtitles) or any(not isinstance(item, str) or not KEY_RE.fullmatch(item) for item in identifiers):
-                raise ArteError("ARTE subtitle identifiers are invalid")
+                raise ArteError("Subtitle identifiers are invalid")
             print(",".join(identifiers))
         elif args.command == "options":
             options = read_json(args.options)
             argv = options.get("argv")
             if options.get("version") != 1 or not isinstance(argv, list) or not 4 <= len(argv) <= 16:
-                raise ArteError("ARTE native transfer options are invalid")
+                raise ArteError("Native transfer options are invalid")
             if (argv[0] != "--format" or not isinstance(argv[1], str)
                     or not 2 <= len(argv[1].split("+")) <= 16
                     or any(not FORMAT_RE.fullmatch(item) for item in argv[1].split("+"))
                     or argv[2:4] != ["--audio-multistreams", "--no-write-auto-subs"]):
-                raise ArteError("ARTE native format options are invalid")
+                raise ArteError("Native format options are invalid")
             remaining = argv[4:]
             if remaining != ["--no-write-subs", "--no-embed-subs"]:
                 if (len(remaining) != 6 or remaining[:5] != ["--write-subs", "--embed-subs", "--convert-subs", "srt", "--sub-langs"]
                         or not isinstance(remaining[5], str) or not 1 <= len(remaining[5].split(",")) <= MAX_TRACKS
                         or any(not KEY_RE.fullmatch(item) for item in remaining[5].split(","))):
-                    raise ArteError("ARTE native subtitle options are invalid")
+                    raise ArteError("Native subtitle options are invalid")
             # This is a data handoff into a Bash array, never a shell command.
             for argument in argv:
                 sys.stdout.buffer.write(text_value(argument, limit=8192).encode() + b"\0")
@@ -1103,14 +1103,14 @@ def main() -> int:
                     print(text_value(item["title"], limit=256))
             for message in plan["arte_selection"]["selection"]["messages"]:
                 if message not in MESSAGE_TEXT:
-                    raise ArteError("ARTE selection messages are invalid")
+                    raise ArteError("Selection messages are invalid")
                 print(MESSAGE_TEXT[message])
         return 0
     except ArteError as error:
-        print(f"[ARTE_TRACKS] {error}", file=sys.stderr)
+        print(f"[TRACK_SELECTION] {error}", file=sys.stderr)
         return 65
     except (OSError, ValueError, KeyError, TypeError, OverflowError, RecursionError):
-        print("[ARTE_TRACKS] Unable to read or create private ARTE track state; analyse and select again.", file=sys.stderr)
+        print("[TRACK_SELECTION] Unable to read or create private track state; analyse and select again.", file=sys.stderr)
         return 65
 
 
