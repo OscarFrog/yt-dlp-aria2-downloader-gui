@@ -175,25 +175,47 @@ jobs:
           python3 -B scripts/check-push-version.py coherence
           git diff --check
           bash ./test-static.sh
-          handoff_dir="${RUNNER_TEMP}/release-docs-candidate"
-          mkdir -p -- "${handoff_dir}"
+          handoff_dir="${RUNNER_TEMP:?}/release-docs-candidate"
+          mkdir -m 700 -- "${handoff_dir}"
+          handoff_id=$(stat --format='%d:%i' -- "${handoff_dir}")
           git diff --binary -- "${paths[@]}" >"${handoff_dir}/release-docs.patch"
           printf '%s\n' "${context}" >"${handoff_dir}/release-docs-metadata.json"
           (
             cd -- "${handoff_dir}"
             sha256sum release-docs.patch release-docs-metadata.json >release-docs-handoff.sha256
           )
-          printf 'update=true\ncontext=%s\n' "${context}" >>"${GITHUB_OUTPUT}"
+          printf 'update=true\ncontext=%s\nhandoff_id=%s\n' "${context}" "${handoff_id}" >>"${GITHUB_OUTPUT}"
+
+      - name: Validate data-only documentation candidate for upload
+        if: steps.prepare.outputs.update == 'true'
+        shell: bash
+        env:
+          HANDOFF_ID: ${{ steps.prepare.outputs.handoff_id }}
+          VERSION_CONTEXT: ${{ steps.prepare.outputs.context }}
+        run: |
+          set -Eeuo pipefail
+          handoff_dir="${RUNNER_TEMP:?}/release-docs-candidate"
+          [[ -d ${handoff_dir} && ! -L ${handoff_dir} && -O ${handoff_dir} ]]
+          [[ $(stat --format='%d:%i:%a' -- "${handoff_dir}") == "${HANDOFF_ID:?}:700" ]]
+          (
+            cd -- "${handoff_dir}"
+            shopt -s dotglob nullglob
+            entries=(*)
+            ((${#entries[@]} == 3))
+            for file in release-docs.patch release-docs-metadata.json release-docs-handoff.sha256; do
+              [[ -f ${file} && ! -L ${file} && -O ${file} && $(stat --format='%h' -- "${file}") == 1 ]]
+            done
+            printf '%s\n' "${VERSION_CONTEXT:?}" | cmp -s -- - release-docs-metadata.json
+            sha256sum -- release-docs.patch release-docs-metadata.json | cmp -s -- - release-docs-handoff.sha256
+          )
+          git diff --binary -- README.fr.md README.md test-static.sh | cmp -s -- - "${handoff_dir}/release-docs.patch"
 
       - name: Upload data-only documentation candidate
         if: steps.prepare.outputs.update == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-docs-candidate-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/release-docs-candidate/release-docs.patch
-            ${{ runner.temp }}/release-docs-candidate/release-docs-metadata.json
-            ${{ runner.temp }}/release-docs-candidate/release-docs-handoff.sha256
+          path: ${{ runner.temp }}/release-docs-candidate/
           if-no-files-found: error
           retention-days: 1
           overwrite: true
