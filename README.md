@@ -14,7 +14,7 @@ then follow the download and processing progress.
 - **Everyday use:** remembered preferences, cancellation and concurrent independent downloads.
 
 The current development version is **2.4.6**.
-The latest published package release is **2.4.5**.
+The latest published package release is **2.4.6**.
 
 ## Contents
 
@@ -46,13 +46,13 @@ The error log illustrates a simulated out-of-space diagnostic.
 ## Recommended installation
 
 Use the [latest GitHub release](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
-The filenames below match the currently published v2.4.5 release.
+The filenames below match the currently published v2.4.6 release.
 Fedora 45 x86_64 is the only officially supported platform. Only an RPM marked `.fc45.x86_64` is suitable for this system. When the published RPM below targets an earlier Fedora, use this checkout on Fedora 45 until the Fedora 45 RPM is published.
 
 | Platform | Application download |
 | --- | --- |
-| Fedora 44 | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.5-1.fc44.noarch.rpm) |
-| Portable sources | [ZIP](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.5.zip) |
+| Fedora 45 | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.6-1.fc45.x86_64.rpm) |
+| Portable sources | [ZIP](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.6.zip) |
 
 ### Fedora 45
 
@@ -82,14 +82,14 @@ source directory with `./install-gui.sh uninstall`.
 Install the [system requirements](#requirements) first. Download:
 
 ```text
-yt-dlp-aria2-downloader-gui-2.4.5.zip
+yt-dlp-aria2-downloader-gui-2.4.6.zip
 SHA256SUMS
 ```
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.4.5.zip
-cd yt-dlp-aria2-downloader-gui-2.4.5
+unzip yt-dlp-aria2-downloader-gui-2.4.6.zip
+cd yt-dlp-aria2-downloader-gui-2.4.6
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -141,8 +141,8 @@ Replace `ARTIFACT` with the downloaded file's name:
 
 ```bash
 gh attestation verify ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.4.5 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.4.5 ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.4.6 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.4.6 ./ARTIFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Checksums check file integrity; these commands also check provenance and the
