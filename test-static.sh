@@ -692,13 +692,17 @@ assert_codex_rules_are_conservative() {
         'decision = "prompt"'
         'decision = "forbidden"'
         'helper uses the ordinary sandbox/baseline policy instead of receiving an'
-        'Every direct Git command remains interactive; use the fixed tracked helper for unattended read-only inspection.'
+        'Use the fixed tracked helper for unattended read-only inspection.'
         'pattern = ["git", "push"]'
         'pattern = ["git", "tag"]'
         'pattern = ["git", "merge"]'
         'pattern = ["gh", "pr", "merge"]'
         'pattern = ["gh", "release",'
         'pattern = ["gh", "workflow", "run"]'
+        '["branch", "tag"], ["-d", "-D", "--delete"]'
+        '"push", ["-d", "--delete"]'
+        '"push", "origin", ["-d", "--delete"]'
+        '"merge", ["--admin", "--delete-branch", "-d"]'
         'Never force-push main'
         'match = ['
         'not_match = ['
@@ -817,6 +821,19 @@ assert_codex_rules_are_conservative() {
         assert_codex_execpolicy_decision forbidden \
             'force-push to main' "${rules_file}" \
             git push --force origin HEAD:main
+        assert_codex_execpolicy_decision prompt \
+            'delegated exact-HEAD squash' "${rules_file}" \
+            gh pr merge 56 --squash --match-head-commit 0123456789abcdef0123456789abcdef01234567
+        assert_codex_execpolicy_decision forbidden \
+            'local source branch deletion' "${rules_file}" git branch -D feature
+        assert_codex_execpolicy_decision forbidden \
+            'local signed tag deletion' "${rules_file}" git tag -d v1.2.3
+        assert_codex_execpolicy_decision forbidden \
+            'remote branch deletion' "${rules_file}" git push --delete origin feature
+        assert_codex_execpolicy_decision forbidden \
+            'remote tag deletion' "${rules_file}" git push origin --delete refs/tags/v1.2.3
+        assert_codex_execpolicy_decision forbidden \
+            'merge with administrator bypass' "${rules_file}" gh pr merge --admin 56
     fi
 
     if ! CODEX_RULE_MUTATION_FILE=$(mktemp); then
@@ -859,6 +876,7 @@ assert_contribution_templates_are_structured() {
         'id: out_of_scope'
         'id: validation'
         'id: external_authority'
+        'qualified squash merge and branch retention'
         'Do not include secrets'
     )
     local -a pull_request_fragments=(

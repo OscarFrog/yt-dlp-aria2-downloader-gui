@@ -27,7 +27,7 @@ Checks not run, with the reason:
 
 Authority granted by the task:
 
-- None.
+- Identify the applicable standing delegation, narrower delivery limit, or explicit release or administration request.
 
 External mutations actually performed (pushes, merges, tags, releases,
 publications, workflow dispatches, repository settings, or secrets):
@@ -44,4 +44,4 @@ publications, workflow dispatches, repository settings, or secrets):
 - [ ] User-facing English and French documentation remain aligned, when applicable.
 - [ ] Tracked-file additions, removals, moves, and role changes are reflected in `REPOSITORY_FILES.md`.
 - [ ] Workflow permissions, action pins, checkout credentials, and trust boundaries remain valid, when applicable.
-- [ ] No external mutation exceeded the task's explicit authority; every mutation is reported in `External mutation authority`.
+- [ ] No external mutation exceeded the delegated scope. Actual mutations are recorded above.

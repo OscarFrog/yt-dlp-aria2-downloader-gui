@@ -75,11 +75,11 @@ body:
     id: external_authority
     attributes:
       label: External mutation authority
-      description: Select the highest level explicitly authorized by this issue.
+      description: Identify the delivery scope for a maintainer-assigned task. A release needs an explicit request naming its version.
       options:
+        - Standing delegation in AGENTS.md, including qualified squash merge and branch retention
         - No external mutation; prepare local changes only
         - Push a branch and open or update a pull request
-        - Merge an approved pull request and delete its branch
         - Release or repository administration is explicitly authorized in the task text
     validations:
       required: true
