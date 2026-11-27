@@ -94,6 +94,9 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Fri Nov 27 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.4.8-1
+- Validate media language tags and progress fields, reconcile late plans and require diffutils at runtime.
+
 * Fri Nov 27 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.4.7-1
 - Fix undetermined audio language validation and use provider-neutral diagnostics.
 

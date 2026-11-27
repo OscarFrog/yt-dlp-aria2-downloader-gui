@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.4.8 - 2026-11-27
+
+### Application fixes
+
+- Validate the entire audio or subtitle language tag before normalizing aliases.
+  Keep support for an omitted Matroska language on authenticated audio selected
+  as undetermined.
+- Show only recognized speed and ETA values in Zenity. If either field is
+  malformed, omit it while retaining the other valid progress information.
+- Match a late download plan to streams already observed through native or
+  aria2 progress. Repeated events retain their stream position and an explicit
+  video/audio pair retains its weighting.
+
+### Packaging
+
+- Require `diffutils` both at runtime and during RPM post-installation so
+  `cmp` is available when preparing managed runtimes.
+
+### Optimizations
+
+- Return percentages and formatted progress messages directly to Bash callers,
+  removing command substitutions from those paths.
+- In the Rust qualification observer, check the set of enrolled identities
+  directly for leaf admission. The separate query for known identities keeps
+  its JSON response.
+
+### Qualification and maintenance
+
+- Use public Python 3.15 APIs to retain uncertain supervision fixtures across
+  garbage collection and to anchor fixture cleanup to a directory descriptor.
+  Synchronize the observer test with child startup.
+- Document the Fedora Rust 1.100 and edition 2024 qualification policy and
+  enforce explicit unsafe operations. Remove an unused test wrapper and imports,
+  and align the repository inventory and testing instructions with Fedora 45.
+- Share authentication of the previous immutable RPM between package and
+  release qualification. Exercise runtime preparation from the installed RPM
+  and verify the staged desktop entry against its executable.
+
 ## 2.4.7 - 2026-11-27
 
 ### Maintenance
