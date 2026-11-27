@@ -262,14 +262,17 @@ def serialize_srt(cues: list[dict]) -> bytes:
 
 
 def playlist_structure(manifest: str) -> dict:
-    if not manifest.startswith("#EXTM3U") or len(manifest.encode()) > TRACKS.MAX_MANIFEST or "#EXT-X-ENDLIST" not in manifest:
+    if len(manifest.encode()) > TRACKS.MAX_MANIFEST:
         raise SubtitleError("Subtitle requires a frozen finite HLS playlist")
     unsupported = ("#EXT-X-KEY", "#EXT-X-MAP", "#EXT-X-BYTERANGE", "#EXT-X-GAP")
-    if any(marker in manifest for marker in unsupported):
+    try:
+        lines = TRACKS.subtitle_playlist_lines(manifest)
+    except TRACKS.ArteError as error:
+        raise SubtitleError(str(error)) from error
+    if any(line.partition(":")[0] in unsupported for line in lines):
         raise SubtitleError("Subtitle playlist uses an unsupported encrypted, mapped, ranged or missing segment")
     segments, discontinuities, discontinuity = [], [], False
-    for line in manifest.splitlines():
-        line = line.strip()
+    for line in lines:
         if line == "#EXT-X-DISCONTINUITY":
             discontinuity = True
         elif line and not line.startswith("#"):

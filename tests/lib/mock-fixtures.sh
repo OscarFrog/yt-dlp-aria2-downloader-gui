@@ -98,8 +98,8 @@ PY_DEFERRED_SIGNAL_ACK
     install -m 0644 -- \
         "${PROJECT_DIR}/private-aria2-plan.py" \
         "${MANAGED_ENGINE_DIR}/private-aria2-plan.py"
-    install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
-        "${MANAGED_ENGINE_DIR}/private-process-supervisor.py"
+    install -m 0644 -- "${PROJECT_DIR}/private-process-signals.sh" \
+        "${PROJECT_DIR}/private-process-supervisor.py" "${MANAGED_ENGINE_DIR}/"
     cat >"${MANAGED_ENGINE_DIR}/runtime-manager.sh" <<'EOF_RUNTIME_MANAGER'
 #!/usr/bin/env bash
 set -euo pipefail

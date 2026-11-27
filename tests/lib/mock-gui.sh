@@ -148,8 +148,8 @@ test_mock_gui_profiles() {
         "${profile_bundle}/progress-monitor.sh"
     install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
         "${profile_bundle}/private-aria2-plan.py"
-    install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
-        "${profile_bundle}/private-process-supervisor.py"
+    install -m 0644 -- "${PROJECT_DIR}/private-process-signals.sh" \
+        "${PROJECT_DIR}/private-process-supervisor.py" "${profile_bundle}/"
     sed '$d' "${PROJECT_DIR}/download-video.sh" >"${profile_bundle}/engine-source.sh"
     cat >"${profile_bundle}/download-video.sh" <<'EOF_PROFILE_ENGINE'
 #!/usr/bin/env bash
@@ -430,8 +430,8 @@ test_mock_gui_progress_completion() {
         "${new_download_bundle}/"
     install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
         "${new_download_bundle}/private-aria2-plan.py"
-    install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
-        "${new_download_bundle}/private-process-supervisor.py"
+    install -m 0644 -- "${PROJECT_DIR}/private-process-signals.sh" \
+        "${PROJECT_DIR}/private-process-supervisor.py" "${new_download_bundle}/"
     prepare_argument_log 'gui-renamed-new-download'
     assert_status 0 'New download re-execs the resolved renamed GUI path' \
         env MOCK_GUI_REAL="${renamed_gui}" \
@@ -1055,8 +1055,8 @@ test_mock_gui_diagnostic_logs() {
         "${PROJECT_DIR}/progress-monitor.sh" "${single_line_bundle}/"
     install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
         "${single_line_bundle}/private-aria2-plan.py"
-    install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
-        "${single_line_bundle}/private-process-supervisor.py"
+    install -m 0644 -- "${PROJECT_DIR}/private-process-signals.sh" \
+        "${PROJECT_DIR}/private-process-supervisor.py" "${single_line_bundle}/"
     cat >"${single_line_bundle}/download-video.sh" <<'EOF_SINGLE_LINE_ENGINE'
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
@@ -1186,8 +1186,8 @@ EOF_SINGLE_LINE_MONITOR
         "${PROJECT_DIR}/progress-monitor.sh" "${final_result_bundle}/"
     install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
         "${final_result_bundle}/private-aria2-plan.py"
-    install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
-        "${final_result_bundle}/private-process-supervisor.py"
+    install -m 0644 -- "${PROJECT_DIR}/private-process-signals.sh" \
+        "${PROJECT_DIR}/private-process-supervisor.py" "${final_result_bundle}/"
     cat >"${final_result_bundle}/download-video.sh" <<'EOF_MISSING_FINAL_ENGINE'
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT

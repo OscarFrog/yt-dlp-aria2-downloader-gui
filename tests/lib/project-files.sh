@@ -11,6 +11,7 @@
 # that root or change to it before passing the lists to external tools.
 # shellcheck disable=SC2034 # Arrays are read by scripts that source this file.
 PRODUCTION_SHELL_FILES=(
+    private-process-signals.sh
     download-video.sh
     download-video-gui.sh
     progress-monitor.sh
@@ -87,6 +88,7 @@ DEVELOPMENT_SHELL_FILES=(
 # caller's shell-option state and are exempt from the executable main() rule.
 # shellcheck disable=SC2034 # Array is read by test-static.sh.
 SOURCED_SHELL_FILES=(
+    private-process-signals.sh
     tests/static/application-contracts.sh
     tests/lib/assert.sh
     tests/lib/mock-fixtures.sh
