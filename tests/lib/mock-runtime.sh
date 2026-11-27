@@ -714,8 +714,8 @@ test_mock_runtime_progress_errors() {
         "${PROJECT_DIR}/download-video.sh" "${monitor_bundle}/"
     install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
         "${monitor_bundle}/private-aria2-plan.py"
-    install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
-        "${monitor_bundle}/private-process-supervisor.py"
+    install -m 0644 -- "${PROJECT_DIR}/private-process-signals.sh" \
+        "${PROJECT_DIR}/private-process-supervisor.py" "${monitor_bundle}/"
     cat >"${monitor_bundle}/progress-monitor.sh" <<'EOF_PROGRESS_MONITOR_FAILURE'
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT

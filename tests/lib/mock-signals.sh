@@ -6,6 +6,12 @@
 # Purpose     : Qualify CLI and GUI signal registration, shutdown, and descendants.
 # ==============================================================================
 
+# Source-only signal fixtures skip the startup path that normally loads the library.
+write_mock_signal_functions() {
+    sed '$d' "${PROJECT_DIR}/$1" || return $?
+    cat -- "${PROJECT_DIR}/private-process-signals.sh"
+}
+
 # Caller-owned globals: declare names without assigning values or changing
 # their existing readonly/export/array attributes, including function sourcing.
 declare -g \
@@ -94,7 +100,7 @@ test_mock_signal_cleanup_requires_quiescence() {
         output/.yt-dlp-aria2.AbcD1234/item-001.download
     )
 
-    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${source_copy}"
+    write_mock_signal_functions download-video.sh >"${source_copy}"
     chmod 0600 -- "${source_copy}"
     cat >"${fixture_script}" <<'EOF_CLEANUP_QUIESCENCE'
 #!/usr/bin/env bash
@@ -201,7 +207,7 @@ test_mock_signal_unbound_directory_registration() {
     local resource case_root expected_status created_path
     local -a deleted_replacements=()
 
-    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${source_copy}"
+    write_mock_signal_functions download-video.sh >"${source_copy}"
     cat >"${harness_path}" <<'EOF_UNBOUND_DIRECTORY_HARNESS'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -305,7 +311,7 @@ test_mock_signal_private_media_registration() {
     local resource checkpoint signal_name case_root created_path expected_status
     local -a checkpoints=()
 
-    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${source_copy}"
+    write_mock_signal_functions download-video.sh >"${source_copy}"
     chmod 0600 -- "${source_copy}"
     cat >"${harness_path}" <<'EOF_MEDIA_REGISTRATION_HARNESS'
 #!/usr/bin/env bash
@@ -561,7 +567,7 @@ test_mock_signal_private_record_registration() {
     local record_count=0
     local batch_path=''
 
-    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${source_copy}"
+    write_mock_signal_functions download-video.sh >"${source_copy}"
     chmod 0600 -- "${source_copy}"
     cat >"${harness_path}" <<'EOF_RECORD_REGISTRATION_HARNESS'
 #!/usr/bin/env bash
@@ -739,7 +745,7 @@ for outcome, expected_status in (
             raise AssertionError("group absence probe did not return its status")
         probe.assert_called_once_with(-424242, 0)
 source_copy = root / "lost-leader-engine-functions.sh"
-source_copy.write_text(source[:-len(entrypoint)], encoding="utf-8")
+source_copy.write_text(source[:-len(entrypoint)] + (project / "private-process-signals.sh").read_text(), encoding="utf-8")
 source_copy.chmod(0o600)
 
 # Adopt the deliberately orphaned descendant so cleanup can reap it directly.
@@ -1000,7 +1006,7 @@ source = (project / "download-video.sh").read_text(encoding="utf-8")
 entrypoint = 'main "$@"\n'
 assert source.endswith(entrypoint)
 source_copy = root / "active-transport-engine-functions.sh"
-source_copy.write_text(source[:-len(entrypoint)], encoding="utf-8")
+source_copy.write_text(source[:-len(entrypoint)] + (project / "private-process-signals.sh").read_text(), encoding="utf-8")
 source_copy.chmod(0o600)
 wrapper = r'''
 set -euo pipefail
@@ -1214,7 +1220,7 @@ test_mock_signal_cli_worker_registration() {
     # Exercise the production critical-section helpers in the vulnerable
     # source order: launch, receive a signal, publish $!, then finish registration.
     cli_source_copy="${TEST_ROOT}/download-video-source-only.sh"
-    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${cli_source_copy}"
+    write_mock_signal_functions download-video.sh >"${cli_source_copy}"
     chmod 0600 -- "${cli_source_copy}"
     printf '%s\n' 'Mock scenario: cli-signal-worker-registration'
 
@@ -3537,7 +3543,7 @@ test_mock_signal_registration_handoff() {
     local handoff_status=0
     local late_first_status=0
 
-    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${source_copy}"
+    write_mock_signal_functions download-video.sh >"${source_copy}"
     chmod 0600 -- "${source_copy}"
     printf '%s\n' 'Mock scenario: cli-signal-registration-handoff'
     # The DEBUG trap injects TERM after the critical-section flag is cleared.
@@ -3755,7 +3761,7 @@ test_mock_signal_cli_pgid_discovery_race() {
     # Force TERM after the child has published its PGID but before the caller
     # accepts it. util-linux setsid then reports raw status 15; the engine must
     # retain the conventional requested status 143.
-    sed '$d' "${PROJECT_DIR}/download-video.sh" >"${cli_source_copy}"
+    write_mock_signal_functions download-video.sh >"${cli_source_copy}"
     chmod 0600 -- "${cli_source_copy}"
     printf '%s\n' 'Mock scenario: cli-signal-pgid-discovery-race'
     # shellcheck disable=SC2016 # Variables belong to the intentionally nested shell.
@@ -3961,7 +3967,7 @@ test_mock_signal_gui_worker_registration() {
     worker_registration_marker="${TEST_ROOT}/worker-pre-registration.pid"
     rm -f -- "${signal_log}" "${worker_deferred_status_marker}" \
         "${worker_launch_state_marker}" "${worker_registration_marker}"
-    sed '$d' "${PROJECT_DIR}/download-video-gui.sh" >"${gui_source_copy}"
+    write_mock_signal_functions download-video-gui.sh >"${gui_source_copy}"
     chmod 0600 -- "${gui_source_copy}"
     printf '%s\n' 'Mock scenario: gui-signal-worker-registration'
 
@@ -4008,7 +4014,7 @@ test_mock_signal_gui_group_identity_after_leader_exit() {
         "${leader_release_marker}" \
         "${signal_log}" \
         "${termination_marker}"
-    sed '$d' "${PROJECT_DIR}/download-video-gui.sh" >"${gui_source_copy}"
+    write_mock_signal_functions download-video-gui.sh >"${gui_source_copy}"
     chmod 0600 -- "${gui_source_copy}"
     printf '%s\n' 'Mock scenario: gui-group-identity-after-leader-exit'
 
@@ -4044,7 +4050,7 @@ libc = ctypes.CDLL(None, use_errno=True)
 if libc.prctl(36, 1, 0, 0, 0) != 0:
     raise OSError(ctypes.get_errno(), "unable to adopt orphaned fixture processes")
 signal.signal(signal.SIGCHLD, signal.SIG_DFL)
-source = Path(sys.argv[1]).read_text().rsplit('\nmain "$@"', 1)[0]
+source = Path(sys.argv[1]).read_text().rsplit('\nmain "$@"', 1)[0] + "\n" + Path(sys.argv[1]).with_name("private-process-signals.sh").read_text()
 marker = Path(sys.argv[2]) / "gui-untrusted-group-child.pid"
 # This interpreter is exec'd by env -u. Read its initial environment before
 # publishing; both sides of the subsequent exec are therefore unmarked.
@@ -4393,8 +4399,8 @@ test_mock_signal_gui_cancellation() {
         "${cancel_monitor_bundle}/"
     install -m 0644 -- "${PROJECT_DIR}/private-aria2-plan.py" \
         "${cancel_monitor_bundle}/private-aria2-plan.py"
-    install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
-        "${cancel_monitor_bundle}/private-process-supervisor.py"
+    install -m 0644 -- "${PROJECT_DIR}/private-process-signals.sh" \
+        "${PROJECT_DIR}/private-process-supervisor.py" "${cancel_monitor_bundle}/"
     cat >"${cancel_monitor_bundle}/progress-monitor.sh" <<'EOF_CANCEL_SIGPIPE_MONITOR'
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT

@@ -1897,7 +1897,7 @@ if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
 with tempfile.TemporaryDirectory(prefix="real-tool-supervision-") as directory:
     base = Path(directory)
     engine = base / "engine.sh"
-    engine.write_text(engine_source + "\n" + traps + '''
+    engine.write_text(engine_source + "\n" + (project / "private-process-signals.sh").read_text() + "\n" + traps + '''
 OUTPUT_LOCK_ROOT=$1
 export ENGINE_FIXTURE_PID=$$
 run_supervised_command python3 "$2"
@@ -3098,7 +3098,7 @@ with tempfile.TemporaryDirectory(prefix="mock-dispatch-") as directory:
     project = root / "project"
     library_root = project / "tests/lib"
     library_root.mkdir(parents=True)
-    for name in ("download-video.sh", "private-aria2-plan.py", "private-process-supervisor.py"):
+    for name in ("download-video.sh", "private-aria2-plan.py", "private-process-supervisor.py", "private-process-signals.sh"):
         shutil.copy2(tests.parent / name, project / name)
     shutil.copy2(tests / "lib/assert.sh", library_root / "assert.sh")
     for name in ("process-observer.py", "observer_build.py"):

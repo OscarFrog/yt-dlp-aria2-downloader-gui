@@ -157,6 +157,9 @@ assert_packaged_executables() {
         || fail 'Missing or unsafe packaged process supervisor.'
     assert_path_mode "${private_dir}/private-process-supervisor.py" 644 \
         'private-process-supervisor.py permissions'
+    [[ -f ${private_dir}/private-process-signals.sh && ! -L ${private_dir}/private-process-signals.sh ]] \
+        || fail 'Missing or unsafe packaged signal library.'
+    assert_path_mode "${private_dir}/private-process-signals.sh" 644 'signal library permissions'
     local private_launcher_helper="${private_dir}/private-launcher-manager.py"
     [[ -f ${private_aria2_helper} &&
         ! -L ${private_aria2_helper} &&

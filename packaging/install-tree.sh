@@ -154,6 +154,7 @@ validate_packaging_inputs() {
         private-art-tracks.py \
         private-art-media.py \
         private-art-subtitle.py \
+        private-process-signals.sh \
         private-process-supervisor.py \
         packaging/package-user-cleanup.sh \
         README.md \
@@ -186,8 +187,8 @@ install_private_payload() {
     install -m 0644 -- "${PROJECT_DIR}/private-art-tracks.py" \
         "${PROJECT_DIR}/private-art-media.py" \
         "${PROJECT_DIR}/private-art-subtitle.py" "${PRIVATE_TARGET}/"
-    install -m 0644 -- "${PROJECT_DIR}/private-process-supervisor.py" \
-        "${PRIVATE_TARGET}/private-process-supervisor.py"
+    install -m 0644 -- "${PROJECT_DIR}/private-process-signals.sh" \
+        "${PROJECT_DIR}/private-process-supervisor.py" "${PRIVATE_TARGET}/"
     install -m 0644 -- "${PROJECT_DIR}/packaging/keys/yt-dlp-public.key" \
         "${PRIVATE_TARGET}/keys/yt-dlp-public.key"
 }
