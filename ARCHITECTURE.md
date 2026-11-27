@@ -1441,7 +1441,8 @@ Each fixture opens a private pipe session to the Rust executable built from
 Python client serializes requests and returns the existing topology and
 privacy records. The executable owns the sampling state and kernel
 descriptors. Production process supervision and fixture rescue remain
-separate owners of their respective signal and wait operations.
+separate owners of their respective signal and wait operations. See the
+[Rust policy](RUST_STYLE.md) for descriptor ownership and ABI review.
 
 The fixture enrolls its own unreaped child at launch. A detached worker can
 announce its PID at a private barrier. The native helper authenticates its

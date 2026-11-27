@@ -51,7 +51,7 @@ fn command(cmd: &[&str], root: &Dir, session: &mut Option<Session>) -> Result<St
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') =>
         {
             let session = session.as_mut().ok_or_else(invalid)?;
-            if session.leaf.is_some() || session.known_json() != "[]" {
+            if session.leaf.is_some() || session.has_scoped_known() {
                 return Err(invalid());
             }
             session.leaf = Some((*label).to_owned());

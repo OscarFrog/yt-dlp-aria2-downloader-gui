@@ -763,6 +763,9 @@ verdict rereads the saved records. The cumulative argv_exit_gaps count records
 argument reads lost to authenticated exits. Command-interface privacy tests
 and actual URL observations remain independent of that count.
 
+### Rust qualification
+
+Apply the [Rust policy](RUST_STYLE.md) when changing a crate or its protocol.
 Build or check the observer on Fedora 45 x86_64 with the distribution's
 `rust`, `cargo`, `gcc`, `rustfmt` and `clippy` packages:
 
@@ -775,7 +778,12 @@ tracked lockfile, offline mode and the distribution toolchain. There are no
 third-party crates. The executable lives in a per-user private temporary
 cache keyed by Rust sources and toolchain identity. Fixture sessions reuse
 it across private HOME directories. The check also runs rustfmt, Clippy and
-Cargo tests. Rust is a development and qualification dependency.
+release-mode Cargo tests. Clippy checks all targets with warnings denied. The
+manifest sets the supported compiler floor and the unsafe-code lints. Record
+the Fedora package and compiler versions when qualifying a floor change.
+Rust is a development and qualification dependency.
+
+### Mock suite groups
 
 The complete mock contract is divided into nine isolated scheduler suites
 (`engine-core`, `engine-hls`, `engine-staging`, `engine-network`, `gui-progress`, `gui-state`,
