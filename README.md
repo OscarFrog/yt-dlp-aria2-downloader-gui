@@ -121,7 +121,7 @@ Fedora 45 x86_64 for the managed runtimes, with:
 
 - Bash **5.3 or newer**, Python **3.15 or newer**, aria2 **1.37.0 or newer**;
 - FFmpeg and `ffprobe`, Zenity, CA certificates, curl, GnuPG and unzip;
-- GNU coreutils/grep, findutils and util-linux (`setsid`, `flock`);
+- GNU coreutils/grep, diffutils (`cmp`), findutils and util-linux (`setsid`, `flock`);
 - usable Linux pidfds, WNOWAIT and readable procfs process/thread information.
 
 The GUI needs the `locale` utility and an installed UTF-8 locale to display

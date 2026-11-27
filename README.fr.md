@@ -121,7 +121,7 @@ Fedora 45 x86_64 pour les runtimes gérés, avec :
 
 - Bash **5.3 ou plus récent**, Python **3.15 ou plus récent**, aria2 **1.37.0 ou plus récent** ;
 - FFmpeg et `ffprobe`, Zenity, certificats CA, curl, GnuPG et unzip ;
-- GNU coreutils/grep, findutils et util-linux (`setsid`, `flock`) ;
+- GNU coreutils/grep, diffutils (`cmp`), findutils et util-linux (`setsid`, `flock`) ;
 - pidfds Linux et WNOWAIT utilisables, informations procfs des processus/threads lisibles.
 
 L’interface graphique a besoin de l’utilitaire `locale` et d’une locale UTF-8
