@@ -2395,7 +2395,6 @@ test_installer_allocation_failure_cleanup() {
         "${COPIED_PROJECT}/download-video-gui.sh" <<'PYTHON_ALLOCATION_FAILURES'
 import errno
 import importlib.util
-import os
 import pathlib
 import sys
 

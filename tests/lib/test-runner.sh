@@ -579,17 +579,6 @@ test_runner_wait_any() {
     done
 }
 
-# Run one foreground-visible command under the same session supervision used
-# for buffered parallel suites.
-test_runner_run_child() {
-    (($# > 0)) || return 2
-    local status=0
-
-    test_runner_start_child 0 '' "$@" || return
-    test_runner_wait_child 0 || status=$?
-    return "${status}"
-}
-
 # Read Linux process start time into a caller variable. The value is stable for
 # one PID lifetime and therefore distinguishes a later recycled PID.
 test_runner_read_start_time() {
