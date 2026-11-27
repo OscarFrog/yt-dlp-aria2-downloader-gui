@@ -13,7 +13,7 @@ then follow the download and processing progress.
 - **Languages:** independent audio and subtitle choices on compatible sites.
 - **Everyday use:** remembered preferences, cancellation and concurrent independent downloads.
 
-The current development version is **2.4.7**.
+The current development version is **2.4.8**.
 The latest published package release is **2.4.7**.
 
 ## Contents
@@ -388,8 +388,8 @@ has passed, manual recovery uses the exact tag:
 
 ```bash
 gh workflow run release.yml \
-  --ref v2.4.7 \
-  -f tag=v2.4.7 \
+  --ref v2.4.8 \
+  -f tag=v2.4.8 \
   -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
