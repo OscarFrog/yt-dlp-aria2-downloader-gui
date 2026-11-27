@@ -193,6 +193,31 @@ class MediaValidationTests(unittest.TestCase):
     def test_complete_selected_streams_accept_long_subtitle_container(self) -> None:
         MEDIA.validate_media(self.probe, self.expected, {})
 
+    def test_identified_languages_validate_the_complete_tag_before_normalization(self) -> None:
+        for kind, index in (("audio", 1), ("subtitles", 2)):
+            track = self.expected[kind][0]
+            tags = self.probe["streams"][index]["tags"]
+            for selected, reported in (("fr", "fr"), ("fra", "FRA"), ("fre", "fre"),
+                                       ("fr_CA", "FRE-ca"), ("fr-CA", "fr_CA"),
+                                       ("zh-Hant", "chi-Hant"), ("es-419", "spa-419"),
+                                       ("ast", "ast")):
+                with self.subTest(kind=kind, selected=selected, reported=reported):
+                    track["language"] = TRACKS.language(selected)
+                    tags["language"] = reported
+                    MEDIA.validate_media(self.probe, self.expected, {})
+            track["language"] = "fr"
+            for invalid in ("fra-!", "fr-", "fr--CA", "fr-C", "fr-abcdefghi", "fr-CA!",
+                            "fr-CA-fr", "fr-éé", "fr-CA\n", "f", "fren", "", None):
+                with self.subTest(kind=kind, invalid=invalid):
+                    tags["language"] = invalid
+                    with self.assertRaisesRegex(MEDIA.MediaError, "Track language is"):
+                        MEDIA.validate_media(self.probe, self.expected, {})
+            tags["language"] = "de-AT"
+            with self.subTest(kind=kind), self.assertRaisesRegex(MEDIA.MediaError, "language differs"):
+                MEDIA.validate_media(self.probe, self.expected, {})
+            self.expected = expected_fixture()
+            self.probe = probe_fixture()
+
     def test_final_und_audio_accepts_only_absence_or_an_und_tag(self) -> None:
         self.expected["audio"][0]["language"] = "und"
         tags = self.probe["streams"][1]["tags"]
