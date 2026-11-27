@@ -583,10 +583,15 @@ jobs:
               require(isinstance(asset_names, list) and
                       asset_names.count(rpm_filename.format(version=release, fedora=new_fedora, arch=new_arch)) == 1,
                       "immutable release does not contain the expected Fedora RPM")
+              require(asset_names.count(f"yt-dlp-aria2-downloader-gui-{release}.zip") == 1,
+                      "immutable release does not contain the expected source ZIP")
               package_references = (
-                  ("| Fedora {fedora} | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/"
+                  ("| Fedora {fedora} | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/download/v{version}/"
                    + rpm_filename + ") |", 1),
-                  ("yt-dlp-aria2-downloader-gui-{version}.zip", 3),
+                  ("[ZIP](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/download/v{version}/"
+                    "yt-dlp-aria2-downloader-gui-{version}.zip)", 1),
+                  ("\nyt-dlp-aria2-downloader-gui-{version}.zip\n", 1),
+                  ("unzip yt-dlp-aria2-downloader-gui-{version}.zip\n", 1),
                   ("cd yt-dlp-aria2-downloader-gui-{version}\n", 1),
               )
               expected = dict(old)
