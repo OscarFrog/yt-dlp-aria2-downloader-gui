@@ -216,7 +216,7 @@ jobs:
 
       - name: Upload data-only documentation candidate
         if: steps.prepare.outputs.update == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-docs-candidate-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-docs-candidate/
@@ -267,7 +267,7 @@ jobs:
           git config --global --add safe.directory "${workspace}"
 
       - name: Download data-only documentation candidate
-        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-docs-candidate-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-docs-candidate
@@ -352,7 +352,7 @@ jobs:
           )
 
       - name: Upload verified data-only documentation handoff
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-docs-verified-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-docs-verified/
@@ -374,7 +374,7 @@ jobs:
       VERSION_CONTEXT: ${{ needs.prepare-release-docs.outputs.context }}
     steps:
       - name: Download verified data-only documentation handoff
-        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-docs-verified-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-docs-verified

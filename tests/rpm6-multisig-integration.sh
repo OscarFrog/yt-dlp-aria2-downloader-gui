@@ -618,6 +618,24 @@ readonly fixture_dir=$1 fixture_fingerprint=$2 fixture_nevra=$3
 export TMPDIR=${fixture_dir}
 system_keyring=${fixture_dir}/system-keyring
 events=${fixture_dir}/events
+# Only the repository bootstrap RPM is real in this fixture. Model its later
+# media installation so every case still enters the checked-in main function.
+mkdir -- "${fixture_dir}/bin"
+for program in ffmpeg ffprobe; do
+    printf '#!/bin/sh\nprintf "media version 10.2\\n"\n' >"${fixture_dir}/bin/${program}"
+    chmod 0700 -- "${fixture_dir}/bin/${program}"
+done
+export PATH="${fixture_dir}/bin:${PATH}"
+rpm() {
+    if [[ $1 != -qf ]]; then command rpm "$@"; return; fi
+    [[ $2 == --qf && $4 == -- && ($5 == "${fixture_dir}/bin/ffmpeg" || $5 == "${fixture_dir}/bin/ffprobe") ]] || return 89
+    case $3 in
+        '%{NAME}') printf ffmpeg ;;
+        '%{NEVRA}') printf ffmpeg-10.2-1.fc45.x86_64 ;;
+        '%{VERSION}') printf 10.2 ;;
+        *) return 89 ;;
+    esac
+}
 curl() {
     local file=${!#}
     file=${file##*/}
@@ -646,14 +664,16 @@ rpmkeys() {
     fi
 }
 dnf() {
+    if [[ $1 == repoquery && ${!#} == ffmpeg-10.2-1.fc45.x86_64 ]]; then printf rpmfusion-free; return; fi
     # Repository tool installation is outside the fixture's bootstrap transaction.
-    if [[ $1 == install && $2 == --assumeyes && ${*:3} =~ ^[[:alnum:]][[:alnum:].+[:space:]-]*$ ]]; then
+    if [[ ($1 == install || $1 == distro-sync) && $2 == --assumeyes &&
+          ${!#} != *.rpm && " $* " == *' --repo=fedora --repo=updates '* ]]; then
         return 0
     fi
     printf 'dnf\n' >>"${events}"
-    [[ $# == 4 && $1 == install && $2 == --assumeyes &&
-       $3 == --setopt=localpkg_gpgcheck=True &&
-       $4 == "${bootstrap_dir}/rpmfusion-free-release-45.noarch.rpm" ]] || exit 89
+    [[ $# == 6 && $1 == install && $2 == --assumeyes &&
+       $3 == --setopt=localpkg_gpgcheck=True && $4 == --repo=fedora && $5 == --repo=updates &&
+       $6 == "${bootstrap_dir}/rpmfusion-free-release-45.noarch.rpm" ]] || exit 89
 }
 '''
 

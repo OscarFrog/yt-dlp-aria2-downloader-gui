@@ -462,7 +462,7 @@ jobs:
 
       - name: Upload data-only shfmt handoff
         if: steps.detect.outputs.update == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: shfmt-candidate-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -522,7 +522,7 @@ jobs:
           mkdir -m 700 -- "${RUNNER_TEMP}/shfmt-prior"
           docker build --output "type=local,dest=${RUNNER_TEMP}/shfmt-prior" "${context}"
       - name: Download untrusted candidate handoff
-        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: shfmt-candidate-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/shfmt-candidate-handoff
@@ -866,7 +866,7 @@ jobs:
             "${verified_shell_files[@]}" \
             >"${verified_dir}/shfmt-tested-tree.sha256"
       - name: Upload verified data-only shfmt handoff
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: shfmt-verified-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -901,7 +901,7 @@ jobs:
           persist-credentials: false
 
       - name: Download verified data-only shfmt handoff
-        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: shfmt-verified-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/shfmt-update-handoff

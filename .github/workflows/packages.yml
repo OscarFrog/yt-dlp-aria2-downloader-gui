@@ -77,7 +77,8 @@ jobs:
           printf 'Userspace %s; shared host kernel %s; kernel arch %s; RPM arch %s\n' \
             "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
           [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
-          dnf -y --setopt=install_weak_deps=False install git python3
+          dnf --repo=fedora --repo=updates --assumeyes --best distro-sync
+          dnf --repo=fedora --repo=updates -y --setopt=install_weak_deps=False install git python3
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -91,7 +92,7 @@ jobs:
           git config --global --add safe.directory "${workspace}"
       - name: Install archive validation tools
         run: |
-          dnf -y install cargo clippy gcc rust rustfmt aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file
+          dnf --repo=fedora --repo=updates -y install cargo clippy gcc rust rustfmt aria2 bash coreutils curl desktop-file-utils diffutils findutils git gnupg2 grep jq procps-ng python3 python3-pip sed ShellCheck unzip util-linux tar gzip which file
       - name: Build and retest Git-free source archive
         shell: bash
         run: |
@@ -258,7 +259,7 @@ jobs:
         run: |
           bash scripts/verify-previous-packages.sh "${PREVIOUS_TAG}" "${PREVIOUS_COMMIT}"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: previous-release-packages-${{ github.sha }}
           path: |
@@ -288,7 +289,9 @@ jobs:
             "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
           [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
       - name: Install RPM build tools
-        run: dnf install --assumeyes cpio desktop-file-utils findutils gawk git gnupg2 gzip python3 rpm-build rpm-sign tar
+        run: |
+          dnf --repo=fedora --repo=updates --assumeyes --best distro-sync
+          dnf --repo=fedora --repo=updates install --assumeyes cpio desktop-file-utils findutils gawk git gnupg2 gzip python3 rpm-build rpm-sign tar
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -324,7 +327,7 @@ jobs:
 
           timeout --signal=TERM --kill-after=10s 4m \
             bash ./tests/rpm6-multisig-integration.sh "${packages[0]}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rpm-under-test-${{ github.sha }}-${{ github.run_id }}
           path: dist/*.rpm
@@ -370,20 +373,22 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          dnf install --assumeyes cpio desktop-file-utils findutils git gnupg2 gzip rpm-build rpm-sign tar
+          dnf --repo=fedora --repo=updates --assumeyes --best distro-sync
+          dnf --repo=fedora --repo=updates install --assumeyes cpio desktop-file-utils findutils git gnupg2 gzip rpm-build rpm-sign tar
           if [[ ${PACKAGE_SCENARIO} == ffmpeg-free ]]; then
-            dnf install --assumeyes ffmpeg-free
+            dnf --repo=fedora --repo=updates install --assumeyes ffmpeg-free
+            dnf repoquery --installed --queryformat '%{full_nevra} %{from_repo}\n' ffmpeg-free
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: rpm-under-test-${{ github.sha }}-${{ github.run_id }}
           path: dist
 
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: previous-release-packages-${{ github.sha }}
           path: previous

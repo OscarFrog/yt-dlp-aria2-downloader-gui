@@ -1585,15 +1585,14 @@ print(f"Real-tools single-run supervision: one wrapper per tool job accepted; {l
 
 # The shared GUI fixture enters the managed-runtime contract. A plain yt-dlp
 # wheel can report version/help successfully while every impersonation target
-# remains unavailable; its latest-only CI prerequisites must be installed first.
+# remains unavailable; its pinned CI prerequisites must be installed first.
 prerequisite_marker = "      - name: Install pinned impersonation dependencies for shared qualification\n"
-prerequisite_condition = "        if: matrix.yt_dlp_version == '2026.8.19'\n"
-prerequisite_diagnostic = "shared qualification requires the pinned/hash-verified latest-only impersonation step before its run"
+prerequisite_diagnostic = "shared qualification requires the pinned/hash-verified pinned impersonation step before its run"
 pins = (
-    "certifi==2026.7.22 --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+    "certifi==2026.10.23 --hash=sha256:e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1",
     "cffi==2.1.1 --hash=sha256:aeae0e330c9f6acd681f647d46cefd30c29f93e3392882e792e82080c9691399",
-    "curl-cffi==0.16.0 --hash=sha256:182416f07d71a342240554fa62c22e591999b78c225b21d3fe27d9f807420dd6",
-    "pycparser==3.0 --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+    "curl-cffi==0.17.0 --hash=sha256:2dac9c915a0ee7d7cc4285203d210816bb187c8deb5c20ee21e0613639c2a8bf",
+    "pycparser==3.12 --hash=sha256:a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e",
 )
 requirements_assignment = '          requirements="${RUNNER_TEMP}/yt-dlp-impersonation-requirements.txt"\n'
 requirements_payload = '          cat >"${requirements}" <<\'EOF_REQUIREMENTS\'\n'
@@ -1624,7 +1623,7 @@ def validate_prerequisites(text):
     conditions = [line + '\n' for line in step.splitlines() if line.startswith('        if:')]
     if (step not in pinned_job or "      image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b\n" not in pinned_job or
             text.index(prerequisite_marker) >= text.index(marker) or
-            conditions != [prerequisite_condition]):
+            conditions):
         raise AssertionError(prerequisite_diagnostic)
     for required in (requirements_assignment, requirements_payload, python_target, install):
         if step.count(required) != 1:
@@ -1647,8 +1646,7 @@ for pin in pins:
 prerequisite_mutations.extend((
     ('missing step', source.replace(prerequisite, '', 1)),
     ('duplicate step', source.replace(prerequisite, prerequisite + prerequisite, 1)),
-    ('other matrix entry', source.replace(prerequisite, prerequisite.replace("'2026.8.19'", "'2026.7.4'", 1), 1)),
-    ('unconditional step', source.replace(prerequisite, prerequisite.replace(prerequisite_condition, '', 1), 1)),
+    ('skipped prerequisite', source.replace(prerequisite_marker, prerequisite_marker + '        if: false\n', 1)),
     ('late installation', source.replace(prerequisite, '', 1).replace(
         '      - name: Retain shared-destination verdicts and monotonic events\n',
         prerequisite + '      - name: Retain shared-destination verdicts and monotonic events\n', 1)),
@@ -1666,7 +1664,7 @@ for name, mutated in prerequisite_mutations:
             raise
     else:
         raise AssertionError(f"shared-runtime prerequisite policy accepted mutation: {name}")
-print(f"Shared-runtime prerequisites: exact latest-only pins and hashes accepted; {len(prerequisite_mutations)} mutations rejected.")
+print(f"Shared-runtime prerequisites: exact pinned pins and hashes accepted; {len(prerequisite_mutations)} mutations rejected.")
 PY_REAL_TOOLS_SINGLE_RUN
 }
 
@@ -2084,7 +2082,7 @@ shfmt_candidate_job_policy() {
     docker_run_blocks_are_hardened "${job_block}" || return 65
     # shellcheck disable=SC2016 # Literal workflow shell expression, not local expansion.
     [[ ${job_block} == *'"${GITHUB_WORKSPACE}/.git:/workspace/.git:ro"'* ]] || return 65
-    [[ ${job_block} == *'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'* ]] || return 65
+    [[ ${job_block} == *'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9'* ]] || return 65
     [[ ${job_block} == *"if: steps.detect.outputs.update == 'true'"* ]] || return 65
     [[ ${job_block} != *'bash ./scripts/format-shell.sh'* ]] || return 65
     [[ ${job_block} != *'bash ./tests/run-all.sh'* ]] || return 65
@@ -2108,7 +2106,7 @@ shfmt_verifier_job_policy() {
     [[ ${job_block} == *'EXPECTED_BASE_SHA: ${{ github.sha }}'* ]] || return 65
     # shellcheck disable=SC2016 # Dynamic checkout refs are forbidden in the verifier.
     [[ ${job_block} != *'ref: ${{'* ]] || return 65
-    [[ ${job_block} == *'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3'* ]] || return 65
+    [[ ${job_block} == *'actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333'* ]] || return 65
     # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
     [[ ${job_block} == *'shfmt-candidate-${{ github.run_id }}-${{ github.run_attempt }}'* ]] || return 65
     # shellcheck disable=SC2016 # The policy matches the trusted container instruction.
@@ -2140,7 +2138,7 @@ shfmt_verifier_job_policy() {
     # shellcheck disable=SC2016 # The verifier must remove its anonymous volume.
     [[ ${job_block} == *'docker rm -f --volumes "${container}"'* ]] || return 65
     [[ ${job_block} != *'run: timeout --signal=TERM --kill-after=10s 8m bash ./tests/run-all.sh'* ]] || return 65
-    [[ ${job_block} == *'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'* ]] || return 65
+    [[ ${job_block} == *'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9'* ]] || return 65
     # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
     [[ ${job_block} == *'shfmt-verified-${{ github.run_id }}-${{ github.run_attempt }}'* ]] || return 65
     [[ ${job_block} != *'bash ./scripts/format-shell.sh'* ]] || return 65
@@ -2161,7 +2159,7 @@ shfmt_publish_job_policy() {
     [[ ${job_block} == *'EXPECTED_BASE_SHA: ${{ github.sha }}'* ]] || return 65
     # shellcheck disable=SC2016 # Dynamic checkout refs are forbidden in the privileged publisher.
     [[ ${job_block} != *'ref: ${{'* ]] || return 65
-    [[ ${job_block} == *'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3'* ]] || return 65
+    [[ ${job_block} == *'actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333'* ]] || return 65
     # shellcheck disable=SC2016 # Literal GitHub Actions expression, not shell expansion.
     [[ ${job_block} == *'shfmt-verified-${{ github.run_id }}-${{ github.run_attempt }}'* ]] || return 65
     [[ ${job_block} == *'git fetch --no-tags origin'* ]] || return 65
@@ -2481,7 +2479,7 @@ release_docs_prepare_job_policy() {
         "if: github.event.workflow_run.conclusion == 'success'" \
         'ref: main' \
         'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' \
-        'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' \
+        'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9' \
         'repos/${GITHUB_REPOSITORY}/actions/runs/${RELEASE_RUN_ID}' \
         'gh release verify "${RELEASE_TAG}"' \
         'tag_sha=$(git rev-parse "${RELEASE_TAG}^{commit}")' \
@@ -2516,7 +2514,7 @@ release_docs_verifier_job_policy() {
     for required in \
         "if: needs.prepare-release-docs.outputs.update == 'true'" \
         'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' \
-        'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3' \
+        'actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333' \
         '[[ $(git rev-parse "${RELEASE_TAG}^{commit}") == "${RELEASE_SHA}" ]]' \
         'git merge-base --is-ancestor "${main_sha}" "${base_sha}"' \
         'current_context=$(python3 -B scripts/check-push-version.py source-context' \
@@ -2528,7 +2526,7 @@ release_docs_verifier_job_policy() {
         'release-docs-tested-tree.sha256' \
         'release-docs-base-tree.sha256' \
         'paths=(README.fr.md README.md test-static.sh)' \
-        'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' \
+        'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9' \
         'release-docs-verified-${{ github.run_id }}-${{ github.run_attempt }}'; do
         [[ ${job_block} == *"${required}"* ]] || return 65
     done
@@ -2588,7 +2586,7 @@ release_docs_publisher_job_policy() {
     # shellcheck disable=SC2016 # Literal workflow expressions and shell contracts.
     for required in \
         "if: needs.prepare-release-docs.outputs.update == 'true'" \
-        'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3' \
+        'actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333' \
         'release-docs-verified-${{ github.run_id }}-${{ github.run_attempt }}' \
         'gh release verify "${RELEASE_TAG}"' \
         'repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}' \
@@ -4208,15 +4206,9 @@ test_static_cleanup_and_qualification_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/stress.yml" \
         'for ((iteration = shard; iteration <= 20; iteration += shard_count)); do' \
         'signal stress retains all twenty timing configurations'
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/real-tools.yml" \
-        $'name: Run real FFmpeg progress qualification\n        if: matrix.yt_dlp_version == \'2026.8.19\'' \
-        'FFmpeg-only progress fixtures run once across the yt-dlp matrix'
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/real-tools.yml" \
-        $'name: Run HLS post-remux duration validation\n        if: matrix.yt_dlp_version == \'2026.8.19\'' \
-        'HLS fixtures with mock yt-dlp run once across the yt-dlp matrix'
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/real-tools.yml" \
-        'EXPECTED_FFMPEG_VERSION: 9.0.2' \
-        'shared real-tool fixtures bind to the qualified Fedora FFmpeg generation'
+    assert_file_contains "${SCRIPT_DIR}/.github/workflows/qualification.yml" \
+        'bash ./tests/ffmpeg-generation-qualification.sh' \
+        'the native media job executes routing, progress, HLS duration and compatibility fixtures'
 }
 
 test_static_packaging_signing_contracts() {
@@ -4935,7 +4927,7 @@ test_static_runtime_regression_contracts() {
             "private launcher helper phase ${launcher_helper_phase}"
     done
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        'actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26' \
+        'actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6' \
         'release provenance attestation action'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/real-tools.yml" \
         'tests/real-tools-integration.sh' 'hermetic real-tool CI validation'
@@ -5095,7 +5087,7 @@ test_static_runtime_regression_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         "gh release view \"\${RELEASE_TAG}\" --json assets" 'existing release asset inventory is exact'
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
-        'actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3' \
+        'actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333' \
         'RPM matrix downloads one shared artifact'
     assert_file_contains "${SCRIPT_DIR}/tests/run-all.sh" \
         'runtime-manager-hardening-integration.sh' 'runtime hardening suite is mandatory'
