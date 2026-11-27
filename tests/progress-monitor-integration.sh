@@ -1092,6 +1092,70 @@ test_monitor_failure_and_input_hardening() {
     finish_failure
 }
 
+test_monitor_late_plans() {
+    local expected
+
+    start_scenario late-native-plan video
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|m|unrelated|downloading|0|0|0|0|0|2%||' \
+        'YTDLP_PROGRESS_V2|m|a|downloading|10|20|0|0|0|50%||' \
+        'YTDLP_PLAN|m|v+a|v|a' \
+        'YTDLP_PROGRESS_V2|m|v|downloading|75|80|0|0|0|93%||' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 1/2 - 93%' 'late V1 video position'
+    expected=$(map_download_to_zenity 85)
+    assert_file_has_line "${CAPTURE_FILE}" "${expected}" \
+        'late V1 retains audio bytes under its second slot'
+    printf '%s\n' \
+        'YTDLP_PLAN|m|v+a|v|a' \
+        'YTDLP_PLAN|m|a+v|a|v' \
+        'YTDLP_PROGRESS_V2|m|a|finished|20|20|0|0|0|100%||' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 100%' 'stable audio membership'
+    assert_file_not_contains "${CAPTURE_FILE}" 'item 3/2' 'late V1 has no phantom slots'
+    finish_success 'late-native.mkv'
+
+    start_scenario late-exact-plan video
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|m|音声|downloading|0|0|0|0|0|10%||' \
+        'YTDLP_PLAN_V2|3|video|video|音声' \
+        'YTDLP_PLAN_V2|3|video|français|音声' \
+        'YTDLP_PROGRESS_V2|m|音声|finished|0|0|0|0|0|100%||' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 3/3 - 100%' 'late Unicode member'
+    printf '%s\n' \
+        'YTDLP_PLAN_V2|2|音声|video' \
+        'YTDLP_PROGRESS_V2|m|unselected|finished|1000|1000|0|0|0|100%||' \
+        'YTDLP_PROGRESS_V2|m|français|downloading|0|0|0|0|0|80%||' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/3 - 80%' 'exact plan survives contradictions'
+    expected=$(map_download_to_zenity 60)
+    assert_file_has_line "${CAPTURE_FILE}" "${expected}" \
+        'strict late plan retains observed percentages and excludes foreign progress'
+    finish_failure
+
+    start_scenario late-mixed-plan video
+    printf '%s\n' \
+        '[#abc 1B/4B(25%) DL:1B ETA:1s]' \
+        'YTDLP_PROGRESS_V2|m|v|finished|0|0|0|0|0|100%||' \
+        'YTDLP_PLAN|m|v+a|v|a' \
+        '[#abc 2B/4B(50%) DL:1B ETA:1s]' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 50% (aria2c)' \
+        'named video takes priority over earlier anonymous audio GID'
+    expected=$(map_download_to_zenity 90)
+    assert_file_has_line "${CAPTURE_FILE}" "${expected}" \
+        'late plan keeps video completion in the 80/20 fallback'
+    printf '%s\n' 'ARIA2_PLAN|3' '[#abc 3B/4B(75%) DL:1B ETA:1s]' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 75% (aria2c)' 'same GID keeps its slot'
+    finish_failure
+
+    start_scenario late-count-plan audio
+    printf '%s\n' \
+        '[#abc 1B/4B(25%)]' '[#def 2B/4B(50%)]' \
+        'ARIA2_PLAN|2' '[#abc 3B/4B(75%)]' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 1/2 - 75% (aria2c)' 'late count uses arrival order'
+    printf '%s\n' '[#fff 4B/4B(100%)]' '[#def 3B/4B(75%)]' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 75% (aria2c)' 'second GID survives surplus transfer'
+    assert_file_not_contains "${CAPTURE_FILE}" 'item 3/2' 'count plan refuses surplus GIDs'
+    finish_failure
+}
+
 test_monitor_multistream_unicode_plan() {
     local completed_video_expected maximum_percent complete_expected
     completed_video_expected=$(map_download_to_zenity 25)
@@ -1167,6 +1231,7 @@ main() {
     test_monitor_failure_and_input_hardening
     test_monitor_display_fields
     test_monitor_multistream_unicode_plan
+    test_monitor_late_plans
     printf '%s\n' 'Progress-monitor integration tests passed.'
 }
 

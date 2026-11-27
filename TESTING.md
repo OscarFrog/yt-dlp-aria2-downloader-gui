@@ -998,6 +998,9 @@ The automated suite checks, among other things:
   pre-download `MetadataParser` hooks being misclassified as final post-processing;
 - separate video/audio transfers, direct audio, HLS, DASH, merge, remux,
   extraction, late progress, and error paths;
+- late native, exact Unicode and count-only plans bind prior observations to
+  component positions; mixed GIDs, byte totals, repeated and conflicting plans
+  exercise stable numbering and weighting;
 - verification that a local transfer reaching 100% does not complete the global
   operation and that global 100% appears only after final-result publication;
 - deletion of successful-download logs and retention of failure logs, with
