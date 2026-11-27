@@ -422,7 +422,7 @@ def stage_evidence(source, output, *, partial=False, current_stable=False):
                     row['process_scope'] == 'authenticated-consumers' and
                     re.fullmatch(VERSION, row['yt_dlp_version']) and row['yt_dlp_kind'] in ('ELF', 'script-or-other')
                     and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', row['deno_version']) and
-                    (current_stable or row['yt_dlp_version'] == '2026.08.19' and row['deno_version'] == '2.9.4'),
+                    (current_stable or row['yt_dlp_version'] == '2026.11.23' and row['deno_version'] == '2.9.8'),
                     'Unexpected runtime identity')
         elif name == 'qualification-errors.json':
             require(isinstance(row, list) and (partial or not row), 'Fixture recorded qualification errors')

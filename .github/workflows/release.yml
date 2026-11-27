@@ -277,7 +277,7 @@ jobs:
 
 
   release-runtime:
-    name: Current Fedora 45 dependencies / yt-dlp ${{ matrix.yt_dlp_version }}
+    name: Current Fedora 45 media and pinned yt-dlp
     needs: validate
     permissions:
       contents: read
@@ -291,10 +291,6 @@ jobs:
     # Distribution dependencies are resolved anew for publication. Source-tree
     # proof does not identify that environment, so exercise current media tools
     # alongside the independent package builds before opening the release gate.
-    strategy:
-      fail-fast: true
-      matrix:
-        yt_dlp_version: ['2026.6.9', '2026.8.19']
     steps:
       - name: Verify Fedora 45 userspace
         timeout-minutes: 2
@@ -317,36 +313,17 @@ jobs:
           persist-credentials: false
       - name: Install current Fedora 45 engines and pinned yt-dlp
         timeout-minutes: 8
-        env:
-          YT_DLP_VERSION: ${{ matrix.yt_dlp_version }}
         shell: bash
         run: |
           set -Eeuo pipefail
           timeout --signal=TERM --kill-after=10s 6m bash ./scripts/ci-fedora-media.sh
-          case ${YT_DLP_VERSION} in
-            2026.6.9)
-              yt_dlp_sha=442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4
-              ;;
-            2026.8.19)
-              yt_dlp_sha=1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf
-              ;;
-            *)
-              printf 'Error: no approved release yt-dlp wheel digest for %s.\n' \
-                "${YT_DLP_VERSION}" >&2
-              exit 65
-              ;;
-          esac
-
-          requirements="${RUNNER_TEMP}/release-yt-dlp-requirements.txt"
-          printf 'yt-dlp==%s --hash=sha256:%s\n' \
-            "${YT_DLP_VERSION}" "${yt_dlp_sha}" >"${requirements}"
-
           python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
-          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
-            --disable-pip-version-check \
-            --only-binary=:all: \
-            --require-hashes \
-            --requirement "${requirements}"
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" --isolated install \
+            --disable-pip-version-check --index-url https://pypi.org/simple \
+            --only-binary=:all: --require-hashes \
+            --requirement scripts/dev-tools/yt-dlp-requirements.txt
+          cat scripts/dev-tools/yt-dlp-requirements.txt
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/yt-dlp" --version
           echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
       - name: Record resolved release dependency versions
         timeout-minutes: 1
@@ -372,13 +349,11 @@ jobs:
           timeout --signal=TERM --kill-after=10s 12m \
             bash ./tests/aria2-real-behavior-integration.sh
       - name: Qualify FFmpeg progress with current release dependencies
-        if: matrix.yt_dlp_version == '2026.8.19'
         shell: bash
         run: |
           timeout --signal=TERM --kill-after=10s 8m \
             bash ./tests/ffmpeg-real-progress-integration.sh
       - name: Qualify HLS duration with current release dependencies
-        if: matrix.yt_dlp_version == '2026.8.19'
         shell: bash
         run: |
           timeout --signal=TERM --kill-after=10s 5m \
@@ -599,7 +574,9 @@ jobs:
             "${PRETTY_NAME}" "$(uname -r)" "${kernel_arch}" "${rpm_arch}"
           [[ ${kernel_arch} == x86_64 && ${rpm_arch} == x86_64 ]]
       - name: Install RPM build tools
-        run: dnf install --assumeyes cpio desktop-file-utils findutils gawk git gnupg2 gzip python3 rpm-build rpm-sign tar
+        run: |
+          dnf --repo=fedora --repo=updates --assumeyes --best distro-sync
+          dnf --repo=fedora --repo=updates install --assumeyes cpio desktop-file-utils findutils gawk git gnupg2 gzip python3 rpm-build rpm-sign tar
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -921,9 +898,11 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          dnf install --assumeyes cpio desktop-file-utils findutils git gnupg2 gzip rpm-build rpm-sign tar
+          dnf --repo=fedora --repo=updates --assumeyes --best distro-sync
+          dnf --repo=fedora --repo=updates install --assumeyes cpio desktop-file-utils findutils git gnupg2 gzip rpm-build rpm-sign tar
           if [[ ${PACKAGE_SCENARIO} == ffmpeg-free ]]; then
-            dnf install --assumeyes ffmpeg-free
+            dnf --repo=fedora --repo=updates install --assumeyes ffmpeg-free
+            dnf repoquery --installed --queryformat '%{full_nevra} %{from_repo}\n' ffmpeg-free
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

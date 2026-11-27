@@ -63,7 +63,7 @@ jobs:
   pinned-local-media:
     needs: identity
     if: github.event_name != 'schedule'
-    name: Local media, pinned yt-dlp ${{ matrix.yt_dlp_version }}
+    name: Fedora 45 shared destination (pinned yt-dlp)
     runs-on: ubuntu-24.04
     container:
       image: registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b
@@ -72,10 +72,6 @@ jobs:
         - /var/tmp
     # Include every test deadline, provisioning and diagnostic retention.
     timeout-minutes: 65
-    strategy:
-      fail-fast: false
-      matrix:
-        yt_dlp_version: ['2026.6.9', '2026.7.4', '2026.8.19']
     steps:
       - name: Verify Fedora 45 userspace
         timeout-minutes: 2
@@ -97,48 +93,25 @@ jobs:
           persist-credentials: false
       - name: Install real engines
         timeout-minutes: 8
-        env:
-          YT_DLP_VERSION: ${{ matrix.yt_dlp_version }}
         run: |
           set -Eeuo pipefail
           timeout --signal=TERM --kill-after=10s 6m bash ./scripts/ci-fedora-media.sh
-          case ${YT_DLP_VERSION} in
-            2026.6.9)
-              yt_dlp_sha=442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4
-              ;;
-            2026.7.4)
-              yt_dlp_sha=f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266
-              ;;
-            2026.8.19)
-              yt_dlp_sha=1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf
-              ;;
-            *)
-              printf 'Error: no approved yt-dlp wheel digest for %s.\n' \
-                "${YT_DLP_VERSION}" >&2
-              exit 65
-              ;;
-          esac
-
-          requirements="${RUNNER_TEMP}/yt-dlp-requirements.txt"
-          printf 'yt-dlp==%s --hash=sha256:%s\n' \
-            "${YT_DLP_VERSION}" "${yt_dlp_sha}" >"${requirements}"
-
           python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"
-          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" install \
-            --disable-pip-version-check \
-            --only-binary=:all: \
-            --require-hashes \
-            --requirement "${requirements}"
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" --isolated install \
+            --disable-pip-version-check --index-url https://pypi.org/simple \
+            --only-binary=:all: --require-hashes \
+            --requirement scripts/dev-tools/yt-dlp-requirements.txt
+          cat scripts/dev-tools/yt-dlp-requirements.txt
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/yt-dlp" --version
           echo "${RUNNER_TEMP}/yt-dlp-venv/bin" >>"${GITHUB_PATH}"
       - name: Install verified Deno for shared-destination qualification
         timeout-minutes: 3
-        if: matrix.yt_dlp_version == '2026.8.19'
         run: |
           set -Eeuo pipefail
           umask 077
-          readonly version=2.9.4
+          readonly version=2.9.8
           # Digest from the immutable upstream release and its official checksum.
-          readonly archive_sha=c24f955d9fbfe0ea5ae2b501c8e71ae76e31e4c9782390a54a284b3364fda725
+          readonly archive_sha=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609
           tool_dir=$(mktemp -d "${RUNNER_TEMP}/deno.XXXXXXXX")
           archive=$(mktemp "${RUNNER_TEMP}/deno-archive.XXXXXXXX")
           trap 'rm -f -- "${archive}"' EXIT
@@ -154,31 +127,6 @@ jobs:
           [[ ${resolved} == "${version}" ]]
           "${tool_dir}/deno" --version
           printf '%s\n' "${tool_dir}" >>"${GITHUB_PATH}"
-      - name: Record resolved tool versions
-        timeout-minutes: 1
-        env:
-          EXPECTED_FFMPEG_VERSION: 9.0.2
-        run: |
-          set -Eeuo pipefail
-          printf 'yt-dlp: %s\n' "$(yt-dlp --version)"
-          aria2c --version | awk 'NR == 1 { first = $0 } END { print first }'
-          for tool in ffmpeg ffprobe; do
-            resolved=$("${tool}" -hide_banner -version | awk 'NR == 1 { version = $3 } END { print version }')
-            printf '%s: %s\n' "${tool}" "${resolved}"
-            case ${resolved} in
-              "${EXPECTED_FFMPEG_VERSION}" | "${EXPECTED_FFMPEG_VERSION}"-* | "${EXPECTED_FFMPEG_VERSION}"+* | "${EXPECTED_FFMPEG_VERSION}"~*) ;;
-              *)
-                printf 'Error: %s does not match expected generation %s.\n' \
-                  "${tool}" "${EXPECTED_FFMPEG_VERSION}" >&2
-                exit 65
-                ;;
-            esac
-          done
-      - name: Run direct, audio, HLS and DASH boundary qualification
-        shell: bash
-        run: |
-          timeout --signal=TERM --kill-after=10s 8m \
-            bash ./tests/real-tools-integration.sh
       - name: Run aria2 direct-transfer behavior qualification
         env:
           ARIA2_BEHAVIOR_BASIC_RUNS: 3
@@ -186,20 +134,8 @@ jobs:
         run: |
           timeout --signal=TERM --kill-after=10s 12m \
             bash ./tests/aria2-real-behavior-integration.sh
-      - name: Run real FFmpeg progress qualification
-        if: matrix.yt_dlp_version == '2026.8.19'
-        run: |
-          timeout --signal=TERM --kill-after=10s 8m \
-            bash ./tests/ffmpeg-real-progress-integration.sh
-      - name: Run HLS post-remux duration validation
-        if: matrix.yt_dlp_version == '2026.8.19'
-        shell: bash
-        run: |
-          timeout --signal=TERM --kill-after=10s 5m \
-            bash ./tests/hls-remux-duration-integration.sh
       - name: Install pinned impersonation dependencies for shared qualification
         timeout-minutes: 3
-        if: matrix.yt_dlp_version == '2026.8.19'
         run: |
           set -Eeuo pipefail
           umask 077
@@ -207,11 +143,12 @@ jobs:
           # wheel digests from the corresponding public PyPI release metadata.
           requirements="${RUNNER_TEMP}/yt-dlp-impersonation-requirements.txt"
           cat >"${requirements}" <<'EOF_REQUIREMENTS'
-          certifi==2026.7.22 --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+          certifi==2026.10.23 --hash=sha256:e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1
           cffi==2.1.1 --hash=sha256:aeae0e330c9f6acd681f647d46cefd30c29f93e3392882e792e82080c9691399
-          curl-cffi==0.16.0 --hash=sha256:182416f07d71a342240554fa62c22e591999b78c225b21d3fe27d9f807420dd6
-          pycparser==3.0 --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+          curl-cffi==0.17.0 --hash=sha256:2dac9c915a0ee7d7cc4285203d210816bb187c8deb5c20ee21e0613639c2a8bf
+          pycparser==3.12 --hash=sha256:a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e
           EOF_REQUIREMENTS
+          sed -n 's/^yt-dlp==/yt-dlp[pin-curl-cffi]==/p' scripts/dev-tools/yt-dlp-requirements.txt >>"${requirements}"
           "${RUNNER_TEMP}/yt-dlp-venv/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 15)'
           "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" --isolated install \
             --disable-pip-version-check \
@@ -219,8 +156,9 @@ jobs:
             --only-binary=:all: \
             --require-hashes \
             --requirement "${requirements}"
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" --isolated check
+          "${RUNNER_TEMP}/yt-dlp-venv/bin/pip" --isolated list --format=freeze
       - name: Run real shared-destination GUI and CLI qualification
-        if: matrix.yt_dlp_version == '2026.8.19'
         id: shared_run
         run: |
           set -Eeuo pipefail
@@ -230,7 +168,7 @@ jobs:
           # All instances share the fixture's HOME/XDG; select only this job's
           # verified executable, never a pre-existing personal runtime.
           export YTDLP_REAL_BINARY="${RUNNER_TEMP}/yt-dlp-venv/bin/yt-dlp"
-          [[ $("${YTDLP_REAL_BINARY}" --ignore-config --no-plugin-dirs --version) == 2026.08.19 ]]
+          [[ $("${YTDLP_REAL_BINARY}" --ignore-config --no-plugin-dirs --version) == 2026.11.23 ]]
           timeout --signal=TERM --kill-after=10s 8m \
             bash ./tests/repeat-qualification.sh --runs 1 --jobs 1 \
               --label 'Shared-destination real tools' -- \
@@ -238,7 +176,7 @@ jobs:
             2>&1 | tee "${TMPDIR}/qualification.log"
       - name: Validate and stage shared-destination evidence
         id: evidence
-        if: ${{ always() && matrix.yt_dlp_version == '2026.8.19' }}
+        if: ${{ always() }}
         timeout-minutes: 1
         env:
           SHARED_OUTCOME: ${{ steps.shared_run.outcome }}
@@ -255,7 +193,7 @@ jobs:
             "${RUNNER_TEMP:?}/shared-destination-evidence" shared-destination-public "${options[@]}"
       - name: Retain shared-destination verdicts and monotonic events
         timeout-minutes: 1
-        if: ${{ always() && matrix.yt_dlp_version == '2026.8.19' && steps.evidence.outcome == 'success' }}
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: shared-destination-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}

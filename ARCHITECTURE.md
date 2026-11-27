@@ -1218,7 +1218,7 @@ architecture document. The source ZIP contains the tracked source tree.
 | `shell.yml` | Fedora 45 checkout identity, x86_64 root and non-root FULL, pinned actionlint and Ruff |
 | `packages.yml` | Git-free source archive, RPM construction, lifecycle, authentication, and previous-release upgrade |
 | `real-tools.yml` | Pinned real-tool behavior and shared-destination qualification on both the latest pin and scheduled current-stable yt-dlp |
-| `qualification.yml` | Supported FFmpeg/FFprobe generation matrix |
+| `qualification.yml` | Fedora RPM Fusion FFmpeg/FFprobe media compatibility with the pinned wheel |
 | `stress.yml` | Twenty signal timing tuples and ten runtime transaction cycles; existing required check aggregates all five PR workflows |
 | `promotion.yml` | Main-only authenticated verification of the complete PR source qualification, without suite execution |
 | `shfmt-update.yml` | Prepare an untrusted formatter-pin candidate, verify it separately, and publish only allowlisted data |
@@ -1272,16 +1272,15 @@ missing proof or new failure cannot obtain
 release authority from a green status name. Source diagnostic dispatches and
 scheduled tool checks do not substitute for PR qualification.
 
-The shared-destination prerequisite installation is an explicit proof obligation:
-it must succeed on the latest pinned yt-dlp job and remain an explicitly skipped
-step on the two earlier pins. No missing or failed step inherits that exception.
+Separate permanent checks qualify native media compatibility and shared-destination
+GUI/CLI behavior with one upstream wheel. Both record its pinned SHA-256.
+The shared check also requires the hash-verified impersonation prerequisites.
 
 Scheduled evidence independently requires the complete current-stable job,
 including its runtime prerequisites, resolved versions, shared-destination
 verdicts and diagnostic upload. The read-only verifier binds the selected
 schedule's source identity, repository, workflow, main branch and exact
-run/attempt, then rechecks the run before accepting it. Its skipped pinned
-matrix is one unexpanded GitHub job. A green older schedule lacking a required
+run/attempt, then rechecks the run before accepting it. Its pinned shared-destination job must be skipped. A green older schedule lacking a required
 step cannot establish the extended qualification; the collector's creation-date
 freshness window and successful-schedule selection remain unchanged.
 
@@ -1291,12 +1290,9 @@ final containers/signatures and current installation/upgrade inputs differ from
 PR candidates. Cross-run package artifacts are not promoted; their short build
 time does not justify another provenance/retention trust boundary. The release
 workflow no longer reruns full source suites. A parallel `release-runtime` job
-retains routing and aria2 behavior for each of the two original yt-dlp versions
-against newly resolved Fedora distribution dependencies. FFmpeg progress and
-HLS duration run only in the latest-version matrix entry because those fixtures
-do not depend on yt-dlp. This checks an external environment not identified by
-the PR source proof. It records resolved package versions and gates final source
-verification/publication, without delaying independent package builds.
+retains routing, aria2 behavior, FFmpeg progress and HLS duration on one pinned
+wheel and freshly resolved Fedora dependencies. It gates final verification
+and publication independently of package builds.
 
 The media jobs use DNF in the admitted Fedora image. The shared CI helper authenticates the RPM Fusion key, exact release package and signature using an isolated keyring before enabling the repository. Media provisioning is bounded independently of each functional scenario.
 
@@ -1310,15 +1306,10 @@ disabled. Jobs receive only the permissions they need. The Fedora non-root valid
 job verifies the pinned actionlint archive before running the shared explicit
 workflow check; ordinary local fast/full validation does not provision this
 additional tool. Fedora supplies the Python and Bash interpreters to both root and non-root validation jobs.
-The latest pinned real-tools entry also requires the shared-destination matrix
-with digest/version-verified Deno and selectively retained pre-rescue evidence.
-A dedicated latest-only prerequisite step installs the four exact wheel/hash
-pins for the verified yt-dlp wheel's `pin-curl-cffi` dependencies into its
-Fedora 45 / Python 3.15 venv before that matrix. Production managed-runtime
-admission still requires a usable impersonation target; a plain wheel's successful
-version/help probes are insufficient. Static checks bind those prerequisites
-to their condition, target and execution order without adding a permanent helper
-or broadening the environments of the other matrix entries.
+The pinned shared-destination check requires the verified Deno executable and
+four hash-pinned `pin-curl-cffi` dependencies before exercising the shared
+destination. The CI wheel and the application's authenticated standalone binary
+have distinct identities and qualification evidence.
 
 The weekly job first reads the current stable version from a bounded HTTPS PyPI
 metadata response, refusing redirects, prereleases and withdrawn releases. It
@@ -1417,7 +1408,7 @@ The `fast` profile is a development loop; the default `full` profile is the
 complete hermetic local contract. Its separate `doctor` mode diagnoses command,
 filesystem, loopback, formatter-bootstrap, network, and repository capabilities
 without running tests or provisioning tools. Real tools, privileged package
-lifecycle, real Zenity, release evidence, upstream generations, and
+lifecycle, real Zenity, release evidence, native media compatibility, and
 stress runs are separate qualifications documented in `TESTING.md`.
 
 Real Zenity qualification has two complete routes: the existing operator-led

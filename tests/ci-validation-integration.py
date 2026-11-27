@@ -183,11 +183,11 @@ class ProofTests(unittest.TestCase):
             (1, "Fedora 45 non-root", "Check Python with reviewed Ruff"),
             (1, "Fedora 45 non-root", "Verify Fedora 45 userspace"),
             (1, "Fedora 45 non-root", "Run validation"),
-            (4, "Local media, pinned yt-dlp 2026.8.19", "Install verified Deno for shared-destination qualification"),
-            (4, "Local media, pinned yt-dlp 2026.8.19", "Install pinned impersonation dependencies for shared qualification"),
-            (4, "Local media, pinned yt-dlp 2026.8.19", "Run real shared-destination GUI and CLI qualification"),
-            (4, "Local media, pinned yt-dlp 2026.8.19", "Validate and stage shared-destination evidence"),
-            (4, "Local media, pinned yt-dlp 2026.8.19", "Retain shared-destination verdicts and monotonic events"),
+            (4, "Fedora 45 shared destination (pinned yt-dlp)", "Install verified Deno for shared-destination qualification"),
+            (4, "Fedora 45 shared destination (pinned yt-dlp)", "Install pinned impersonation dependencies for shared qualification"),
+            (4, "Fedora 45 shared destination (pinned yt-dlp)", "Run real shared-destination GUI and CLI qualification"),
+            (4, "Fedora 45 shared destination (pinned yt-dlp)", "Validate and stage shared-destination evidence"),
+            (4, "Fedora 45 shared destination (pinned yt-dlp)", "Retain shared-destination verdicts and monotonic events"),
         )
         for index, name, step in checks:
             for outcome in ("missing", "skipped", "failure"):
@@ -203,27 +203,20 @@ class ProofTests(unittest.TestCase):
                     with self.assertRaises(CHECK.Refusal):
                         CHECK.Verifier(api, NOW).verify(TARGET)
 
-    def test_shared_prerequisite_obligation_matches_the_pinned_matrix(self):
-        step_name = "Install pinned impersonation dependencies for shared qualification"
-        for version in ("2026.6.9", "2026.7.4", "2026.8.19"):
-            for outcome in ("expected", "missing", "failure", "opposite"):
-                with self.subTest(version=version, outcome=outcome):
+    def test_both_pinned_qualifications_are_required_on_the_same_tree(self):
+        for workflow, name in ((3, "Fedora 45 media compatibility (pinned yt-dlp)"),
+                               (4, "Fedora 45 shared destination (pinned yt-dlp)")):
+            for outcome in ("missing", "skipped", "failure"):
+                with self.subTest(job=name, outcome=outcome):
                     api = fixture()
-                    jobs = api.responses["actions/runs/400/attempts/1/jobs?per_page=100&page=1"]["jobs"]
-                    job = next(item for item in jobs if item["name"] == f"Local media, pinned yt-dlp {version}")
-                    # Model the workflow condition independently of checker tables.
-                    job["steps"] = [step for step in job["steps"] if step["name"] != step_name]
-                    expected = "success" if version == "2026.8.19" else "skipped"
-                    if outcome != "missing":
-                        conclusion = (expected if outcome == "expected" else "failure" if outcome == "failure"
-                                      else "skipped" if expected == "success" else "success")
-                        job["steps"].append({"name": step_name, "status": "completed", "conclusion": conclusion})
-                    verifier = CHECK.Verifier(api, NOW)
-                    if outcome == "expected":
-                        self.assertEqual(verifier.verify(TARGET)["tree"], TREE)
+                    jobs = api.responses[f"actions/runs/{workflow * 100}/attempts/1/jobs?per_page=100&page=1"]["jobs"]
+                    job = next(item for item in jobs if item["name"] == name)
+                    if outcome == "missing":
+                        jobs.remove(job)
                     else:
-                        with self.assertRaises(CHECK.Refusal, msg="matrix prerequisite obligation was not enforced"):
-                            verifier.verify(TARGET)
+                        job["conclusion"] = outcome
+                    with self.assertRaises(CHECK.Refusal):
+                        CHECK.Verifier(api, NOW).verify(TARGET)
 
     def test_pr_association_may_be_empty_after_merge_and_fork_is_accepted(self):
         self.assertEqual(self.verify()["pull_request"], 23)
@@ -352,7 +345,7 @@ class ProofTests(unittest.TestCase):
     def test_fedora44_job_cannot_satisfy_fedora45_evidence(self):
         for workflow, job_name in ((1, "Fedora 45"), (2, "Fedora 45 RPM build-once"),
                                    (2, "Fedora 45 RPM (fresh)"), (2, "Fedora 45 RPM (ffmpeg-free)"),
-                                   (3, "FFmpeg 9.0.2 / Fedora 45")):
+                                   (3, "Fedora 45 media compatibility (pinned yt-dlp)")):
             with self.subTest(job=job_name):
                 job = next(item for item in self.jobs(workflow) if item["name"] == job_name)
                 job["name"] = job_name.replace("Fedora 45", "Fedora 44")
@@ -388,8 +381,8 @@ class ProofTests(unittest.TestCase):
         self.verify()
         for index, name, step_name in (
             (2, "Fedora 45 RPM (fresh)", "Test previous immutable release -> current RPM upgrade"),
-            (4, "Local media, pinned yt-dlp 2026.8.19", "Run real FFmpeg progress qualification"),
-            (4, "Local media, pinned yt-dlp 2026.6.9", "Run aria2 direct-transfer behavior qualification"),
+            (3, "Fedora 45 media compatibility (pinned yt-dlp)", "Qualify Fedora media and FFmpeg compatibility"),
+            (4, "Fedora 45 shared destination (pinned yt-dlp)", "Run aria2 direct-transfer behavior qualification"),
         ):
             job = next(job for job in self.jobs(index) if job["name"] == name)
             step = next(step for step in job["steps"] if step["name"] == step_name)
@@ -406,7 +399,7 @@ class ProofTests(unittest.TestCase):
             (2, "Fedora 45 RPM build-once", "Qualify RPM v4/v6 signature semantics"),
             (2, "Previous immutable release", "Verify exact published previous packages"),
             (2, "Fedora 45 RPM (fresh)", "Reject a different globally trusted RPM signer in PR CI"),
-            (4, "Local media, pinned yt-dlp 2026.8.19", "Run direct, audio, HLS and DASH boundary qualification"),
+            (3, "Fedora 45 media compatibility (pinned yt-dlp)", "Qualify Fedora media and FFmpeg compatibility"),
         ):
             with self.subTest(job=name, obligation=obligation):
                 self.api = fixture()
@@ -662,7 +655,7 @@ class ScheduledProofTests(unittest.TestCase):
                      for name, skipped, steps in (
                          (CHECK.IDENTITY_PREFIX + SOURCE, False, {"Verify Fedora 45 userspace", "Bind validation to the event source"}),
                          ("Scheduled current stable yt-dlp", False, SCHEDULED_STEPS),
-                         ("Local media, pinned yt-dlp ${{ matrix.yt_dlp_version }}", True, set()),
+                         ("Fedora 45 shared destination (pinned yt-dlp)", True, set()),
                      )]
         self.api.responses["actions/runs/600/attempts/2/jobs?per_page=100&page=1"] = {"jobs": self.jobs}
         self.api.responses[f"git/commits/{SOURCE}"] = {
@@ -1254,7 +1247,8 @@ class WorkflowContractTests(unittest.TestCase):
                 budget_seconds += duration
                 tests_seconds += duration
         self.assertGreaterEqual(minutes * 60, budget_seconds + 120)
-        expected_tests = 33 * 60 + 40 if job_name == "release-runtime" else 41 * 60 + 50
+        expected_tests = {"release-runtime": 33 * 60 + 40, "pinned-local-media": 20 * 60 + 20,
+                          "current-stable-local-media": 41 * 60 + 50}[job_name]
         self.assertEqual(tests_seconds, expected_tests, "Test deadlines and coverage must remain unchanged")
         install = next(step for step in steps if "./scripts/ci-fedora-media.sh" in step)
         self.assertRegex(install, rf"(?m)^        timeout-minutes: {setup}$")
@@ -1266,7 +1260,8 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_pinned_media_jobs_finish_independently_and_remain_required(self):
         job = self.jobs(self.workflow("real-tools.yml"))["pinned-local-media"]
-        self.assertIn("    strategy:\n      fail-fast: false\n      matrix:", job)
+        self.assertNotIn("matrix:", job)
+        self.assertIn("name: Fedora 45 shared destination (pinned yt-dlp)", job)
         self.assertNotIn("continue-on-error", job)
 
     def test_media_provisioning_and_job_budgets_cover_all_original_tests(self):
@@ -1283,6 +1278,8 @@ class WorkflowContractTests(unittest.TestCase):
                              ("6m bash ./scripts/ci-fedora-media.sh", "60m bash ./scripts/ci-fedora-media.sh"),
                              ("8m \\\n            bash ./tests/real-tools-integration.sh", "7m \\\n            bash ./tests/real-tools-integration.sh")):
                 with self.subTest(job=name, mutation=old):
+                    if name == "pinned-local-media" and "tests/real-tools-integration.sh" in old:
+                        old, new = "12m \\\n            bash ./tests/aria2-real-behavior", "7m \\\n            bash ./tests/aria2-real-behavior"
                     self.assertIn(old, job)
                     mutated = text.replace(job, job.replace(old, new, 1), 1)
                     with self.assertRaises(AssertionError):
@@ -1424,15 +1421,7 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
             for name in names | {CHECK.IDENTITY_PREFIX + SOURCE}:
                 for step in CHECK.required_steps(name):
                     with self.subTest(workflow=filename, job=name, step=step):
-                        if name.endswith(" / verified upstream source"):
-                            version = name.split()[1]
-                            upstream = self.jobs(text)["ffmpeg-upstream"]
-                            self.assertIn("version: ['6.1.1', '8.1.3', '9.0.1']", upstream)
-                            self.assertIn("EXPECTED_FFMPEG_VERSION: ${{ matrix.version }}", upstream)
-                            self.assertIn("- name: " + step + "\n",
-                                          upstream.replace("${{ matrix.version }}", version))
-                        else:
-                            self.assertIn("- name: " + step + "\n", text)
+                        self.assertIn("- name: " + step + "\n", text)
 
     def test_fedora_userspace_and_nonroot_subject_are_required(self):
         image = "registry.fedoraproject.org/fedora:45@sha256:89fe812033e4b10bb8b05bd573fce914e7a11c2337772ede441c9382f874717b"
@@ -1441,7 +1430,7 @@ bash() { [[ ${CHECK_FAILURE} != syntax ]] || return 23; }
             "stress.yml": ("identity", "mock-stress", "runtime-hardening-stress"),
             "real-tools.yml": ("identity", "pinned-local-media", "current-stable-local-media"),
             "packages.yml": ("identity", "source-archive", "previous-release", "rpm", "rpm-build"),
-            "qualification.yml": ("identity", "ffmpeg-fedora-9", "ffmpeg-upstream"),
+            "qualification.yml": ("identity", "ffmpeg-fedora"),
             "release.yml": ("validate", "release-runtime", "previous-release", "zip", "rpm-build", "rpm-test", "rpm-sign"),
             "release-docs.yml": ("prepare-release-docs", "verify-release-docs"),
         }
@@ -1580,10 +1569,10 @@ exit "${CHECK_VALIDATION_STATUS}"
         run = next(step for step in steps if step.startswith("name: Run real shared-destination"))
         retain = next(step for step in steps if step.startswith("name: Retain shared-destination"))
         for step in (install, run):
-            self.assertIn("if: matrix.yt_dlp_version == '2026.8.19'", step)
-        self.assertIn("always() && matrix.yt_dlp_version == '2026.8.19'", retain)
-        self.assertIn("readonly version=2.9.4", install)
-        self.assertIn("c24f955d9fbfe0ea5ae2b501c8e71ae76e31e4c9782390a54a284b3364fda725", install)
+            self.assertNotIn("        if:", step)
+        self.assertIn("always() && steps.evidence.outcome == 'success'", retain)
+        self.assertIn("readonly version=2.9.8", install)
+        self.assertIn("e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609", install)
         self.assertLess(install.index("sha256sum --check"), install.index("unzip -q"))
         self.assertLess(install.index("sha256sum --check"), install.index('"${tool_dir}/deno" --version'))
         self.assertIn('export YTDLP_REAL_BINARY="${RUNNER_TEMP}/yt-dlp-venv/bin/yt-dlp"', run)
@@ -1716,10 +1705,7 @@ exit "${CHECK_VALIDATION_STATUS}"
         self.assertIn("ref: ${{ github.sha }}", runtime)
         self.assertIn("--require-hashes", runtime)
         self.assertIn("--only-binary=:all:", runtime)
-        matrix = re.search(r"(?m)^        yt_dlp_version: \[([^\n]+)\]$", runtime)
-        self.assertIsNotNone(matrix)
-        self.assertEqual(re.findall(r"[0-9]+\.[0-9]+\.[0-9]+", matrix.group(1)),
-                         ["2026.6.9", "2026.8.19"])
+        self.assertNotIn("matrix:", runtime)
         suites = ("tests/real-tools-integration.sh", "tests/aria2-real-behavior-integration.sh",
                   "tests/ffmpeg-real-progress-integration.sh", "tests/hls-remux-duration-integration.sh")
         # Source identity cannot prove unchanged distribution dependencies. Preserve the
@@ -1732,7 +1718,7 @@ exit "${CHECK_VALIDATION_STATUS}"
         for suite in suites[2:]:
             steps = [step for step in re.split(r"(?m)^      - ", runtime) if suite in step]
             self.assertEqual(len(steps), 1, suite)
-            self.assertIn("if: matrix.yt_dlp_version == '2026.8.19'", steps[0])
+            self.assertNotIn("if:", steps[0])
         for suite in suites[:2]:
             step = next(step for step in re.split(r"(?m)^      - ", runtime) if suite in step)
             self.assertNotIn("if:", step)
@@ -1766,9 +1752,10 @@ exit "${CHECK_VALIDATION_STATUS}"
             ("bash ./tests/real-tools-integration.sh", "bash ./tests/run-all.sh --full --jobs 4"),
             ("bash ./tests/real-tools-integration.sh", "bash ./tests/repeat-qualification.sh --runs 3 --jobs 3 -- bash ./tests/real-tools-integration.sh"),
             ("bash ./tests/real-tools-integration.sh", "bash ./tests/real-tools-integration.sh\n          bash ./tests/real-tools-integration.sh"),
-            ("if: matrix.yt_dlp_version == '2026.8.19'", "if: true"),
+            ("name: Qualify FFmpeg progress with current release dependencies",
+             "name: Qualify FFmpeg progress with current release dependencies\\n        if: false"),
             ("ARIA2_BEHAVIOR_CANCEL_RESTART_RUNS: 10", "ARIA2_BEHAVIOR_CANCEL_RESTART_RUNS: 1"),
-            ("name: Run aria2 direct-transfer behavior qualification", "name: Run aria2 direct-transfer behavior qualification\n        if: matrix.yt_dlp_version == '2026.8.19'"),
+            ("name: Run aria2 direct-transfer behavior qualification", "name: Run aria2 direct-transfer behavior qualification\n        if: false"),
             ("name: Qualify routing with current release dependencies", "name: Qualify routing with current release dependencies\n        if: false"),
             ("--require-hashes", "--no-deps"),
         )
@@ -2363,44 +2350,75 @@ printf '%s\n' "$op" >> "$FIXTURE/calls"
                                    capture_output=True, timeout=2)
                 self.assertEqual(p.returncode, 71, step_name)
 
+    def test_fedora_media_identity_tracks_installed_rpm_and_rejects_substitution(self):
+        source = (PROJECT / "scripts/ci-fedora-media.sh").read_text()
+        body, entry = source.rsplit('main "$@"', 1)
+        self.assertFalse(entry.strip())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for tool in ("ffmpeg", "ffprobe"):
+                target = root / tool
+                target.write_text('#!/bin/sh\nprintf "%s version %s\\n" "$0" "${VERSION}-1.fc45"\n')
+                target.chmod(0o755)
+            fixture = """
+rpm() {
+  case $3 in
+    '%{NAME}') printf '%s' "$PKG" ;;
+    '%{NEVRA}') printf 'ffmpeg-10.2-1.fc45.x86_64' ;;
+    '%{VERSION}') printf '10.2' ;;
+    *) return 83 ;;
+  esac
+}
+dnf() { printf '%s' "$ORIGIN"; }
+verify_media
+"""
+            for pkg, origin, version, status in (("ffmpeg", "rpmfusion-free", "10.2", 0),
+                    ("ffmpeg", "rpmfusion-free-updates", "10.2", 0),
+                    ("ffmpeg-free", "updates", "10.2", 65),
+                    ("ffmpeg", "rpmfusion-free-updates-testing", "10.2", 65),
+                    ("ffmpeg", "rpmfusion-free", "10.20", 65)):
+                with self.subTest(pkg=pkg, origin=origin, version=version):
+                    env = dict(os.environ, PKG=pkg, ORIGIN=origin, VERSION=version,
+                               PATH=str(root) + os.pathsep + os.defpath)
+                    result = subprocess.run(["bash", "-c", body + fixture], env=env, timeout=5,
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    if status == 0:
+                        self.assertIn("ffprobe: 10.2-1.fc45", result.stdout)
+
     def test_pinned_engine_installation_preserves_hashes_and_pip_failure(self):
-        pins = {"2026.6.9": "442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4",
-                "2026.7.4": "f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266",
-                "2026.8.19": "1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf"}
-        for workflow, name, versions in (("real-tools.yml", "Install real engines", tuple(pins)),
-                                         ("release.yml", "Install current Fedora 45 engines and pinned yt-dlp",
-                                          ("2026.6.9", "2026.8.19"))):
-            script = self.step(workflow, name)
-            script = "set -Eeuo pipefail\npython3() { return 0; }\n" + script[script.index("case ${YT_DLP_VERSION}"):]
+        lock = "scripts/dev-tools/yt-dlp-requirements.txt"
+        lines = [line for line in (PROJECT / lock).read_text().splitlines() if not line.startswith("#")]
+        self.assertEqual(lines, ["yt-dlp==2026.11.23 --hash=sha256:e9188e0c559905f7ee05acc1ba0b6fb3f310e7565bf6dea5f62b5300e0775e35"])
+        for workflow, step in (("real-tools.yml", "Install real engines"),
+                               ("release.yml", "Install current Fedora 45 engines and pinned yt-dlp"),
+                               ("qualification.yml", "Install pinned yt-dlp")):
+            script = self.step(workflow, step)
             with tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                for version in versions:
-                    for status in (0, 23):
-                        with self.subTest(workflow=workflow, version=version, status=status):
-                            run = root / f"{version}-{status}"
-                            binary = run / "yt-dlp-venv/bin"
-                            binary.mkdir(parents=True)
-                            pip = binary / "pip"
-                            pip.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >"${CHECK_ARGUMENTS}"\n'
-                                           'exit "${CHECK_PIP_STATUS}"\n')
-                            pip.chmod(0o755)
-                            env = dict(os.environ, RUNNER_TEMP=str(run), YT_DLP_VERSION=version,
-                                       GITHUB_PATH=str(run / "path"), CHECK_ARGUMENTS=str(run / "arguments"),
-                                       CHECK_PIP_STATUS=str(status))
-                            result = subprocess.run(["bash", "-c", script], env=env,
-                                                    capture_output=True, timeout=5, check=False)
-                            self.assertEqual(result.returncode, status, result.stderr)
-                            arguments = (run / "arguments").read_text().splitlines()
-                            self.assertEqual(arguments[:4], ["install", "--disable-pip-version-check",
-                                                            "--only-binary=:all:", "--require-hashes"])
-                            self.assertEqual(arguments[4], "--requirement")
-                            self.assertEqual(Path(arguments[5]).read_text(),
-                                             f"yt-dlp=={version} --hash=sha256:{pins[version]}\n")
-                            self.assertEqual((run / "path").exists(), status == 0)
+                run = Path(temporary)
+                binary = run / "yt-dlp-venv/bin"
+                binary.mkdir(parents=True)
+                pip = binary / "pip"
+                pip.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >"$CHECK_ARGUMENTS"\nexit "$CHECK_STATUS"\n')
+                pip.chmod(0o755)
+                (binary / "yt-dlp").symlink_to("/usr/bin/true")
+                for status in (23, 0):
+                    with self.subTest(workflow=workflow, status=status):
+                        prefix = "set -Eeuo pipefail\npython3() { return 0; }\ntimeout() { return 0; }\n"
+                        env = dict(os.environ, RUNNER_TEMP=str(run), GITHUB_PATH=str(run/"path"),
+                                   CHECK_ARGUMENTS=str(run/"args"), CHECK_STATUS=str(status))
+                        result = subprocess.run(["bash", "-c", prefix + script], cwd=PROJECT, env=env,
+                                                capture_output=True, timeout=5)
+                        self.assertEqual(result.returncode, status, result.stderr)
+                        self.assertEqual((run/"args").read_text().splitlines(),
+                                         ["--isolated", "install", "--disable-pip-version-check", "--index-url",
+                                          "https://pypi.org/simple", "--only-binary=:all:", "--require-hashes",
+                                          "--requirement", lock])
+                        self.assertEqual((run/"path").exists(), status == 0)
 
     def test_deno_bootstrap_refuses_bad_digest_before_extracting_or_executing(self):
         for step_name, expected_version in (
-                ("Install verified Deno for shared-destination qualification", "2.9.4"),
+                ("Install verified Deno for shared-destination qualification", "2.9.8"),
                 ("Install verified Deno for current-stable shared qualification", "2.9.8")):
             script = self.step("real-tools.yml", step_name)
             with tempfile.TemporaryDirectory() as temporary:
@@ -3156,8 +3174,8 @@ class SharedDestinationPublicEvidenceTests(unittest.TestCase):
         self.write_fixture('fixture-environment.log', {'private': self.raw_lines})
         self.write_fixture('qualification-errors.json', [])
         self.write_fixture(
-            'fixture-tools.log', dict(process_scope='authenticated-consumers', yt_dlp_version='2026.08.19',
-                                      yt_dlp_kind='ELF', deno_version='2.9.4')
+            'fixture-tools.log', dict(process_scope='authenticated-consumers', yt_dlp_version='2026.11.23',
+                                      yt_dlp_kind='ELF', deno_version='2.9.8')
         )
         events = []
         for status, labels in groups.items():
@@ -3349,7 +3367,7 @@ class SharedDestinationPublicEvidenceTests(unittest.TestCase):
     def test_stable_requires_selected_and_executed_versions(self):
         self.fill()
         tools = self.fixture / 'fixture-tools.log'
-        tools.write_text(tools.read_text().replace('2.9.4', '2.9.8'))
+        tools.write_text(tools.read_text().replace('2026.11.23', '2026.08.19'))
         meta = dict(
             source='https://pypi.org/pypi/yt-dlp/json',
             package_version='2026.8.19',

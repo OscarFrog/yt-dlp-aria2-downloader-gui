@@ -32,9 +32,13 @@ provision_media() (
     mkdir -p -- "${rpm_keyring}"
     chmod 700 -- "${rpm_keyring}"
 
-    dnf install --assumeyes \
+    local -a fedora=(--repo=fedora --repo=updates)
+    local -a media_repos=("${fedora[@]}" --repo=rpmfusion-free --repo=rpmfusion-free-updates)
+    # install alone can retain older tools from the pinned container image.
+    dnf distro-sync --assumeyes --refresh --best "${fedora[@]}"
+    dnf install --assumeyes "${fedora[@]}" \
         ca-certificates cargo curl findutils gawk gcc git gnupg2 grep gzip procps-ng \
-        python3 python3-pip rpm rust sed tar unzip util-linux xz
+        python3 python3-pip rpm rust sed tar unzip util-linux
 
     curl --fail --location --proto '=https' --tlsv1.2 \
         --retry 3 --retry-all-errors \
@@ -103,13 +107,43 @@ provision_media() (
     fi
 
     rpmkeys --import "${bootstrap_dir}/RPM-GPG-KEY-rpmfusion-free-fedora-2020"
-    dnf install --assumeyes --setopt=localpkg_gpgcheck=True \
+    dnf install --assumeyes --setopt=localpkg_gpgcheck=True "${fedora[@]}" \
         "${bootstrap_dir}/rpmfusion-free-release-45.noarch.rpm"
-    dnf install --assumeyes aria2 ffmpeg
+    dnf install --assumeyes "${media_repos[@]}" --best aria2 ffmpeg
+    dnf distro-sync --assumeyes "${media_repos[@]}" --best aria2 ffmpeg
 )
+
+verify_media() {
+    local tool path package nevra origin version reported
+    for tool in ffmpeg ffprobe; do
+        path=$(type -P "${tool}")
+        package=$(rpm -qf --qf '%{NAME}' -- "${path}")
+        [[ ${package} == ffmpeg ]] || return 65
+        nevra=$(rpm -qf --qf '%{NEVRA}' -- "${path}")
+        version=$(rpm -qf --qf '%{VERSION}' -- "${path}")
+        origin=$(dnf repoquery --installed --queryformat '%{from_repo}' "${nevra}")
+        case ${origin} in
+            rpmfusion-free | rpmfusion-free-updates) ;;
+            *)
+                printf 'Error: unapproved origin for %s: %s\n' "${nevra}" "${origin}" >&2
+                return 65
+                ;;
+        esac
+        reported=$("${path}" -version | awk 'NR == 1 { version=$3 } END { print version }')
+        case ${reported} in
+            "${version}" | "${version}"-* | "${version}"+* | "${version}"~*) ;;
+            *)
+                printf 'Error: %s reports %s, RPM version is %s.\n' "${tool}" "${reported}" "${version}" >&2
+                return 65
+                ;;
+        esac
+        printf '%s: %s; RPM %s; repository %s\n' "${tool}" "${reported}" "${nevra}" "${origin}"
+    done
+}
 
 main() {
     provision_media
+    verify_media
 }
 
 main "$@"

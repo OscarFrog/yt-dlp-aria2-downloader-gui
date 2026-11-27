@@ -169,7 +169,7 @@ Absolute and PATH-based interpreter lookups must reach the native Fedora RPMs. T
 
 ### Reproducible Python static analysis
 
-`ruff.toml` requires Ruff **0.14.4**, uses the Python 3.14 grammar supported by this Ruff release and enables only
+`ruff.toml` requires Ruff **0.17.4**, uses the Fedora Python 3.15 grammar and enables only
 `E4`, `E7`, `E9` and `F`: import/statement errors and Pyflakes diagnostics.
 This is a contributor/CI dependency, never an application or RPM runtime
 dependency. No automatic fixes or formatting are part of the check.
@@ -1489,12 +1489,13 @@ immutable Git objects and the reviewed workflow definition in the equal tree.
 This proves what the source passed with the qualification environment; it does
 not claim compatibility with every future distribution update.
 
-The latest pinned media job must prove installation of the hash-pinned
-impersonation prerequisites before shared-destination qualification. The two
-earlier pins must retain an explicitly skipped record for that conditional
-step. Missing records, failed installation, a skipped latest-pin installation
-or an unexpected execution in the earlier pins are refused. Regression fixtures
-model the workflow condition independently of the verifier's obligation tables.
+Both permanent Fedora checks install the same reviewed wheel from
+`scripts/dev-tools/yt-dlp-requirements.txt` with pip hash checking.
+The shared-destination check must install all impersonation prerequisites, run
+the real GUI/CLI fixture and stage its evidence. Each step must succeed.
+To inspect a historical release, use its signed tag's checkout and its own
+source verifier. The historical run identities and job inventory belong to
+that tree. Run the current verifier for the current PR and promotion.
 
 An authorized maintainer can inspect a merged candidate without publishing:
 
@@ -1519,7 +1520,7 @@ Manual diagnostic dispatch runs do not replace PR evidence.
 | --- | --- | --- |
 | A | Event/checkout identity, version, syntax; formatting, ShellCheck, static and workflow contracts early in shell CI | Cheap rejection before costly work |
 | B | Three Fedora 45 x86_64 FULL runs (checkout, non-root checkout and Git-free source ZIP) | Once in each complementary environment on PR |
-| C | Git-free source, real-tool/pinned versions, FFmpeg generations, signal jitters, native package candidate qualification | Once per candidate tree; complete required gate before merge |
+| C | Git-free source, pinned real tools, Fedora FFmpeg compatibility, signal jitters, native package candidate qualification | Once per candidate tree; complete required gate before merge |
 | D | Tag/signer/main/version, final ZIP identity, release build/sign/install/upgrade, newly resolved distribution runtime, provenance, immutable assets and public download | At release, on final objects and current external inputs |
 
 The full source archive is qualified once on PR without `.git`. At release,
@@ -1535,14 +1536,10 @@ retention obligations for little wall-clock gain; it is not used here.
 The PR source proof does not contain a cryptographically bound fingerprint of
 every installed distribution package and library. Even an unchanged FFmpeg
 version string can hide a changed distribution revision. Therefore release
-retains `release-runtime`: one routing and aria2 behavior pass for each original
-pinned yt-dlp version (2026.6.9 and 2026.8.19) on freshly resolved Fedora
-dependencies. The aria2 fixture uses native yt-dlp fallbacks, so both versions
-remain necessary, with their existing internal cycles. FFmpeg progress and HLS
-duration run once in the latest matrix entry because those fixtures are
-independent of yt-dlp. Resolved tool and distribution package versions are
-logged. This job runs alongside builds and must succeed before final source
-verification and publication. It has no outer repeat wrapper or full suite.
+retains `release-runtime` for the pinned wheel against freshly resolved Fedora
+dependencies. It exercises direct routing, aria2, FFmpeg progress and HLS
+duration once. It runs alongside builds and gates final source verification.
+
 Removing this gate would require verified environment identity/reuse;
 installation and `--version` checks alone cannot establish real transfer and
 conversion compatibility.
@@ -1616,35 +1613,24 @@ identical signed RPM is then installed on Fedora 45 in `fresh` and
 `ffmpeg-free` scenarios through the authenticated RPM Fusion bootstrap.
 
 
-`.github/workflows/real-tools.yml` installs actual yt-dlp, aria2c, FFmpeg, and
-FFprobe on Fedora 45. Pull-request qualification retains the pinned yt-dlp
-`2026.6.9`, `2026.7.4`, and `2026.8.19` matrix for reproducibility. It generates
-tiny direct HTTP, AAC/M4A, Opus/WebM, combined-audio, HLS and DASH fixtures
-locally, serves them over loopback, proves the aria2c/native downloader boundary,
-exercises real
-FFmpeg progress, and checks HLS post-remux duration consistency without
-contacting a public media service. Routing runs once per pinned yt-dlp version.
-The HLS live argv-privacy regression also runs for each of these three pins:
-it observes the real child arguments with synthetic sentinels, checks engine
-refusal and preserves an actual non-live HLS control. A pass on one version
-does not stand in for the other matrix entries. These cases extend the existing
-real-tools and private-plan suites without adding canonical tasks or changing
-concurrency, stress repetitions or process-supervision requirements.
-HLS duration mocks yt-dlp and FFmpeg progress does not use it; those fixtures
-run once on the latest Fedora matrix entry with FFmpeg/FFprobe 9.0.2 verified.
-Before shared-destination qualification, that latest entry has a dedicated
-Python 3.15 / Fedora 45 prerequisite step. It installs curl-cffi 0.16.0,
-cffi 2.1.1, certifi 2026.7.22 and pycparser 3.0 into its disposable yt-dlp venv
-with exact wheel SHA-256 pins, `--require-hashes` and `--only-binary=:all:`.
-These versions come from the verified yt-dlp wheel's `pin-curl-cffi` metadata;
-the wheel hashes come from the corresponding public PyPI releases. The other
-matrix entries retain their existing environments. The static contract binds
-each version/hash, the Python target, installation flags and latest-only
-placement before the shared run, with discriminating source mutations.
-Fedora 45 runs the common fixtures with the RPM Fusion build of 9.0.2. Verified upstream builds of 6.1.1, 8.1.3 and 9.0.1 retain the generation-sensitive coverage on Fedora. Each job checks the exact
-version of both tools. The upstream builds enable libvpx and libopus so the
-foreign native WebM witness contains real VP9/Opus media. Missing encoders are
-qualification failures; that preservation witness is never skipped.
+The **Fedora 45 media compatibility (pinned yt-dlp)** check exercises direct
+HTTP, AAC/M4A, Opus/WebM, multistream, HLS and DASH transfers, native routing,
+argument privacy, duration, progress, cancellation and preservation using real
+media on loopback. It uses the RPM Fusion FFmpeg and FFprobe installed from
+the stable Fedora 45 and RPM Fusion Free repositories. The bootstrap
+synchronizes installed packages and checks binary ownership, reported version
+and DNF origin. Job initialization records the pulled image digest; the
+provisioning log records the RPM NEVRA and repository.
+
+The **Fedora 45 shared destination (pinned yt-dlp)** check runs real aria2
+behavior and the shared GUI/CLI fixture. Both checks and release runtime use
+the reviewed PyPI wheel. Their logs record its version and verified SHA-256.
+The shared check installs the wheel's exact `pin-curl-cffi` dependencies on
+Python 3.15 and validates the selected Deno. The application continues to
+authenticate its upstream standalone runtime. The HLS cancellation witness
+with the standalone executable remains a documented limitation reproduced on
+both A06 trees. A successful wheel qualification applies to the wheel.
+
 The controlled
 aria2 behavior suite repeats
 Range/no-Range/redirect/error three times, the silent-active quiescence
@@ -1652,7 +1638,7 @@ negative control ten times, and interrupted resume ten times. A separate weekly
 scheduled job resolves and logs the current stable yt-dlp
 version and runs the same qualification, including shared-destination GUI/CLI
 cycles, without changing PR pins. A manual `workflow_dispatch` also runs this
-job alongside the unchanged historical matrix, allowing a candidate commit to
+job alongside the pinned shared-destination job, allowing a candidate commit to
 be checked before merge. Such a diagnostic dispatch does not substitute for
 PR proof or scheduled-main evidence. It first selects the published stable version
 from `https://pypi.org/pypi/yt-dlp/json`, with an eight-MiB response bound and a
@@ -1663,12 +1649,9 @@ PyPI index instead of copying the earlier wheel's four dependency pins. Only
 wheels are accepted. Unavailable dependencies or an incompatible interpreter
 must fail; resolver backtracking cannot silently select an older yt-dlp.
 The version installed in the same venv must match the selected package version.
-The weekly/manual job pins Deno 2.9.8 and its official archive SHA-256;
-the historical matrix retains its validated Deno 2.9.4 pin. These independent
-pins require review when upstream compatibility changes; no runtime is selected
-or trusted automatically. The verified Deno baseline must satisfy that selected
-wheel's `deno` compatibility metadata; missing metadata or a newer minimum fails
-explicitly.
+The weekly/manual and pinned jobs use the reviewed Deno 2.9.8 archive and
+official SHA-256. The weekly job checks the dynamically resolved wheel's Deno
+compatibility metadata and refuses a newer minimum or missing constraint.
 Pip's bundled PEP 508 parser evaluates markers and version constraints in this
 disposable venv; it is not a new dependency of the local test suite. The weekly
 run records the PyPI source, observation time and selected package version in

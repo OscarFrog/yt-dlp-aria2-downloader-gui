@@ -1,0 +1,2 @@
+# Upstream wheel for Fedora PR and release qualification. Reviewed against PyPI provenance.
+yt-dlp==2026.11.23 --hash=sha256:e9188e0c559905f7ee05acc1ba0b6fb3f310e7565bf6dea5f62b5300e0775e35

@@ -32,15 +32,8 @@ WORKFLOWS = {
         "Fedora 45 RPM build-once", "Fedora 45 RPM (fresh)",
         "Fedora 45 RPM (ffmpeg-free)",
     },
-    "qualification.yml": {
-        "FFmpeg 6.1.1 / verified upstream source", "FFmpeg 9.0.2 / Fedora 45",
-        "FFmpeg 8.1.3 / verified upstream source", "FFmpeg 9.0.1 / verified upstream source",
-    },
-    "real-tools.yml": {
-        "Local media, pinned yt-dlp 2026.6.9",
-        "Local media, pinned yt-dlp 2026.7.4",
-        "Local media, pinned yt-dlp 2026.8.19",
-    },
+    "qualification.yml": {"Fedora 45 media compatibility (pinned yt-dlp)"},
+    "real-tools.yml": {"Fedora 45 shared destination (pinned yt-dlp)"},
     "stress.yml": {
         *(f"Mock process/cancellation stress shard {shard}/4" for shard in range(1, 5)),
         "Mock process/cancellation stress (20x deterministic jitter)",
@@ -74,22 +67,16 @@ REQUIRED_STEPS = {
         "Validate installed environment", "Remove and re-run exact RPM lifecycle",
         "Test previous immutable release -> current RPM upgrade",
     } for scenario in ("fresh", "ffmpeg-free")},
-    **{name: {f"Qualify FFmpeg {version} generation"} for name, version in (
-        ("FFmpeg 6.1.1 / verified upstream source", "6.1.1"),
-        ("FFmpeg 9.0.2 / Fedora 45", "9.0.2"),
-        ("FFmpeg 8.1.3 / verified upstream source", "8.1.3"),
-        ("FFmpeg 9.0.1 / verified upstream source", "9.0.1"),
-    )},
-    **{f"Local media, pinned yt-dlp {version}": {
-        "Run direct, audio, HLS and DASH boundary qualification",
-        "Run aria2 direct-transfer behavior qualification",
-        "Run real FFmpeg progress qualification", "Run HLS post-remux duration validation",
+    "Fedora 45 media compatibility (pinned yt-dlp)": {"Install pinned yt-dlp", "Install Fedora bootstrap tools and authenticated RPM Fusion",
+        "Qualify Fedora media and FFmpeg compatibility"},
+    "Fedora 45 shared destination (pinned yt-dlp)": {
+        "Install real engines", "Run aria2 direct-transfer behavior qualification",
         "Install verified Deno for shared-destination qualification",
         "Install pinned impersonation dependencies for shared qualification",
         "Run real shared-destination GUI and CLI qualification",
         "Validate and stage shared-destination evidence",
         "Retain shared-destination verdicts and monotonic events",
-    } for version in ("2026.6.9", "2026.7.4", "2026.8.19")},
+    },
     **{f"Mock process/cancellation stress shard {shard}/4": {
         "Repeat race-sensitive integration scenarios with bounded jitter",
     } for shard in range(1, 5)},
@@ -109,14 +96,6 @@ for fedora_job in WORKFLOWS["shell.yml"] | WORKFLOWS["qualification.yml"] | WORK
     REQUIRED_STEPS[fedora_job].add("Verify Fedora 45 userspace")
 ALLOWED_SKIPS = {
     ("Fedora 45 RPM (ffmpeg-free)", "Test previous immutable release -> current RPM upgrade"),
-    *((f"Local media, pinned yt-dlp {version}", step)
-      for version in ("2026.6.9", "2026.7.4")
-      for step in ("Run real FFmpeg progress qualification", "Run HLS post-remux duration validation",
-                   "Install verified Deno for shared-destination qualification",
-                   "Install pinned impersonation dependencies for shared qualification",
-                   "Run real shared-destination GUI and CLI qualification",
-                   "Validate and stage shared-destination evidence",
-                   "Retain shared-destination verdicts and monotonic events")),
 }
 
 
@@ -446,9 +425,7 @@ class Verifier:
         validate_metadata(run)
         jobs = self.pages(f"actions/runs/{run_id}/attempts/{run['run_attempt']}/jobs", "jobs")
         identity = IDENTITY_PREFIX + sha
-        # GitHub evaluates a job condition before expanding its matrix. A
-        # scheduled run exposes the literal matrix name once, as skipped.
-        pinned = "Local media, pinned yt-dlp ${{ matrix.yt_dlp_version }}"
+        pinned = "Fedora 45 shared destination (pinned yt-dlp)"
         names = [job["name"] for job in jobs]
         require(len(names) == 3 and set(names) == {identity, SCHEDULED_JOB, pinned},
                 "Scheduled qualification job inventory is incomplete or changed.")

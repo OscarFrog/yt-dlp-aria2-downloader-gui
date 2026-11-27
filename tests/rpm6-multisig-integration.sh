@@ -647,13 +647,14 @@ rpmkeys() {
 }
 dnf() {
     # Repository tool installation is outside the fixture's bootstrap transaction.
-    if [[ $1 == install && $2 == --assumeyes && ${*:3} =~ ^[[:alnum:]][[:alnum:].+[:space:]-]*$ ]]; then
+    if [[ ($1 == install || $1 == distro-sync) && $2 == --assumeyes &&
+          $3 != --setopt=localpkg_gpgcheck=True && " $* " == *' --repo=fedora --repo=updates '* ]]; then
         return 0
     fi
     printf 'dnf\n' >>"${events}"
-    [[ $# == 4 && $1 == install && $2 == --assumeyes &&
-       $3 == --setopt=localpkg_gpgcheck=True &&
-       $4 == "${bootstrap_dir}/rpmfusion-free-release-45.noarch.rpm" ]] || exit 89
+    [[ $# == 6 && $1 == install && $2 == --assumeyes &&
+       $3 == --setopt=localpkg_gpgcheck=True && $4 == --repo=fedora && $5 == --repo=updates &&
+       $6 == "${bootstrap_dir}/rpmfusion-free-release-45.noarch.rpm" ]] || exit 89
 }
 '''
 
@@ -674,7 +675,7 @@ def run(label, package, key=key_a, expected_nevra=nevra, implementation=body):
                         '--define', f'_keyring_lockpath {case / "system-keyring/.keyring.lock"}',
                         '--define', f'_rpmlock_path {case / "system-keyring/.rpm.lock"}',
                         '--import', str(key_b)], check=True, capture_output=True)
-        result = subprocess.run(['bash', '-c', prefix + implementation, 'bootstrap-test',
+        result = subprocess.run(['bash', '-c', prefix + implementation.removesuffix('main "$@"\n') + 'provision_media\n', 'bootstrap-test',
                                  str(case), fingerprint, expected_nevra],
                                 capture_output=True, text=True, timeout=20)
         events = (case / 'events').read_text().splitlines() if (case / 'events').exists() else []
