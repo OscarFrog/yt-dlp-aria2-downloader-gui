@@ -2436,13 +2436,7 @@ package_development_job_policy() {
         'found_current=false' \
         'sort -Vr -u' \
         'git merge-base --is-ancestor' \
-        '${immutable} != true' \
-        'gh release verify "${PREVIOUS_TAG}"' \
-        'gh release verify-asset' \
-        'gh attestation verify' \
-        '--source-digest "${PREVIOUS_COMMIT}"' \
-        '--source-ref "refs/tags/${PREVIOUS_TAG}"' \
-        'sha256sum --check PREVIOUS_SHA256SUMS'; do
+        'bash scripts/verify-previous-packages.sh "${PREVIOUS_TAG}" "${PREVIOUS_COMMIT}"'; do
         [[ ${job_block} == *"${required}"* ]] || return 65
     done
 }
@@ -2461,9 +2455,7 @@ assert_package_development_policy() {
     # shellcheck disable=SC2016 # Literal negative-control identity fragments.
     for required in \
         'git merge-base --is-ancestor' \
-        '${immutable} != true' \
-        '--source-digest "${PREVIOUS_COMMIT}"' \
-        '--source-ref "refs/tags/${PREVIOUS_TAG}"'; do
+        'bash scripts/verify-previous-packages.sh "${PREVIOUS_TAG}" "${PREVIOUS_COMMIT}"'; do
         mutated=${job_block/"${required}"/removed-evidence-guard}
         mutation_must_change "${job_block}" "${mutated}" 'package upgrade evidence guard removal'
         # shellcheck disable=SC2310
@@ -5215,20 +5207,10 @@ test_static_upgrade_and_supply_chain_contracts() {
         'attestations: read' \
         'previous release attestation read permission'
 
-    # shellcheck disable=SC2016
-    # Literal workflow source: PREVIOUS_TAG must not expand in this test.
+    # shellcheck disable=SC2016 # Literal inputs of the read-only authentication step.
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        'gh release verify "${PREVIOUS_TAG}"' \
-        'previous immutable release identity verification'
-
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        'gh release verify-asset' \
-        'previous and current release assets use immutable release verification'
-
-    # shellcheck disable=SC2016 # Literal GitHub-attestation policy source.
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
-        '--source-digest "${PREVIOUS_COMMIT}"' \
-        'previous package provenance is bound to its exact source commit'
+        'bash scripts/verify-previous-packages.sh "${PREVIOUS_TAG}" "${PREVIOUS_COMMIT}"' \
+        'release upgrade evidence uses the selected tag and commit'
 
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/release.yml" \
         'previous-release-packages' \
@@ -5308,30 +5290,6 @@ test_static_upgrade_and_supply_chain_contracts() {
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
         'sort -Vr -u' \
         'package CI resolves the previous semantic version dynamically'
-
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
-        '--json isImmutable' \
-        'package CI requires the previous release to be immutable'
-
-    # shellcheck disable=SC2016
-    # Literal workflow source: PREVIOUS_TAG must not expand in this test.
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
-        'gh release verify "${PREVIOUS_TAG}"' \
-        'package CI verifies previous immutable release identity'
-
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
-        'gh release verify-asset' \
-        'package CI verifies previous release assets'
-
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
-        'gh attestation verify' \
-        'package CI verifies previous release provenance'
-
-    # shellcheck disable=SC2016
-    # Literal workflow source: PREVIOUS_COMMIT must not expand in this test.
-    assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \
-        '--source-digest "${PREVIOUS_COMMIT}"' \
-        'package CI binds provenance to the exact previous source commit'
 
     # shellcheck disable=SC2016 # Literal GitHub Actions expression.
     assert_file_contains "${SCRIPT_DIR}/.github/workflows/packages.yml" \

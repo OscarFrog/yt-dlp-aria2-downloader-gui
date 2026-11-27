@@ -1184,7 +1184,11 @@ builders wrap that tree:
   enumeration or explicitly requested single-home operations;
 
 The RPM jobs test install/remove/reinstall and an upgrade from the
-previous immutable release. Package assembly intentionally installs current
+previous immutable release. Each workflow selects its own predecessor, then
+its read-only job runs `scripts/verify-previous-packages.sh` to bind the RPM
+and checksum manifest to that release, source commit and signing workflow.
+The receiving upgrade job checks the transferred digest and RPM signature.
+Package assembly intentionally installs current
 user documentation but not contributor-only policy, tests, skills, or this
 architecture document. The source ZIP contains the tracked source tree.
 
