@@ -749,15 +749,37 @@ fn members(label: &str) -> Result<BTreeSet<u32>> {
 mod tests {
     use super::*;
     use crate::linux::{ENOENT, ESRCH};
+    use std::io::Read;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
     use std::process::{Child, Command, Stdio};
+    use std::time::Duration;
 
     fn fixture() -> (Dir, Group, Child) {
-        let child = Command::new("/usr/bin/sh")
+        let (mut ready, announce) = UnixStream::pair().unwrap();
+        ready
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut child = Command::new("/usr/bin/sh")
             .env_clear()
-            .args(["-c", "read -r gate; exit 37", "https://fixture.invalid/"])
+            .args([
+                "-c",
+                "printf R || exit 1; read -r gate; exit 37",
+                "https://fixture.invalid/",
+            ])
             .stdin(Stdio::piped())
+            .stdout(OwnedFd::from(announce))
             .spawn()
             .unwrap();
+        // Sample argv only after the shell has entered its script. Stdin keeps
+        // that generation alive until the test explicitly releases it.
+        let mut ack = [0];
+        let received = ready.read_exact(&mut ack);
+        if received.is_err() || ack != *b"R" {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("fixture startup acknowledgement failed: {received:?}, {ack:?}");
+        }
         let root = Dir::root().unwrap();
         let row = stat(&root, child.id(), None).unwrap();
         let group = Group::bind(&root, row, "registered").unwrap();
