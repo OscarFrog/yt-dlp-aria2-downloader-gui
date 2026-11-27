@@ -93,6 +93,9 @@ fi
 %dir %{_licensedir}/%{name}
 %license %{_licensedir}/%{name}/LICENSE
 %changelog
+* Fri Nov 27 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.4.7-1
+- Fix undetermined audio language validation and use provider-neutral diagnostics.
+
 * Wed Nov 25 2026 OscarFrog <151366285+OscarFrog@users.noreply.github.com> - 2.4.6-1
 - Preserve Unicode in Zenity dialogs and make engine protocols independent of the caller locale.
 
