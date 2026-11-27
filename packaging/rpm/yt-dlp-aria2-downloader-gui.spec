@@ -78,6 +78,7 @@ fi
 %{_libexecdir}/yt-dlp-aria2-downloader/private-art-tracks.py
 %{_libexecdir}/yt-dlp-aria2-downloader/private-art-media.py
 %{_libexecdir}/yt-dlp-aria2-downloader/private-art-subtitle.py
+%{_libexecdir}/yt-dlp-aria2-downloader/private-process-signals.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/private-process-supervisor.py
 %{_libexecdir}/yt-dlp-aria2-downloader/runtime-manager.sh
 %{_libexecdir}/yt-dlp-aria2-downloader/package-user-cleanup.sh

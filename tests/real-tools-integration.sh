@@ -1230,7 +1230,8 @@ test_real_media_validation_mutations() {
     # intended mutated validation logic instead of failing dependency discovery.
     cp -- "${PROJECT_DIR}/private-aria2-plan.py" "${TEST_ROOT}/private-aria2-plan.py"
     chmod 644 -- "${TEST_ROOT}/private-aria2-plan.py"
-    cp -- "${PROJECT_DIR}/private-process-supervisor.py" "${TEST_ROOT}/private-process-supervisor.py"
+    cp -- "${PROJECT_DIR}/private-process-supervisor.py" \
+        "${PROJECT_DIR}/private-process-signals.sh" "${TEST_ROOT}/"
 
     # VAL-001 regression: create a clean physical truncation that still exposes
     # both expected streams and retains fewer content-video packets. A temporary
