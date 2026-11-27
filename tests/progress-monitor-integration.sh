@@ -702,7 +702,7 @@ test_monitor_native_transfer_progress() {
     start_scenario hls-bootstrap-record video
     printf '%s\n' \
         'YTDLP_PLAN|media|96-21|96-21|' \
-        'YTDLP_PROGRESS_V2|media|96-21|downloading|1024|0|1024|0|473|100.0%|2KiB/s|Unknown' \
+        'YTDLP_PROGRESS_V2|media|96-21|downloading|1024|0|1024.0|0|473|100.0%|2KiB/s|Unknown' \
         >>"${LOG_FILE}"
     wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 0%' \
         'HLS bootstrap record is ignored'
@@ -714,6 +714,11 @@ test_monitor_native_transfer_progress() {
         >>"${LOG_FILE}"
     wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 2%' \
         'HLS media fragments advance normally after bootstrap'
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|media|96-21|downloading|23528240|0|2000000000.5|11|473|1.2%||' \
+        >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading the media - 1%' 'revised estimate updates the item'
+    assert_percentages_never_decrease "${CAPTURE_FILE}" 'revised estimate preserves the overall gauge'
     finish_success '/tmp/hls-bootstrap.mkv'
 
     # An unknown-size transfer may animate within a narrow range, but every
@@ -984,6 +989,38 @@ test_monitor_composite_and_postprocess_progress() {
 
 # A stopped fixture worker makes the production monitor drain the complete
 # record before its last render. Compare whole lines, including padding.
+test_monitor_byte_estimates() {
+    local dir="${TEST_ROOT}/byte-estimates" worker downloaded total estimate expected
+    mkdir -- "${dir}"
+    true &
+    worker=$!
+    wait "${worker}"
+    while read -r downloaded total estimate expected; do
+        printf 'YTDLP_PROGRESS_V2|m|v|downloading|%s|%s|%s|2|10|15%%||\n' \
+            "${downloaded}" "${total}" "${estimate}" >"${dir}/log"
+        timeout 4s bash "${MONITOR}" "${dir}/log" "${worker}" "${dir}/absent" audio "${dir}" >"${dir}/out"
+        assert_file_has_line "${dir}/out" "# Downloading the audio track - ${expected}%" \
+            "estimated bytes: ${downloaded}/${total}/${estimate}"
+        assert_file_has_no_line "${dir}/out" '100' 'byte estimate cannot confirm publication'
+    done <<'ESTIMATES'
+600 0 1000 60
+600 0 1000.0 60
+600 0 1000.875 60
+600 0 0 20
+600 1200 1000.0 50
+600 1000.0 1200.0 50
+600.0 1000 0 0
+600 0 0.9999999999999999 20
+600 0 1000.0x 20
+600 0 1000,0 20
+600 0 1e+25 20
+600 0 10000000000000000.0 20
+4500000000000000 0 9000000000000000.0 50
+4500000000000000 0 9000000000000000.1 20
+4500000000000000 0 9000000000000001 20
+ESTIMATES
+}
+
 test_monitor_display_fields() {
     local dir="${TEST_ROOT}/display-fields" worker record expected
     local speed eta suffix oversized native aria
@@ -1230,6 +1267,7 @@ main() {
     test_monitor_composite_and_postprocess_progress
     test_monitor_failure_and_input_hardening
     test_monitor_display_fields
+    test_monitor_byte_estimates
     test_monitor_multistream_unicode_plan
     test_monitor_late_plans
     printf '%s\n' 'Progress-monitor integration tests passed.'
