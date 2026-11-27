@@ -90,7 +90,10 @@ if args[:2] == ["release", "view"]:
     fedora = 44 if state["scenario"] == "wrong-release-rpm" else 45
     arch = "noarch" if state["scenario"] == "wrong-release-arch" else "x86_64"
     asset = {"name": f"yt-dlp-aria2-downloader-gui-100.0.0-1.fc{fedora}.{arch}.rpm", "size": 1024}
-    emit({"isImmutable": True, "assets": [asset]})
+    assets = [asset]
+    if state["scenario"] != "missing-release-zip":
+        assets.append({"name": "yt-dlp-aria2-downloader-gui-100.0.0.zip", "size": 1024})
+    emit({"isImmutable": True, "assets": assets})
     sys.exit(0)
 path = next(arg for arg in args if arg.startswith("repos/"))
 route = path.split("/", 3)[3]
@@ -420,10 +423,17 @@ class ReleaseDocsReplay(unittest.TestCase):
                 self.assertIn("immutable release does not contain the expected Fedora RPM", result.stderr)
                 self.assertEqual(state["writes"], [])
 
+    def test_release_missing_the_linked_zip_is_rejected_before_any_write(self):
+        self.prepare(scenario="missing-release-zip")
+        result, state = self.run_publisher()
+        self.assertEqual(result.returncode, 65, result.stderr)
+        self.assertIn("immutable release does not contain the expected source ZIP", result.stderr)
+        self.assertEqual(state["writes"], [])
+
     def test_rehashed_french_fedora_link_cannot_substitute_a_different_build(self):
         self.prepare()
         asset = f"yt-dlp-aria2-downloader-gui-{RELEASE_VERSION}-1.fc45.x86_64.rpm"
-        url = f"https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/{asset}"
+        url = f"https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/download/v{RELEASE_VERSION}/{asset}"
         for name in ("README.md", "README.fr.md"):
             data = (self.handoff / name).read_text(encoding="utf-8")
             self.assertEqual(data.splitlines().count(f"| Fedora 45 | [RPM]({url}) |"), 1)
@@ -608,6 +618,28 @@ class ReleaseDocsReplay(unittest.TestCase):
                       ("release-docs.patch", "release-docs-metadata.json"))
         rejected = self.run_verifier(context, "tampered")
         self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
+
+    def test_successive_publications_keep_frozen_download_links_resolvable(self):
+        prefix = "https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/"
+        archives = {}
+        assets = {}
+        for version in (RELEASE_VERSION, "100.0.1"):
+            self.command("update-published-version.py", version, "--root", self.base)
+            assets["v" + version] = {
+                f"yt-dlp-aria2-downloader-gui-{version}-1.fc45.x86_64.rpm",
+                f"yt-dlp-aria2-downloader-gui-{version}.zip",
+            }
+            for name in ("README.md", "README.fr.md"):
+                archives[version, name] = (self.base / name).read_text()
+            before = {name: (self.base / name).read_bytes() for name in PATHS}
+            self.command("update-published-version.py", version, "--root", self.base)
+            self.assertEqual(before, {name: (self.base / name).read_bytes() for name in PATHS})
+        for (version, name), frozen in archives.items():
+            with self.subTest(version=version, name=name):
+                self.assertIn(prefix + "latest)", frozen)
+                links = re.findall(r"\[(?:RPM|ZIP)\]\(([^)]+)\)", frozen)
+                self.assertCountEqual(links, [prefix + f"download/v{version}/{asset}"
+                                              for asset in assets["v" + version]])
 
     def test_published_update_accepts_older_release_but_refuses_future_or_downgrade(self):
         self.command("update-published-version.py", RELEASE_VERSION, "--root", self.base)

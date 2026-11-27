@@ -145,10 +145,10 @@ def require(condition, message):
 launcher = Path(sys.argv[1]).absolute()
 payload = launcher.resolve(strict=True).parent
 helpers = ('private-process-supervisor.py', 'private-aria2-plan.py')
-for name in (*helpers, 'download-video.sh', 'runtime-manager.sh'):
+for name in (*helpers, 'private-process-signals.sh', 'download-video.sh', 'runtime-manager.sh'):
     info = (payload / name).lstat()
     require(stat.S_ISREG(info.st_mode), f'unsafe installed file: {name}')
-    expected = 0o644 if name in helpers else 0o755
+    expected = 0o755 if name in ('download-video.sh', 'runtime-manager.sh') else 0o644
     require(stat.S_IMODE(info.st_mode) == expected, f'wrong installed mode: {name}')
     print(f'Payload {name}: {hashlib.sha256((payload / name).read_bytes()).hexdigest()}', flush=True)
 

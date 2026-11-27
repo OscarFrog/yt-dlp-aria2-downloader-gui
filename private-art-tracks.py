@@ -378,6 +378,25 @@ def quarantine_diagnostic(entries: list) -> str:
             "details retained in private session state.")
 
 
+def subtitle_playlist_lines(manifest: str) -> list[str]:
+    """Recognize subtitle playlist lines at RFC 8216 LF/CRLF boundaries."""
+    text = manifest.replace("\r\n", "\n")
+    if re.search(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]", text):
+        raise ArteError("Subtitle playlist contains an invalid control character")
+    lines = text.split("\n")
+    if lines[0] != "#EXTM3U" or "#EXT-X-ENDLIST" not in lines:
+        raise ArteError("Subtitle playlist requires an HLS header and a finite endpoint")
+    for line in lines:
+        if line.startswith("#EXT"):
+            name, separator, _ = line.partition(":")
+            if (not re.fullmatch(r"#EXT[A-Za-z0-9-]*", name) or
+                    (separator and name in ("#EXTM3U", "#EXT-X-ENDLIST", "#EXT-X-DISCONTINUITY"))):
+                raise ArteError("Subtitle playlist contains a malformed directive")
+        elif not line.startswith("#") and line != line.strip():
+            raise ArteError("Subtitle playlist contains whitespace around a segment URI")
+    return lines
+
+
 def subtitle_content(source: dict, fetch) -> str:
     url = source_url(source["url"])
     request_headers = headers(source.get("http_headers"))
@@ -387,10 +406,10 @@ def subtitle_content(source: dict, fetch) -> str:
         if not payload.lstrip(b"\xef\xbb\xbf").startswith(b"WEBVTT"):
             raise ArteError("Subtitle alias identity is not a WebVTT resource")
         return hashlib.sha256(payload).hexdigest()
-    manifest = hls_text(payload)
-    if "#EXT-X-ENDLIST" not in manifest or "#EXT-X-KEY" in manifest:
+    lines = subtitle_playlist_lines(hls_text(payload))
+    if any(line.partition(":")[0] == "#EXT-X-KEY" for line in lines):
         raise ArteError("Subtitle alias requires a finite unencrypted rendition")
-    segments = [line.strip() for line in manifest.splitlines() if line.strip() and not line.startswith("#")]
+    segments = [line for line in lines if line and not line.startswith("#")]
     if not 1 <= len(segments) <= 128:
         raise ArteError("Subtitle alias has an unsupported segment count")
     digest = hashlib.sha256()

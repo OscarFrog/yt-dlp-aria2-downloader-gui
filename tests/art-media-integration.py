@@ -695,6 +695,7 @@ def create_hls_fixture(web: Path, base: str, *, duration: int = 4, gop: int = 10
             encoding="utf-8")
         (web / f"{stem}.m3u8").write_text(
             "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n"
+            "# Editorial note about #EXT-X-KEY\n"
             f"#EXTINF:4.0,\n{stem}.vtt\n#EXT-X-ENDLIST\n", encoding="utf-8")
         characteristics = "public.accessibility.describes-music-and-sound" if "MAL" in stem else "public.accessibility.transcribes-spoken-dialog"
         if stem in ("fr", "ja-alias"):
