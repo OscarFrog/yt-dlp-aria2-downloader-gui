@@ -51,8 +51,8 @@ Fedora 45 x86_64 est la seule plateforme officiellement prise en charge. Seul un
 
 | Système | Application à télécharger |
 | --- | --- |
-| Fedora 45 | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.8-1.fc45.x86_64.rpm) |
-| Sources portables | [ZIP](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.8.zip) |
+| Fedora 45 | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/download/v2.4.8/yt-dlp-aria2-downloader-gui-2.4.8-1.fc45.x86_64.rpm) |
+| Sources portables | [ZIP](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/download/v2.4.8/yt-dlp-aria2-downloader-gui-2.4.8.zip) |
 
 ### Fedora 45
 

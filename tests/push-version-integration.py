@@ -362,7 +362,7 @@ class OfflineCoherenceTests(unittest.TestCase):
                     path = self.root / name
                     valid = path.read_text(encoding="utf-8")
                     asset = f"yt-dlp-aria2-downloader-gui-{published}-1.fc{fedora}.{arch}.rpm"
-                    url = f"https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/{asset}"
+                    url = f"https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/download/v{published}/{asset}"
                     row = f"| Fedora {fedora} | [RPM]({url}) |"
                     self.assertEqual(valid.splitlines().count(row), 1)
                     self.assertEqual(valid.count(asset), 1)
@@ -370,7 +370,7 @@ class OfflineCoherenceTests(unittest.TestCase):
                         (f"-1.fc{fedora}.{arch}.rpm", f"-1.fc{wrong}.{arch}.rpm"),
                         (f".{arch}.rpm", f".{wrong_arch}.rpm"),
                         (f"| Fedora {fedora} | [RPM]", f"| Fedora {wrong} | [RPM]"),
-                        (url, url.replace("/latest/download/", "/download/v0/")),
+                        (url, url.replace(f"/download/v{published}/", "/download/v0/")),
                     ):
                         self.assertIn(before, valid)
                         path.write_text(valid.replace(before, after, 1), encoding="utf-8")

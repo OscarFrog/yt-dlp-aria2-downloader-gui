@@ -404,6 +404,8 @@ sufficient. Unavailable capabilities cause status 69. Failure after admission
 never grants cleanup permission. A zombie thread leader remains active while
 any sibling thread can still use resources.
 
+The engine and GUI load `private-process-signals.sh` beside the physical entry point. It defines the identity-bound signal and escalation functions. Each caller owns its traps, grace periods and cleanup decisions.
+
 Timed runtime and FFprobe commands use `private-process-supervisor.py`. It
 remains in its caller's outer SID while its direct child creates a private SID
 before restoring signal dispositions and executing the command. The helper pins
@@ -1010,7 +1012,10 @@ the compatibility contract, not an implied version negotiation.
 
 Byte and fragment counters and microseconds are unsigned decimal strings with
 1–16 digits, at most `9000000000000000`; invalid/missing/out-of-range values
-become zero. Zero totals mean unknown size, not completed transfer. Percent text
+become zero. Only the V2 estimated byte total also accepts a decimal point and
+1–17 fractional digits. Drop sub-byte precision after checking the full value
+against the same upper bound. The exact byte total always takes precedence.
+Zero totals mean unknown size, not completed transfer. Percent text
 permits surrounding whitespace, a trailing `%`, one to three integer digits,
 and up to six fractional digits; the integer part is displayed, capped at 100,
 invalid input becomes unknown (`-1`). Format identifiers use at most 128

@@ -598,7 +598,7 @@ handle_v2_progress() {
     local key
     local downloaded
     local total
-    local estimate
+    local estimate estimate_fraction=''
     local fragment_index
     local fragment_count
     local percent
@@ -614,7 +614,16 @@ handle_v2_progress() {
 
     sanitize_integer downloaded "${downloaded_text}"
     sanitize_integer total "${total_text}"
+    # yt-dlp prints estimated byte counts as integers or decimal floats.
+    # Discard sub-byte precision before arithmetic, retaining the domain bound.
+    if [[ ${estimate_text} =~ ^([0-9]{1,16})[.]([0-9]{1,17})$ ]]; then
+        estimate_text=${BASH_REMATCH[1]}
+        estimate_fraction=${BASH_REMATCH[2]}
+    fi
     sanitize_integer estimate "${estimate_text}"
+    if ((estimate == MAX_SAFE_COUNTER)) && [[ ${estimate_fraction} == *[1-9]* ]]; then
+        estimate=0
+    fi
     sanitize_integer fragment_index "${fragment_index_text}"
     sanitize_integer fragment_count "${fragment_count_text}"
     sanitize_percent percent "${percent_text}"
