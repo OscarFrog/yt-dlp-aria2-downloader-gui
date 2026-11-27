@@ -105,10 +105,11 @@ saturating_add() {
 }
 
 sanitize_percent() {
+    local percent_output=$1
     local value
     local integer_part
 
-    value=${1:-}
+    value=${2:-}
     value=${value#"${value%%[![:space:]]*}"}
     value=${value%"${value##*[![:space:]]}"}
     value=${value%%%}
@@ -120,9 +121,9 @@ sanitize_percent() {
         if ((value > 100)); then
             value=100
         fi
-        printf '%d' "${value}"
+        printf -v "${percent_output}" '%d' "${value}"
     else
-        printf '%d' '-1'
+        printf -v "${percent_output}" '%d' '-1'
     fi
 }
 
@@ -446,6 +447,7 @@ resolve_aria_key() {
 }
 
 calculate_download_percent() {
+    local percent_output=$1
     local key
     local item_count=${planned_items}
     local first_percent=0
@@ -460,7 +462,7 @@ calculate_download_percent() {
         item_count=${seen_items}
     fi
     if ((item_count <= 0)); then
-        printf '%d' 0
+        printf -v "${percent_output}" '%d' 0
         return 0
     fi
 
@@ -511,14 +513,14 @@ calculate_download_percent() {
     if ((value > 100)); then
         value=100
     fi
-    printf '%d' "${value}"
+    printf -v "${percent_output}" '%d' "${value}"
 }
 
 update_stable_download_display() {
     local global_percent
     local candidate
 
-    global_percent=$(calculate_download_percent)
+    calculate_download_percent global_percent
     candidate=$((DOWNLOAD_START + global_percent * (DOWNLOAD_END - DOWNLOAD_START) / 100))
     if ((candidate > DOWNLOAD_END)); then
         candidate=${DOWNLOAD_END}
@@ -567,7 +569,7 @@ format_download_message() {
     if ((${#eta} <= 24)) && [[ -n ${eta} && ${eta} =~ ${eta_pattern} ]]; then
         text+=" - ${eta} remaining"
     fi
-    printf '%s' "${text}"
+    message=${text}
 }
 
 handle_plan() {
@@ -615,7 +617,7 @@ handle_v2_progress() {
     sanitize_integer estimate "${estimate_text}"
     sanitize_integer fragment_index "${fragment_index_text}"
     sanitize_integer fragment_count "${fragment_count_text}"
-    percent=$(sanitize_percent "${percent_text}")
+    sanitize_percent percent "${percent_text}"
 
     if ((fragment_count > 1 && fragment_index == 0)) \
         && [[ ${status} != finished ]]; then
@@ -654,7 +656,7 @@ handle_v2_progress() {
     fi
 
     update_stable_download_display
-    message=$(format_download_message "${key}" native "${percent}" "${speed}" "${eta}")
+    format_download_message "${key}" native "${percent}" "${speed}" "${eta}"
 }
 
 handle_legacy_progress() {
@@ -674,12 +676,12 @@ handle_legacy_progress() {
     key=${RESOLVED_KEY}
     [[ -n ${key} ]] || return 0
     register_item "${key}"
-    percent=$(sanitize_percent "${percent_text}")
+    sanitize_percent percent "${percent_text}"
     if ((percent >= 0 && percent > ${ITEM_PERCENT[${key}]:-0})); then
         ITEM_PERCENT[${key}]=${percent}
     fi
     update_stable_download_display
-    message=$(format_download_message "${key}" native "${percent}" "${speed}" "${eta}")
+    format_download_message "${key}" native "${percent}" "${speed}" "${eta}"
 }
 
 handle_aria_plan() {
@@ -770,7 +772,7 @@ handle_aria_progress() {
     fi
 
     update_stable_download_display
-    message=$(format_download_message "${key}" aria2 "${percent}" "${speed}" "${eta}")
+    format_download_message "${key}" aria2 "${percent}" "${speed}" "${eta}"
 }
 
 handle_ffmpeg_duration() {
