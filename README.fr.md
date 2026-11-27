@@ -14,7 +14,7 @@ le dossier de destination, puis suivez le téléchargement et le traitement.
 - **Au quotidien :** préférences mémorisées, annulation et téléchargements indépendants simultanés.
 
 La version de développement actuelle est la **2.4.7**.
-La dernière release de paquets publiée est la **2.4.6**.
+La dernière release de paquets publiée est la **2.4.7**.
 
 ## Sommaire
 
@@ -46,13 +46,13 @@ Le journal illustre une erreur d'espace disque simulée.
 ## Installation recommandée
 
 Ouvrez la [dernière release GitHub](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest).
-Les noms ci-dessous correspondent à la release v2.4.6 actuellement publiée.
+Les noms ci-dessous correspondent à la release v2.4.7 actuellement publiée.
 Fedora 45 x86_64 est la seule plateforme officiellement prise en charge. Seul un RPM portant la mention `.fc45.x86_64` convient à ce système. Si le RPM publié ci-dessous cible une version antérieure de Fedora, utilisez ce dépôt source sous Fedora 45 en attendant la publication du RPM Fedora 45.
 
 | Système | Application à télécharger |
 | --- | --- |
-| Fedora 45 | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.6-1.fc45.x86_64.rpm) |
-| Sources portables | [ZIP](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.6.zip) |
+| Fedora 45 | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.7-1.fc45.x86_64.rpm) |
+| Sources portables | [ZIP](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/yt-dlp-aria2-downloader-gui-2.4.7.zip) |
 
 ### Fedora 45
 
@@ -82,14 +82,14 @@ depuis le dossier source avec `./install-gui.sh uninstall`.
 Installez d'abord les [prérequis système](#prérequis). Téléchargez :
 
 ```text
-yt-dlp-aria2-downloader-gui-2.4.6.zip
+yt-dlp-aria2-downloader-gui-2.4.7.zip
 SHA256SUMS
 ```
 
 ```bash
 sha256sum --ignore-missing --check SHA256SUMS
-unzip yt-dlp-aria2-downloader-gui-2.4.6.zip
-cd yt-dlp-aria2-downloader-gui-2.4.6
+unzip yt-dlp-aria2-downloader-gui-2.4.7.zip
+cd yt-dlp-aria2-downloader-gui-2.4.7
 chmod +x download-video.sh download-video-gui.sh runtime-manager.sh install-gui.sh
 chmod +x test-static.sh tests/*.sh
 ./install-gui.sh install
@@ -142,8 +142,8 @@ Remplacez `ARTEFACT` par le nom du fichier téléchargé :
 
 ```bash
 gh attestation verify ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify v2.4.6 -R OscarFrog/yt-dlp-aria2-downloader-gui
-gh release verify-asset v2.4.6 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify v2.4.7 -R OscarFrog/yt-dlp-aria2-downloader-gui
+gh release verify-asset v2.4.7 ./ARTEFACT -R OscarFrog/yt-dlp-aria2-downloader-gui
 ```
 
 Les empreintes contrôlent l'intégrité des fichiers ; ces commandes vérifient
