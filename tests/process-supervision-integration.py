@@ -2856,17 +2856,19 @@ printf '%s\n' "$status"
             bundle.mkdir()
             entry = bundle / filename
             shutil.copy2(PROJECT / filename, entry)
-            if omit:
-                source = entry.read_text()
-                source, count = re.subn(r'^    source "[^"]+/private-process-signals[.]sh" [|][|] exit 66$',
-                                        '    :', source, flags=re.M)
-                self.assertEqual(count, 1)
-                entry.write_text(source)
+            probe = '\n    declare -f signal_owned_process escalate_owned_process || exit 43\n    exit 42'
+            source, count = re.subn(r'^    source "[^"]+/private-process-signals[.]sh" [|][|] exit 66$',
+                                    lambda match: ('' if omit else match[0]) + probe, entry.read_text(), flags=re.M)
+            self.assertEqual(count, 1)
+            entry.write_text(source)
             launcher = root / 'launcher'
             launcher.symlink_to(entry)
             library = PROJECT / 'private-process-signals.sh'
-            (bundle / library.name).write_text(
-                library.read_text() + '\ndeclare -f signal_owned_process escalate_owned_process || exit 1\nexit 42\n')
+            shutil.copy2(library, bundle / library.name)
+            for command in ('aria2c', 'ffmpeg', 'ffprobe'):
+                stub = root / command
+                stub.write_text('#!/bin/sh\n: > "$HOME/media-command-invoked"\nexit 1\n')
+                stub.chmod(0o700)
             (root / 'zenity').symlink_to('/usr/bin/true')
             request = root / 'request'
             request.write_text('https://fixture.invalid/media\n')
@@ -2875,8 +2877,10 @@ printf '%s\n' "$status"
             result = subprocess.run([launcher, *args], cwd=root, stdin=subprocess.DEVNULL,
                                     env=dict(PATH=str(root) + os.pathsep + os.defpath, HOME=str(root),
                                              LC_ALL='C.UTF-8'), capture_output=True, text=True, timeout=10)
+            self.assertFalse((root / 'media-command-invoked').exists(), 'A presence-only media command was invoked')
             if omit:
-                self.assertNotEqual(result.returncode, 42)
+                self.assertEqual(result.returncode, 43, result.stderr)
+                self.assertNotIn('PY_SIGNAL_OWNED', result.stdout)
                 self.assertNotIn('PY_ESCALATE_OWNED', result.stdout)
             else:
                 self.assertEqual(result.returncode, 42, result.stderr)
