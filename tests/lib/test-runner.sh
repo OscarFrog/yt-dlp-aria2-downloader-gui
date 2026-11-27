@@ -566,9 +566,9 @@ test_runner_wait_any() {
                 return "${status}"
             fi
         done
-        # Callers collect child failures with ||, disabling errexit here. Bash
-        # 4.4 does not relay terminal INT from a foreground poll to its INT trap.
-        # Preserve that poll's 130 explicitly instead of starting another poll.
+        # Callers collect child failures with ||, disabling errexit here. If
+        # the shell leaves its INT trap undispatched, preserve the interrupted
+        # poll's 130 explicitly instead of starting another poll.
         if sleep 0.01; then
             :
         else

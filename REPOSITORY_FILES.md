@@ -173,11 +173,3 @@ The first column contains every source path included in this inventory, includin
 ## Historical and compatibility files
 
 `CHANGELOG.md` is intentionally historical and is installed with the packages. Package upgrade tests, runtime preservation helpers, RPM cleanup, and RPM v4/v6 qualification remain active compatibility or security mechanisms. Legacy launcher paths and old runtime fixtures are retained only where they represent data created by supported previous installations or named compatibility boundaries. No tracked file is currently proven redundant or safe to remove.
-
-## Inventory status
-
-- Tracked and new source files included: **142**.
-- Inventory entries: **142**.
-- Files retained: **142**.
-- Historical files: **1** (`CHANGELOG.md`).
-These counts describe inventory coverage, not a defect-free audit verdict. All descriptions are in English; machine-readable filenames, command names, SPDX identifiers, package metadata and protocol tokens retain their required spelling.
