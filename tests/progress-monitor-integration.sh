@@ -13,7 +13,7 @@ readonly PROJECT_DIR
 # shellcheck disable=SC1090
 source "${PROJECT_DIR}/tests/lib/assert.sh"
 
-for required_command in bash grep head mkdir mktemp rm sed sleep sort tail timeout tr wc; do
+for required_command in bash cmp grep head mkdir mkfifo mktemp rm sed sleep sort tail timeout tr wc; do
     require_test_command "${required_command}"
 done
 
@@ -982,6 +982,54 @@ test_monitor_composite_and_postprocess_progress() {
     finish_success '/tmp/late.mkv'
 }
 
+# A stopped fixture worker makes the production monitor drain the complete
+# record before its last render. Compare whole lines, including padding.
+test_monitor_display_fields() {
+    local dir="${TEST_ROOT}/display-fields" worker record expected
+    local speed eta suffix oversized native aria
+    native='# Downloading the audio track - 25%'
+    aria="${native} (aria2c)"
+    mkdir -- "${dir}"
+    true &
+    worker=$!
+    wait "${worker}"
+    printf -v oversized '%080d' 1
+    while IFS= read -r record && IFS= read -r expected; do
+        printf '%s\n' "${record}" >"${dir}/log"
+        timeout 4s bash "${MONITOR}" "${dir}/log" "${worker}" "${dir}/result" audio "${dir}" \
+            >"${dir}/out" 2>"${dir}/err"
+        printf '26\n%s\n26\n# Download ended before the final file was confirmed.\n' \
+            "${expected}" >"${dir}/expected"
+        cmp -- "${dir}/expected" "${dir}/out" || fail 'unexpected public progress fields'
+        [[ ! -s ${dir}/err ]] || fail 'a rejected progress field generated a diagnostic'
+    done < <(
+        for speed in '     0.00B/s' '1KiB/s' '21.83MiB/s' '0GiB/s' '1.25TiB/s'; do
+            printf 'YTDLP_PROGRESS|downloading|25%%|%s|00:00\n%s - %s - 00:00 remaining\n' \
+                "${speed}" "${native}" "${speed}"
+        done
+        for eta in '00:00' '00:59' '99:59:59' '   01:06'; do
+            printf 'YTDLP_PROGRESS_V2|m|v|downloading|25|100|0|0|0|25%%|0B/s|%s\n%s - 0B/s - %s remaining\n' \
+                "${eta}" "${native}" "${eta}"
+        done
+        for eta in 0s 3m 1m9s 2h 1h2s 596523h14m7s; do
+            printf '[#abc 1B/4B(25%%) DL:2.50MiB ETA:%s]\n%s - 2.50MiB - %s remaining\n' \
+                "${eta}" "${aria}" "${eta}"
+        done
+        printf '[#abc 1B/4B(25%%) SPD:0B]\n%s - 0B\n' "${aria}"
+        for suffix in 'SYNTH_PRIVATE' 'https://example.invalid/private' 'arbitrary text' \
+            $'\t' $'\033[31m' "${oversized}" ']private' ' private'; do
+            printf 'YTDLP_PROGRESS|downloading|25%%|2MiB/s%s|00:00\n%s - 00:00 remaining\n' "${suffix}" "${native}"
+            printf 'YTDLP_PROGRESS_V2|m|v|downloading|25|100|0|0|0|25%%|2MiB/s|00:00%s\n%s - 2MiB/s\n' "${suffix}" "${native}"
+            printf '[#abc 1B/4B(25%%) DL:2MiB%s ETA:4s]\n%s - 4s remaining\n' "${suffix}" "${aria}"
+            printf '[#abc 1B/4B(25%%) SPD:2Mi ETA:4s%s]\n%s - 2Mi\n' "${suffix}" "${aria}"
+        done
+        printf 'YTDLP_PROGRESS|downloading|25%%| Unknown B/s|--:--:--\n%s\n' "${native}"
+        printf 'YTDLP_PROGRESS|downloading|25%%||\n%s\n' "${native}"
+        printf 'YTDLP_PROGRESS|downloading|25%%|12345B/s|12:60\n%s\n' "${native}"
+        printf '[#abc 1B/4B(25%%) DL:1MiB|private ETA:60m60s]\n%s\n' "${aria}"
+    )
+}
+
 test_monitor_failure_and_input_hardening() {
     local hostile_id hostile_marker
 
@@ -1033,6 +1081,78 @@ test_monitor_failure_and_input_hardening() {
     # Negative control: a published path without a target file is not completion.
     start_scenario missing-final-file video
     printf '%s\n' "${SCENARIO_DIR}/missing-output.mkv" >"${RESULT_FILE}"
+    finish_failure
+
+    start_scenario fifo-result-record video
+    mkfifo -- "${RESULT_FILE}"
+    finish_failure
+
+    start_scenario directory-result-record video
+    mkdir -- "${RESULT_FILE}"
+    finish_failure
+}
+
+test_monitor_late_plans() {
+    local expected
+
+    start_scenario late-native-plan video
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|m|unrelated|downloading|0|0|0|0|0|2%||' \
+        'YTDLP_PROGRESS_V2|m|a|downloading|10|20|0|0|0|50%||' \
+        'YTDLP_PLAN|m|v+a|v|a' \
+        'YTDLP_PROGRESS_V2|m|v|downloading|75|80|0|0|0|93%||' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 1/2 - 93%' 'late V1 video position'
+    expected=$(map_download_to_zenity 85)
+    assert_file_has_line "${CAPTURE_FILE}" "${expected}" \
+        'late V1 retains audio bytes under its second slot'
+    printf '%s\n' \
+        'YTDLP_PLAN|m|v+a|v|a' \
+        'YTDLP_PLAN|m|a+v|a|v' \
+        'YTDLP_PROGRESS_V2|m|a|finished|20|20|0|0|0|100%||' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 100%' 'stable audio membership'
+    assert_file_not_contains "${CAPTURE_FILE}" 'item 3/2' 'late V1 has no phantom slots'
+    finish_success 'late-native.mkv'
+
+    start_scenario late-exact-plan video
+    printf '%s\n' \
+        'YTDLP_PROGRESS_V2|m|音声|downloading|0|0|0|0|0|10%||' \
+        'YTDLP_PLAN_V2|3|video|video|音声' \
+        'YTDLP_PLAN_V2|3|video|français|音声' \
+        'YTDLP_PROGRESS_V2|m|音声|finished|0|0|0|0|0|100%||' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 3/3 - 100%' 'late Unicode member'
+    printf '%s\n' \
+        'YTDLP_PLAN_V2|2|音声|video' \
+        'YTDLP_PROGRESS_V2|m|unselected|finished|1000|1000|0|0|0|100%||' \
+        'YTDLP_PROGRESS_V2|m|français|downloading|0|0|0|0|0|80%||' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/3 - 80%' 'exact plan survives contradictions'
+    expected=$(map_download_to_zenity 60)
+    assert_file_has_line "${CAPTURE_FILE}" "${expected}" \
+        'strict late plan retains observed percentages and excludes foreign progress'
+    finish_failure
+
+    start_scenario late-mixed-plan video
+    printf '%s\n' \
+        '[#abc 1B/4B(25%) DL:1B ETA:1s]' \
+        'YTDLP_PROGRESS_V2|m|v|finished|0|0|0|0|0|100%||' \
+        'YTDLP_PLAN|m|v+a|v|a' \
+        '[#abc 2B/4B(50%) DL:1B ETA:1s]' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 50% (aria2c)' \
+        'named video takes priority over earlier anonymous audio GID'
+    expected=$(map_download_to_zenity 90)
+    assert_file_has_line "${CAPTURE_FILE}" "${expected}" \
+        'late plan keeps video completion in the 80/20 fallback'
+    printf '%s\n' 'ARIA2_PLAN|3' '[#abc 3B/4B(75%) DL:1B ETA:1s]' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 75% (aria2c)' 'same GID keeps its slot'
+    finish_failure
+
+    start_scenario late-count-plan audio
+    printf '%s\n' \
+        '[#abc 1B/4B(25%)]' '[#def 2B/4B(50%)]' \
+        'ARIA2_PLAN|2' '[#abc 3B/4B(75%)]' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 1/2 - 75% (aria2c)' 'late count uses arrival order'
+    printf '%s\n' '[#fff 4B/4B(100%)]' '[#def 3B/4B(75%)]' >>"${LOG_FILE}"
+    wait_for_text "${CAPTURE_FILE}" 'Downloading item 2/2 - 75% (aria2c)' 'second GID survives surplus transfer'
+    assert_file_not_contains "${CAPTURE_FILE}" 'item 3/2' 'count plan refuses surplus GIDs'
     finish_failure
 }
 
@@ -1109,7 +1229,9 @@ main() {
     test_monitor_video_audio_weighting
     test_monitor_composite_and_postprocess_progress
     test_monitor_failure_and_input_hardening
+    test_monitor_display_fields
     test_monitor_multistream_unicode_plan
+    test_monitor_late_plans
     printf '%s\n' 'Progress-monitor integration tests passed.'
 }
 

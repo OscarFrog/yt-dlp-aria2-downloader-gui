@@ -1006,7 +1006,7 @@ the compatibility contract, not an implied version negotiation.
 | `YTDLP_STORAGE` | `local-disk` | 2; only this exact complete record is recognized, no display transition |
 | `YTDLP_PREPARE` | `subtitles` | 2; fixed preparation text before A/V transfer, without a percentage or phase jump |
 | `FFMPEG_PROGRESS_DURATION` | expected source duration in microseconds | 2; starts remux display; invalid/zero duration leaves no quantitative denominator |
-| `ARIA2_PLAN` | transfer count, integer 1–16 without leading zero | 2; pre-registers items, ignored after items have already been observed; two video items mean video then audio |
+| `ARIA2_PLAN` | transfer count, integer 1–16 without leading zero | 2; reserves positions in transfer order, including already observed transfers; two video items mean video then audio |
 
 Byte and fragment counters and microseconds are unsigned decimal strings with
 1–16 digits, at most `9000000000000000`; invalid/missing/out-of-range values
@@ -1016,12 +1016,26 @@ and up to six fractional digits; the integer part is displayed, capped at 100,
 invalid input becomes unknown (`-1`). Format identifiers use at most 128
 characters, including Unicode letters/numbers and the safe punctuation
 `_.:+-`; separators, whitespace and controls remain invalid. Native
-progress first falls back to an incomplete planned slot, then the last native
-item, then a generic item. yt-dlp defaults absent IDs/status to `unknown`,
-counters to `0`, optional plan IDs and display strings to empty. Speed and ETA
-are formatted display strings, not arithmetic inputs or fixed units;
-empty, `NA`, `N/A`, `Unknown`,
-`unknown`, `None` and `null` are omitted from the message.
+progress uses exact membership for V2. Legacy plans may fall back to an
+incomplete slot. Without a plan, distinct native identifiers acquire their own
+positions. A late plan first binds previously observed literal IDs, then assigns
+anonymous transfers to the remaining slots in arrival order. Matching counters
+and GIDs stay with their slots. Unselected observations cannot add positions.
+A named plan can refine a count of the same size. Once named, its order is
+fixed, and a matching V2 declaration can require exact membership.
+yt-dlp defaults absent IDs/status to `unknown`,
+counters to `0`, optional plan IDs and display strings to empty.
+
+Only recognized speed and ETA fields enter Zenity. The native speed grammar
+accepts up to four digits, an optional one- or two-digit fraction and B/s or
+KiB/s through YiB/s. Native ETA is MM:SS or HH:MM:SS, with minutes and
+seconds below 60. ASCII presentation spaces are preserved (up to ten leading
+for speed, eight for ETA, two trailing). The aria2 DL/SPD token accepts up
+to ten digits, an optional one- or two-digit fraction and B, Ki, Mi, Gi or
+their byte suffixes. Its ETA accepts ordered hours (up to six digits), minutes
+and seconds (0–59), with at least one component. Zero is valid. Speed and ETA
+are limited to 32 and 24 bytes respectively. Unknown, absent or malformed
+fields are omitted independently. Raw progress lines remain in the private log.
 
 The reader pads missing PLAN/V2/legacy/postprocess fields with empty strings;
 surplus parsed fields make it ignore that record. ARIA2_PLAN and duration

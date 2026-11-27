@@ -34,13 +34,6 @@ process_is_running() {
     return 0
 }
 
-is_unknown_field() {
-    case ${1:-} in
-        '' | NA | N/A | Unknown | unknown | None | null) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 # Assign a bounded counter to the caller's named variable without a subshell.
 sanitize_integer() {
     local integer_output=$1
@@ -112,10 +105,11 @@ saturating_add() {
 }
 
 sanitize_percent() {
+    local percent_output=$1
     local value
     local integer_part
 
-    value=${1:-}
+    value=${2:-}
     value=${value#"${value%%[![:space:]]*}"}
     value=${value%"${value##*[![:space:]]}"}
     value=${value%%%}
@@ -127,9 +121,9 @@ sanitize_percent() {
         if ((value > 100)); then
             value=100
         fi
-        printf '%d' "${value}"
+        printf -v "${percent_output}" '%d' "${value}"
     else
-        printf '%d' '-1'
+        printf -v "${percent_output}" '%d' '-1'
     fi
 }
 
@@ -176,6 +170,9 @@ register_item() {
         ((seen_items += 1))
         if ((index <= 0)); then
             index=${seen_items}
+        fi
+        if [[ ${plan_kind} == none ]] && ((planned_items > 0 && index > planned_items)); then
+            planned_items=${index}
         fi
         ITEM_INDEX[${key}]=${index}
         ITEM_PERCENT[${key}]=0
@@ -227,11 +224,89 @@ raise SystemExit(0 if re.fullmatch(r"[\w.:+\-]{1,128}", value) else 1)
     fi
 }
 
+# Attach observations to the announced positions without discarding their byte
+# counters. Native IDs take precedence over the arrival order of anonymous GIDs.
+apply_plan() {
+    local kind=$1 weighted=$2
+    shift 2
+    local -a ids=("$@") old_keys=() keys=() anonymous=()
+    local -A known_ids=()
+    local key index slot next=0
+
+    [[ ${phase} != postprocessing && ${phase} != verifying ]] || return 0
+    if [[ ${plan_kind} == exact || ${plan_kind} == native ]]; then
+        # A matching exact plan can strengthen legacy membership; a conflicting
+        # declaration cannot relabel data already attributed to named slots.
+        [[ ${kind} == exact && ${plan_kind} == native && $# == "${planned_items}" ]] || return 0
+        for slot in "${!ids[@]}"; do
+            [[ ${ids[slot]} == "${PLANNED_FORMAT_IDS[slot]}" ]] || return 0
+        done
+        plan_kind=exact
+        video_audio_fallback_plan=false
+        return 0
+    fi
+    if [[ ${plan_kind} == aria ]]; then
+        [[ ${kind} != aria && $# == "${planned_items}" ]] || return 0
+    fi
+
+    for index in "${!NATIVE_FORMAT_IDS[@]}"; do
+        known_ids[${NATIVE_FORMAT_KEYS[index]}]=${NATIVE_FORMAT_IDS[index]}
+    done
+    for slot in "${!PLANNED_FORMAT_IDS[@]}"; do
+        known_ids[${PLANNED_KEYS[slot]}]=${PLANNED_FORMAT_IDS[slot]}
+    done
+    for key in "${!ITEM_INDEX[@]}"; do
+        index=${ITEM_INDEX[${key}]}
+        if ((index > 0)); then
+            old_keys[index - 1]=${key}
+            ITEM_INDEX[${key}]=0
+        fi
+    done
+    for key in "${old_keys[@]}"; do
+        if [[ ${kind} == aria || -z ${known_ids[${key}]:-} ]]; then
+            anonymous+=("${key}")
+            continue
+        fi
+        for slot in "${!ids[@]}"; do
+            if [[ -z ${keys[slot]:-} && ${known_ids[${key}]} == "${ids[slot]}" ]]; then
+                keys[slot]=${key}
+                break
+            fi
+        done
+    done
+    for slot in "${!ids[@]}"; do
+        if [[ -z ${keys[slot]:-} ]]; then
+            key=${anonymous[next]:-}
+            if [[ -n ${key} ]]; then
+                ((next += 1))
+            else
+                key="slot:${kind}:$((slot + 1))"
+                register_item "${key}" "$((slot + 1))"
+            fi
+            keys[slot]=${key}
+        fi
+        ITEM_INDEX[${keys[slot]}]=$((slot + 1))
+        if [[ ${kind} == aria ]]; then
+            ids[slot]=${known_ids[${keys[slot]}]:-}
+        fi
+    done
+    PLANNED_KEYS=("${keys[@]}")
+    PLANNED_FORMAT_IDS=("${ids[@]}")
+    planned_items=$#
+    plan_kind=${kind}
+    video_audio_fallback_plan=${weighted}
+    phase='downloading'
+    message='Preparing the selected media streams...'
+    if ((stable_percent < DOWNLOAD_START)); then
+        stable_percent=${DOWNLOAD_START}
+    fi
+}
+
 # V2 is an exact bounded list; validate the whole record before changing state.
 set_multistream_plan() {
     local count=$1
     shift
-    local format_id key index
+    local format_id key
     local -a accepted_ids=()
 
     [[ ${count} =~ ^([1-9]|1[0-6])$ ]] || return 0
@@ -244,78 +319,30 @@ set_multistream_plan() {
         done
         accepted_ids+=("${SANITIZED_IDENTIFIER}")
     done
-    # Repeated before_dl records must not reset already observed components.
-    ((seen_items == 0)) || return 0
-    PLANNED_KEYS=()
-    PLANNED_FORMAT_IDS=("${accepted_ids[@]}")
-    explicit_multistream_plan=true
-    video_audio_fallback_plan=false
-    for index in "${!accepted_ids[@]}"; do
-        key="plan:$((index + 1))"
-        PLANNED_KEYS+=("${key}")
-        register_item "${key}" "$((index + 1))"
-    done
-    planned_items=${count}
-    phase='downloading'
-    message='Preparing the selected media streams...'
-    if ((stable_percent < DOWNLOAD_START)); then
-        stable_percent=${DOWNLOAD_START}
-    fi
+    apply_plan exact false "${accepted_ids[@]}"
 }
 
 set_plan() {
-    local combined_id=$1
-    local first_id=$2
-    local second_id=$3
-    local key
-    local slot=0
-
-    [[ ${explicit_multistream_plan} != true ]] || return 0
-    PLANNED_KEYS=()
-    PLANNED_FORMAT_IDS=()
-    video_audio_fallback_plan=false
-
-    sanitize_identifier "${first_id}"
-    first_id=${SANITIZED_IDENTIFIER}
-    sanitize_identifier "${second_id}"
-    second_id=${SANITIZED_IDENTIFIER}
-    sanitize_identifier "${combined_id}"
-    combined_id=${SANITIZED_IDENTIFIER}
-
-    if [[ -n ${first_id} ]]; then
-        ((slot += 1))
-        PLANNED_KEYS+=("plan:${slot}")
-        PLANNED_FORMAT_IDS+=("${first_id}")
-    fi
-    if [[ -n ${second_id} ]]; then
-        ((slot += 1))
-        PLANNED_KEYS+=("plan:${slot}")
-        PLANNED_FORMAT_IDS+=("${second_id}")
-    fi
-    if ((${#PLANNED_KEYS[@]} == 0)); then
-        PLANNED_KEYS=('plan:1')
-        PLANNED_FORMAT_IDS=("${combined_id}")
-    fi
-
-    # The video selector is bv*+ba/b. An exact combined identifier matching
-    # the two requested slots therefore identifies its video-then-audio branch;
-    # the /b fallback and any ambiguous future plan retain generic weighting.
-    if [[ ${PROFILE} == video &&
-        -n ${first_id} &&
-        -n ${second_id} &&
-        ${combined_id} == "${first_id}+${second_id}" ]] \
-        && ((${#PLANNED_KEYS[@]} == 2)); then
-        video_audio_fallback_plan=true
-    fi
-
-    planned_items=${#PLANNED_KEYS[@]}
-    for key in "${PLANNED_KEYS[@]}"; do
-        register_item "${key}" "$((${#ITEM_INDEX[@]} + 1))"
+    local combined_id=$1 first_id=$2 second_id=$3
+    local id weighted=false
+    local -a ids=()
+    for id in "${first_id}" "${second_id}"; do
+        [[ -n ${id} ]] || continue
+        sanitize_identifier "${id}"
+        [[ -n ${SANITIZED_IDENTIFIER} ]] || return 0
+        ids+=("${id}")
     done
-    phase='downloading'
-    if ((stable_percent < DOWNLOAD_START)); then
-        stable_percent=${DOWNLOAD_START}
+    if [[ -n ${combined_id} ]]; then
+        sanitize_identifier "${combined_id}"
+        combined_id=${SANITIZED_IDENTIFIER}
     fi
+    if ((${#ids[@]} == 0)); then
+        [[ -n ${combined_id} ]] || return 0
+        ids+=("${combined_id}")
+    elif ((${#ids[@]} == 2)) && [[ ${PROFILE} == video && ${combined_id} == "${first_id}+${second_id}" ]]; then
+        weighted=true
+    fi
+    apply_plan native "${weighted}" "${ids[@]}"
 }
 
 resolve_native_key() {
@@ -344,6 +371,7 @@ resolve_native_key() {
         done
         for index in "${!NATIVE_FORMAT_IDS[@]}"; do
             if [[ ${NATIVE_FORMAT_IDS[index]} == "${format_id}" ]]; then
+                ((${ITEM_INDEX[${NATIVE_FORMAT_KEYS[index]}]:-0} > 0)) || return 0
                 RESOLVED_KEY=${NATIVE_FORMAT_KEYS[index]}
                 return 0
             fi
@@ -352,15 +380,20 @@ resolve_native_key() {
 
     # Subtitle and combined-result hooks may precede the media transfers.
     # With an exact V2 plan, only its literal components may advance a slot.
-    [[ ${explicit_multistream_plan} != true ]] || return 0
+    [[ ${plan_kind} != exact ]] || return 0
 
-    for key in "${PLANNED_KEYS[@]}"; do
-        if ((${ITEM_PERCENT[${key}]:-0} < 100)); then
-            RESOLVED_KEY=${key}
-            return 0
+    for index in "${!PLANNED_KEYS[@]}"; do
+        key=${PLANNED_KEYS[index]}
+        ((${ITEM_PERCENT[${key}]:-0} < 100)) || continue
+        if [[ ${plan_kind} == aria && -n ${format_id} ]]; then
+            [[ -z ${PLANNED_FORMAT_IDS[index]} && -z ${ARIA_KEY_ASSIGNED[${key}]+x} ]] || continue
+            PLANNED_FORMAT_IDS[index]=${format_id}
         fi
+        RESOLVED_KEY=${key}
+        return 0
     done
 
+    [[ ${plan_kind} == none ]] || return 0
     if [[ -z ${format_id} && ${#NATIVE_FORMAT_KEYS[@]} -gt 0 ]]; then
         RESOLVED_KEY=${NATIVE_FORMAT_KEYS[-1]}
         return 0
@@ -373,18 +406,16 @@ resolve_native_key() {
 
 resolve_aria_key() {
     local gid=$1
-    local index
     local key=''
     local candidate
 
     RESOLVED_KEY=''
     if [[ -n ${ARIA_GID_ITEM[${gid}]+x} ]]; then
-        RESOLVED_KEY=${ARIA_GID_ITEM[${gid}]}
+        key=${ARIA_GID_ITEM[${gid}]}
+        ((${ITEM_INDEX[${key}]:-0} > 0)) || return 0
+        RESOLVED_KEY=${key}
         return 0
     fi
-
-    ((aria_items += 1))
-    index=${aria_items}
 
     # aria2c does not expose yt-dlp's format identifier. Associate each new GID
     # with the first planned stream that has not already been assigned to aria2c
@@ -405,16 +436,18 @@ resolve_aria_key() {
         done
     fi
     if [[ -z ${key} ]]; then
-        key="aria:${gid}"
+        [[ ${plan_kind} == none ]] || return 0
+        key="gid:${gid}"
     fi
 
     ARIA_GID_ITEM[${gid}]=${key}
     ARIA_KEY_ASSIGNED[${key}]=1
-    register_item "${key}" "${ITEM_INDEX[${key}]:-${index}}"
+    register_item "${key}"
     RESOLVED_KEY=${key}
 }
 
 calculate_download_percent() {
+    local percent_output=$1
     local key
     local item_count=${planned_items}
     local first_percent=0
@@ -429,7 +462,7 @@ calculate_download_percent() {
         item_count=${seen_items}
     fi
     if ((item_count <= 0)); then
-        printf '%d' 0
+        printf -v "${percent_output}" '%d' 0
         return 0
     fi
 
@@ -480,14 +513,14 @@ calculate_download_percent() {
     if ((value > 100)); then
         value=100
     fi
-    printf '%d' "${value}"
+    printf -v "${percent_output}" '%d' "${value}"
 }
 
 update_stable_download_display() {
     local global_percent
     local candidate
 
-    global_percent=$(calculate_download_percent)
+    calculate_download_percent global_percent
     candidate=$((DOWNLOAD_START + global_percent * (DOWNLOAD_END - DOWNLOAD_START) / 100))
     if ((candidate > DOWNLOAD_END)); then
         candidate=${DOWNLOAD_END}
@@ -506,6 +539,8 @@ format_download_message() {
     local index=${ITEM_INDEX[${key}]:-1}
     local total=${planned_items}
     local text
+    local speed_pattern=${NATIVE_SPEED_PATTERN}
+    local eta_pattern=${NATIVE_ETA_PATTERN}
 
     if ((total <= 0)); then
         total=${seen_items}
@@ -524,18 +559,17 @@ format_download_message() {
     fi
     if [[ ${source} == aria2 ]]; then
         text+=' (aria2c)'
+        speed_pattern=${ARIA_SPEED_PATTERN}
+        eta_pattern=${ARIA_ETA_PATTERN}
     fi
-    # Unknown speed is intentionally omitted.
-    # shellcheck disable=SC2310
-    if ! is_unknown_field "${speed}"; then
+    # These two fields are the only tool-provided text copied to Zenity.
+    if ((${#speed} <= 32)) && [[ ${speed} =~ ${speed_pattern} ]]; then
         text+=" - ${speed}"
     fi
-    # Unknown ETA is intentionally omitted.
-    # shellcheck disable=SC2310
-    if ! is_unknown_field "${eta}"; then
+    if ((${#eta} <= 24)) && [[ -n ${eta} && ${eta} =~ ${eta_pattern} ]]; then
         text+=" - ${eta} remaining"
     fi
-    printf '%s' "${text}"
+    message=${text}
 }
 
 handle_plan() {
@@ -546,7 +580,6 @@ handle_plan() {
     local second_id=$5
 
     set_plan "${combined_id}" "${first_id}" "${second_id}"
-    message='Preparing the selected media streams...'
 }
 
 handle_v2_progress() {
@@ -584,7 +617,7 @@ handle_v2_progress() {
     sanitize_integer estimate "${estimate_text}"
     sanitize_integer fragment_index "${fragment_index_text}"
     sanitize_integer fragment_count "${fragment_count_text}"
-    percent=$(sanitize_percent "${percent_text}")
+    sanitize_percent percent "${percent_text}"
 
     if ((fragment_count > 1 && fragment_index == 0)) \
         && [[ ${status} != finished ]]; then
@@ -623,7 +656,7 @@ handle_v2_progress() {
     fi
 
     update_stable_download_display
-    message=$(format_download_message "${key}" native "${percent}" "${speed}" "${eta}")
+    format_download_message "${key}" native "${percent}" "${speed}" "${eta}"
 }
 
 handle_legacy_progress() {
@@ -643,61 +676,27 @@ handle_legacy_progress() {
     key=${RESOLVED_KEY}
     [[ -n ${key} ]] || return 0
     register_item "${key}"
-    if ((planned_items <= 0)); then
-        planned_items=1
-        PLANNED_KEYS=("${key}")
-    fi
-    percent=$(sanitize_percent "${percent_text}")
+    sanitize_percent percent "${percent_text}"
     if ((percent >= 0 && percent > ${ITEM_PERCENT[${key}]:-0})); then
         ITEM_PERCENT[${key}]=${percent}
     fi
     update_stable_download_display
-    message=$(format_download_message "${key}" native "${percent}" "${speed}" "${eta}")
+    format_download_message "${key}" native "${percent}" "${speed}" "${eta}"
 }
 
 handle_aria_plan() {
     local _prefix=$1
     local count_text=$2
-    local count
-    local slot
-    local key
-
-    if [[ ! ${count_text} =~ ^([1-9]|1[0-6])$ ]]; then
-        return 0
-    fi
-    # Ignore a late or duplicate plan rather than resetting progress that has
-    # already been observed.
-    if ((seen_items > 0)); then
-        return 0
-    fi
-
-    count=$((10#${count_text}))
-    planned_items=${count}
-    PLANNED_KEYS=()
-    PLANNED_FORMAT_IDS=()
-    video_audio_fallback_plan=false
-
-    # Pre-register every direct item. Without placeholders, the first aria2
-    # item with a known byte total can be mistaken for the whole transfer and
-    # drive the global bar to DOWNLOAD_END before later items have appeared.
-    for ((slot = 1; slot <= count; slot++)); do
-        key="aria-plan:${slot}"
-        PLANNED_KEYS+=("${key}")
-        PLANNED_FORMAT_IDS+=('')
-        register_item "${key}" "${slot}"
+    local slot weighted=false
+    local -a slots=()
+    [[ ${count_text} =~ ^([1-9]|1[0-6])$ ]] || return 0
+    for ((slot = 0; slot < count_text; slot++)); do
+        slots+=('')
     done
-
-    # The validated direct-transfer count preserves the configured video
-    # selector order. Exactly two video-profile transfers are video then audio.
-    if [[ ${PROFILE} == video ]] && ((count == 2)); then
-        video_audio_fallback_plan=true
+    if [[ ${PROFILE} == video && ${count_text} == 2 ]]; then
+        weighted=true
     fi
-
-    phase='downloading'
-    if ((stable_percent < DOWNLOAD_START)); then
-        stable_percent=${DOWNLOAD_START}
-    fi
-    message='Preparing the selected media streams...'
+    apply_plan aria "${weighted}" "${slots[@]}"
 }
 
 handle_aria_progress() {
@@ -721,12 +720,16 @@ handle_aria_progress() {
     gid=${BASH_REMATCH[1]}
     resolve_aria_key "${gid}"
     key=${RESOLVED_KEY}
+    [[ -n ${key} ]] || return 0
     phase='downloading'
     if ((planned_items <= 0)); then
         if [[ ${PROFILE} == video ]]; then
             planned_items=2
         else
             planned_items=1
+        fi
+        if ((seen_items > planned_items)); then
+            planned_items=${seen_items}
         fi
     fi
 
@@ -753,23 +756,23 @@ handle_aria_progress() {
         ITEM_TOTAL[${key}]=${total}
     fi
 
+    # Strip the console frame and optional following status blocks. A stray
+    # bracket or arbitrary suffix inside a field must reach the validator.
+    line=${line%%'] ['*}
+    line=${line%']'}
     if [[ ${line} == *' DL:'* ]]; then
         speed=${line##* DL:}
-        speed=${speed%% *}
-        speed=${speed%%]*}
     elif [[ ${line} == *' SPD:'* ]]; then
         speed=${line##* SPD:}
-        speed=${speed%% *}
-        speed=${speed%%]*}
     fi
+    speed=${speed%% UL:*}
+    speed=${speed%% ETA:*}
     if [[ ${line} == *' ETA:'* ]]; then
         eta=${line##* ETA:}
-        eta=${eta%%]*}
-        eta=${eta%% *}
     fi
 
     update_stable_download_display
-    message=$(format_download_message "${key}" aria2 "${percent}" "${speed}" "${eta}")
+    format_download_message "${key}" aria2 "${percent}" "${speed}" "${eta}"
 }
 
 handle_ffmpeg_duration() {
@@ -907,7 +910,7 @@ result_file_confirms_output() {
     local final_path=''
     local resolved_path=''
 
-    [[ -s ${RESULT_FILE} ]] || return 1
+    [[ -f ${RESULT_FILE} && -s ${RESULT_FILE} ]] || return 1
     while IFS= read -r candidate || [[ -n ${candidate} ]]; do
         if [[ -n ${candidate} ]]; then
             final_path=${candidate}
@@ -1024,6 +1027,10 @@ initialize_progress_inputs() {
     readonly VERIFY_PERCENT=99
     readonly MAX_PENDING_CHARS=1048576
     readonly MAX_SAFE_COUNTER=9000000000000000
+    readonly NATIVE_SPEED_PATTERN='^[ ]{0,10}[0-9]{1,4}([.][0-9]{1,2})?([KMGTPEZY]i)?B/s[ ]{0,2}$'
+    readonly NATIVE_ETA_PATTERN='^[ ]{0,8}([0-9]{2}:)?[0-5][0-9]:[0-5][0-9][ ]{0,2}$'
+    readonly ARIA_SPEED_PATTERN='^[0-9]{1,10}([.][0-9]{1,2})?(B|[KMG]iB?)$'
+    readonly ARIA_ETA_PATTERN='^([0-9]{1,6}h)?([1-5]?[0-9]m)?([1-5]?[0-9]s)?$'
 
     if (($# != 5)); then
         usage
@@ -1080,7 +1087,6 @@ initialize_progress_state() {
 
     planned_items=0
     seen_items=0
-    aria_items=0
     stable_percent=0
     display_percent=0
     message='Analyzing the webpage...'
@@ -1093,7 +1099,7 @@ initialize_progress_state() {
     pending_data=''
     discarding_oversized_record=false
     video_audio_fallback_plan=false
-    explicit_multistream_plan=false
+    plan_kind=none
 }
 
 open_progress_log() {
