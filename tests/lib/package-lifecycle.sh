@@ -107,7 +107,7 @@ assert_common_package_payload() {
     grep -Fqx -- 'Icon=yt-dlp-aria2-downloader' "${PACKAGE_DESKTOP_FILE}"
 
     for runtime_command in \
-        aria2c ffmpeg ffprobe python3 curl gpg unzip flock timeout; do
+        aria2c ffmpeg ffprobe python3 curl gpg unzip flock timeout cmp; do
         command -v "${runtime_command}" >/dev/null 2>&1 || {
             printf 'Error: %s dependency command is absent: %s\n' \
                 "${package_kind}" "${runtime_command}" >&2
@@ -288,6 +288,11 @@ else: raise SystemExit(93)
     executable(deno_dir / 'deno', '#!/bin/sh\nprintf "deno 2.9.4 (stable, release)\\n"\n')
     manager = payload / 'runtime-manager.sh'
     run([manager, 'require'], 0, 'installed runtime probes')
+    prepared = run([manager, 'prepare', 'require'], 0, 'installed engine runtime preparation')
+    require(prepared.stdout.splitlines() == [
+        'runtime-contract=1', f'yt-dlp-path={yt_dir}/yt-dlp_linux', 'yt-dlp-version=2026.08.19',
+        f'deno-path={deno_dir}/deno', 'deno-version=2.9.4',
+    ], 'installed runtime preparation returned unexpected paths or versions')
     executable(deno_dir / 'deno', '#!/bin/sh\nexit 23\n')
     run([manager, 'require'], 69, 'installed runtime rejects failing probe')
     executable(deno_dir / 'deno', '#!/bin/sh\nprintf "deno 2.9.4 (stable, release)\\n"\n')
