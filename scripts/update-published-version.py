@@ -38,9 +38,12 @@ PUBLISHED_VERSION_RE = re.compile(
 STATIC_CONTRACT_PATH = Path("test-static.sh")
 RPM_FILENAME = "yt-dlp-aria2-downloader-gui-{version}-1.fc{fedora}.{arch}.rpm"
 PACKAGE_REFERENCES = (
-    ("| Fedora {fedora} | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/latest/download/"
+    ("| Fedora {fedora} | [RPM](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/download/v{version}/"
      + RPM_FILENAME + ") |", 1),
-    ("yt-dlp-aria2-downloader-gui-{version}.zip", 3),
+    ("[ZIP](https://github.com/OscarFrog/yt-dlp-aria2-downloader-gui/releases/download/v{version}/"
+      "yt-dlp-aria2-downloader-gui-{version}.zip)", 1),
+    ("\nyt-dlp-aria2-downloader-gui-{version}.zip\n", 1),
+    ("unzip yt-dlp-aria2-downloader-gui-{version}.zip\n", 1),
     ("cd yt-dlp-aria2-downloader-gui-{version}\n", 1),
 )
 README_REFERENCE_TEMPLATES = {
