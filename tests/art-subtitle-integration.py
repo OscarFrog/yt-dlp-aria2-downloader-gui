@@ -56,6 +56,70 @@ def mapped_vtt(local: str, ticks: int, cue_start: str, cue_end: str, text="mappe
 
 
 class ParserTests(unittest.TestCase):
+    def test_hls_directives_are_complete_case_sensitive_lines(self):
+        base = "https://example.invalid/"
+        segments = ["first.vtt?label=#EXT-X-KEY", "second.vtt"]
+        payloads = {base + uri: b"WEBVTT\n\n00:00.000 --> 00:01.000\n" + bytes([65 + index])
+                    for index, uri in enumerate(segments)}
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=newline):
+                calls = []
+
+                def fetch(url, _headers, _limit):
+                    calls.append(url)
+                    return payloads[url]
+
+                lines = ["#EXTM3U", "# a comment about #EXT-X-KEY", "#EXT-X-KEYFRAME:1",
+                         "#ext-x-key:lowercase", "#EXTINF:1,title #EXT-X-MAP", segments[0],
+                         "#EXT-X-DISCONTINUITY", "#EXTINF:1,title #EXT-X-ENDLIST", segments[1],
+                         "#EXT-X-ENDLIST"]
+                manifest = newline.join(lines) + newline
+                self.assertEqual(SUBS.playlist_structure(manifest),
+                                 {"count": 2, "discontinuities": [False, True]})
+                source = {"url": base + "list.m3u8", "hls_media_playlist_data": manifest}
+                digest = TRACKS.subtitle_content(source, fetch)
+                self.assertEqual(calls, list(payloads))
+                source["hls_media_playlist_data"] = newline.join(
+                    ["#EXTM3U", *segments, "#EXT-X-ENDLIST"])
+                self.assertEqual(TRACKS.subtitle_content(source, fetch), digest)
+
+    def test_hls_readers_retain_distinct_segment_limits(self):
+        def manifest(count):
+            return "#EXTM3U\n" + "part.vtt\n" * count + "#EXT-X-ENDLIST\n"
+
+        source = {"url": "https://example.invalid/list", "hls_media_playlist_data": manifest(128)}
+        self.assertTrue(TRACKS.subtitle_content(source, lambda *_: b"WEBVTT\n\n"))
+        source["hls_media_playlist_data"] = manifest(129)
+        with self.assertRaises(TRACKS.ArteError):
+            TRACKS.subtitle_content(source, lambda *_: self.fail("unexpected segment request"))
+        self.assertEqual(SUBS.playlist_structure(manifest(4096))["count"], 4096)
+        with self.assertRaises(SUBS.SubtitleError):
+            SUBS.playlist_structure(manifest(4097))
+
+    def test_hls_finiteness_and_refusals_precede_segment_reads(self):
+        base = "https://example.invalid/private-marker/"
+        for line in ("# comment #EXT-X-ENDLIST", "#EXT-X-ENDLIST-EXTRA", "#ext-x-endlist",
+                     "#EXTINF:1,title #EXT-X-ENDLIST", "uri.vtt?x=#EXT-X-ENDLIST",
+                     "#EXT-X-ENDLIST:1", " #EXT-X-ENDLIST", "#EXT-X-ENDLIST "):
+            with self.subTest(line=line):
+                manifest = "\n".join(("#EXTM3U", "part.vtt", line))
+                with self.assertRaises(SUBS.SubtitleError):
+                    SUBS.playlist_structure(manifest)
+                with self.assertRaises(TRACKS.ArteError):
+                    TRACKS.subtitle_content({"url": base, "hls_media_playlist_data": manifest},
+                                            lambda *_: self.fail("unexpected segment request"))
+        for tag in ('#EXT-X-KEY:METHOD=NONE', "#EXT-X-KEY", "#EXT-X-KEY :METHOD=NONE",
+                    "#EXT-X-MAP:URI=init", "#EXT-X-BYTERANGE:1", "#EXT-X-GAP"):
+            with self.subTest(tag=tag):
+                manifest = f"#EXTM3U\n{tag}\npart.vtt\n#EXT-X-ENDLIST\n"
+                with self.assertRaises(SUBS.SubtitleError) as refusal:
+                    SUBS.playlist_structure(manifest)
+                self.assertNotIn(tag, str(refusal.exception))
+                if tag.startswith("#EXT-X-KEY"):
+                    with self.assertRaises(TRACKS.ArteError):
+                        TRACKS.subtitle_content({"url": base, "hls_media_playlist_data": manifest},
+                                                lambda *_: self.fail("unexpected segment request"))
+
     def test_bom_crlf_ids_unicode_entities_markup_lines_and_settings(self):
         parsed = SUBS.parse_webvtt(VTT)
         self.assertEqual(len(parsed["cues"]), 2)
