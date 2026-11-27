@@ -39,6 +39,7 @@ defect. Resolve both surfaces together.
 | Document | Authoritative scope |
 | --- | --- |
 | `ARCHITECTURE.md` | Component interactions, data flow, process supervision, trust boundaries, packaging, CI, and release topology |
+| `RUST_STYLE.md` | Rust crate structure, supported compiler, ownership, unsafe operations and FFI review |
 | `SHELL_STYLE.md` | Bash structure, headers, idioms, comments, shfmt, ShellCheck, and shell inventories |
 | `TESTING.md` | Local profiles, targeted suites, CI coverage, qualifications, and release-only procedures |
 | `REPOSITORY_FILES.md` | Exact tracked-file inventory, each file's consumer, packaging status, and retention reason |
@@ -58,6 +59,7 @@ reading the whole repository.
 | Change | Required route |
 | --- | --- |
 | Bash, shell libraries or shell-bearing workflows | `.agents/skills/shell-change/SKILL.md`; read `SHELL_STYLE.md` in full |
+| Rust crates or Rust protocol changes | [Rust style](RUST_STYLE.md) and [Rust qualification](TESTING.md#rust-qualification); inspect both ends of the protocol |
 | Python helpers or Bash/Python interfaces | `TESTING.md` → **Python changes**; inspect both ends of the interface |
 | Fedora RPM, installation, cleanup, versions or release | `.agents/skills/packaging-release/SKILL.md` and matching workflow/static contracts |
 | GitHub Actions, pins, signatures or provenance | `.agents/skills/workflow-supply-chain/SKILL.md`; `./scripts/check-workflows.sh` for workflow changes |
@@ -83,6 +85,7 @@ banner into every format.
   is a module docstring naming the project, repository-relative module path, and
   durable role. A deliberately non-executable Python helper has no shebang and
   is invoked explicitly with `python3`.
+- Rust source identity and module documentation follow [Rust style](RUST_STYLE.md).
 - Markdown titles, workflow `name` fields, desktop-entry keys, RPM
   metadata, manpage `NAME` sections, and OpenPGP packet identity are the native
   identifiers for those formats.
@@ -99,6 +102,9 @@ purpose, or retention decision changes.
 Treat established safety, privacy, trust-boundary, packaging, release,
 installation, runtime-preservation, and cleanup behavior as intentional unless
 the task explicitly changes it.
+
+Across Bash, Python and Rust, document resource ownership and caller contracts,
+preserve primary errors and private data, and test observable behavior.
 
 Prefer the smallest coherent change that satisfies the task and preserves
 behavior outside its scope.

@@ -30,6 +30,7 @@ struct Timespec {
     nsec: i64,
 }
 
+// SAFETY: the declarations and repr(C) layouts match the Linux x86_64 C ABI.
 unsafe extern "C" {
     fn openat(fd: c_int, name: *const i8, flags: c_int, ...) -> c_int;
     fn pidfd_open(pid: c_int, flags: u32) -> c_int;
@@ -410,6 +411,7 @@ mod tests {
         let (announce, tid) = mpsc::channel();
         let (release, gate) = mpsc::channel();
         let worker = std::thread::spawn(move || {
+            // SAFETY: gettid has no preconditions and returns this live thread’s TID.
             announce.send(unsafe { gettid() } as u32).unwrap();
             gate.recv().unwrap();
         });

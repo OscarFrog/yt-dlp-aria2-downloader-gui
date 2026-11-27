@@ -25,7 +25,8 @@ the relevant redacted excerpt. Report suspected vulnerabilities through
 1. Start a focused branch from the latest `main` in your fork. Discuss a large
    change in an issue before implementing it.
 2. Read the relevant [architecture](ARCHITECTURE.md), [testing](TESTING.md) and
-   [shell conventions](SHELL_STYLE.md). Preserve the existing privacy,
+   language conventions for [Bash](SHELL_STYLE.md), [Python](TESTING.md#python-changes)
+   or [Rust](RUST_STYLE.md). Preserve the existing privacy,
    verification, cleanup and user-data protections.
 3. Add regression coverage where behavior changes. Keep English and French
    READMEs equivalent and update [the file inventory](REPOSITORY_FILES.md) for
