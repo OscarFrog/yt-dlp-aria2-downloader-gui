@@ -36,20 +36,17 @@ spec.loader.exec_module(observer)
 
 @contextmanager
 def denied_procfs_enumeration(error):
-    """Deny the OS boundary, including pathlib's cached Python 3.10 accessor."""
+    """Inject failures at the public OS operations used to enumerate /proc."""
     with ExitStack() as stack:
-        for owner in (os, getattr(Path, '_accessor', None)):
-            for name in ('scandir', 'listdir'):
-                original = getattr(owner, name, None)
-                if original is None:
-                    continue
+        for name in ('scandir', 'listdir'):
+            original = getattr(os, name)
 
-                def denied(path, original=original):
-                    if os.fspath(path) == '/proc':
-                        raise error
-                    return original(path)
+            def denied(path='.', original=original):
+                if not isinstance(path, int) and os.fspath(path) == '/proc':
+                    raise error
+                return original(path)
 
-                stack.enter_context(mock.patch.object(owner, name, side_effect=denied))
+            stack.enter_context(mock.patch.object(os, name, side_effect=denied))
         yield
 
 
@@ -179,13 +176,13 @@ class ObservationFailureTests(unittest.TestCase):
             with mock.patch.object(case, 'adopted_rows', return_value={}):
                 with self.assertRaises(subprocess.TimeoutExpired):
                     case.tearDown()
-            self.assertFalse(case.temp._finalizer.alive, 'automatic cleanup still owns an uncertain fixture')
-            return case.root, weakref.ref(case)
+            return case.root, weakref.ref(case), weakref.ref(case.temp)
 
-        root, reference = exercise()
+        root, reference, directory_owner = exercise()
         try:
             gc.collect()
             self.assertIsNone(reference(), 'the fixture lifetime probe did not collect its TestCase')
+            self.assertIsNone(directory_owner(), 'the temporary directory owner is still reachable')
             self.assertTrue(root.is_dir(), 'automatic cleanup removed an unconfirmed fixture')
         finally:
             # The synthetic Popen never created a process or inherited an FD.
@@ -596,7 +593,6 @@ class TeardownRescueTests(unittest.TestCase):
                     self.assertIsInstance(result, fixture.real_observer.ObservationError)
                 self.assert_rescued(fixture)
                 self.assertTrue(fixture.case.root.is_dir(), 'uncertain fixture evidence was erased')
-                self.assertFalse(fixture.case.temp._finalizer.alive)
                 fixture.case.doCleanups()
                 self.assertTrue(fixture.case.root.is_dir(), 'unittest cleanup erased uncertain evidence')
 
@@ -615,8 +611,8 @@ class TeardownRescueTests(unittest.TestCase):
                              KeyboardInterrupt(), SystemExit(7)):
             with self.subTest(exception=type(interruption).__name__), self.fixture() as fixture:
                 self.assertIs(self.drive(fixture, close_errors={0: interruption}), interruption)
+                fixture.case.doCleanups()
                 self.assertTrue(fixture.case.root.is_dir())
-                self.assertFalse(fixture.case.temp._finalizer.alive)
                 self.assertEqual(len(fixture.close_attempts), 1)
 
 
@@ -908,10 +904,8 @@ os.execve(sys.argv[1], [sys.argv[1]], {'YTDLP_QUALIFICATION_TOKEN':token})
 
 class ProcessTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='process-contract-')
-        # Python 3.10 has no delete=False. Failed observation must not let the
-        # automatic finalizer delete files still held by an uncertain consumer.
-        self.temp._finalizer.detach()
+        # Only a confirmed terminal observation permits explicit cleanup.
+        self.temp = tempfile.TemporaryDirectory(prefix='process-contract-', delete=False)
         self.root = Path(self.temp.name)
         self.token = os.urandom(24).hex()
         self.observer = observer.Observer(self.token)
@@ -1017,8 +1011,8 @@ class ProcessTests(unittest.TestCase):
             self.temp.cleanup()
         if failures:
             # Preserve the native primary exception, without chaining private
-            # secondary messages. Metadata is inspectable even on Python 3.10;
-            # unittest's ordinary traceback does not render these attributes.
+            # secondary messages. Keep secondary metadata available to assertions
+            # without rendering it in unittest's ordinary traceback.
             secondary = []
             for error in failures[1:9]:
                 category = ('OSError' if isinstance(error, OSError) else

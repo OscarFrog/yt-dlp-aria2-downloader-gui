@@ -173,16 +173,24 @@ source = sys.stdin.read()
 sys.argv = ["cleanup"] + sys.argv[4:]
 mode = os.environ["INJECTION_MODE"]
 if mode == "replace-after-validation":
-    original = os.fchdir
-    def replacement(descriptor):
-        path = sys.argv[1]
-        os.rename(path, path + ".original")
-        os.mkdir(path)
-        Path(path, "third-party").write_text("preserve replacement")
-        Path(path, "nested").mkdir()
-        Path(path, "nested", "third-party").write_text("preserve nested replacement")
-        original(descriptor)
-    boundary = mock.patch("os.fchdir", side_effect=replacement)
+    original = os.stat
+    path = Path(sys.argv[1])
+    replaced = False
+    def replacement(name, *args, **kwargs):
+        global replaced
+        visible = original(name, *args, **kwargs)
+        if not replaced and name == path.name and kwargs.get("dir_fd") is not None:
+            # Return the real observation, then let traversal meet the changed namespace.
+            replaced = True
+            path.rename(str(path) + ".original")
+            path.mkdir()
+            (path / "third-party").write_text("preserve replacement")
+            (path / "nested").mkdir()
+            (path / "nested/third-party").write_text("preserve nested replacement")
+        return visible
+    boundary = mock.patch("os.stat", side_effect=replacement)
+elif mode == "wrong-owner":
+    boundary = mock.patch("os.geteuid", return_value=os.geteuid() + 1)
 elif mode == "observation-error":
     boundary = mock.patch("os.stat", side_effect=OSError(errno.EIO, "synthetic I/O failure"))
 elif mode == "no-fd-safe-rmtree":
@@ -214,6 +222,11 @@ export PATH="${INJECTION_BIN}:${PATH}"
         original = Path(str(self.root()) + ".original")
         self.assertTrue(original.is_dir())
         self.assertEqual(list(original.iterdir()), [])
+
+    def test_mismatched_root_owner_preserves_owned_contents(self):
+        result = self.injected_cleanup("wrong-owner")
+        self.assert_refused(result)
+        self.assertEqual((self.root() / "nested/owned").read_text(), "owned")
 
     def test_root_observation_error_preserves_owned_contents(self):
         result = self.injected_cleanup("observation-error")

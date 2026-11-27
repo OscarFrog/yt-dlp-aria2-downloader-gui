@@ -637,9 +637,8 @@ create_mock_test_root() {
 }
 
 remove_owned_mock_test_root() {
-    # Python 3.10 supports fd-safe rmtree, but not its later dir_fd argument.
-    # Only this child changes cwd, anchoring every recursive operation to the
-    # retained root. Refuse ambiguous roots before touching their contents.
+    # Anchor every child operation to the retained root descriptor. Refuse an
+    # ambiguous visible root before traversal and again before final removal.
     python3 -I -B - "${TEST_ROOT}" "${TEST_ROOT_IDENTITY}" "${TEST_ROOT_FD}" <<'PY_MOCK_ROOT_CLEANUP'
 import os
 import shutil
@@ -668,11 +667,10 @@ def remove_owned_root(path, identity, descriptor):
                 raise ValueError("visible root mismatch")
 
         require_visible_root()
-        os.fchdir(root_fd)
         for child in os.listdir(root_fd):
             entry = os.stat(child, dir_fd=root_fd, follow_symlinks=False)
             if stat.S_ISDIR(entry.st_mode):
-                shutil.rmtree(child)
+                shutil.rmtree(child, dir_fd=root_fd)
             else:
                 os.unlink(child, dir_fd=root_fd)
         # The traversal never follows a replacement of the root pathname.
