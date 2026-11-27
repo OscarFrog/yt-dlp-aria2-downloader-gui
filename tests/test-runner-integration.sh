@@ -3681,7 +3681,6 @@ PY_MANIFEST
 test_doctor_private_path_contract() {
     python3 -I -B - "${SCRIPT_DIR}/run-all.sh" <<'PY_DOCTOR_PRIVATE_PATH_TEST'
 import json
-import os
 from pathlib import Path
 import re
 import subprocess

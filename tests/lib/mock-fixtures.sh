@@ -31,8 +31,8 @@ needle = "            DEFERRED_SIGNAL_NAME=${signal_name}\n"
 if source.count(needle) != 1:
     raise SystemExit("expected one deferred-signal registration in the engine fixture")
 # A marker published inside the INT trap becomes visible before that trap
-# returns. Bash 4.4 can consume a second INT during the external mv without
-# entering the handler again. Both registration polling loops run this probe
+# returns. A second INT during the external mv can arrive before the
+# handler is ready to run again. Both registration polling loops run this probe
 # only after the first handler has returned, retaining the same two-INT test.
 acknowledgement = r'''        if [[ -n ${DEFERRED_SIGNAL_STATUS} &&
             -n ${MOCK_DEFERRED_SIGNAL_RETURNED_MARKER:-} &&

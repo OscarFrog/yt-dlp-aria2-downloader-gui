@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import resource
 import selectors
 import stat
@@ -93,11 +94,13 @@ def decimal_value(value: object, *, positive: bool = False) -> Decimal | None:
 def language(value: object) -> str:
     if not isinstance(value, str) or not 2 <= len(value) <= 32:
         raise MediaError("Track language is missing or invalid")
-    normalized = value.lower().split("-", 1)[0]
-    if not normalized.isascii() or not normalized.isalpha():
+    # Match the complete discovery tag before reducing it to a Matroska language.
+    match = re.fullmatch(r"([A-Za-z]{2,3})(?:[-_][A-Za-z0-9]{2,8})?", value)
+    if match is None:
         raise MediaError("Track language is invalid")
     # Keep an unrecognized language literal. Never silently label it undetermined.
-    return LANGUAGES.get(normalized, normalized)
+    base = match[1].lower()
+    return LANGUAGES.get(base, base)
 
 
 def checked_expected(expected: dict) -> None:

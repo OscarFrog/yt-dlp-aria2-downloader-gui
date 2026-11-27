@@ -2431,7 +2431,7 @@ class VersionBoundaryTests(unittest.TestCase):
 
     def test_current_stable_installs_exact_selected_version_or_preserves_failure(self):
         script = self.step("real-tools.yml", "Install real engines and current yt-dlp stable")
-        # Exercise the real resolution/install boundary without apt or network.
+        # Exercise version resolution and installation with a local pip fixture.
         script = "set -Eeuo pipefail\n" + script[script.index('python3 -m venv "${RUNNER_TEMP}/yt-dlp-venv"'):]
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

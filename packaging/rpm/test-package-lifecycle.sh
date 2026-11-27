@@ -90,6 +90,7 @@ initialize_rpm_lifecycle_paths() {
 validate_rpm_dependencies() {
     local package_requires=''
     local required_dependency=''
+    local dependency_types=''
 
     package_requires=$(rpm -qpR -- "${PACKAGE_PATH}")
     for required_dependency in \
@@ -104,6 +105,14 @@ validate_rpm_dependencies() {
         if ! grep -Fqx -- "${required_dependency}" <<<"${package_requires}"; then
             printf 'Error: RPM dependency is missing or too weak: %s\n' \
                 "${required_dependency}" >&2
+            exit 65
+        fi
+    done
+    # rpm -qpR does not distinguish runtime requirements from scriptlet ordering.
+    dependency_types=$(rpm -qp --qf '[%{REQUIRENAME} %{REQUIREFLAGS:deptype}\n]' -- "${PACKAGE_PATH}")
+    for required_dependency in 'diffutils manual' 'diffutils post'; do
+        if ! grep -Fqx -- "${required_dependency}" <<<"${dependency_types}"; then
+            printf 'Error: RPM dependency scope is missing: %s\n' "${required_dependency}" >&2
             exit 65
         fi
     done

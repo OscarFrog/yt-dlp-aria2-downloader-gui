@@ -637,8 +637,9 @@ status/output preservation and rejection of provisional group identity. It
 also sends real terminal Ctrl-C during scheduler polling, incomplete identity
 handoff and handoff-file removal. It verifies the worker's received INT,
 descendant shutdown and cleanup after a second Ctrl-C, including an explicitly
-handled poll status 130 under Bash 4.4 and the EXIT path that bypasses Bash’s
-ordinary INT trap. Failed or missing scheduler polls must preserve their exact
+handled poll status 130 and the EXIT path that bypasses Bash’s ordinary INT
+trap. This regression was first observed on Bash 4.4 and is qualified on
+Fedora 45 x86_64 with its native Bash. Failed or missing scheduler polls must preserve their exact
 status and clean active children without consuming a nonexistent completion slot.
 The startup stress records monotonic failure time, barrier states and the
 fixture parent/child procfs state before watchdog rescue. A timeout remains a
@@ -1723,15 +1724,17 @@ revalidates that exact successful run, semantic tag, source SHA, and immutable
 release. A read-only job invokes `scripts/update-published-version.py` to update
 only the known English/French release references and
 `EXPECTED_PUBLISHED_VERSION`; exact reference counts make documentation drift
-fail closed. The current examples identify the immutable v2.4.5 Fedora 44 RPM.
-Before advancing them, verify the exact Fedora 45 RPM name against the new
-immutable release. All replacement and backup files are staged before publication.
+fail closed. The [English](README.md) and [French](README.fr.md) READMEs
+reference the last published packages throughout release preparation. Before
+advancing them, verify the Fedora 45 x86_64 RPM and ZIP names against the
+new immutable release. All replacement and backup files are staged before publication.
 A caught publication failure restores the previous generation with renames;
 failed restoration preserves the backup and reports its location. This does
 not claim recovery after SIGKILL or a filesystem-wide failure. The updater
 accepts only a published version between the previous published version and the
-current development version. With the pre-publication tag guard, this is
-normally an idempotent consistency check and no branch or bump is needed.
+current development version. When the published references already match, the
+workflow finishes without creating a branch. Otherwise the publisher prepares
+the documentation branch for a qualified PR.
 
 When an update is needed, preparation uses current main or an existing target
 that descends from it, preserves that base's source version and changes only

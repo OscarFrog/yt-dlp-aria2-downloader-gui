@@ -1557,8 +1557,8 @@ it does not wait for session readiness before delivering the first signal.
 Discovery of token-bearing orphaned group members is a fallback after direct
 authority is lost, so unrelated procfs traversal cannot delay the known child.
 Terminal Ctrl-C can instead interrupt a foreground utility. The scheduler
-handles the poll’s status 130 explicitly: Bash 4.4 may leave its INT trap
-undispatched, and callers collecting child statuses suppress implicit errexit.
+handles the poll’s status 130 explicitly when the shell leaves its INT trap
+undispatched. Callers collecting child statuses suppress implicit errexit.
 The EXIT path also preserves INT when Bash exits directly with status 130.
 Both runners guard cleanup against repeated fatal signals. Other failed polls
 propagate their status without inventing a completed child slot. A provisional direct-child

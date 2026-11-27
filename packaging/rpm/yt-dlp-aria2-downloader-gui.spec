@@ -15,6 +15,7 @@ BuildRequires:  coreutils
 BuildRequires:  desktop-file-utils
 Requires:       bash >= 5.3
 Requires:       coreutils
+Requires:       diffutils
 Requires:       findutils
 Requires:       grep
 Requires:       sed
