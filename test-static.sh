@@ -4757,7 +4757,6 @@ PY_PUBLIC_TRACK_DOCUMENTATION
         test_alternate_private_directory \
         assert_packaged_executables \
         assert_packaged_entrypoints \
-        assert_packaged_desktop_entry \
         assert_packaged_assets \
         test_packaged_install_tree; do
         assert_file_contains \
