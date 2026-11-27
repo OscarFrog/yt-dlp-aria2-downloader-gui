@@ -171,7 +171,8 @@ Depuis un dossier ZIP ou Git, utilisez plutôt :
 2. Choisissez **Complete video (MKV)** ou **Audio track (native format)**.
    Pour YouTube, le choix vidéo est **YouTube video - Firefox cookies (HLS/MKV)**.
 3. Choisissez un dossier de destination, puis les pistes audio/sous-titres lorsqu'elles sont proposées.
-4. Suivez la progression ; **Cancel** arrête la session. Après un succès, utilisez
+4. La fenêtre de progression affiche le débit et le temps restant lorsque
+   l’outil fournit une valeur reconnue pour chacun. **Cancel** arrête la session. Après un succès, utilisez
    **Open folder** (ouvrir le dossier), **New download** (nouveau téléchargement) ou **Close** (fermer).
 
 ### Vidéo YouTube HLS authentifiée

@@ -1018,10 +1018,18 @@ characters, including Unicode letters/numbers and the safe punctuation
 `_.:+-`; separators, whitespace and controls remain invalid. Native
 progress first falls back to an incomplete planned slot, then the last native
 item, then a generic item. yt-dlp defaults absent IDs/status to `unknown`,
-counters to `0`, optional plan IDs and display strings to empty. Speed and ETA
-are formatted display strings, not arithmetic inputs or fixed units;
-empty, `NA`, `N/A`, `Unknown`,
-`unknown`, `None` and `null` are omitted from the message.
+counters to `0`, optional plan IDs and display strings to empty.
+
+Only recognized speed and ETA fields enter Zenity. The native speed grammar
+accepts up to four digits, an optional one- or two-digit fraction and B/s or
+KiB/s through YiB/s. Native ETA is MM:SS or HH:MM:SS, with minutes and
+seconds below 60. ASCII presentation spaces are preserved (up to ten leading
+for speed, eight for ETA, two trailing). The aria2 DL/SPD token accepts up
+to ten digits, an optional one- or two-digit fraction and B, Ki, Mi, Gi or
+their byte suffixes. Its ETA accepts ordered hours (up to six digits), minutes
+and seconds (0–59), with at least one component. Zero is valid. Speed and ETA
+are limited to 32 and 24 bytes respectively. Unknown, absent or malformed
+fields are omitted independently. Raw progress lines remain in the private log.
 
 The reader pads missing PLAN/V2/legacy/postprocess fields with empty strings;
 surplus parsed fields make it ignore that record. ARIA2_PLAN and duration

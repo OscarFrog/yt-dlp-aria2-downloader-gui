@@ -34,13 +34,6 @@ process_is_running() {
     return 0
 }
 
-is_unknown_field() {
-    case ${1:-} in
-        '' | NA | N/A | Unknown | unknown | None | null) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 # Assign a bounded counter to the caller's named variable without a subshell.
 sanitize_integer() {
     local integer_output=$1
@@ -506,6 +499,8 @@ format_download_message() {
     local index=${ITEM_INDEX[${key}]:-1}
     local total=${planned_items}
     local text
+    local speed_pattern=${NATIVE_SPEED_PATTERN}
+    local eta_pattern=${NATIVE_ETA_PATTERN}
 
     if ((total <= 0)); then
         total=${seen_items}
@@ -524,15 +519,14 @@ format_download_message() {
     fi
     if [[ ${source} == aria2 ]]; then
         text+=' (aria2c)'
+        speed_pattern=${ARIA_SPEED_PATTERN}
+        eta_pattern=${ARIA_ETA_PATTERN}
     fi
-    # Unknown speed is intentionally omitted.
-    # shellcheck disable=SC2310
-    if ! is_unknown_field "${speed}"; then
+    # These two fields are the only tool-provided text copied to Zenity.
+    if ((${#speed} <= 32)) && [[ ${speed} =~ ${speed_pattern} ]]; then
         text+=" - ${speed}"
     fi
-    # Unknown ETA is intentionally omitted.
-    # shellcheck disable=SC2310
-    if ! is_unknown_field "${eta}"; then
+    if ((${#eta} <= 24)) && [[ -n ${eta} && ${eta} =~ ${eta_pattern} ]]; then
         text+=" - ${eta} remaining"
     fi
     printf '%s' "${text}"
@@ -753,19 +747,19 @@ handle_aria_progress() {
         ITEM_TOTAL[${key}]=${total}
     fi
 
+    # Strip the console frame and optional following status blocks. A stray
+    # bracket or arbitrary suffix inside a field must reach the validator.
+    line=${line%%'] ['*}
+    line=${line%']'}
     if [[ ${line} == *' DL:'* ]]; then
         speed=${line##* DL:}
-        speed=${speed%% *}
-        speed=${speed%%]*}
     elif [[ ${line} == *' SPD:'* ]]; then
         speed=${line##* SPD:}
-        speed=${speed%% *}
-        speed=${speed%%]*}
     fi
+    speed=${speed%% UL:*}
+    speed=${speed%% ETA:*}
     if [[ ${line} == *' ETA:'* ]]; then
         eta=${line##* ETA:}
-        eta=${eta%%]*}
-        eta=${eta%% *}
     fi
 
     update_stable_download_display
@@ -907,7 +901,7 @@ result_file_confirms_output() {
     local final_path=''
     local resolved_path=''
 
-    [[ -s ${RESULT_FILE} ]] || return 1
+    [[ -f ${RESULT_FILE} && -s ${RESULT_FILE} ]] || return 1
     while IFS= read -r candidate || [[ -n ${candidate} ]]; do
         if [[ -n ${candidate} ]]; then
             final_path=${candidate}
@@ -1024,6 +1018,10 @@ initialize_progress_inputs() {
     readonly VERIFY_PERCENT=99
     readonly MAX_PENDING_CHARS=1048576
     readonly MAX_SAFE_COUNTER=9000000000000000
+    readonly NATIVE_SPEED_PATTERN='^[ ]{0,10}[0-9]{1,4}([.][0-9]{1,2})?([KMGTPEZY]i)?B/s[ ]{0,2}$'
+    readonly NATIVE_ETA_PATTERN='^[ ]{0,8}([0-9]{2}:)?[0-5][0-9]:[0-5][0-9][ ]{0,2}$'
+    readonly ARIA_SPEED_PATTERN='^[0-9]{1,10}([.][0-9]{1,2})?(B|[KMG]iB?)$'
+    readonly ARIA_ETA_PATTERN='^([0-9]{1,6}h)?([1-5]?[0-9]m)?([1-5]?[0-9]s)?$'
 
     if (($# != 5)); then
         usage

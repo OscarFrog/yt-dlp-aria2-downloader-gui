@@ -984,6 +984,9 @@ The automated suite checks, among other things:
 - unchanged progress messages, percentage, speed and ETA with or without the
   local-storage event; storage diagnostics remain in the log, while the final
   destination-copy phase stays visible;
+- exact Zenity output for bounded native and aria2 speeds and ETAs, including
+  zeroes, presentation spaces, unknown values and independent rejection of
+  embedded controls, delimiters and private text without a diagnostic echo;
 - native-audio selection with `ba/b`, `best`, and quality `0`;
 - absence of forced MP3, M4A, or Opus output formats;
 - MKV video selection without forced re-encoding;

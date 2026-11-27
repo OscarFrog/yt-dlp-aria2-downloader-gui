@@ -168,7 +168,8 @@ From a ZIP or Git directory instead:
 2. Choose **Complete video (MKV)** or **Audio track (native format)**.
    For YouTube URLs, the video choice is **YouTube video - Firefox cookies (HLS/MKV)**.
 3. Choose a destination folder, then audio/subtitle tracks when offered.
-4. Follow progress; **Cancel** stops the session. After success, use
+4. The progress dialog shows speed and time remaining when the downloader
+   reports a recognized value for each. **Cancel** stops the session. After success, use
    **Open folder**, **New download** or **Close**.
 
 ### Authenticated YouTube HLS video
