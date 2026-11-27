@@ -259,7 +259,7 @@ jobs:
         run: |
           bash scripts/verify-previous-packages.sh "${PREVIOUS_TAG}" "${PREVIOUS_COMMIT}"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: previous-release-packages-${{ github.sha }}
           path: |
@@ -327,7 +327,7 @@ jobs:
 
           timeout --signal=TERM --kill-after=10s 4m \
             bash ./tests/rpm6-multisig-integration.sh "${packages[0]}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rpm-under-test-${{ github.sha }}-${{ github.run_id }}
           path: dist/*.rpm
@@ -383,12 +383,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: rpm-under-test-${{ github.sha }}-${{ github.run_id }}
           path: dist
 
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: previous-release-packages-${{ github.sha }}
           path: previous

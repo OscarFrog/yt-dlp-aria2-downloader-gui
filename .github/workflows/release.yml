@@ -485,7 +485,7 @@ jobs:
         run: |
           bash scripts/verify-previous-packages.sh "${PREVIOUS_TAG}" "${PREVIOUS_COMMIT}"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: artifact
         with:
           name: previous-release-packages
@@ -544,7 +544,7 @@ jobs:
           git archive --format=zip --prefix="${package}/" --output="dist/${package}.zip" HEAD
           unzip -t "dist/${package}.zip"
           python3 -I scripts/verify-source-archive.py "dist/${package}.zip" "${package}/" "$(git rev-parse HEAD)"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: artifact
         with:
           name: release-zip
@@ -594,7 +594,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           bash packaging/rpm/build-rpm.sh "${RELEASE_TAG#v}" dist
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: artifact
         with:
           name: unsigned-rpm
@@ -639,7 +639,7 @@ jobs:
             printf '%s\n' 'Error: required immutable artifact identities are missing or malformed.' >&2
             exit 65
           }
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.rpm-build.outputs.artifact_id }}
           path: unsigned
@@ -852,7 +852,7 @@ jobs:
             --define "_rpmlock_path ${verify_keyring}/.rpm.lock" \
             --checksig "${signed}"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: artifact
         with:
           name: release-rpm
@@ -919,7 +919,7 @@ jobs:
             printf '%s\n' 'Error: required immutable artifact identities are missing or malformed.' >&2
             exit 65
           }
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.rpm-sign.outputs.artifact_id }}
           path: dist
@@ -935,7 +935,7 @@ jobs:
             printf '%s\n' 'Error: required immutable artifact identities are missing or malformed.' >&2
             exit 65
           }
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: matrix.scenario == 'fresh'
         with:
           artifact-ids: ${{ needs.previous-release.outputs.artifact_id }}
@@ -1165,12 +1165,12 @@ jobs:
             printf '%s\n' 'Error: required immutable artifact identities are missing or malformed.' >&2
             exit 65
           }
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.zip.outputs.artifact_id }}
           path: dist
           digest-mismatch: error
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.rpm-test.outputs.artifact_id }}
           path: dist
@@ -1209,7 +1209,7 @@ jobs:
             exit 65
           }
       - name: Attest release artifacts
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: dist/*
       - name: Publish and verify immutable release
@@ -1323,12 +1323,12 @@ jobs:
             printf '%s\n' 'Error: required immutable artifact identities are missing or malformed.' >&2
             exit 65
           }
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.publish.outputs.zip_artifact_id }}
           path: expected
           digest-mismatch: error
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.publish.outputs.rpm_artifact_id }}
           path: expected
