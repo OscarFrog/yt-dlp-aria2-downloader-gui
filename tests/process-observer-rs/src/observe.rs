@@ -4,7 +4,7 @@ use crate::linux::{Dir, EIO, Fault, PidEvent, PidFd, Result, Row, checked};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub type Identity = (u32, u64);
+type Identity = (u32, u64);
 pub type Census = BTreeMap<u32, Row>;
 const MEMORY_MAX: usize = 8 * 1024 * 1024;
 
@@ -424,9 +424,9 @@ pub struct Session {
     externals: BTreeSet<Identity>,
     leaks: BTreeSet<Identity>,
     argv_exit_gaps: u64,
-    pub failure: Option<Fault>,
+    failure: Option<Fault>,
 }
-pub fn pairs(entries: &BTreeSet<Identity>) -> String {
+fn pairs(entries: &BTreeSet<Identity>) -> String {
     entries
         .iter()
         .map(|(p, s)| format!("[{p},{s}]"))
@@ -446,6 +446,10 @@ impl Session {
             allow_external,
             ..Default::default()
         }
+    }
+    /// External consumers do not prevent initial leaf selection.
+    pub(super) fn has_scoped_known(&self) -> bool {
+        self.known.difference(&self.externals).next().is_some()
     }
     pub fn known_json(&self) -> String {
         let scoped = self.known.difference(&self.externals).copied().collect();
@@ -758,6 +762,42 @@ mod tests {
         let row = stat(&root, child.id(), None).unwrap();
         let group = Group::bind(&root, row, "registered").unwrap();
         (root, group, child)
+    }
+
+    #[test]
+    fn leaf_admission_and_known_reply_exclude_only_exact_external_identities() {
+        let root = Dir::root().unwrap();
+        let external = (17, 2);
+        let local = (17, 3);
+        for (known, expected, admit) in [
+            (vec![], "[]", true),
+            (vec![external], "[]", true),
+            (vec![local], "[[17,3]]", false),
+            (vec![external, local], "[[17,3]]", false),
+        ] {
+            let mut session = Some(Session {
+                known: known.into_iter().collect(),
+                externals: BTreeSet::from([external]),
+                ..Session::default()
+            });
+            assert_eq!(
+                crate::command(&["KNOWN"], &root, &mut session).unwrap(),
+                expected
+            );
+            if admit {
+                assert_eq!(
+                    crate::command(&["LEAF", "test"], &root, &mut session).unwrap(),
+                    "true"
+                );
+            }
+            // Both a second LEAF and initial selection with a scoped consumer refuse.
+            let error = crate::command(&["LEAF", "other"], &root, &mut session).unwrap_err();
+            assert_eq!((error.op, error.errno), ("protocol", crate::EINVAL));
+            assert_eq!(
+                crate::command(&["KNOWN"], &root, &mut session).unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]
