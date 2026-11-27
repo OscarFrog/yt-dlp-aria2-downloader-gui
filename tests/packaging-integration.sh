@@ -189,14 +189,14 @@ assert_packaged_entrypoints() {
 
 assert_packaged_desktop_entry() {
     local desktop_file="${root}/usr/share/applications/yt-dlp-aria2-downloader.desktop"
+    local launcher='/usr/bin/yt-dlp-aria2-downloader-gui'
+    local field
 
     desktop-file-validate --no-hints "${desktop_file}"
-    assert_file_contains "${desktop_file}" \
-        'Exec=/usr/bin/yt-dlp-aria2-downloader-gui' 'system desktop Exec'
-    assert_file_contains "${desktop_file}" \
-        'TryExec=/usr/bin/yt-dlp-aria2-downloader-gui' 'system desktop TryExec'
-    assert_file_contains "${desktop_file}" \
-        'Icon=yt-dlp-aria2-downloader' 'dedicated packaged icon name'
+    for field in "Exec=${launcher}" "TryExec=${launcher}" 'Icon=yt-dlp-aria2-downloader'; do
+        grep -Fxq -- "${field}" "${desktop_file}" || fail "Missing exact desktop entry: ${field}"
+    done
+    [[ -x ${root}${launcher} ]] || fail 'Packaged desktop launcher is not executable.'
 }
 
 assert_packaged_assets() {

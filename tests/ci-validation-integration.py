@@ -2253,6 +2253,78 @@ class VersionBoundaryTests(unittest.TestCase):
         return "\n".join(line[10:] for line in block.splitlines()
                          if line.startswith("          ")) + "\n"
 
+    def test_previous_package_authentication_in_both_workflows(self):
+        tag, commit, repo = "v2.4.6", "a" * 40, CHECK.REPOSITORY
+        rpm = "yt-dlp-aria2-downloader-gui-2.4.6-1.fc45.x86_64.rpm"
+        checksum = hashlib.sha256(b"previous package").hexdigest()
+        # The fixture represents one release and its two signed subjects. Keep the
+        # expected identities independent of the inputs supplied to each workflow.
+        gh = r'''#!/bin/bash
+set -eu
+op="$1 $2"
+shift 2
+case "$op" in
+    'release view')
+        [[ "$*" == "$TAG -R $REPO --json isImmutable --jq .isImmutable" ]]
+        if [[ $CASE == mutable ]]; then echo false; else echo true; fi ;;
+    'release verify') [[ "$*" == "$TAG -R $REPO" ]] ;;
+    'release download')
+        [[ "$*" == "$TAG -R $REPO --pattern *.rpm --pattern SHA256SUMS" ]]
+        cp -- "$FIXTURE"/*.rpm "$FIXTURE/SHA256SUMS" . ;;
+    'release verify-asset')
+        [[ "$*" == "$TAG $2 -R $REPO" && -f $2 && $CASE != "bad-asset-$2" ]]
+        op+=" $2" ;;
+    'attestation verify')
+        [[ "$*" == "$1 --repo $REPO --signer-workflow $REPO/.github/workflows/release.yml --source-digest $COMMIT --source-ref refs/tags/$TAG" ]]
+        [[ $CASE != "missing-attestation-$1" ]]
+        op+=" $1" ;;
+    *) exit 99 ;;
+esac
+printf '%s\n' "$op" >> "$FIXTURE/calls"
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "gh"
+            executable.write_text(gh)
+            executable.chmod(0o755)
+            for workflow, step_name in (("packages.yml", "Verify exact published previous packages"),
+                                        ("release.yml", "Download and verify exact previous immutable packages")):
+                step = self.step(workflow, step_name)
+                for case in ("valid", "historic", "mutable", "wrong-tag", "wrong-commit", "wrong-rpm", "wrong-arch", "duplicate",
+                             "bad-checksum", "bad-asset-" + rpm, "bad-asset-SHA256SUMS",
+                             "missing-attestation-" + rpm, "missing-attestation-SHA256SUMS"):
+                    with self.subTest(workflow=workflow, case=case):
+                        work = root / workflow / case
+                        fixture = work / "fixture"
+                        fixture.mkdir(parents=True)
+                        (work / "scripts").symlink_to(PROJECT / "scripts", target_is_directory=True)
+                        filename = rpm.replace("2.4.6", "2.4.5") if case == "wrong-rpm" else rpm
+                        release_tag = "v2.4.5" if case == "historic" else tag
+                        if case == "historic":
+                            filename = rpm.replace("2.4.6-1.fc45.x86_64", "2.4.5-1.fc44.noarch")
+                        if case == "wrong-arch":
+                            filename = rpm.replace("x86_64", "noarch")
+                        (fixture / filename).write_bytes(b"previous package")
+                        row = f"{'0' * 64 if case == 'bad-checksum' else checksum}  {filename}\n"
+                        (fixture / "SHA256SUMS").write_text(row * (2 if case == "duplicate" else 1))
+                        env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"], TAG=release_tag,
+                                   COMMIT=commit, REPO=repo, FIXTURE=str(fixture), CASE=case, GITHUB_REPOSITORY=repo,
+                                   PREVIOUS_TAG="v2.4.5" if case == "wrong-tag" else release_tag,
+                                   PREVIOUS_COMMIT="b" * 40 if case == "wrong-commit" else commit)
+                        result = subprocess.run(["bash", "-e", "-c", step], cwd=work, env=env,
+                                                capture_output=True, text=True, timeout=10)
+                        receipt = work / "previous/PREVIOUS_SHA256SUMS"
+                        if case in ("valid", "historic"):
+                            calls = ["release view", "release verify", "release download",
+                                     "release verify-asset " + filename, "attestation verify " + filename,
+                                     "release verify-asset SHA256SUMS", "attestation verify SHA256SUMS"]
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            self.assertEqual(receipt.read_text(), row)
+                            self.assertEqual((fixture / "calls").read_text().splitlines(), calls)
+                        else:
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertFalse(receipt.exists())
+
     def test_each_stress_iteration_runs_without_a_diagnostic_selector(self):
         step = self.step("stress.yml", "Repeat race-sensitive integration scenarios with bounded jitter")
         with tempfile.TemporaryDirectory() as temporary:

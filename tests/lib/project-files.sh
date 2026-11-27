@@ -80,6 +80,7 @@ DEVELOPMENT_SHELL_FILES=(
     scripts/format-shell.sh
     scripts/git-inspect.sh
     scripts/release-evidence-qualification.sh
+    scripts/verify-previous-packages.sh
 )
 
 # Shell files sourced by other scripts. These libraries must not change their
