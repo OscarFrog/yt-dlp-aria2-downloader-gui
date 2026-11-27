@@ -404,6 +404,8 @@ sufficient. Unavailable capabilities cause status 69. Failure after admission
 never grants cleanup permission. A zombie thread leader remains active while
 any sibling thread can still use resources.
 
+The engine and GUI load `private-process-signals.sh` beside the physical entry point. It defines the identity-bound signal and escalation functions. Each caller owns its traps, grace periods and cleanup decisions.
+
 Timed runtime and FFprobe commands use `private-process-supervisor.py`. It
 remains in its caller's outer SID while its direct child creates a private SID
 before restoring signal dispositions and executing the command. The helper pins

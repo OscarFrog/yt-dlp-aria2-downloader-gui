@@ -2216,19 +2216,19 @@ assert_no_residual_processes "${FIXTURE_EVIDENCE}" "${FIXTURE_STOP}"
     def test_procfs_identity_ignores_arbitrary_thread_name_bytes(self):
         module = self.supervisor_module()
         predicates = []
-        for filename, absent in (('download-video.sh', 'PY_GROUP_ABSENT'),
-                                 ('download-video-gui.sh', 'PY_GUI_GROUP_ABSENT')):
+        for filename, marker in (('download-video.sh', 'PY_GROUP_ABSENT'),
+                                 ('download-video-gui.sh', 'PY_GUI_GROUP_ABSENT'),
+                                 ('private-process-signals.sh', 'PY_ESCALATE_OWNED')):
             source = (PROJECT / filename).read_text(encoding='utf-8')
-            for marker in (absent, 'PY_ESCALATE_OWNED'):
-                code = source.split(f"<<'{marker}'\n", 1)[1].split(f'\n{marker}', 1)[0]
-                tree = ast.parse(code)
-                # Execute actual reusable production predicates, excluding the
-                # entrypoint that would signal or exit this test controller.
-                tree.body = [node for node in tree.body if isinstance(
-                    node, (ast.Import, ast.ImportFrom, ast.FunctionDef))]
-                namespace = {}
-                exec(compile(tree, f'{filename}:{marker}', 'exec'), namespace)
-                predicates.append((filename, marker, namespace))
+            code = source.split(f"<<'{marker}'\n", 1)[1].split(f'\n{marker}', 1)[0]
+            tree = ast.parse(code)
+            # Execute actual reusable production predicates, excluding the
+            # entrypoint that would signal or exit this test controller.
+            tree.body = [node for node in tree.body if isinstance(
+                node, (ast.Import, ast.ImportFrom, ast.FunctionDef))]
+            namespace = {}
+            exec(compile(tree, f'{filename}:{marker}', 'exec'), namespace)
+            predicates.append((filename, marker, namespace))
         worker = r'''import ctypes, os, sys, threading
 def named_thread():
     libc = ctypes.CDLL(None, use_errno=True)
@@ -2725,8 +2725,8 @@ esac
                 if process is not None:
                     process.communicate(timeout=5)
 
-        engine = (PROJECT / 'download-video.sh').read_text().rsplit('\nmain "$@"', 1)[0]
-        gui = (PROJECT / 'download-video-gui.sh').read_text().rsplit('\nmain "$@"', 1)[0]
+        engine = self.source_without_main('download-video.sh')
+        gui = self.source_without_main('download-video-gui.sh')
         sentinel_start = engine.index('            while true; do\n',
                                       engine.index('# Stay alive as the authenticated session leader'))
         sentinel_end = engine.index('            exit "${command_status}"\n', sentinel_start)
@@ -2843,9 +2843,55 @@ printf '%s\n' "$status"
                         self.assertNotEqual(completed.stdout.strip(), expected,
                                             'single-inventory mutation escaped the oracle')
 
+    def source_without_main(self, name):
+        source = (PROJECT / name).read_text().removesuffix('main "$@"\n')
+        return source + (PROJECT / 'private-process-signals.sh').read_text()
+
+    def loaded_signal_functions(self, filename, *, omit=False):
+        # Observe the shell definitions in the real entry point before it can
+        # prepare runtimes, create a download, or interact with the desktop.
+        with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+            root = Path(temporary)
+            bundle = root / 'payload'
+            bundle.mkdir()
+            entry = bundle / filename
+            shutil.copy2(PROJECT / filename, entry)
+            if omit:
+                source = entry.read_text()
+                source, count = re.subn(r'^    source "[^"]+/private-process-signals[.]sh" [|][|] exit 66$',
+                                        '    :', source, flags=re.M)
+                self.assertEqual(count, 1)
+                entry.write_text(source)
+            launcher = root / 'launcher'
+            launcher.symlink_to(entry)
+            library = PROJECT / 'private-process-signals.sh'
+            (bundle / library.name).write_text(
+                library.read_text() + '\ndeclare -f signal_owned_process escalate_owned_process || exit 1\nexit 42\n')
+            (root / 'zenity').symlink_to('/usr/bin/true')
+            request = root / 'request'
+            request.write_text('https://fixture.invalid/media\n')
+            request.chmod(0o600)
+            args = ['--mode', 'video', '--url-file', str(request)] if filename == 'download-video.sh' else []
+            result = subprocess.run([launcher, *args], cwd=root, stdin=subprocess.DEVNULL,
+                                    env=dict(PATH=str(root) + os.pathsep + os.defpath, HOME=str(root),
+                                             LC_ALL='C.UTF-8'), capture_output=True, text=True, timeout=10)
+            if omit:
+                self.assertNotEqual(result.returncode, 42)
+                self.assertNotIn('PY_ESCALATE_OWNED', result.stdout)
+            else:
+                self.assertEqual(result.returncode, 42, result.stderr)
+                self.assertIn("<<'PY_SIGNAL_OWNED'", result.stdout)
+            return result.stdout
+
+    def test_each_entry_point_requires_its_signal_library(self):
+        for filename in ('download-video.sh', 'download-video-gui.sh'):
+            with self.subTest(target=filename):
+                self.assertIn("<<'PY_ESCALATE_OWNED'", self.loaded_signal_functions(filename))
+                self.loaded_signal_functions(filename, omit=True)
+
     def escalation_sources(self):
         for filename in ('download-video.sh', 'download-video-gui.sh'):
-            source = (PROJECT / filename).read_text()
+            source = self.loaded_signal_functions(filename)
             opening = "<<'PY_ESCALATE_OWNED'\n"
             self.assertEqual(source.count(opening), 1)
             yield filename, source.split(opening, 1)[1].split('\nPY_ESCALATE_OWNED', 1)[0]
@@ -3083,7 +3129,7 @@ child = subprocess.Popen([sys.executable, str(root / 'consumer.py')], start_new_
 child.wait()
 ''')
         source = self.root / 'gui-functions.sh'
-        source.write_text((PROJECT / 'download-video-gui.sh').read_text().rsplit('\nmain "$@"', 1)[0])
+        source.write_text(self.source_without_main('download-video-gui.sh'))
         wrapper = self.root / 'gui.sh'
         wrapper.write_text('''#!/bin/bash
 source "$1"
@@ -3699,7 +3745,7 @@ exit "$?"
     def engine_case(self, reuse):
         self.child(slow=True)
         source = self.root / 'engine-functions.sh'
-        source.write_text((PROJECT / 'download-video.sh').read_text().rsplit('\nmain "$@"', 1)[0])
+        source.write_text(self.source_without_main('download-video.sh'))
         wrapper = self.root / 'engine.sh'
         wrapper.write_text('''#!/bin/bash
 source "$1"
@@ -3746,7 +3792,7 @@ exit 23
 ''')
         binary.chmod(0o700)
         engine_source = self.root / 'engine-functions.sh'
-        engine_code = (PROJECT / 'download-video.sh').read_text().rsplit('\nmain "$@"', 1)[0]
+        engine_code = self.source_without_main('download-video.sh')
         engine_source.write_text(engine_code)
         cont_traps = [line.strip() for line in engine_code.splitlines()
                       if line.strip().startswith('trap ') and line.endswith(' CONT')]
@@ -3773,7 +3819,7 @@ exit "$?"
         arguments = ['bash', str(engine), str(engine_source), str(self.root), str(PROJECT), str(gui).lower()]
         if gui:
             source = self.root / 'gui-functions.sh'
-            source.write_text((PROJECT / 'download-video-gui.sh').read_text().rsplit('\nmain "$@"', 1)[0])
+            source.write_text(self.source_without_main('download-video-gui.sh'))
             wrapper = self.root / 'gui.sh'
             wrapper.write_text('''#!/bin/bash
 source "$1"
@@ -3839,7 +3885,7 @@ wait "$WORKER_PID"
             "fd = os.open", "os.closerange(3, 1024)\nfd = os.open"
         ).replace('while True:', "while not (root / 'release').exists():"))
         source = self.root / 'engine-functions.sh'
-        source.write_text((PROJECT / 'download-video.sh').read_text().rsplit('\nmain "$@"', 1)[0])
+        source.write_text(self.source_without_main('download-video.sh'))
         # Only checkpoint serialization is inert; real stop, retention, locks
         # and descriptor-bound cleanup operate on a real live consumer.
         (self.root / 'checkpoint.py').write_text('pass\n')
@@ -3912,7 +3958,7 @@ exit "$DOWNLOAD_STATUS"
     def test_cli_escalates_subgroup_before_retiring_sentinel(self):
         self.child(resistant=True)
         source = self.root / 'engine-functions.sh'
-        source.write_text((PROJECT / 'download-video.sh').read_text().rsplit('\nmain "$@"', 1)[0])
+        source.write_text(self.source_without_main('download-video.sh'))
         wrapper = self.root / 'engine.sh'
         wrapper.write_text('''#!/bin/bash
 source "$1"
@@ -3946,7 +3992,7 @@ exit "$DOWNLOAD_STATUS"
     def test_gui_stops_timeout_subgroup_after_leader_exit(self):
         self.child(resistant=True)
         source = self.root / 'gui-functions.sh'
-        source.write_text((PROJECT / 'download-video-gui.sh').read_text().rsplit('\nmain "$@"', 1)[0])
+        source.write_text(self.source_without_main('download-video-gui.sh'))
         wrapper = self.root / 'gui.sh'
         wrapper.write_text('''#!/bin/bash
 source "$1"
