@@ -227,6 +227,17 @@ squash SHA. An eligible PR needs no further functional confirmation.
 Keep `allow_auto_merge=true` and `delete_branch_on_merge=false`. Never delete
 branches or tags, force-push `main`, bypass protections or override a sandbox
 or reviewer denial.
+
+After successful promotion, the maintainer may personally retire a secondary
+branch under a separately approved manifest naming the repository, full ref,
+expected commit and SHA-256 of a restored and verified Git bundle. Verify the
+integrated tree, promotion evidence and commit recovery. Recheck open PRs,
+active workflows, worktrees and protections immediately before removal. Bind
+the removal to the expected old commit and stop on any mismatch. Afterwards,
+verify the remaining refs and recheck qualification evidence with the canonical
+verifiers. This exception excludes the default branch, tags and historical
+copies. Codex prepares the evidence; its deletion prohibitions still apply.
+
 Changes to keys, secrets, protections or other repository settings require
 specific maintainer authorization.
 Ask the maintainer when a decision falls outside the task or a genuine blocker
